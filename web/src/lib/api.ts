@@ -95,6 +95,11 @@ export const api = {
     testConnection: () => request<{ connected: boolean; models: string[] }>('/api/config/ai/test', { method: 'POST' }),
     assist: (data: { action: string; content: string }) =>
       request<{ result: string }>('/api/ai/assist', { method: 'POST', body: JSON.stringify(data) }),
+    chat: (data: { session_id: string; message: string }) =>
+      request<{ message: any }>('/api/ai/chat', { method: 'POST', body: JSON.stringify(data) }),
+    chatHistory: (sessionId: string) => request<any[]>(`/api/ai/chat/${sessionId}`),
+    chatConfirm: (data: { session_id: string; message_id: string }) =>
+      request<{ executed: boolean; updated: number }>('/api/ai/chat/confirm', { method: 'POST', body: JSON.stringify(data) }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),

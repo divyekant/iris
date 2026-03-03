@@ -1,6 +1,11 @@
 <script lang="ts">
   import { push } from 'svelte-spa-router';
 
+  let { onchatToggle, chatOpen = false }: {
+    onchatToggle?: () => void;
+    chatOpen?: boolean;
+  } = $props();
+
   function openSearch() {
     push('/search');
   }
@@ -17,4 +22,13 @@
       onclick={openSearch}
     />
   </div>
+  <button
+    class="px-3 py-1.5 text-sm rounded-lg transition-colors {chatOpen
+      ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400'
+      : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'}"
+    onclick={onchatToggle}
+    title="AI Chat"
+  >
+    AI Chat
+  </button>
 </header>
