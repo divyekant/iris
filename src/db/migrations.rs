@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 
 const MIGRATION_001: &str = include_str!("../../migrations/001_initial.sql");
+const MIGRATION_002: &str = include_str!("../../migrations/002_chat.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     let current_version: i64 = conn
@@ -14,6 +15,11 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 1 {
         conn.execute_batch(MIGRATION_001)?;
         tracing::info!("Applied migration 001_initial");
+    }
+
+    if current_version < 2 {
+        conn.execute_batch(MIGRATION_002)?;
+        tracing::info!("Applied migration 002_chat");
     }
 
     Ok(())
