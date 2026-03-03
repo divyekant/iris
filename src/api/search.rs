@@ -15,6 +15,7 @@ pub struct SearchParams {
     pub account_id: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub semantic: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,8 +43,6 @@ pub async fn search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<SearchResponse>, StatusCode> {
-    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     let query_str = params.q.as_deref().unwrap_or("").trim().to_string();
     if query_str.is_empty() {
         return Ok(Json(SearchResponse {
@@ -53,6 +52,51 @@ pub async fn search(
         }));
     }
 
+    // Semantic search path — use Memories hybrid BM25+vector search
+    if params.semantic == Some(true) {
+        let source_prefix = params.account_id.as_ref()
+            .map(|id| format!("iris/{}/", id))
+            .unwrap_or_else(|| "iris/".to_string());
+
+        let limit = params.limit.unwrap_or(50) as usize;
+        let mem_results = state.memories.search(&query_str, limit, Some(&source_prefix)).await;
+
+        if !mem_results.is_empty() {
+            let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let mut results = Vec::new();
+            for r in &mem_results {
+                let msg_id = r.source.rsplit('/').next().unwrap_or("").to_string();
+                if msg_id.is_empty() { continue; }
+                if let Ok(sr) = conn.query_row(
+                    "SELECT id, account_id, thread_id, from_address, from_name, subject, date, is_read, has_attachments
+                     FROM messages WHERE id = ?1 AND is_deleted = 0",
+                    rusqlite::params![msg_id],
+                    |row| {
+                        Ok(SearchResult {
+                            id: row.get(0)?,
+                            account_id: row.get(1)?,
+                            thread_id: row.get(2)?,
+                            from_address: row.get(3)?,
+                            from_name: row.get(4)?,
+                            subject: row.get(5)?,
+                            snippet: r.text.chars().take(200).collect(),
+                            date: row.get(6)?,
+                            is_read: row.get(7)?,
+                            has_attachments: row.get(8)?,
+                        })
+                    },
+                ) {
+                    results.push(sr);
+                }
+            }
+            let total = results.len() as i64;
+            return Ok(Json(SearchResponse { results, total, query: query_str }));
+        }
+
+        // Fall through to FTS5 if Memories returned nothing
+    }
+
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 

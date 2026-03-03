@@ -11,6 +11,7 @@
   // Filters
   let hasAttachment = $state(false);
   let dateFilter = $state('');
+  let semantic = $state(false);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -38,6 +39,7 @@
       const res = await api.search({
         q: searchQuery,
         has_attachment: hasAttachment || undefined,
+        semantic: semantic || undefined,
         ...dateRange,
       });
       results = res.results;
@@ -74,6 +76,11 @@
     hasAttachment = !hasAttachment;
     doSearch();
   }
+
+  function toggleSemantic() {
+    semantic = !semantic;
+    doSearch();
+  }
 </script>
 
 <div class="h-full flex flex-col">
@@ -97,6 +104,12 @@
 
     <!-- Filter chips -->
     <div class="flex gap-2 mt-2">
+      <button
+        class="px-3 py-1 text-xs rounded-full border transition-colors
+               {semantic ? 'bg-purple-100 dark:bg-purple-900/40 border-purple-300 dark:border-purple-700 text-purple-700 dark:text-purple-300' : 'border-gray-300 dark:border-gray-600 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'}"
+        onclick={toggleSemantic}
+        title="Search by meaning, not just keywords"
+      >Semantic</button>
       <button
         class="px-3 py-1 text-xs rounded-full border transition-colors
                {hasAttachment ? 'bg-blue-100 dark:bg-blue-900/40 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300' : 'border-gray-300 dark:border-gray-600 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800'}"
