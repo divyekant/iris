@@ -1,10 +1,10 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::models::message::{self, MessageSummary};
+use crate::models::message::{self, MessageDetail, MessageSummary};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -96,4 +96,26 @@ pub async fn list_messages(
         unread_count: unread,
         total,
     }))
+}
+
+pub async fn get_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MessageDetail>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    MessageDetail::get_by_id(&conn, &id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+pub async fn mark_message_read(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if message::mark_as_read(&conn, &id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }

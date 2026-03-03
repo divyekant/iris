@@ -46,6 +46,9 @@ async fn main() {
         .route("/accounts", get(api::accounts::list_accounts).post(api::accounts::create_account))
         .route("/accounts/{id}", get(api::accounts::get_account).delete(api::accounts::delete_account))
         .route("/messages", get(api::messages::list_messages))
+        .route("/messages/{id}", get(api::messages::get_message))
+        .route("/messages/{id}/read", put(api::messages::mark_message_read))
+        .route("/threads/{id}", get(api::threads::get_thread))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
