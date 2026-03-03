@@ -72,6 +72,17 @@ export const api = {
         body: JSON.stringify({ view_mode }),
       }),
   },
+  search: (params: { q: string; has_attachment?: boolean; after?: number; before?: number; account_id?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams();
+    query.set('q', params.q);
+    if (params.has_attachment) query.set('has_attachment', 'true');
+    if (params.after) query.set('after', String(params.after));
+    if (params.before) query.set('before', String(params.before));
+    if (params.account_id) query.set('account_id', params.account_id);
+    if (params.limit) query.set('limit', String(params.limit));
+    if (params.offset) query.set('offset', String(params.offset));
+    return request<{ results: any[]; total: number; query: string }>(`/api/search?${query}`);
+  },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },

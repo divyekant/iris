@@ -6,9 +6,11 @@
   import ThreadView from './pages/ThreadView.svelte';
   import AccountSetup from './pages/AccountSetup.svelte';
   import Settings from './pages/Settings.svelte';
+  import Search from './pages/Search.svelte';
 
   const routes = {
     '/': Inbox,
+    '/search': Search,
     '/thread/:id': ThreadView,
     '/setup': AccountSetup,
     '/setup/*': AccountSetup,
