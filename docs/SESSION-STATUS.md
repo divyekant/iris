@@ -1,7 +1,7 @@
 # Iris — Session Status
 
 **Last updated:** 2026-03-03
-**Pipeline:** explore ✓ → shape ✓ → plan ✓ → **build (V8 DONE)** → verify → review → finish → release
+**Pipeline:** explore ✓ → shape ✓ → plan ✓ → **build (ALL 9 SLICES DONE)** → verify → review → finish → release
 
 ---
 
@@ -170,6 +170,30 @@
 
 **Scoping note:** Newsletter Feed (P6) deferred. Semantic search (embeddings) deferred — FTS5 used for context retrieval.
 
+### Build Phase — V9: Agent Connectivity (Complete)
+4 commits on `main`, ~1,900 lines added. 73 total tests (19 new).
+
+**Backend:**
+- Migration 003: api_keys table (SHA-256 hashed tokens, 4 permission levels) + audit_log table (append-only)
+- Trust indicators: parse Authentication-Results header for SPF/DKIM/DMARC status
+- Tracking pixel detection: scan HTML for 1x1 images + 17 known tracker domains
+- API key management: create (iris_ prefixed), validate, revoke, list with permission hierarchy
+- Permission hierarchy: read_only < draft_only < send_with_approval < autonomous
+- Agent auth middleware: Bearer token validation, permission checking, request extension injection
+- Agent REST API: GET /agent/search, /agent/messages/{id}, /agent/threads/{id}, POST /agent/drafts, /agent/send
+- Audit logging: all agent actions logged with key ID, action, resource, status
+- Message/thread responses enriched with trust indicators and tracking pixel data
+
+**Frontend:**
+- TrustBadge component: SPF/DKIM/DMARC verified/unverified/partial badge
+- Tracking pixel alert: orange pill with blocked tracker count
+- MessageCard: trust badge + tracking alert per message in ThreadView
+- Settings: API key management (create with permission picker, list, revoke)
+- Settings: audit log table with status indicators
+- API client: apiKeys.list/create/revoke, auditLog.list methods
+
+**Scoping note:** MCP protocol deferred (REST API provides equivalent agent access). Webhooks deferred. Keyboard shortcuts deferred (unrelated to agent connectivity).
+
 ### Key Decisions Made
 - **Architecture:** Shape B — Rust (Axum) backend + SPA frontend + SQLite/FTS5 + Ollama sidecar + Docker Compose
 - **Frontend:** Svelte 5 + TypeScript + Vite 7 + Tailwind CSS 4
@@ -181,14 +205,12 @@
 
 ## What's Next
 
-### Plan + Build V9: Agent Connectivity
-V9 covers external agent integration:
-- Agent API for programmatic inbox access
-- Trust/security model for agent actions
-- Webhook notifications
-
-### After V9
-All 9 slices complete. Polish, testing, deployment.
+### All 9 Slices Complete
+V1-V9 all built. Next steps:
+- End-to-end testing with real email accounts
+- UI polish and responsive design
+- Performance optimization
+- Deployment and release
 
 ---
 
@@ -202,13 +224,15 @@ iris/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── migrations/
-│   └── 001_initial.sql
+│   ├── 001_initial.sql
+│   ├── 002_chat.sql
+│   └── 003_agent.sql
 ├── src/
 │   ├── main.rs
 │   ├── config.rs
 │   ├── smtp.rs       (SMTP send, email builder)
 │   ├── ai/           (ollama client, classification pipeline)
-│   ├── api/          (health, accounts, messages, config, compose, search, ai_config)
+│   ├── api/          (health, accounts, messages, config, compose, search, ai_config, agent, trust, chat)
 │   ├── auth/         (OAuth2 for Gmail/Outlook, token refresh)
 │   ├── db/           (pool, migrations)
 │   ├── imap/         (connection, sync, idle)
@@ -217,7 +241,7 @@ iris/
 ├── web/
 │   ├── src/
 │   │   ├── App.svelte
-│   │   ├── components/   (AppShell, Sidebar, Header, inbox/, thread/, compose/)
+│   │   ├── components/   (AppShell, Sidebar, Header, TrustBadge, ChatPanel, inbox/, thread/, compose/)
 │   │   ├── pages/        (Inbox, AccountSetup, Settings, ThreadView, Search)
 │   │   └── lib/          (api.ts, ws.ts)
 │   ├── vite.config.ts
@@ -232,5 +256,10 @@ iris/
         ├── 2026-03-02-v1-foundation.md
         ├── 2026-03-03-v2-email-reader.md
         ├── 2026-03-03-v3-compose.md
-        └── 2026-03-03-v4-manage-inbox.md
+        ├── 2026-03-03-v4-manage-inbox.md
+        ├── 2026-03-03-v5-keyword-search.md
+        ├── 2026-03-03-v6-ai-ingest.md
+        ├── 2026-03-03-v7-ai-on-demand.md
+        ├── 2026-03-03-v8-ai-chat.md
+        └── 2026-03-03-v9-agent-connectivity.md
 ```
