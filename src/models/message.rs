@@ -85,6 +85,7 @@ impl MessageSummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageDetail {
     pub id: String,
+    pub message_id: Option<String>,
     pub account_id: String,
     pub thread_id: Option<String>,
     pub folder: String,
@@ -112,6 +113,7 @@ impl MessageDetail {
 
         Ok(Self {
             id: row.get("id")?,
+            message_id: row.get("message_id")?,
             account_id: row.get("account_id")?,
             thread_id: row.get("thread_id")?,
             folder: row.get("folder")?,
@@ -133,7 +135,7 @@ impl MessageDetail {
 
     pub fn get_by_id(conn: &Conn, id: &str) -> Option<Self> {
         conn.query_row(
-            "SELECT id, account_id, thread_id, folder, from_address, from_name,
+            "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                     to_addresses, cc_addresses, subject, snippet, date,
                     body_text, body_html, is_read, is_starred, has_attachments, attachment_names
              FROM messages WHERE id = ?1 AND is_deleted = 0",
@@ -146,7 +148,7 @@ impl MessageDetail {
     pub fn list_by_thread(conn: &Conn, thread_id: &str) -> Vec<Self> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, account_id, thread_id, folder, from_address, from_name,
+                "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
                         body_text, body_html, is_read, is_starred, has_attachments, attachment_names
                  FROM messages WHERE thread_id = ?1 AND is_deleted = 0
@@ -559,6 +561,20 @@ mod tests {
 
         let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
         assert!(detail.is_read);
+    }
+
+    #[test]
+    fn test_message_detail_includes_message_id() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg = make_insert_message(&account.id, "INBOX", "ID Test", false);
+        msg.message_id = Some("<unique-123@example.com>".to_string());
+        let id = InsertMessage::insert(&conn, &msg);
+
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert_eq!(detail.message_id.as_deref(), Some("<unique-123@example.com>"));
     }
 
     #[test]
