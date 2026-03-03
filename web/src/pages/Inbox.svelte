@@ -29,7 +29,7 @@
   function handleMessageClick(id: string) {
     const msg = messages.find((m) => m.id === id);
     const threadId = msg?.thread_id || id;
-    push(`/thread/${threadId}`);
+    push(`/thread/${encodeURIComponent(threadId)}`);
   }
 
   // Load messages and connect WebSocket on mount

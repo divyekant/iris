@@ -15,7 +15,7 @@
           'hr', 'sub', 'sup',
         ],
         ALLOWED_ATTR: [
-          'href', 'src', 'alt', 'style', 'target', 'width', 'height',
+          'href', 'src', 'alt', 'target', 'width', 'height',
           'colspan', 'rowspan',
         ],
         ALLOW_DATA_ATTR: false,
