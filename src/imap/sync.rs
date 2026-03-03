@@ -1,10 +1,12 @@
 use futures::TryStreamExt;
 use mailparse::MailHeaderMap;
 
+use crate::ai::ollama::OllamaClient;
+use crate::ai::pipeline;
 use crate::db::DbPool;
 use crate::imap::connection::{connect, ImapCredentials};
 use crate::models::account::Account;
-use crate::models::message::{AttachmentMeta, InsertMessage};
+use crate::models::message::{self, AttachmentMeta, InsertMessage};
 use crate::ws::hub::{WsEvent, WsHub};
 
 // ---------------------------------------------------------------------------
@@ -15,6 +17,7 @@ use crate::ws::hub::{WsEvent, WsHub};
 pub struct SyncEngine {
     pub db: DbPool,
     pub ws_hub: WsHub,
+    pub ollama: OllamaClient,
 }
 
 impl SyncEngine {
@@ -97,8 +100,16 @@ impl SyncEngine {
             // Broadcast new email event
             self.ws_hub.broadcast(WsEvent::NewEmail {
                 account_id: account_id.to_string(),
-                message_id: msg_id,
+                message_id: msg_id.clone(),
             });
+
+            // Spawn AI processing in background (fire-and-forget)
+            self.spawn_ai_processing(
+                msg_id,
+                insert_msg.subject.clone().unwrap_or_default(),
+                insert_msg.from_address.clone().unwrap_or_default(),
+                insert_msg.body_text.clone().unwrap_or_default(),
+            );
 
             // Broadcast progress
             let progress = (i + 1) as f32 / fetched_count as f32;
@@ -122,6 +133,67 @@ impl SyncEngine {
 
         tracing::info!(account_id, "Initial sync complete");
         Ok(())
+    }
+
+    /// Spawn a background task to process a message through the AI pipeline.
+    /// Gracefully degrades: if AI is not configured or Ollama is down, does nothing.
+    fn spawn_ai_processing(
+        &self,
+        message_id: String,
+        subject: String,
+        from: String,
+        body: String,
+    ) {
+        let db = self.db.clone();
+        let ws_hub = self.ws_hub.clone();
+        let ollama = self.ollama.clone();
+
+        tokio::spawn(async move {
+            // Check if AI is enabled
+            let (enabled, model) = {
+                let conn = match db.get() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let enabled = conn
+                    .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                    .unwrap_or_else(|_| "false".to_string())
+                    == "true";
+                let model = conn
+                    .query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
+                    .unwrap_or_default();
+                (enabled, model)
+            };
+
+            if !enabled || model.is_empty() {
+                return;
+            }
+
+            // Run AI pipeline
+            let metadata = match pipeline::process_email(&ollama, &model, &subject, &from, &body).await {
+                Some(m) => m,
+                None => return,
+            };
+
+            // Update message with AI metadata
+            if let Ok(conn) = db.get() {
+                let updated = message::update_ai_metadata(
+                    &conn,
+                    &message_id,
+                    &metadata.intent,
+                    metadata.priority_score,
+                    &metadata.priority_label,
+                    &metadata.category,
+                    &metadata.summary,
+                );
+                if updated {
+                    ws_hub.broadcast(WsEvent::AiProcessed {
+                        message_id: message_id.clone(),
+                    });
+                    tracing::debug!(message_id, "AI processing complete");
+                }
+            }
+        });
     }
 }
 

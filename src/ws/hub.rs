@@ -15,6 +15,9 @@ pub enum WsEvent {
     SyncComplete {
         account_id: String,
     },
+    AiProcessed {
+        message_id: String,
+    },
 }
 
 #[derive(Clone)]
