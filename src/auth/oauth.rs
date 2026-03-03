@@ -314,6 +314,33 @@ pub async fn oauth_callback(
         "OAuth account created"
     );
 
+    // Spawn initial sync + IDLE listener in the background
+    if let (Some(imap_host), Some(imap_port)) = (account.imap_host.clone(), account.imap_port) {
+        let sync_creds = crate::imap::connection::ImapCredentials {
+            host: imap_host,
+            port: imap_port as u16,
+            username: account.email.clone(),
+            auth: crate::imap::connection::ImapAuth::OAuth2 {
+                access_token: access_token.clone(),
+            },
+        };
+        let db_clone = state.db.clone();
+        let ws_clone = state.ws_hub.clone();
+        let acct_id = account.id.clone();
+
+        tokio::spawn(async move {
+            let engine = crate::imap::sync::SyncEngine {
+                db: db_clone.clone(),
+                ws_hub: ws_clone.clone(),
+            };
+            if let Err(e) = engine.initial_sync(&acct_id, &sync_creds).await {
+                tracing::error!(account_id = %acct_id, error = %e, "Initial sync failed");
+            }
+            // Start IDLE listener after initial sync completes
+            crate::imap::idle::spawn_idle_listener(acct_id, sync_creds, db_clone, ws_clone);
+        });
+    }
+
     // Redirect to frontend success page
     Ok(Redirect::to(&format!(
         "/setup/success?account_id={}",
