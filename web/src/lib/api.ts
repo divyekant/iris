@@ -25,6 +25,11 @@ export const api = {
       if (params?.offset) query.set('offset', String(params.offset));
       return request<{ messages: any[]; unread_count: number; total: number }>(`/api/messages?${query}`);
     },
+    get: (id: string) => request<any>(`/api/messages/${id}`),
+    markRead: (id: string) => request<void>(`/api/messages/${id}/read`, { method: 'PUT' }),
+  },
+  threads: {
+    get: (id: string) => request<any>(`/api/threads/${id}`),
   },
   config: {
     get: () => request<{ theme: string }>('/api/config'),
