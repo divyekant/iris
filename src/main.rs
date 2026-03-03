@@ -19,6 +19,7 @@ pub struct AppState {
     pub db: db::DbPool,
     pub config: Config,
     pub ws_hub: ws::hub::WsHub,
+    pub ollama: ai::ollama::OllamaClient,
 }
 
 #[tokio::main]
@@ -37,10 +38,13 @@ async fn main() {
         db::migrations::run(&conn).expect("Failed to run migrations");
     }
 
+    let ollama = ai::ollama::OllamaClient::new(&config.ollama_url);
+
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
         ws_hub: ws::hub::WsHub::new(),
+        ollama,
     });
 
     let api_routes = Router::new()
@@ -56,6 +60,8 @@ async fn main() {
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/config/view-mode", put(api::config::set_view_mode))
+        .route("/config/ai", get(api::ai_config::get_ai_config).put(api::ai_config::set_ai_config))
+        .route("/config/ai/test", post(api::ai_config::test_ai_connection))
         .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth))
         .route("/send", post(api::compose::send_message))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
