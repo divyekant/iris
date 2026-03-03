@@ -5,7 +5,7 @@ mod db;
 mod models;
 mod ws;
 
-use axum::{Router, routing::get};
+use axum::{Router, routing::{get, put}};
 use config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,6 +42,11 @@ async fn main() {
 
     let api_routes = Router::new()
         .route("/health", get(api::health::health))
+        .route("/accounts", get(api::accounts::list_accounts).post(api::accounts::create_account))
+        .route("/accounts/{id}", get(api::accounts::get_account).delete(api::accounts::delete_account))
+        .route("/messages", get(api::messages::list_messages))
+        .route("/config", get(api::config::get_config))
+        .route("/config/theme", put(api::config::set_theme))
         .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
 
     let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
