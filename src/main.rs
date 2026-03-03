@@ -53,6 +53,7 @@ async fn main() {
         .route("/threads/{id}", get(api::threads::get_thread))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
+        .route("/config/view-mode", put(api::config::set_view_mode))
         .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth))
         .route("/send", post(api::compose::send_message))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
