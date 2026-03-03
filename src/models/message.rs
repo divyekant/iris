@@ -266,6 +266,112 @@ pub fn unread_count(conn: &Conn, account_id: &str, folder: &str) -> i64 {
     .unwrap_or(0)
 }
 
+/// Save a draft message. If `draft_id` is Some, update existing; otherwise create new.
+/// Returns the draft's message ID.
+pub fn save_draft(
+    conn: &Conn,
+    draft_id: Option<&str>,
+    account_id: &str,
+    to_addresses: Option<&str>,
+    cc_addresses: Option<&str>,
+    bcc_addresses: Option<&str>,
+    subject: Option<&str>,
+    body_text: &str,
+    body_html: Option<&str>,
+) -> String {
+    if let Some(id) = draft_id {
+        // Update existing draft
+        conn.execute(
+            "UPDATE messages SET
+                to_addresses = ?1, cc_addresses = ?2, bcc_addresses = ?3,
+                subject = ?4, body_text = ?5, body_html = ?6,
+                snippet = ?7, updated_at = unixepoch()
+             WHERE id = ?8 AND is_draft = 1",
+            rusqlite::params![
+                to_addresses,
+                cc_addresses,
+                bcc_addresses,
+                subject,
+                body_text,
+                body_html,
+                &body_text.chars().take(200).collect::<String>(),
+                id,
+            ],
+        )
+        .expect("failed to update draft");
+        id.to_string()
+    } else {
+        // Create new draft
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO messages (
+                id, account_id, folder, to_addresses, cc_addresses, bcc_addresses,
+                subject, body_text, body_html, snippet,
+                is_read, is_starred, is_draft, date, from_address, from_name, has_attachments
+            ) VALUES (
+                ?1, ?2, 'Drafts', ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                1, 0, 1, unixepoch(), NULL, NULL, 0
+            )",
+            rusqlite::params![
+                id,
+                account_id,
+                to_addresses,
+                cc_addresses,
+                bcc_addresses,
+                subject,
+                body_text,
+                body_html,
+                &body_text.chars().take(200).collect::<String>(),
+            ],
+        )
+        .expect("failed to insert draft");
+        id
+    }
+}
+
+/// List all drafts for an account, ordered by most recently updated.
+pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
+                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+             FROM messages
+             WHERE account_id = ?1 AND is_draft = 1 AND is_deleted = 0
+             ORDER BY updated_at DESC",
+        )
+        .expect("failed to prepare list_drafts query");
+
+    stmt.query_map(rusqlite::params![account_id], MessageSummary::from_row)
+        .expect("failed to query drafts")
+        .filter_map(|r| r.ok())
+        .collect()
+}
+
+/// Soft-delete a draft. Returns true if a row was updated.
+pub fn delete_draft(conn: &Conn, id: &str) -> bool {
+    conn.execute(
+        "UPDATE messages SET is_deleted = 1, updated_at = unixepoch() WHERE id = ?1 AND is_draft = 1",
+        rusqlite::params![id],
+    )
+    .map(|rows| rows > 0)
+    .unwrap_or(false)
+}
+
+/// Convert a draft to a sent message (mark as not-draft, move to Sent folder).
+pub fn finalize_draft_as_sent(conn: &Conn, id: &str, message_id: Option<&str>, thread_id: Option<&str>) -> bool {
+    conn.execute(
+        "UPDATE messages SET
+            is_draft = 0, folder = 'Sent', is_read = 1,
+            message_id = ?1, thread_id = ?2,
+            date = unixepoch(), updated_at = unixepoch()
+         WHERE id = ?3",
+        rusqlite::params![message_id, thread_id, id],
+    )
+    .map(|rows| rows > 0)
+    .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +559,90 @@ mod tests {
 
         let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
         assert!(detail.is_read);
+    }
+
+    #[test]
+    fn test_save_and_list_drafts() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let draft_id = save_draft(
+            &conn,
+            None, // new draft
+            &account.id,
+            Some(r#"["alice@example.com"]"#),
+            None,
+            None,
+            Some("Draft subject"),
+            "Draft body text",
+            None,
+        );
+        assert!(!draft_id.is_empty());
+
+        let drafts = list_drafts(&conn, &account.id);
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, draft_id);
+        assert_eq!(drafts[0].subject.as_deref(), Some("Draft subject"));
+    }
+
+    #[test]
+    fn test_update_existing_draft() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let draft_id = save_draft(
+            &conn,
+            None,
+            &account.id,
+            Some(r#"["alice@example.com"]"#),
+            None,
+            None,
+            Some("First version"),
+            "Body v1",
+            None,
+        );
+
+        // Update the same draft
+        let same_id = save_draft(
+            &conn,
+            Some(&draft_id),
+            &account.id,
+            Some(r#"["alice@example.com","bob@example.com"]"#),
+            None,
+            None,
+            Some("Updated subject"),
+            "Body v2",
+            None,
+        );
+        assert_eq!(same_id, draft_id);
+
+        let detail = MessageDetail::get_by_id(&conn, &draft_id).unwrap();
+        assert_eq!(detail.subject.as_deref(), Some("Updated subject"));
+        assert_eq!(detail.body_text.as_deref(), Some("Body v2"));
+    }
+
+    #[test]
+    fn test_delete_draft() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let draft_id = save_draft(
+            &conn,
+            None,
+            &account.id,
+            None,
+            None,
+            None,
+            Some("To delete"),
+            "Body",
+            None,
+        );
+
+        assert!(delete_draft(&conn, &draft_id));
+        let drafts = list_drafts(&conn, &account.id);
+        assert_eq!(drafts.len(), 0);
     }
 }
