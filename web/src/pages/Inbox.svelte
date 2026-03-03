@@ -15,6 +15,7 @@
   let activeAccountId = $state('');
   let activeCategory = $state('');
   let selectedIds = $state(new Set<string>());
+  let filterAccountId = $state('');
 
   const categories = [
     { id: '', label: 'All' },
@@ -28,7 +29,10 @@
     loading = true;
     error = '';
     try {
-      const res = await api.messages.list({ category: activeCategory || undefined });
+      const res = await api.messages.list({
+        account_id: filterAccountId || undefined,
+        category: activeCategory || undefined,
+      });
       messages = res.messages;
       unreadCount = res.unread_count;
       total = res.total;
@@ -44,6 +48,10 @@
   }
 
   async function ensureAccountId() {
+    if (filterAccountId) {
+      activeAccountId = filterAccountId;
+      return;
+    }
     if (activeAccountId) return;
     try {
       const accounts = await api.accounts.list();
@@ -66,6 +74,12 @@
     showCompose = true;
   }
 
+  function onAccountSwitch(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    filterAccountId = detail.accountId || '';
+    loadMessages();
+  }
+
   async function handleBulkAction(action: string) {
     if (selectedIds.size === 0) return;
     try {
@@ -81,7 +95,11 @@
     loadMessages();
     wsClient.connect();
     const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
-    return () => { offNewEmail(); };
+    window.addEventListener('account-switch', onAccountSwitch);
+    return () => {
+      offNewEmail();
+      window.removeEventListener('account-switch', onAccountSwitch);
+    };
   });
 </script>
 
