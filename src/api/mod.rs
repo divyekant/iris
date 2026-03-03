@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod agent;
 pub mod ai_actions;
 pub mod ai_config;
 pub mod chat;

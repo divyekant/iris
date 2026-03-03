@@ -4,8 +4,17 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::api::trust;
 use crate::models::message::{self, MessageDetail, MessageSummary};
 use crate::AppState;
+
+#[derive(Debug, Serialize)]
+pub struct MessageDetailResponse {
+    #[serde(flatten)]
+    pub message: MessageDetail,
+    pub trust: trust::TrustIndicators,
+    pub tracking_pixels: Vec<trust::TrackingPixel>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListMessagesParams {
@@ -133,11 +142,29 @@ pub async fn list_messages(
 pub async fn get_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<MessageDetail>, StatusCode> {
+) -> Result<Json<MessageDetailResponse>, StatusCode> {
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    MessageDetail::get_by_id(&conn, &id)
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+    let message = MessageDetail::get_by_id(&conn, &id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // Query raw_headers separately (not part of MessageDetail)
+    let raw_headers: Option<String> = conn
+        .query_row(
+            "SELECT raw_headers FROM messages WHERE id = ?1",
+            rusqlite::params![&id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let trust_indicators =
+        trust::extract_trust_indicators(raw_headers.as_deref().unwrap_or(""));
+    let tracking_pixels =
+        trust::detect_tracking_pixels(message.body_html.as_deref().unwrap_or(""));
+
+    Ok(Json(MessageDetailResponse {
+        message,
+        trust: trust_indicators,
+        tracking_pixels,
+    }))
 }
 
 pub async fn mark_message_read(
