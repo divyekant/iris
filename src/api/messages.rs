@@ -11,6 +11,7 @@ use crate::AppState;
 pub struct ListMessagesParams {
     pub account_id: Option<String>,
     pub folder: Option<String>,
+    pub category: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -32,34 +33,65 @@ pub async fn list_messages(
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);
 
+    let category_filter = if let Some(ref cat) = params.category {
+        format!(" AND m.labels LIKE '%\"{}%'", cat.replace('\'', "''"))
+    } else {
+        String::new()
+    };
+
     let (messages, unread, total) = if let Some(ref account_id) = params.account_id {
         // Single-account query
-        let msgs = MessageSummary::list_by_folder(&conn, account_id, folder, limit, offset);
+        let query = format!(
+            "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
+                    m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
+                    m.labels, m.ai_priority_label, m.ai_category
+             FROM messages m
+             WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_deleted = 0{}
+             ORDER BY m.date DESC
+             LIMIT ?3 OFFSET ?4",
+            category_filter
+        );
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let msgs: Vec<MessageSummary> = stmt
+            .query_map(rusqlite::params![account_id, folder, limit, offset], MessageSummary::from_row)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .filter_map(|r| r.ok())
+            .collect();
 
-        let unread = message::unread_count(&conn, account_id, folder);
+        let unread_query = format!(
+            "SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_read = 0 AND m.is_deleted = 0{}",
+            category_filter
+        );
+        let unread: i64 = conn
+            .query_row(&unread_query, rusqlite::params![account_id, folder], |row| row.get(0))
+            .unwrap_or(0);
 
+        let total_query = format!(
+            "SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_deleted = 0{}",
+            category_filter
+        );
         let total: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND folder = ?2 AND is_deleted = 0",
-                rusqlite::params![account_id, folder],
-                |row| row.get(0),
-            )
+            .query_row(&total_query, rusqlite::params![account_id, folder], |row| row.get(0))
             .unwrap_or(0);
 
         (msgs, unread, total)
     } else {
         // Unified inbox: messages from all active accounts, merged by date DESC
+        let query = format!(
+            "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
+                    m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
+                    m.labels, m.ai_priority_label, m.ai_category
+             FROM messages m
+             JOIN accounts a ON m.account_id = a.id
+             WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0{}
+             ORDER BY m.date DESC
+             LIMIT ?2 OFFSET ?3",
+            category_filter
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
-                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                        m.labels, m.ai_priority_label, m.ai_category
-                 FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0
-                 ORDER BY m.date DESC
-                 LIMIT ?2 OFFSET ?3",
-            )
+            .prepare(&query)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let msgs: Vec<MessageSummary> = stmt
@@ -68,24 +100,24 @@ pub async fn list_messages(
             .filter_map(|r| r.ok())
             .collect();
 
+        let unread_query = format!(
+            "SELECT COUNT(*) FROM messages m
+             JOIN accounts a ON m.account_id = a.id
+             WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_read = 0 AND m.is_deleted = 0{}",
+            category_filter
+        );
         let unread: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_read = 0 AND m.is_deleted = 0",
-                rusqlite::params![folder],
-                |row| row.get(0),
-            )
+            .query_row(&unread_query, rusqlite::params![folder], |row| row.get(0))
             .unwrap_or(0);
 
+        let total_query = format!(
+            "SELECT COUNT(*) FROM messages m
+             JOIN accounts a ON m.account_id = a.id
+             WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0{}",
+            category_filter
+        );
         let total: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0",
-                rusqlite::params![folder],
-                |row| row.get(0),
-            )
+            .query_row(&total_query, rusqlite::params![folder], |row| row.get(0))
             .unwrap_or(0);
 
         (msgs, unread, total)

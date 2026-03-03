@@ -13,12 +13,21 @@
   let error = $state('');
   let showCompose = $state(false);
   let activeAccountId = $state('');
+  let activeCategory = $state('');
+
+  const categories = [
+    { id: '', label: 'All' },
+    { id: 'primary', label: 'Primary' },
+    { id: 'updates', label: 'Updates' },
+    { id: 'social', label: 'Social' },
+    { id: 'promotions', label: 'Promotions' },
+  ];
 
   async function loadMessages() {
     loading = true;
     error = '';
     try {
-      const res = await api.messages.list();
+      const res = await api.messages.list({ category: activeCategory || undefined });
       messages = res.messages;
       unreadCount = res.unread_count;
       total = res.total;
@@ -85,6 +94,21 @@
         {total} message{total === 1 ? '' : 's'}
       </span>
     {/if}
+  </div>
+
+  <!-- Category tabs -->
+  <div class="px-4 border-b border-gray-200 dark:border-gray-700 flex gap-1 overflow-x-auto">
+    {#each categories as cat}
+      <button
+        class="px-3 py-2 text-sm whitespace-nowrap border-b-2 transition-colors
+               {activeCategory === cat.id
+                 ? 'border-blue-600 text-blue-600 font-medium'
+                 : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
+        onclick={() => { activeCategory = cat.id; loadMessages(); }}
+      >
+        {cat.label}
+      </button>
+    {/each}
   </div>
 
   <SyncStatus />
