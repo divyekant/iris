@@ -15,6 +15,16 @@
   let aiTesting = $state(false);
   let aiSaving = $state(false);
 
+  // API key management
+  let apiKeys = $state<any[]>([]);
+  let newKeyName = $state('');
+  let newKeyPermission = $state('read_only');
+  let createdKey = $state('');
+  let keyCreating = $state(false);
+
+  // Audit log
+  let auditEntries = $state<any[]>([]);
+
   const themes: { value: Theme; label: string; icon: string }[] = [
     { value: 'light', label: 'Light', icon: '\u{2600}\u{FE0F}' },
     { value: 'dark', label: 'Dark', icon: '\u{1F319}' },
@@ -73,6 +83,44 @@
     await saveAiConfig();
   }
 
+  async function loadApiKeys() {
+    try {
+      apiKeys = await api.apiKeys.list();
+    } catch { apiKeys = []; }
+  }
+
+  async function createApiKey() {
+    if (!newKeyName.trim() || keyCreating) return;
+    keyCreating = true;
+    createdKey = '';
+    try {
+      const result = await api.apiKeys.create({ name: newKeyName.trim(), permission: newKeyPermission });
+      createdKey = result.key;
+      newKeyName = '';
+      await loadApiKeys();
+    } catch { /* silently fail */ }
+    finally { keyCreating = false; }
+  }
+
+  async function revokeApiKey(id: string) {
+    try {
+      await api.apiKeys.revoke(id);
+      await loadApiKeys();
+    } catch { /* silently fail */ }
+  }
+
+  async function loadAuditLog() {
+    try {
+      auditEntries = await api.auditLog.list({ limit: 25 });
+    } catch { auditEntries = []; }
+  }
+
+  function formatTimestamp(ts: number): string {
+    return new Date(ts * 1000).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  }
+
   // Load settings on mount
   $effect(() => {
     async function loadSettings() {
@@ -93,6 +141,9 @@
       } catch {
         // AI config not available
       }
+
+      await loadApiKeys();
+      await loadAuditLog();
 
       loading = false;
     }
@@ -201,6 +252,130 @@
           {aiSaving ? 'Saving...' : 'Save AI Settings'}
         </button>
       </div>
+    </section>
+
+    <!-- API Keys section -->
+    <section>
+      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">API Keys</h3>
+      <p class="text-xs text-gray-400 dark:text-gray-500 mb-4">Create API keys for external agents to access your inbox.</p>
+
+      <div class="flex gap-2 mb-4">
+        <input
+          type="text"
+          bind:value={newKeyName}
+          placeholder="Key name (e.g., Claude agent)"
+          class="flex-1 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <select
+          bind:value={newKeyPermission}
+          class="px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="read_only">Read Only</option>
+          <option value="draft_only">Draft Only</option>
+          <option value="send_with_approval">Send w/ Approval</option>
+          <option value="autonomous">Autonomous</option>
+        </select>
+        <button
+          class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-500 text-white hover:bg-blue-600 transition-colors disabled:opacity-50"
+          onclick={createApiKey}
+          disabled={keyCreating || !newKeyName.trim()}
+        >
+          {keyCreating ? 'Creating...' : 'Create'}
+        </button>
+      </div>
+
+      {#if createdKey}
+        <div class="mb-4 p-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
+          <p class="text-sm font-medium text-green-700 dark:text-green-400 mb-1">API key created! Copy it now — it won't be shown again.</p>
+          <code class="block p-2 bg-white dark:bg-gray-800 rounded text-xs font-mono select-all break-all">{createdKey}</code>
+        </div>
+      {/if}
+
+      {#if apiKeys.length > 0}
+        <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 dark:bg-gray-800/50">
+              <tr>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Name</th>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Permission</th>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Last Used</th>
+                <th class="text-right px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each apiKeys as key}
+                <tr class="border-t border-gray-100 dark:border-gray-800">
+                  <td class="px-3 py-2">
+                    <span class="font-medium">{key.name}</span>
+                    <span class="text-xs text-gray-400 ml-1">{key.key_prefix}...</span>
+                  </td>
+                  <td class="px-3 py-2">
+                    <span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+                      {key.permission.replace(/_/g, ' ')}
+                    </span>
+                  </td>
+                  <td class="px-3 py-2 text-xs text-gray-400">
+                    {key.last_used_at ? formatTimestamp(key.last_used_at) : 'Never'}
+                  </td>
+                  <td class="px-3 py-2 text-right">
+                    <button
+                      class="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400"
+                      onclick={() => revokeApiKey(key.id)}
+                    >Revoke</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <p class="text-sm text-gray-400 dark:text-gray-500">No API keys created yet.</p>
+      {/if}
+    </section>
+
+    <!-- Audit Log section -->
+    <section>
+      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">Audit Log</h3>
+      <p class="text-xs text-gray-400 dark:text-gray-500 mb-4">Recent agent activity.</p>
+
+      {#if auditEntries.length > 0}
+        <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 dark:bg-gray-800/50">
+              <tr>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Time</th>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Agent</th>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Action</th>
+                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each auditEntries as entry}
+                <tr class="border-t border-gray-100 dark:border-gray-800">
+                  <td class="px-3 py-2 text-xs text-gray-400">{formatTimestamp(entry.created_at)}</td>
+                  <td class="px-3 py-2 text-xs">{entry.key_name || entry.api_key_id?.slice(0, 8) || '—'}</td>
+                  <td class="px-3 py-2 text-xs">
+                    {entry.action}
+                    {#if entry.resource_type}
+                      <span class="text-gray-400"> on {entry.resource_type}</span>
+                    {/if}
+                  </td>
+                  <td class="px-3 py-2 text-xs">
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-medium
+                      {entry.status === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                       : entry.status === 'denied' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                       : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'}">
+                      {entry.status}
+                    </span>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <p class="text-sm text-gray-400 dark:text-gray-500">No agent activity yet.</p>
+      {/if}
     </section>
 
     <!-- Accounts section -->

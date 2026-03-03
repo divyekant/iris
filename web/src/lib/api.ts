@@ -104,4 +104,22 @@ export const api = {
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },
+  apiKeys: {
+    list: () => request<any[]>('/api/api-keys'),
+    create: (data: { name: string; permission: string; account_id?: string }) =>
+      request<{ key: string; id: string; name: string; permission: string; key_prefix: string }>('/api/api-keys', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    revoke: (id: string) => request<void>(`/api/api-keys/${id}`, { method: 'DELETE' }),
+  },
+  auditLog: {
+    list: (params?: { api_key_id?: string; limit?: number; offset?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.api_key_id) query.set('api_key_id', params.api_key_id);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      return request<any[]>(`/api/audit-log?${query}`);
+    },
+  },
 };

@@ -1,5 +1,6 @@
 <script lang="ts">
   import EmailBody from './EmailBody.svelte';
+  import TrustBadge from '../TrustBadge.svelte';
 
   let { message }: { message: any } = $props();
   let expanded = $state(true);
@@ -56,6 +57,12 @@
           <div>Cc: {parseAddresses(message.cc_addresses)}</div>
         {/if}
       </div>
+
+      {#if message.trust || (message.tracking_pixels && message.tracking_pixels.length > 0)}
+        <div class="mb-3">
+          <TrustBadge trust={message.trust || {}} trackingPixels={message.tracking_pixels || []} />
+        </div>
+      {/if}
 
       <EmailBody html={message.body_html} text={message.body_text} />
 
