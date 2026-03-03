@@ -8,3 +8,4 @@ pub mod health;
 pub mod messages;
 pub mod search;
 pub mod threads;
+pub mod trust;
