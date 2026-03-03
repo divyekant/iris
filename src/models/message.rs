@@ -81,6 +81,96 @@ impl MessageSummary {
     }
 }
 
+/// Full message detail including body, used for thread/detail views.
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDetail {
+    pub id: String,
+    pub account_id: String,
+    pub thread_id: Option<String>,
+    pub folder: String,
+    pub from_address: Option<String>,
+    pub from_name: Option<String>,
+    pub to_addresses: Option<String>,
+    pub cc_addresses: Option<String>,
+    pub subject: Option<String>,
+    pub snippet: Option<String>,
+    pub date: Option<i64>,
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
+    pub is_read: bool,
+    pub is_starred: bool,
+    pub has_attachments: bool,
+    pub attachments: Vec<AttachmentMeta>,
+}
+
+impl MessageDetail {
+    pub fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        let attachment_json: Option<String> = row.get("attachment_names")?;
+        let attachments: Vec<AttachmentMeta> = attachment_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        Ok(Self {
+            id: row.get("id")?,
+            account_id: row.get("account_id")?,
+            thread_id: row.get("thread_id")?,
+            folder: row.get("folder")?,
+            from_address: row.get("from_address")?,
+            from_name: row.get("from_name")?,
+            to_addresses: row.get("to_addresses")?,
+            cc_addresses: row.get("cc_addresses")?,
+            subject: row.get("subject")?,
+            snippet: row.get("snippet")?,
+            date: row.get("date")?,
+            body_text: row.get("body_text")?,
+            body_html: row.get("body_html")?,
+            is_read: row.get("is_read")?,
+            is_starred: row.get("is_starred")?,
+            has_attachments: row.get("has_attachments")?,
+            attachments,
+        })
+    }
+
+    pub fn get_by_id(conn: &Conn, id: &str) -> Option<Self> {
+        conn.query_row(
+            "SELECT id, account_id, thread_id, folder, from_address, from_name,
+                    to_addresses, cc_addresses, subject, snippet, date,
+                    body_text, body_html, is_read, is_starred, has_attachments, attachment_names
+             FROM messages WHERE id = ?1 AND is_deleted = 0",
+            rusqlite::params![id],
+            Self::from_row,
+        )
+        .ok()
+    }
+
+    pub fn list_by_thread(conn: &Conn, thread_id: &str) -> Vec<Self> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, account_id, thread_id, folder, from_address, from_name,
+                        to_addresses, cc_addresses, subject, snippet, date,
+                        body_text, body_html, is_read, is_starred, has_attachments, attachment_names
+                 FROM messages WHERE thread_id = ?1 AND is_deleted = 0
+                 ORDER BY date ASC",
+            )
+            .expect("failed to prepare list_by_thread");
+
+        stmt.query_map(rusqlite::params![thread_id], Self::from_row)
+            .expect("failed to query thread messages")
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+}
+
+/// Mark a message as read. Returns true if a row was updated.
+pub fn mark_as_read(conn: &Conn, id: &str) -> bool {
+    conn.execute(
+        "UPDATE messages SET is_read = 1, updated_at = datetime('now') WHERE id = ?1",
+        rusqlite::params![id],
+    )
+    .map(|rows| rows > 0)
+    .unwrap_or(false)
+}
+
 /// Struct for inserting synced messages from IMAP.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InsertMessage {
@@ -297,5 +387,71 @@ mod tests {
 
         let page3 = MessageSummary::list_by_folder(&conn, &account.id, "INBOX", 2, 4);
         assert_eq!(page3.len(), 1);
+    }
+
+    #[test]
+    fn test_message_detail_get_by_id() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg = make_insert_message(&account.id, "INBOX", "Detail Test", false);
+        msg.body_text = Some("Full body text here.".to_string());
+        msg.body_html = Some("<p>Full body HTML</p>".to_string());
+        let id = InsertMessage::insert(&conn, &msg);
+
+        let detail = MessageDetail::get_by_id(&conn, &id);
+        assert!(detail.is_some());
+        let detail = detail.unwrap();
+        assert_eq!(detail.id, id);
+        assert_eq!(detail.body_text.as_deref(), Some("Full body text here."));
+        assert_eq!(detail.body_html.as_deref(), Some("<p>Full body HTML</p>"));
+    }
+
+    #[test]
+    fn test_message_detail_list_by_thread() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let thread_id = "thread-abc@example.com";
+        for i in 0..3 {
+            let mut msg = make_insert_message(&account.id, "INBOX", &format!("Thread msg {i}"), false);
+            msg.thread_id = Some(thread_id.to_string());
+            msg.message_id = Some(format!("<thread-msg-{i}@example.com>"));
+            msg.date = Some(1700000000 + i);
+            msg.uid = Some(100 + i);
+            InsertMessage::insert(&conn, &msg);
+        }
+
+        let mut other = make_insert_message(&account.id, "INBOX", "Other thread", false);
+        other.thread_id = Some("other-thread@example.com".to_string());
+        other.message_id = Some("<other@example.com>".to_string());
+        other.uid = Some(200);
+        InsertMessage::insert(&conn, &other);
+
+        let thread = MessageDetail::list_by_thread(&conn, thread_id);
+        assert_eq!(thread.len(), 3);
+        assert_eq!(thread[0].subject.as_deref(), Some("Thread msg 0"));
+        assert_eq!(thread[2].subject.as_deref(), Some("Thread msg 2"));
+    }
+
+    #[test]
+    fn test_mark_as_read() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let msg = make_insert_message(&account.id, "INBOX", "Unread msg", false);
+        let id = InsertMessage::insert(&conn, &msg);
+
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert!(!detail.is_read);
+
+        let result = mark_as_read(&conn, &id);
+        assert!(result);
+
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert!(detail.is_read);
     }
 }
