@@ -8,6 +8,8 @@
     date: string;
     is_read: boolean;
     has_attachments?: boolean;
+    ai_priority_label?: string;
+    ai_category?: string;
   }
 
   let { message, onclick, selected = false, onselect }: {
@@ -34,6 +36,17 @@
     return msgDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
   });
 
+  const priorityColors: Record<string, string> = {
+    urgent: 'bg-red-500',
+    high: 'bg-orange-400',
+    normal: 'bg-green-400',
+    low: 'bg-gray-300 dark:bg-gray-600',
+  };
+
+  let priorityColor = $derived(
+    message.ai_priority_label ? priorityColors[message.ai_priority_label] || '' : ''
+  );
+
   function handleCheckbox(e: Event) {
     e.stopPropagation();
     const checked = (e.target as HTMLInputElement).checked;
@@ -56,10 +69,12 @@
     />
   </div>
 
-  <!-- Unread indicator -->
+  <!-- Unread indicator + priority badge -->
   <div class="pt-1.5 w-3 flex-shrink-0">
     {#if !message.is_read}
       <div class="w-2.5 h-2.5 rounded-full bg-blue-500"></div>
+    {:else if priorityColor}
+      <div class="w-2 h-2 rounded-full {priorityColor}" title={message.ai_priority_label}></div>
     {/if}
   </div>
 
@@ -69,9 +84,14 @@
       <span class="text-sm truncate {message.is_read ? 'text-gray-700 dark:text-gray-300' : 'font-semibold text-gray-900 dark:text-gray-100'}">
         {senderDisplay}
       </span>
-      <span class="flex-shrink-0 text-xs text-gray-400 dark:text-gray-500 ml-auto">
+      <span class="flex-shrink-0 text-xs text-gray-400 dark:text-gray-500 ml-auto flex items-center gap-1.5">
+        {#if message.ai_category}
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">
+            {message.ai_category}
+          </span>
+        {/if}
         {#if message.has_attachments}
-          <span class="mr-1.5" title="Has attachments">{'\u{1F4CE}'}</span>
+          <span title="Has attachments">&#128206;</span>
         {/if}
         {formattedDate}
       </span>

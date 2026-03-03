@@ -83,6 +83,15 @@ export const api = {
     if (params.offset) query.set('offset', String(params.offset));
     return request<{ results: any[]; total: number; query: string }>(`/api/search?${query}`);
   },
+  ai: {
+    getConfig: () => request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean }>('/api/config/ai'),
+    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean }) =>
+      request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean }>('/api/config/ai', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    testConnection: () => request<{ connected: boolean; models: string[] }>('/api/config/ai/test', { method: 'POST' }),
+  },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },
