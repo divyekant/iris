@@ -18,16 +18,22 @@ export const api = {
     create: (data: any) => request<any>('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
   },
   messages: {
-    list: (params?: { account_id?: string; folder?: string; limit?: number; offset?: number }) => {
+    list: (params?: { account_id?: string; folder?: string; category?: string; limit?: number; offset?: number }) => {
       const query = new URLSearchParams();
       if (params?.account_id) query.set('account_id', params.account_id);
       if (params?.folder) query.set('folder', params.folder);
+      if (params?.category) query.set('category', params.category);
       if (params?.limit) query.set('limit', String(params.limit));
       if (params?.offset) query.set('offset', String(params.offset));
       return request<{ messages: any[]; unread_count: number; total: number }>(`/api/messages?${query}`);
     },
     get: (id: string) => request<any>(`/api/messages/${id}`),
     markRead: (id: string) => request<void>(`/api/messages/${id}/read`, { method: 'PUT' }),
+    batch: (ids: string[], action: string) =>
+      request<{ updated: number }>('/api/messages/batch', {
+        method: 'PATCH',
+        body: JSON.stringify({ ids, action }),
+      }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
@@ -58,8 +64,13 @@ export const api = {
     delete: (id: string) => request<void>(`/api/drafts/${id}`, { method: 'DELETE' }),
   },
   config: {
-    get: () => request<{ theme: string }>('/api/config'),
+    get: () => request<{ theme: string; view_mode: string }>('/api/config'),
     setTheme: (theme: string) => request<void>('/api/config/theme', { method: 'PUT', body: JSON.stringify({ theme }) }),
+    setViewMode: (view_mode: string) =>
+      request<{ theme: string; view_mode: string }>('/api/config/view-mode', {
+        method: 'PUT',
+        body: JSON.stringify({ view_mode }),
+      }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
