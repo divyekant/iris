@@ -16,6 +16,7 @@
   let activeCategory = $state('');
   let selectedIds = $state(new Set<string>());
   let filterAccountId = $state('');
+  let viewMode = $state('traditional');
 
   const categories = [
     { id: '', label: 'All' },
@@ -74,6 +75,21 @@
     showCompose = true;
   }
 
+  async function loadViewMode() {
+    try {
+      const config = await api.config.get();
+      viewMode = config.view_mode || 'traditional';
+    } catch { /* ignore */ }
+  }
+
+  async function toggleViewMode() {
+    const next = viewMode === 'traditional' ? 'messaging' : 'traditional';
+    viewMode = next;
+    try {
+      await api.config.setViewMode(next);
+    } catch { /* ignore */ }
+  }
+
   function onAccountSwitch(e: Event) {
     const detail = (e as CustomEvent).detail;
     filterAccountId = detail.accountId || '';
@@ -93,6 +109,7 @@
 
   $effect(() => {
     loadMessages();
+    loadViewMode();
     wsClient.connect();
     const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
     window.addEventListener('account-switch', onAccountSwitch);
@@ -113,6 +130,16 @@
       </span>
     {/if}
     <span class="flex-1"></span>
+    <button
+      class="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors
+             {viewMode === 'traditional'
+               ? 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+               : 'border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30'}"
+      onclick={toggleViewMode}
+      title="Toggle view mode"
+    >
+      {viewMode === 'traditional' ? 'Traditional' : 'Messaging'}
+    </button>
     <button
       class="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
       onclick={openCompose}
