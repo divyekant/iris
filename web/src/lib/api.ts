@@ -32,6 +32,31 @@ export const api = {
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
   },
+  send: (data: {
+    account_id: string;
+    to: string[];
+    cc?: string[];
+    bcc?: string[];
+    subject: string;
+    body_text: string;
+    body_html?: string;
+    in_reply_to?: string;
+    references?: string;
+  }) => request<{ message_id: string }>('/api/send', { method: 'POST', body: JSON.stringify(data) }),
+  drafts: {
+    list: (accountId: string) => request<any[]>(`/api/drafts?account_id=${accountId}`),
+    save: (data: {
+      account_id: string;
+      draft_id?: string | null;
+      to?: string[];
+      cc?: string[];
+      bcc?: string[];
+      subject?: string;
+      body_text: string;
+      body_html?: string;
+    }) => request<{ draft_id: string }>('/api/drafts', { method: 'POST', body: JSON.stringify(data) }),
+    delete: (id: string) => request<void>(`/api/drafts/${id}`, { method: 'DELETE' }),
+  },
   config: {
     get: () => request<{ theme: string }>('/api/config'),
     setTheme: (theme: string) => request<void>('/api/config/theme', { method: 'PUT', body: JSON.stringify({ theme }) }),
