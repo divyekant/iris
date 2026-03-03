@@ -15,7 +15,7 @@ use crate::models::account::CreateAccount;
 use crate::AppState;
 
 /// Fully-configured BasicClient with auth URL and token URL set.
-type ConfiguredClient = BasicClient<
+pub(crate) type ConfiguredClient = BasicClient<
     EndpointSet,   // HasAuthUrl
     EndpointNotSet, // HasDeviceAuthUrl
     EndpointNotSet, // HasIntrospectionUrl
@@ -27,14 +27,14 @@ type ConfiguredClient = BasicClient<
 // Provider configuration
 // ---------------------------------------------------------------------------
 
-struct ProviderConfig {
-    auth_url: &'static str,
-    token_url: &'static str,
-    userinfo_url: &'static str,
-    scopes: &'static [&'static str],
+pub(crate) struct ProviderConfig {
+    pub(crate) auth_url: &'static str,
+    pub(crate) token_url: &'static str,
+    pub(crate) userinfo_url: &'static str,
+    pub(crate) scopes: &'static [&'static str],
 }
 
-fn provider_config(provider: &str) -> Option<ProviderConfig> {
+pub(crate) fn provider_config(provider: &str) -> Option<ProviderConfig> {
     match provider {
         "gmail" => Some(ProviderConfig {
             auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
@@ -93,7 +93,7 @@ fn client_credentials<'a>(
     }
 }
 
-fn build_oauth_client(
+pub(crate) fn build_oauth_client(
     provider: &str,
     config: &crate::config::Config,
     provider_cfg: &ProviderConfig,
