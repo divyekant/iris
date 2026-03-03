@@ -1,0 +1,28 @@
+services:
+  iris:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - iris-data:/app/data
+    environment:
+      - DATABASE_URL=/app/data/iris.db
+      - OLLAMA_URL=http://ollama:11434
+      - PORT=3000
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  iris-data:
+  ollama-data:
