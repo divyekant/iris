@@ -1,6 +1,7 @@
 use futures::TryStreamExt;
 use mailparse::MailHeaderMap;
 
+use crate::ai::memories::MemoriesClient;
 use crate::ai::ollama::OllamaClient;
 use crate::ai::pipeline;
 use crate::db::DbPool;
@@ -18,6 +19,7 @@ pub struct SyncEngine {
     pub db: DbPool,
     pub ws_hub: WsHub,
     pub ollama: OllamaClient,
+    pub memories: MemoriesClient,
 }
 
 impl SyncEngine {
@@ -105,10 +107,22 @@ impl SyncEngine {
 
             // Spawn AI processing in background (fire-and-forget)
             self.spawn_ai_processing(
-                msg_id,
+                msg_id.clone(),
                 insert_msg.subject.clone().unwrap_or_default(),
                 insert_msg.from_address.clone().unwrap_or_default(),
                 insert_msg.body_text.clone().unwrap_or_default(),
+            );
+
+            // Store in Memories for semantic search (fire-and-forget)
+            self.spawn_memories_storage(
+                account_id.to_string(),
+                msg_id,
+                insert_msg.message_id.clone(),
+                insert_msg.from_name.clone(),
+                insert_msg.from_address.clone(),
+                insert_msg.subject.clone(),
+                insert_msg.body_text.clone(),
+                insert_msg.date,
             );
 
             // Broadcast progress
@@ -192,6 +206,52 @@ impl SyncEngine {
                     });
                     tracing::debug!(message_id, "AI processing complete");
                 }
+            }
+        });
+    }
+
+    /// Store email content in Memories for semantic search.
+    /// Gracefully degrades: if Memories server is unreachable, does nothing.
+    fn spawn_memories_storage(
+        &self,
+        account_id: String,
+        db_message_id: String,
+        rfc_message_id: Option<String>,
+        from_name: Option<String>,
+        from_address: Option<String>,
+        subject: Option<String>,
+        body_text: Option<String>,
+        date: Option<i64>,
+    ) {
+        let memories = self.memories.clone();
+
+        tokio::spawn(async move {
+            // Build text content for embedding
+            let from = match (&from_name, &from_address) {
+                (Some(name), Some(addr)) => format!("From: {} <{}>", name, addr),
+                (None, Some(addr)) => format!("From: {}", addr),
+                _ => String::new(),
+            };
+            let subj = subject.as_deref().unwrap_or("(no subject)");
+            let date_str = date
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_default();
+
+            // Truncate body to 4000 chars for embedding
+            let body = body_text.as_deref().unwrap_or("");
+            let body_truncated: String = body.chars().take(4000).collect();
+
+            let text = format!(
+                "{}\nSubject: {}\nDate: {}\n\n{}",
+                from, subj, date_str, body_truncated
+            );
+
+            let source = format!("iris/{}/messages/{}", account_id, db_message_id);
+            let key = rfc_message_id.unwrap_or_else(|| db_message_id.clone());
+
+            if !memories.upsert(&text, &source, &key).await {
+                tracing::debug!(db_message_id, "Memories upsert skipped (server unreachable or error)");
             }
         });
     }

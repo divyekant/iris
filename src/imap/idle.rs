@@ -1,6 +1,7 @@
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+use crate::ai::memories::MemoriesClient;
 use crate::ai::ollama::OllamaClient;
 use crate::db::DbPool;
 use crate::imap::connection::{connect, ImapCredentials};
@@ -21,12 +22,13 @@ pub fn spawn_idle_listener(
     db: DbPool,
     ws_hub: WsHub,
     ollama: OllamaClient,
+    memories: MemoriesClient,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tracing::info!(account_id, "IDLE: connecting");
 
-            let result = idle_loop(&account_id, &creds, &db, &ws_hub, &ollama).await;
+            let result = idle_loop(&account_id, &creds, &db, &ws_hub, &ollama, &memories).await;
 
             if let Err(e) = result {
                 tracing::error!(account_id, error = %e, "IDLE loop error, retrying in 30s");
@@ -45,6 +47,7 @@ async fn idle_loop(
     db: &DbPool,
     ws_hub: &WsHub,
     ollama: &OllamaClient,
+    memories: &MemoriesClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Connect
     let mut session = connect(creds).await?;
@@ -74,6 +77,7 @@ async fn idle_loop(
         db: db.clone(),
         ws_hub: ws_hub.clone(),
         ollama: ollama.clone(),
+        memories: memories.clone(),
     };
 
     // Re-run initial sync (INSERT OR IGNORE handles duplicates)
