@@ -1,7 +1,7 @@
 # Iris — Session Status
 
 **Last updated:** 2026-03-03
-**Pipeline:** explore ✓ → shape ✓ → plan ✓ → **build (V7 DONE)** → verify → review → finish → release
+**Pipeline:** explore ✓ → shape ✓ → plan ✓ → **build (V8 DONE)** → verify → review → finish → release
 
 ---
 
@@ -150,6 +150,26 @@
 
 **Scoping note:** Semantic search (U40, U41) deferred — requires sqlite-vec embeddings infrastructure.
 
+### Build Phase — V8: AI Chat (Complete)
+2 commits on `main`, ~700 lines added. 54 total tests (5 new).
+
+**Backend:**
+- Migration 002: chat_messages table with session_id, role, citations, proposed_action
+- POST /api/ai/chat: FTS5-based RAG context retrieval, Ollama conversation generation
+- GET /api/ai/chat/{session_id}: conversation history retrieval
+- POST /api/ai/chat/confirm: execute confirmed bulk actions (archive, delete, mark read/unread, star)
+- Action proposal parsing from AI response (ACTION_PROPOSAL: JSON format)
+- System prompt instructs AI to cite emails by ID and propose actions with confirmation
+
+**Frontend:**
+- ChatPanel: sliding right sidebar with conversation bubbles, suggestion chips, citation display
+- Action confirmation UI: proposed actions shown with Confirm button
+- Header: AI Chat toggle button
+- AppShell: ChatPanel wired alongside main content area
+- API client: ai.chat, ai.chatHistory, ai.chatConfirm methods
+
+**Scoping note:** Newsletter Feed (P6) deferred. Semantic search (embeddings) deferred — FTS5 used for context retrieval.
+
 ### Key Decisions Made
 - **Architecture:** Shape B — Rust (Axum) backend + SPA frontend + SQLite/FTS5 + Ollama sidecar + Docker Compose
 - **Frontend:** Svelte 5 + TypeScript + Vite 7 + Tailwind CSS 4
@@ -161,14 +181,14 @@
 
 ## What's Next
 
-### Plan + Build V8: AI Chat
-V8 covers conversational AI interaction with inbox:
-- Chat panel for natural language queries about email
-- Context-aware responses using thread/message data
-- Briefings and digest generation
+### Plan + Build V9: Agent Connectivity
+V9 covers external agent integration:
+- Agent API for programmatic inbox access
+- Trust/security model for agent actions
+- Webhook notifications
 
-### After V8
-Build V9 (Agent connectivity). Each slice is independently demo-able.
+### After V9
+All 9 slices complete. Polish, testing, deployment.
 
 ---
 
