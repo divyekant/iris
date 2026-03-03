@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod db;
 mod models;
+mod ws;
 
 use axum::{Router, routing::get};
 use config::Config;
@@ -13,6 +14,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub struct AppState {
     pub db: db::DbPool,
     pub config: Config,
+    pub ws_hub: ws::hub::WsHub,
 }
 
 #[tokio::main]
@@ -34,6 +36,7 @@ async fn main() {
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
+        ws_hub: ws::hub::WsHub::new(),
     });
 
     let api_routes = Router::new().route("/health", get(api::health::health));
@@ -41,6 +44,7 @@ async fn main() {
     let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
 
     let app = Router::new()
+        .route("/ws", get(ws::ws_handler))
         .nest("/api", api_routes)
         .fallback_service(spa)
         .layer(
