@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 
 type Conn = PooledConnection<SqliteConnectionManager>;
 
+/// Attachment metadata stored as JSON in the attachment_names column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub filename: String,
+    pub mime_type: String,
+    pub size: usize,
+}
+
 /// Lightweight message struct for inbox list views (no body fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageSummary {

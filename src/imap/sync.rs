@@ -1,9 +1,10 @@
 use futures::TryStreamExt;
+use mailparse::MailHeaderMap;
 
 use crate::db::DbPool;
 use crate::imap::connection::{connect, ImapCredentials};
 use crate::models::account::Account;
-use crate::models::message::InsertMessage;
+use crate::models::message::{AttachmentMeta, InsertMessage};
 use crate::ws::hub::{WsEvent, WsHub};
 
 // ---------------------------------------------------------------------------
@@ -225,8 +226,24 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         .header()
         .map(|h| String::from_utf8_lossy(h).to_string());
 
-    // Snippet: first 200 chars of body text
-    let snippet = body_text.as_ref().map(|text| {
+    // Parse MIME body for text, html, and attachments
+    let mime_parsed = match (&raw_headers, &body_text) {
+        (Some(headers), Some(body)) => parse_mime_body(headers, body),
+        _ => ParsedBody {
+            text: body_text.clone(),
+            html: None,
+            attachments: Vec::new(),
+        },
+    };
+
+    // Extract thread ID from headers
+    let thread_id = raw_headers
+        .as_deref()
+        .map(|h| extract_thread_id(h, &message_id))
+        .unwrap_or_else(|| message_id.clone());
+
+    // Snippet: first 200 chars of the extracted plain text body
+    let snippet = mime_parsed.text.as_ref().map(|text| {
         let clean: String = text
             .chars()
             .filter(|c| !c.is_control())
@@ -234,6 +251,14 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
             .collect();
         clean
     });
+
+    // Serialize attachment metadata
+    let has_attachments = !mime_parsed.attachments.is_empty();
+    let attachment_names = if has_attachments {
+        serde_json::to_string(&mime_parsed.attachments).ok()
+    } else {
+        None
+    };
 
     // Check flags for \Seen
     let is_read = fetch.flags().any(|f| matches!(f, async_imap::types::Flag::Seen));
@@ -247,7 +272,7 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
     InsertMessage {
         account_id: account_id.to_string(),
         message_id,
-        thread_id: None,
+        thread_id,
         folder: "INBOX".to_string(),
         from_address,
         from_name,
@@ -257,8 +282,8 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         subject,
         date,
         snippet,
-        body_text,
-        body_html: None,
+        body_text: mime_parsed.text,
+        body_html: mime_parsed.html,
         is_read,
         is_starred,
         is_draft,
@@ -266,8 +291,295 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         uid: fetch.uid.map(|u| u as i64),
         modseq: fetch.modseq.map(|m| m as i64),
         raw_headers,
-        has_attachments: false, // TODO: parse BODYSTRUCTURE for attachments
-        attachment_names: None,
+        has_attachments,
+        attachment_names,
         size_bytes: fetch.size.map(|s| s as i64),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MIME parsing
+// ---------------------------------------------------------------------------
+
+struct ParsedBody {
+    text: Option<String>,
+    html: Option<String>,
+    attachments: Vec<AttachmentMeta>,
+}
+
+/// Parse the MIME body of a message.
+/// Concatenates raw headers + body, then uses mailparse to extract
+/// text/plain, text/html, and attachment metadata.
+fn parse_mime_body(raw_headers: &str, raw_body: &str) -> ParsedBody {
+    // MIME requires a blank line (\r\n\r\n) between headers and body.
+    // Trim trailing whitespace from headers, then add the blank line separator.
+    let full = format!("{}\r\n\r\n{}", raw_headers.trim_end(), raw_body);
+
+    let parsed = match mailparse::parse_mail(full.as_bytes()) {
+        Ok(p) => p,
+        Err(_) => {
+            // Fallback: return raw body as text
+            return ParsedBody {
+                text: Some(raw_body.to_string()),
+                html: None,
+                attachments: Vec::new(),
+            };
+        }
+    };
+
+    let mut text = None;
+    let mut html = None;
+    let mut attachments = Vec::new();
+
+    extract_mime_parts(&parsed, &mut text, &mut html, &mut attachments);
+
+    ParsedBody {
+        text,
+        html,
+        attachments,
+    }
+}
+
+/// Recursively walk MIME parts to extract text, HTML, and attachment metadata.
+fn extract_mime_parts(
+    part: &mailparse::ParsedMail,
+    text: &mut Option<String>,
+    html: &mut Option<String>,
+    attachments: &mut Vec<AttachmentMeta>,
+) {
+    let content_type = &part.ctype;
+    let disposition = part.get_content_disposition();
+
+    // Check if this part is an attachment
+    if disposition.disposition == mailparse::DispositionType::Attachment {
+        let filename = disposition
+            .params
+            .get("filename")
+            .cloned()
+            .unwrap_or_else(|| "unnamed".to_string());
+        let mime_type = format!("{}/{}", content_type.mimetype.split('/').next().unwrap_or("application"),
+            content_type.mimetype.split('/').nth(1).unwrap_or("octet-stream"));
+        let size = part.get_body_raw().map(|b| b.len()).unwrap_or(0);
+        attachments.push(AttachmentMeta {
+            filename,
+            mime_type,
+            size,
+        });
+        return;
+    }
+
+    // If this part has subparts, recurse into them
+    if !part.subparts.is_empty() {
+        for subpart in &part.subparts {
+            extract_mime_parts(subpart, text, html, attachments);
+        }
+        return;
+    }
+
+    // Leaf part: extract text or html
+    let mime = &content_type.mimetype;
+    if mime == "text/plain" && text.is_none() {
+        if let Ok(body) = part.get_body() {
+            text.replace(body);
+        }
+    } else if mime == "text/html" && html.is_none() {
+        if let Ok(body) = part.get_body() {
+            html.replace(body);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Thread ID extraction
+// ---------------------------------------------------------------------------
+
+/// Extract a thread ID from the message headers.
+///
+/// Strategy:
+/// 1. If `References` header exists, use the first message-id (thread root).
+/// 2. Else if `In-Reply-To` header exists, use that.
+/// 3. Else fall back to the message's own `Message-ID`.
+///
+/// All message-ids have angle brackets stripped.
+fn extract_thread_id(raw_headers: &str, message_id: &Option<String>) -> Option<String> {
+    let headers = match mailparse::parse_headers(raw_headers.as_bytes()) {
+        Ok((headers, _)) => headers,
+        Err(_) => return message_id.clone(),
+    };
+
+    // Helper to strip angle brackets from a message-id
+    let strip_brackets = |s: &str| -> String {
+        s.trim().trim_start_matches('<').trim_end_matches('>').to_string()
+    };
+
+    // Check References header (first ID = thread root)
+    if let Some(refs) = headers.get_first_value("References") {
+        let first_ref = refs.split_whitespace().next();
+        if let Some(r) = first_ref {
+            let stripped = strip_brackets(r);
+            if !stripped.is_empty() {
+                return Some(stripped);
+            }
+        }
+    }
+
+    // Check In-Reply-To header
+    if let Some(in_reply_to) = headers.get_first_value("In-Reply-To") {
+        let stripped = strip_brackets(&in_reply_to);
+        if !stripped.is_empty() {
+            return Some(stripped);
+        }
+    }
+
+    // Fall back to own message-id
+    message_id.as_ref().map(|id| strip_brackets(id))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_mime_plain_text() {
+        let headers = "From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Test\r\nContent-Type: text/plain; charset=utf-8\r\n";
+        let body = "Hello, this is a plain text email.\r\n";
+
+        let result = parse_mime_body(headers, body);
+
+        assert!(result.text.is_some(), "text should be extracted");
+        assert!(
+            result.text.as_ref().unwrap().contains("Hello, this is a plain text email."),
+            "text should contain the body content"
+        );
+        assert!(result.html.is_none(), "html should be None for plain text");
+        assert!(result.attachments.is_empty(), "no attachments expected");
+    }
+
+    #[test]
+    fn test_parse_mime_multipart() {
+        let headers = concat!(
+            "From: sender@example.com\r\n",
+            "To: recipient@example.com\r\n",
+            "Subject: Multipart\r\n",
+            "Content-Type: multipart/alternative; boundary=\"boundary123\"\r\n",
+        );
+        let body = concat!(
+            "--boundary123\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Plain text version.\r\n",
+            "--boundary123\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>HTML version.</p>\r\n",
+            "--boundary123--\r\n",
+        );
+
+        let result = parse_mime_body(headers, body);
+
+        assert!(result.text.is_some(), "text part should be extracted");
+        assert!(
+            result.text.as_ref().unwrap().contains("Plain text version."),
+            "text should match"
+        );
+        assert!(result.html.is_some(), "html part should be extracted");
+        assert!(
+            result.html.as_ref().unwrap().contains("<p>HTML version.</p>"),
+            "html should match"
+        );
+        assert!(result.attachments.is_empty(), "no attachments in alternative");
+    }
+
+    #[test]
+    fn test_parse_mime_with_attachment() {
+        let headers = concat!(
+            "From: sender@example.com\r\n",
+            "To: recipient@example.com\r\n",
+            "Subject: With Attachment\r\n",
+            "Content-Type: multipart/mixed; boundary=\"mixboundary\"\r\n",
+        );
+        let body = concat!(
+            "--mixboundary\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "See attached file.\r\n",
+            "--mixboundary\r\n",
+            "Content-Type: application/pdf; name=\"report.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"report.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "JVBERi0xLjQK\r\n",
+            "--mixboundary--\r\n",
+        );
+
+        let result = parse_mime_body(headers, body);
+
+        assert!(result.text.is_some(), "text part should be extracted");
+        assert!(
+            result.text.as_ref().unwrap().contains("See attached file."),
+            "text should match"
+        );
+        assert_eq!(result.attachments.len(), 1, "should have 1 attachment");
+        assert_eq!(result.attachments[0].filename, "report.pdf");
+        assert_eq!(result.attachments[0].mime_type, "application/pdf");
+        assert!(result.attachments[0].size > 0, "attachment should have size > 0");
+    }
+
+    #[test]
+    fn test_extract_thread_id_with_references() {
+        let headers = concat!(
+            "From: sender@example.com\r\n",
+            "Message-ID: <msg3@example.com>\r\n",
+            "References: <root@example.com> <msg2@example.com>\r\n",
+            "In-Reply-To: <msg2@example.com>\r\n",
+        );
+        let message_id = Some("<msg3@example.com>".to_string());
+
+        let thread_id = extract_thread_id(headers, &message_id);
+
+        assert_eq!(
+            thread_id,
+            Some("root@example.com".to_string()),
+            "should use first message-id from References as thread root"
+        );
+    }
+
+    #[test]
+    fn test_extract_thread_id_with_in_reply_to_only() {
+        let headers = concat!(
+            "From: sender@example.com\r\n",
+            "Message-ID: <reply@example.com>\r\n",
+            "In-Reply-To: <original@example.com>\r\n",
+        );
+        let message_id = Some("<reply@example.com>".to_string());
+
+        let thread_id = extract_thread_id(headers, &message_id);
+
+        assert_eq!(
+            thread_id,
+            Some("original@example.com".to_string()),
+            "should use In-Reply-To when no References header"
+        );
+    }
+
+    #[test]
+    fn test_extract_thread_id_standalone() {
+        let headers = concat!(
+            "From: sender@example.com\r\n",
+            "Message-ID: <standalone@example.com>\r\n",
+        );
+        let message_id = Some("<standalone@example.com>".to_string());
+
+        let thread_id = extract_thread_id(headers, &message_id);
+
+        assert_eq!(
+            thread_id,
+            Some("standalone@example.com".to_string()),
+            "should fall back to own message-id with brackets stripped"
+        );
     }
 }
