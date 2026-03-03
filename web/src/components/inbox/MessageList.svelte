@@ -1,7 +1,21 @@
 <script lang="ts">
   import MessageRow from './MessageRow.svelte';
 
-  let { messages, onclick }: { messages: any[]; onclick: (id: string) => void } = $props();
+  let { messages, onclick, selectedIds = $bindable(new Set<string>()) }: {
+    messages: any[];
+    onclick: (id: string) => void;
+    selectedIds?: Set<string>;
+  } = $props();
+
+  function handleSelect(id: string, checked: boolean) {
+    const next = new Set(selectedIds);
+    if (checked) {
+      next.add(id);
+    } else {
+      next.delete(id);
+    }
+    selectedIds = next;
+  }
 </script>
 
 {#if messages.length === 0}
@@ -12,7 +26,7 @@
 {:else}
   <div class="divide-y divide-gray-100 dark:divide-gray-800">
     {#each messages as message (message.id)}
-      <MessageRow {message} {onclick} />
+      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} onselect={handleSelect} />
     {/each}
   </div>
 {/if}

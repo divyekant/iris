@@ -14,6 +14,7 @@
   let showCompose = $state(false);
   let activeAccountId = $state('');
   let activeCategory = $state('');
+  let selectedIds = $state(new Set<string>());
 
   const categories = [
     { id: '', label: 'All' },
@@ -65,6 +66,17 @@
     showCompose = true;
   }
 
+  async function handleBulkAction(action: string) {
+    if (selectedIds.size === 0) return;
+    try {
+      await api.messages.batch([...selectedIds], action);
+      selectedIds = new Set();
+      await loadMessages();
+    } catch (e: any) {
+      error = e.message || 'Bulk action failed';
+    }
+  }
+
   $effect(() => {
     loadMessages();
     wsClient.connect();
@@ -113,6 +125,21 @@
 
   <SyncStatus />
 
+  {#if selectedIds.size > 0}
+    <div class="px-4 py-2 bg-blue-50 dark:bg-blue-900/30 border-b border-blue-200 dark:border-blue-800 flex items-center gap-2">
+      <span class="text-sm font-medium text-blue-700 dark:text-blue-300">
+        {selectedIds.size} selected
+      </span>
+      <span class="flex-1"></span>
+      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('archive')}>Archive</button>
+      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('mark_read')}>Mark Read</button>
+      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('mark_unread')}>Mark Unread</button>
+      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('star')}>Star</button>
+      <button class="px-3 py-1 text-xs font-medium text-red-600 dark:text-red-400 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onclick={() => handleBulkAction('delete')}>Delete</button>
+      <button class="px-3 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" onclick={() => (selectedIds = new Set())}>Clear</button>
+    </div>
+  {/if}
+
   <div class="flex-1 overflow-auto">
     {#if loading}
       <div class="flex items-center justify-center py-16">
@@ -129,7 +156,7 @@
         </button>
       </div>
     {:else}
-      <MessageList {messages} onclick={handleMessageClick} />
+      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds />
     {/if}
   </div>
 </div>
