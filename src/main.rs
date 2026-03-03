@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod config;
 mod db;
 mod models;
@@ -39,12 +40,15 @@ async fn main() {
         ws_hub: ws::hub::WsHub::new(),
     });
 
-    let api_routes = Router::new().route("/health", get(api::health::health));
+    let api_routes = Router::new()
+        .route("/health", get(api::health::health))
+        .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
 
     let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
+        .route("/auth/callback", get(auth::oauth::oauth_callback))
         .nest("/api", api_routes)
         .fallback_service(spa)
         .layer(
