@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod imap;
 mod models;
+mod smtp;
 mod ws;
 
 use axum::{Router, routing::{get, put}};
