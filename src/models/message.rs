@@ -102,6 +102,11 @@ pub struct MessageDetail {
     pub is_starred: bool,
     pub has_attachments: bool,
     pub attachments: Vec<AttachmentMeta>,
+    pub ai_intent: Option<String>,
+    pub ai_priority_score: Option<f64>,
+    pub ai_priority_label: Option<String>,
+    pub ai_category: Option<String>,
+    pub ai_summary: Option<String>,
 }
 
 impl MessageDetail {
@@ -130,6 +135,11 @@ impl MessageDetail {
             is_starred: row.get("is_starred")?,
             has_attachments: row.get("has_attachments")?,
             attachments,
+            ai_intent: row.get("ai_intent")?,
+            ai_priority_score: row.get("ai_priority_score")?,
+            ai_priority_label: row.get("ai_priority_label")?,
+            ai_category: row.get("ai_category")?,
+            ai_summary: row.get("ai_summary")?,
         })
     }
 
@@ -137,7 +147,8 @@ impl MessageDetail {
         conn.query_row(
             "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                     to_addresses, cc_addresses, subject, snippet, date,
-                    body_text, body_html, is_read, is_starred, has_attachments, attachment_names
+                    body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
+                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
              FROM messages WHERE id = ?1 AND is_deleted = 0",
             rusqlite::params![id],
             Self::from_row,
@@ -150,7 +161,8 @@ impl MessageDetail {
             .prepare(
                 "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
-                        body_text, body_html, is_read, is_starred, has_attachments, attachment_names
+                        body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
+                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
                  FROM messages WHERE thread_id = ?1 AND is_deleted = 0
                  ORDER BY date ASC",
             )
@@ -266,6 +278,32 @@ pub fn unread_count(conn: &Conn, account_id: &str, folder: &str) -> i64 {
         |row| row.get(0),
     )
     .unwrap_or(0)
+}
+
+/// Update AI metadata columns on a message.
+pub fn update_ai_metadata(
+    conn: &Conn,
+    id: &str,
+    intent: &str,
+    priority_score: f64,
+    priority_label: &str,
+    category: &str,
+    summary: &str,
+) -> bool {
+    let updated = conn
+        .execute(
+            "UPDATE messages SET
+                ai_intent = ?2,
+                ai_priority_score = ?3,
+                ai_priority_label = ?4,
+                ai_category = ?5,
+                ai_summary = ?6,
+                updated_at = unixepoch()
+             WHERE id = ?1",
+            rusqlite::params![id, intent, priority_score, priority_label, category, summary],
+        )
+        .unwrap_or(0);
+    updated > 0
 }
 
 /// Save a draft message. If `draft_id` is Some, update existing; otherwise create new.
@@ -834,5 +872,34 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert!(snippet.contains("<mark>"));
+    }
+
+    #[test]
+    fn test_update_ai_metadata() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let msg = make_insert_message(&account.id, "INBOX", "AI Test", false);
+        let id = InsertMessage::insert(&conn, &msg);
+
+        // Initially AI fields are null
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert!(detail.ai_intent.is_none());
+        assert!(detail.ai_priority_label.is_none());
+
+        // Update AI metadata
+        let updated = update_ai_metadata(
+            &conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test email requesting action",
+        );
+        assert!(updated);
+
+        // Verify fields are set
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert_eq!(detail.ai_intent.as_deref(), Some("ACTION_REQUEST"));
+        assert_eq!(detail.ai_priority_score, Some(0.85));
+        assert_eq!(detail.ai_priority_label.as_deref(), Some("high"));
+        assert_eq!(detail.ai_category.as_deref(), Some("Primary"));
+        assert_eq!(detail.ai_summary.as_deref(), Some("Test email requesting action"));
     }
 }
