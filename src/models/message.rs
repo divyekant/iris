@@ -374,6 +374,43 @@ pub fn finalize_draft_as_sent(conn: &Conn, id: &str, message_id: Option<&str>, t
     .unwrap_or(false)
 }
 
+/// Batch update messages by action. Returns count of rows affected.
+/// Supported actions: archive, delete, mark_read, mark_unread, star, unstar.
+pub fn batch_update(conn: &Conn, ids: &[&str], action: &str) -> usize {
+    if ids.is_empty() {
+        return 0;
+    }
+
+    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+    let in_clause = placeholders.join(", ");
+
+    let sql = match action {
+        "archive" => format!(
+            "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        "delete" => format!(
+            "UPDATE messages SET is_deleted = 1, updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        "mark_read" => format!(
+            "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        "mark_unread" => format!(
+            "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        "star" => format!(
+            "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        "unstar" => format!(
+            "UPDATE messages SET is_starred = 0, updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        _ => return 0,
+    };
+
+    let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    conn.execute(&sql, params.as_slice())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,5 +697,92 @@ mod tests {
         assert!(delete_draft(&conn, &draft_id));
         let drafts = list_drafts(&conn, &account.id);
         assert_eq!(drafts.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_update_archive() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg1 = make_insert_message(&account.id, "INBOX", "Msg 1", false);
+        msg1.message_id = Some("<batch-1@example.com>".to_string());
+        let id1 = InsertMessage::insert(&conn, &msg1);
+
+        let mut msg2 = make_insert_message(&account.id, "INBOX", "Msg 2", false);
+        msg2.message_id = Some("<batch-2@example.com>".to_string());
+        let id2 = InsertMessage::insert(&conn, &msg2);
+
+        let mut msg3 = make_insert_message(&account.id, "INBOX", "Msg 3", false);
+        msg3.message_id = Some("<batch-3@example.com>".to_string());
+        let _id3 = InsertMessage::insert(&conn, &msg3);
+
+        let updated = batch_update(&conn, &[&id1, &id2], "archive");
+        assert_eq!(updated, 2);
+
+        let inbox = MessageSummary::list_by_folder(&conn, &account.id, "INBOX", 50, 0);
+        assert_eq!(inbox.len(), 1);
+
+        let archived = MessageSummary::list_by_folder(&conn, &account.id, "Archive", 50, 0);
+        assert_eq!(archived.len(), 2);
+    }
+
+    #[test]
+    fn test_batch_update_delete() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg1 = make_insert_message(&account.id, "INBOX", "Delete me", false);
+        msg1.message_id = Some("<del-1@example.com>".to_string());
+        let id1 = InsertMessage::insert(&conn, &msg1);
+
+        let updated = batch_update(&conn, &[&id1], "delete");
+        assert_eq!(updated, 1);
+
+        let inbox = MessageSummary::list_by_folder(&conn, &account.id, "INBOX", 50, 0);
+        assert_eq!(inbox.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_update_read_unread() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg1 = make_insert_message(&account.id, "INBOX", "Unread", false);
+        msg1.message_id = Some("<read-1@example.com>".to_string());
+        let id1 = InsertMessage::insert(&conn, &msg1);
+
+        let updated = batch_update(&conn, &[&id1], "mark_read");
+        assert_eq!(updated, 1);
+        let detail = MessageDetail::get_by_id(&conn, &id1).unwrap();
+        assert!(detail.is_read);
+
+        let updated = batch_update(&conn, &[&id1], "mark_unread");
+        assert_eq!(updated, 1);
+        let detail = MessageDetail::get_by_id(&conn, &id1).unwrap();
+        assert!(!detail.is_read);
+    }
+
+    #[test]
+    fn test_batch_update_star() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg1 = make_insert_message(&account.id, "INBOX", "Star me", false);
+        msg1.message_id = Some("<star-1@example.com>".to_string());
+        let id1 = InsertMessage::insert(&conn, &msg1);
+
+        let updated = batch_update(&conn, &[&id1], "star");
+        assert_eq!(updated, 1);
+        let detail = MessageDetail::get_by_id(&conn, &id1).unwrap();
+        assert!(detail.is_starred);
+
+        let updated = batch_update(&conn, &[&id1], "unstar");
+        assert_eq!(updated, 1);
+        let detail = MessageDetail::get_by_id(&conn, &id1).unwrap();
+        assert!(!detail.is_starred);
     }
 }

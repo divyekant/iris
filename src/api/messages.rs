@@ -119,3 +119,31 @@ pub async fn mark_message_read(
         Err(StatusCode::NOT_FOUND)
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub struct BatchUpdateRequest {
+    pub ids: Vec<String>,
+    pub action: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchUpdateResponse {
+    pub updated: usize,
+}
+
+pub async fn batch_update_messages(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BatchUpdateRequest>,
+) -> Result<Json<BatchUpdateResponse>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let valid_actions = ["archive", "delete", "mark_read", "mark_unread", "star", "unstar"];
+    if !valid_actions.contains(&req.action.as_str()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let id_refs: Vec<&str> = req.ids.iter().map(|s| s.as_str()).collect();
+    let updated = message::batch_update(&conn, &id_refs, &req.action);
+
+    Ok(Json(BatchUpdateResponse { updated }))
+}

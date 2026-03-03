@@ -7,7 +7,7 @@ mod models;
 mod smtp;
 mod ws;
 
-use axum::{Router, routing::{get, put, post, delete}};
+use axum::{Router, routing::{get, put, post, delete, patch}};
 use config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,6 +49,7 @@ async fn main() {
         .route("/messages", get(api::messages::list_messages))
         .route("/messages/{id}", get(api::messages::get_message))
         .route("/messages/{id}/read", put(api::messages::mark_message_read))
+        .route("/messages/batch", patch(api::messages::batch_update_messages))
         .route("/threads/{id}", get(api::threads::get_thread))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
