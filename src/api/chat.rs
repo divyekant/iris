@@ -83,47 +83,79 @@ pub async fn chat(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, StatusCode> {
-    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Phase 1: DB reads (no await across conn)
+    let (ai_model, history, fts_citations) = {
+        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Check AI enabled
-    let ai_enabled = conn
-        .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
-        .unwrap_or_else(|_| "false".to_string());
-    let ai_model = conn
-        .query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
-        .unwrap_or_default();
+        let ai_enabled = conn
+            .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|_| "false".to_string());
+        let ai_model = conn
+            .query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
+            .unwrap_or_default();
 
-    if ai_enabled != "true" || ai_model.is_empty() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+        if ai_enabled != "true" || ai_model.is_empty() {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
 
-    // Store the user message
-    let user_msg_id = uuid::Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?1, ?2, 'user', ?3)",
-        rusqlite::params![user_msg_id, input.session_id, input.message],
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        // Store the user message
+        let user_msg_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?1, ?2, 'user', ?3)",
+            rusqlite::params![user_msg_id, input.session_id, input.message],
+        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Load conversation history (last 10 messages for context)
-    let history = load_history(&conn, &input.session_id, 10);
+        let history = load_history(&conn, &input.session_id, 10);
+        let fts_citations = search_relevant_emails_fts(&conn, &input.message);
 
-    // Search for relevant emails using FTS5
-    let citations = search_relevant_emails(&conn, &input.message);
+        (ai_model, history, fts_citations)
+    };
 
-    // Build the prompt with context
+    // Phase 2: Semantic search via Memories (async)
+    let semantic_results = state.memories.search(&input.message, 10, Some("iris/")).await;
+
+    // Phase 3: Resolve semantic results to citations (needs DB)
+    let citations = if !semantic_results.is_empty() {
+        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut citations = Vec::new();
+        for r in &semantic_results {
+            let msg_id = r.source.rsplit('/').next().unwrap_or("").to_string();
+            if msg_id.is_empty() {
+                continue;
+            }
+            if let Ok(c) = conn.query_row(
+                "SELECT subject, from_name, from_address FROM messages WHERE id = ?1",
+                rusqlite::params![msg_id],
+                |row| {
+                    let from_name: Option<String> = row.get(1)?;
+                    let from_addr: Option<String> = row.get(2)?;
+                    Ok(Citation {
+                        message_id: msg_id.clone(),
+                        subject: row.get(0)?,
+                        from: from_name.or(from_addr),
+                        snippet: r.text.chars().take(100).collect(),
+                    })
+                },
+            ) {
+                citations.push(c);
+            }
+        }
+        if citations.is_empty() { fts_citations } else { citations }
+    } else {
+        fts_citations
+    };
+
+    // Phase 4: Build prompt and call Ollama (async)
     let prompt = build_chat_prompt(&history, &citations, &input.message);
 
-    // Call Ollama
     let ai_response = state
         .ollama
         .generate(&ai_model, &prompt, Some(CHAT_SYSTEM_PROMPT))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
-    // Parse response for action proposals
     let (clean_content, proposed_action) = parse_action_proposal(&ai_response);
 
-    // Extract which citations were actually referenced
     let referenced_citations: Vec<Citation> = citations
         .iter()
         .filter(|c| ai_response.contains(&c.message_id[..8.min(c.message_id.len())]))
@@ -140,15 +172,18 @@ pub async fn chat(
         .as_ref()
         .and_then(|a| serde_json::to_string(a).ok());
 
-    // Store the assistant message
-    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO chat_messages (id, session_id, role, content, citations, proposed_action) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
-        rusqlite::params![assistant_msg_id, input.session_id, clean_content, citations_json, action_json],
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Phase 5: Store assistant message (DB write, no await)
+    {
+        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let assistant_msg_id_inner = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, citations, proposed_action) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
+            rusqlite::params![assistant_msg_id_inner, input.session_id, clean_content, citations_json, action_json],
+        ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
 
     let msg = ChatMessage {
-        id: assistant_msg_id,
+        id: uuid::Uuid::new_v4().to_string(),
         session_id: input.session_id,
         role: "assistant".to_string(),
         content: clean_content,
@@ -288,7 +323,7 @@ fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> 
     .collect()
 }
 
-fn search_relevant_emails(conn: &rusqlite::Connection, query: &str) -> Vec<Citation> {
+fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<Citation> {
     // Sanitize query for FTS5 — wrap each word in quotes
     let terms: Vec<String> = query
         .split_whitespace()
