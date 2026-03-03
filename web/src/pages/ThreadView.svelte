@@ -88,6 +88,21 @@
     };
   }
 
+  async function handleThreadAction(action: string) {
+    if (!thread) return;
+    const ids = thread.messages.map((m: any) => m.id);
+    try {
+      await api.messages.batch(ids, action);
+      if (action === 'archive' || action === 'delete') {
+        push('/');
+      } else {
+        await loadThread();
+      }
+    } catch (e: any) {
+      error = e.message || 'Action failed';
+    }
+  }
+
   $effect(() => {
     if (params.id) {
       loadThread();
@@ -115,6 +130,28 @@
           {thread.participants.map((p: any) => p.name || p.email).join(', ')}
           &middot; {thread.message_count} message{thread.message_count === 1 ? '' : 's'}
         </p>
+      </div>
+      <div class="flex items-center gap-1">
+        <button
+          class="p-2 text-gray-400 hover:text-yellow-500 transition-colors"
+          onclick={() => handleThreadAction('star')}
+          title="Star"
+        >&#9734;</button>
+        <button
+          class="p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          onclick={() => handleThreadAction('archive')}
+          title="Archive"
+        >&#128230;</button>
+        <button
+          class="p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          onclick={() => handleThreadAction('mark_unread')}
+          title="Mark unread"
+        >&#9993;</button>
+        <button
+          class="p-2 text-gray-400 hover:text-red-500 transition-colors"
+          onclick={() => handleThreadAction('delete')}
+          title="Delete"
+        >&#128465;</button>
       </div>
     {/if}
   </div>
