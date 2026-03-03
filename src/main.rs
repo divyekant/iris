@@ -7,7 +7,7 @@ mod models;
 mod smtp;
 mod ws;
 
-use axum::{Router, routing::{get, put}};
+use axum::{Router, routing::{get, put, post, delete}};
 use config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,7 +52,10 @@ async fn main() {
         .route("/threads/{id}", get(api::threads::get_thread))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
-        .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
+        .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth))
+        .route("/send", post(api::compose::send_message))
+        .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
+        .route("/drafts/{id}", delete(api::compose::delete_draft));
 
     let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
 
