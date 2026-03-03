@@ -87,9 +87,9 @@ export const api = {
     return request<{ results: any[]; total: number; query: string }>(`/api/search?${query}`);
   },
   ai: {
-    getConfig: () => request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean }>('/api/config/ai'),
+    getConfig: () => request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean; memories_url: string; memories_connected: boolean }>('/api/config/ai'),
     setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean }) =>
-      request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean }>('/api/config/ai', {
+      request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean; memories_url: string; memories_connected: boolean }>('/api/config/ai', {
         method: 'PUT',
         body: JSON.stringify(data),
       }),

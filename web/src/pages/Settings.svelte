@@ -14,6 +14,8 @@
   let aiModels = $state<string[]>([]);
   let aiTesting = $state(false);
   let aiSaving = $state(false);
+  let memoriesUrl = $state('');
+  let memoriesConnected = $state(false);
 
   // API key management
   let apiKeys = $state<any[]>([]);
@@ -138,6 +140,8 @@
         aiModel = aiConfig.model;
         aiEnabled = aiConfig.enabled;
         aiConnected = aiConfig.connected;
+        memoriesUrl = aiConfig.memories_url;
+        memoriesConnected = aiConfig.memories_connected;
       } catch {
         // AI config not available
       }
@@ -251,6 +255,21 @@
         >
           {aiSaving ? 'Saving...' : 'Save AI Settings'}
         </button>
+
+        <!-- Memories (Semantic Search) status -->
+        <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+          <p class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Semantic Search (Memories)</p>
+          <p class="text-xs text-gray-400 dark:text-gray-500 mb-2">Vector-based search for meaning, not just keywords</p>
+          <div class="flex items-center gap-2">
+            <code class="text-xs bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded">{memoriesUrl}</code>
+            <div class="flex items-center gap-1.5">
+              <div class="w-2 h-2 rounded-full {memoriesConnected ? 'bg-green-500' : 'bg-red-400'}"></div>
+              <span class="text-xs text-gray-400 dark:text-gray-500">
+                {memoriesConnected ? 'Connected' : 'Not connected'}
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
