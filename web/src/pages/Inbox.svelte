@@ -4,12 +4,15 @@
   import { wsClient } from '../lib/ws';
   import MessageList from '../components/inbox/MessageList.svelte';
   import SyncStatus from '../components/inbox/SyncStatus.svelte';
+  import ComposeModal from '../components/compose/ComposeModal.svelte';
 
   let messages = $state<any[]>([]);
   let unreadCount = $state(0);
   let total = $state(0);
   let loading = $state(true);
   let error = $state('');
+  let showCompose = $state(false);
+  let activeAccountId = $state('');
 
   async function loadMessages() {
     loading = true;
@@ -19,11 +22,23 @@
       messages = res.messages;
       unreadCount = res.unread_count;
       total = res.total;
+      // Track first account for compose
+      if (messages.length > 0 && !activeAccountId) {
+        activeAccountId = messages[0].account_id;
+      }
     } catch (err: any) {
       error = err.message || 'Failed to load messages';
     } finally {
       loading = false;
     }
+  }
+
+  async function ensureAccountId() {
+    if (activeAccountId) return;
+    try {
+      const accounts = await api.accounts.list();
+      if (accounts.length > 0) activeAccountId = accounts[0].id;
+    } catch { /* ignore */ }
   }
 
   function handleMessageClick(id: string) {
@@ -32,19 +47,20 @@
     push(`/thread/${encodeURIComponent(threadId)}`);
   }
 
-  // Load messages and connect WebSocket on mount
+  async function openCompose() {
+    await ensureAccountId();
+    if (!activeAccountId) {
+      push('/setup');
+      return;
+    }
+    showCompose = true;
+  }
+
   $effect(() => {
     loadMessages();
-
     wsClient.connect();
-
-    const offNewEmail = wsClient.on('NewEmail', () => {
-      loadMessages();
-    });
-
-    return () => {
-      offNewEmail();
-    };
+    const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
+    return () => { offNewEmail(); };
   });
 </script>
 
@@ -57,17 +73,22 @@
         {unreadCount}
       </span>
     {/if}
+    <span class="flex-1"></span>
+    <button
+      class="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+      onclick={openCompose}
+    >
+      Compose
+    </button>
     {#if total > 0}
-      <span class="text-xs text-gray-400 dark:text-gray-500 ml-auto">
+      <span class="text-xs text-gray-400 dark:text-gray-500">
         {total} message{total === 1 ? '' : 's'}
       </span>
     {/if}
   </div>
 
-  <!-- Sync status bar -->
   <SyncStatus />
 
-  <!-- Message list -->
   <div class="flex-1 overflow-auto">
     {#if loading}
       <div class="flex items-center justify-center py-16">
@@ -88,3 +109,11 @@
     {/if}
   </div>
 </div>
+
+{#if showCompose}
+  <ComposeModal
+    context={{ mode: 'new', accountId: activeAccountId }}
+    onclose={() => (showCompose = false)}
+    onsent={loadMessages}
+  />
+{/if}

@@ -3,12 +3,14 @@
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
   import MessageCard from '../components/thread/MessageCard.svelte';
+  import ComposeModal from '../components/compose/ComposeModal.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
   let thread = $state<any>(null);
   let loading = $state(true);
   let error = $state('');
+  let composeContext = $state<any>(null);
 
   async function loadThread() {
     loading = true;
@@ -28,15 +30,71 @@
     }
   }
 
+  function lastMessage() {
+    return thread?.messages?.[thread.messages.length - 1];
+  }
+
+  function openReply() {
+    const msg = lastMessage();
+    if (!msg) return;
+    composeContext = {
+      mode: 'reply',
+      accountId: msg.account_id,
+      original: {
+        message_id: msg.message_id || msg.id,
+        from_address: msg.from_address,
+        from_name: msg.from_name,
+        to_addresses: msg.to_addresses,
+        cc_addresses: msg.cc_addresses,
+        subject: thread.subject,
+        body_text: msg.body_text,
+        date: msg.date,
+      },
+    };
+  }
+
+  function openReplyAll() {
+    const msg = lastMessage();
+    if (!msg) return;
+    composeContext = {
+      mode: 'reply-all',
+      accountId: msg.account_id,
+      original: {
+        message_id: msg.message_id || msg.id,
+        from_address: msg.from_address,
+        from_name: msg.from_name,
+        to_addresses: msg.to_addresses,
+        cc_addresses: msg.cc_addresses,
+        subject: thread.subject,
+        body_text: msg.body_text,
+        date: msg.date,
+      },
+    };
+  }
+
+  function openForward() {
+    const msg = lastMessage();
+    if (!msg) return;
+    composeContext = {
+      mode: 'forward',
+      accountId: msg.account_id,
+      original: {
+        from_address: msg.from_address,
+        from_name: msg.from_name,
+        subject: thread.subject,
+        body_text: msg.body_text,
+        date: msg.date,
+      },
+    };
+  }
+
   $effect(() => {
     if (params.id) {
       loadThread();
     }
-
     const off = wsClient.on('NewEmail', () => {
       if (thread) loadThread();
     });
-
     return () => off();
   });
 </script>
@@ -85,9 +143,32 @@
 
   {#if thread && !loading}
     <div class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex gap-2">
-      <button disabled class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 text-gray-400 rounded-lg cursor-not-allowed" title="Coming in V3">Reply</button>
-      <button disabled class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 text-gray-400 rounded-lg cursor-not-allowed" title="Coming in V3">Reply All</button>
-      <button disabled class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 text-gray-400 rounded-lg cursor-not-allowed" title="Coming in V3">Forward</button>
+      <button
+        class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+        onclick={openReply}
+      >
+        Reply
+      </button>
+      <button
+        class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+        onclick={openReplyAll}
+      >
+        Reply All
+      </button>
+      <button
+        class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+        onclick={openForward}
+      >
+        Forward
+      </button>
     </div>
   {/if}
 </div>
+
+{#if composeContext}
+  <ComposeModal
+    context={composeContext}
+    onclose={() => (composeContext = null)}
+    onsent={loadThread}
+  />
+{/if}
