@@ -1,0 +1,344 @@
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::models::message::MessageDetail;
+use crate::AppState;
+
+// ---------------------------------------------------------------------------
+// POST /api/threads/{id}/summarize
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct SummarizeResponse {
+    pub summary: String,
+    pub cached: bool,
+}
+
+const SUMMARY_SYSTEM_PROMPT: &str = "You are an email thread summarizer. Given a thread of emails, produce a concise 2-4 sentence summary covering: the key topic or decision being discussed, the current status or outcome, and any action items or next steps. Be factual and concise. Do not use bullet points. Respond with plain text only.";
+
+/// Build a summarization prompt from a list of thread messages.
+pub fn build_summary_prompt(subject: &str, messages: &[MessageDetail]) -> String {
+    let mut prompt = format!("Thread: {}\n\n", subject);
+    let max_total = 3000;
+
+    for (i, msg) in messages.iter().enumerate() {
+        let from = msg.from_name.as_deref().unwrap_or(
+            msg.from_address.as_deref().unwrap_or("Unknown"),
+        );
+        let date = msg
+            .date
+            .map(|d| {
+                chrono::DateTime::from_timestamp(d, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
+        let body = msg.body_text.as_deref().unwrap_or("");
+        let body_truncated = if body.len() > 500 {
+            format!("{}...", &body[..500])
+        } else {
+            body.to_string()
+        };
+
+        let section = format!(
+            "Message {} (from {}, {}):\n{}\n\n",
+            i + 1,
+            from,
+            date,
+            body_truncated
+        );
+
+        if prompt.len() + section.len() > max_total {
+            prompt.push_str("...(remaining messages truncated)\n");
+            break;
+        }
+        prompt.push_str(&section);
+    }
+
+    prompt
+}
+
+pub async fn summarize_thread(
+    State(state): State<Arc<AppState>>,
+    Path(thread_id): Path<String>,
+) -> Result<Json<SummarizeResponse>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let messages = MessageDetail::list_by_thread(&conn, &thread_id);
+    if messages.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Check cache — use first message's ai_summary
+    if let Some(ref cached_summary) = messages[0].ai_summary {
+        if !cached_summary.is_empty() {
+            return Ok(Json(SummarizeResponse {
+                summary: cached_summary.clone(),
+                cached: true,
+            }));
+        }
+    }
+
+    // Check AI is enabled
+    let ai_enabled = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "false".to_string());
+
+    let ai_model = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_model'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+
+    if ai_enabled != "true" || ai_model.is_empty() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let subject = messages[0].subject.as_deref().unwrap_or("(no subject)");
+    let prompt = build_summary_prompt(subject, &messages);
+
+    let summary = state
+        .ollama
+        .generate(&ai_model, &prompt, Some(SUMMARY_SYSTEM_PROMPT))
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    // Cache the summary in the first message
+    let first_id = &messages[0].id;
+    conn.execute(
+        "UPDATE messages SET ai_summary = ?2, updated_at = unixepoch() WHERE id = ?1",
+        rusqlite::params![first_id, summary],
+    )
+    .ok();
+
+    Ok(Json(SummarizeResponse {
+        summary,
+        cached: false,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/ai/assist
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct AiAssistRequest {
+    pub action: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiAssistResponse {
+    pub result: String,
+}
+
+/// Get the system prompt for a given AI assist action.
+pub fn get_assist_system_prompt(action: &str) -> Option<&'static str> {
+    match action {
+        "rewrite" => Some("Rewrite the following text to be clearer and more professional. Preserve the original meaning. Return only the rewritten text, no explanation."),
+        "formal" => Some("Rewrite the following text in a formal, professional tone. Return only the rewritten text."),
+        "casual" => Some("Rewrite the following text in a casual, friendly tone. Return only the rewritten text."),
+        "shorter" => Some("Condense the following text to be more concise while preserving key points. Return only the shortened text."),
+        "longer" => Some("Expand the following text with more detail and elaboration. Return only the expanded text."),
+        _ => None,
+    }
+}
+
+pub async fn ai_assist(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<AiAssistRequest>,
+) -> Result<Json<AiAssistResponse>, StatusCode> {
+    let system_prompt = get_assist_system_prompt(&input.action)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let ai_enabled = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "false".to_string());
+
+    let ai_model = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_model'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+
+    if ai_enabled != "true" || ai_model.is_empty() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let result = state
+        .ollama
+        .generate(&ai_model, &input.content, Some(system_prompt))
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    Ok(Json(AiAssistResponse { result }))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_summary_prompt_single_message() {
+        let msg = MessageDetail {
+            id: "m1".to_string(),
+            message_id: None,
+            account_id: "a1".to_string(),
+            thread_id: Some("t1".to_string()),
+            folder: "INBOX".to_string(),
+            from_address: Some("alice@example.com".to_string()),
+            from_name: Some("Alice".to_string()),
+            to_addresses: None,
+            cc_addresses: None,
+            subject: Some("Project Update".to_string()),
+            snippet: None,
+            date: Some(1709500800), // 2024-03-04
+            body_text: Some("The project is on track.".to_string()),
+            body_html: None,
+            is_read: true,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let prompt = build_summary_prompt("Project Update", &[msg]);
+        assert!(prompt.contains("Thread: Project Update"));
+        assert!(prompt.contains("Message 1 (from Alice,"));
+        assert!(prompt.contains("The project is on track."));
+    }
+
+    #[test]
+    fn test_build_summary_prompt_truncates_long_body() {
+        let long_body = "x".repeat(1000);
+        let msg = MessageDetail {
+            id: "m1".to_string(),
+            message_id: None,
+            account_id: "a1".to_string(),
+            thread_id: Some("t1".to_string()),
+            folder: "INBOX".to_string(),
+            from_address: Some("bob@example.com".to_string()),
+            from_name: None,
+            to_addresses: None,
+            cc_addresses: None,
+            subject: None,
+            snippet: None,
+            date: None,
+            body_text: Some(long_body),
+            body_html: None,
+            is_read: true,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let prompt = build_summary_prompt("Test", &[msg]);
+        // Body should be truncated to 500 chars + "..."
+        assert!(prompt.contains("..."));
+        // Body should be truncated — prompt should contain "..." truncation marker
+        // and not the full 1000 chars of body
+        assert!(prompt.len() < 1000);
+    }
+
+    #[test]
+    fn test_build_summary_prompt_caps_total_length() {
+        let messages: Vec<MessageDetail> = (0..20)
+            .map(|i| MessageDetail {
+                id: format!("m{}", i),
+                message_id: None,
+                account_id: "a1".to_string(),
+                thread_id: Some("t1".to_string()),
+                folder: "INBOX".to_string(),
+                from_address: Some(format!("user{}@example.com", i)),
+                from_name: None,
+                to_addresses: None,
+                cc_addresses: None,
+                subject: None,
+                snippet: None,
+                date: None,
+                body_text: Some("a".repeat(400)),
+                body_html: None,
+                is_read: true,
+                is_starred: false,
+                has_attachments: false,
+                attachments: vec![],
+                ai_intent: None,
+                ai_priority_score: None,
+                ai_priority_label: None,
+                ai_category: None,
+                ai_summary: None,
+            })
+            .collect();
+
+        let prompt = build_summary_prompt("Long Thread", &messages);
+        assert!(prompt.len() <= 3100); // small buffer for truncation message
+        assert!(prompt.contains("truncated"));
+    }
+
+    #[test]
+    fn test_get_assist_prompt_rewrite() {
+        let prompt = get_assist_system_prompt("rewrite").unwrap();
+        assert!(prompt.contains("clearer"));
+    }
+
+    #[test]
+    fn test_get_assist_prompt_formal() {
+        let prompt = get_assist_system_prompt("formal").unwrap();
+        assert!(prompt.contains("formal"));
+    }
+
+    #[test]
+    fn test_get_assist_prompt_casual() {
+        let prompt = get_assist_system_prompt("casual").unwrap();
+        assert!(prompt.contains("casual"));
+    }
+
+    #[test]
+    fn test_get_assist_prompt_shorter() {
+        let prompt = get_assist_system_prompt("shorter").unwrap();
+        assert!(prompt.contains("concise"));
+    }
+
+    #[test]
+    fn test_get_assist_prompt_longer() {
+        let prompt = get_assist_system_prompt("longer").unwrap();
+        assert!(prompt.contains("Expand"));
+    }
+
+    #[test]
+    fn test_get_assist_prompt_invalid_action() {
+        assert!(get_assist_system_prompt("invalid").is_none());
+        assert!(get_assist_system_prompt("").is_none());
+    }
+}

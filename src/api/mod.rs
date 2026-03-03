@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod ai_actions;
 pub mod ai_config;
 pub mod compose;
 pub mod config;
