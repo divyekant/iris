@@ -20,6 +20,7 @@ pub struct AppState {
     pub config: Config,
     pub ws_hub: ws::hub::WsHub,
     pub ollama: ai::ollama::OllamaClient,
+    pub memories: ai::memories::MemoriesClient,
 }
 
 #[tokio::main]
@@ -39,12 +40,14 @@ async fn main() {
     }
 
     let ollama = ai::ollama::OllamaClient::new(&config.ollama_url);
+    let memories = ai::memories::MemoriesClient::new(&config.memories_url, config.memories_api_key.clone());
 
     let state = Arc::new(AppState {
         db: pool,
         config: config.clone(),
         ws_hub: ws::hub::WsHub::new(),
         ollama,
+        memories,
     });
 
     // Agent-facing endpoints (API key auth via Bearer token)
