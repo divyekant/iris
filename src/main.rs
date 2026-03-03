@@ -51,6 +51,7 @@ async fn main() {
         .route("/messages/{id}/read", put(api::messages::mark_message_read))
         .route("/messages/batch", patch(api::messages::batch_update_messages))
         .route("/threads/{id}", get(api::threads::get_thread))
+        .route("/search", get(api::search::search))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/config/view-mode", put(api::config::set_view_mode))
