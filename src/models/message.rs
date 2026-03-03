@@ -785,4 +785,54 @@ mod tests {
         let detail = MessageDetail::get_by_id(&conn, &id1).unwrap();
         assert!(!detail.is_starred);
     }
+
+    #[test]
+    fn test_fts5_search() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg1 = make_insert_message(&account.id, "INBOX", "Invoice from Amazon", false);
+        msg1.message_id = Some("<fts-1@example.com>".to_string());
+        msg1.body_text = Some("Please find attached your invoice for order #12345.".to_string());
+        InsertMessage::insert(&conn, &msg1);
+
+        let mut msg2 = make_insert_message(&account.id, "INBOX", "Meeting tomorrow", false);
+        msg2.message_id = Some("<fts-2@example.com>".to_string());
+        msg2.body_text = Some("Let's meet at 3pm to discuss the project.".to_string());
+        InsertMessage::insert(&conn, &msg2);
+
+        // Search for "invoice" — should match msg1
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM fts_messages WHERE fts_messages MATCH '\"invoice\"'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(count >= 1);
+
+        // Search for "meeting" — should match msg2
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM fts_messages WHERE fts_messages MATCH '\"meeting\"'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(count >= 1);
+
+        // Search for "nonexistent" — should match nothing
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM fts_messages WHERE fts_messages MATCH '\"zzzznonexistent\"'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
+
+        // Snippet extraction
+        let snippet: String = conn.query_row(
+            "SELECT snippet(fts_messages, 2, '<mark>', '</mark>', '...', 20)
+             FROM fts_messages WHERE fts_messages MATCH '\"invoice\"'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(snippet.contains("<mark>"));
+    }
 }
