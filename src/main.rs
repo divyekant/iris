@@ -8,7 +8,7 @@ mod models;
 mod smtp;
 mod ws;
 
-use axum::{Router, routing::{get, put, post, delete, patch}};
+use axum::{middleware, Router, routing::{get, put, post, delete, patch}};
 use config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -47,6 +47,18 @@ async fn main() {
         ollama,
     });
 
+    // Agent-facing endpoints (API key auth via Bearer token)
+    let agent_routes = Router::new()
+        .route("/search", get(api::agent::agent_search))
+        .route("/messages/{id}", get(api::agent::agent_get_message))
+        .route("/threads/{id}", get(api::agent::agent_get_thread))
+        .route("/drafts", post(api::agent::agent_create_draft))
+        .route("/send", post(api::agent::agent_send))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::agent::agent_auth_middleware,
+        ));
+
     let api_routes = Router::new()
         .route("/health", get(api::health::health))
         .route("/accounts", get(api::accounts::list_accounts).post(api::accounts::create_account))
@@ -73,7 +85,8 @@ async fn main() {
         .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth))
         .route("/send", post(api::compose::send_message))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
-        .route("/drafts/{id}", delete(api::compose::delete_draft));
+        .route("/drafts/{id}", delete(api::compose::delete_draft))
+        .nest("/agent", agent_routes);
 
     let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
 

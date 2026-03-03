@@ -1,5 +1,8 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
+use axum::Extension;
 use axum::Json;
 use rand::Rng;
 use rusqlite::params;
@@ -7,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::auth::refresh::ensure_fresh_token;
+use crate::models::account::Account;
+use crate::models::message::{self, MessageDetail};
+use crate::smtp::{self, ComposeRequest};
 use crate::AppState;
 
 type Conn = r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>;
@@ -358,6 +365,655 @@ pub async fn get_audit_log_handler(
 }
 
 // ---------------------------------------------------------------------------
+// Bearer token extraction
+// ---------------------------------------------------------------------------
+
+pub fn extract_bearer_token(auth_header: &str) -> Option<String> {
+    let lower = auth_header.to_lowercase();
+    if lower.starts_with("bearer ") {
+        Some(auth_header[7..].trim().to_string())
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent auth middleware
+// ---------------------------------------------------------------------------
+
+pub async fn agent_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let token = extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let conn = state
+        .db
+        .get()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let api_key = validate_api_key(&conn, &token).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    request.extensions_mut().insert(api_key);
+    Ok(next.run(request).await)
+}
+
+// ---------------------------------------------------------------------------
+// Agent endpoint request/response types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct AgentSearchParams {
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct AgentDraftRequest {
+    pub account_id: String,
+    pub to: Option<Vec<String>>,
+    pub subject: Option<String>,
+    pub body_text: String,
+}
+
+#[derive(Deserialize)]
+pub struct AgentSendRequest {
+    pub account_id: String,
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub cc: Vec<String>,
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body_text: String,
+    pub body_html: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent endpoint handlers
+// ---------------------------------------------------------------------------
+
+/// GET /api/agent/search?q=...
+/// Requires "search" permission. Reuses FTS5 search logic.
+pub async fn agent_search(
+    State(state): State<Arc<AppState>>,
+    Extension(api_key): Extension<ApiKey>,
+    Query(params): Query<AgentSearchParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !has_permission(&api_key.permission, "search") {
+        let conn = state.db.get().ok();
+        if let Some(conn) = conn {
+            log_audit(&conn, &api_key.id, "search", None, None, None, "forbidden");
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "insufficient permissions"})),
+        ));
+    }
+
+    let conn = state.db.get().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "database error"})),
+        )
+    })?;
+
+    let query_str = params.q.as_deref().unwrap_or("").trim().to_string();
+    if query_str.is_empty() {
+        log_audit(
+            &conn,
+            &api_key.id,
+            "search",
+            Some("message"),
+            None,
+            Some("empty query"),
+            "success",
+        );
+        return Ok(Json(serde_json::json!({"results": [], "total": 0, "query": ""})));
+    }
+
+    let limit = params.limit.unwrap_or(50);
+    let offset = params.offset.unwrap_or(0);
+
+    // Build FTS query with optional account_id scope
+    let mut conditions = Vec::new();
+    let mut filter_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut param_idx = 1;
+
+    conditions.push(format!("fts.fts_messages MATCH ?{param_idx}"));
+    let fts_query = query_str
+        .split_whitespace()
+        .map(|term| {
+            let clean = term.replace('"', "");
+            format!("\"{clean}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    filter_params.push(Box::new(fts_query));
+    param_idx += 1;
+
+    // Scope to account if the API key has an account_id
+    if let Some(ref acct_id) = api_key.account_id {
+        conditions.push(format!("m.account_id = ?{param_idx}"));
+        filter_params.push(Box::new(acct_id.clone()));
+        param_idx += 1;
+    }
+
+    conditions.push("m.is_deleted = 0".to_string());
+    let where_clause = conditions.join(" AND ");
+
+    let sql = format!(
+        "SELECT m.id, m.account_id, m.thread_id, m.from_address, m.from_name,
+                m.subject, snippet(fts, -1, '<mark>', '</mark>', '...', 40) as match_snippet,
+                m.date, m.is_read, m.has_attachments
+         FROM fts_messages fts
+         JOIN messages m ON fts.rowid = m.rowid
+         WHERE {where_clause}
+         ORDER BY rank
+         LIMIT ?{param_idx} OFFSET ?{}",
+        param_idx + 1
+    );
+    filter_params.push(Box::new(limit));
+    filter_params.push(Box::new(offset));
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        filter_params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| {
+        tracing::error!("Agent search query error: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "search query error"})),
+        )
+    })?;
+
+    let results: Vec<serde_json::Value> = stmt
+        .query_map(params_refs.as_slice(), |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>("id")?,
+                "account_id": row.get::<_, String>("account_id")?,
+                "thread_id": row.get::<_, Option<String>>("thread_id")?,
+                "from_address": row.get::<_, Option<String>>("from_address")?,
+                "from_name": row.get::<_, Option<String>>("from_name")?,
+                "subject": row.get::<_, Option<String>>("subject")?,
+                "snippet": row.get::<_, String>("match_snippet")?,
+                "date": row.get::<_, Option<i64>>("date")?,
+                "is_read": row.get::<_, bool>("is_read")?,
+                "has_attachments": row.get::<_, bool>("has_attachments")?,
+            }))
+        })
+        .map_err(|e| {
+            tracing::error!("Agent search execution error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "search execution error"})),
+            )
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total = results.len() as i64;
+
+    log_audit(
+        &conn,
+        &api_key.id,
+        "search",
+        Some("message"),
+        None,
+        Some(&format!("q={query_str}, results={total}")),
+        "success",
+    );
+
+    Ok(Json(serde_json::json!({
+        "results": results,
+        "total": total,
+        "query": query_str,
+    })))
+}
+
+/// GET /api/agent/messages/{id}
+/// Requires "read" permission.
+pub async fn agent_get_message(
+    State(state): State<Arc<AppState>>,
+    Extension(api_key): Extension<ApiKey>,
+    Path(id): Path<String>,
+) -> Result<Json<MessageDetail>, (StatusCode, Json<serde_json::Value>)> {
+    if !has_permission(&api_key.permission, "read") {
+        let conn = state.db.get().ok();
+        if let Some(conn) = conn {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "read",
+                Some("message"),
+                Some(&id),
+                None,
+                "forbidden",
+            );
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "insufficient permissions"})),
+        ));
+    }
+
+    let conn = state.db.get().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "database error"})),
+        )
+    })?;
+
+    let msg = MessageDetail::get_by_id(&conn, &id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "message not found"})),
+        )
+    })?;
+
+    // Scope check: if API key has account_id, ensure message belongs to that account
+    if let Some(ref acct_id) = api_key.account_id {
+        if msg.account_id != *acct_id {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "read",
+                Some("message"),
+                Some(&id),
+                Some("account scope mismatch"),
+                "forbidden",
+            );
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "message not in scope"})),
+            ));
+        }
+    }
+
+    log_audit(
+        &conn,
+        &api_key.id,
+        "read",
+        Some("message"),
+        Some(&id),
+        None,
+        "success",
+    );
+
+    Ok(Json(msg))
+}
+
+/// GET /api/agent/threads/{id}
+/// Requires "read" permission.
+pub async fn agent_get_thread(
+    State(state): State<Arc<AppState>>,
+    Extension(api_key): Extension<ApiKey>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<MessageDetail>>, (StatusCode, Json<serde_json::Value>)> {
+    if !has_permission(&api_key.permission, "read") {
+        let conn = state.db.get().ok();
+        if let Some(conn) = conn {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "read",
+                Some("thread"),
+                Some(&id),
+                None,
+                "forbidden",
+            );
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "insufficient permissions"})),
+        ));
+    }
+
+    let conn = state.db.get().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "database error"})),
+        )
+    })?;
+
+    let messages = MessageDetail::list_by_thread(&conn, &id);
+
+    // Scope check: if API key has account_id, ensure all messages belong to that account
+    if let Some(ref acct_id) = api_key.account_id {
+        if let Some(first) = messages.first() {
+            if first.account_id != *acct_id {
+                log_audit(
+                    &conn,
+                    &api_key.id,
+                    "read",
+                    Some("thread"),
+                    Some(&id),
+                    Some("account scope mismatch"),
+                    "forbidden",
+                );
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({"error": "thread not in scope"})),
+                ));
+            }
+        }
+    }
+
+    log_audit(
+        &conn,
+        &api_key.id,
+        "read",
+        Some("thread"),
+        Some(&id),
+        Some(&format!("messages={}", messages.len())),
+        "success",
+    );
+
+    Ok(Json(messages))
+}
+
+/// POST /api/agent/drafts
+/// Requires "draft" permission.
+pub async fn agent_create_draft(
+    State(state): State<Arc<AppState>>,
+    Extension(api_key): Extension<ApiKey>,
+    Json(req): Json<AgentDraftRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !has_permission(&api_key.permission, "draft") {
+        let conn = state.db.get().ok();
+        if let Some(conn) = conn {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "draft",
+                Some("message"),
+                None,
+                None,
+                "forbidden",
+            );
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "insufficient permissions"})),
+        ));
+    }
+
+    // Scope check: if API key has account_id, ensure request targets that account
+    if let Some(ref acct_id) = api_key.account_id {
+        if req.account_id != *acct_id {
+            let conn = state.db.get().ok();
+            if let Some(conn) = conn {
+                log_audit(
+                    &conn,
+                    &api_key.id,
+                    "draft",
+                    Some("message"),
+                    None,
+                    Some("account scope mismatch"),
+                    "forbidden",
+                );
+            }
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "account not in scope"})),
+            ));
+        }
+    }
+
+    let conn = state.db.get().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "database error"})),
+        )
+    })?;
+
+    let to_json = req
+        .to
+        .as_ref()
+        .and_then(|v| serde_json::to_string(v).ok());
+
+    let draft_id = message::save_draft(
+        &conn,
+        None, // always create new
+        &req.account_id,
+        to_json.as_deref(),
+        None, // cc
+        None, // bcc
+        req.subject.as_deref(),
+        &req.body_text,
+        None, // body_html
+    );
+
+    log_audit(
+        &conn,
+        &api_key.id,
+        "draft",
+        Some("message"),
+        Some(&draft_id),
+        None,
+        "success",
+    );
+
+    Ok(Json(serde_json::json!({"draft_id": draft_id})))
+}
+
+/// POST /api/agent/send
+/// Requires "send" permission. Reuses compose/SMTP send pipeline.
+pub async fn agent_send(
+    State(state): State<Arc<AppState>>,
+    Extension(api_key): Extension<ApiKey>,
+    Json(req): Json<AgentSendRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !has_permission(&api_key.permission, "send") {
+        let conn = state.db.get().ok();
+        if let Some(conn) = conn {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "send",
+                Some("message"),
+                None,
+                None,
+                "forbidden",
+            );
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "insufficient permissions"})),
+        ));
+    }
+
+    // Scope check: if API key has account_id, ensure request targets that account
+    if let Some(ref acct_id) = api_key.account_id {
+        if req.account_id != *acct_id {
+            let conn = state.db.get().ok();
+            if let Some(conn) = conn {
+                log_audit(
+                    &conn,
+                    &api_key.id,
+                    "send",
+                    Some("message"),
+                    None,
+                    Some("account scope mismatch"),
+                    "forbidden",
+                );
+            }
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "account not in scope"})),
+            ));
+        }
+    }
+
+    let conn = state.db.get().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "database error"})),
+        )
+    })?;
+
+    let account = Account::get_by_id(&conn, &req.account_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "account not found"})),
+        )
+    })?;
+
+    // Refresh OAuth token if needed
+    let access_token = ensure_fresh_token(&state.db, &account, &state.config)
+        .await
+        .map_err(|e| {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "send",
+                Some("message"),
+                None,
+                Some(&format!("token refresh failed: {e}")),
+                "error",
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("token refresh: {e}")})),
+            )
+        })?;
+
+    // Build ComposeRequest to reuse existing SMTP pipeline
+    let compose_req = ComposeRequest {
+        account_id: req.account_id.clone(),
+        to: req.to.clone(),
+        cc: req.cc.clone(),
+        bcc: req.bcc.clone(),
+        subject: req.subject.clone(),
+        body_text: req.body_text.clone(),
+        body_html: req.body_html.clone(),
+        in_reply_to: req.in_reply_to.clone(),
+        references: req.references.clone(),
+    };
+
+    // Build email
+    let email = smtp::build_email(
+        &account.email,
+        account.display_name.as_deref(),
+        &compose_req,
+    )
+    .map_err(|e| {
+        log_audit(
+            &conn,
+            &api_key.id,
+            "send",
+            Some("message"),
+            None,
+            Some(&format!("build failed: {e}")),
+            "error",
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+
+    // Extract the Message-ID that lettre generated
+    let rfc_message_id = email
+        .headers()
+        .get_raw("Message-ID")
+        .map(|v| v.to_string());
+
+    // Send via SMTP
+    smtp::send_email(&account, access_token.as_deref(), email)
+        .await
+        .map_err(|e| {
+            log_audit(
+                &conn,
+                &api_key.id,
+                "send",
+                Some("message"),
+                None,
+                Some(&format!("smtp failed: {e}")),
+                "error",
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+
+    // Store in Sent folder (reuse pattern from compose.rs)
+    let to_json = serde_json::to_string(&req.to).ok();
+    let cc_json = if req.cc.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&req.cc).ok()
+    };
+    let bcc_json = if req.bcc.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&req.bcc).ok()
+    };
+
+    let sent_msg = message::InsertMessage {
+        account_id: req.account_id.clone(),
+        message_id: rfc_message_id.clone(),
+        thread_id: req
+            .in_reply_to
+            .as_ref()
+            .map(|r| r.trim_matches(|c| c == '<' || c == '>').to_string()),
+        folder: "Sent".to_string(),
+        from_address: Some(account.email.clone()),
+        from_name: account.display_name.clone(),
+        to_addresses: to_json,
+        cc_addresses: cc_json,
+        bcc_addresses: bcc_json,
+        subject: Some(req.subject.clone()),
+        date: Some(chrono::Utc::now().timestamp()),
+        snippet: Some(req.body_text.chars().take(200).collect()),
+        body_text: Some(req.body_text.clone()),
+        body_html: req.body_html.clone(),
+        is_read: true,
+        is_starred: false,
+        is_draft: false,
+        labels: None,
+        uid: None,
+        modseq: None,
+        raw_headers: None,
+        has_attachments: false,
+        attachment_names: None,
+        size_bytes: None,
+    };
+
+    let msg_id = message::InsertMessage::insert(&conn, &sent_msg);
+
+    log_audit(
+        &conn,
+        &api_key.id,
+        "send",
+        Some("message"),
+        Some(&msg_id),
+        Some(&format!("to={:?}, subject={}", req.to, req.subject)),
+        "success",
+    );
+
+    tracing::info!(
+        agent = %api_key.name,
+        account = %account.email,
+        to = ?req.to,
+        subject = %req.subject,
+        "Agent sent email"
+    );
+
+    Ok(Json(serde_json::json!({"message_id": msg_id})))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -492,6 +1148,20 @@ mod tests {
         assert_eq!(entries[0].api_key_id, stored.id);
         assert_eq!(entries[0].key_name.as_deref(), Some("Audit Test"));
         assert_eq!(entries[0].status, "success");
+    }
+
+    #[test]
+    fn test_extract_bearer_token() {
+        assert_eq!(
+            extract_bearer_token("Bearer iris_abc123"),
+            Some("iris_abc123".to_string())
+        );
+        assert_eq!(
+            extract_bearer_token("bearer iris_abc123"),
+            Some("iris_abc123".to_string())
+        );
+        assert_eq!(extract_bearer_token("Basic abc123"), None);
+        assert_eq!(extract_bearer_token(""), None);
     }
 
     #[test]
