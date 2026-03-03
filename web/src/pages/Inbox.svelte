@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api';
+  import { push } from 'svelte-spa-router';
   import { wsClient } from '../lib/ws';
   import MessageList from '../components/inbox/MessageList.svelte';
   import SyncStatus from '../components/inbox/SyncStatus.svelte';
@@ -26,7 +27,9 @@
   }
 
   function handleMessageClick(id: string) {
-    console.log('Selected:', id);
+    const msg = messages.find((m) => m.id === id);
+    const threadId = msg?.thread_id || id;
+    push(`/thread/${threadId}`);
   }
 
   // Load messages and connect WebSocket on mount
