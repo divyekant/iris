@@ -42,6 +42,33 @@
   let draftId = $state<string | null>(null);
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // AI assist state
+  let aiAssisting = $state(false);
+  let showAiMenu = $state(false);
+
+  const aiActions = [
+    { action: 'rewrite', label: 'Improve writing' },
+    { action: 'formal', label: 'Make formal' },
+    { action: 'casual', label: 'Make casual' },
+    { action: 'shorter', label: 'Make shorter' },
+    { action: 'longer', label: 'Expand' },
+  ];
+
+  async function handleAiAssist(action: string) {
+    if (!body.trim()) return;
+    showAiMenu = false;
+    aiAssisting = true;
+    error = '';
+    try {
+      const res = await api.ai.assist({ action, content: body });
+      body = res.result;
+    } catch {
+      error = 'AI assist failed. Check AI settings.';
+    } finally {
+      aiAssisting = false;
+    }
+  }
+
   // Pre-populate fields based on mode
   function initFields() {
     const orig = context.original;
@@ -296,6 +323,27 @@
       >
         Save Draft
       </button>
+      <!-- AI Assist dropdown -->
+      <div class="relative">
+        <button
+          class="px-3 py-1.5 text-sm text-gray-500 hover:text-blue-500 transition-colors disabled:opacity-50"
+          onclick={() => (showAiMenu = !showAiMenu)}
+          disabled={aiAssisting || sending || !body.trim()}
+          title="AI Assist"
+        >
+          {aiAssisting ? 'Thinking...' : 'AI'}
+        </button>
+        {#if showAiMenu}
+          <div class="absolute bottom-full left-0 mb-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[160px] z-10">
+            {#each aiActions as { action, label }}
+              <button
+                class="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300"
+                onclick={() => handleAiAssist(action)}
+              >{label}</button>
+            {/each}
+          </div>
+        {/if}
+      </div>
       <button
         class="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 transition-colors"
         onclick={handleSend}

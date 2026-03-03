@@ -12,6 +12,12 @@
   let error = $state('');
   let composeContext = $state<any>(null);
 
+  // AI summary state
+  let aiSummary = $state<string | null>(null);
+  let summaryLoading = $state(false);
+  let summaryOpen = $state(false);
+  let summaryError = $state('');
+
   async function loadThread() {
     loading = true;
     error = '';
@@ -103,8 +109,35 @@
     }
   }
 
+  async function toggleSummary() {
+    if (summaryOpen) {
+      summaryOpen = false;
+      return;
+    }
+    summaryOpen = true;
+    if (aiSummary) return; // already loaded
+    summaryLoading = true;
+    summaryError = '';
+    try {
+      const res = await api.threads.summarize(params.id);
+      aiSummary = res.summary;
+    } catch (e: any) {
+      if (e.message?.includes('503')) {
+        summaryError = 'Enable AI in Settings to use this feature.';
+      } else {
+        summaryError = 'Failed to generate summary.';
+      }
+    } finally {
+      summaryLoading = false;
+    }
+  }
+
   $effect(() => {
     if (params.id) {
+      // Reset AI summary when navigating to a new thread
+      aiSummary = null;
+      summaryOpen = false;
+      summaryError = '';
       loadThread();
     }
     const off = wsClient.on('NewEmail', () => {
@@ -155,6 +188,32 @@
       </div>
     {/if}
   </div>
+
+  <!-- AI Summary panel -->
+  {#if thread && thread.message_count > 1}
+    <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+      <button
+        class="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1"
+        onclick={toggleSummary}
+      >
+        <span class="text-[10px]">{summaryOpen ? '\u25BE' : '\u25B8'}</span> AI Summary
+      </button>
+      {#if summaryOpen}
+        {#if summaryLoading}
+          <div class="mt-2 text-xs text-gray-400 dark:text-gray-500 flex items-center gap-2">
+            <div class="w-3 h-3 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin"></div>
+            Summarizing thread...
+          </div>
+        {:else if aiSummary}
+          <div class="mt-2 text-sm text-gray-700 dark:text-gray-300 bg-blue-50 dark:bg-blue-900/20 rounded-lg px-3 py-2 leading-relaxed">
+            {aiSummary}
+          </div>
+        {:else if summaryError}
+          <div class="mt-2 text-xs text-gray-400 dark:text-gray-500">{summaryError}</div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
   <div class="flex-1 overflow-y-auto p-4 space-y-3">
     {#if loading}

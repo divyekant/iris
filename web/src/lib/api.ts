@@ -37,6 +37,8 @@ export const api = {
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
+    summarize: (id: string) =>
+      request<{ summary: string; cached: boolean }>(`/api/threads/${id}/summarize`, { method: 'POST' }),
   },
   send: (data: {
     account_id: string;
@@ -91,6 +93,8 @@ export const api = {
         body: JSON.stringify(data),
       }),
     testConnection: () => request<{ connected: boolean; models: string[] }>('/api/config/ai/test', { method: 'POST' }),
+    assist: (data: { action: string; content: string }) =>
+      request<{ result: string }>('/api/ai/assist', { method: 'POST', body: JSON.stringify(data) }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
