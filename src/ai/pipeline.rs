@@ -1,5 +1,5 @@
 use super::ollama::OllamaClient;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct AiMetadata {
@@ -8,6 +8,8 @@ pub struct AiMetadata {
     pub priority_label: String,
     pub category: String,
     pub summary: String,
+    pub entities: Option<String>,
+    pub deadline: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -17,6 +19,20 @@ struct AiResponse {
     priority_label: Option<String>,
     category: Option<String>,
     summary: Option<String>,
+    entities: Option<AiEntities>,
+    deadline: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiEntities {
+    #[serde(default)]
+    pub people: Vec<String>,
+    #[serde(default)]
+    pub dates: Vec<String>,
+    #[serde(default)]
+    pub amounts: Vec<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
 }
 
 const SYSTEM_PROMPT: &str = r#"You are an email classification assistant. Analyze the email and respond with ONLY a JSON object (no markdown, no explanation) with these fields:
@@ -26,17 +42,21 @@ const SYSTEM_PROMPT: &str = r#"You are an email classification assistant. Analyz
 - "priority_label": one of "urgent", "high", "normal", "low"
 - "category": one of "Primary", "Updates", "Social", "Promotions", "Finance", "Travel", "Newsletters"
 - "summary": 1-2 sentence summary of the email
+- "entities": object with arrays: "people" (names mentioned), "dates" (dates/deadlines mentioned), "amounts" (monetary amounts), "topics" (key topics/projects). Omit empty arrays.
+- "deadline": ISO date string if a deadline is mentioned, null otherwise
 
 Respond with valid JSON only."#;
 
 /// Process a single email through the AI pipeline.
 /// Returns None if Ollama is unavailable or response can't be parsed.
+/// `feedback_context` is an optional suffix from user corrections to improve accuracy.
 pub async fn process_email(
     client: &OllamaClient,
     model: &str,
     subject: &str,
     from: &str,
     body: &str,
+    feedback_context: Option<&str>,
 ) -> Option<AiMetadata> {
     // Truncate body to avoid overwhelming the model (char-safe for multi-byte UTF-8)
     let body_truncated: String = body.chars().take(2000).collect();
@@ -45,7 +65,12 @@ pub async fn process_email(
         "From: {from}\nSubject: {subject}\n\n{}", body_truncated
     );
 
-    let response = client.generate(model, &prompt, Some(SYSTEM_PROMPT)).await?;
+    let system = match feedback_context {
+        Some(ctx) => format!("{}{}", SYSTEM_PROMPT, ctx),
+        None => SYSTEM_PROMPT.to_string(),
+    };
+
+    let response = client.generate(model, &prompt, Some(&system)).await?;
 
     parse_ai_response(&response)
 }
@@ -56,13 +81,18 @@ fn parse_ai_response(response: &str) -> Option<AiMetadata> {
     let json_str = extract_json(response);
 
     match serde_json::from_str::<AiResponse>(json_str) {
-        Ok(parsed) => Some(AiMetadata {
-            intent: parsed.intent.unwrap_or_else(|| "INFORMATIONAL".to_string()),
-            priority_score: parsed.priority_score.unwrap_or(0.5),
-            priority_label: parsed.priority_label.unwrap_or_else(|| "normal".to_string()),
-            category: parsed.category.unwrap_or_else(|| "Primary".to_string()),
-            summary: parsed.summary.unwrap_or_default(),
-        }),
+        Ok(parsed) => {
+            let entities_json = parsed.entities.as_ref().and_then(|e| serde_json::to_string(e).ok());
+            Some(AiMetadata {
+                intent: parsed.intent.unwrap_or_else(|| "INFORMATIONAL".to_string()),
+                priority_score: parsed.priority_score.unwrap_or(0.5),
+                priority_label: parsed.priority_label.unwrap_or_else(|| "normal".to_string()),
+                category: parsed.category.unwrap_or_else(|| "Primary".to_string()),
+                summary: parsed.summary.unwrap_or_default(),
+                entities: entities_json,
+                deadline: parsed.deadline,
+            })
+        }
         Err(e) => {
             tracing::warn!("Failed to parse AI response: {e}. Raw: {response}");
             None

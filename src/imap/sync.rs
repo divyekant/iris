@@ -205,8 +205,13 @@ impl SyncEngine {
                 return;
             }
 
+            // Build feedback context from user corrections
+            let feedback_ctx = db.get().ok().and_then(|conn| {
+                crate::api::ai_feedback::build_feedback_context(&conn)
+            });
+
             // Run AI pipeline
-            let metadata = match pipeline::process_email(&ollama, &model, &subject, &from, &body).await {
+            let metadata = match pipeline::process_email(&ollama, &model, &subject, &from, &body, feedback_ctx.as_deref()).await {
                 Some(m) => m,
                 None => return,
             };
@@ -221,6 +226,8 @@ impl SyncEngine {
                     &metadata.priority_label,
                     &metadata.category,
                     &metadata.summary,
+                    metadata.entities.as_deref(),
+                    metadata.deadline.as_deref(),
                 );
                 if updated {
                     ws_hub.broadcast(WsEvent::AiProcessed {

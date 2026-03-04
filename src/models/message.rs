@@ -289,6 +289,8 @@ pub fn update_ai_metadata(
     priority_label: &str,
     category: &str,
     summary: &str,
+    entities: Option<&str>,
+    deadline: Option<&str>,
 ) -> bool {
     let updated = conn
         .execute(
@@ -298,9 +300,11 @@ pub fn update_ai_metadata(
                 ai_priority_label = ?4,
                 ai_category = ?5,
                 ai_summary = ?6,
+                ai_entities = ?7,
+                ai_deadline = ?8,
                 updated_at = unixepoch()
              WHERE id = ?1",
-            rusqlite::params![id, intent, priority_score, priority_label, category, summary],
+            rusqlite::params![id, intent, priority_score, priority_label, category, summary, entities, deadline],
         )
         .unwrap_or(0);
     updated > 0
@@ -891,8 +895,10 @@ mod tests {
         assert!(detail.ai_priority_label.is_none());
 
         // Update AI metadata
+        let entities = r#"{"people":["Alice","Bob"],"dates":["2024-03-15"],"amounts":[],"topics":["project review"]}"#;
         let updated = update_ai_metadata(
             &conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test email requesting action",
+            Some(entities), Some("2024-03-15"),
         );
         assert!(updated);
 

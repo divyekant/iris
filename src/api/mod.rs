@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod agent;
 pub mod ai_actions;
 pub mod ai_config;
+pub mod ai_feedback;
 pub mod chat;
 pub mod compose;
 pub mod config;
