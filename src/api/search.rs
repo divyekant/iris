@@ -148,7 +148,7 @@ pub async fn search(
     // snippet(table, col, open, close, ellipsis, max_tokens) — col -1 = best matching column
     let sql = format!(
         "SELECT m.id, m.account_id, m.thread_id, m.from_address, m.from_name,
-                m.subject, snippet(fts, -1, '<mark>', '</mark>', '...', 40) as match_snippet,
+                m.subject, snippet(fts_messages, -1, '<mark>', '</mark>', '...', 40) as match_snippet,
                 m.date, m.is_read, m.has_attachments
          FROM fts_messages fts
          JOIN messages m ON fts.rowid = m.rowid

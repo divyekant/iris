@@ -1,9 +1,28 @@
 const BASE = '';
 
+let sessionToken: string | null = null;
+
+export async function initSession(): Promise<void> {
+  const res = await fetch(`${BASE}/api/auth/bootstrap`, {
+    headers: { 'Sec-Fetch-Site': 'same-origin' },
+  });
+  if (!res.ok) throw new Error(`Bootstrap failed: ${res.status}`);
+  const data = await res.json();
+  sessionToken = data.token;
+}
+
+export function getSessionToken(): string | null {
+  return sessionToken;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (sessionToken) {
+    headers['x-session-token'] = sessionToken;
+  }
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: { ...headers, ...(options?.headers as Record<string, string> || {}) },
   });
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   if (res.status === 204 || res.headers.get('content-length') === '0') return undefined as T;

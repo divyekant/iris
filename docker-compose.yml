@@ -8,19 +8,32 @@ services:
     environment:
       - DATABASE_URL=/app/data/iris.db
       - OLLAMA_URL=http://ollama:11434
+      - MEMORIES_URL=http://memories:8900
       - PORT=3000
     env_file:
       - path: .env
         required: false
     depends_on:
       ollama:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     restart: unless-stopped
 
   ollama:
     image: ollama/ollama:latest
     volumes:
       - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:11434/api/tags"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     restart: unless-stopped
 
 volumes:

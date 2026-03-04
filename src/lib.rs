@@ -1,0 +1,99 @@
+pub mod ai;
+pub mod api;
+pub mod auth;
+pub mod config;
+pub mod db;
+pub mod imap;
+pub mod models;
+pub mod smtp;
+pub mod ws;
+
+use axum::{middleware, routing::{delete, get, patch, post, put}, Router};
+use std::sync::Arc;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
+
+pub struct AppState {
+    pub db: db::DbPool,
+    pub config: config::Config,
+    pub ws_hub: ws::hub::WsHub,
+    pub ollama: ai::ollama::OllamaClient,
+    pub memories: ai::memories::MemoriesClient,
+    pub session_token: String,
+}
+
+pub fn build_app(state: Arc<AppState>) -> Router {
+    // Agent-facing endpoints (API key auth via Bearer token)
+    let agent_routes = Router::new()
+        .route("/search", get(api::agent::agent_search))
+        .route("/messages/{id}", get(api::agent::agent_get_message))
+        .route("/threads/{id}", get(api::agent::agent_get_thread))
+        .route("/drafts", post(api::agent::agent_create_draft))
+        .route("/send", post(api::agent::agent_send))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::agent::agent_auth_middleware,
+        ));
+
+    // Public API routes (no session auth)
+    let public_api = Router::new()
+        .route("/health", get(api::health::health))
+        .route("/auth/bootstrap", get(api::session_auth::bootstrap_token))
+        .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
+
+    // Protected API routes (session auth required)
+    let protected_api = Router::new()
+        .route("/accounts", get(api::accounts::list_accounts).post(api::accounts::create_account))
+        .route("/accounts/{id}", get(api::accounts::get_account).delete(api::accounts::delete_account))
+        .route("/messages", get(api::messages::list_messages))
+        .route("/messages/{id}", get(api::messages::get_message))
+        .route("/messages/{id}/read", put(api::messages::mark_message_read))
+        .route("/messages/batch", patch(api::messages::batch_update_messages))
+        .route("/threads/{id}", get(api::threads::get_thread))
+        .route("/threads/{id}/summarize", post(api::ai_actions::summarize_thread))
+        .route("/search", get(api::search::search))
+        .route("/ai/assist", post(api::ai_actions::ai_assist))
+        .route("/ai/chat", post(api::chat::chat))
+        .route("/ai/chat/confirm", post(api::chat::confirm_action))
+        .route("/ai/chat/{session_id}", get(api::chat::get_history))
+        .route("/config", get(api::config::get_config))
+        .route("/config/theme", put(api::config::set_theme))
+        .route("/config/view-mode", put(api::config::set_view_mode))
+        .route("/config/ai", get(api::ai_config::get_ai_config).put(api::ai_config::set_ai_config))
+        .route("/config/ai/test", post(api::ai_config::test_ai_connection))
+        .route("/api-keys", get(api::agent::list_keys_handler).post(api::agent::create_key_handler))
+        .route("/api-keys/{id}", delete(api::agent::revoke_key_handler))
+        .route("/audit-log", get(api::agent::get_audit_log_handler))
+        .route("/send", post(api::compose::send_message))
+        .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
+        .route("/drafts/{id}", delete(api::compose::delete_draft))
+        .nest("/agent", agent_routes)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::session_auth::session_auth_middleware,
+        ));
+
+    let api_routes = Router::new()
+        .merge(public_api)
+        .merge(protected_api);
+
+    let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
+
+    Router::new()
+        .route("/ws", get(ws::ws_handler))
+        .route("/auth/callback", get(auth::oauth::oauth_callback))
+        .nest("/api", api_routes)
+        .fallback_service(spa)
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([
+                    "http://localhost:3000".parse().unwrap(),
+                    "http://localhost:5173".parse().unwrap(),
+                    "http://127.0.0.1:3000".parse().unwrap(),
+                    "http://127.0.0.1:5173".parse().unwrap(),
+                ]))
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+        .with_state(state)
+}

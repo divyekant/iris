@@ -1,3 +1,5 @@
+import { getSessionToken } from './api';
+
 type WsEventHandler = (event: WsEvent) => void;
 
 interface WsEvent {
@@ -9,16 +11,17 @@ class WebSocketClient {
   private ws: WebSocket | null = null;
   private handlers: Map<string, Set<WsEventHandler>> = new Map();
   private reconnectTimer: number | null = null;
-  private url: string;
 
-  constructor() {
+  private buildUrl(): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.url = `${protocol}//${window.location.host}/ws`;
+    const token = getSessionToken();
+    const base = `${protocol}//${window.location.host}/ws`;
+    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
 
   connect() {
     if (this.ws?.readyState === WebSocket.OPEN) return;
-    this.ws = new WebSocket(this.url);
+    this.ws = new WebSocket(this.buildUrl());
 
     this.ws.onopen = () => {
       console.log('[WS] Connected');
