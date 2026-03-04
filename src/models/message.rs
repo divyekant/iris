@@ -76,7 +76,7 @@ impl MessageSummary {
 
         stmt.query_map(rusqlite::params![account_id, folder, limit, offset], Self::from_row)
             .expect("failed to query messages")
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::warn!("Message row skip: {e}")).ok())
             .collect()
     }
 }
@@ -170,7 +170,7 @@ impl MessageDetail {
 
         stmt.query_map(rusqlite::params![thread_id], Self::from_row)
             .expect("failed to query thread messages")
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::warn!("Thread row skip: {e}")).ok())
             .collect()
     }
 }
@@ -320,13 +320,13 @@ pub fn save_draft(
     body_html: Option<&str>,
 ) -> String {
     if let Some(id) = draft_id {
-        // Update existing draft
+        // Update existing draft (scoped to account_id for ownership verification)
         conn.execute(
             "UPDATE messages SET
                 to_addresses = ?1, cc_addresses = ?2, bcc_addresses = ?3,
                 subject = ?4, body_text = ?5, body_html = ?6,
                 snippet = ?7, updated_at = unixepoch()
-             WHERE id = ?8 AND is_draft = 1",
+             WHERE id = ?8 AND account_id = ?9 AND is_draft = 1",
             rusqlite::params![
                 to_addresses,
                 cc_addresses,
@@ -336,6 +336,7 @@ pub fn save_draft(
                 body_html,
                 &body_text.chars().take(200).collect::<String>(),
                 id,
+                account_id,
             ],
         )
         .expect("failed to update draft");
@@ -370,7 +371,7 @@ pub fn save_draft(
     }
 }
 
-/// List all drafts for an account, ordered by most recently updated.
+/// List drafts for an account, ordered by most recently updated.
 pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
     let mut stmt = conn
         .prepare(
@@ -378,13 +379,14 @@ pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
                     date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
              FROM messages
              WHERE account_id = ?1 AND is_draft = 1 AND is_deleted = 0
-             ORDER BY updated_at DESC",
+             ORDER BY updated_at DESC
+             LIMIT 100",
         )
         .expect("failed to prepare list_drafts query");
 
     stmt.query_map(rusqlite::params![account_id], MessageSummary::from_row)
         .expect("failed to query drafts")
-        .filter_map(|r| r.ok())
+        .filter_map(|r| r.map_err(|e| tracing::warn!("Draft row skip: {e}")).ok())
         .collect()
 }
 

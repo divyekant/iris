@@ -31,6 +31,10 @@ pub async fn send_message(
         (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "account not found"})))
     })?;
 
+    if !account.is_active {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "account is inactive"}))));
+    }
+
     // Refresh OAuth token if needed
     let access_token = ensure_fresh_token(&state.db, &account, &state.config)
         .await

@@ -38,15 +38,11 @@ pub async fn process_email(
     from: &str,
     body: &str,
 ) -> Option<AiMetadata> {
-    // Truncate body to avoid overwhelming the model
-    let body_truncated = if body.len() > 2000 {
-        &body[..2000]
-    } else {
-        body
-    };
+    // Truncate body to avoid overwhelming the model (char-safe for multi-byte UTF-8)
+    let body_truncated: String = body.chars().take(2000).collect();
 
     let prompt = format!(
-        "From: {from}\nSubject: {subject}\n\n{body_truncated}"
+        "From: {from}\nSubject: {subject}\n\n{}", body_truncated
     );
 
     let response = client.generate(model, &prompt, Some(SYSTEM_PROMPT)).await?;

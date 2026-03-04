@@ -62,7 +62,7 @@ impl Account {
             .expect("failed to prepare list accounts query");
         stmt.query_map([], Self::from_row)
             .expect("failed to query accounts")
-            .filter_map(|r| r.ok())
+            .filter_map(|r| r.map_err(|e| tracing::warn!("Account row skip: {e}")).ok())
             .collect()
     }
 

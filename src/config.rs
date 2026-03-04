@@ -1,6 +1,7 @@
 use std::env;
+use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub port: u16,
     pub database_url: String,
@@ -12,6 +13,23 @@ pub struct Config {
     pub outlook_client_id: Option<String>,
     pub outlook_client_secret: Option<String>,
     pub public_url: String,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("port", &self.port)
+            .field("database_url", &self.database_url)
+            .field("ollama_url", &self.ollama_url)
+            .field("memories_url", &self.memories_url)
+            .field("memories_api_key", &"[REDACTED]")
+            .field("gmail_client_id", &self.gmail_client_id)
+            .field("gmail_client_secret", &"[REDACTED]")
+            .field("outlook_client_id", &self.outlook_client_id)
+            .field("outlook_client_secret", &"[REDACTED]")
+            .field("public_url", &self.public_url)
+            .finish()
+    }
 }
 
 impl Config {

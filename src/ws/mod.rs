@@ -30,6 +30,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             break;
                         }
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "WebSocket client lagged, continuing");
+                        continue;
+                    }
                     Err(_) => break,
                 }
             }

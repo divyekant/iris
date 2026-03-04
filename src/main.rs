@@ -12,7 +12,7 @@ use axum::{middleware, Router, routing::{get, put, post, delete, patch}};
 use config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 pub struct AppState {
@@ -75,8 +75,8 @@ async fn main() {
         .route("/search", get(api::search::search))
         .route("/ai/assist", post(api::ai_actions::ai_assist))
         .route("/ai/chat", post(api::chat::chat))
-        .route("/ai/chat/{session_id}", get(api::chat::get_history))
         .route("/ai/chat/confirm", post(api::chat::confirm_action))
+        .route("/ai/chat/{session_id}", get(api::chat::get_history))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/config/view-mode", put(api::config::set_view_mode))
@@ -100,13 +100,18 @@ async fn main() {
         .fallback_service(spa)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::list([
+                    "http://localhost:3000".parse().unwrap(),
+                    "http://localhost:5173".parse().unwrap(),
+                    "http://127.0.0.1:3000".parse().unwrap(),
+                    "http://127.0.0.1:5173".parse().unwrap(),
+                ]))
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
     tracing::info!("Iris listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

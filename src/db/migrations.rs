@@ -5,6 +5,14 @@ const MIGRATION_002: &str = include_str!("../../migrations/002_chat.sql");
 const MIGRATION_003: &str = include_str!("../../migrations/003_agent.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Ensure schema_version table exists before querying (handles fresh databases)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );",
+    )?;
+
     let current_version: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",

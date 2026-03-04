@@ -25,17 +25,25 @@ pub fn spawn_idle_listener(
     memories: MemoriesClient,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut backoff_secs = 30u64;
         loop {
             tracing::info!(account_id, "IDLE: connecting");
 
             let result = idle_loop(&account_id, &creds, &db, &ws_hub, &ollama, &memories).await;
 
-            if let Err(e) = result {
-                tracing::error!(account_id, error = %e, "IDLE loop error, retrying in 30s");
+            match result {
+                Ok(_) => {
+                    // Successful IDLE cycle — reset backoff
+                    backoff_secs = 30;
+                }
+                Err(e) => {
+                    tracing::error!(account_id, error = %e, backoff_secs, "IDLE loop error, retrying");
+                }
             }
 
-            // Back off before reconnecting
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+            // Exponential backoff capped at 15 minutes
+            backoff_secs = (backoff_secs * 2).min(900);
         }
     })
 }
@@ -68,17 +76,12 @@ async fn idle_loop(
     tracing::info!(account_id, ?idle_result, "IDLE: got response");
 
     // 5. Exit IDLE — get session back
-    let session = idle_handle.done().await?;
+    let mut session = idle_handle.done().await?;
 
     // 6. Re-sync to pick up new messages
     tracing::info!(account_id, "IDLE: re-syncing after notification");
 
-    let engine = SyncEngine {
-        db: db.clone(),
-        ws_hub: ws_hub.clone(),
-        ollama: ollama.clone(),
-        memories: memories.clone(),
-    };
+    let engine = SyncEngine::new(db.clone(), ws_hub.clone(), ollama.clone(), memories.clone());
 
     // Re-run initial sync (INSERT OR IGNORE handles duplicates)
     if let Err(e) = engine.initial_sync(account_id, creds).await {
@@ -86,7 +89,7 @@ async fn idle_loop(
     }
 
     // Logout the IDLE session (sync created its own connection)
-    drop(session);
+    let _ = session.logout().await;
 
     Ok(())
 }

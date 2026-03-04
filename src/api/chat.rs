@@ -83,6 +83,15 @@ pub async fn chat(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, StatusCode> {
+    // Validate session_id format (max 100 chars, alphanumeric + hyphens)
+    if input.session_id.is_empty() || input.session_id.len() > 100 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // Cap message length to prevent abuse
+    if input.message.len() > 50_000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     // Phase 1: DB reads (no await across conn)
     let (ai_model, history, fts_citations) = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -294,17 +303,21 @@ pub async fn confirm_action(
 // ---------------------------------------------------------------------------
 
 fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> Vec<ChatMessage> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, session_id, role, content, citations, proposed_action, created_at
-             FROM chat_messages
-             WHERE session_id = ?1
-             ORDER BY created_at ASC
-             LIMIT ?2",
-        )
-        .unwrap();
+    let mut stmt = match conn.prepare(
+        "SELECT id, session_id, role, content, citations, proposed_action, created_at
+         FROM chat_messages
+         WHERE session_id = ?1
+         ORDER BY created_at ASC
+         LIMIT ?2",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to prepare chat history query: {e}");
+            return Vec::new();
+        }
+    };
 
-    stmt.query_map(rusqlite::params![session_id, limit as i64], |row| {
+    match stmt.query_map(rusqlite::params![session_id, limit as i64], |row| {
         let citations_json: Option<String> = row.get(4)?;
         let action_json: Option<String> = row.get(5)?;
 
@@ -317,10 +330,15 @@ fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> 
             proposed_action: action_json.and_then(|s| serde_json::from_str(&s).ok()),
             created_at: row.get(6)?,
         })
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+    }) {
+        Ok(rows) => rows
+            .filter_map(|r| r.map_err(|e| tracing::warn!("Chat history row skip: {e}")).ok())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to query chat history: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<Citation> {
@@ -338,19 +356,23 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
 
     let fts_query = terms.join(" OR ");
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT m.id, m.subject, m.from_name, m.from_address,
-                    snippet(fts_messages, -1, '', '', '...', 40) as snip
-             FROM fts_messages fts
-             JOIN messages m ON m.id = fts.rowid
-             WHERE fts_messages MATCH ?1
-             ORDER BY rank
-             LIMIT 10",
-        )
-        .unwrap();
+    let mut stmt = match conn.prepare(
+        "SELECT m.id, m.subject, m.from_name, m.from_address,
+                snippet(fts_messages, -1, '', '', '...', 40) as snip
+         FROM fts_messages fts
+         JOIN messages m ON m.rowid = fts.rowid
+         WHERE fts_messages MATCH ?1
+         ORDER BY rank
+         LIMIT 10",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to prepare FTS search: {e}");
+            return Vec::new();
+        }
+    };
 
-    stmt.query_map(rusqlite::params![fts_query], |row| {
+    match stmt.query_map(rusqlite::params![fts_query], |row| {
         let from_name: Option<String> = row.get(2)?;
         let from_addr: Option<String> = row.get(3)?;
         Ok(Citation {
@@ -359,10 +381,15 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
             from: from_name.or(from_addr),
             snippet: row.get::<_, String>(4).unwrap_or_default(),
         })
-    })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+    }) {
+        Ok(rows) => rows
+            .filter_map(|r| r.map_err(|e| tracing::warn!("FTS row skip: {e}")).ok())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to execute FTS search: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn build_chat_prompt(

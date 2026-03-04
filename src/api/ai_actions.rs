@@ -38,8 +38,10 @@ pub fn build_summary_prompt(subject: &str, messages: &[MessageDetail]) -> String
             .unwrap_or_default();
 
         let body = msg.body_text.as_deref().unwrap_or("");
-        let body_truncated = if body.len() > 500 {
-            format!("{}...", &body[..500])
+        let body_truncated: String = if body.chars().count() > 500 {
+            let mut s: String = body.chars().take(500).collect();
+            s.push_str("...");
+            s
         } else {
             body.to_string()
         };
@@ -158,6 +160,11 @@ pub async fn ai_assist(
     State(state): State<Arc<AppState>>,
     Json(input): Json<AiAssistRequest>,
 ) -> Result<Json<AiAssistResponse>, StatusCode> {
+    // Cap content length to prevent abuse
+    if input.content.len() > 50_000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     let system_prompt = get_assist_system_prompt(&input.action)
         .ok_or(StatusCode::BAD_REQUEST)?;
 

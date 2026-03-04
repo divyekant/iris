@@ -59,9 +59,14 @@ impl Authenticator for XOAuth2 {
 /// Open a TLS connection to the IMAP server, authenticate, and return the
 /// ready-to-use session.
 pub async fn connect(creds: &ImapCredentials) -> Result<ImapSession, Box<dyn std::error::Error + Send + Sync>> {
-    // 1. TCP connection
+    // 1. TCP connection (with 30s timeout to prevent indefinite hangs)
     let addr = format!("{}:{}", creds.host, creds.port);
-    let tcp = tokio::net::TcpStream::connect(&addr).await?;
+    let tcp = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    .map_err(|_| format!("IMAP connection timeout after 30s: {}", addr))??;
 
     // 2. Wrap in TLS
     let tls_connector = async_native_tls::TlsConnector::new();

@@ -1,5 +1,7 @@
 use futures::TryStreamExt;
 use mailparse::MailHeaderMap;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::ai::memories::MemoriesClient;
 use crate::ai::ollama::OllamaClient;
@@ -14,15 +16,29 @@ use crate::ws::hub::{WsEvent, WsHub};
 // Sync engine
 // ---------------------------------------------------------------------------
 
+/// Maximum number of concurrent AI classification tasks.
+const MAX_AI_CONCURRENCY: usize = 4;
+
 /// Drives the initial (and incremental re-) sync of a single account.
 pub struct SyncEngine {
     pub db: DbPool,
     pub ws_hub: WsHub,
     pub ollama: OllamaClient,
     pub memories: MemoriesClient,
+    ai_semaphore: Arc<Semaphore>,
 }
 
 impl SyncEngine {
+    pub fn new(db: DbPool, ws_hub: WsHub, ollama: OllamaClient, memories: MemoriesClient) -> Self {
+        Self {
+            db,
+            ws_hub,
+            ollama,
+            memories,
+            ai_semaphore: Arc::new(Semaphore::new(MAX_AI_CONCURRENCY)),
+        }
+    }
+
     /// Perform an initial sync: fetch the newest batch of messages from
     /// INBOX and insert them into the local database.
     pub async fn initial_sync(
@@ -161,8 +177,14 @@ impl SyncEngine {
         let db = self.db.clone();
         let ws_hub = self.ws_hub.clone();
         let ollama = self.ollama.clone();
+        let semaphore = self.ai_semaphore.clone();
 
         tokio::spawn(async move {
+            // Acquire semaphore permit to limit concurrent AI tasks
+            let _permit = match semaphore.acquire().await {
+                Ok(p) => p,
+                Err(_) => return, // Semaphore closed
+            };
             // Check if AI is enabled
             let (enabled, model) = {
                 let conn = match db.get() {

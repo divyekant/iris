@@ -97,8 +97,8 @@ pub async fn search(
     }
 
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let limit = params.limit.unwrap_or(50);
-    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(50).min(500);
+    let offset = params.offset.unwrap_or(0).max(0);
 
     // Build dynamic WHERE clauses for filters
     let mut conditions = Vec::new();

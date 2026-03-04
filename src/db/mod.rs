@@ -2,7 +2,6 @@ pub mod migrations;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Connection;
 use std::path::Path;
 
 pub type DbPool = Pool<SqliteConnectionManager>;
@@ -11,29 +10,34 @@ pub fn create_pool(database_url: &str) -> Result<DbPool, Box<dyn std::error::Err
     if let Some(parent) = Path::new(database_url).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let manager = SqliteConnectionManager::file(database_url);
+    let manager = SqliteConnectionManager::file(database_url)
+        .with_init(|conn| {
+            // Per-connection PRAGMAs: applied to every connection in the pool
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA busy_timeout = 5000;",
+            )
+        });
     let pool = Pool::builder().max_size(10).build(manager)?;
+    // WAL mode is per-database (persists), only needs to be set once
     let conn = pool.get()?;
-    configure_connection(&conn)?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     Ok(pool)
-}
-
-fn configure_connection(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;",
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
 pub fn create_test_pool() -> DbPool {
-    let manager = SqliteConnectionManager::memory();
+    let manager = SqliteConnectionManager::memory()
+        .with_init(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA busy_timeout = 5000;",
+            )
+        });
     let pool = Pool::builder().max_size(1).build(manager).unwrap();
     let conn = pool.get().unwrap();
-    configure_connection(&conn).unwrap();
     migrations::run(&conn).unwrap();
     pool
 }

@@ -331,12 +331,12 @@ pub async fn oauth_callback(
         let acct_id = account.id.clone();
 
         tokio::spawn(async move {
-            let engine = crate::imap::sync::SyncEngine {
-                db: db_clone.clone(),
-                ws_hub: ws_clone.clone(),
-                ollama: ollama_clone.clone(),
-                memories: memories_clone.clone(),
-            };
+            let engine = crate::imap::sync::SyncEngine::new(
+                db_clone.clone(),
+                ws_clone.clone(),
+                ollama_clone.clone(),
+                memories_clone.clone(),
+            );
             if let Err(e) = engine.initial_sync(&acct_id, &sync_creds).await {
                 tracing::error!(account_id = %acct_id, error = %e, "Initial sync failed");
             }
