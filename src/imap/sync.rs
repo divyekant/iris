@@ -72,8 +72,8 @@ impl SyncEngine {
             return Ok(());
         }
 
-        // 4. Determine range: newest 100 (or fewer)
-        let batch_size: u32 = 100;
+        // 4. Determine range: newest 50 (or fewer)
+        let batch_size: u32 = 50;
         let start = if total > batch_size { total - batch_size + 1 } else { 1 };
         let range = format!("{}:{}", start, total);
 
