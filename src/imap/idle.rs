@@ -1,8 +1,6 @@
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-use crate::ai::memories::MemoriesClient;
-use crate::ai::ollama::OllamaClient;
 use crate::db::DbPool;
 use crate::imap::connection::{connect, ImapCredentials};
 use crate::imap::sync::SyncEngine;
@@ -21,15 +19,13 @@ pub fn spawn_idle_listener(
     creds: ImapCredentials,
     db: DbPool,
     ws_hub: WsHub,
-    ollama: OllamaClient,
-    memories: MemoriesClient,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut backoff_secs = 30u64;
         loop {
             tracing::info!(account_id, "IDLE: connecting");
 
-            let result = idle_loop(&account_id, &creds, &db, &ws_hub, &ollama, &memories).await;
+            let result = idle_loop(&account_id, &creds, &db, &ws_hub).await;
 
             match result {
                 Ok(_) => {
@@ -54,8 +50,6 @@ async fn idle_loop(
     creds: &ImapCredentials,
     db: &DbPool,
     ws_hub: &WsHub,
-    ollama: &OllamaClient,
-    memories: &MemoriesClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 1. Connect
     let mut session = connect(creds).await?;
@@ -81,7 +75,7 @@ async fn idle_loop(
     // 6. Re-sync to pick up new messages
     tracing::info!(account_id, "IDLE: re-syncing after notification");
 
-    let engine = SyncEngine::new(db.clone(), ws_hub.clone(), ollama.clone(), memories.clone());
+    let engine = SyncEngine::new(db.clone(), ws_hub.clone());
 
     // Re-run initial sync (INSERT OR IGNORE handles duplicates)
     if let Err(e) = engine.initial_sync(account_id, creds).await {

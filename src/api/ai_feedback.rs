@@ -89,6 +89,14 @@ pub async fn submit_feedback(
     )
     .ok();
 
+    // Trigger preference extraction every 10 corrections
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ai_feedback", [], |row| row.get(0))
+        .unwrap_or(0);
+    if total > 0 && total % 10 == 0 {
+        crate::jobs::queue::enqueue_pref_extract(&conn);
+    }
+
     Ok(Json(FeedbackResponse { updated }))
 }
 

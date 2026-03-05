@@ -60,6 +60,14 @@ These variables are required to connect Gmail or Outlook accounts via OAuth. You
 4. Under **Certificates & secrets**, create a new client secret.
 5. Copy the Application (client) ID and the secret value into your `.env` file.
 
+### Job Queue
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `JOB_POLL_INTERVAL_MS` | number | `2000` | How often (in milliseconds) the job worker polls for new jobs to process |
+| `JOB_MAX_CONCURRENCY` | number | `4` | Maximum number of jobs processed at the same time |
+| `JOB_CLEANUP_DAYS` | number | `7` | Number of days to keep completed job records before automatic cleanup |
+
 ### Integration
 
 | Variable | Type | Default | Description |

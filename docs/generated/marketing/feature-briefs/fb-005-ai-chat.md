@@ -30,12 +30,15 @@ Finding information buried in email threads is painfully slow. You remember the 
 1. **Natural language queries**: Ask in plain English. No search operators, no filters, no guesswork
 2. **Cited answers**: Every response links back to specific emails so you can verify and dig deeper
 3. **Action proposals**: The AI can suggest next steps — draft a reply, flag a thread, set a reminder — and waits for your approval before acting
-4. **Conversation memory**: Chat history persists within a session, so you can ask follow-up questions naturally
-5. **Fully local**: Your questions and the AI's answers never leave your machine
+4. **Cross-session memory**: The assistant remembers your past conversations — not just within a session, but across sessions. Come back days later and pick up exactly where you left off
+5. **Context that compounds**: Every conversation builds on the last. The AI draws on previous interactions to give you more relevant, personalized responses over time
+6. **Fully local**: Your questions, the AI's answers, and your entire conversation history never leave your machine
 
 ## How It Works
 
 Open the chat panel in Iris and type your question. Iris searches your email using semantic search to find relevant messages, feeds that context to your local AI model, and generates an answer. Source emails are cited inline so you can click through to the original thread. If the AI suggests an action (like drafting a reply), you see a clear confirmation prompt before anything happens.
+
+Unlike other AI chat tools, Iris maintains memory across sessions. Ask about the quarterly budget on Monday, then follow up on Thursday — the assistant remembers the earlier conversation and responds with full context. Over time, this creates an AI that genuinely understands your communication landscape, not one that starts from scratch every time you open it.
 
 ## Competitive Context
 
@@ -53,12 +56,13 @@ Open the chat panel in Iris and type your question. Iris searches your email usi
 - Semantic search retrieval for accurate context finding
 - Action proposals require explicit user confirmation — no autonomous actions
 - Suggestion chips for common queries to help users get started
-- Chat history with persistent conversation context
+- Cross-session memory — conversation context persists across sessions, not just within one
+- AI responses improve over time as conversation history builds richer context
 
 ## Suggested Messaging
 
-**Announcement**: "Iris AI Chat lets you ask questions about your email in plain English — and get answers with citations, powered by local AI."
+**Announcement**: "Iris AI Chat lets you ask questions about your email in plain English — and get answers with citations, powered by local AI. Now with cross-session memory that remembers your past conversations."
 
-**Sales pitch**: "Imagine asking 'What did the client say about pricing?' and getting an instant, sourced answer — without your email data ever leaving your laptop. That's Iris AI Chat."
+**Sales pitch**: "Imagine asking 'What did the client say about pricing?' and getting an instant, sourced answer — without your email data ever leaving your laptop. Come back a week later, and the assistant still remembers the conversation. That's Iris AI Chat."
 
-**One-liner**: "Ask your email anything. Get answers with receipts."
+**One-liner**: "Ask your email anything. Get answers with receipts. Pick up where you left off."

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod imap;
+pub mod jobs;
 pub mod models;
 pub mod smtp;
 pub mod ws;
@@ -57,7 +58,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/ai/feedback-stats", get(api::ai_feedback::feedback_stats))
         .route("/ai/chat", post(api::chat::chat))
         .route("/ai/chat/confirm", post(api::chat::confirm_action))
+        .route("/ai/chat/memory", get(api::chat::get_chat_memory))
         .route("/ai/chat/{session_id}", get(api::chat::get_history))
+        .route("/ai/queue-status", get(api::queue_status::queue_status))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/config/view-mode", put(api::config::set_view_mode))

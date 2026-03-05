@@ -154,8 +154,12 @@ pub async fn chat(
         fts_citations
     };
 
+    // Phase 3b: Load cross-session context from Memories
+    let past_sessions = state.memories.search(&input.message, 3, Some("iris/chat/sessions/")).await;
+    let user_prefs = state.memories.search("user email preferences", 1, Some("iris/user/preferences")).await;
+
     // Phase 4: Build prompt and call Ollama (async)
-    let prompt = build_chat_prompt(&history, &citations, &input.message);
+    let prompt = build_chat_prompt(&history, &citations, &input.message, &past_sessions, &user_prefs);
 
     let ai_response = state
         .ollama
@@ -181,7 +185,7 @@ pub async fn chat(
         .as_ref()
         .and_then(|a| serde_json::to_string(a).ok());
 
-    // Phase 5: Store assistant message (DB write, no await)
+    // Phase 5: Store assistant message and check for summary trigger (DB write, no await)
     {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let assistant_msg_id_inner = uuid::Uuid::new_v4().to_string();
@@ -189,6 +193,18 @@ pub async fn chat(
             "INSERT INTO chat_messages (id, session_id, role, content, citations, proposed_action) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
             rusqlite::params![assistant_msg_id_inner, input.session_id, clean_content, citations_json, action_json],
         ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Trigger chat summarization every 10 messages
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1",
+                rusqlite::params![input.session_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if msg_count > 0 && msg_count % 10 == 0 {
+            crate::jobs::queue::enqueue_chat_summarize(&conn, &input.session_id);
+        }
     }
 
     let msg = ChatMessage {
@@ -299,6 +315,48 @@ pub async fn confirm_action(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/ai/chat/memory — return stored chat summaries and preferences
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct ChatMemoryResponse {
+    pub summaries: Vec<MemoryEntry>,
+    pub preferences: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryEntry {
+    pub source: String,
+    pub text: String,
+    pub score: f64,
+}
+
+pub async fn get_chat_memory(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ChatMemoryResponse>, StatusCode> {
+    let summaries = state
+        .memories
+        .search("chat conversation summary", 10, Some("iris/chat/sessions/"))
+        .await;
+    let prefs = state
+        .memories
+        .search("user email preferences", 1, Some("iris/user/preferences"))
+        .await;
+
+    Ok(Json(ChatMemoryResponse {
+        summaries: summaries
+            .into_iter()
+            .map(|r| MemoryEntry {
+                source: r.source,
+                text: r.text,
+                score: r.score,
+            })
+            .collect(),
+        preferences: prefs.first().map(|p| p.text.clone()),
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -396,8 +454,26 @@ fn build_chat_prompt(
     history: &[ChatMessage],
     citations: &[Citation],
     current_message: &str,
+    past_sessions: &[crate::ai::memories::MemoryResult],
+    user_prefs: &[crate::ai::memories::MemoryResult],
 ) -> String {
     let mut prompt = String::new();
+
+    // Add user preferences context
+    if let Some(prefs) = user_prefs.first() {
+        prompt.push_str("=== User Preferences ===\n");
+        prompt.push_str(&prefs.text);
+        prompt.push_str("\n\n");
+    }
+
+    // Add past conversation summaries
+    if !past_sessions.is_empty() {
+        prompt.push_str("=== Past Conversations ===\n");
+        for s in past_sessions {
+            prompt.push_str(&format!("- {}\n", s.text));
+        }
+        prompt.push_str("\n");
+    }
 
     // Add email context
     if !citations.is_empty() {
@@ -494,7 +570,7 @@ mod tests {
             from: Some("Alice".to_string()),
             snippet: "Let's meet at 3pm".to_string(),
         }];
-        let prompt = build_chat_prompt(&[], &citations, "What's happening tomorrow?");
+        let prompt = build_chat_prompt(&[], &citations, "What's happening tomorrow?", &[], &[]);
         assert!(prompt.contains("=== Relevant Emails ==="));
         assert!(prompt.contains("[abcdef12]"));
         assert!(prompt.contains("Alice"));
@@ -504,8 +580,22 @@ mod tests {
 
     #[test]
     fn test_build_chat_prompt_no_citations() {
-        let prompt = build_chat_prompt(&[], &[], "Hello");
+        let prompt = build_chat_prompt(&[], &[], "Hello", &[], &[]);
         assert!(!prompt.contains("=== Relevant Emails ==="));
         assert!(prompt.contains("User: Hello"));
+    }
+
+    #[test]
+    fn test_build_chat_prompt_with_past_sessions() {
+        use crate::ai::memories::MemoryResult;
+        let past = vec![MemoryResult {
+            id: 1,
+            text: "User asked about quarterly reports".to_string(),
+            source: "iris/chat/sessions/abc".to_string(),
+            score: 0.9,
+        }];
+        let prompt = build_chat_prompt(&[], &[], "Hello", &past, &[]);
+        assert!(prompt.contains("=== Past Conversations ==="));
+        assert!(prompt.contains("quarterly reports"));
     }
 }

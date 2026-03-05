@@ -50,7 +50,16 @@ A: Yes. Set `ai_enabled` to false in Settings. All AI features (classification, 
 A: When you correct an AI classification (category, priority, or intent), the correction is stored. When the same correction pattern occurs 2 or more times, it is appended to the classification prompt as a hint, so the model adjusts future classifications.
 
 **Q: Why is AI classification slow during initial sync?**
-A: Classification runs in background with a concurrency limit of 4 tasks. During initial sync of 100 messages, classification tasks queue up. Each task takes 1-5 seconds depending on model size and hardware. All 100 messages may take several minutes to classify.
+A: Classification runs via the job queue with a concurrency limit of 4 tasks (configurable via `job_max_concurrency`). During initial sync of 100 messages, 200 jobs are enqueued (one `ai_classify` + one `memories_store` per message). Each AI classification takes 1-5 seconds depending on model size and hardware. All 100 messages may take several minutes to classify. Monitor progress via `GET /api/ai/queue-status`.
+
+**Q: What happens if Ollama is down during email sync?**
+A: Email sync completes normally -- messages are inserted into the database. AI classification and Memories storage jobs are enqueued into the `processing_jobs` table. When the job worker picks them up and Ollama is unreachable, the jobs fail and are retried with exponential backoff (5s, 20s, 45s). If Ollama remains down through all 4 attempts, the jobs are permanently marked as `failed`. Once Ollama recovers, it only processes newly enqueued jobs. Failed jobs can be manually retried by resetting their status in SQLite.
+
+**Q: How do I check job queue health?**
+A: Call `GET /api/ai/queue-status`. It returns `{ pending, processing, failed, done_today }`. Key things to watch: `failed > 0` indicates jobs that exhausted retries (check Ollama/Memories connectivity). `pending` growing without `done_today` increasing means the worker may not be running. `processing` stuck at a non-zero value for extended periods suggests stuck jobs.
+
+**Q: How does cross-session chat memory work?**
+A: Every 10 messages in a chat session, a `chat_summarize` job is enqueued. The job loads the session's messages, sends them to Ollama for summarization (2-3 sentences), and stores the summary in Memories at `iris/chat/sessions/{session_id}`. On subsequent chat sessions, the prompt builder searches Memories for the top 3 most relevant past session summaries and includes them in the prompt under "Past Conversations." User preferences (extracted from AI feedback corrections) are also loaded and included under "User Preferences." View stored memory via `GET /api/ai/chat/memory`.
 
 ## Search
 

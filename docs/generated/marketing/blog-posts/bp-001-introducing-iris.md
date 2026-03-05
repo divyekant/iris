@@ -35,6 +35,8 @@ But Iris isn't just a privacy play. It's a genuinely capable email client with A
 
 **Write with AI assistance.** Rewrite, formalize, casualize, shorten, or lengthen your drafts. The AI runs locally, so your draft content stays private.
 
+**An AI that actually learns.** Iris doesn't just classify your emails — it learns how *you* classify them. Correct a misclassification, and the system remembers. Over time, Iris adapts to your priorities, your categories, and your working patterns. The chat assistant remembers past conversations across sessions, so you never have to repeat context. Most AI tools start from zero every time you open them. Iris gets smarter with every correction, every conversation, and every interaction — and all of that learning stays on your machine.
+
 **Connect any provider.** Gmail, Outlook, Yahoo, Fastmail, your self-hosted server — Iris speaks standard IMAP and SMTP. OAuth2 for major providers, real-time sync via IMAP IDLE. One client for all your accounts.
 
 **Build on top of it.** Iris ships with an open REST API for AI agents. Create API keys with scoped permissions, connect your automation framework, and let agents search, read, draft, and send email. Every action is logged in a full audit trail.

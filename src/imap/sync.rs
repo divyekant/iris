@@ -1,42 +1,26 @@
 use futures::TryStreamExt;
 use mailparse::MailHeaderMap;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
 
-use crate::ai::memories::MemoriesClient;
-use crate::ai::ollama::OllamaClient;
-use crate::ai::pipeline;
 use crate::db::DbPool;
 use crate::imap::connection::{connect, ImapCredentials};
+use crate::jobs::queue::{self, MemoriesStorePayload};
 use crate::models::account::Account;
-use crate::models::message::{self, AttachmentMeta, InsertMessage};
+use crate::models::message::{AttachmentMeta, InsertMessage};
 use crate::ws::hub::{WsEvent, WsHub};
 
 // ---------------------------------------------------------------------------
 // Sync engine
 // ---------------------------------------------------------------------------
 
-/// Maximum number of concurrent AI classification tasks.
-const MAX_AI_CONCURRENCY: usize = 4;
-
 /// Drives the initial (and incremental re-) sync of a single account.
 pub struct SyncEngine {
     pub db: DbPool,
     pub ws_hub: WsHub,
-    pub ollama: OllamaClient,
-    pub memories: MemoriesClient,
-    ai_semaphore: Arc<Semaphore>,
 }
 
 impl SyncEngine {
-    pub fn new(db: DbPool, ws_hub: WsHub, ollama: OllamaClient, memories: MemoriesClient) -> Self {
-        Self {
-            db,
-            ws_hub,
-            ollama,
-            memories,
-            ai_semaphore: Arc::new(Semaphore::new(MAX_AI_CONCURRENCY)),
-        }
+    pub fn new(db: DbPool, ws_hub: WsHub) -> Self {
+        Self { db, ws_hub }
     }
 
     /// Perform an initial sync: fetch the newest batch of messages from
@@ -121,25 +105,30 @@ impl SyncEngine {
                 message_id: msg_id.clone(),
             });
 
-            // Spawn AI processing in background (fire-and-forget)
-            self.spawn_ai_processing(
-                msg_id.clone(),
-                insert_msg.subject.clone().unwrap_or_default(),
-                insert_msg.from_address.clone().unwrap_or_default(),
-                insert_msg.body_text.clone().unwrap_or_default(),
-            );
-
-            // Store in Memories for semantic search (fire-and-forget)
-            self.spawn_memories_storage(
-                account_id.to_string(),
-                msg_id,
-                insert_msg.message_id.clone(),
-                insert_msg.from_name.clone(),
-                insert_msg.from_address.clone(),
-                insert_msg.subject.clone(),
-                insert_msg.body_text.clone(),
-                insert_msg.date,
-            );
+            // Enqueue AI classification and Memories storage jobs
+            {
+                let conn = self.db.get().unwrap();
+                queue::enqueue_ai_classify(
+                    &conn,
+                    &msg_id,
+                    &insert_msg.subject.clone().unwrap_or_default(),
+                    &insert_msg.from_address.clone().unwrap_or_default(),
+                    &insert_msg.body_text.clone().unwrap_or_default(),
+                );
+                queue::enqueue_memories_store(
+                    &conn,
+                    &msg_id,
+                    &MemoriesStorePayload {
+                        account_id: account_id.to_string(),
+                        rfc_message_id: insert_msg.message_id.clone(),
+                        from_name: insert_msg.from_name.clone(),
+                        from_address: insert_msg.from_address.clone(),
+                        subject: insert_msg.subject.clone(),
+                        body_text: insert_msg.body_text.clone(),
+                        date: insert_msg.date,
+                    },
+                );
+            }
 
             // Broadcast progress
             let progress = (i + 1) as f32 / fetched_count as f32;
@@ -165,125 +154,6 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Spawn a background task to process a message through the AI pipeline.
-    /// Gracefully degrades: if AI is not configured or Ollama is down, does nothing.
-    fn spawn_ai_processing(
-        &self,
-        message_id: String,
-        subject: String,
-        from: String,
-        body: String,
-    ) {
-        let db = self.db.clone();
-        let ws_hub = self.ws_hub.clone();
-        let ollama = self.ollama.clone();
-        let semaphore = self.ai_semaphore.clone();
-
-        tokio::spawn(async move {
-            // Acquire semaphore permit to limit concurrent AI tasks
-            let _permit = match semaphore.acquire().await {
-                Ok(p) => p,
-                Err(_) => return, // Semaphore closed
-            };
-            // Check if AI is enabled
-            let (enabled, model) = {
-                let conn = match db.get() {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
-                let enabled = conn
-                    .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
-                    .unwrap_or_else(|_| "false".to_string())
-                    == "true";
-                let model = conn
-                    .query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
-                    .unwrap_or_default();
-                (enabled, model)
-            };
-
-            if !enabled || model.is_empty() {
-                return;
-            }
-
-            // Build feedback context from user corrections
-            let feedback_ctx = db.get().ok().and_then(|conn| {
-                crate::api::ai_feedback::build_feedback_context(&conn)
-            });
-
-            // Run AI pipeline
-            let metadata = match pipeline::process_email(&ollama, &model, &subject, &from, &body, feedback_ctx.as_deref()).await {
-                Some(m) => m,
-                None => return,
-            };
-
-            // Update message with AI metadata
-            if let Ok(conn) = db.get() {
-                let updated = message::update_ai_metadata(
-                    &conn,
-                    &message_id,
-                    &metadata.intent,
-                    metadata.priority_score,
-                    &metadata.priority_label,
-                    &metadata.category,
-                    &metadata.summary,
-                    metadata.entities.as_deref(),
-                    metadata.deadline.as_deref(),
-                );
-                if updated {
-                    ws_hub.broadcast(WsEvent::AiProcessed {
-                        message_id: message_id.clone(),
-                    });
-                    tracing::debug!(message_id, "AI processing complete");
-                }
-            }
-        });
-    }
-
-    /// Store email content in Memories for semantic search.
-    /// Gracefully degrades: if Memories server is unreachable, does nothing.
-    fn spawn_memories_storage(
-        &self,
-        account_id: String,
-        db_message_id: String,
-        rfc_message_id: Option<String>,
-        from_name: Option<String>,
-        from_address: Option<String>,
-        subject: Option<String>,
-        body_text: Option<String>,
-        date: Option<i64>,
-    ) {
-        let memories = self.memories.clone();
-
-        tokio::spawn(async move {
-            // Build text content for embedding
-            let from = match (&from_name, &from_address) {
-                (Some(name), Some(addr)) => format!("From: {} <{}>", name, addr),
-                (None, Some(addr)) => format!("From: {}", addr),
-                _ => String::new(),
-            };
-            let subj = subject.as_deref().unwrap_or("(no subject)");
-            let date_str = date
-                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
-                .unwrap_or_default();
-
-            // Truncate body to 4000 chars for embedding
-            let body = body_text.as_deref().unwrap_or("");
-            let body_truncated: String = body.chars().take(4000).collect();
-
-            let text = format!(
-                "{}\nSubject: {}\nDate: {}\n\n{}",
-                from, subj, date_str, body_truncated
-            );
-
-            let source = format!("iris/{}/messages/{}", account_id, db_message_id);
-            let key = rfc_message_id.unwrap_or_else(|| db_message_id.clone());
-
-            if !memories.upsert(&text, &source, &key).await {
-                tracing::debug!(db_message_id, "Memories upsert skipped (server unreachable or error)");
-            }
-        });
-    }
 }
 
 // ---------------------------------------------------------------------------

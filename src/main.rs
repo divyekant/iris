@@ -1,4 +1,4 @@
-use iris_server::{ai, build_app, config::Config, db, ws, AppState};
+use iris_server::{ai, build_app, config::Config, db, jobs, ws, AppState};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -42,6 +42,18 @@ async fn main() {
         memories,
         session_token,
     });
+
+    // Spawn the background job worker
+    let worker = Arc::new(jobs::worker::JobWorker::new(
+        state.db.clone(),
+        state.ws_hub.clone(),
+        state.ollama.clone(),
+        state.memories.clone(),
+        config.job_poll_interval_ms,
+        config.job_max_concurrency,
+        config.job_cleanup_days,
+    ));
+    tokio::spawn(worker.run());
 
     let app = build_app(state);
 

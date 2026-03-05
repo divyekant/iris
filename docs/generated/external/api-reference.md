@@ -350,6 +350,84 @@ curl -s -X POST \
 
 ---
 
+### Queue Status
+
+Check the current state of the background job queue.
+
+```
+GET /api/ai/queue-status
+```
+
+**Authentication:** Session token (not agent API key)
+
+**Example Request:**
+
+```bash
+curl -s -H "X-Session-Token: your_session_token" \
+  "http://localhost:3000/api/ai/queue-status"
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "pending": 3,
+  "processing": 1,
+  "failed": 0,
+  "done_today": 142
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `pending` | integer | Jobs waiting to be processed |
+| `processing` | integer | Jobs currently running |
+| `failed` | integer | Jobs that have exceeded retry attempts |
+| `done_today` | integer | Jobs successfully completed since midnight |
+
+---
+
+### Chat Memory
+
+Retrieve the AI chat assistant's stored session summaries and learned preferences.
+
+```
+GET /api/ai/chat/memory
+```
+
+**Authentication:** Session token (not agent API key)
+
+**Example Request:**
+
+```bash
+curl -s -H "X-Session-Token: your_session_token" \
+  "http://localhost:3000/api/ai/chat/memory"
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "summaries": [
+    {
+      "session_id": "sess-abc-123",
+      "summary": "User asked about emails from the marketing team regarding the Q1 campaign.",
+      "created_at": "2026-03-02T14:30:00Z"
+    }
+  ],
+  "preferences": [
+    "Prefers concise email summaries over detailed ones"
+  ]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `summaries` | array | Past chat session summaries with session ID, summary text, and timestamp |
+| `preferences` | array of strings | User preferences and patterns extracted from chat history |
+
+---
+
 ## Status Codes
 
 | Code | Meaning |

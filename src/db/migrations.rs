@@ -4,6 +4,7 @@ const MIGRATION_001: &str = include_str!("../../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../../migrations/002_chat.sql");
 const MIGRATION_003: &str = include_str!("../../migrations/003_agent.sql");
 const MIGRATION_004: &str = include_str!("../../migrations/004_ai_feedback.sql");
+const MIGRATION_005: &str = include_str!("../../migrations/005_job_queue.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -40,6 +41,11 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 4 {
         conn.execute_batch(MIGRATION_004)?;
         tracing::info!("Applied migration 004_ai_feedback");
+    }
+
+    if current_version < 5 {
+        conn.execute_batch(MIGRATION_005)?;
+        tracing::info!("Applied migration 005_job_queue");
     }
 
     Ok(())

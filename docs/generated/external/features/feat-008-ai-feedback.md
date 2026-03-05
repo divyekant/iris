@@ -65,6 +65,8 @@ Iris stores every correction you make in a feedback log. When the AI classifies 
 
 The feedback loop activates once a correction pattern occurs at least 2 times. The top 10 most frequent correction patterns are included in the AI's classification prompt.
 
+Additionally, every 10 corrections trigger a preference extraction job. This job analyzes your correction history, identifies recurring patterns, and stores them as structured preferences in your Memories instance. These preferences persist across sessions and are included in future classification prompts, so the AI's accuracy improves steadily over time -- even after a server restart.
+
 ## Viewing Feedback Statistics
 
 You can see a summary of all corrections you have made:

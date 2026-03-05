@@ -60,6 +60,14 @@ Any model available in your Ollama instance can be used. Smaller models (e.g., `
 - **Model quality varies.** Classification accuracy depends on the model you choose and the nature of your emails.
 - **Local processing only.** All classification happens on your machine. No email content is sent to external services.
 
+## Learning from Your Corrections
+
+Iris does not just accept your corrections -- it learns from them. When you correct a misclassification (see [AI Feedback](feat-008-ai-feedback.md)), the system extracts preference patterns from your feedback. These patterns are stored persistently and used to guide future classifications.
+
+Over time, this means classifications become more personalized to your workflow. For example, if you consistently recategorize newsletters from a certain sender as "Primary" instead of "Newsletters," the AI adapts and starts doing that automatically.
+
+The learning happens in the background. You do not need to configure anything -- just keep correcting misclassifications when you see them, and the system improves on its own.
+
 ## Improving Accuracy
 
 If you notice the AI misclassifying emails, you can correct it. See [AI Feedback](feat-008-ai-feedback.md) for details on how to submit corrections that improve future classifications.

@@ -29,13 +29,16 @@ Email overload costs knowledge workers an estimated 28% of their workweek. Exist
 
 1. **Instant triage**: Every email is classified and prioritized the moment it arrives — no manual sorting
 2. **Complete privacy**: AI processing happens on your machine using Ollama. Your email never leaves your hardware
-3. **Self-improving accuracy**: Correct a misclassification once, and Iris learns. The AI adapts to your communication patterns
-4. **Actionable extraction**: Key dates, amounts, names, and action items are surfaced automatically — no reading between the lines
-5. **Zero subscription cost**: No per-seat fees for AI features. Run your own models, pay nothing
+3. **Self-improving accuracy**: Correct a misclassification once, and Iris learns. The AI adapts to your communication patterns — and remembers your corrections permanently, getting more accurate with every interaction
+4. **Reliable processing**: Every email is classified, every time. A robust background processing system ensures nothing slips through the cracks — even during sync interruptions or heavy inboxes
+5. **Actionable extraction**: Key dates, amounts, names, and action items are surfaced automatically — no reading between the lines
+6. **Zero subscription cost**: No per-seat fees for AI features. Run your own models, pay nothing
 
 ## How It Works
 
 When a new email arrives, Iris sends it through a local AI pipeline powered by Ollama. In a single pass, the AI classifies the email by category and priority, detects the sender's tone, and pulls out important details. Results appear as priority badges and category labels in your inbox. If something looks off, one click corrects it — and Iris remembers.
+
+The system learns from every correction you make. Over time, classifications become personalized to the way you actually work. An email from your CEO that keeps getting tagged "updates"? Correct it to "primary" once, and Iris adjusts. A reliable background job system ensures that every email is processed — no messages skipped, no classifications lost, even under heavy load.
 
 ## Competitive Context
 
@@ -53,6 +56,8 @@ When a new email arrives, Iris sends it through a local AI pipeline powered by O
 - 4 AI processing modes (classification, summarization, chat, writing assist) in a single local pipeline
 - Single-prompt classification produces category, priority, sentiment, and entities in one inference call
 - Background processing on sync — no user wait time
+- Adaptive learning from user corrections improves accuracy over time
+- Reliable job processing with automatic retry ensures zero missed emails
 
 ## Suggested Messaging
 

@@ -41,6 +41,9 @@ Iris is a self-hosted email client with built-in AI intelligence. It connects to
 - **AI chat**: Ask questions about your email in natural language, get cited answers
 - **Writing assist**: AI-powered rewrite, formalize, casualize, shorten, and lengthen for compose
 - **Feedback loop**: Correct AI mistakes and the system learns from your input
+- **Adaptive classification**: AI learns from your corrections and personalizes categories and priorities over time
+- **Cross-session AI memory**: The chat assistant remembers past conversations across sessions — context persists, not just within one sitting
+- **Reliable background processing**: A job queue with automatic retry ensures every email is processed — no messages skipped, even during interruptions
 - **Semantic search**: Find emails by meaning using local vector search
 
 ### Agent Platform

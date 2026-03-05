@@ -13,6 +13,9 @@ pub struct Config {
     pub outlook_client_id: Option<String>,
     pub outlook_client_secret: Option<String>,
     pub public_url: String,
+    pub job_poll_interval_ms: u64,
+    pub job_max_concurrency: usize,
+    pub job_cleanup_days: i64,
 }
 
 impl fmt::Debug for Config {
@@ -28,6 +31,9 @@ impl fmt::Debug for Config {
             .field("outlook_client_id", &self.outlook_client_id)
             .field("outlook_client_secret", &"[REDACTED]")
             .field("public_url", &self.public_url)
+            .field("job_poll_interval_ms", &self.job_poll_interval_ms)
+            .field("job_max_concurrency", &self.job_max_concurrency)
+            .field("job_cleanup_days", &self.job_cleanup_days)
             .finish()
     }
 }
@@ -45,6 +51,9 @@ impl Config {
             outlook_client_id: env::var("OUTLOOK_CLIENT_ID").ok(),
             outlook_client_secret: env::var("OUTLOOK_CLIENT_SECRET").ok(),
             public_url: env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into()),
+            job_poll_interval_ms: env::var("JOB_POLL_INTERVAL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000),
+            job_max_concurrency: env::var("JOB_MAX_CONCURRENCY").ok().and_then(|v| v.parse().ok()).unwrap_or(4),
+            job_cleanup_days: env::var("JOB_CLEANUP_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(7),
         }
     }
 }

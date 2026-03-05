@@ -50,6 +50,7 @@ Respond with valid JSON only."#;
 /// Process a single email through the AI pipeline.
 /// Returns None if Ollama is unavailable or response can't be parsed.
 /// `feedback_context` is an optional suffix from user corrections to improve accuracy.
+/// `preferences_context` is an optional suffix from extracted user preferences.
 pub async fn process_email(
     client: &OllamaClient,
     model: &str,
@@ -57,6 +58,7 @@ pub async fn process_email(
     from: &str,
     body: &str,
     feedback_context: Option<&str>,
+    preferences_context: Option<&str>,
 ) -> Option<AiMetadata> {
     // Truncate body to avoid overwhelming the model (char-safe for multi-byte UTF-8)
     let body_truncated: String = body.chars().take(2000).collect();
@@ -65,10 +67,13 @@ pub async fn process_email(
         "From: {from}\nSubject: {subject}\n\n{}", body_truncated
     );
 
-    let system = match feedback_context {
-        Some(ctx) => format!("{}{}", SYSTEM_PROMPT, ctx),
-        None => SYSTEM_PROMPT.to_string(),
-    };
+    let mut system = SYSTEM_PROMPT.to_string();
+    if let Some(prefs) = preferences_context {
+        system.push_str(prefs);
+    }
+    if let Some(ctx) = feedback_context {
+        system.push_str(ctx);
+    }
 
     let response = client.generate(model, &prompt, Some(&system)).await?;
 

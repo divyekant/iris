@@ -12,6 +12,24 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-03-04
+
+### Added
+- Reliable background job queue with automatic retry for AI processing
+- Cross-session chat memory -- AI assistant remembers past conversations
+- User preference extraction from AI feedback corrections
+- Queue status API endpoint (GET /api/ai/queue-status)
+- Chat memory API endpoint (GET /api/ai/chat/memory)
+
+### Changed
+- Email sync now queues AI processing instead of fire-and-forget
+- AI classification uses learned user preferences for better accuracy
+- Chat prompt includes past session context and user preferences
+
+### Fixed
+- AI processing no longer silently fails when Ollama is temporarily unavailable
+- Memories storage retries on transient failures
+
 ## [0.1.0] - 2026-03-04
 
 ### Added

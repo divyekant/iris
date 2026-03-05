@@ -18,6 +18,10 @@ pub enum WsEvent {
     AiProcessed {
         message_id: String,
     },
+    JobCompleted {
+        message_id: Option<String>,
+        job_type: String,
+    },
 }
 
 #[derive(Clone)]

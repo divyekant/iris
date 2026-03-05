@@ -8,6 +8,7 @@ pub mod compose;
 pub mod config;
 pub mod health;
 pub mod messages;
+pub mod queue_status;
 pub mod search;
 pub mod session_auth;
 pub mod threads;

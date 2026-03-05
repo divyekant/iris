@@ -1,8 +1,8 @@
 # Hermes Documentation Index
 
-Generated: 2026-03-04 | Source: direct | Hermes v1.0.0
+Generated: 2026-03-04 (updated) | Source: direct | Hermes v1.0.0
 
-## Internal (25 docs)
+## Internal (26 docs)
 
 | ID | Type | Topic | Generated |
 |----|------|-------|-----------|
@@ -18,6 +18,7 @@ Generated: 2026-03-04 | Source: direct | Hermes v1.0.0
 | fh-010 | Feature Handoff | Agent API | 2026-03-04 |
 | fh-011 | Feature Handoff | Semantic Memory | 2026-03-04 |
 | fh-012 | Feature Handoff | Auth & Security | 2026-03-04 |
+| fh-013 | Feature Handoff | Job Queue | 2026-03-04 |
 | rn-v0.1.0 | Release Notes | v0.1.0 | 2026-03-04 |
 | uc-001 | Use Case | Add Email Account | 2026-03-04 |
 | uc-002 | Use Case | Read and Reply | 2026-03-04 |
@@ -32,7 +33,7 @@ Generated: 2026-03-04 | Source: direct | Hermes v1.0.0
 | ts-004 | Troubleshooting | Agent API | 2026-03-04 |
 | glossary | Glossary | All | 2026-03-04 |
 
-## External (17 docs)
+## External (19 docs)
 
 | ID | Type | Topic | Generated |
 |----|------|-------|-----------|
@@ -45,6 +46,8 @@ Generated: 2026-03-04 | Source: direct | Hermes v1.0.0
 | feat-006 | Feature Doc | Agent API | 2026-03-04 |
 | feat-007 | Feature Doc | Trust Indicators | 2026-03-04 |
 | feat-008 | Feature Doc | AI Feedback | 2026-03-04 |
+| feat-009 | Feature Doc | Reliable Processing | 2026-03-04 |
+| feat-010 | Feature Doc | Chat Memory | 2026-03-04 |
 | changelog | Changelog | v0.1.0 | 2026-03-04 |
 | api-reference | API Reference | Agent API | 2026-03-04 |
 | config-reference | Config Reference | All | 2026-03-04 |
@@ -54,7 +57,7 @@ Generated: 2026-03-04 | Source: direct | Hermes v1.0.0
 | tut-003 | Tutorial | Connecting an Agent | 2026-03-04 |
 | cookbook | Cookbook | All | 2026-03-04 |
 
-## Marketing (15 docs)
+## Marketing (16 docs)
 
 | ID | Type | Topic | Generated |
 |----|------|-------|-----------|
@@ -64,6 +67,7 @@ Generated: 2026-03-04 | Source: direct | Hermes v1.0.0
 | fb-004 | Feature Brief | Semantic Search | 2026-03-04 |
 | fb-005 | Feature Brief | AI Chat | 2026-03-04 |
 | fb-006 | Feature Brief | Universal Provider | 2026-03-04 |
+| fb-007 | Feature Brief | Intelligent Memory | 2026-03-04 |
 | ds-001 | Datasheet | Full Product | 2026-03-04 |
 | ra-v0.1.0 | Release Announcement | v0.1.0 | 2026-03-04 |
 | op-001 | One-Pager | Product Overview | 2026-03-04 |

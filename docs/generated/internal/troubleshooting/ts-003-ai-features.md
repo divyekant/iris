@@ -149,6 +149,56 @@ Test with: `POST /api/config/ai/test` to verify the model produces valid respons
 | Different exact patterns | Corrections are grouped by (field, original_value, corrected_value). If the original values differ (e.g., "Promotions" vs null), they are counted as separate patterns. |
 | Model ignoring feedback context | The feedback is appended as a system prompt suffix. Some models may not follow it well. Try a different model. |
 
+## Issue: Jobs stuck in "processing" status
+
+**Symptoms**: `GET /api/ai/queue-status` shows a non-zero `processing` count that does not decrease over time. Messages have `ai_status = 'pending'` or `memories_status = 'pending'` indefinitely.
+
+**Causes and resolutions**:
+
+| Cause | Resolution |
+|---|---|
+| Server was restarted while jobs were processing | Jobs claimed before shutdown remain in `processing` status. Run: `UPDATE processing_jobs SET status = 'pending', attempts = 0, next_retry_at = unixepoch() WHERE status = 'processing';` |
+| Worker not started | Check server logs for "Job worker started". If absent, there may be a startup error. |
+| Ollama hanging on a request | The Ollama generate call may be blocking. Check Ollama logs. Restart Ollama to unblock. |
+| Database lock contention | SQLite WAL mode should prevent this, but check for long-running transactions. |
+
+## Issue: Jobs permanently failed (retries exhausted)
+
+**Symptoms**: `GET /api/ai/queue-status` shows `failed > 0`. Messages have `ai_status = 'failed'` or `memories_status = 'failed'`.
+
+**Diagnostic steps**:
+
+1. Query failed jobs: `SELECT id, job_type, message_id, error, attempts, created_at FROM processing_jobs WHERE status = 'failed' ORDER BY created_at DESC LIMIT 20;`
+2. Check the `error` column for the failure reason.
+3. Common error messages:
+   - `"AI not enabled"` -- AI was disabled in config when the job ran. Enable AI and re-enqueue.
+   - `"Ollama summarization failed"` / `"AI pipeline returned no result"` -- Ollama returned no response. Check Ollama health.
+   - `"Memories upsert failed"` -- Memories server was unreachable. Check Memories health.
+   - `"No AI model configured"` -- `ai_model` config key is empty. Set a model in Settings.
+
+**To retry failed jobs**:
+```sql
+UPDATE processing_jobs SET status = 'pending', attempts = 0, next_retry_at = unixepoch() WHERE status = 'failed';
+```
+
+**To retry failed jobs for a specific type only**:
+```sql
+UPDATE processing_jobs SET status = 'pending', attempts = 0, next_retry_at = unixepoch() WHERE status = 'failed' AND job_type = 'ai_classify';
+```
+
+## Issue: Queue health check shows concerning numbers
+
+**Symptoms**: `GET /api/ai/queue-status` shows unexpected values.
+
+**Interpretation guide**:
+
+| Indicator | Normal | Concerning | Action |
+|---|---|---|---|
+| `pending` | 0-20 during sync, 0 at rest | Continuously growing | Worker may not be running, or Ollama/Memories too slow |
+| `processing` | 0-4 (up to `job_max_concurrency`) | > 4 for extended periods | Stuck jobs; see "Jobs stuck in processing" above |
+| `failed` | 0 | Any value > 0 | Investigate errors; check Ollama/Memories connectivity |
+| `done_today` | Grows during sync | 0 after a sync | Worker may not be processing jobs |
+
 ## Server Log Patterns
 
 | Log Message | Meaning |
@@ -158,3 +208,11 @@ Test with: `POST /api/config/ai/test` to verify the model produces valid respons
 | `Memories upsert failed` (WARN) | Could not store email in Memories |
 | `Memories search failed` (WARN) | Semantic search request failed |
 | `Failed to parse Memories search response` (WARN) | Memories returned unexpected format |
+| `Job worker started (poll=Xms, concurrency=Y)` (INFO) | Worker initialized successfully |
+| `Job completed` (DEBUG) | A job finished successfully (includes job_id and job_type) |
+| `Job failed` (WARN) | A job failed (includes job_id, job_type, and error) |
+| `Job worker DB error` (ERROR) | Worker could not acquire a database connection |
+| `Chat session summarized` (INFO) | A chat_summarize job completed |
+| `User preferences extracted and stored` (INFO) | A pref_extract job completed |
+| `Failed to enqueue chat_summarize` (WARN) | Could not insert chat_summarize job into queue |
+| `Failed to enqueue pref_extract` (WARN) | Could not insert pref_extract job into queue |

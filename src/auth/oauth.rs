@@ -326,22 +326,18 @@ pub async fn oauth_callback(
         };
         let db_clone = state.db.clone();
         let ws_clone = state.ws_hub.clone();
-        let ollama_clone = state.ollama.clone();
-        let memories_clone = state.memories.clone();
         let acct_id = account.id.clone();
 
         tokio::spawn(async move {
             let engine = crate::imap::sync::SyncEngine::new(
                 db_clone.clone(),
                 ws_clone.clone(),
-                ollama_clone.clone(),
-                memories_clone.clone(),
             );
             if let Err(e) = engine.initial_sync(&acct_id, &sync_creds).await {
                 tracing::error!(account_id = %acct_id, error = %e, "Initial sync failed");
             }
             // Start IDLE listener after initial sync completes
-            crate::imap::idle::spawn_idle_listener(acct_id, sync_creds, db_clone, ws_clone, ollama_clone, memories_clone);
+            crate::imap::idle::spawn_idle_listener(acct_id, sync_creds, db_clone, ws_clone);
         });
     }
 
