@@ -1,3 +1,26 @@
 @import "tailwindcss";
+@import "./tokens.css";
 
-@custom-variant dark (&:where(.dark, .dark *));
+/* Base styles using tokens */
+html {
+  font-family: var(--iris-font-family);
+  font-size: var(--iris-font-base-size);
+  background-color: var(--iris-color-bg);
+  color: var(--iris-color-text);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+/* Utility classes for tokens */
+@utility iris-bg { background-color: var(--iris-color-bg); }
+@utility iris-bg-elevated { background-color: var(--iris-color-bg-elevated); }
+@utility iris-bg-surface { background-color: var(--iris-color-bg-surface); }
+@utility iris-text { color: var(--iris-color-text); }
+@utility iris-text-muted { color: var(--iris-color-text-muted); }
+@utility iris-text-faint { color: var(--iris-color-text-faint); }
+@utility iris-text-primary { color: var(--iris-color-primary); }
+@utility iris-border { border-color: var(--iris-color-border); }
+@utility iris-border-subtle { border-color: var(--iris-color-border-subtle); }

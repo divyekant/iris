@@ -1,0 +1,60 @@
+/* Design tokens — generated from .kalos.yaml */
+/* Do not edit manually. Regenerate with: /kalos sync */
+
+:root {
+  /* Dark theme (default) */
+  --iris-color-primary: #d4af37;
+  --iris-color-secondary: #f5d060;
+  --iris-color-bg: #0a0a0a;
+  --iris-color-bg-elevated: #111111;
+  --iris-color-bg-surface: #1a1a1a;
+  --iris-color-text: #e5e5e5;
+  --iris-color-text-muted: #a3a3a3;
+  --iris-color-text-faint: #666666;
+  --iris-color-border: rgba(212, 175, 55, 0.15);
+  --iris-color-border-subtle: rgba(255, 255, 255, 0.06);
+  --iris-color-accent-border: rgba(212, 175, 55, 0.15);
+  --iris-color-overlay: rgba(0, 0, 0, 0.6);
+  --iris-color-unread: #d4af37;
+
+  /* Semantic */
+  --iris-color-success: #16A34A;
+  --iris-color-warning: #CA8A04;
+  --iris-color-error: #DC2626;
+  --iris-color-info: #2563EB;
+
+  /* Typography */
+  --iris-font-family: 'Inter', system-ui, sans-serif;
+  --iris-font-mono: 'SF Mono', 'Cascadia Mono', 'Menlo', monospace;
+  --iris-font-base-size: 16px;
+
+  /* Spacing */
+  --iris-spacing-base: 4px;
+
+  /* Radii */
+  --iris-radius-none: 0px;
+  --iris-radius-sm: 4px;
+  --iris-radius-md: 8px;
+  --iris-radius-lg: 12px;
+  --iris-radius-full: 9999px;
+
+  /* Transitions */
+  --iris-transition-fast: 120ms ease;
+  --iris-transition-normal: 200ms ease;
+}
+
+[data-brand="light"] {
+  --iris-color-primary: #b8960f;
+  --iris-color-secondary: #d4af37;
+  --iris-color-bg: #FAF9F6;
+  --iris-color-bg-elevated: #FFFEF9;
+  --iris-color-bg-surface: #F0EDE6;
+  --iris-color-text: #2C2418;
+  --iris-color-text-muted: #7A7060;
+  --iris-color-text-faint: #A69E90;
+  --iris-color-border: #E8E2D6;
+  --iris-color-border-subtle: rgba(0, 0, 0, 0.06);
+  --iris-color-accent-border: rgba(184, 150, 15, 0.18);
+  --iris-color-overlay: rgba(0, 0, 0, 0.3);
+  --iris-color-unread: #b8960f;
+}
