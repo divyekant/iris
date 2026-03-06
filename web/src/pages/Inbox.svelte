@@ -18,7 +18,6 @@
   let activeCategory = $state('');
   let selectedIds = $state(new Set<string>());
   let filterAccountId = $state('');
-  let viewMode = $state('traditional');
 
   const categories = [
     { id: '', label: 'All' },
@@ -56,21 +55,6 @@
     push(`/thread/${encodeURIComponent(threadId)}`);
   }
 
-  async function loadViewMode() {
-    try {
-      const config = await api.config.get();
-      viewMode = config.view_mode || 'traditional';
-    } catch { /* ignore */ }
-  }
-
-  async function toggleViewMode() {
-    const next = viewMode === 'traditional' ? 'messaging' : 'traditional';
-    viewMode = next;
-    try {
-      await api.config.setViewMode(next);
-    } catch { /* ignore */ }
-  }
-
   function onAccountSwitch(e: Event) {
     const detail = (e as CustomEvent).detail;
     filterAccountId = detail.accountId || '';
@@ -96,7 +80,6 @@
 
   $effect(() => {
     loadMessages();
-    loadViewMode();
     wsClient.connect();
     const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
     window.addEventListener('account-switch', onAccountSwitch);
@@ -119,16 +102,6 @@
       </span>
     {/if}
     <span class="flex-1"></span>
-    <button
-      class="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors"
-      style={viewMode === 'traditional'
-        ? 'border-color: var(--iris-color-border); color: var(--iris-color-text-muted);'
-        : 'border-color: var(--iris-color-primary); color: var(--iris-color-primary); background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);'}
-      onclick={toggleViewMode}
-      title="Toggle view mode"
-    >
-      {viewMode === 'traditional' ? 'Traditional' : 'Messaging'}
-    </button>
     {#if total > 0}
       <span class="text-xs" style="color: var(--iris-color-text-faint);">
         {total} message{total === 1 ? '' : 's'}
