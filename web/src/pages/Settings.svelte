@@ -34,10 +34,20 @@
   ];
 
   function applyTheme(theme: string) {
-    const isDark =
-      theme === 'dark' ||
-      (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    document.documentElement.classList.toggle('dark', isDark);
+    if (theme === 'system') {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (!prefersDark) {
+        document.documentElement.setAttribute('data-brand', 'light');
+      } else {
+        document.documentElement.removeAttribute('data-brand');
+      }
+    } else if (theme === 'light') {
+      document.documentElement.setAttribute('data-brand', 'light');
+    } else {
+      // dark is the default (:root), remove attribute
+      document.documentElement.removeAttribute('data-brand');
+    }
+    localStorage.setItem('iris-theme', theme);
   }
 
   async function setTheme(theme: Theme) {
@@ -156,19 +166,17 @@
 </script>
 
 <div class="max-w-2xl mx-auto py-12 px-6">
-  <h2 class="text-2xl font-bold mb-8">Settings</h2>
+  <h2 class="text-2xl font-bold mb-8" style="color: var(--iris-color-text);">Settings</h2>
 
   <div class="space-y-8">
     <!-- Theme section -->
     <section>
-      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">Appearance</h3>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Appearance</h3>
       <div class="flex gap-3">
         {#each themes as theme}
           <button
-            class="flex-1 flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-colors
-                   {currentTheme === theme.value
-                     ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'
-                     : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}"
+            class="settings-theme-card flex-1 flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-colors"
+            style="border-color: {currentTheme === theme.value ? 'var(--iris-color-primary)' : 'var(--iris-color-border-subtle)'}; background: {currentTheme === theme.value ? 'color-mix(in srgb, var(--iris-color-primary) 10%, transparent)' : 'transparent'}; color: {currentTheme === theme.value ? 'var(--iris-color-primary)' : 'var(--iris-color-text)'};"
             onclick={() => setTheme(theme.value)}
             disabled={loading}
           >
@@ -181,34 +189,37 @@
 
     <!-- AI section -->
     <section>
-      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">AI Processing</h3>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">AI Processing</h3>
       <div class="space-y-4">
         <!-- Enable/disable toggle -->
         <div class="flex items-center justify-between">
           <div>
-            <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Enable AI classification</p>
-            <p class="text-xs text-gray-400 dark:text-gray-500">Classify emails on ingest using local Ollama</p>
+            <p class="text-sm font-medium" style="color: var(--iris-color-text);">Enable AI classification</p>
+            <p class="text-xs" style="color: var(--iris-color-text-faint);">Classify emails on ingest using local Ollama</p>
           </div>
           <button
-            class="relative w-11 h-6 rounded-full transition-colors {aiEnabled ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}"
+            class="relative w-11 h-6 rounded-full transition-colors"
+            style="background: {aiEnabled ? 'var(--iris-color-primary)' : 'var(--iris-color-border-subtle)'};"
             onclick={toggleAi}
           >
-            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform {aiEnabled ? 'translate-x-5' : ''}"></span>
+            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full shadow transition-transform {aiEnabled ? 'translate-x-5' : ''}" style="background: var(--iris-color-text);"></span>
           </button>
         </div>
 
         <!-- Ollama URL -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Ollama URL</label>
+          <label class="block text-sm font-medium mb-1" style="color: var(--iris-color-text);">Ollama URL</label>
           <div class="flex gap-2">
             <input
               type="text"
               bind:value={aiOllamaUrl}
               placeholder="http://localhost:11434"
-              class="flex-1 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+              style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
             />
             <button
-              class="px-4 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
+              class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
               onclick={testAiConnection}
               disabled={aiTesting}
             >
@@ -216,8 +227,8 @@
             </button>
           </div>
           <div class="mt-1 flex items-center gap-1.5">
-            <div class="w-2 h-2 rounded-full {aiConnected ? 'bg-green-500' : 'bg-red-400'}"></div>
-            <span class="text-xs text-gray-400 dark:text-gray-500">
+            <div class="w-2 h-2 rounded-full" style="background: {aiConnected ? 'var(--iris-color-success)' : 'var(--iris-color-error)'};"></div>
+            <span class="text-xs" style="color: var(--iris-color-text-faint);">
               {aiConnected ? 'Connected' : 'Not connected'}
             </span>
           </div>
@@ -225,11 +236,12 @@
 
         <!-- Model picker -->
         <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Model</label>
+          <label class="block text-sm font-medium mb-1" style="color: var(--iris-color-text);">Model</label>
           {#if aiModels.length > 0}
             <select
               bind:value={aiModel}
-              class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+              style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
               onchange={saveAiConfig}
             >
               <option value="">Select a model</option>
@@ -242,14 +254,16 @@
               type="text"
               bind:value={aiModel}
               placeholder="e.g. llama3.2:3b"
-              class="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+              style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
             />
           {/if}
         </div>
 
         <!-- Save button -->
         <button
-          class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-500 text-white hover:bg-blue-600 transition-colors disabled:opacity-50"
+          class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
           onclick={saveAiConfig}
           disabled={aiSaving}
         >
@@ -257,14 +271,14 @@
         </button>
 
         <!-- Memories (Semantic Search) status -->
-        <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
-          <p class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Semantic Search (Memories)</p>
-          <p class="text-xs text-gray-400 dark:text-gray-500 mb-2">Vector-based search for meaning, not just keywords</p>
+        <div class="pt-4 border-t" style="border-color: var(--iris-color-border);">
+          <p class="text-sm font-medium mb-1" style="color: var(--iris-color-text);">Semantic Search (Memories)</p>
+          <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">Vector-based search for meaning, not just keywords</p>
           <div class="flex items-center gap-2">
-            <code class="text-xs bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded">{memoriesUrl}</code>
+            <code class="text-xs px-2 py-1 rounded" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted); font-family: var(--iris-font-mono);">{memoriesUrl}</code>
             <div class="flex items-center gap-1.5">
-              <div class="w-2 h-2 rounded-full {memoriesConnected ? 'bg-green-500' : 'bg-red-400'}"></div>
-              <span class="text-xs text-gray-400 dark:text-gray-500">
+              <div class="w-2 h-2 rounded-full" style="background: {memoriesConnected ? 'var(--iris-color-success)' : 'var(--iris-color-error)'};"></div>
+              <span class="text-xs" style="color: var(--iris-color-text-faint);">
                 {memoriesConnected ? 'Connected' : 'Not connected'}
               </span>
             </div>
@@ -275,19 +289,21 @@
 
     <!-- API Keys section -->
     <section>
-      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">API Keys</h3>
-      <p class="text-xs text-gray-400 dark:text-gray-500 mb-4">Create API keys for external agents to access your inbox.</p>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">API Keys</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Create API keys for external agents to access your inbox.</p>
 
       <div class="flex gap-2 mb-4">
         <input
           type="text"
           bind:value={newKeyName}
           placeholder="Key name (e.g., Claude agent)"
-          class="flex-1 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
         />
         <select
           bind:value={newKeyPermission}
-          class="px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
         >
           <option value="read_only">Read Only</option>
           <option value="draft_only">Draft Only</option>
@@ -295,7 +311,8 @@
           <option value="autonomous">Autonomous</option>
         </select>
         <button
-          class="px-4 py-2 text-sm font-medium rounded-lg bg-blue-500 text-white hover:bg-blue-600 transition-colors disabled:opacity-50"
+          class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
           onclick={createApiKey}
           disabled={keyCreating || !newKeyName.trim()}
         >
@@ -304,41 +321,42 @@
       </div>
 
       {#if createdKey}
-        <div class="mb-4 p-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
-          <p class="text-sm font-medium text-green-700 dark:text-green-400 mb-1">API key created! Copy it now — it won't be shown again.</p>
-          <code class="block p-2 bg-white dark:bg-gray-800 rounded text-xs font-mono select-all break-all">{createdKey}</code>
+        <div class="mb-4 p-3 rounded-lg border" style="background: color-mix(in srgb, var(--iris-color-success) 10%, transparent); border-color: color-mix(in srgb, var(--iris-color-success) 30%, transparent);">
+          <p class="text-sm font-medium mb-1" style="color: var(--iris-color-success);">API key created! Copy it now — it won't be shown again.</p>
+          <code class="block p-2 rounded text-xs select-all break-all" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text); font-family: var(--iris-font-mono);">{createdKey}</code>
         </div>
       {/if}
 
       {#if apiKeys.length > 0}
-        <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+        <div class="border rounded-lg overflow-hidden" style="border-color: var(--iris-color-border);">
           <table class="w-full text-sm">
-            <thead class="bg-gray-50 dark:bg-gray-800/50">
+            <thead style="background: var(--iris-color-bg-surface);">
               <tr>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Name</th>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Permission</th>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Last Used</th>
-                <th class="text-right px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400"></th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Name</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Permission</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Last Used</th>
+                <th class="text-right px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);"></th>
               </tr>
             </thead>
             <tbody>
               {#each apiKeys as key}
-                <tr class="border-t border-gray-100 dark:border-gray-800">
-                  <td class="px-3 py-2">
+                <tr class="border-t" style="border-color: var(--iris-color-border-subtle);">
+                  <td class="px-3 py-2" style="color: var(--iris-color-text);">
                     <span class="font-medium">{key.name}</span>
-                    <span class="text-xs text-gray-400 ml-1">{key.key_prefix}...</span>
+                    <span class="text-xs ml-1" style="color: var(--iris-color-text-faint);">{key.key_prefix}...</span>
                   </td>
                   <td class="px-3 py-2">
-                    <span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
+                    <span class="px-2 py-0.5 text-xs rounded-full" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted);">
                       {key.permission.replace(/_/g, ' ')}
                     </span>
                   </td>
-                  <td class="px-3 py-2 text-xs text-gray-400">
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text-faint);">
                     {key.last_used_at ? formatTimestamp(key.last_used_at) : 'Never'}
                   </td>
                   <td class="px-3 py-2 text-right">
                     <button
-                      class="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400"
+                      class="settings-revoke-btn text-xs"
+                      style="color: var(--iris-color-error);"
                       onclick={() => revokeApiKey(key.id)}
                     >Revoke</button>
                   </td>
@@ -348,42 +366,44 @@
           </table>
         </div>
       {:else}
-        <p class="text-sm text-gray-400 dark:text-gray-500">No API keys created yet.</p>
+        <p class="text-sm" style="color: var(--iris-color-text-faint);">No API keys created yet.</p>
       {/if}
     </section>
 
     <!-- Audit Log section -->
     <section>
-      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">Audit Log</h3>
-      <p class="text-xs text-gray-400 dark:text-gray-500 mb-4">Recent agent activity.</p>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Audit Log</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Recent agent activity.</p>
 
       {#if auditEntries.length > 0}
-        <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+        <div class="border rounded-lg overflow-hidden" style="border-color: var(--iris-color-border);">
           <table class="w-full text-sm">
-            <thead class="bg-gray-50 dark:bg-gray-800/50">
+            <thead style="background: var(--iris-color-bg-surface);">
               <tr>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Time</th>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Agent</th>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Action</th>
-                <th class="text-left px-3 py-2 text-xs font-medium text-gray-500 dark:text-gray-400">Status</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Time</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Agent</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Action</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Status</th>
               </tr>
             </thead>
             <tbody>
               {#each auditEntries as entry}
-                <tr class="border-t border-gray-100 dark:border-gray-800">
-                  <td class="px-3 py-2 text-xs text-gray-400">{formatTimestamp(entry.created_at)}</td>
-                  <td class="px-3 py-2 text-xs">{entry.key_name || entry.api_key_id?.slice(0, 8) || '—'}</td>
-                  <td class="px-3 py-2 text-xs">
+                <tr class="border-t" style="border-color: var(--iris-color-border-subtle);">
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text-faint);">{formatTimestamp(entry.created_at)}</td>
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text);">{entry.key_name || entry.api_key_id?.slice(0, 8) || '—'}</td>
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text);">
                     {entry.action}
                     {#if entry.resource_type}
-                      <span class="text-gray-400"> on {entry.resource_type}</span>
+                      <span style="color: var(--iris-color-text-faint);"> on {entry.resource_type}</span>
                     {/if}
                   </td>
                   <td class="px-3 py-2 text-xs">
-                    <span class="px-1.5 py-0.5 rounded text-[10px] font-medium
-                      {entry.status === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                       : entry.status === 'denied' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                       : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'}">
+                    <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                      style="background: {entry.status === 'success' ? 'color-mix(in srgb, var(--iris-color-success) 15%, transparent)'
+                       : entry.status === 'denied' ? 'color-mix(in srgb, var(--iris-color-error) 15%, transparent)'
+                       : 'var(--iris-color-bg-surface)'}; color: {entry.status === 'success' ? 'var(--iris-color-success)'
+                       : entry.status === 'denied' ? 'var(--iris-color-error)'
+                       : 'var(--iris-color-text-muted)'};">
                       {entry.status}
                     </span>
                   </td>
@@ -393,14 +413,36 @@
           </table>
         </div>
       {:else}
-        <p class="text-sm text-gray-400 dark:text-gray-500">No agent activity yet.</p>
+        <p class="text-sm" style="color: var(--iris-color-text-faint);">No agent activity yet.</p>
       {/if}
     </section>
 
     <!-- Accounts section -->
     <section>
-      <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">Email Accounts</h3>
-      <p class="text-sm text-gray-400 dark:text-gray-500">Manage connected accounts in a future version.</p>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Email Accounts</h3>
+      <p class="text-sm" style="color: var(--iris-color-text-faint);">Manage connected accounts in a future version.</p>
     </section>
   </div>
 </div>
+
+<style>
+  .settings-theme-card:hover {
+    border-color: var(--iris-color-primary) !important;
+  }
+
+  .settings-btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+
+  .settings-btn-secondary:hover:not(:disabled) {
+    background: var(--iris-color-bg-surface);
+  }
+
+  .settings-revoke-btn:hover {
+    filter: brightness(1.3);
+  }
+
+  .settings-input::placeholder {
+    color: var(--iris-color-text-faint);
+  }
+</style>
