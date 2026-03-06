@@ -80,8 +80,17 @@
     onclick={() => push('/')}
   >Iris</span>
 
-  <!-- Account Switcher -->
-  {#if accounts.length > 0}
+  <!-- Account Switcher / Add Account -->
+  {#if accounts.length === 0}
+    <button
+      class="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md"
+      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+      onclick={() => push('/setup')}
+    >
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14M5 12h14"/></svg>
+      Add Account
+    </button>
+  {:else}
     <div class="relative">
       <button
         class="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md"
@@ -147,7 +156,7 @@
     </div>
   {/if}
 
-  <!-- Nav Items -->
+  <!-- Nav Items (only show when accounts exist) -->
   <div class="flex items-center gap-0.5">
     {#each navItems as item}
       <button
