@@ -218,19 +218,21 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div
-  class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30"
+  class="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+  style="background: var(--iris-color-overlay);"
   role="dialog"
   aria-modal="true"
   onkeydown={handleKeydown}
 >
-  <div class="bg-white dark:bg-gray-900 w-full sm:max-w-2xl sm:rounded-xl shadow-2xl flex flex-col max-h-[90vh]">
+  <div class="w-full sm:max-w-2xl sm:rounded-xl shadow-2xl flex flex-col max-h-[90vh]" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
     <!-- Header -->
-    <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-      <h3 class="font-semibold text-sm">
+    <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color: var(--iris-color-border);">
+      <h3 class="font-semibold text-sm" style="color: var(--iris-color-text);">
         {context.mode === 'new' ? 'New Message' : context.mode === 'reply' ? 'Reply' : context.mode === 'reply-all' ? 'Reply All' : 'Forward'}
       </h3>
       <button
-        class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+        class="p-1"
+        style="color: var(--iris-color-text-faint);"
         onclick={onclose}
         title="Close"
       >
@@ -242,18 +244,20 @@
     <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2">
       <!-- To -->
       <div class="flex items-center gap-2">
-        <label class="text-xs text-gray-500 w-8" for="compose-to">To</label>
+        <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-to">To</label>
         <input
           id="compose-to"
           type="text"
           bind:value={to}
           oninput={scheduleAutoSave}
-          class="flex-1 text-sm bg-transparent border-b border-gray-200 dark:border-gray-700 focus:border-blue-500 outline-none py-1"
+          class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+          style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
           placeholder="recipient@example.com"
         />
         {#if !showCcBcc}
           <button
-            class="text-xs text-blue-500 hover:text-blue-600"
+            class="text-xs"
+            style="color: var(--iris-color-primary);"
             onclick={() => (showCcBcc = true)}
           >
             Cc/Bcc
@@ -264,38 +268,41 @@
       <!-- Cc -->
       {#if showCcBcc}
         <div class="flex items-center gap-2">
-          <label class="text-xs text-gray-500 w-8" for="compose-cc">Cc</label>
+          <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-cc">Cc</label>
           <input
             id="compose-cc"
             type="text"
             bind:value={cc}
             oninput={scheduleAutoSave}
-            class="flex-1 text-sm bg-transparent border-b border-gray-200 dark:border-gray-700 focus:border-blue-500 outline-none py-1"
+            class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+            style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
           />
         </div>
 
         <!-- Bcc -->
         <div class="flex items-center gap-2">
-          <label class="text-xs text-gray-500 w-8" for="compose-bcc">Bcc</label>
+          <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-bcc">Bcc</label>
           <input
             id="compose-bcc"
             type="text"
             bind:value={bcc}
             oninput={scheduleAutoSave}
-            class="flex-1 text-sm bg-transparent border-b border-gray-200 dark:border-gray-700 focus:border-blue-500 outline-none py-1"
+            class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+            style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
           />
         </div>
       {/if}
 
       <!-- Subject -->
       <div class="flex items-center gap-2">
-        <label class="text-xs text-gray-500 w-8" for="compose-subject">Subj</label>
+        <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-subject">Subj</label>
         <input
           id="compose-subject"
           type="text"
           bind:value={subject}
           oninput={scheduleAutoSave}
-          class="flex-1 text-sm bg-transparent border-b border-gray-200 dark:border-gray-700 focus:border-blue-500 outline-none py-1"
+          class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+          style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
           placeholder="Subject"
         />
       </div>
@@ -305,19 +312,21 @@
         bind:value={body}
         oninput={scheduleAutoSave}
         class="w-full min-h-[200px] text-sm bg-transparent outline-none resize-y mt-2 leading-relaxed"
+        style="color: var(--iris-color-text);"
         placeholder="Write your message..."
       ></textarea>
     </div>
 
     <!-- Footer -->
-    <div class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center gap-2">
+    <div class="px-4 py-3 border-t flex items-center gap-2" style="border-color: var(--iris-color-border);">
       {#if error}
-        <p class="text-xs text-red-500 flex-1">{error}</p>
+        <p class="text-xs flex-1" style="color: var(--iris-color-error);">{error}</p>
       {:else}
         <span class="flex-1"></span>
       {/if}
       <button
-        class="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+        class="px-3 py-1.5 text-sm"
+        style="color: var(--iris-color-text-muted);"
         onclick={handleSaveDraft}
         disabled={sending}
       >
@@ -326,7 +335,8 @@
       <!-- AI Assist dropdown -->
       <div class="relative">
         <button
-          class="px-3 py-1.5 text-sm text-gray-500 hover:text-blue-500 transition-colors disabled:opacity-50"
+          class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50"
+          style="color: var(--iris-color-text-muted);"
           onclick={() => (showAiMenu = !showAiMenu)}
           disabled={aiAssisting || sending || !body.trim()}
           title="AI Assist"
@@ -334,10 +344,11 @@
           {aiAssisting ? 'Thinking...' : 'AI'}
         </button>
         {#if showAiMenu}
-          <div class="absolute bottom-full left-0 mb-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[160px] z-10">
+          <div class="absolute bottom-full left-0 mb-1 rounded-lg shadow-lg py-1 min-w-[160px] z-10" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
             {#each aiActions as { action, label }}
               <button
-                class="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300"
+                class="w-full text-left px-3 py-1.5 text-sm compose-dropdown-item"
+                style="color: var(--iris-color-text-muted);"
                 onclick={() => handleAiAssist(action)}
               >{label}</button>
             {/each}
@@ -345,15 +356,22 @@
         {/if}
       </div>
       <button
-        class="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 transition-colors"
+        class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors"
+        style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
         onclick={handleSend}
         disabled={sending}
       >
         {sending ? 'Sending...' : 'Send'}
       </button>
-      <span class="text-xs text-gray-400" title="Cmd/Ctrl + Enter to send">
+      <span class="text-xs" style="color: var(--iris-color-text-faint);" title="Cmd/Ctrl + Enter to send">
         {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+&#x23CE;
       </span>
     </div>
   </div>
 </div>
+
+<style>
+  .compose-dropdown-item:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent);
+  }
+</style>
