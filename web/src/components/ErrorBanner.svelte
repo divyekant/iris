@@ -16,8 +16,8 @@
   <p class="text-[13px] flex-1" style="color: var(--iris-color-text);">{message}</p>
   {#if onaction}
     <button
-      class="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white"
-      style="background: var(--iris-color-error);"
+      class="px-3.5 py-1.5 rounded-lg text-xs font-semibold"
+      style="background: var(--iris-color-error); color: #fff;"
       onclick={onaction}
     >{actionLabel}</button>
   {/if}
