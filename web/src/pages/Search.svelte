@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import { push } from 'svelte-spa-router';
+  import EmptyState from '../components/EmptyState.svelte';
 
   let searchQuery = $state('');
   let results = $state<any[]>([]);
@@ -140,10 +141,7 @@
         <div class="w-8 h-8 border-4 rounded-full animate-spin" style="border-color: color-mix(in srgb, var(--iris-color-primary) 20%, transparent); border-top-color: var(--iris-color-primary);"></div>
       </div>
     {:else if searched && results.length === 0}
-      <div class="text-center py-16">
-        <p class="text-lg mb-2" style="color: var(--iris-color-text);">No results found</p>
-        <p class="text-sm" style="color: var(--iris-color-text-muted);">Try different keywords or adjust your filters.</p>
-      </div>
+      <EmptyState icon="search" title="No results found" subtitle="Try different keywords or remove some filters." />
     {:else if results.length > 0}
       <div class="px-4 py-2 text-xs" style="color: var(--iris-color-text-faint);">
         {total} result{total === 1 ? '' : 's'}

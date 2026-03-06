@@ -5,6 +5,8 @@
   import MessageList from '../components/inbox/MessageList.svelte';
   import SyncStatus from '../components/inbox/SyncStatus.svelte';
   import ComposeModal from '../components/compose/ComposeModal.svelte';
+  import EmptyState from '../components/EmptyState.svelte';
+  import SkeletonRow from '../components/SkeletonRow.svelte';
 
   let messages = $state<any[]>([]);
   let unreadCount = $state(0);
@@ -168,9 +170,10 @@
 
   <div class="flex-1 overflow-auto">
     {#if loading}
-      <div class="flex items-center justify-center py-16">
-        <div class="w-8 h-8 border-4 rounded-full animate-spin" style="border-color: color-mix(in srgb, var(--iris-color-primary) 30%, transparent); border-top-color: var(--iris-color-primary);"></div>
-      </div>
+      <SkeletonRow widths={[120, 280, 200]} />
+      <SkeletonRow widths={[160, 340, 180]} />
+      <SkeletonRow widths={[100, 300, 220]} />
+      <SkeletonRow widths={[140, 260, 240]} />
     {:else if error}
       <div class="text-center py-16">
         <p class="mb-4" style="color: var(--iris-color-error);">{error}</p>
@@ -182,6 +185,8 @@
           Retry
         </button>
       </div>
+    {:else if messages.length === 0}
+      <EmptyState title="Inbox zero" subtitle="You've read everything. Time to go outside." />
     {:else}
       <MessageList {messages} onclick={handleMessageClick} bind:selectedIds />
     {/if}
