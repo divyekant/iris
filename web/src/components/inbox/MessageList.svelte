@@ -19,12 +19,12 @@
 </script>
 
 {#if messages.length === 0}
-  <div class="text-center py-16 text-gray-400 dark:text-gray-500">
+  <div class="text-center py-16" style="color: var(--iris-color-text-faint);">
     <p class="text-lg mb-2">No messages yet</p>
     <p class="text-sm">Add an email account to get started.</p>
   </div>
 {:else}
-  <div class="divide-y divide-gray-100 dark:divide-gray-800">
+  <div>
     {#each messages as message (message.id)}
       <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} onselect={handleSelect} />
     {/each}

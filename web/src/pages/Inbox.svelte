@@ -48,31 +48,10 @@
     }
   }
 
-  async function ensureAccountId() {
-    if (filterAccountId) {
-      activeAccountId = filterAccountId;
-      return;
-    }
-    if (activeAccountId) return;
-    try {
-      const accounts = await api.accounts.list();
-      if (accounts.length > 0) activeAccountId = accounts[0].id;
-    } catch { /* ignore */ }
-  }
-
   function handleMessageClick(id: string) {
     const msg = messages.find((m) => m.id === id);
     const threadId = msg?.thread_id || id;
     push(`/thread/${encodeURIComponent(threadId)}`);
-  }
-
-  async function openCompose() {
-    await ensureAccountId();
-    if (!activeAccountId) {
-      push('/setup');
-      return;
-    }
-    showCompose = true;
   }
 
   async function loadViewMode() {
@@ -96,6 +75,12 @@
     loadMessages();
   }
 
+  function onOpenCompose(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    if (detail.accountId) activeAccountId = detail.accountId;
+    showCompose = true;
+  }
+
   async function handleBulkAction(action: string) {
     if (selectedIds.size === 0) return;
     try {
@@ -113,54 +98,50 @@
     wsClient.connect();
     const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
     window.addEventListener('account-switch', onAccountSwitch);
+    window.addEventListener('open-compose', onOpenCompose);
     return () => {
       offNewEmail();
       window.removeEventListener('account-switch', onAccountSwitch);
+      window.removeEventListener('open-compose', onOpenCompose);
     };
   });
 </script>
 
 <div class="h-full flex flex-col">
   <!-- Inbox header bar -->
-  <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
+  <div class="px-4 py-3 border-b flex items-center gap-3" style="border-color: var(--iris-color-border-subtle);">
     <h2 class="text-lg font-semibold">Inbox</h2>
     {#if unreadCount > 0}
-      <span class="px-2 py-0.5 bg-blue-600 text-white text-xs font-medium rounded-full">
+      <span class="px-2 py-0.5 text-xs font-medium rounded-full" style="background: var(--iris-color-primary); color: var(--iris-color-bg);">
         {unreadCount}
       </span>
     {/if}
     <span class="flex-1"></span>
     <button
-      class="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors
-             {viewMode === 'traditional'
-               ? 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-               : 'border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30'}"
+      class="px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors"
+      style={viewMode === 'traditional'
+        ? 'border-color: var(--iris-color-border); color: var(--iris-color-text-muted);'
+        : 'border-color: var(--iris-color-primary); color: var(--iris-color-primary); background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);'}
       onclick={toggleViewMode}
       title="Toggle view mode"
     >
       {viewMode === 'traditional' ? 'Traditional' : 'Messaging'}
     </button>
-    <button
-      class="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
-      onclick={openCompose}
-    >
-      Compose
-    </button>
     {#if total > 0}
-      <span class="text-xs text-gray-400 dark:text-gray-500">
+      <span class="text-xs" style="color: var(--iris-color-text-faint);">
         {total} message{total === 1 ? '' : 's'}
       </span>
     {/if}
   </div>
 
   <!-- Category tabs -->
-  <div class="px-4 border-b border-gray-200 dark:border-gray-700 flex gap-1 overflow-x-auto">
+  <div class="px-4 border-b flex gap-1 overflow-x-auto" style="border-color: var(--iris-color-border-subtle);">
     {#each categories as cat}
       <button
-        class="px-3 py-2 text-sm whitespace-nowrap border-b-2 transition-colors
-               {activeCategory === cat.id
-                 ? 'border-blue-600 text-blue-600 font-medium'
-                 : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
+        class="px-3 py-2 text-sm whitespace-nowrap border-b-2 transition-colors {activeCategory === cat.id ? 'font-medium' : ''}"
+        style={activeCategory === cat.id
+          ? 'border-color: var(--iris-color-primary); color: var(--iris-color-primary);'
+          : 'border-color: transparent; color: var(--iris-color-text-muted);'}
         onclick={() => { activeCategory = cat.id; loadMessages(); }}
       >
         {cat.label}
@@ -171,30 +152,31 @@
   <SyncStatus />
 
   {#if selectedIds.size > 0}
-    <div class="px-4 py-2 bg-blue-50 dark:bg-blue-900/30 border-b border-blue-200 dark:border-blue-800 flex items-center gap-2">
-      <span class="text-sm font-medium text-blue-700 dark:text-blue-300">
+    <div class="px-4 py-2 border-b flex items-center gap-2" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); border-color: var(--iris-color-border);">
+      <span class="text-sm font-medium" style="color: var(--iris-color-primary);">
         {selectedIds.size} selected
       </span>
       <span class="flex-1"></span>
-      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('archive')}>Archive</button>
-      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('mark_read')}>Mark Read</button>
-      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('mark_unread')}>Mark Unread</button>
-      <button class="px-3 py-1 text-xs font-medium bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors" onclick={() => handleBulkAction('star')}>Star</button>
-      <button class="px-3 py-1 text-xs font-medium text-red-600 dark:text-red-400 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onclick={() => handleBulkAction('delete')}>Delete</button>
-      <button class="px-3 py-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300" onclick={() => (selectedIds = new Set())}>Clear</button>
+      <button class="px-3 py-1 text-xs font-medium rounded transition-colors" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); color: var(--iris-color-text-muted);" onclick={() => handleBulkAction('archive')}>Archive</button>
+      <button class="px-3 py-1 text-xs font-medium rounded transition-colors" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); color: var(--iris-color-text-muted);" onclick={() => handleBulkAction('mark_read')}>Mark Read</button>
+      <button class="px-3 py-1 text-xs font-medium rounded transition-colors" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); color: var(--iris-color-text-muted);" onclick={() => handleBulkAction('mark_unread')}>Mark Unread</button>
+      <button class="px-3 py-1 text-xs font-medium rounded transition-colors" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); color: var(--iris-color-text-muted);" onclick={() => handleBulkAction('star')}>Star</button>
+      <button class="px-3 py-1 text-xs font-medium rounded transition-colors" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); color: var(--iris-color-error);" onclick={() => handleBulkAction('delete')}>Delete</button>
+      <button class="px-3 py-1 text-xs" style="color: var(--iris-color-text-faint);" onclick={() => (selectedIds = new Set())}>Clear</button>
     </div>
   {/if}
 
   <div class="flex-1 overflow-auto">
     {#if loading}
       <div class="flex items-center justify-center py-16">
-        <div class="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+        <div class="w-8 h-8 border-4 rounded-full animate-spin" style="border-color: color-mix(in srgb, var(--iris-color-primary) 30%, transparent); border-top-color: var(--iris-color-primary);"></div>
       </div>
     {:else if error}
       <div class="text-center py-16">
-        <p class="text-red-500 dark:text-red-400 mb-4">{error}</p>
+        <p class="mb-4" style="color: var(--iris-color-error);">{error}</p>
         <button
-          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+          class="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
           onclick={loadMessages}
         >
           Retry

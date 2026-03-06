@@ -36,15 +36,15 @@
     return msgDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
   });
 
-  const priorityColors: Record<string, string> = {
-    urgent: 'bg-red-500',
-    high: 'bg-orange-400',
-    normal: 'bg-green-400',
-    low: 'bg-gray-300 dark:bg-gray-600',
+  const priorityStyles: Record<string, string> = {
+    urgent: 'background: var(--iris-color-error);',
+    high: 'background: var(--iris-color-warning);',
+    normal: 'background: var(--iris-color-success);',
+    low: 'background: var(--iris-color-text-faint);',
   };
 
-  let priorityColor = $derived(
-    message.ai_priority_label ? priorityColors[message.ai_priority_label] || '' : ''
+  let priorityStyle = $derived(
+    message.ai_priority_label ? priorityStyles[message.ai_priority_label] || '' : ''
   );
 
   function handleCheckbox(e: Event) {
@@ -55,8 +55,8 @@
 </script>
 
 <button
-  class="w-full text-left px-4 py-3 border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors flex items-start gap-3
-         {selected ? 'bg-blue-50 dark:bg-blue-900/20' : ''}"
+  class="w-full text-left px-4 py-3 border-b transition-colors flex items-start gap-3"
+  style="border-color: var(--iris-color-border-subtle); {selected ? 'background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);' : ''}"
   onclick={() => onclick(message.id)}
 >
   <!-- Checkbox -->
@@ -65,28 +65,29 @@
       type="checkbox"
       checked={selected}
       onclick={handleCheckbox}
-      class="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+      class="w-4 h-4 rounded"
+      style="accent-color: var(--iris-color-primary);"
     />
   </div>
 
   <!-- Unread indicator + priority badge -->
   <div class="pt-1.5 w-3 flex-shrink-0">
     {#if !message.is_read}
-      <div class="w-2.5 h-2.5 rounded-full bg-blue-500"></div>
-    {:else if priorityColor}
-      <div class="w-2 h-2 rounded-full {priorityColor}" title={message.ai_priority_label}></div>
+      <div class="w-2.5 h-2.5 rounded-full" style="background: var(--iris-color-unread);"></div>
+    {:else if priorityStyle}
+      <div class="w-2 h-2 rounded-full" style={priorityStyle} title={message.ai_priority_label}></div>
     {/if}
   </div>
 
   <!-- Content -->
   <div class="flex-1 min-w-0">
     <div class="flex items-baseline gap-2">
-      <span class="text-sm truncate {message.is_read ? 'text-gray-700 dark:text-gray-300' : 'font-semibold text-gray-900 dark:text-gray-100'}">
+      <span class="text-sm truncate {message.is_read ? '' : 'font-semibold'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
         {senderDisplay}
       </span>
-      <span class="flex-shrink-0 text-xs text-gray-400 dark:text-gray-500 ml-auto flex items-center gap-1.5">
+      <span class="flex-shrink-0 text-xs ml-auto flex items-center gap-1.5" style="color: var(--iris-color-text-faint);">
         {#if message.ai_category}
-          <span class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
             {message.ai_category}
           </span>
         {/if}
@@ -96,11 +97,11 @@
         {formattedDate}
       </span>
     </div>
-    <div class="text-sm truncate {message.is_read ? 'text-gray-600 dark:text-gray-400' : 'font-medium text-gray-800 dark:text-gray-200'}">
+    <div class="text-sm truncate {message.is_read ? '' : 'font-medium'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
       {subjectDisplay}
     </div>
     {#if message.snippet}
-      <div class="text-xs text-gray-400 dark:text-gray-500 truncate mt-0.5">
+      <div class="text-xs truncate mt-0.5" style="color: var(--iris-color-text-faint);">
         {message.snippet}
       </div>
     {/if}
