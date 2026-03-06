@@ -82,18 +82,25 @@
 </script>
 
 {#if open}
-  <div class="w-80 border-l border-gray-200 dark:border-gray-700 flex flex-col bg-white dark:bg-gray-900 h-full">
+  <div class="w-80 border-l flex flex-col h-full" style="background: var(--iris-color-bg-elevated); border-color: var(--iris-color-border);">
     <!-- Header -->
-    <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-      <h3 class="text-sm font-semibold">AI Chat</h3>
+    <div class="px-4 py-3 border-b flex items-center justify-between" style="border-color: var(--iris-color-border);">
+      <div class="flex items-center gap-1.5">
+        <svg class="w-4 h-4" style="color: var(--iris-color-primary);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+        </svg>
+        <h3 class="text-sm font-semibold" style="color: var(--iris-color-text);">AI Chat</h3>
+      </div>
       <div class="flex items-center gap-1">
         <button
-          class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-xs"
+          class="p-1 text-xs hover:opacity-80 transition-opacity"
+          style="color: var(--iris-color-text-faint);"
           onclick={newSession}
           title="New conversation"
         >New</button>
         <button
-          class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+          class="p-1 hover:opacity-80 transition-opacity"
+          style="color: var(--iris-color-text-faint);"
           onclick={onclose}
           title="Close chat"
         >&times;</button>
@@ -104,11 +111,12 @@
     <div class="flex-1 overflow-y-auto p-3 space-y-3" bind:this={messagesContainer}>
       {#if messages.length === 0 && !loading}
         <div class="text-center py-8">
-          <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">Ask me anything about your inbox</p>
+          <p class="text-sm mb-4" style="color: var(--iris-color-text-muted);">Ask me anything about your inbox</p>
           <div class="space-y-2">
             {#each suggestions as { label, prompt }}
               <button
-                class="w-full text-left px-3 py-2 text-xs rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-gray-600 dark:text-gray-400"
+                class="w-full text-left px-3 py-2 text-xs transition-colors hover:opacity-80"
+                style="border: 1px solid var(--iris-color-border); color: var(--iris-color-text-muted); border-radius: 9999px;"
                 onclick={() => sendMessage(prompt)}
               >
                 {label}
@@ -120,46 +128,83 @@
 
       {#each messages as msg (msg.id)}
         <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}">
-          <div class="max-w-[85%] {msg.role === 'user'
-            ? 'bg-blue-500 text-white rounded-2xl rounded-br-sm'
-            : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-2xl rounded-bl-sm'} px-3 py-2 text-sm leading-relaxed">
-            {msg.content}
+          {#if msg.role === 'user'}
+            <div class="max-w-[85%] rounded-2xl rounded-br-sm px-3 py-2 text-sm leading-relaxed" style="background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-text); align-self: end;">
+              {msg.content}
 
-            <!-- Citations -->
-            {#if msg.citations?.length}
-              <div class="mt-2 pt-2 border-t {msg.role === 'user' ? 'border-blue-400' : 'border-gray-200 dark:border-gray-700'}">
-                <p class="text-[10px] font-medium opacity-70 mb-1">References:</p>
-                {#each msg.citations as citation}
-                  <p class="text-[11px] opacity-80 truncate">
-                    {citation.from}: {citation.subject}
+              <!-- Citations -->
+              {#if msg.citations?.length}
+                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border);">
+                  <p class="text-[10px] font-medium mb-1" style="color: var(--iris-color-text-muted);">
+                    <svg class="w-3 h-3 inline-block mr-0.5" style="color: var(--iris-color-text-muted);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
+                    References:
                   </p>
-                {/each}
-              </div>
-            {/if}
+                  {#each msg.citations as citation}
+                    <p class="text-[11px] truncate" style="color: var(--iris-color-text-muted);">
+                      {citation.from}: {citation.subject}
+                    </p>
+                  {/each}
+                </div>
+              {/if}
 
-            <!-- Action proposal -->
-            {#if msg.proposed_action}
-              <div class="mt-2 pt-2 border-t {msg.role === 'user' ? 'border-blue-400' : 'border-gray-200 dark:border-gray-700'}">
-                <p class="text-xs font-medium mb-1">{msg.proposed_action.description}</p>
-                <button
-                  class="px-3 py-1 text-xs font-medium rounded-lg bg-blue-500 text-white hover:bg-blue-600 transition-colors"
-                  onclick={() => confirmAction(msg.id)}
-                >
-                  Confirm
-                </button>
-              </div>
-            {/if}
-          </div>
+              <!-- Action proposal -->
+              {#if msg.proposed_action}
+                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border);">
+                  <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
+                  <button
+                    class="px-3 py-1 text-xs font-medium rounded-lg hover:opacity-90 transition-colors"
+                    style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                    onclick={() => confirmAction(msg.id)}
+                  >
+                    Confirm
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <div class="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 text-sm leading-relaxed" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+              {msg.content}
+
+              <!-- Citations -->
+              {#if msg.citations?.length}
+                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
+                  <p class="text-[10px] font-medium mb-1" style="color: var(--iris-color-text-muted);">
+                    <svg class="w-3 h-3 inline-block mr-0.5" style="color: var(--iris-color-text-muted);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
+                    References:
+                  </p>
+                  {#each msg.citations as citation}
+                    <p class="text-[11px] truncate" style="color: var(--iris-color-text-muted);">
+                      {citation.from}: {citation.subject}
+                    </p>
+                  {/each}
+                </div>
+              {/if}
+
+              <!-- Action proposal -->
+              {#if msg.proposed_action}
+                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
+                  <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
+                  <button
+                    class="px-3 py-1 text-xs font-medium rounded-lg hover:opacity-90 transition-colors"
+                    style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                    onclick={() => confirmAction(msg.id)}
+                  >
+                    Confirm
+                  </button>
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
       {/each}
 
       {#if loading}
         <div class="flex justify-start">
-          <div class="bg-gray-100 dark:bg-gray-800 rounded-2xl rounded-bl-sm px-3 py-2 text-sm text-gray-400">
+          <div class="rounded-2xl rounded-bl-sm px-3 py-2 text-sm" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-faint);">
             <span class="inline-flex gap-1">
-              <span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 0ms"></span>
-              <span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 150ms"></span>
-              <span class="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 300ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--iris-color-text-faint); animation-delay: 0ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--iris-color-text-faint); animation-delay: 150ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--iris-color-text-faint); animation-delay: 300ms"></span>
             </span>
           </div>
         </div>
@@ -167,13 +212,13 @@
 
       {#if error}
         <div class="text-center">
-          <p class="text-xs text-red-500">{error}</p>
+          <p class="text-xs" style="color: var(--iris-color-error);">{error}</p>
         </div>
       {/if}
     </div>
 
     <!-- Input -->
-    <div class="px-3 py-3 border-t border-gray-200 dark:border-gray-700">
+    <div class="px-3 py-3 border-t" style="border-color: var(--iris-color-border);">
       <div class="flex gap-2">
         <input
           type="text"
@@ -181,10 +226,12 @@
           onkeydown={handleKeydown}
           placeholder="Ask about your inbox..."
           disabled={loading}
-          class="flex-1 px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          class="flex-1 px-3 py-2 text-sm rounded-lg focus:outline-none disabled:opacity-50"
+          style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border); color: var(--iris-color-text);"
         />
         <button
-          class="px-3 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 transition-colors"
+          class="px-3 py-2 text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-colors"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
           onclick={() => sendMessage()}
           disabled={loading || !input.trim()}
         >
