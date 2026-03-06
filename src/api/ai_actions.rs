@@ -94,15 +94,7 @@ pub async fn summarize_thread(
         )
         .unwrap_or_else(|_| "false".to_string());
 
-    let ai_model = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'ai_model'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_default();
-
-    if ai_enabled != "true" || ai_model.is_empty() {
+    if ai_enabled != "true" || !state.providers.has_providers() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -110,8 +102,8 @@ pub async fn summarize_thread(
     let prompt = build_summary_prompt(subject, &messages);
 
     let summary = state
-        .ollama
-        .generate(&ai_model, &prompt, Some(SUMMARY_SYSTEM_PROMPT))
+        .providers
+        .generate(&prompt, Some(SUMMARY_SYSTEM_PROMPT))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
@@ -178,21 +170,13 @@ pub async fn ai_assist(
         )
         .unwrap_or_else(|_| "false".to_string());
 
-    let ai_model = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'ai_model'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_default();
-
-    if ai_enabled != "true" || ai_model.is_empty() {
+    if ai_enabled != "true" || !state.providers.has_providers() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     let result = state
-        .ollama
-        .generate(&ai_model, &input.content, Some(system_prompt))
+        .providers
+        .generate(&input.content, Some(system_prompt))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 

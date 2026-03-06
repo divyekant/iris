@@ -18,7 +18,7 @@ pub struct AppState {
     pub db: db::DbPool,
     pub config: config::Config,
     pub ws_hub: ws::hub::WsHub,
-    pub ollama: ai::ollama::OllamaClient,
+    pub providers: ai::provider::ProviderPool,
     pub memories: ai::memories::MemoriesClient,
     pub session_token: String,
 }

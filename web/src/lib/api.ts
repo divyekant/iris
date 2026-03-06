@@ -106,13 +106,13 @@ export const api = {
     return request<{ results: any[]; total: number; query: string }>(`/api/search?${query}`);
   },
   ai: {
-    getConfig: () => request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean; memories_url: string; memories_connected: boolean }>('/api/config/ai'),
-    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean }) =>
-      request<{ ollama_url: string; model: string; enabled: boolean; connected: boolean; memories_url: string; memories_connected: boolean }>('/api/config/ai', {
+    getConfig: () => request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai'),
+    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean; anthropic_api_key?: string; anthropic_model?: string; openai_api_key?: string; openai_model?: string }) =>
+      request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai', {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
-    testConnection: () => request<{ connected: boolean; models: string[] }>('/api/config/ai/test', { method: 'POST' }),
+    testConnection: () => request<{ providers: { name: string; model: string; healthy: boolean }[] }>('/api/config/ai/test', { method: 'POST' }),
     assist: (data: { action: string; content: string }) =>
       request<{ result: string }>('/api/ai/assist', { method: 'POST', body: JSON.stringify(data) }),
     chat: (data: { session_id: string; message: string }) =>

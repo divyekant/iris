@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use crate::ai::memories::MemoriesClient;
-use crate::ai::ollama::OllamaClient;
+use crate::ai::provider::ProviderPool;
 use crate::ai::pipeline;
 use crate::db::DbPool;
 use crate::jobs::queue::{self, Job};
@@ -14,7 +14,7 @@ use crate::ws::hub::{WsEvent, WsHub};
 pub struct JobWorker {
     db: DbPool,
     ws_hub: WsHub,
-    ollama: OllamaClient,
+    providers: ProviderPool,
     memories: MemoriesClient,
     poll_interval: Duration,
     semaphore: Arc<Semaphore>,
@@ -25,7 +25,7 @@ impl JobWorker {
     pub fn new(
         db: DbPool,
         ws_hub: WsHub,
-        ollama: OllamaClient,
+        providers: ProviderPool,
         memories: MemoriesClient,
         poll_interval_ms: u64,
         max_concurrency: usize,
@@ -34,7 +34,7 @@ impl JobWorker {
         Self {
             db,
             ws_hub,
-            ollama,
+            providers,
             memories,
             poll_interval: Duration::from_millis(poll_interval_ms),
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
@@ -144,20 +144,19 @@ impl JobWorker {
         let message_id = job.message_id.as_deref().ok_or("Missing message_id")?;
 
         // Check if AI is enabled
-        let (enabled, model) = {
+        let enabled = {
             let conn = self.db.get().map_err(|e| e.to_string())?;
-            let enabled = conn
-                .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+            conn.query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
                 .unwrap_or_else(|_| "false".to_string())
-                == "true";
-            let model = conn
-                .query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
-                .unwrap_or_default();
-            (enabled, model)
+                == "true"
         };
 
-        if !enabled || model.is_empty() {
+        if !enabled {
             return Err("AI not enabled".to_string());
+        }
+
+        if !self.providers.has_providers() {
+            return Err("No AI providers configured".to_string());
         }
 
         // Build feedback context
@@ -173,8 +172,7 @@ impl JobWorker {
 
         // Run AI pipeline
         let metadata = pipeline::process_email(
-            &self.ollama,
-            &model,
+            &self.providers,
             &payload.subject,
             &payload.from,
             &payload.body,
@@ -279,27 +277,16 @@ impl JobWorker {
 
         let conversation = messages.join("\n");
 
-        // Get AI model
-        let model = {
-            let conn = self.db.get().map_err(|e| e.to_string())?;
-            conn.query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
-                .unwrap_or_default()
-        };
-
-        if model.is_empty() {
-            return Err("No AI model configured".to_string());
-        }
-
         let prompt = format!(
             "Summarize this email assistant conversation in 2-3 sentences, capturing key topics discussed, actions taken, and user preferences revealed:\n\n{}",
             conversation
         );
 
         let summary = self
-            .ollama
-            .generate(&model, &prompt, Some("You are a conversation summarizer. Be concise."))
+            .providers
+            .generate(&prompt, Some("You are a conversation summarizer. Be concise."))
             .await
-            .ok_or("Ollama summarization failed")?;
+            .ok_or("AI summarization failed")?;
 
         // Store summary in Memories
         let source = format!("iris/chat/sessions/{}", payload.session_id);
@@ -343,26 +330,16 @@ impl JobWorker {
             return Ok(());
         }
 
-        let model = {
-            let conn = self.db.get().map_err(|e| e.to_string())?;
-            conn.query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
-                .unwrap_or_default()
-        };
-
-        if model.is_empty() {
-            return Err("No AI model configured".to_string());
-        }
-
         let prompt = format!(
             "Based on these email classification correction patterns from the user, generate a concise preference profile (3-5 bullet points) describing how this user prefers emails to be classified:\n\n{}",
             patterns.join("\n")
         );
 
         let preferences = self
-            .ollama
-            .generate(&model, &prompt, Some("You generate concise user preference profiles for email classification."))
+            .providers
+            .generate(&prompt, Some("You generate concise user preference profiles for email classification."))
             .await
-            .ok_or("Ollama preference extraction failed")?;
+            .ok_or("AI preference extraction failed")?;
 
         // Store preferences in Memories
         if !self

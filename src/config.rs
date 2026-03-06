@@ -8,6 +8,8 @@ pub struct Config {
     pub ollama_url: String,
     pub memories_url: String,
     pub memories_api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub openai_api_key: Option<String>,
     pub gmail_client_id: Option<String>,
     pub gmail_client_secret: Option<String>,
     pub outlook_client_id: Option<String>,
@@ -26,6 +28,8 @@ impl fmt::Debug for Config {
             .field("ollama_url", &self.ollama_url)
             .field("memories_url", &self.memories_url)
             .field("memories_api_key", &"[REDACTED]")
+            .field("anthropic_api_key", &"[REDACTED]")
+            .field("openai_api_key", &"[REDACTED]")
             .field("gmail_client_id", &self.gmail_client_id)
             .field("gmail_client_secret", &"[REDACTED]")
             .field("outlook_client_id", &self.outlook_client_id)
@@ -46,6 +50,8 @@ impl Config {
             ollama_url: env::var("OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".into()),
             memories_url: env::var("MEMORIES_URL").unwrap_or_else(|_| "http://localhost:8900".into()),
             memories_api_key: env::var("MEMORIES_API_KEY").ok(),
+            anthropic_api_key: env::var("ANTHROPIC_API_KEY").ok(),
+            openai_api_key: env::var("OPENAI_API_KEY").ok(),
             gmail_client_id: env::var("GMAIL_CLIENT_ID").ok(),
             gmail_client_secret: env::var("GMAIL_CLIENT_SECRET").ok(),
             outlook_client_id: env::var("OUTLOOK_CLIENT_ID").ok(),

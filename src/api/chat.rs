@@ -93,17 +93,14 @@ pub async fn chat(
     }
 
     // Phase 1: DB reads (no await across conn)
-    let (ai_model, history, fts_citations) = {
+    let (history, fts_citations) = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let ai_enabled = conn
             .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
             .unwrap_or_else(|_| "false".to_string());
-        let ai_model = conn
-            .query_row("SELECT value FROM config WHERE key = 'ai_model'", [], |row| row.get::<_, String>(0))
-            .unwrap_or_default();
 
-        if ai_enabled != "true" || ai_model.is_empty() {
+        if ai_enabled != "true" || !state.providers.has_providers() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
 
@@ -117,7 +114,7 @@ pub async fn chat(
         let history = load_history(&conn, &input.session_id, 10);
         let fts_citations = search_relevant_emails_fts(&conn, &input.message);
 
-        (ai_model, history, fts_citations)
+        (history, fts_citations)
     };
 
     // Phase 2: Semantic search via Memories (async)
@@ -158,12 +155,12 @@ pub async fn chat(
     let past_sessions = state.memories.search(&input.message, 3, Some("iris/chat/sessions/")).await;
     let user_prefs = state.memories.search("user email preferences", 1, Some("iris/user/preferences")).await;
 
-    // Phase 4: Build prompt and call Ollama (async)
+    // Phase 4: Build prompt and call AI provider (async)
     let prompt = build_chat_prompt(&history, &citations, &input.message, &past_sessions, &user_prefs);
 
     let ai_response = state
-        .ollama
-        .generate(&ai_model, &prompt, Some(CHAT_SYSTEM_PROMPT))
+        .providers
+        .generate(&prompt, Some(CHAT_SYSTEM_PROMPT))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 

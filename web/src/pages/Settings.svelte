@@ -11,11 +11,17 @@
   let aiModel = $state('');
   let aiEnabled = $state(false);
   let aiConnected = $state(false);
-  let aiModels = $state<string[]>([]);
+  let aiProviders = $state<{ name: string; model: string; healthy: boolean }[]>([]);
   let aiTesting = $state(false);
   let aiSaving = $state(false);
   let memoriesUrl = $state('');
   let memoriesConnected = $state(false);
+
+  // Provider API keys (masked display)
+  let anthropicKey = $state('');
+  let anthropicModel = $state('');
+  let openaiKey = $state('');
+  let openaiModel = $state('');
 
   // API key management
   let apiKeys = $state<any[]>([]);
@@ -64,11 +70,11 @@
     aiTesting = true;
     try {
       const result = await api.ai.testConnection();
-      aiConnected = result.connected;
-      aiModels = result.models;
+      aiProviders = result.providers;
+      aiConnected = result.providers.some(p => p.healthy);
     } catch {
       aiConnected = false;
-      aiModels = [];
+      aiProviders = [];
     } finally {
       aiTesting = false;
     }
@@ -77,12 +83,23 @@
   async function saveAiConfig() {
     aiSaving = true;
     try {
-      const result = await api.ai.setConfig({
+      const data: any = {
         ollama_url: aiOllamaUrl,
         model: aiModel,
         enabled: aiEnabled,
-      });
+      };
+      // Only send keys if they've been changed (non-empty = user typed something)
+      if (anthropicKey) data.anthropic_api_key = anthropicKey;
+      if (anthropicModel) data.anthropic_model = anthropicModel;
+      if (openaiKey) data.openai_api_key = openaiKey;
+      if (openaiModel) data.openai_model = openaiModel;
+
+      const result = await api.ai.setConfig(data);
       aiConnected = result.connected;
+      aiProviders = result.providers;
+      // Clear key fields after save (stored server-side)
+      anthropicKey = '';
+      openaiKey = '';
     } catch {
       // Silently fail
     } finally {
@@ -150,6 +167,7 @@
         aiModel = aiConfig.model;
         aiEnabled = aiConfig.enabled;
         aiConnected = aiConfig.connected;
+        aiProviders = aiConfig.providers || [];
         memoriesUrl = aiConfig.memories_url;
         memoriesConnected = aiConfig.memories_connected;
       } catch {
@@ -195,7 +213,7 @@
         <div class="flex items-center justify-between">
           <div>
             <p class="text-sm font-medium" style="color: var(--iris-color-text);">Enable AI classification</p>
-            <p class="text-xs" style="color: var(--iris-color-text-faint);">Classify emails on ingest using local Ollama</p>
+            <p class="text-xs" style="color: var(--iris-color-text-faint);">Classify and summarize emails using AI providers</p>
           </div>
           <button
             class="relative w-11 h-6 rounded-full transition-colors"
@@ -206,9 +224,65 @@
           </button>
         </div>
 
-        <!-- Ollama URL -->
-        <div>
-          <label class="block text-sm font-medium mb-1" style="color: var(--iris-color-text);">Ollama URL</label>
+        <!-- Provider Status -->
+        {#if aiProviders.length > 0}
+          <div class="flex flex-wrap gap-2">
+            {#each aiProviders as provider}
+              <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs" style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);">
+                <div class="w-2 h-2 rounded-full" style="background: {provider.healthy ? 'var(--iris-color-success)' : 'var(--iris-color-error)'};"></div>
+                <span class="font-medium" style="color: var(--iris-color-text);">{provider.name}</span>
+                {#if provider.model}
+                  <span style="color: var(--iris-color-text-faint);">{provider.model}</span>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Anthropic -->
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-sm font-medium mb-0.5" style="color: var(--iris-color-text);">Anthropic</p>
+          <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">API key (sk-ant-api03-...) or OAuth token (sk-ant-oat01-...)</p>
+          <input
+            type="password"
+            bind:value={anthropicKey}
+            placeholder="Paste Anthropic API key or OAuth token"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
+          <input
+            type="text"
+            bind:value={anthropicModel}
+            placeholder="Model (default: claude-haiku-4-5-20251001)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
+        </div>
+
+        <!-- OpenAI -->
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-sm font-medium mb-0.5" style="color: var(--iris-color-text);">OpenAI</p>
+          <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">API key (sk-...) or ChatGPT subscription token</p>
+          <input
+            type="password"
+            bind:value={openaiKey}
+            placeholder="Paste OpenAI API key or ChatGPT token"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
+          <input
+            type="text"
+            bind:value={openaiModel}
+            placeholder="Model (default: gpt-4o-mini)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
+        </div>
+
+        <!-- Ollama -->
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-sm font-medium mb-0.5" style="color: var(--iris-color-text);">Ollama (local)</p>
+          <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">Free local AI — requires Ollama running on your machine</p>
           <div class="flex gap-2">
             <input
               type="text"
@@ -217,58 +291,35 @@
               class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
               style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
             />
-            <button
-              class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
-              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
-              onclick={testAiConnection}
-              disabled={aiTesting}
-            >
-              {aiTesting ? 'Testing...' : 'Test'}
-            </button>
-          </div>
-          <div class="mt-1 flex items-center gap-1.5">
-            <div class="w-2 h-2 rounded-full" style="background: {aiConnected ? 'var(--iris-color-success)' : 'var(--iris-color-error)'};"></div>
-            <span class="text-xs" style="color: var(--iris-color-text-faint);">
-              {aiConnected ? 'Connected' : 'Not connected'}
-            </span>
-          </div>
-        </div>
-
-        <!-- Model picker -->
-        <div>
-          <label class="block text-sm font-medium mb-1" style="color: var(--iris-color-text);">Model</label>
-          {#if aiModels.length > 0}
-            <select
-              bind:value={aiModel}
-              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-              style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-              onchange={saveAiConfig}
-            >
-              <option value="">Select a model</option>
-              {#each aiModels as model}
-                <option value={model}>{model}</option>
-              {/each}
-            </select>
-          {:else}
             <input
               type="text"
               bind:value={aiModel}
               placeholder="e.g. llama3.2:3b"
-              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+              class="settings-input w-40 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
               style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
             />
-          {/if}
+          </div>
         </div>
 
-        <!-- Save button -->
-        <button
-          class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
-          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
-          onclick={saveAiConfig}
-          disabled={aiSaving}
-        >
-          {aiSaving ? 'Saving...' : 'Save AI Settings'}
-        </button>
+        <!-- Save + Test buttons -->
+        <div class="flex gap-2">
+          <button
+            class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+            style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+            onclick={saveAiConfig}
+            disabled={aiSaving}
+          >
+            {aiSaving ? 'Saving...' : 'Save AI Settings'}
+          </button>
+          <button
+            class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
+            style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+            onclick={testAiConnection}
+            disabled={aiTesting}
+          >
+            {aiTesting ? 'Testing...' : 'Test Providers'}
+          </button>
+        </div>
 
         <!-- Memories (Semantic Search) status -->
         <div class="pt-4 border-t" style="border-color: var(--iris-color-border);">

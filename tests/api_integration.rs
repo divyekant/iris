@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use iris_server::ai::memories::MemoriesClient;
-use iris_server::ai::ollama::OllamaClient;
+use iris_server::ai::provider::ProviderPool;
 use iris_server::config::Config;
 use iris_server::db::migrations;
 use iris_server::ws::hub::WsHub;
@@ -37,6 +37,8 @@ fn create_test_state() -> Arc<AppState> {
             ollama_url: "http://localhost:11434".to_string(),
             memories_url: "http://localhost:8900".to_string(),
             memories_api_key: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
             gmail_client_id: None,
             gmail_client_secret: None,
             outlook_client_id: None,
@@ -47,7 +49,7 @@ fn create_test_state() -> Arc<AppState> {
             job_cleanup_days: 7,
         },
         ws_hub: WsHub::new(),
-        ollama: OllamaClient::new("http://localhost:11434"),
+        providers: ProviderPool::new(vec![]),
         memories: MemoriesClient::new("http://localhost:8900", None),
         session_token: TEST_TOKEN.to_string(),
     })

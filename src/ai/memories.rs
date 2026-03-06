@@ -47,7 +47,13 @@ pub struct MemoryResult {
     pub id: usize,
     pub text: String,
     pub source: String,
+    #[serde(default)]
     pub score: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchResponse {
+    results: Vec<MemoryResult>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,8 +177,8 @@ impl MemoriesClient {
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<Vec<MemoryResult>>().await {
-                    Ok(results) => results,
+                match resp.json::<SearchResponse>().await {
+                    Ok(r) => r.results,
                     Err(e) => {
                         tracing::warn!("Failed to parse Memories search response: {e}");
                         Vec::new()

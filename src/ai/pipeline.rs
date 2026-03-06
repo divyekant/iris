@@ -1,4 +1,4 @@
-use super::ollama::OllamaClient;
+use super::provider::ProviderPool;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -48,12 +48,11 @@ const SYSTEM_PROMPT: &str = r#"You are an email classification assistant. Analyz
 Respond with valid JSON only."#;
 
 /// Process a single email through the AI pipeline.
-/// Returns None if Ollama is unavailable or response can't be parsed.
+/// Returns None if no provider is available or response can't be parsed.
 /// `feedback_context` is an optional suffix from user corrections to improve accuracy.
 /// `preferences_context` is an optional suffix from extracted user preferences.
 pub async fn process_email(
-    client: &OllamaClient,
-    model: &str,
+    pool: &ProviderPool,
     subject: &str,
     from: &str,
     body: &str,
@@ -75,7 +74,7 @@ pub async fn process_email(
         system.push_str(ctx);
     }
 
-    let response = client.generate(model, &prompt, Some(&system)).await?;
+    let response = pool.generate(&prompt, Some(&system)).await?;
 
     parse_ai_response(&response)
 }

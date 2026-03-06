@@ -10,7 +10,7 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub db: bool,
-    pub ollama: bool,
+    pub ai: bool,
     pub memories: bool,
 }
 
@@ -19,7 +19,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         conn.query_row("SELECT 1", [], |_| Ok(())).is_ok()
     }).unwrap_or(false);
 
-    let ollama_ok = state.ollama.health().await;
+    let ai_ok = state.providers.any_healthy().await;
     let memories_ok = state.memories.health().await;
 
     let status = if db_ok { "ok" } else { "degraded" }.to_string();
@@ -28,7 +28,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
         status,
         version: env!("CARGO_PKG_VERSION").to_string(),
         db: db_ok,
-        ollama: ollama_ok,
+        ai: ai_ok,
         memories: memories_ok,
     })
 }

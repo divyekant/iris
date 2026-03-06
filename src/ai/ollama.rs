@@ -6,6 +6,7 @@ use std::time::Duration;
 pub struct OllamaClient {
     client: Client,
     pub base_url: String,
+    pub model: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -33,6 +34,10 @@ pub struct ModelInfo {
 
 impl OllamaClient {
     pub fn new(base_url: &str) -> Self {
+        Self::with_model(base_url, "")
+    }
+
+    pub fn with_model(base_url: &str, model: &str) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -41,6 +46,7 @@ impl OllamaClient {
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            model: model.to_string(),
         }
     }
 
@@ -108,11 +114,18 @@ mod tests {
     fn test_ollama_client_new() {
         let client = OllamaClient::new("http://localhost:11434/");
         assert_eq!(client.base_url, "http://localhost:11434");
+        assert_eq!(client.model, "");
     }
 
     #[test]
     fn test_ollama_client_new_no_trailing_slash() {
         let client = OllamaClient::new("http://localhost:11434");
         assert_eq!(client.base_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn test_ollama_client_with_model() {
+        let client = OllamaClient::with_model("http://localhost:11434", "llama3.2");
+        assert_eq!(client.model, "llama3.2");
     }
 }
