@@ -7,6 +7,26 @@
   import AccountSetup from './pages/AccountSetup.svelte';
   import Settings from './pages/Settings.svelte';
   import Search from './pages/Search.svelte';
+  import { api } from './lib/api';
+
+  // Sync theme from server config on mount
+  $effect(() => {
+    api.config.get().then(config => {
+      if (config?.theme) {
+        localStorage.setItem('iris-theme', config.theme);
+        // Apply if different from what main.ts set
+        if (config.theme === 'light') {
+          document.documentElement.setAttribute('data-brand', 'light');
+        } else if (config.theme === 'dark') {
+          document.documentElement.removeAttribute('data-brand');
+        } else if (config.theme === 'system') {
+          const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (!prefersDark) document.documentElement.setAttribute('data-brand', 'light');
+          else document.documentElement.removeAttribute('data-brand');
+        }
+      }
+    }).catch(() => {});
+  });
 
   const routes = {
     '/': Inbox,

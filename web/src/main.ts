@@ -3,9 +3,15 @@ import App from './App.svelte';
 import { mount } from 'svelte';
 import { initSession } from './lib/api';
 
-// Apply theme before mount to prevent flash
-const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-document.documentElement.classList.toggle('dark', isDark);
+// Apply saved theme before first render to prevent flash
+const savedTheme = localStorage.getItem('iris-theme') || 'dark';
+if (savedTheme === 'system') {
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  if (!prefersDark) document.documentElement.setAttribute('data-brand', 'light');
+} else if (savedTheme === 'light') {
+  document.documentElement.setAttribute('data-brand', 'light');
+}
+// Dark is the default (:root), so no attribute needed
 
 // Bootstrap session token, then mount the app
 initSession()
