@@ -148,9 +148,10 @@
 </script>
 
 <div class="h-full flex flex-col">
-  <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center gap-3">
+  <div class="px-4 py-3 flex items-center gap-3" style="border-bottom: 1px solid var(--iris-color-border);">
     <button
-      class="p-1 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+      class="p-1 transition-colors"
+      style="color: var(--iris-color-text-muted);"
       onclick={() => push('/')}
       title="Back to inbox"
     >
@@ -158,30 +159,30 @@
     </button>
     {#if thread}
       <div class="flex-1 min-w-0">
-        <h2 class="text-lg font-semibold truncate">{thread.subject || '(no subject)'}</h2>
-        <p class="text-xs text-gray-500 truncate">
+        <h2 class="text-lg font-semibold truncate" style="color: var(--iris-color-text);">{thread.subject || '(no subject)'}</h2>
+        <p class="text-xs truncate" style="color: var(--iris-color-text-faint);">
           {thread.participants.map((p: any) => p.name || p.email).join(', ')}
           &middot; {thread.message_count} message{thread.message_count === 1 ? '' : 's'}
         </p>
       </div>
       <div class="flex items-center gap-1">
         <button
-          class="p-2 text-gray-400 hover:text-yellow-500 transition-colors"
+          class="p-2 transition-colors thread-action-btn star-btn"
           onclick={() => handleThreadAction('star')}
           title="Star"
         >&#9734;</button>
         <button
-          class="p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          class="p-2 transition-colors thread-action-btn"
           onclick={() => handleThreadAction('archive')}
           title="Archive"
         >&#128230;</button>
         <button
-          class="p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          class="p-2 transition-colors thread-action-btn"
           onclick={() => handleThreadAction('mark_unread')}
           title="Mark unread"
         >&#9993;</button>
         <button
-          class="p-2 text-gray-400 hover:text-red-500 transition-colors"
+          class="p-2 transition-colors thread-action-btn delete-btn"
           onclick={() => handleThreadAction('delete')}
           title="Delete"
         >&#128465;</button>
@@ -191,25 +192,26 @@
 
   <!-- AI Summary panel -->
   {#if thread && thread.message_count > 1}
-    <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+    <div class="px-4 py-2" style="border-bottom: 1px solid var(--iris-color-border);">
       <button
-        class="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1"
+        class="text-xs flex items-center gap-1"
+        style="color: var(--iris-color-primary);"
         onclick={toggleSummary}
       >
-        <span class="text-[10px]">{summaryOpen ? '\u25BE' : '\u25B8'}</span> AI Summary
+        <span class="text-[10px]">{summaryOpen ? '\u25BE' : '\u25B8'}</span> &#10024; AI Summary
       </button>
       {#if summaryOpen}
         {#if summaryLoading}
-          <div class="mt-2 text-xs text-gray-400 dark:text-gray-500 flex items-center gap-2">
-            <div class="w-3 h-3 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin"></div>
+          <div class="mt-2 text-xs flex items-center gap-2" style="color: var(--iris-color-text-faint);">
+            <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
             Summarizing thread...
           </div>
         {:else if aiSummary}
-          <div class="mt-2 text-sm text-gray-700 dark:text-gray-300 bg-blue-50 dark:bg-blue-900/20 rounded-lg px-3 py-2 leading-relaxed">
+          <div class="mt-2 text-sm rounded-lg px-3 py-2 leading-relaxed" style="color: var(--iris-color-text); background: var(--iris-color-bg-surface);">
             {aiSummary}
           </div>
         {:else if summaryError}
-          <div class="mt-2 text-xs text-gray-400 dark:text-gray-500">{summaryError}</div>
+          <div class="mt-2 text-xs" style="color: var(--iris-color-text-faint);">{summaryError}</div>
         {/if}
       {/if}
     </div>
@@ -218,13 +220,13 @@
   <div class="flex-1 overflow-y-auto p-4 space-y-3">
     {#if loading}
       <div class="flex items-center justify-center py-16">
-        <div class="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+        <div class="w-8 h-8 rounded-full animate-spin" style="border: 4px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
       </div>
     {:else if error}
       <div class="text-center py-16">
-        <p class="text-red-500 dark:text-red-400 mb-4">{error}</p>
+        <p class="mb-4" style="color: var(--iris-color-error);">{error}</p>
         <button
-          class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium"
+          class="px-4 py-2 rounded-lg text-sm font-medium transition-colors retry-btn"
           onclick={loadThread}
         >
           Retry
@@ -238,21 +240,21 @@
   </div>
 
   {#if thread && !loading}
-    <div class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex gap-2">
+    <div class="px-4 py-3 flex gap-2" style="border-top: 1px solid var(--iris-color-border); background: var(--iris-color-bg-elevated);">
       <button
-        class="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+        class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn"
         onclick={openReply}
       >
         Reply
       </button>
       <button
-        class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+        class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn"
         onclick={openReplyAll}
       >
         Reply All
       </button>
       <button
-        class="px-4 py-2 text-sm bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+        class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn"
         onclick={openForward}
       >
         Forward
@@ -268,3 +270,41 @@
     onsent={loadThread}
   />
 {/if}
+
+<style>
+  .thread-action-btn {
+    color: var(--iris-color-text-faint);
+  }
+  .thread-action-btn:hover {
+    color: var(--iris-color-text-muted);
+  }
+  .thread-action-btn.star-btn:hover {
+    color: var(--iris-color-primary);
+  }
+  .thread-action-btn.delete-btn:hover {
+    color: var(--iris-color-error);
+  }
+  .retry-btn {
+    background: var(--iris-color-primary);
+    color: var(--iris-color-bg);
+  }
+  .retry-btn:hover {
+    filter: brightness(1.1);
+  }
+  .reply-primary-btn {
+    background: var(--iris-color-primary);
+    color: var(--iris-color-bg);
+  }
+  .reply-primary-btn:hover {
+    filter: brightness(1.1);
+  }
+  .reply-secondary-btn {
+    background: var(--iris-color-bg-surface);
+    color: var(--iris-color-text-muted);
+    border: 1px solid var(--iris-color-border);
+  }
+  .reply-secondary-btn:hover {
+    background: var(--iris-color-bg-elevated);
+    color: var(--iris-color-text);
+  }
+</style>
