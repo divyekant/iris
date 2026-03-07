@@ -40,8 +40,8 @@
     { id: 'promotions', label: 'Promotions' },
   ];
 
-  async function loadMessages() {
-    loading = true;
+  async function loadMessages(showLoading = true) {
+    if (showLoading) loading = true;
     error = '';
     try {
       const res = await api.messages.list({
@@ -50,7 +50,11 @@
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
       });
-      messages = res.messages;
+      // Only update if data actually changed to prevent unnecessary re-renders
+      if (JSON.stringify(res.messages.map((m: any) => m.id + m.is_read + m.is_starred)) !==
+          JSON.stringify(messages.map((m: any) => m.id + m.is_read + m.is_starred))) {
+        messages = res.messages;
+      }
       unreadCount = res.unread_count;
       total = res.total;
       // Track first account for compose
@@ -109,9 +113,9 @@
     const offNewEmail = wsClient.on('NewEmail', (evt: any) => {
       toastMessage = `New email received`;
       toastVisible = true;
-      loadMessages();
+      loadMessages(false);
     });
-    const pollInterval = setInterval(() => { loadMessages(); }, 60000);
+    const pollInterval = setInterval(() => { loadMessages(false); }, 60000);
     window.addEventListener('account-switch', onAccountSwitch);
     window.addEventListener('open-compose', onOpenCompose);
     return () => {

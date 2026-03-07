@@ -24,7 +24,7 @@ impl SyncEngine {
     }
 
     /// Perform an initial sync: fetch the newest batch of messages from
-    /// INBOX and insert them into the local database.
+    /// INBOX and other standard folders, inserting them into the local database.
     pub async fn initial_sync(
         &self,
         account_id: &str,
@@ -43,103 +43,113 @@ impl SyncEngine {
 
         // 2. Connect to IMAP
         let mut session = connect(creds).await.map_err(|e| {
-            // Update status on connection failure
             if let Ok(conn) = self.db.get() {
                 Account::update_sync_status(&conn, account_id, "error", Some(&e.to_string()));
             }
             e
         })?;
 
-        // 3. SELECT INBOX
-        let mailbox = session.select("INBOX").await.map_err(|e| {
-            if let Ok(conn) = self.db.get() {
-                Account::update_sync_status(&conn, account_id, "error", Some(&e.to_string()));
-            }
-            e
-        })?;
+        // Folders to sync: (IMAP name, local folder name, batch size)
+        // Gmail uses [Gmail]/Sent Mail etc; standard IMAP uses Sent, Drafts, Trash
+        let folders_to_sync = vec![
+            ("INBOX", "INBOX", 50u32),
+            ("[Gmail]/Sent Mail", "Sent", 25),
+            ("Sent", "Sent", 25),
+        ];
 
-        let total = mailbox.exists;
-        tracing::info!(account_id, total, "INBOX has {} messages", total);
-
-        if total == 0 {
-            // Nothing to sync
-            let conn = self.db.get()?;
-            Account::update_sync_status(&conn, account_id, "idle", None);
-            self.ws_hub.broadcast(WsEvent::SyncComplete {
-                account_id: account_id.to_string(),
-            });
-            let _ = session.logout().await;
-            return Ok(());
-        }
-
-        // 4. Determine range: newest 50 (or fewer)
-        let batch_size: u32 = 50;
-        let start = if total > batch_size { total - batch_size + 1 } else { 1 };
-        let range = format!("{}:{}", start, total);
-
-        tracing::info!(account_id, range, "Fetching message range");
-
-        // 5. FETCH
-        let fetch_query = "(UID FLAGS ENVELOPE BODY.PEEK[TEXT] RFC822.SIZE BODY.PEEK[HEADER])";
-        let fetches: Vec<_> = session
-            .fetch(&range, fetch_query)
-            .await?
-            .try_collect()
-            .await?;
-
-        let fetched_count = fetches.len();
-        tracing::info!(account_id, fetched_count, "Fetched {} messages", fetched_count);
-
-        // 6. Parse and insert each message
-        for (i, fetch) in fetches.iter().enumerate() {
-            let insert_msg = parse_fetch(account_id, fetch);
-
-            let msg_id = {
-                let conn = self.db.get()?;
-                InsertMessage::insert(&conn, &insert_msg)
+        for (imap_folder, local_folder, batch_size) in &folders_to_sync {
+            // SELECT the folder — skip if it doesn't exist (different providers)
+            let mailbox = match session.select(*imap_folder).await {
+                Ok(mb) => mb,
+                Err(_) => {
+                    tracing::debug!(account_id, imap_folder, "Folder not available, skipping");
+                    continue;
+                }
             };
 
-            // Broadcast new email event
-            self.ws_hub.broadcast(WsEvent::NewEmail {
-                account_id: account_id.to_string(),
-                message_id: msg_id.clone(),
-            });
+            let total = mailbox.exists;
+            tracing::info!(account_id, imap_folder, total, "{} has {} messages", imap_folder, total);
 
-            // Enqueue AI classification and Memories storage jobs
-            {
-                let conn = self.db.get().unwrap();
-                queue::enqueue_ai_classify(
-                    &conn,
-                    &msg_id,
-                    &insert_msg.subject.clone().unwrap_or_default(),
-                    &insert_msg.from_address.clone().unwrap_or_default(),
-                    &insert_msg.body_text.clone().unwrap_or_default(),
-                );
-                queue::enqueue_memories_store(
-                    &conn,
-                    &msg_id,
-                    &MemoriesStorePayload {
-                        account_id: account_id.to_string(),
-                        rfc_message_id: insert_msg.message_id.clone(),
-                        from_name: insert_msg.from_name.clone(),
-                        from_address: insert_msg.from_address.clone(),
-                        subject: insert_msg.subject.clone(),
-                        body_text: insert_msg.body_text.clone(),
-                        date: insert_msg.date,
-                    },
-                );
+            if total == 0 {
+                continue;
             }
 
-            // Broadcast progress
-            let progress = (i + 1) as f32 / fetched_count as f32;
-            self.ws_hub.broadcast(WsEvent::SyncStatus {
-                account_id: account_id.to_string(),
-                status: "syncing".to_string(),
-                progress: Some(progress),
-            });
+            let start = if total > *batch_size { total - batch_size + 1 } else { 1 };
+            let range = format!("{}:{}", start, total);
+
+            tracing::info!(account_id, imap_folder, range, "Fetching message range");
+
+            let fetch_query = "(UID FLAGS ENVELOPE BODY.PEEK[TEXT] RFC822.SIZE BODY.PEEK[HEADER])";
+            let fetches: Vec<_> = match session.fetch(&range, fetch_query).await {
+                Ok(stream) => match stream.try_collect().await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(account_id, imap_folder, error = %e, "Fetch failed for folder");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(account_id, imap_folder, error = %e, "Fetch command failed for folder");
+                    continue;
+                }
+            };
+
+            let fetched_count = fetches.len();
+            tracing::info!(account_id, imap_folder, fetched_count, "Fetched {} messages", fetched_count);
+
+            for (i, fetch) in fetches.iter().enumerate() {
+                let mut insert_msg = parse_fetch(account_id, fetch);
+                insert_msg.folder = local_folder.to_string();
+
+                let msg_id = {
+                    let conn = self.db.get()?;
+                    InsertMessage::insert(&conn, &insert_msg)
+                };
+
+                // Broadcast new email event (only for INBOX)
+                if *local_folder == "INBOX" {
+                    self.ws_hub.broadcast(WsEvent::NewEmail {
+                        account_id: account_id.to_string(),
+                        message_id: msg_id.clone(),
+                    });
+                }
+
+                // Enqueue AI classification and Memories storage jobs
+                {
+                    let conn = self.db.get().unwrap();
+                    queue::enqueue_ai_classify(
+                        &conn,
+                        &msg_id,
+                        &insert_msg.subject.clone().unwrap_or_default(),
+                        &insert_msg.from_address.clone().unwrap_or_default(),
+                        &insert_msg.body_text.clone().unwrap_or_default(),
+                    );
+                    queue::enqueue_memories_store(
+                        &conn,
+                        &msg_id,
+                        &MemoriesStorePayload {
+                            account_id: account_id.to_string(),
+                            rfc_message_id: insert_msg.message_id.clone(),
+                            from_name: insert_msg.from_name.clone(),
+                            from_address: insert_msg.from_address.clone(),
+                            subject: insert_msg.subject.clone(),
+                            body_text: insert_msg.body_text.clone(),
+                            date: insert_msg.date,
+                        },
+                    );
+                }
+
+                // Broadcast progress
+                let progress = (i + 1) as f32 / fetched_count as f32;
+                self.ws_hub.broadcast(WsEvent::SyncStatus {
+                    account_id: account_id.to_string(),
+                    status: "syncing".to_string(),
+                    progress: Some(progress),
+                });
+            }
         }
 
-        // 7. Done
+        // Done
         {
             let conn = self.db.get()?;
             Account::update_sync_status(&conn, account_id, "idle", None);

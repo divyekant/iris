@@ -95,22 +95,22 @@
 
   <!-- Content -->
   <div class="flex-1 min-w-0">
-    <div class="flex items-baseline gap-2">
+    <div class="flex items-center gap-2">
       <span class="text-sm truncate {message.is_read ? '' : 'font-semibold'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
         {senderDisplay}
       </span>
+      {#if message.ai_category}
+        <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
+          {message.ai_category}
+        </span>
+      {/if}
+      {#each parsedLabels as label}
+        <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
+          style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
+          {label}
+        </span>
+      {/each}
       <span class="flex-shrink-0 text-xs ml-auto flex items-center gap-1.5" style="color: var(--iris-color-text-faint);">
-        {#if message.ai_category}
-          <span class="px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
-            {message.ai_category}
-          </span>
-        {/if}
-        {#each parsedLabels as label}
-          <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
-            style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
-            {label}
-          </span>
-        {/each}
         {#if message.has_attachments}
           <span title="Has attachments"><Paperclip size={12} /></span>
         {/if}

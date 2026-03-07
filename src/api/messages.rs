@@ -39,78 +39,75 @@ pub async fn list_messages(
 ) -> Result<Json<ListMessagesResponse>, StatusCode> {
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let folder = params.folder.as_deref().unwrap_or("INBOX");
+    // Validate folder against allowlist to prevent SQL injection
+    const ALLOWED_FOLDERS: &[&str] = &["INBOX", "Sent", "Drafts", "Starred", "Archive", "Trash"];
+    let raw_folder = params.folder.as_deref().unwrap_or("INBOX");
+    let folder = if ALLOWED_FOLDERS.contains(&raw_folder) { raw_folder } else { "INBOX" };
+
     let limit = params.limit.unwrap_or(50).min(500);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    // Build category filter as a bound parameter (not string-interpolated) to prevent SQL injection
-    // Escape LIKE wildcards in user input to prevent unintended matches
-    let category_like = params.category.as_ref().map(|cat| {
-        let escaped = cat.replace('%', "\\%").replace('_', "\\_");
-        format!("%\"{}%", escaped)
-    });
+    // Category filter matches ai_category column (case-insensitive)
+    let category_filter = params.category.as_ref().map(|cat| cat.to_lowercase());
+
+    // Virtual folder WHERE clauses — Starred/Trash/Drafts are flag-based, not folder-column based
+    let folder_where = match folder {
+        "Starred" => "m.is_starred = 1 AND m.is_deleted = 0",
+        "Trash" => "m.is_deleted = 1",
+        "Drafts" => "m.is_draft = 1 AND m.is_deleted = 0",
+        // Safe: folder is validated against ALLOWED_FOLDERS above
+        "INBOX" => "m.folder = 'INBOX' AND m.is_deleted = 0",
+        "Sent" => "m.folder = 'Sent' AND m.is_deleted = 0",
+        "Archive" => "m.folder = 'Archive' AND m.is_deleted = 0",
+        _ => "m.folder = 'INBOX' AND m.is_deleted = 0",
+    };
+
+    let select_cols = "m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
+                       m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
+                       m.labels, m.ai_priority_label, m.ai_category";
 
     let (messages, unread, total) = if let Some(ref account_id) = params.account_id {
         // Single-account query
-        let (query, has_cat) = if category_like.is_some() {
-            (
-                "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
-                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                        m.labels, m.ai_priority_label, m.ai_category
-                 FROM messages m
-                 WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_deleted = 0 AND m.labels LIKE ?5
-                 ORDER BY m.date DESC
-                 LIMIT ?3 OFFSET ?4".to_string(),
-                true,
-            )
+        let cat_clause = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?4" } else { "" };
+
+        let query = format!(
+            "SELECT {select_cols} FROM messages m WHERE m.account_id = ?1 AND {folder_where}{cat_clause} ORDER BY m.date DESC LIMIT ?2 OFFSET ?3"
+        );
+        let mut stmt = conn.prepare(&query).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let msgs: Vec<MessageSummary> = if let Some(ref cat) = category_filter {
+            stmt.query_map(rusqlite::params![account_id, limit, offset, cat], MessageSummary::from_row)
         } else {
-            (
-                "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
-                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                        m.labels, m.ai_priority_label, m.ai_category
-                 FROM messages m
-                 WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_deleted = 0
-                 ORDER BY m.date DESC
-                 LIMIT ?3 OFFSET ?4".to_string(),
-                false,
-            )
-        };
-        let mut stmt = conn
-            .prepare(&query)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let msgs: Vec<MessageSummary> = if has_cat {
-            stmt.query_map(rusqlite::params![account_id, folder, limit, offset, &category_like], MessageSummary::from_row)
-        } else {
-            stmt.query_map(rusqlite::params![account_id, folder, limit, offset], MessageSummary::from_row)
+            stmt.query_map(rusqlite::params![account_id, limit, offset], MessageSummary::from_row)
         }
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .filter_map(|r| r.ok())
             .collect();
 
-        let unread: i64 = if has_cat {
+        let count_cat = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?2" } else { "" };
+        let unread: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_read = 0 AND m.is_deleted = 0 AND m.labels LIKE ?3",
-                rusqlite::params![account_id, folder, &category_like],
+                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where} AND m.is_read = 0{count_cat}"),
+                rusqlite::params![account_id, cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_read = 0 AND m.is_deleted = 0",
-                rusqlite::params![account_id, folder],
+                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where} AND m.is_read = 0"),
+                rusqlite::params![account_id],
                 |row| row.get(0),
             ).unwrap_or(0)
         };
 
-        let total: i64 = if has_cat {
+        let total: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_deleted = 0 AND m.labels LIKE ?3",
-                rusqlite::params![account_id, folder, &category_like],
+                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where}{count_cat}"),
+                rusqlite::params![account_id, cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND m.folder = ?2 AND m.is_deleted = 0",
-                rusqlite::params![account_id, folder],
+                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where}"),
+                rusqlite::params![account_id],
                 |row| row.get(0),
             ).unwrap_or(0)
         };
@@ -118,76 +115,47 @@ pub async fn list_messages(
         (msgs, unread, total)
     } else {
         // Unified inbox: messages from all active accounts, merged by date DESC
-        let (query, has_cat) = if category_like.is_some() {
-            (
-                "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
-                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                        m.labels, m.ai_priority_label, m.ai_category
-                 FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0 AND m.labels LIKE ?4
-                 ORDER BY m.date DESC
-                 LIMIT ?2 OFFSET ?3".to_string(),
-                true,
-            )
-        } else {
-            (
-                "SELECT m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
-                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                        m.labels, m.ai_priority_label, m.ai_category
-                 FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0
-                 ORDER BY m.date DESC
-                 LIMIT ?2 OFFSET ?3".to_string(),
-                false,
-            )
-        };
-        let mut stmt = conn
-            .prepare(&query)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let unified_where = format!("a.is_active = 1 AND {folder_where}");
+        let cat_clause = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?3" } else { "" };
 
-        let msgs: Vec<MessageSummary> = if has_cat {
-            stmt.query_map(rusqlite::params![folder, limit, offset, &category_like], MessageSummary::from_row)
+        let query = format!(
+            "SELECT {select_cols} FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}{cat_clause} ORDER BY m.date DESC LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = conn.prepare(&query).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let msgs: Vec<MessageSummary> = if let Some(ref cat) = category_filter {
+            stmt.query_map(rusqlite::params![limit, offset, cat], MessageSummary::from_row)
         } else {
-            stmt.query_map(rusqlite::params![folder, limit, offset], MessageSummary::from_row)
+            stmt.query_map(rusqlite::params![limit, offset], MessageSummary::from_row)
         }
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .filter_map(|r| r.ok())
             .collect();
 
-        let unread: i64 = if has_cat {
+        let count_cat = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?1" } else { "" };
+        let unread: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_read = 0 AND m.is_deleted = 0 AND m.labels LIKE ?2",
-                rusqlite::params![folder, &category_like],
+                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where} AND m.is_read = 0{count_cat}"),
+                rusqlite::params![cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_read = 0 AND m.is_deleted = 0",
-                rusqlite::params![folder],
+                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where} AND m.is_read = 0"),
+                [],
                 |row| row.get(0),
             ).unwrap_or(0)
         };
 
-        let total: i64 = if has_cat {
+        let total: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0 AND m.labels LIKE ?2",
-                rusqlite::params![folder, &category_like],
+                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}{count_cat}"),
+                rusqlite::params![cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                "SELECT COUNT(*) FROM messages m
-                 JOIN accounts a ON m.account_id = a.id
-                 WHERE a.is_active = 1 AND m.folder = ?1 AND m.is_deleted = 0",
-                rusqlite::params![folder],
+                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}"),
+                [],
                 |row| row.get(0),
             ).unwrap_or(0)
         };
