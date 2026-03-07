@@ -326,7 +326,7 @@
         <span class="flex-1"></span>
       {/if}
       <button
-        class="px-3 py-1.5 text-sm"
+        class="px-3 py-1.5 text-sm compose-secondary-btn"
         style="color: var(--iris-color-text-muted);"
         onclick={handleSaveDraft}
         disabled={sending}
@@ -336,7 +336,7 @@
       <!-- AI Assist dropdown -->
       <div class="relative">
         <button
-          class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50"
+          class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn"
           style="color: var(--iris-color-text-muted);"
           onclick={() => (showAiMenu = !showAiMenu)}
           disabled={aiAssisting || sending || !body.trim()}
@@ -357,7 +357,7 @@
         {/if}
       </div>
       <button
-        class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors"
+        class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors compose-send-btn"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
         onclick={handleSend}
         disabled={sending}
@@ -374,5 +374,25 @@
 <style>
   .compose-dropdown-item:hover {
     background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent);
+  }
+
+  /* Send button */
+  .compose-send-btn {
+    transition: all 120ms ease;
+  }
+  .compose-send-btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+  }
+  .compose-send-btn:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  /* Secondary buttons (Save Draft, AI) */
+  .compose-secondary-btn {
+    transition: all 120ms ease;
+  }
+  .compose-secondary-btn:hover:not(:disabled) {
+    background: var(--iris-color-bg-surface);
+    color: var(--iris-color-text);
   }
 </style>
