@@ -17,6 +17,10 @@
   let memoriesUrl = $state('');
   let memoriesConnected = $state(false);
 
+  // AI reprocess
+  let reprocessing = $state(false);
+  let reprocessMessage = $state('');
+
   // Provider API keys (masked display)
   let anthropicKey = $state('');
   let anthropicModel = $state('');
@@ -110,6 +114,21 @@
   async function toggleAi() {
     aiEnabled = !aiEnabled;
     await saveAiConfig();
+  }
+
+  async function reprocessUntagged() {
+    reprocessing = true;
+    reprocessMessage = '';
+    try {
+      const result = await api.ai.reprocess();
+      reprocessMessage = result.enqueued > 0
+        ? `Enqueued ${result.enqueued} message${result.enqueued === 1 ? '' : 's'} for AI classification.`
+        : 'All messages are already tagged.';
+    } catch {
+      reprocessMessage = 'Failed to trigger reprocessing.';
+    } finally {
+      reprocessing = false;
+    }
   }
 
   async function loadApiKeys() {
@@ -319,6 +338,21 @@
           >
             {aiTesting ? 'Testing...' : 'Test Providers'}
           </button>
+        </div>
+
+        <!-- Reprocess untagged -->
+        <div class="flex items-center gap-3">
+          <button
+            class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
+            style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+            onclick={reprocessUntagged}
+            disabled={reprocessing}
+          >
+            {reprocessing ? 'Processing...' : 'Reprocess untagged'}
+          </button>
+          {#if reprocessMessage}
+            <span class="text-xs" style="color: var(--iris-color-text-muted);">{reprocessMessage}</span>
+          {/if}
         </div>
 
         <!-- Memories (Semantic Search) status -->

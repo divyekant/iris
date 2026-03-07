@@ -120,6 +120,7 @@ export const api = {
     chatHistory: (sessionId: string) => request<any[]>(`/api/ai/chat/${sessionId}`),
     chatConfirm: (data: { session_id: string; message_id: string }) =>
       request<{ executed: boolean; updated: number }>('/api/ai/chat/confirm', { method: 'POST', body: JSON.stringify(data) }),
+    reprocess: () => request<{ enqueued: number }>('/api/ai/reprocess', { method: 'POST' }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
