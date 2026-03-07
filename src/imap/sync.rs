@@ -157,6 +157,25 @@ impl SyncEngine {
 }
 
 // ---------------------------------------------------------------------------
+// RFC 2047 encoded-word decoding
+// ---------------------------------------------------------------------------
+
+/// Decode RFC 2047 encoded-words (e.g. `=?UTF-8?Q?Hello?=`) using mailparse.
+/// Falls back to lossy UTF-8 conversion if decoding fails.
+fn decode_rfc2047(raw: &[u8]) -> String {
+    let lossy = String::from_utf8_lossy(raw).to_string();
+    if !lossy.contains("=?") {
+        return lossy;
+    }
+    // Build a fake header line so mailparse can decode the encoded-words
+    let header_line = format!("Subject: {}", lossy);
+    match mailparse::parse_header(header_line.as_bytes()) {
+        Ok((header, _)) => header.get_value(),
+        Err(_) => lossy,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parse a single FETCH response into an InsertMessage
 // ---------------------------------------------------------------------------
 
@@ -182,7 +201,7 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
                     let name = addr
                         .name
                         .as_ref()
-                        .map(|n| String::from_utf8_lossy(n).to_string());
+                        .map(|n| decode_rfc2047(n));
                     (Some(email), name)
                 })
             })
@@ -219,11 +238,11 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         })
     });
 
-    // Extract subject
+    // Extract subject (decode RFC 2047 encoded-words)
     let subject = envelope.and_then(|env| {
         env.subject
             .as_ref()
-            .map(|s| String::from_utf8_lossy(s).to_string())
+            .map(|s| decode_rfc2047(s))
     });
 
     // Extract message-id
@@ -611,6 +630,42 @@ mod tests {
             thread_id,
             Some("standalone@example.com".to_string()),
             "should fall back to own message-id with brackets stripped"
+        );
+    }
+
+    #[test]
+    fn test_decode_rfc2047_quoted_printable() {
+        let encoded = b"=?UTF-8?Q?BadBo_1.0_Making_History_=F0=9F=90=B0?=";
+        let decoded = decode_rfc2047(encoded);
+        assert!(
+            decoded.contains("BadBo 1.0 Making History"),
+            "should decode QP encoded subject, got: {}",
+            decoded
+        );
+    }
+
+    #[test]
+    fn test_decode_rfc2047_plain_ascii() {
+        let plain = b"Hello World";
+        assert_eq!(decode_rfc2047(plain), "Hello World");
+    }
+
+    #[test]
+    fn test_decode_rfc2047_base64() {
+        // "Hello" in UTF-8 Base64
+        let encoded = b"=?UTF-8?B?SGVsbG8=?=";
+        let decoded = decode_rfc2047(encoded);
+        assert_eq!(decoded, "Hello", "should decode Base64 encoded-word");
+    }
+
+    #[test]
+    fn test_decode_rfc2047_multiple_encoded_words() {
+        let encoded = b"=?UTF-8?Q?Part_One?= =?UTF-8?Q?_Part_Two?=";
+        let decoded = decode_rfc2047(encoded);
+        assert!(
+            decoded.contains("Part One") && decoded.contains("Part Two"),
+            "should decode multiple encoded-words, got: {}",
+            decoded
         );
     }
 }
