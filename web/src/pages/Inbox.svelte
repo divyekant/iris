@@ -7,6 +7,7 @@
   import ComposeModal from '../components/compose/ComposeModal.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import SkeletonRow from '../components/SkeletonRow.svelte';
+  import { RefreshCw } from 'lucide-svelte';
 
   let messages = $state<any[]>([]);
   let unreadCount = $state(0);
@@ -18,6 +19,15 @@
   let activeCategory = $state('');
   let selectedIds = $state(new Set<string>());
   let filterAccountId = $state('');
+  let page = $state(1);
+  const PAGE_SIZE = 25;
+  let refreshing = $state(false);
+
+  async function handleRefresh() {
+    refreshing = true;
+    await loadMessages();
+    refreshing = false;
+  }
 
   const categories = [
     { id: '', label: 'All' },
@@ -34,6 +44,8 @@
       const res = await api.messages.list({
         account_id: filterAccountId || undefined,
         category: activeCategory || undefined,
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
       });
       messages = res.messages;
       unreadCount = res.unread_count;
@@ -58,6 +70,7 @@
   function onAccountSwitch(e: Event) {
     const detail = (e as CustomEvent).detail;
     filterAccountId = detail.accountId || '';
+    page = 1;
     loadMessages();
   }
 
@@ -78,13 +91,24 @@
     }
   }
 
+  async function handleRowAction(id: string, action: string) {
+    try {
+      await api.messages.batch([id], action);
+      await loadMessages();
+    } catch (e: any) {
+      error = e.message || 'Action failed';
+    }
+  }
+
   $effect(() => {
     loadMessages();
     wsClient.connect();
     const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
+    const pollInterval = setInterval(() => { loadMessages(); }, 60000);
     window.addEventListener('account-switch', onAccountSwitch);
     window.addEventListener('open-compose', onOpenCompose);
     return () => {
+      clearInterval(pollInterval);
       offNewEmail();
       window.removeEventListener('account-switch', onAccountSwitch);
       window.removeEventListener('open-compose', onOpenCompose);
@@ -107,6 +131,15 @@
         {total} message{total === 1 ? '' : 's'}
       </span>
     {/if}
+    <button
+      class="p-1.5 rounded-lg transition-colors"
+      style="color: var(--iris-color-text-faint);"
+      onclick={handleRefresh}
+      title="Refresh"
+      disabled={refreshing}
+    >
+      <RefreshCw size={14} class={refreshing ? 'animate-spin' : ''} />
+    </button>
   </div>
 
   <!-- Category tabs -->
@@ -117,7 +150,7 @@
         style={activeCategory === cat.id
           ? 'border-color: var(--iris-color-primary); color: var(--iris-color-primary);'
           : 'border-color: transparent; color: var(--iris-color-text-muted);'}
-        onclick={() => { activeCategory = cat.id; loadMessages(); }}
+        onclick={() => { activeCategory = cat.id; page = 1; loadMessages(); }}
       >
         {cat.label}
       </button>
@@ -161,9 +194,29 @@
     {:else if messages.length === 0}
       <EmptyState title="Inbox zero" subtitle="You've read everything. Time to go outside." />
     {:else}
-      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds />
+      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} />
     {/if}
   </div>
+
+  {#if !loading && total > PAGE_SIZE}
+    <div class="flex items-center justify-center gap-4 py-3 border-t" style="border-color: var(--iris-color-border-subtle);">
+      <button
+        class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-30"
+        style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted); border: 1px solid var(--iris-color-border);"
+        disabled={page <= 1}
+        onclick={() => { page--; loadMessages(); }}
+      >Previous</button>
+      <span class="text-xs" style="color: var(--iris-color-text-faint);">
+        {(page - 1) * PAGE_SIZE + 1}&ndash;{Math.min(page * PAGE_SIZE, total)} of {total}
+      </span>
+      <button
+        class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-30"
+        style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted); border: 1px solid var(--iris-color-border);"
+        disabled={page * PAGE_SIZE >= total}
+        onclick={() => { page++; loadMessages(); }}
+      >Next</button>
+    </div>
+  {/if}
 </div>
 
 {#if showCompose}
