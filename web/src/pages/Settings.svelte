@@ -17,6 +17,9 @@
   let memoriesUrl = $state('');
   let memoriesKey = $state('');
   let memoriesConnected = $state(false);
+  let memoriesSaving = $state(false);
+  let memoriesTesting = $state(false);
+  let memoriesStatus = $state<string | null>(null);
 
   // AI reprocess
   let reprocessing = $state(false);
@@ -102,8 +105,6 @@
       if (anthropicModel) data.anthropic_model = anthropicModel;
       if (openaiKey) data.openai_api_key = openaiKey;
       if (openaiModel) data.openai_model = openaiModel;
-      if (memoriesUrl) data.memories_url = memoriesUrl;
-      if (memoriesKey) data.memories_api_key = memoriesKey;
 
       const result = await api.ai.setConfig(data);
       aiConnected = result.connected;
@@ -111,14 +112,45 @@
       // Clear key fields after save (stored server-side)
       anthropicKey = '';
       openaiKey = '';
-      memoriesKey = '';
-      // Update URL from response
-      memoriesUrl = result.memories_url || memoriesUrl;
-      memoriesConnected = result.memories_connected;
     } catch {
       // Silently fail
     } finally {
       aiSaving = false;
+    }
+  }
+
+  async function saveMemoriesConfig() {
+    memoriesSaving = true;
+    memoriesStatus = null;
+    try {
+      const data: any = { memories_url: memoriesUrl };
+      if (memoriesKey) data.memories_api_key = memoriesKey;
+      const result = await api.ai.setConfig(data);
+      memoriesUrl = result.memories_url || memoriesUrl;
+      memoriesConnected = result.memories_connected;
+      memoriesKey = '';
+      memoriesStatus = memoriesConnected ? 'Saved & connected' : 'Saved (not reachable)';
+    } catch {
+      memoriesStatus = 'Save failed';
+    } finally {
+      memoriesSaving = false;
+      setTimeout(() => { memoriesStatus = null; }, 3000);
+    }
+  }
+
+  async function testMemoriesConnection() {
+    memoriesTesting = true;
+    memoriesStatus = null;
+    try {
+      const result = await api.ai.getConfig();
+      memoriesConnected = result.memories_connected;
+      memoriesStatus = memoriesConnected ? 'Connected' : 'Not reachable';
+    } catch {
+      memoriesConnected = false;
+      memoriesStatus = 'Test failed';
+    } finally {
+      memoriesTesting = false;
+      setTimeout(() => { memoriesStatus = null; }, 3000);
     }
   }
 
@@ -420,9 +452,30 @@
             type="password"
             bind:value={memoriesKey}
             placeholder="API key (optional)"
-            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
             style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
           />
+          <div class="flex items-center gap-2">
+            <button
+              class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={saveMemoriesConfig}
+              disabled={memoriesSaving}
+            >
+              {memoriesSaving ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors disabled:opacity-50"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={testMemoriesConnection}
+              disabled={memoriesTesting}
+            >
+              {memoriesTesting ? 'Testing...' : 'Test Connection'}
+            </button>
+            {#if memoriesStatus}
+              <span class="text-xs" style="color: {memoriesStatus.includes('fail') || memoriesStatus.includes('not') ? 'var(--iris-color-error)' : 'var(--iris-color-success)'};">{memoriesStatus}</span>
+            {/if}
+          </div>
         </div>
       </div>
     </section>

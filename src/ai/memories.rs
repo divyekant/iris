@@ -102,9 +102,22 @@ impl MemoriesClient {
         cfg.api_key = api_key;
     }
 
+    /// Resolve the effective base URL for internal requests.
+    /// When running inside Docker, localhost URLs can't reach the host,
+    /// so we substitute host.docker.internal automatically.
+    fn effective_url(base: &str) -> String {
+        if std::env::var("BIND_ALL").is_ok() {
+            base.replace("://localhost", "://host.docker.internal")
+                .replace("://127.0.0.1", "://host.docker.internal")
+        } else {
+            base.to_string()
+        }
+    }
+
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let cfg = self.config.read().unwrap();
-        let url = format!("{}{}", cfg.base_url, path);
+        let base = Self::effective_url(&cfg.base_url);
+        let url = format!("{}{}", base, path);
         let mut req = self.client.request(method, &url);
         if let Some(ref key) = cfg.api_key {
             req = req.header("X-API-Key", key);
