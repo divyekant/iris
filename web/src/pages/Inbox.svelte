@@ -7,6 +7,7 @@
   import ComposeModal from '../components/compose/ComposeModal.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import SkeletonRow from '../components/SkeletonRow.svelte';
+  import Toast from '../components/Toast.svelte';
   import { RefreshCw } from 'lucide-svelte';
 
   let messages = $state<any[]>([]);
@@ -22,6 +23,8 @@
   let page = $state(1);
   const PAGE_SIZE = 25;
   let refreshing = $state(false);
+  let toastMessage = $state('');
+  let toastVisible = $state(false);
 
   async function handleRefresh() {
     refreshing = true;
@@ -103,7 +106,11 @@
   $effect(() => {
     loadMessages();
     wsClient.connect();
-    const offNewEmail = wsClient.on('NewEmail', () => { loadMessages(); });
+    const offNewEmail = wsClient.on('NewEmail', (evt: any) => {
+      toastMessage = `New email received`;
+      toastVisible = true;
+      loadMessages();
+    });
     const pollInterval = setInterval(() => { loadMessages(); }, 60000);
     window.addEventListener('account-switch', onAccountSwitch);
     window.addEventListener('open-compose', onOpenCompose);
@@ -218,6 +225,8 @@
     </div>
   {/if}
 </div>
+
+<Toast message={toastMessage} visible={toastVisible} ondismiss={() => toastVisible = false} />
 
 {#if showCompose}
   <ComposeModal

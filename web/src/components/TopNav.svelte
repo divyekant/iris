@@ -180,7 +180,15 @@
           ? 'background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-primary);'
           : 'color: var(--iris-color-text-muted);'}
         onclick={() => navigate(item.path)}
-      >{item.label}</button>
+      >
+        {item.label}
+        {#if item.icon === 'inbox' && unreadCount > 0}
+          <span
+            class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold rounded-full leading-none"
+            style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+          >{unreadCount > 99 ? '99+' : unreadCount}</span>
+        {/if}
+      </button>
     {/each}
 
     <!-- Overflow Menu -->

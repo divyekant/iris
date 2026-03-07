@@ -20,6 +20,7 @@
 
   $effect(() => {
     loadAccounts();
+    loadMessages();
     const unsub1 = wsClient.on('SyncStatus', (evt: any) => {
       syncStatus = evt.data?.message || 'Syncing...';
       syncError = false;
@@ -29,7 +30,10 @@
       syncError = false;
       loadMessages();
     });
-    return () => { unsub1(); unsub2(); };
+    const unsub3 = wsClient.on('NewEmail', () => {
+      loadMessages();
+    });
+    return () => { unsub1(); unsub2(); unsub3(); };
   });
 
   async function loadAccounts() {
