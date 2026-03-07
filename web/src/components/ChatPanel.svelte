@@ -10,6 +10,31 @@
   let error = $state('');
   let messagesContainer: HTMLDivElement | undefined = $state();
 
+  let chatWidth = $state(parseInt(localStorage.getItem('iris-chat-width') || '320'));
+  let resizing = $state(false);
+
+  function startResize(e: MouseEvent) {
+    e.preventDefault();
+    resizing = true;
+    const startX = e.clientX;
+    const startWidth = chatWidth;
+
+    function onMouseMove(e: MouseEvent) {
+      const delta = startX - e.clientX; // drag left = wider
+      chatWidth = Math.min(600, Math.max(280, startWidth + delta));
+    }
+
+    function onMouseUp() {
+      resizing = false;
+      localStorage.setItem('iris-chat-width', String(chatWidth));
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    }
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }
+
   const suggestions = [
     { label: 'Briefing', prompt: 'Give me a briefing of my important unread emails' },
     { label: 'Action items', prompt: 'What action items do I have from recent emails?' },
@@ -82,7 +107,14 @@
 </script>
 
 {#if open}
-  <div class="w-80 border-l flex flex-col h-full" style="background: var(--iris-color-bg-elevated); border-color: var(--iris-color-border);">
+  <div class="border-l flex flex-col h-full relative" style="width: {chatWidth}px; background: var(--iris-color-bg-elevated); border-color: var(--iris-color-border);">
+    <!-- Resize handle -->
+    <div
+      class="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[var(--iris-color-primary)] transition-colors z-10"
+      style="background: {resizing ? 'var(--iris-color-primary)' : 'transparent'};"
+      onmousedown={startResize}
+    ></div>
+
     <!-- Header -->
     <div class="px-4 py-3 border-b flex items-center justify-between" style="border-color: var(--iris-color-border);">
       <div class="flex items-center gap-1.5">
