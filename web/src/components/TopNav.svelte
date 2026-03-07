@@ -45,6 +45,7 @@
   const navItems = [
     { path: '/', label: 'Inbox', icon: 'inbox' },
     { path: '/search', label: 'Search', icon: 'search' },
+    { path: '/sent', label: 'Sent', icon: 'send' },
     { path: '/drafts', label: 'Drafts', icon: 'file-text' },
   ];
 
