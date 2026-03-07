@@ -5,7 +5,7 @@
     from_address: string;
     subject?: string;
     snippet?: string;
-    date: string;
+    date: number | string;
     is_read: boolean;
     has_attachments?: boolean;
     ai_priority_label?: string;
@@ -23,7 +23,8 @@
   let subjectDisplay = $derived(message.subject || '(no subject)');
 
   let formattedDate = $derived.by(() => {
-    const msgDate = new Date(message.date);
+    const raw = message.date;
+    const msgDate = new Date(typeof raw === 'number' && raw < 1e12 ? raw * 1000 : raw);
     const now = new Date();
     const isToday =
       msgDate.getFullYear() === now.getFullYear() &&
