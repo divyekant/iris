@@ -1,52 +1,60 @@
 <script lang="ts">
-  import DOMPurify from 'dompurify';
-
   let { html, text }: { html?: string | null; text?: string | null } = $props();
 
   let iframeEl: HTMLIFrameElement;
 
-  function getSanitizedContent(): string {
-    if (html) {
-      return DOMPurify.sanitize(html, {
-        ALLOWED_TAGS: [
-          'p', 'br', 'b', 'i', 'u', 'strong', 'em', 'a', 'ul', 'ol', 'li',
-          'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code',
-          'table', 'thead', 'tbody', 'tr', 'th', 'td', 'div', 'span', 'img',
-          'hr', 'sub', 'sup', 'center', 'font', 's', 'strike',
-        ],
-        ALLOWED_ATTR: [
-          'href', 'src', 'alt', 'target', 'width', 'height',
-          'colspan', 'rowspan', 'style',
-          'align', 'valign', 'bgcolor', 'color', 'size', 'face',
-          'border', 'cellpadding', 'cellspacing',
-        ],
-        ALLOW_DATA_ATTR: false,
-      });
-    }
-    if (text) {
-      const escaped = text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-      return `<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;">${escaped}</pre>`;
-    }
-    return '<p style="color:#999;">No content</p>';
+  function isDarkMode(): boolean {
+    return !document.documentElement.hasAttribute('data-brand');
+  }
+
+  function sanitizeHtml(raw: string): string {
+    // Security model: the iframe sandbox (no allow-scripts, no allow-forms,
+    // no allow-top-navigation) is the primary boundary. We strip <script>,
+    // event handlers, and dangerous tags as defense-in-depth, but preserve
+    // all CSS (<style>, @font-face, url(), class selectors) since email
+    // layout depends on it. DOMPurify's CSS sanitizer is too aggressive —
+    // it strips url() in @font-face, breaking marketing email layouts.
+    return raw
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<(iframe|object|embed|applet|form|input|textarea|select|button)[\s\S]*?<\/\1>/gi, '')
+      .replace(/<(iframe|object|embed|applet|form|input|textarea|select|button)\b[^>]*\/?>/gi, '')
+      .replace(/\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)/gi, '')
+      .replace(/<meta\s+http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '')
+      .replace(/\s+(width|height)\s*=\s*["']?auto["']?/gi, '');
+  }
+
+  function getTextContent(raw: string): string {
+    const escaped = raw
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    return `<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;">${escaped}</pre>`;
   }
 
   $effect(() => {
     if (iframeEl) {
       const doc = iframeEl.contentDocument;
       if (doc) {
+        const dark = isDarkMode();
+        const bg = dark ? '#1a1a1a' : '#fff';
+        const fg = dark ? '#e0e0e0' : '#333';
+        // Base styles: only background/color for theme + img overflow safety
+        const baseStyle = `<style>body{margin:0;padding:8px;color:${fg};background:${bg};}img{max-width:100%;height:auto;}</style>`;
+
+        let content: string;
+        if (html) {
+          // WHOLE_DOCUMENT returns full <!DOCTYPE><html>…</html>
+          // Inject our base styles at the start of <head>
+          const sanitized = sanitizeHtml(html);
+          content = sanitized.replace(/<head>/i, `<head>${baseStyle}`);
+        } else if (text) {
+          content = `<!DOCTYPE html><html><head>${baseStyle}</head><body>${getTextContent(text)}</body></html>`;
+        } else {
+          content = `<!DOCTYPE html><html><head>${baseStyle}</head><body><p style="color:#999;">No content</p></body></html>`;
+        }
+
         doc.open();
-        doc.write(`<!DOCTYPE html>
-<html><head><style>
-body{margin:0;padding:8px;font-family:-apple-system,system-ui,sans-serif;font-size:14px;line-height:1.6;color:#333;background:#fff;}
-a{color:#2563eb;}
-img{max-width:100%;height:auto;}
-blockquote{margin:8px 0;padding-left:12px;border-left:3px solid #ddd;color:#666;}
-table{border-collapse:collapse;}
-td,th{padding:4px 8px;}
-</style></head><body>${getSanitizedContent()}</body></html>`);
+        doc.write(content);
         doc.close();
         setTimeout(() => {
           if (iframeEl && doc.body) {
