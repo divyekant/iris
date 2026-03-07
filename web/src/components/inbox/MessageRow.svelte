@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Paperclip } from 'lucide-svelte';
+
   interface Message {
     id: string;
     from_name?: string;
@@ -93,7 +95,7 @@
           </span>
         {/if}
         {#if message.has_attachments}
-          <span title="Has attachments">&#128206;</span>
+          <span title="Has attachments"><Paperclip size={12} /></span>
         {/if}
         {formattedDate}
       </span>

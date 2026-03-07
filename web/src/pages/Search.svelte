@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import { push } from 'svelte-spa-router';
+  import { ArrowLeft, Paperclip } from 'lucide-svelte';
   import EmptyState from '../components/EmptyState.svelte';
 
   let searchQuery = $state('');
@@ -93,7 +94,7 @@
         style="color: var(--iris-color-text-faint);"
         onclick={() => push('/')}
         title="Back to inbox"
-      >&larr;</button>
+      ><ArrowLeft size={16} /></button>
       <input
         type="text"
         bind:value={searchQuery}
@@ -164,7 +165,7 @@
                 </span>
                 <span class="flex-shrink-0 text-xs ml-auto" style="color: var(--iris-color-text-faint);">
                   {#if result.has_attachments}
-                    <span class="mr-1.5" title="Has attachments">&#128206;</span>
+                    <span class="mr-1.5" title="Has attachments"><Paperclip size={12} /></span>
                   {/if}
                   {#if result.date}
                     {formatDate(result.date)}

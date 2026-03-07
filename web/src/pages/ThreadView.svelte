@@ -2,6 +2,7 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft } from 'lucide-svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import ComposeModal from '../components/compose/ComposeModal.svelte';
 
@@ -155,7 +156,7 @@
       onclick={() => push('/')}
       title="Back to inbox"
     >
-      &larr;
+      <ArrowLeft size={16} />
     </button>
     {#if thread}
       <div class="flex-1 min-w-0">
@@ -170,22 +171,22 @@
           class="p-2 transition-colors thread-action-btn star-btn"
           onclick={() => handleThreadAction('star')}
           title="Star"
-        >&#9734;</button>
+        ><Star size={16} /></button>
         <button
           class="p-2 transition-colors thread-action-btn"
           onclick={() => handleThreadAction('archive')}
           title="Archive"
-        >&#128230;</button>
+        ><Archive size={16} /></button>
         <button
           class="p-2 transition-colors thread-action-btn"
           onclick={() => handleThreadAction('mark_unread')}
           title="Mark unread"
-        >&#9993;</button>
+        ><MailOpen size={16} /></button>
         <button
           class="p-2 transition-colors thread-action-btn delete-btn"
           onclick={() => handleThreadAction('delete')}
           title="Delete"
-        >&#128465;</button>
+        ><Trash2 size={16} /></button>
       </div>
     {/if}
   </div>
@@ -198,7 +199,7 @@
         style="color: var(--iris-color-primary);"
         onclick={toggleSummary}
       >
-        <span class="text-[10px]">{summaryOpen ? '\u25BE' : '\u25B8'}</span> &#10024; AI Summary
+        <span class="text-[10px]">{summaryOpen ? '\u25BE' : '\u25B8'}</span> <Sparkles size={14} /> AI Summary
       </button>
       {#if summaryOpen}
         {#if summaryLoading}
