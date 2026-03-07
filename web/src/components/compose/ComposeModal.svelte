@@ -169,7 +169,8 @@
       onsent?.();
       onclose();
     } catch (e: any) {
-      error = e.message || 'Failed to send';
+      const msg = e.message || 'Failed to send';
+      error = msg.includes('502') ? 'Send failed — check account connection in Settings.' : msg;
     } finally {
       sending = false;
     }
