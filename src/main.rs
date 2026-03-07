@@ -1,4 +1,4 @@
-use iris_server::{ai, build_app, config::Config, db, jobs, ws, AppState};
+use iris_server::{ai, auth, build_app, config::Config, db, imap, jobs, models, ws, AppState};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -113,6 +113,59 @@ async fn main() {
         config.job_cleanup_days,
     ));
     tokio::spawn(worker.run());
+
+    // Spawn IMAP sync + IDLE for all existing accounts on startup
+    {
+        let conn = state.db.get().expect("DB connection for startup sync");
+        let accounts = models::account::Account::list(&conn);
+        drop(conn); // Release connection before async work
+        for account in accounts {
+            let (Some(imap_host), Some(imap_port)) = (account.imap_host.clone(), account.imap_port) else {
+                continue;
+            };
+            let state_clone = state.clone();
+            let acct_id = account.id.clone();
+            let email = account.email.clone();
+            tokio::spawn(async move {
+                // Refresh OAuth token if needed
+                let token = match auth::refresh::ensure_fresh_token(
+                    &state_clone.db,
+                    &account,
+                    &state_clone.config,
+                ).await {
+                    Ok(Some(t)) => t,
+                    Ok(None) => {
+                        // Password-based account — use stored password
+                        // (not yet implemented for startup sync)
+                        tracing::warn!(account_id = %acct_id, "Skipping non-OAuth account for startup sync");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(account_id = %acct_id, error = %e, "Failed to refresh token for startup sync");
+                        return;
+                    }
+                };
+
+                let creds = imap::connection::ImapCredentials {
+                    host: imap_host,
+                    port: imap_port as u16,
+                    username: email,
+                    auth: imap::connection::ImapAuth::OAuth2 { access_token: token },
+                };
+
+                tracing::info!(account_id = %acct_id, "Startup: syncing account");
+                let engine = imap::sync::SyncEngine::new(
+                    state_clone.db.clone(),
+                    state_clone.ws_hub.clone(),
+                );
+                if let Err(e) = engine.initial_sync(&acct_id, &creds).await {
+                    tracing::error!(account_id = %acct_id, error = %e, "Startup sync failed");
+                }
+                // Start IDLE listener for real-time push
+                imap::idle::spawn_idle_listener(acct_id, creds, state_clone.db.clone(), state_clone.ws_hub.clone());
+            });
+        }
+    }
 
     let app = build_app(state);
 
