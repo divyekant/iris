@@ -12,11 +12,13 @@
           'p', 'br', 'b', 'i', 'u', 'strong', 'em', 'a', 'ul', 'ol', 'li',
           'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'code',
           'table', 'thead', 'tbody', 'tr', 'th', 'td', 'div', 'span', 'img',
-          'hr', 'sub', 'sup',
+          'hr', 'sub', 'sup', 'center', 'font', 's', 'strike',
         ],
         ALLOWED_ATTR: [
           'href', 'src', 'alt', 'target', 'width', 'height',
-          'colspan', 'rowspan',
+          'colspan', 'rowspan', 'style',
+          'align', 'valign', 'bgcolor', 'color', 'size', 'face',
+          'border', 'cellpadding', 'cellspacing',
         ],
         ALLOW_DATA_ATTR: false,
       });
@@ -38,7 +40,7 @@
         doc.open();
         doc.write(`<!DOCTYPE html>
 <html><head><style>
-body{margin:0;padding:8px;font-family:-apple-system,system-ui,sans-serif;font-size:14px;line-height:1.6;color:#333;}
+body{margin:0;padding:8px;font-family:-apple-system,system-ui,sans-serif;font-size:14px;line-height:1.6;color:#333;background:#fff;}
 a{color:#2563eb;}
 img{max-width:100%;height:auto;}
 blockquote{margin:8px 0;padding-left:12px;border-left:3px solid #ddd;color:#666;}
