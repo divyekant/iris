@@ -60,7 +60,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="group relative w-full text-left px-4 py-3 border-b transition-colors flex items-start gap-3 cursor-pointer"
+  class="group relative w-full text-left px-4 py-3 border-b transition-colors flex items-center gap-2 cursor-pointer"
   style="border-color: var(--iris-color-border-subtle); {selected ? 'background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);' : ''}"
   role="button"
   tabindex="0"
@@ -68,7 +68,7 @@
   onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onclick(message.id); } }}
 >
   <!-- Checkbox -->
-  <div class="pt-1 flex-shrink-0">
+  <div class="flex-shrink-0">
     <input
       type="checkbox"
       checked={selected}
@@ -79,9 +79,9 @@
   </div>
 
   <!-- Unread indicator + priority badge -->
-  <div class="pt-1.5 w-3 flex-shrink-0">
+  <div class="w-2.5 flex-shrink-0 flex items-center justify-center">
     {#if !message.is_read}
-      <div class="w-2.5 h-2.5 rounded-full" style="background: var(--iris-color-unread);"></div>
+      <div class="w-2 h-2 rounded-full" style="background: var(--iris-color-unread);"></div>
     {:else if priorityStyle}
       <div class="w-2 h-2 rounded-full" style={priorityStyle} title={message.ai_priority_label}></div>
     {/if}
