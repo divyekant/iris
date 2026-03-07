@@ -28,6 +28,8 @@ pub struct SetAiConfigRequest {
     pub anthropic_model: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_model: Option<String>,
+    pub memories_url: Option<String>,
+    pub memories_api_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,7 +74,7 @@ pub async fn get_ai_config(
     Ok(Json(AiConfigResponse {
         enabled,
         providers,
-        memories_url: state.memories.base_url.clone(),
+        memories_url: state.memories.base_url(),
         memories_connected,
         ollama_url,
         model,
@@ -108,6 +110,21 @@ pub async fn set_ai_config(
         if let Some(ref model) = input.openai_model {
             set_config_value(&conn, "ai_model_openai", model)?;
         }
+        if let Some(ref url) = input.memories_url {
+            set_config_value(&conn, "memories_url", url)?;
+        }
+        if let Some(ref key) = input.memories_api_key {
+            set_config_value(&conn, "memories_api_key", key)?;
+        }
+    }
+
+    // Apply memories config change live (no restart needed)
+    if input.memories_url.is_some() || input.memories_api_key.is_some() {
+        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let url = get_config_value(&conn, "memories_url", &state.config.memories_url);
+        let key = get_config_value(&conn, "memories_api_key", "");
+        let key = if key.is_empty() { state.config.memories_api_key.clone() } else { Some(key) };
+        state.memories.update_config(&url, key);
     }
 
     // Re-read to return current state
@@ -126,7 +143,7 @@ pub async fn set_ai_config(
     Ok(Json(AiConfigResponse {
         enabled,
         providers,
-        memories_url: state.memories.base_url.clone(),
+        memories_url: state.memories.base_url(),
         memories_connected,
         ollama_url,
         model,

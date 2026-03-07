@@ -1,12 +1,17 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+struct MemoriesConfig {
+    base_url: String,
+    api_key: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct MemoriesClient {
     client: Client,
-    pub base_url: String,
-    api_key: Option<String>,
+    config: Arc<RwLock<MemoriesConfig>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -80,15 +85,28 @@ impl MemoriesClient {
 
         Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
+            config: Arc::new(RwLock::new(MemoriesConfig {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key,
+            })),
         }
     }
 
+    pub fn base_url(&self) -> String {
+        self.config.read().unwrap().base_url.clone()
+    }
+
+    pub fn update_config(&self, base_url: &str, api_key: Option<String>) {
+        let mut cfg = self.config.write().unwrap();
+        cfg.base_url = base_url.trim_end_matches('/').to_string();
+        cfg.api_key = api_key;
+    }
+
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}{}", self.base_url, path);
+        let cfg = self.config.read().unwrap();
+        let url = format!("{}{}", cfg.base_url, path);
         let mut req = self.client.request(method, &url);
-        if let Some(ref key) = self.api_key {
+        if let Some(ref key) = cfg.api_key {
             req = req.header("X-API-Key", key);
         }
         req
@@ -245,15 +263,17 @@ mod tests {
     #[test]
     fn test_memories_client_new() {
         let client = MemoriesClient::new("http://localhost:8900/", Some("test-key".into()));
-        assert_eq!(client.base_url, "http://localhost:8900");
-        assert_eq!(client.api_key, Some("test-key".into()));
+        assert_eq!(client.base_url(), "http://localhost:8900");
+        let cfg = client.config.read().unwrap();
+        assert_eq!(cfg.api_key, Some("test-key".into()));
     }
 
     #[test]
     fn test_memories_client_no_trailing_slash() {
         let client = MemoriesClient::new("http://localhost:8900", None);
-        assert_eq!(client.base_url, "http://localhost:8900");
-        assert!(client.api_key.is_none());
+        assert_eq!(client.base_url(), "http://localhost:8900");
+        let cfg = client.config.read().unwrap();
+        assert!(cfg.api_key.is_none());
     }
 
     #[test]

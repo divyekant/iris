@@ -108,7 +108,7 @@ export const api = {
   },
   ai: {
     getConfig: () => request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai'),
-    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean; anthropic_api_key?: string; anthropic_model?: string; openai_api_key?: string; openai_model?: string }) =>
+    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean; anthropic_api_key?: string; anthropic_model?: string; openai_api_key?: string; openai_model?: string; memories_url?: string; memories_api_key?: string }) =>
       request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai', {
         method: 'PUT',
         body: JSON.stringify(data),

@@ -15,6 +15,7 @@
   let aiTesting = $state(false);
   let aiSaving = $state(false);
   let memoriesUrl = $state('');
+  let memoriesKey = $state('');
   let memoriesConnected = $state(false);
 
   // AI reprocess
@@ -101,6 +102,8 @@
       if (anthropicModel) data.anthropic_model = anthropicModel;
       if (openaiKey) data.openai_api_key = openaiKey;
       if (openaiModel) data.openai_model = openaiModel;
+      if (memoriesUrl) data.memories_url = memoriesUrl;
+      if (memoriesKey) data.memories_api_key = memoriesKey;
 
       const result = await api.ai.setConfig(data);
       aiConnected = result.connected;
@@ -108,6 +111,10 @@
       // Clear key fields after save (stored server-side)
       anthropicKey = '';
       openaiKey = '';
+      memoriesKey = '';
+      // Update URL from response
+      memoriesUrl = result.memories_url || memoriesUrl;
+      memoriesConnected = result.memories_connected;
     } catch {
       // Silently fail
     } finally {
@@ -206,8 +213,9 @@
         aiEnabled = aiConfig.enabled;
         aiConnected = aiConfig.connected;
         aiProviders = aiConfig.providers || [];
-        memoriesUrl = aiConfig.memories_url;
+        memoriesUrl = aiConfig.memories_url || '';
         memoriesConnected = aiConfig.memories_connected;
+        memoriesKey = '';
       } catch {
         // AI config not available
       }
@@ -389,12 +397,10 @@
           {/if}
         </div>
 
-        <!-- Memories (Semantic Search) status -->
-        <div class="pt-4 border-t" style="border-color: var(--iris-color-border);">
-          <p class="text-sm font-medium mb-1" style="color: var(--iris-color-text);">Semantic Search (Memories)</p>
-          <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">Vector-based search for meaning, not just keywords</p>
-          <div class="flex items-center gap-2">
-            <code class="text-xs px-2 py-1 rounded" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted); font-family: var(--iris-font-mono);">{memoriesUrl}</code>
+        <!-- Memories (Semantic Search) -->
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <div class="flex items-center justify-between mb-0.5">
+            <p class="text-sm font-medium" style="color: var(--iris-color-text);">Semantic Search (Memories)</p>
             <div class="flex items-center gap-1.5">
               <div class="w-2 h-2 rounded-full" style="background: {memoriesConnected ? 'var(--iris-color-success)' : 'var(--iris-color-error)'};"></div>
               <span class="text-xs" style="color: var(--iris-color-text-faint);">
@@ -402,6 +408,21 @@
               </span>
             </div>
           </div>
+          <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">Vector-based search for meaning, not just keywords</p>
+          <input
+            type="text"
+            bind:value={memoriesUrl}
+            placeholder="http://localhost:8900"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
+          <input
+            type="password"
+            bind:value={memoriesKey}
+            placeholder="API key (optional)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
         </div>
       </div>
     </section>
