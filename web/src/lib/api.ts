@@ -53,6 +53,7 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify({ ids, action }),
       }),
+    fixEncoding: () => request<{ fixed: number }>('/api/messages/fix-encoding', { method: 'POST' }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::api::trust;
 use crate::models::message::{self, MessageDetail, MessageSummary};
 use crate::AppState;
+extern crate mailparse;
 
 #[derive(Debug, Serialize)]
 pub struct MessageDetailResponse {
@@ -272,4 +273,81 @@ pub async fn batch_update_messages(
     let updated = message::batch_update(&conn, &id_refs, &req.action);
 
     Ok(Json(BatchUpdateResponse { updated }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct FixEncodingResponse {
+    pub fixed: usize,
+}
+
+/// Re-decode RFC 2047 encoded subjects and from_names from raw_headers.
+/// Fixes messages that were synced before the decode_rfc2047 fix was applied.
+pub async fn fix_encoding(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<FixEncodingResponse>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Find messages with encoded subjects or from_names
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, subject, from_name, raw_headers FROM messages \
+             WHERE raw_headers IS NOT NULL AND (subject LIKE '%=?%' OR from_name LIKE '%=?%')",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let rows: Vec<(String, Option<String>, Option<String>, String)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut fixed = 0usize;
+    for (id, _old_subject, _old_from_name, raw_headers) in &rows {
+        let headers = match mailparse::parse_headers(raw_headers.as_bytes()) {
+            Ok((hdrs, _)) => hdrs,
+            Err(_) => continue,
+        };
+
+        let new_subject = headers.iter().find(|h| h.get_key_ref() == "Subject").map(|h| h.get_value());
+        let new_from_name = headers
+            .iter()
+            .find(|h| h.get_key_ref() == "From")
+            .and_then(|h| {
+                let val = h.get_value();
+                // Extract display name from "Name <email>" format
+                if let Some(pos) = val.rfind('<') {
+                    let name = val[..pos].trim().trim_matches('"').to_string();
+                    if name.is_empty() { None } else { Some(name) }
+                } else {
+                    None
+                }
+            });
+
+        let updated = conn
+            .execute(
+                "UPDATE messages SET subject = COALESCE(?1, subject), from_name = COALESCE(?2, from_name) WHERE id = ?3",
+                rusqlite::params![new_subject, new_from_name, id],
+            )
+            .unwrap_or(0);
+
+        if updated > 0 {
+            fixed += 1;
+        }
+    }
+
+    // Also update the FTS5 index for fixed messages
+    if fixed > 0 {
+        let _ = conn.execute_batch(
+            "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')"
+        );
+    }
+
+    Ok(Json(FixEncodingResponse { fixed }))
 }

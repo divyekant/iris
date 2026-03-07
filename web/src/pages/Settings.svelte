@@ -21,6 +21,10 @@
   let reprocessing = $state(false);
   let reprocessMessage = $state('');
 
+  // Fix encoding
+  let fixingEncoding = $state(false);
+  let fixEncodingMessage = $state('');
+
   // Provider API keys (masked display)
   let anthropicKey = $state('');
   let anthropicModel = $state('');
@@ -128,6 +132,21 @@
       reprocessMessage = 'Failed to trigger reprocessing.';
     } finally {
       reprocessing = false;
+    }
+  }
+
+  async function fixEncoding() {
+    fixingEncoding = true;
+    fixEncodingMessage = '';
+    try {
+      const result = await api.messages.fixEncoding();
+      fixEncodingMessage = result.fixed > 0
+        ? `Fixed ${result.fixed} message${result.fixed === 1 ? '' : 's'} with encoded subjects.`
+        : 'No encoded subjects found.';
+    } catch {
+      fixEncodingMessage = 'Failed to fix encoding.';
+    } finally {
+      fixingEncoding = false;
     }
   }
 
@@ -352,6 +371,21 @@
           </button>
           {#if reprocessMessage}
             <span class="text-xs" style="color: var(--iris-color-text-muted);">{reprocessMessage}</span>
+          {/if}
+        </div>
+
+        <!-- Fix encoded subjects -->
+        <div class="flex items-center gap-3">
+          <button
+            class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
+            style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+            onclick={fixEncoding}
+            disabled={fixingEncoding}
+          >
+            {fixingEncoding ? 'Fixing...' : 'Fix encoded subjects'}
+          </button>
+          {#if fixEncodingMessage}
+            <span class="text-xs" style="color: var(--iris-color-text-muted);">{fixEncodingMessage}</span>
           {/if}
         </div>
 
