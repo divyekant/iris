@@ -10,6 +10,7 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - MEMORIES_URL=http://memories:8900
       - PORT=3000
+      - BIND_ALL=1
     env_file:
       - path: .env
         required: false
@@ -29,7 +30,7 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 5s
       start_period: 15s

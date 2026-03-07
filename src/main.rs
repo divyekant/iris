@@ -169,7 +169,12 @@ async fn main() {
 
     let app = build_app(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let host: [u8; 4] = if std::env::var("BIND_ALL").is_ok() {
+        [0, 0, 0, 0]
+    } else {
+        [127, 0, 0, 1]
+    };
+    let addr = SocketAddr::from((host, config.port));
     tracing::info!("Iris listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
