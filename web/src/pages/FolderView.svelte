@@ -45,6 +45,15 @@
     }
   }
 
+  async function handleRowAction(id: string, action: string) {
+    try {
+      await api.messages.batch([id], action);
+      await loadMessages();
+    } catch (e: any) {
+      error = e.message || 'Action failed';
+    }
+  }
+
   $effect(() => {
     loadMessages();
   });
@@ -105,7 +114,7 @@
     {:else if messages.length === 0}
       <EmptyState title="No messages" subtitle="This folder is empty." />
     {:else}
-      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds />
+      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} />
     {/if}
   </div>
 </div>

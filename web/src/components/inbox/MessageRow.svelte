@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Paperclip } from 'lucide-svelte';
+  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen } from 'lucide-svelte';
 
   interface Message {
     id: string;
@@ -14,11 +14,12 @@
     ai_category?: string;
   }
 
-  let { message, onclick, selected = false, onselect }: {
+  let { message, onclick, selected = false, onselect, onaction }: {
     message: Message;
     onclick: (id: string) => void;
     selected?: boolean;
     onselect?: (id: string, checked: boolean) => void;
+    onaction?: (id: string, action: string) => void;
   } = $props();
 
   let senderDisplay = $derived(message.from_name || message.from_address);
@@ -57,10 +58,14 @@
   }
 </script>
 
-<button
-  class="w-full text-left px-4 py-3 border-b transition-colors flex items-start gap-3"
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  class="group relative w-full text-left px-4 py-3 border-b transition-colors flex items-start gap-3 cursor-pointer"
   style="border-color: var(--iris-color-border-subtle); {selected ? 'background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);' : ''}"
+  role="button"
+  tabindex="0"
   onclick={() => onclick(message.id)}
+  onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onclick(message.id); } }}
 >
   <!-- Checkbox -->
   <div class="pt-1 flex-shrink-0">
@@ -109,4 +114,38 @@
       </div>
     {/if}
   </div>
-</button>
+
+  <!-- Hover quick actions -->
+  <div class="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1 px-2 py-1 rounded-lg"
+       style="background: var(--iris-color-bg-elevated); box-shadow: 0 1px 3px rgba(0,0,0,.15);">
+    <button
+      class="p-1 rounded transition-colors quick-action"
+      style="color: var(--iris-color-text-faint);"
+      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'archive'); }}
+      title="Archive"
+    ><Archive size={14} /></button>
+    <button
+      class="p-1 rounded transition-colors quick-action-delete"
+      style="color: var(--iris-color-text-faint);"
+      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'delete'); }}
+      title="Delete"
+    ><Trash2 size={14} /></button>
+    <button
+      class="p-1 rounded transition-colors quick-action"
+      style="color: var(--iris-color-text-faint);"
+      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, message.is_read ? 'mark_unread' : 'mark_read'); }}
+      title={message.is_read ? 'Mark unread' : 'Mark read'}
+    >{#if message.is_read}<Mail size={14} />{:else}<MailOpen size={14} />{/if}</button>
+    <button
+      class="p-1 rounded transition-colors quick-action"
+      style="color: var(--iris-color-text-faint);"
+      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'star'); }}
+      title="Star"
+    ><Star size={14} /></button>
+  </div>
+</div>
+
+<style>
+  .quick-action:hover { color: var(--iris-color-primary); }
+  .quick-action-delete:hover { color: var(--iris-color-error); }
+</style>

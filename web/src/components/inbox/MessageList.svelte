@@ -1,10 +1,11 @@
 <script lang="ts">
   import MessageRow from './MessageRow.svelte';
 
-  let { messages, onclick, selectedIds = $bindable(new Set<string>()) }: {
+  let { messages, onclick, selectedIds = $bindable(new Set<string>()), onaction }: {
     messages: any[];
     onclick: (id: string) => void;
     selectedIds?: Set<string>;
+    onaction?: (id: string, action: string) => void;
   } = $props();
 
   function handleSelect(id: string, checked: boolean) {
@@ -26,7 +27,7 @@
 {:else}
   <div>
     {#each messages as message (message.id)}
-      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} onselect={handleSelect} />
+      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} onselect={handleSelect} {onaction} />
     {/each}
   </div>
 {/if}
