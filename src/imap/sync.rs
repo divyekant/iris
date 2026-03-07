@@ -319,6 +319,11 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
     // Check for \Draft
     let is_draft = fetch.flags().any(|f| matches!(f, async_imap::types::Flag::Draft));
 
+    // Parse Gmail labels from X-Gmail-Labels header (if present)
+    let labels = raw_headers
+        .as_deref()
+        .and_then(extract_gmail_labels);
+
     InsertMessage {
         account_id: account_id.to_string(),
         message_id,
@@ -337,7 +342,7 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         is_read,
         is_starred,
         is_draft,
-        labels: None,
+        labels,
         uid: fetch.uid.map(|u| u as i64),
         modseq: fetch.modseq.map(|m| m as i64),
         raw_headers,
@@ -483,6 +488,34 @@ fn extract_thread_id(raw_headers: &str, message_id: &Option<String>) -> Option<S
 
     // Fall back to own message-id
     message_id.as_ref().map(|id| strip_brackets(id))
+}
+
+// ---------------------------------------------------------------------------
+// Gmail label extraction
+// ---------------------------------------------------------------------------
+
+/// Extract Gmail labels from the `X-Gmail-Labels` header.
+///
+/// Gmail includes this header in IMAP-fetched messages with a comma-separated
+/// list of labels (e.g. `X-Gmail-Labels: Important,Starred,Social`).
+/// Returns a JSON array string like `["Important","Social"]` or None if the
+/// header is absent or empty.
+fn extract_gmail_labels(raw_headers: &str) -> Option<String> {
+    let headers = mailparse::parse_headers(raw_headers.as_bytes()).ok()?.0;
+    let value = headers.get_first_value("X-Gmail-Labels")?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let labels: Vec<String> = trimmed
+        .split(',')
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if labels.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&labels).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -667,5 +700,46 @@ mod tests {
             "should decode multiple encoded-words, got: {}",
             decoded
         );
+    }
+
+    #[test]
+    fn test_extract_gmail_labels_present() {
+        let headers = "From: a@b.com\r\nX-Gmail-Labels: Important,Social,Updates\r\nSubject: Hi\r\n";
+        let result = extract_gmail_labels(headers);
+        assert!(result.is_some());
+        let labels: Vec<String> = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(labels, vec!["Important", "Social", "Updates"]);
+    }
+
+    #[test]
+    fn test_extract_gmail_labels_with_spaces() {
+        let headers = "X-Gmail-Labels: Promotions , Forums , Starred\r\n";
+        let result = extract_gmail_labels(headers);
+        assert!(result.is_some());
+        let labels: Vec<String> = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(labels, vec!["Promotions", "Forums", "Starred"]);
+    }
+
+    #[test]
+    fn test_extract_gmail_labels_absent() {
+        let headers = "From: a@b.com\r\nSubject: No labels\r\n";
+        let result = extract_gmail_labels(headers);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_gmail_labels_empty() {
+        let headers = "X-Gmail-Labels: \r\n";
+        let result = extract_gmail_labels(headers);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_gmail_labels_single() {
+        let headers = "X-Gmail-Labels: Inbox\r\n";
+        let result = extract_gmail_labels(headers);
+        assert!(result.is_some());
+        let labels: Vec<String> = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(labels, vec!["Inbox"]);
     }
 }

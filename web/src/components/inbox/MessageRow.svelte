@@ -12,6 +12,7 @@
     has_attachments?: boolean;
     ai_priority_label?: string;
     ai_category?: string;
+    labels?: string;
   }
 
   let { message, onclick, selected = false, onselect, onaction }: {
@@ -50,6 +51,11 @@
   let priorityStyle = $derived(
     message.ai_priority_label ? priorityStyles[message.ai_priority_label] || '' : ''
   );
+
+  let parsedLabels: string[] = $derived.by(() => {
+    if (!message.labels) return [];
+    try { return JSON.parse(message.labels); } catch { return []; }
+  });
 
   function handleCheckbox(e: Event) {
     e.stopPropagation();
@@ -99,6 +105,12 @@
             {message.ai_category}
           </span>
         {/if}
+        {#each parsedLabels as label}
+          <span class="px-1.5 py-0.5 rounded text-[10px] font-medium"
+            style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
+            {label}
+          </span>
+        {/each}
         {#if message.has_attachments}
           <span title="Has attachments"><Paperclip size={12} /></span>
         {/if}
