@@ -29,6 +29,15 @@
   let accountDropdownOpen = $state(false);
   let overflowOpen = $state(false);
   let isDark = $state(!document.documentElement.hasAttribute('data-brand'));
+  let activeCategory = $state('');
+
+  const categories = [
+    { id: '', label: 'All' },
+    { id: 'primary', label: 'Primary' },
+    { id: 'updates', label: 'Updates' },
+    { id: 'social', label: 'Social' },
+    { id: 'promotions', label: 'Promotions' },
+  ];
 
   function toggleTheme() {
     isDark = !isDark;
@@ -42,9 +51,17 @@
     api.config.setTheme(isDark ? 'dark' : 'light').catch(() => {});
   }
 
+  let searchQuery = $state('');
+
+  function handleSearchSubmit() {
+    if (searchQuery.trim()) {
+      push(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
+    } else {
+      push('/search');
+    }
+  }
+
   const navItems = [
-    { path: '/', label: 'Inbox', icon: 'inbox' },
-    { path: '/search', label: 'Search', icon: 'search' },
     { path: '/sent', label: 'Sent', icon: 'send' },
     { path: '/drafts', label: 'Drafts', icon: 'file-text' },
   ];
@@ -62,6 +79,8 @@
     return $location.startsWith(path);
   }
 
+  const isInbox = $derived($location === '/' || $location === '');
+
   function navigate(path: string) {
     push(path);
     overflowOpen = false;
@@ -70,6 +89,11 @@
   function selectAccount(id: string | null) {
     onaccountSwitch?.(id);
     accountDropdownOpen = false;
+  }
+
+  function selectCategory(id: string) {
+    activeCategory = id;
+    window.dispatchEvent(new CustomEvent('category-change', { detail: { category: id } }));
   }
 
   const activeAccount = $derived(
@@ -85,17 +109,17 @@
 <svelte:window onclick={handleClickOutside} />
 
 <nav
-  class="flex items-center h-14 px-6 gap-4"
+  class="flex items-center h-12 px-4 gap-3"
   style="background-color: var(--iris-color-bg-elevated); border-bottom: 1px solid var(--iris-color-border-subtle);"
 >
   <!-- Logo -->
   <span
-    class="text-xl font-bold cursor-pointer select-none"
+    class="text-lg font-bold cursor-pointer select-none mr-1"
     style="color: var(--iris-color-primary);"
     onclick={() => push('/')}
   >Iris</span>
 
-  <!-- Account Switcher / Add Account -->
+  <!-- Account Switcher -->
   {#if accounts.length === 0}
     <button
       class="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md"
@@ -108,18 +132,16 @@
   {:else}
     <div class="relative">
       <button
-        class="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md"
-        style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);
+        class="flex items-center justify-center w-7 h-7 rounded-full"
+        style="background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent);
                border: 1px solid var(--iris-color-border);"
         onclick={(e) => { e.stopPropagation(); accountDropdownOpen = !accountDropdownOpen; }}
+        title={activeAccount?.email || 'Switch account'}
       >
         <span
-          class="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-semibold"
-          style="background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent);
-                 color: var(--iris-color-primary);"
+          class="text-[11px] font-semibold"
+          style="color: var(--iris-color-primary);"
         >{activeAccount?.email?.[0]?.toUpperCase() || '?'}</span>
-        <span style="color: var(--iris-color-text);">{activeAccount?.email || 'No account'}</span>
-        <svg class="w-3.5 h-3.5" style="color: var(--iris-color-text-faint);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
       </button>
 
       {#if accountDropdownOpen}
@@ -171,7 +193,45 @@
     </div>
   {/if}
 
-  <!-- Nav Items (only show when accounts exist) -->
+  <!-- Divider -->
+  <div class="w-px h-5 shrink-0" style="background: var(--iris-color-border);"></div>
+
+  <!-- Category tabs (only on Inbox) -->
+  {#if isInbox}
+    <div class="flex items-center h-12 gap-0.5">
+      {#each categories as cat}
+        <button
+          class="flex items-center h-12 px-2.5 text-[13px] font-medium border-b-2 transition-colors"
+          style={activeCategory === cat.id
+            ? 'border-color: var(--iris-color-primary); color: var(--iris-color-primary);'
+            : 'border-color: transparent; color: var(--iris-color-text-muted);'}
+          onclick={() => selectCategory(cat.id)}
+        >
+          {cat.label}
+        </button>
+      {/each}
+    </div>
+
+    <!-- Divider -->
+    <div class="w-px h-5 shrink-0" style="background: var(--iris-color-border);"></div>
+  {:else}
+    <!-- Inbox nav item when not on inbox -->
+    <button
+      class="flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[13px] font-medium transition-colors"
+      style="color: var(--iris-color-text-muted);"
+      onclick={() => navigate('/')}
+    >
+      Inbox
+      {#if unreadCount > 0}
+        <span
+          class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold rounded-full leading-none"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+        >{unreadCount > 99 ? '99+' : unreadCount}</span>
+      {/if}
+    </button>
+  {/if}
+
+  <!-- Nav Items -->
   <div class="flex items-center gap-0.5">
     {#each navItems as item}
       <button
@@ -182,12 +242,6 @@
         onclick={() => navigate(item.path)}
       >
         {item.label}
-        {#if item.icon === 'inbox' && unreadCount > 0}
-          <span
-            class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold rounded-full leading-none"
-            style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
-          >{unreadCount > 99 ? '99+' : unreadCount}</span>
-        {/if}
       </button>
     {/each}
 
@@ -224,6 +278,22 @@
   <!-- Spacer -->
   <div class="flex-1"></div>
 
+  <!-- Inline Search -->
+  <form
+    class="flex items-center gap-2 h-8 px-2.5 rounded-lg w-56"
+    style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);"
+    onsubmit={(e) => { e.preventDefault(); handleSearchSubmit(); }}
+  >
+    <svg class="w-3.5 h-3.5 shrink-0" style="color: var(--iris-color-text-faint);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" stroke-width="2"/><path stroke-linecap="round" stroke-width="2" d="M21 21l-4.35-4.35"/></svg>
+    <input
+      type="text"
+      bind:value={searchQuery}
+      placeholder="Search emails..."
+      class="bg-transparent border-none outline-none text-[12px] w-full"
+      style="color: var(--iris-color-text); font-family: inherit;"
+    />
+  </form>
+
   <!-- Sync Status -->
   {#if syncStatus}
     <span
@@ -257,10 +327,10 @@
     onclick={onchatToggle}
   >AI Chat</button>
 
-  <!-- Compose Button -->
+  <!-- Compose Button (primary) -->
   <button
-    class="flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[13px] font-medium"
-    style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted); border: 1px solid var(--iris-color-border);"
+    class="flex items-center gap-1.5 px-3.5 h-8 rounded-lg text-[13px] font-semibold"
+    style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
     onclick={oncompose}
   >Compose</button>
 </nav>

@@ -8,7 +8,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import SkeletonRow from '../components/SkeletonRow.svelte';
   import Toast from '../components/Toast.svelte';
-  import { RefreshCw } from 'lucide-svelte';
+
 
   let messages = $state<any[]>([]);
   let unreadCount = $state(0);
@@ -22,23 +22,15 @@
   let filterAccountId = $state('');
   let page = $state(1);
   const PAGE_SIZE = 25;
-  let refreshing = $state(false);
   let toastMessage = $state('');
   let toastVisible = $state(false);
 
-  async function handleRefresh() {
-    refreshing = true;
-    await loadMessages();
-    refreshing = false;
+  function onCategoryChange(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    activeCategory = detail.category || '';
+    page = 1;
+    loadMessages();
   }
-
-  const categories = [
-    { id: '', label: 'All' },
-    { id: 'primary', label: 'Primary' },
-    { id: 'updates', label: 'Updates' },
-    { id: 'social', label: 'Social' },
-    { id: 'promotions', label: 'Promotions' },
-  ];
 
   async function loadMessages(showLoading = true) {
     if (showLoading) loading = true;
@@ -118,55 +110,19 @@
     const pollInterval = setInterval(() => { loadMessages(false); }, 60000);
     window.addEventListener('account-switch', onAccountSwitch);
     window.addEventListener('open-compose', onOpenCompose);
+    window.addEventListener('category-change', onCategoryChange);
     return () => {
       clearInterval(pollInterval);
       offNewEmail();
       window.removeEventListener('account-switch', onAccountSwitch);
       window.removeEventListener('open-compose', onOpenCompose);
+      window.removeEventListener('category-change', onCategoryChange);
     };
   });
 </script>
 
 <div class="h-full flex flex-col">
-  <!-- Inbox header bar -->
-  <div class="px-4 py-3 border-b flex items-center gap-3" style="border-color: var(--iris-color-border-subtle);">
-    <h2 class="text-lg font-semibold">Inbox</h2>
-    {#if unreadCount > 0}
-      <span class="px-2 py-0.5 text-xs font-medium rounded-full" style="background: var(--iris-color-primary); color: var(--iris-color-bg);">
-        {unreadCount}
-      </span>
-    {/if}
-    <span class="flex-1"></span>
-    {#if total > 0}
-      <span class="text-xs" style="color: var(--iris-color-text-faint);">
-        {total} message{total === 1 ? '' : 's'}
-      </span>
-    {/if}
-    <button
-      class="p-1.5 rounded-lg transition-colors"
-      style="color: var(--iris-color-text-faint);"
-      onclick={handleRefresh}
-      title="Refresh"
-      disabled={refreshing}
-    >
-      <RefreshCw size={14} class={refreshing ? 'animate-spin' : ''} />
-    </button>
-  </div>
-
-  <!-- Category tabs -->
-  <div class="px-4 border-b flex gap-1 overflow-x-auto" style="border-color: var(--iris-color-border-subtle);">
-    {#each categories as cat}
-      <button
-        class="px-3 py-2 text-sm whitespace-nowrap border-b-2 transition-colors {activeCategory === cat.id ? 'font-medium' : ''}"
-        style={activeCategory === cat.id
-          ? 'border-color: var(--iris-color-primary); color: var(--iris-color-primary);'
-          : 'border-color: transparent; color: var(--iris-color-text-muted);'}
-        onclick={() => { activeCategory = cat.id; page = 1; loadMessages(); }}
-      >
-        {cat.label}
-      </button>
-    {/each}
-  </div>
+  <!-- No sub-header — tabs are in TopNav. Just a sync status bar below. -->
 
   <SyncStatus />
 

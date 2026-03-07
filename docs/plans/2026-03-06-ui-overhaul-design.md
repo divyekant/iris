@@ -161,8 +161,9 @@ Components to build/refactor (from prototypes):
 
 ---
 
-## What's NOT in scope
+## What's NOT in scope (future work)
 
+- **Traditional vs Messaging view mode:** Toggle between traditional email list and conversational chat-style thread rendering — needs proper design for the messaging layout and UX
 - **Responsive/mobile:** Top nav collapses to hamburger at narrow viewports — implementation detail, not designed here
 - **Compact density mode:** Reduce row height from 72px to 48px via CSS variable — trivial toggle
 - **Drafts page:** Same layout as inbox, filtered to drafts — no unique design needed
