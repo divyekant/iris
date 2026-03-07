@@ -3,10 +3,6 @@
 
   let iframeEl: HTMLIFrameElement;
 
-  function isDarkMode(): boolean {
-    return !document.documentElement.hasAttribute('data-brand');
-  }
-
   function sanitizeHtml(raw: string): string {
     // Security model: the iframe sandbox (no allow-scripts, no allow-forms,
     // no allow-top-navigation) is the primary boundary. We strip <script>,
@@ -19,8 +15,7 @@
       .replace(/<(iframe|object|embed|applet|form|input|textarea|select|button)[\s\S]*?<\/\1>/gi, '')
       .replace(/<(iframe|object|embed|applet|form|input|textarea|select|button)\b[^>]*\/?>/gi, '')
       .replace(/\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)/gi, '')
-      .replace(/<meta\s+http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '')
-      .replace(/\s+(width|height)\s*=\s*["']?auto["']?/gi, '');
+      .replace(/<meta\s+http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
   }
 
   function getTextContent(raw: string): string {
@@ -35,11 +30,11 @@
     if (iframeEl) {
       const doc = iframeEl.contentDocument;
       if (doc) {
-        const dark = isDarkMode();
-        const bg = dark ? '#1a1a1a' : '#fff';
-        const fg = dark ? '#e0e0e0' : '#333';
-        // Base styles: only background/color for theme + img overflow safety
-        const baseStyle = `<style>body{margin:0;padding:8px;color:${fg};background:${bg};}img{max-width:100%;height:auto;}</style>`;
+        // Always render email content with white bg / dark text regardless of
+        // app theme. Email authors design for light backgrounds — dark-mode
+        // inversion causes invisible text (dark inline color on dark bg).
+        // Gmail, Outlook, and Apple Mail all use the same approach.
+        const baseStyle = `<style>body{margin:0;padding:8px;color:#333;background:#fff;}img{max-width:100%;height:auto;}</style>`;
 
         let content: string;
         if (html) {
