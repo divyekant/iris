@@ -83,7 +83,20 @@
     semantic = !semantic;
     doSearch();
   }
+
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      document.getElementById('search-input')?.focus();
+    }
+    if (e.key === '/' && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
+      e.preventDefault();
+      document.getElementById('search-input')?.focus();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleGlobalKeydown} />
 
 <div class="h-full flex flex-col">
   <!-- Search header -->
@@ -100,6 +113,7 @@
         bind:value={searchQuery}
         oninput={onInput}
         placeholder="Search emails..."
+        id="search-input"
         class="flex-1 px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2"
         style="background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
         autofocus
@@ -145,7 +159,7 @@
       <EmptyState icon="search" title="No results found" subtitle="Try different keywords or remove some filters." />
     {:else if results.length > 0}
       <div class="px-4 py-2 text-xs" style="color: var(--iris-color-text-faint);">
-        {total} result{total === 1 ? '' : 's'}
+        {total} result{total === 1 ? '' : 's'} for &lsquo;{searchQuery}&rsquo;
       </div>
       <div class="divide-y" style="--tw-divide-color: var(--iris-color-border-subtle);">
         {#each results as result (result.id)}
@@ -185,7 +199,18 @@
     {:else}
       <div class="text-center py-16">
         <p class="text-lg mb-2" style="color: var(--iris-color-text);">Search your emails</p>
-        <p class="text-sm" style="color: var(--iris-color-text-muted);">Type a keyword to find messages by content, subject, or sender.</p>
+        <p class="text-sm mb-6" style="color: var(--iris-color-text-muted);">
+          Type a keyword or press <kbd class="px-1.5 py-0.5 rounded text-xs" style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);">{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd> from anywhere
+        </p>
+        <div class="flex flex-wrap justify-center gap-2 max-w-md mx-auto">
+          {#each ['from:stockx', 'has:attachment', 'security alert', 'order confirmation'] as suggestion}
+            <button
+              class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+              style="color: var(--iris-color-text-muted); border-color: var(--iris-color-border);"
+              onclick={() => { searchQuery = suggestion; doSearch(); }}
+            >{suggestion}</button>
+          {/each}
+        </div>
       </div>
     {/if}
   </div>
