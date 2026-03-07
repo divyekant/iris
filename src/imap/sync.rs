@@ -106,37 +106,40 @@ impl SyncEngine {
                     InsertMessage::insert(&conn, &insert_msg)
                 };
 
-                // Broadcast new email event (only for INBOX)
-                if *local_folder == "INBOX" {
-                    self.ws_hub.broadcast(WsEvent::NewEmail {
-                        account_id: account_id.to_string(),
-                        message_id: msg_id.clone(),
-                    });
-                }
-
-                // Enqueue AI classification and Memories storage jobs
-                {
-                    let conn = self.db.get().unwrap();
-                    queue::enqueue_ai_classify(
-                        &conn,
-                        &msg_id,
-                        &insert_msg.subject.clone().unwrap_or_default(),
-                        &insert_msg.from_address.clone().unwrap_or_default(),
-                        &insert_msg.body_text.clone().unwrap_or_default(),
-                    );
-                    queue::enqueue_memories_store(
-                        &conn,
-                        &msg_id,
-                        &MemoriesStorePayload {
+                // Only process newly inserted messages (skip duplicates)
+                if let Some(ref msg_id) = msg_id {
+                    // Broadcast new email event (only for INBOX)
+                    if *local_folder == "INBOX" {
+                        self.ws_hub.broadcast(WsEvent::NewEmail {
                             account_id: account_id.to_string(),
-                            rfc_message_id: insert_msg.message_id.clone(),
-                            from_name: insert_msg.from_name.clone(),
-                            from_address: insert_msg.from_address.clone(),
-                            subject: insert_msg.subject.clone(),
-                            body_text: insert_msg.body_text.clone(),
-                            date: insert_msg.date,
-                        },
-                    );
+                            message_id: msg_id.clone(),
+                        });
+                    }
+
+                    // Enqueue AI classification and Memories storage jobs
+                    {
+                        let conn = self.db.get().unwrap();
+                        queue::enqueue_ai_classify(
+                            &conn,
+                            msg_id,
+                            &insert_msg.subject.clone().unwrap_or_default(),
+                            &insert_msg.from_address.clone().unwrap_or_default(),
+                            &insert_msg.body_text.clone().unwrap_or_default(),
+                        );
+                        queue::enqueue_memories_store(
+                            &conn,
+                            msg_id,
+                            &MemoriesStorePayload {
+                                account_id: account_id.to_string(),
+                                rfc_message_id: insert_msg.message_id.clone(),
+                                from_name: insert_msg.from_name.clone(),
+                                from_address: insert_msg.from_address.clone(),
+                                subject: insert_msg.subject.clone(),
+                                body_text: insert_msg.body_text.clone(),
+                                date: insert_msg.date,
+                            },
+                        );
+                    }
                 }
 
                 // Broadcast progress

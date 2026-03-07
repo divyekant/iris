@@ -66,12 +66,22 @@ pub async fn list_messages(
                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
                        m.labels, m.ai_priority_label, m.ai_category";
 
+    // Thread grouping: show only the latest message per thread using ROW_NUMBER()
     let (messages, unread, total) = if let Some(ref account_id) = params.account_id {
         // Single-account query
         let cat_clause = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?4" } else { "" };
 
         let query = format!(
-            "SELECT {select_cols} FROM messages m WHERE m.account_id = ?1 AND {folder_where}{cat_clause} ORDER BY m.date DESC LIMIT ?2 OFFSET ?3"
+            "WITH threaded AS (
+                SELECT m.*, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(m.thread_id, m.id)
+                    ORDER BY m.date DESC
+                ) as rn
+                FROM messages m
+                WHERE m.account_id = ?1 AND {folder_where}{cat_clause}
+            )
+            SELECT {select_cols} FROM threaded m WHERE m.rn = 1
+            ORDER BY m.date DESC LIMIT ?2 OFFSET ?3"
         );
         let mut stmt = conn.prepare(&query).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let msgs: Vec<MessageSummary> = if let Some(ref cat) = category_filter {
@@ -86,13 +96,13 @@ pub async fn list_messages(
         let count_cat = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?2" } else { "" };
         let unread: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where} AND m.is_read = 0{count_cat}"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m WHERE m.account_id = ?1 AND {folder_where} AND m.is_read = 0{count_cat}"),
                 rusqlite::params![account_id, cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where} AND m.is_read = 0"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m WHERE m.account_id = ?1 AND {folder_where} AND m.is_read = 0"),
                 rusqlite::params![account_id],
                 |row| row.get(0),
             ).unwrap_or(0)
@@ -100,13 +110,13 @@ pub async fn list_messages(
 
         let total: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where}{count_cat}"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m WHERE m.account_id = ?1 AND {folder_where}{count_cat}"),
                 rusqlite::params![account_id, cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m WHERE m.account_id = ?1 AND {folder_where}"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m WHERE m.account_id = ?1 AND {folder_where}"),
                 rusqlite::params![account_id],
                 |row| row.get(0),
             ).unwrap_or(0)
@@ -119,7 +129,17 @@ pub async fn list_messages(
         let cat_clause = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?3" } else { "" };
 
         let query = format!(
-            "SELECT {select_cols} FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}{cat_clause} ORDER BY m.date DESC LIMIT ?1 OFFSET ?2"
+            "WITH threaded AS (
+                SELECT m.*, ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(m.thread_id, m.id)
+                    ORDER BY m.date DESC
+                ) as rn
+                FROM messages m
+                JOIN accounts a ON m.account_id = a.id
+                WHERE {unified_where}{cat_clause}
+            )
+            SELECT {select_cols} FROM threaded m WHERE m.rn = 1
+            ORDER BY m.date DESC LIMIT ?1 OFFSET ?2"
         );
         let mut stmt = conn.prepare(&query).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let msgs: Vec<MessageSummary> = if let Some(ref cat) = category_filter {
@@ -134,13 +154,13 @@ pub async fn list_messages(
         let count_cat = if category_filter.is_some() { " AND LOWER(m.ai_category) = ?1" } else { "" };
         let unread: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where} AND m.is_read = 0{count_cat}"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where} AND m.is_read = 0{count_cat}"),
                 rusqlite::params![cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where} AND m.is_read = 0"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where} AND m.is_read = 0"),
                 [],
                 |row| row.get(0),
             ).unwrap_or(0)
@@ -148,13 +168,13 @@ pub async fn list_messages(
 
         let total: i64 = if let Some(ref cat) = category_filter {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}{count_cat}"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}{count_cat}"),
                 rusqlite::params![cat],
                 |row| row.get(0),
             ).unwrap_or(0)
         } else {
             conn.query_row(
-                &format!("SELECT COUNT(*) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}"),
+                &format!("SELECT COUNT(DISTINCT COALESCE(m.thread_id, m.id)) FROM messages m JOIN accounts a ON m.account_id = a.id WHERE {unified_where}"),
                 [],
                 |row| row.get(0),
             ).unwrap_or(0)

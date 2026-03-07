@@ -157,13 +157,39 @@ impl MessageDetail {
     }
 
     pub fn list_by_thread(conn: &Conn, thread_id: &str) -> Vec<Self> {
+        // Deduplicate thread messages in two stages:
+        // 1. Exclude NULL message_id rows when a matching row (same sender+subject, date within 60s) exists with a real message_id
+        // 2. Dedup across folders (INBOX vs Sent) by message_id, preferring INBOX
         let mut stmt = conn
             .prepare(
-                "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
+                "WITH cleaned AS (
+                    SELECT * FROM messages
+                    WHERE thread_id = ?1 AND is_deleted = 0
+                    AND NOT (
+                        message_id IS NULL
+                        AND EXISTS (
+                            SELECT 1 FROM messages m2
+                            WHERE m2.thread_id = ?1
+                            AND m2.is_deleted = 0
+                            AND m2.message_id IS NOT NULL
+                            AND m2.from_address = messages.from_address
+                            AND m2.subject = messages.subject
+                            AND ABS(m2.date - messages.date) <= 60
+                        )
+                    )
+                ),
+                ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(message_id, id)
+                        ORDER BY CASE WHEN folder = 'INBOX' THEN 0 ELSE 1 END, date ASC
+                    ) as rn
+                    FROM cleaned
+                )
+                SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
                         body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
                         ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
-                 FROM messages WHERE thread_id = ?1 AND is_deleted = 0
+                 FROM ranked WHERE rn = 1
                  ORDER BY date ASC",
             )
             .expect("failed to prepare list_by_thread");
@@ -215,12 +241,38 @@ pub struct InsertMessage {
 }
 
 impl InsertMessage {
+    /// Resolve thread_id by chaining: if our thread_id matches an existing
+    /// message's message_id, adopt that message's thread_id instead.
+    /// This handles cases where References header points to a reply rather
+    /// than the thread root (common with Gmail Sent folder copies).
+    fn resolve_thread_id(conn: &Conn, thread_id: &Option<String>) -> Option<String> {
+        let tid = thread_id.as_deref()?;
+        // Wrap in angle brackets for matching against message_id which stores them
+        let bracketed = if tid.starts_with('<') { tid.to_string() } else { format!("<{}>", tid) };
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT thread_id FROM messages WHERE message_id = ?1 LIMIT 1",
+                rusqlite::params![bracketed],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        // If the existing message has a different thread_id, use it (it's closer to the root)
+        if let Some(ref resolved) = existing {
+            if resolved != tid {
+                return Some(resolved.clone());
+            }
+        }
+        Some(tid.to_string())
+    }
+
     /// Insert a message into the database.
-    /// Uses INSERT OR IGNORE to handle duplicate primary keys gracefully.
-    /// Returns the message ID.
-    pub fn insert(conn: &Conn, msg: &InsertMessage) -> String {
+    /// Uses INSERT OR IGNORE to handle duplicates (unique on account_id+message_id+folder).
+    /// Returns Some(id) if inserted, None if duplicate was skipped.
+    pub fn insert(conn: &Conn, msg: &InsertMessage) -> Option<String> {
         let id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
+        let resolved_thread_id = Self::resolve_thread_id(conn, &msg.thread_id);
+        let rows = conn.execute(
             "INSERT OR IGNORE INTO messages (
                 id, account_id, message_id, thread_id, folder,
                 from_address, from_name, to_addresses, cc_addresses, bcc_addresses,
@@ -240,7 +292,7 @@ impl InsertMessage {
                 id,
                 msg.account_id,
                 msg.message_id,
-                msg.thread_id,
+                resolved_thread_id,
                 msg.folder,
                 msg.from_address,
                 msg.from_name,
@@ -266,7 +318,7 @@ impl InsertMessage {
         )
         .expect("failed to insert message");
 
-        id
+        if rows > 0 { Some(id) } else { None }
     }
 }
 
@@ -516,8 +568,8 @@ mod tests {
         let msg2 = make_insert_message(&account.id, "INBOX", "Second Email", true);
         let msg3 = make_insert_message(&account.id, "Sent", "Sent Message", true);
 
-        let id1 = InsertMessage::insert(&conn, &msg1);
-        let id2 = InsertMessage::insert(&conn, &msg2);
+        let id1 = InsertMessage::insert(&conn, &msg1).unwrap();
+        let id2 = InsertMessage::insert(&conn, &msg2).unwrap();
         let _id3 = InsertMessage::insert(&conn, &msg3);
 
         assert!(!id1.is_empty());
@@ -587,7 +639,7 @@ mod tests {
         let mut msg = make_insert_message(&account.id, "INBOX", "Detail Test", false);
         msg.body_text = Some("Full body text here.".to_string());
         msg.body_html = Some("<p>Full body HTML</p>".to_string());
-        let id = InsertMessage::insert(&conn, &msg);
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
 
         let detail = MessageDetail::get_by_id(&conn, &id);
         assert!(detail.is_some());
@@ -632,7 +684,7 @@ mod tests {
         let account = create_test_account(&conn);
 
         let msg = make_insert_message(&account.id, "INBOX", "Unread msg", false);
-        let id = InsertMessage::insert(&conn, &msg);
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
 
         let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
         assert!(!detail.is_read);
@@ -652,7 +704,7 @@ mod tests {
 
         let mut msg = make_insert_message(&account.id, "INBOX", "ID Test", false);
         msg.message_id = Some("<unique-123@example.com>".to_string());
-        let id = InsertMessage::insert(&conn, &msg);
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
 
         let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
         assert_eq!(detail.message_id.as_deref(), Some("<unique-123@example.com>"));
@@ -751,11 +803,11 @@ mod tests {
 
         let mut msg1 = make_insert_message(&account.id, "INBOX", "Msg 1", false);
         msg1.message_id = Some("<batch-1@example.com>".to_string());
-        let id1 = InsertMessage::insert(&conn, &msg1);
+        let id1 = InsertMessage::insert(&conn, &msg1).unwrap();
 
         let mut msg2 = make_insert_message(&account.id, "INBOX", "Msg 2", false);
         msg2.message_id = Some("<batch-2@example.com>".to_string());
-        let id2 = InsertMessage::insert(&conn, &msg2);
+        let id2 = InsertMessage::insert(&conn, &msg2).unwrap();
 
         let mut msg3 = make_insert_message(&account.id, "INBOX", "Msg 3", false);
         msg3.message_id = Some("<batch-3@example.com>".to_string());
@@ -779,7 +831,7 @@ mod tests {
 
         let mut msg1 = make_insert_message(&account.id, "INBOX", "Delete me", false);
         msg1.message_id = Some("<del-1@example.com>".to_string());
-        let id1 = InsertMessage::insert(&conn, &msg1);
+        let id1 = InsertMessage::insert(&conn, &msg1).unwrap();
 
         let updated = batch_update(&conn, &[&id1], "delete");
         assert_eq!(updated, 1);
@@ -796,7 +848,7 @@ mod tests {
 
         let mut msg1 = make_insert_message(&account.id, "INBOX", "Unread", false);
         msg1.message_id = Some("<read-1@example.com>".to_string());
-        let id1 = InsertMessage::insert(&conn, &msg1);
+        let id1 = InsertMessage::insert(&conn, &msg1).unwrap();
 
         let updated = batch_update(&conn, &[&id1], "mark_read");
         assert_eq!(updated, 1);
@@ -817,7 +869,7 @@ mod tests {
 
         let mut msg1 = make_insert_message(&account.id, "INBOX", "Star me", false);
         msg1.message_id = Some("<star-1@example.com>".to_string());
-        let id1 = InsertMessage::insert(&conn, &msg1);
+        let id1 = InsertMessage::insert(&conn, &msg1).unwrap();
 
         let updated = batch_update(&conn, &[&id1], "star");
         assert_eq!(updated, 1);
@@ -887,7 +939,7 @@ mod tests {
         let account = create_test_account(&conn);
 
         let msg = make_insert_message(&account.id, "INBOX", "AI Test", false);
-        let id = InsertMessage::insert(&conn, &msg);
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
 
         // Initially AI fields are null
         let detail = MessageDetail::get_by_id(&conn, &id).unwrap();

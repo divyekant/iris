@@ -97,7 +97,7 @@ pub async fn send_message(
         size_bytes: None,
     };
 
-    let id = InsertMessage::insert(&conn, &sent_msg);
+    let id = InsertMessage::insert(&conn, &sent_msg).expect("sent message should always insert");
 
     tracing::info!(account = %account.email, to = ?req.to, subject = %req.subject, "Email sent");
 

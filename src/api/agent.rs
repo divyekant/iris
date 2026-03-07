@@ -990,7 +990,7 @@ pub async fn agent_send(
         size_bytes: None,
     };
 
-    let msg_id = message::InsertMessage::insert(&conn, &sent_msg);
+    let msg_id = message::InsertMessage::insert(&conn, &sent_msg).expect("sent message should always insert");
 
     log_audit(
         &conn,
