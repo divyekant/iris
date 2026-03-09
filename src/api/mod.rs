@@ -13,6 +13,7 @@ pub mod inbox_stats;
 pub mod messages;
 pub mod muted_threads;
 pub mod queue_status;
+pub mod saved_searches;
 pub mod search;
 pub mod session_auth;
 pub mod signatures;

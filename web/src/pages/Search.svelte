@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { api } from '../lib/api';
-  import { push } from 'svelte-spa-router';
-  import { ArrowLeft, Paperclip } from 'lucide-svelte';
+  import { push, querystring } from 'svelte-spa-router';
+  import { ArrowLeft, Paperclip, Search, Bookmark, X, HelpCircle, Plus } from 'lucide-svelte';
   import EmptyState from '../components/EmptyState.svelte';
 
   let searchQuery = $state('');
@@ -9,46 +10,64 @@
   let total = $state(0);
   let loading = $state(false);
   let searched = $state(false);
+  let parsedOperators = $state<{ key: string; value: string }[]>([]);
 
   // Filters
-  let hasAttachment = $state(false);
-  let dateFilter = $state('');
   let semantic = $state(false);
+
+  // Saved searches
+  let savedSearches = $state<{ id: string; name: string; query: string; account_id: string | null; created_at: number }[]>([]);
+  let showSaveDialog = $state(false);
+  let saveName = $state('');
+  let showOperatorHelp = $state(false);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function getDateRange(): { after?: number; before?: number } {
-    const now = Math.floor(Date.now() / 1000);
-    switch (dateFilter) {
-      case '7d': return { after: now - 7 * 86400 };
-      case '30d': return { after: now - 30 * 86400 };
-      case '1y': return { after: now - 365 * 86400 };
-      default: return {};
-    }
-  }
+  // Operator color mapping
+  const operatorColors: Record<string, { bg: string; text: string; border: string }> = {
+    from: { bg: 'color-mix(in srgb, #2563EB 12%, transparent)', text: '#60a5fa', border: '#2563EB' },
+    to: { bg: 'color-mix(in srgb, #9333EA 12%, transparent)', text: '#c084fc', border: '#9333EA' },
+    subject: { bg: 'color-mix(in srgb, #16A34A 12%, transparent)', text: '#4ade80', border: '#16A34A' },
+    is: { bg: 'color-mix(in srgb, #CA8A04 12%, transparent)', text: '#fbbf24', border: '#CA8A04' },
+    has: { bg: 'color-mix(in srgb, #DC2626 12%, transparent)', text: '#f87171', border: '#DC2626' },
+    before: { bg: 'color-mix(in srgb, #0891B2 12%, transparent)', text: '#67e8f9', border: '#0891B2' },
+    after: { bg: 'color-mix(in srgb, #0891B2 12%, transparent)', text: '#67e8f9', border: '#0891B2' },
+    category: { bg: 'color-mix(in srgb, #D97706 12%, transparent)', text: '#fbbf24', border: '#D97706' },
+  };
+
+  const operatorHelp = [
+    { op: 'from:', desc: 'Sender email or name', example: 'from:sarah@acme.com' },
+    { op: 'to:', desc: 'Recipient email or name', example: 'to:team@company.com' },
+    { op: 'subject:', desc: 'Subject line text', example: 'subject:"quarterly report"' },
+    { op: 'is:', desc: 'Message state', example: 'is:unread, is:read, is:starred' },
+    { op: 'has:', desc: 'Message attributes', example: 'has:attachment' },
+    { op: 'before:', desc: 'Date upper bound', example: 'before:2026-03-01' },
+    { op: 'after:', desc: 'Date lower bound', example: 'after:2026-01-01' },
+    { op: 'category:', desc: 'AI category', example: 'category:promotions' },
+  ];
 
   async function doSearch() {
     if (!searchQuery.trim()) {
       results = [];
       total = 0;
       searched = false;
+      parsedOperators = [];
       return;
     }
     loading = true;
     searched = true;
     try {
-      const dateRange = getDateRange();
       const res = await api.search({
         q: searchQuery,
-        has_attachment: hasAttachment || undefined,
         semantic: semantic || undefined,
-        ...dateRange,
       });
       results = res.results;
       total = res.total;
+      parsedOperators = res.parsed_operators || [];
     } catch {
       results = [];
       total = 0;
+      parsedOperators = [];
     } finally {
       loading = false;
     }
@@ -69,18 +88,64 @@
     return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
   }
 
-  function toggleFilter(filter: string) {
-    dateFilter = dateFilter === filter ? '' : filter;
-    doSearch();
-  }
-
-  function toggleAttachment() {
-    hasAttachment = !hasAttachment;
-    doSearch();
-  }
-
   function toggleSemantic() {
     semantic = !semantic;
+    doSearch();
+  }
+
+  function removeOperator(index: number) {
+    const op = parsedOperators[index];
+    // Remove the operator from the query string
+    const opStr = op.value.includes(' ') ? `${op.key}:"${op.value}"` : `${op.key}:${op.value}`;
+    searchQuery = searchQuery.replace(opStr, '').replace(/\s+/g, ' ').trim();
+    doSearch();
+  }
+
+  function insertOperator(op: string) {
+    const current = searchQuery.trim();
+    searchQuery = current ? `${current} ${op}` : op;
+    document.getElementById('search-input')?.focus();
+    doSearch();
+  }
+
+  function insertSuggestion(suggestion: string) {
+    searchQuery = suggestion;
+    doSearch();
+  }
+
+  // Saved search management
+  async function loadSavedSearches() {
+    try {
+      savedSearches = await api.savedSearches.list();
+    } catch {
+      savedSearches = [];
+    }
+  }
+
+  async function saveCurrentSearch() {
+    const name = saveName.trim();
+    if (!name || !searchQuery.trim()) return;
+    try {
+      await api.savedSearches.create({ name, query: searchQuery });
+      saveName = '';
+      showSaveDialog = false;
+      await loadSavedSearches();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function deleteSavedSearch(id: string) {
+    try {
+      await api.savedSearches.delete(id);
+      savedSearches = savedSearches.filter(s => s.id !== id);
+    } catch {
+      // ignore
+    }
+  }
+
+  function applySavedSearch(query: string) {
+    searchQuery = query;
     doSearch();
   }
 
@@ -93,131 +158,289 @@
       e.preventDefault();
       document.getElementById('search-input')?.focus();
     }
+    if (e.key === 'Escape') {
+      showSaveDialog = false;
+      showOperatorHelp = false;
+    }
   }
+
+  onMount(() => {
+    loadSavedSearches();
+
+    // Check for query param from URL
+    const params = new URLSearchParams($querystring || '');
+    const q = params.get('q');
+    if (q) {
+      searchQuery = q;
+      doSearch();
+    }
+  });
 </script>
 
 <svelte:window onkeydown={handleGlobalKeydown} />
 
-<div class="h-full flex flex-col">
-  <!-- Search header -->
-  <div class="px-4 py-3 border-b" style="border-color: var(--iris-color-border);">
-    <div class="flex items-center gap-3">
-      <button
-        class="p-1 transition-colors"
-        style="color: var(--iris-color-text-faint);"
-        onclick={() => push('/')}
-        title="Back to inbox"
-      ><ArrowLeft size={16} /></button>
-      <input
-        type="text"
-        bind:value={searchQuery}
-        oninput={onInput}
-        placeholder="Search emails..."
-        id="search-input"
-        class="flex-1 px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2"
-        style="background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        autofocus
-      />
-    </div>
-
-    <!-- Filter chips -->
-    <div class="flex gap-2 mt-2">
-      <button
-        class="px-3 py-1 text-xs rounded-full border transition-colors"
-        style={semantic
-          ? 'background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-primary); border-color: var(--iris-color-primary);'
-          : 'background: transparent; color: var(--iris-color-text-muted); border-color: var(--iris-color-border);'}
-        onclick={toggleSemantic}
-        title="Search by meaning, not just keywords"
-      >Semantic</button>
-      <button
-        class="px-3 py-1 text-xs rounded-full border transition-colors"
-        style={hasAttachment
-          ? 'background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-primary); border-color: var(--iris-color-primary);'
-          : 'background: transparent; color: var(--iris-color-text-muted); border-color: var(--iris-color-border);'}
-        onclick={toggleAttachment}
-      >has:attachment</button>
-      {#each [{ id: '7d', label: 'Last 7 days' }, { id: '30d', label: 'Last 30 days' }, { id: '1y', label: 'Last year' }] as f}
-        <button
-          class="px-3 py-1 text-xs rounded-full border transition-colors"
-          style={dateFilter === f.id
-            ? 'background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-primary); border-color: var(--iris-color-primary);'
-            : 'background: transparent; color: var(--iris-color-text-muted); border-color: var(--iris-color-border);'}
-          onclick={() => toggleFilter(f.id)}
-        >{f.label}</button>
-      {/each}
-    </div>
-  </div>
-
-  <!-- Results -->
-  <div class="flex-1 overflow-auto">
-    {#if loading}
-      <div class="flex items-center justify-center py-16">
-        <div class="w-8 h-8 border-4 rounded-full animate-spin" style="border-color: color-mix(in srgb, var(--iris-color-primary) 20%, transparent); border-top-color: var(--iris-color-primary);"></div>
+<div class="h-full flex">
+  <!-- Saved Searches Sidebar -->
+  {#if savedSearches.length > 0}
+    <div class="w-56 flex-shrink-0 border-r overflow-y-auto" style="border-color: var(--iris-color-border-subtle); background: var(--iris-color-bg-surface);">
+      <div class="px-3 py-2.5 flex items-center gap-1.5" style="color: var(--iris-color-text-muted);">
+        <Bookmark size={14} />
+        <span class="text-xs font-medium uppercase tracking-wide">Saved Searches</span>
       </div>
-    {:else if searched && results.length === 0}
-      <EmptyState icon="search" title="No results found" subtitle="Try different keywords or remove some filters." />
-    {:else if results.length > 0}
-      <div class="px-4 py-2 text-xs" style="color: var(--iris-color-text-faint);">
-        {total} result{total === 1 ? '' : 's'} for &lsquo;{searchQuery}&rsquo;
-      </div>
-      <div class="divide-y" style="--tw-divide-color: var(--iris-color-border-subtle);">
-        {#each results as result (result.id)}
-          <button
-            class="w-full text-left px-4 py-3 transition-colors flex items-start gap-3 search-result-row"
-            onclick={() => handleResultClick(result)}
-          >
-            <div class="pt-1.5 w-3 flex-shrink-0">
-              {#if !result.is_read}
-                <div class="w-2.5 h-2.5 rounded-full" style="background: var(--iris-color-unread);"></div>
-              {/if}
-            </div>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-baseline gap-2">
-                <span class="text-sm truncate {result.is_read ? '' : 'font-semibold'}" style="color: var(--iris-color-text);">
-                  {result.from_name || result.from_address || 'Unknown'}
-                </span>
-                <span class="flex-shrink-0 text-xs ml-auto" style="color: var(--iris-color-text-faint);">
-                  {#if result.has_attachments}
-                    <span class="mr-1.5" title="Has attachments"><Paperclip size={12} /></span>
-                  {/if}
-                  {#if result.date}
-                    {formatDate(result.date)}
-                  {/if}
-                </span>
-              </div>
-              <div class="text-sm truncate {result.is_read ? '' : 'font-medium'}" style="color: var(--iris-color-text);">
-                {result.subject || '(no subject)'}
-              </div>
-              <div class="text-xs mt-0.5 line-clamp-2" style="color: var(--iris-color-text-muted);">
-                {@html result.snippet}
-              </div>
-            </div>
-          </button>
+      <div class="px-1.5">
+        {#each savedSearches as saved (saved.id)}
+          <div class="group flex items-center gap-1">
+            <button
+              class="flex-1 text-left px-2 py-1.5 text-sm rounded transition-colors truncate saved-search-item"
+              style="color: var(--iris-color-text);"
+              onclick={() => applySavedSearch(saved.query)}
+              title={saved.query}
+            >
+              {saved.name}
+            </button>
+            <button
+              class="opacity-0 group-hover:opacity-100 p-0.5 rounded transition-opacity"
+              style="color: var(--iris-color-text-faint);"
+              onclick={() => deleteSavedSearch(saved.id)}
+              title="Remove saved search"
+            ><X size={12} /></button>
+          </div>
         {/each}
       </div>
-    {:else}
-      <div class="text-center py-16">
-        <p class="text-lg mb-2" style="color: var(--iris-color-text);">Search your emails</p>
-        <p class="text-sm mb-6" style="color: var(--iris-color-text-muted);">
-          Type a keyword or press <kbd class="px-1.5 py-0.5 rounded text-xs" style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);">{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd> from anywhere
-        </p>
-        <div class="flex flex-wrap justify-center gap-2 max-w-md mx-auto">
-          {#each ['from:stockx', 'has:attachment', 'security alert', 'order confirmation'] as suggestion}
+    </div>
+  {/if}
+
+  <!-- Main Search Area -->
+  <div class="flex-1 flex flex-col min-w-0">
+    <!-- Search header -->
+    <div class="px-4 py-3 border-b" style="border-color: var(--iris-color-border);">
+      <div class="flex items-center gap-3">
+        <button
+          class="p-1 transition-colors"
+          style="color: var(--iris-color-text-faint);"
+          onclick={() => push('/')}
+          title="Back to inbox"
+        ><ArrowLeft size={16} /></button>
+        <div class="flex-1 relative">
+          <input
+            type="text"
+            bind:value={searchQuery}
+            oninput={onInput}
+            placeholder="Search emails... (use operators like from: is: has:)"
+            id="search-input"
+            class="w-full px-3 py-2 rounded-lg text-sm focus:outline-none focus:ring-2"
+            style="background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+            autofocus
+          />
+        </div>
+        <!-- Save Search Button -->
+        {#if searchQuery.trim()}
+          <button
+            class="px-2.5 py-1.5 text-xs rounded-md border transition-colors flex items-center gap-1"
+            style="color: var(--iris-color-text-muted); border-color: var(--iris-color-border);"
+            onclick={() => { showSaveDialog = !showSaveDialog; showOperatorHelp = false; }}
+            title="Save this search"
+          >
+            <Bookmark size={12} />
+            <span>Save</span>
+          </button>
+        {/if}
+        <!-- Help Button -->
+        <button
+          class="p-1.5 rounded transition-colors"
+          style="color: var(--iris-color-text-faint);"
+          onclick={() => { showOperatorHelp = !showOperatorHelp; showSaveDialog = false; }}
+          title="Search operators help"
+        ><HelpCircle size={16} /></button>
+      </div>
+
+      <!-- Save Search Dialog -->
+      {#if showSaveDialog}
+        <div class="mt-2 p-3 rounded-lg border" style="background: var(--iris-color-bg-elevated); border-color: var(--iris-color-border);">
+          <div class="flex items-center gap-2">
+            <input
+              type="text"
+              bind:value={saveName}
+              placeholder="Name this search..."
+              class="flex-1 px-2 py-1.5 rounded text-sm focus:outline-none focus:ring-1"
+              style="background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+              onkeydown={(e) => { if (e.key === 'Enter') saveCurrentSearch(); }}
+              autofocus
+            />
             <button
-              class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-              style="color: var(--iris-color-text-muted); border-color: var(--iris-color-border);"
-              onclick={() => { searchQuery = suggestion; doSearch(); }}
-            >{suggestion}</button>
+              class="px-3 py-1.5 rounded text-xs font-medium transition-colors"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={saveCurrentSearch}
+              disabled={!saveName.trim()}
+            >Save</button>
+            <button
+              class="p-1 rounded transition-colors"
+              style="color: var(--iris-color-text-faint);"
+              onclick={() => { showSaveDialog = false; }}
+            ><X size={14} /></button>
+          </div>
+          <div class="mt-1.5 text-xs" style="color: var(--iris-color-text-faint);">
+            Query: {searchQuery}
+          </div>
+        </div>
+      {/if}
+
+      <!-- Parsed Operator Chips -->
+      {#if parsedOperators.length > 0 || semantic}
+        <div class="flex flex-wrap gap-1.5 mt-2">
+          {#if semantic}
+            <button
+              class="px-2.5 py-1 text-xs rounded-full border transition-colors flex items-center gap-1"
+              style="background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-primary); border-color: var(--iris-color-primary);"
+              onclick={toggleSemantic}
+            >
+              Semantic
+              <X size={10} />
+            </button>
+          {/if}
+          {#each parsedOperators as op, i}
+            {@const colors = operatorColors[op.key] || { bg: 'color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent)', text: 'var(--iris-color-text-muted)', border: 'var(--iris-color-border)' }}
+            <button
+              class="px-2.5 py-1 text-xs rounded-full border transition-colors flex items-center gap-1"
+              style="background: {colors.bg}; color: {colors.text}; border-color: {colors.border};"
+              onclick={() => removeOperator(i)}
+              title="Click to remove"
+            >
+              <span class="font-medium">{op.key}:</span>{op.value}
+              <X size={10} />
+            </button>
           {/each}
+        </div>
+      {:else if !searched}
+        <!-- Quick filter chips when no search yet -->
+        <div class="flex gap-2 mt-2">
+          <button
+            class="px-3 py-1 text-xs rounded-full border transition-colors"
+            style={semantic
+              ? 'background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-primary); border-color: var(--iris-color-primary);'
+              : 'background: transparent; color: var(--iris-color-text-muted); border-color: var(--iris-color-border);'}
+            onclick={toggleSemantic}
+            title="Search by meaning, not just keywords"
+          >Semantic</button>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Operator Help Panel -->
+    {#if showOperatorHelp}
+      <div class="px-4 py-3 border-b" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-medium uppercase tracking-wide" style="color: var(--iris-color-text-muted);">Search Operators</span>
+          <button
+            class="p-0.5 rounded"
+            style="color: var(--iris-color-text-faint);"
+            onclick={() => { showOperatorHelp = false; }}
+          ><X size={14} /></button>
+        </div>
+        <div class="grid grid-cols-2 gap-x-6 gap-y-1">
+          {#each operatorHelp as h}
+            {@const colors = operatorColors[h.op.replace(':', '')] || { text: 'var(--iris-color-text-muted)' }}
+            <button
+              class="text-left flex items-baseline gap-2 py-1 rounded transition-colors operator-help-row"
+              onclick={() => insertOperator(h.op)}
+            >
+              <code class="text-xs font-mono font-semibold" style="color: {colors.text};">{h.op}</code>
+              <span class="text-xs" style="color: var(--iris-color-text-faint);">{h.desc}</span>
+            </button>
+          {/each}
+        </div>
+        <div class="mt-2 text-xs" style="color: var(--iris-color-text-faint);">
+          Combine operators: <code class="font-mono" style="color: var(--iris-color-text-muted);">from:sarah is:unread has:attachment</code>
         </div>
       </div>
     {/if}
+
+    <!-- Results -->
+    <div class="flex-1 overflow-auto">
+      {#if loading}
+        <div class="flex items-center justify-center py-16">
+          <div class="w-8 h-8 border-4 rounded-full animate-spin" style="border-color: color-mix(in srgb, var(--iris-color-primary) 20%, transparent); border-top-color: var(--iris-color-primary);"></div>
+        </div>
+      {:else if searched && results.length === 0}
+        <EmptyState icon="search" title="No results found" subtitle="Try different keywords or remove some filters." />
+      {:else if results.length > 0}
+        <div class="px-4 py-2 text-xs" style="color: var(--iris-color-text-faint);">
+          {total} result{total === 1 ? '' : 's'} for &lsquo;{searchQuery}&rsquo;
+        </div>
+        <div class="divide-y" style="--tw-divide-color: var(--iris-color-border-subtle);">
+          {#each results as result (result.id)}
+            <button
+              class="w-full text-left px-4 py-3 transition-colors flex items-start gap-3 search-result-row"
+              onclick={() => handleResultClick(result)}
+            >
+              <div class="pt-1.5 w-3 flex-shrink-0">
+                {#if !result.is_read}
+                  <div class="w-2.5 h-2.5 rounded-full" style="background: var(--iris-color-unread);"></div>
+                {/if}
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-baseline gap-2">
+                  <span class="text-sm truncate {result.is_read ? '' : 'font-semibold'}" style="color: var(--iris-color-text);">
+                    {result.from_name || result.from_address || 'Unknown'}
+                  </span>
+                  <span class="flex-shrink-0 text-xs ml-auto flex items-center gap-1.5" style="color: var(--iris-color-text-faint);">
+                    {#if result.has_attachments}
+                      <span title="Has attachments"><Paperclip size={12} /></span>
+                    {/if}
+                    {#if result.date}
+                      {formatDate(result.date)}
+                    {/if}
+                  </span>
+                </div>
+                <div class="text-sm truncate {result.is_read ? '' : 'font-medium'}" style="color: var(--iris-color-text);">
+                  {result.subject || '(no subject)'}
+                </div>
+                <div class="text-xs mt-0.5 line-clamp-2" style="color: var(--iris-color-text-muted);">
+                  {@html result.snippet}
+                </div>
+              </div>
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <div class="text-center py-16">
+          <p class="text-lg mb-2" style="color: var(--iris-color-text);">Search your emails</p>
+          <p class="text-sm mb-6" style="color: var(--iris-color-text-muted);">
+            Use operators like <code class="font-mono text-xs px-1 py-0.5 rounded" style="background: var(--iris-color-bg-surface);">from:</code> <code class="font-mono text-xs px-1 py-0.5 rounded" style="background: var(--iris-color-bg-surface);">is:</code> <code class="font-mono text-xs px-1 py-0.5 rounded" style="background: var(--iris-color-bg-surface);">has:</code> or press <kbd class="px-1.5 py-0.5 rounded text-xs" style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);">{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd>
+          </p>
+          <div class="flex flex-wrap justify-center gap-2 max-w-md mx-auto">
+            {#each [
+              'from:stockx is:unread',
+              'has:attachment after:2026-01-01',
+              'is:starred subject:invoice',
+              'category:promotions',
+            ] as suggestion}
+              <button
+                class="px-3 py-1.5 text-xs rounded-full border transition-colors suggestion-chip"
+                style="color: var(--iris-color-text-muted); border-color: var(--iris-color-border);"
+                onclick={() => insertSuggestion(suggestion)}
+              >{suggestion}</button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 
 <style>
   .search-result-row:hover {
     background: var(--iris-color-bg-surface);
+  }
+  .saved-search-item:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);
+  }
+  .suggestion-chip:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);
+    border-color: var(--iris-color-primary);
+    color: var(--iris-color-primary);
+  }
+  .operator-help-row:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 5%, transparent);
   }
 </style>

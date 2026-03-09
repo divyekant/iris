@@ -153,7 +153,16 @@ export const api = {
     if (params.limit) query.set('limit', String(params.limit));
     if (params.offset) query.set('offset', String(params.offset));
     if (params.semantic) query.set('semantic', 'true');
-    return request<{ results: any[]; total: number; query: string }>(`/api/search?${query}`);
+    return request<{ results: any[]; total: number; query: string; parsed_operators: { key: string; value: string }[] }>(`/api/search?${query}`);
+  },
+  savedSearches: {
+    list: () => request<{ id: string; name: string; query: string; account_id: string | null; created_at: number }[]>('/api/saved-searches'),
+    create: (data: { name: string; query: string; account_id?: string }) =>
+      request<{ id: string; name: string; query: string; account_id: string | null; created_at: number }>('/api/saved-searches', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    delete: (id: string) => request<void>(`/api/saved-searches/${id}`, { method: 'DELETE' }),
   },
   ai: {
     getConfig: () => request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai'),

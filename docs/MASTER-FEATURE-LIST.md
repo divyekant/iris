@@ -27,7 +27,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 |---|---------|--------|--------|
 | 5 | Attachments — send, receive, drag-and-drop | M | **done** |
 | 6 | Inline attachment preview (PDF, images) | M | **done** |
-| 7 | Rich text compose — font family, size, color | M | pending |
+| 7 | Rich text compose — font family, size, color | M | **done** |
 | 8 | Undo send (5–30s configurable delay) | S | **done** |
 | 9 | Signatures — multiple, per-account, rich HTML | S | **done** |
 | 10 | Scheduled send | S | **done** |
@@ -49,8 +49,8 @@ Core features every email client has. Without these, Iris isn't a real email cli
 
 | # | Feature | Effort | Status |
 |---|---------|--------|--------|
-| 19 | Search operators — from:, to:, subject:, is:unread, AND/OR | M | pending |
-| 20 | Saved searches / Smart folders | M | pending |
+| 19 | Search operators — from:, to:, subject:, is:unread, AND/OR | M | **done** |
+| 20 | Saved searches / Smart folders | M | **done** |
 | 21 | Filters / Rules — auto-label, auto-archive, auto-delete | L | pending |
 
 ### 1E. UI Essentials
