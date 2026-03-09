@@ -86,9 +86,11 @@ fn chat_system_prompt_with_stats_str(stats_block: &str) -> String {
 
 Today's date is {today}.
 {stats_block}
-You have access to tools that let you search and read the user's emails. Use them to find relevant information before answering. When answering:
-- When you need information, use the available tools (search_emails, read_email, inbox_stats)
-- Search first, then read specific emails for details
+You have access to tools that let you search, list, and read the user's emails. Use them to find relevant information before answering. When answering:
+- When you need information, use the available tools (search_emails, list_emails, read_email, inbox_stats)
+- Use list_emails for browsing/filtering by metadata (date, sender, category, read status)
+- Use search_emails for keyword searches with optional filters
+- Read specific emails for full details
 - Cite emails by referencing their ID from tool results
 - Be concise and helpful
 - Use the date and read/unread status to answer questions about "today's emails", "unread emails", "this week", etc.
@@ -202,6 +204,26 @@ async fn agentic_chat(
                                         date: None,
                                         is_read: v.get("is_read").and_then(|v| v.as_bool()),
                                     });
+                                }
+                            }
+                        }
+                    }
+                    if call.name == "list_emails" {
+                        if let Ok(ref v) = result {
+                            if let Some(emails) = v.get("emails").and_then(|v| v.as_array()) {
+                                for item in emails {
+                                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                        if !all_citations.iter().any(|c| c.message_id == id) {
+                                            all_citations.push(Citation {
+                                                message_id: id.to_string(),
+                                                subject: item.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                from: item.get("from").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                date: None,
+                                                is_read: item.get("is_read").and_then(|v| v.as_bool()),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }

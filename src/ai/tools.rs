@@ -64,8 +64,8 @@ pub fn all_tools() -> Vec<Tool> {
         },
         Tool {
             name: "search_emails".to_string(),
-            description: "Search emails by keyword using full-text search. Returns matching \
-                          messages with subject, sender, date, and a text snippet."
+            description: "Search emails by keyword using full-text search, with optional filters. \
+                          Returns matching messages with subject, sender, date, and a text snippet."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -73,6 +73,26 @@ pub fn all_tools() -> Vec<Tool> {
                     "query": {
                         "type": "string",
                         "description": "Search query — keywords to find in email subject, body, or sender"
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "Start date filter (ISO format, e.g. 2026-03-01)"
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "End date filter (ISO format, e.g. 2026-03-08)"
+                    },
+                    "sender": {
+                        "type": "string",
+                        "description": "Filter by sender (email or name substring)"
+                    },
+                    "is_read": {
+                        "type": "boolean",
+                        "description": "Filter by read status"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by AI category"
                     }
                 },
                 "required": ["query"]
@@ -94,6 +114,51 @@ pub fn all_tools() -> Vec<Tool> {
                 "required": ["message_id"]
             }),
         },
+        Tool {
+            name: "list_emails".to_string(),
+            description: "List emails with optional filters. Returns summary info (no body). \
+                          Use for browsing, counting filtered results, or finding emails by metadata \
+                          like date range, sender, read status, or category.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "date_from": {
+                        "type": "string",
+                        "description": "Start date (ISO format, e.g. 2026-03-01)"
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "End date (ISO format, e.g. 2026-03-08)"
+                    },
+                    "sender": {
+                        "type": "string",
+                        "description": "Filter by sender email address or name (substring match)"
+                    },
+                    "is_read": {
+                        "type": "boolean",
+                        "description": "Filter by read status (true=read, false=unread)"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by AI category: primary, social, promotions, updates"
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Filter by IMAP folder name"
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["newest", "oldest"],
+                        "description": "Sort order (default: newest)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default: 20, max: 50)"
+                    }
+                },
+                "required": []
+            }),
+        },
     ]
 }
 
@@ -112,7 +177,7 @@ pub fn execute_tool(
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required parameter: query".to_string())?;
-            handle_search_emails(conn, query)
+            handle_search_emails(conn, query, arguments)
         }
         "read_email" => {
             let message_id = arguments
@@ -121,6 +186,7 @@ pub fn execute_tool(
                 .ok_or_else(|| "Missing required parameter: message_id".to_string())?;
             handle_read_email(conn, message_id)
         }
+        "list_emails" => handle_list_emails(conn, arguments),
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }
@@ -131,7 +197,11 @@ fn handle_inbox_stats(conn: &Connection) -> Result<serde_json::Value, String> {
     serde_json::to_value(&stats).map_err(|e| format!("Serialization error: {}", e))
 }
 
-fn handle_search_emails(conn: &Connection, query: &str) -> Result<serde_json::Value, String> {
+fn handle_search_emails(
+    conn: &Connection,
+    query: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     // Sanitize: keep only alphanumeric + whitespace
     let sanitized: String = query
         .chars()
@@ -151,17 +221,86 @@ fn handle_search_emails(conn: &Connection, query: &str) -> Result<serde_json::Va
 
     let fts_query = terms.join(" OR ");
 
+    // Build additional filter conditions
+    let mut extra_conditions = Vec::new();
+    let mut extra_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    // FTS5 MATCH is param ?1, so extra params start at ?2
+    let mut pidx = 2;
+
+    if let Some(date_from) = args.get("date_from").and_then(|v| v.as_str()) {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_from, "%Y-%m-%d") {
+            let ts = dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+            extra_conditions.push(format!("m.date >= ?{}", pidx));
+            extra_params.push(Box::new(ts));
+            pidx += 1;
+        }
+    }
+
+    if let Some(date_to) = args.get("date_to").and_then(|v| v.as_str()) {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_to, "%Y-%m-%d") {
+            let ts = dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp();
+            extra_conditions.push(format!("m.date <= ?{}", pidx));
+            extra_params.push(Box::new(ts));
+            pidx += 1;
+        }
+    }
+
+    if let Some(sender) = args.get("sender").and_then(|v| v.as_str()) {
+        if !sender.is_empty() {
+            let escaped = sender.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let pattern = format!("%{}%", escaped);
+            extra_conditions.push(format!(
+                "(m.from_address LIKE ?{p} ESCAPE '\\' OR m.from_name LIKE ?{p} ESCAPE '\\')",
+                p = pidx
+            ));
+            extra_params.push(Box::new(pattern));
+            pidx += 1;
+        }
+    }
+
+    if let Some(is_read) = args.get("is_read").and_then(|v| v.as_bool()) {
+        extra_conditions.push(format!("m.is_read = ?{}", pidx));
+        extra_params.push(Box::new(if is_read { 1i32 } else { 0i32 }));
+        pidx += 1;
+    }
+
+    if let Some(category) = args.get("category").and_then(|v| v.as_str()) {
+        if !category.is_empty() {
+            extra_conditions.push(format!("m.ai_category = ?{}", pidx));
+            extra_params.push(Box::new(category.to_string()));
+            pidx += 1;
+        }
+    }
+
+    let _ = pidx; // suppress unused variable warning
+
+    let filter_clause = if extra_conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", extra_conditions.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT m.id, m.subject, m.from_name, m.from_address, m.date, m.is_read, \
+         snippet(fts_messages, -1, '', '', '...', 40) \
+         FROM fts_messages fts JOIN messages m ON m.rowid = fts.rowid \
+         WHERE fts_messages MATCH ?1 AND m.is_draft = 0{} ORDER BY rank LIMIT 10",
+        filter_clause
+    );
+
     let mut stmt = conn
-        .prepare(
-            "SELECT m.id, m.subject, m.from_name, m.from_address, m.date, m.is_read, \
-             snippet(fts_messages, -1, '', '', '...', 40) \
-             FROM fts_messages fts JOIN messages m ON m.rowid = fts.rowid \
-             WHERE fts_messages MATCH ?1 ORDER BY rank LIMIT 10",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("Query prepare error: {}", e))?;
 
+    // Build combined params: FTS query first, then extra filter params
+    let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    all_params.push(Box::new(fts_query));
+    all_params.extend(extra_params);
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        all_params.iter().map(|p| p.as_ref()).collect();
+
     let rows: Vec<serde_json::Value> = stmt
-        .query_map(params![fts_query], |row| {
+        .query_map(rusqlite::params_from_iter(param_refs), |row| {
             let id: String = row.get(0)?;
             let subject: Option<String> = row.get(1)?;
             let from_name: Option<String> = row.get(2)?;
@@ -287,6 +426,158 @@ fn handle_read_email(conn: &Connection, message_id: &str) -> Result<serde_json::
     Ok(result)
 }
 
+fn handle_list_emails(
+    conn: &Connection,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut conditions = vec!["is_draft = 0".to_string()];
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut param_idx = 1;
+
+    // date_from: parse ISO date to epoch timestamp
+    if let Some(date_from) = args.get("date_from").and_then(|v| v.as_str()) {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_from, "%Y-%m-%d") {
+            let ts = dt
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp();
+            conditions.push(format!("date >= ?{}", param_idx));
+            param_values.push(Box::new(ts));
+            param_idx += 1;
+        }
+    }
+
+    // date_to: parse ISO date to epoch timestamp (end of day)
+    if let Some(date_to) = args.get("date_to").and_then(|v| v.as_str()) {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_to, "%Y-%m-%d") {
+            let ts = dt
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+                .and_utc()
+                .timestamp();
+            conditions.push(format!("date <= ?{}", param_idx));
+            param_values.push(Box::new(ts));
+            param_idx += 1;
+        }
+    }
+
+    // sender: LIKE match on from_address or from_name
+    if let Some(sender) = args.get("sender").and_then(|v| v.as_str()) {
+        if !sender.is_empty() {
+            let escaped = sender.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let pattern = format!("%{}%", escaped);
+            conditions.push(format!(
+                "(from_address LIKE ?{p} ESCAPE '\\' OR from_name LIKE ?{p} ESCAPE '\\')",
+                p = param_idx
+            ));
+            param_values.push(Box::new(pattern));
+            param_idx += 1;
+        }
+    }
+
+    // is_read: boolean filter
+    if let Some(is_read) = args.get("is_read").and_then(|v| v.as_bool()) {
+        conditions.push(format!("is_read = ?{}", param_idx));
+        param_values.push(Box::new(if is_read { 1i32 } else { 0i32 }));
+        param_idx += 1;
+    }
+
+    // category: exact match on ai_category
+    if let Some(category) = args.get("category").and_then(|v| v.as_str()) {
+        if !category.is_empty() {
+            conditions.push(format!("ai_category = ?{}", param_idx));
+            param_values.push(Box::new(category.to_string()));
+            param_idx += 1;
+        }
+    }
+
+    // folder: exact match
+    if let Some(folder) = args.get("folder").and_then(|v| v.as_str()) {
+        if !folder.is_empty() {
+            conditions.push(format!("folder = ?{}", param_idx));
+            param_values.push(Box::new(folder.to_string()));
+            param_idx += 1;
+        }
+    }
+
+    let _ = param_idx; // suppress unused variable warning
+
+    // sort
+    let sort_order = match args.get("sort").and_then(|v| v.as_str()) {
+        Some("oldest") => "ASC",
+        _ => "DESC",
+    };
+
+    // limit (capped at 50)
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .map(|l| l.min(50).max(1))
+        .unwrap_or(20);
+
+    let where_clause = conditions.join(" AND ");
+    let sql = format!(
+        "SELECT id, subject, from_name, from_address, date, is_read, is_starred, ai_category, snippet \
+         FROM messages WHERE {} ORDER BY date {} LIMIT {}",
+        where_clause, sort_order, limit
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("Query prepare error: {}", e))?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map(rusqlite::params_from_iter(param_refs), |row| {
+            let id: String = row.get(0)?;
+            let subject: Option<String> = row.get(1)?;
+            let from_name: Option<String> = row.get(2)?;
+            let from_address: Option<String> = row.get(3)?;
+            let date: Option<i64> = row.get(4)?;
+            let is_read: i32 = row.get(5)?;
+            let is_starred: i32 = row.get(6)?;
+            let category: Option<String> = row.get(7)?;
+            let snippet: Option<String> = row.get(8)?;
+
+            let date_str = date
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%b %-d, %Y %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default();
+
+            let from = match (&from_name, &from_address) {
+                (Some(name), Some(addr)) if !name.is_empty() => format!("{} <{}>", name, addr),
+                (_, Some(addr)) => addr.clone(),
+                _ => String::new(),
+            };
+
+            Ok(serde_json::json!({
+                "id": id,
+                "subject": subject.unwrap_or_default(),
+                "from": from,
+                "date": date_str,
+                "is_read": is_read != 0,
+                "is_starred": is_starred != 0,
+                "category": category.unwrap_or_default(),
+                "snippet": snippet.unwrap_or_default(),
+            }))
+        })
+        .map_err(|e| format!("Query error: {}", e))?
+        .filter_map(|r| r.map_err(|e| tracing::warn!("List row skip: {e}")).ok())
+        .collect();
+
+    Ok(serde_json::json!({
+        "count": rows.len(),
+        "emails": rows,
+    }))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -350,10 +641,11 @@ mod tests {
     #[test]
     fn test_all_tools_defined() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         assert_eq!(tools[0].name, "inbox_stats");
         assert_eq!(tools[1].name, "search_emails");
         assert_eq!(tools[2].name, "read_email");
+        assert_eq!(tools[3].name, "list_emails");
     }
 
     #[test]
@@ -491,5 +783,189 @@ mod tests {
         let val = result.unwrap();
         assert_eq!(val["id"], msg_id);
         assert_eq!(val["subject"], "Truncated ID Test");
+    }
+
+    #[test]
+    fn test_all_tools_includes_list_emails() {
+        let tools = all_tools();
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[3].name, "list_emails");
+    }
+
+    #[test]
+    fn test_handle_list_emails_no_filters() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name) \
+             VALUES ('acct1', 'gmail', 'test@example.com', 'Test')",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, from_address, date, is_read, is_draft) \
+             VALUES ('m1', 'acct1', 'Test Email', 'alice@test.com', ?1, 0, 0)",
+            params![now],
+        )
+        .unwrap();
+
+        let result = execute_tool(&conn, None, "list_emails", &serde_json::json!({}));
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"], 1);
+        assert_eq!(val["emails"][0]["subject"], "Test Email");
+    }
+
+    #[test]
+    fn test_handle_list_emails_with_filters() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name) \
+             VALUES ('acct1', 'gmail', 'test@example.com', 'Test')",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        // Insert one read and one unread message
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, from_address, from_name, date, is_read, is_draft, ai_category) \
+             VALUES ('m1', 'acct1', 'Read Email', 'alice@test.com', 'Alice', ?1, 1, 0, 'primary')",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, from_address, from_name, date, is_read, is_draft, ai_category) \
+             VALUES ('m2', 'acct1', 'Unread Email', 'bob@test.com', 'Bob', ?1, 0, 0, 'updates')",
+            params![now],
+        )
+        .unwrap();
+
+        // Filter by is_read=false
+        let result = execute_tool(
+            &conn,
+            None,
+            "list_emails",
+            &serde_json::json!({"is_read": false}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"], 1);
+        assert_eq!(val["emails"][0]["subject"], "Unread Email");
+
+        // Filter by category
+        let result = execute_tool(
+            &conn,
+            None,
+            "list_emails",
+            &serde_json::json!({"category": "primary"}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"], 1);
+        assert_eq!(val["emails"][0]["subject"], "Read Email");
+
+        // Filter by sender
+        let result = execute_tool(
+            &conn,
+            None,
+            "list_emails",
+            &serde_json::json!({"sender": "alice"}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"], 1);
+        assert_eq!(val["emails"][0]["from"], "Alice <alice@test.com>");
+    }
+
+    #[test]
+    fn test_handle_list_emails_sort_and_limit() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name) \
+             VALUES ('acct1', 'gmail', 'test@example.com', 'Test')",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO messages (id, account_id, subject, from_address, date, is_read, is_draft) \
+                 VALUES (?1, 'acct1', ?2, 'x@test.com', ?3, 0, 0)",
+                params![format!("m{}", i), format!("Email {}", i), now + i * 100],
+            )
+            .unwrap();
+        }
+
+        // Limit to 2, newest first
+        let result = execute_tool(
+            &conn,
+            None,
+            "list_emails",
+            &serde_json::json!({"limit": 2, "sort": "newest"}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"], 2);
+        assert_eq!(val["emails"][0]["subject"], "Email 4"); // newest
+
+        // Oldest first
+        let result = execute_tool(
+            &conn,
+            None,
+            "list_emails",
+            &serde_json::json!({"sort": "oldest", "limit": 2}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["emails"][0]["subject"], "Email 0"); // oldest
+    }
+
+    #[test]
+    fn test_search_emails_with_filters() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name) \
+             VALUES ('acct1', 'gmail', 'test@example.com', 'Test')",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, body_text, from_address, from_name, date, is_read, is_draft, ai_category) \
+             VALUES ('m1', 'acct1', 'Security Alert Read', 'Your account was accessed', 'security@google.com', 'Google', ?1, 1, 0, 'updates')",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, body_text, from_address, from_name, date, is_read, is_draft, ai_category) \
+             VALUES ('m2', 'acct1', 'Security Alert Unread', 'New sign-in detected', 'security@google.com', 'Google', ?1, 0, 0, 'updates')",
+            params![now],
+        )
+        .unwrap();
+
+        // Search with is_read filter
+        let result = execute_tool(
+            &conn,
+            None,
+            "search_emails",
+            &serde_json::json!({"query": "security alert", "is_read": false}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["subject"], "Security Alert Unread");
     }
 }
