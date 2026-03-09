@@ -40,7 +40,7 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRecord {
     pub name: String,
     pub arguments: serde_json::Value,
@@ -195,7 +195,7 @@ fn handle_search_emails(conn: &Connection, query: &str) -> Result<serde_json::Va
             }))
         })
         .map_err(|e| format!("Query error: {}", e))?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| r.map_err(|e| tracing::warn!("Search row skip: {e}")).ok())
         .collect();
 
     Ok(serde_json::Value::Array(rows))
@@ -203,10 +203,15 @@ fn handle_search_emails(conn: &Connection, query: &str) -> Result<serde_json::Va
 
 fn handle_read_email(conn: &Connection, message_id: &str) -> Result<serde_json::Value, String> {
     // Resolve potentially truncated ID (8-char prefix)
-    let full_id = if message_id.len() < 36 {
+    // Strip LIKE wildcards to prevent matching arbitrary messages
+    let sanitized_id: String = message_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let full_id = if sanitized_id.len() < 36 {
         conn.query_row(
             "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
-            params![format!("{}%", message_id)],
+            params![format!("{}%", sanitized_id)],
             |row| row.get::<_, String>(0),
         )
         .map_err(|_| format!("No message found matching ID: {}", message_id))?

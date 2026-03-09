@@ -73,6 +73,7 @@ struct ToolUseMessage {
 struct ToolUseResponse {
     content: Vec<ToolUseContentBlock>,
     #[serde(default)]
+    #[allow(dead_code)]
     stop_reason: Option<String>,
 }
 

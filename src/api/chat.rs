@@ -18,6 +18,8 @@ pub struct ChatMessage {
     pub content: String,
     pub citations: Option<Vec<Citation>>,
     pub proposed_action: Option<ProposedAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls_made: Option<Vec<crate::ai::tools::ToolCallRecord>>,
     pub created_at: i64,
 }
 
@@ -84,11 +86,13 @@ fn chat_system_prompt_with_stats_str(stats_block: &str) -> String {
 
 Today's date is {today}.
 {stats_block}
-You have access to the user's recent emails provided as context below. Each email shows its date, read/unread status, sender, subject, and a snippet. When answering:
-- Reference specific emails by their [ID] markers when citing information
+You have access to tools that let you search and read the user's emails. Use them to find relevant information before answering. When answering:
+- When you need information, use the available tools (search_emails, read_email, inbox_stats)
+- Search first, then read specific emails for details
+- Cite emails by referencing their ID from tool results
 - Be concise and helpful
 - Use the date and read/unread status to answer questions about "today's emails", "unread emails", "this week", etc.
-- Use the Inbox Overview stats above to answer aggregate questions like "how many emails", "who sends me the most", etc.
+- Use inbox_stats to answer aggregate questions like "how many emails", "who sends me the most", etc.
 - If the user asks to perform an action (archive, delete, mark read, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
   ACTION_PROPOSAL:{{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}}
 - Valid actions: archive, delete, mark_read, mark_unread, star
@@ -96,6 +100,133 @@ You have access to the user's recent emails provided as context below. Each emai
 - For briefing requests, summarize the most important unread emails first
 - Do not make up information not present in the provided emails"#
     )
+}
+
+// ---------------------------------------------------------------------------
+// Agentic tool-use loop
+// ---------------------------------------------------------------------------
+
+/// Run the agentic tool-use loop. Calls the LLM with tools, executes any tool calls,
+/// appends results, and repeats until the LLM produces a text response or max iterations.
+async fn agentic_chat(
+    providers: &crate::ai::provider::ProviderPool,
+    db: &crate::db::DbPool,
+    memories: &crate::ai::memories::MemoriesClient,
+    system_prompt: &str,
+    initial_user_message: &str,
+    history: &[ChatMessage],
+    max_iterations: usize,
+) -> Result<(String, Vec<Citation>, Vec<crate::ai::tools::ToolCallRecord>), StatusCode> {
+    use crate::ai::tools::{self, LlmMessage, LlmResponse, ToolCallRecord};
+
+    let tools = tools::all_tools();
+    let mut tool_records: Vec<ToolCallRecord> = Vec::new();
+    let mut all_citations: Vec<Citation> = Vec::new();
+
+    // Build initial message list from conversation history
+    let mut messages: Vec<LlmMessage> = Vec::new();
+    for msg in history.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+        match msg.role.as_str() {
+            "user" => messages.push(LlmMessage::User(msg.content.clone())),
+            "assistant" => messages.push(LlmMessage::AssistantText(msg.content.clone())),
+            _ => {}
+        }
+    }
+    messages.push(LlmMessage::User(initial_user_message.to_string()));
+
+    for iteration in 0..max_iterations {
+        let response = providers
+            .generate_with_tools(&messages, Some(system_prompt), &tools)
+            .await
+            .ok_or(StatusCode::BAD_GATEWAY)?;
+
+        match response {
+            LlmResponse::Text(text) => {
+                return Ok((text, all_citations, tool_records));
+            }
+            LlmResponse::ToolCalls { text, calls } => {
+                tracing::info!(iteration, num_calls = calls.len(), "Agentic loop: tool calls");
+
+                // Append assistant message with tool calls
+                messages.push(LlmMessage::AssistantToolCalls {
+                    text: text.clone(),
+                    tool_calls: calls.clone(),
+                });
+
+                // Execute each tool call
+                let conn = db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                for call in &calls {
+                    let result = tools::execute_tool(&conn, Some(memories), &call.name, &call.arguments);
+                    let result_json = match &result {
+                        Ok(v) => serde_json::to_string(v).unwrap_or_default(),
+                        Err(e) => serde_json::json!({"error": e}).to_string(),
+                    };
+
+                    // Track for response metadata
+                    tool_records.push(ToolCallRecord {
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        result_preview: result_json.chars().take(200).collect(),
+                    });
+
+                    // Extract citations from search results (deduplicate by message_id)
+                    if call.name == "search_emails" {
+                        if let Ok(ref v) = result {
+                            if let Some(arr) = v.as_array() {
+                                for item in arr {
+                                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                        if !all_citations.iter().any(|c| c.message_id == id) {
+                                            all_citations.push(Citation {
+                                                message_id: id.to_string(),
+                                                subject: item.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                from: item.get("from").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                date: None,
+                                                is_read: item.get("is_read").and_then(|v| v.as_bool()),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if call.name == "read_email" {
+                        if let Ok(ref v) = result {
+                            if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                                if !all_citations.iter().any(|c| c.message_id == id) {
+                                    all_citations.push(Citation {
+                                        message_id: id.to_string(),
+                                        subject: v.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        from: v.get("from").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        snippet: v.get("body").and_then(|v| v.as_str()).unwrap_or("").chars().take(100).collect(),
+                                        date: None,
+                                        is_read: v.get("is_read").and_then(|v| v.as_bool()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Append tool result message
+                    messages.push(LlmMessage::ToolResult {
+                        tool_call_id: call.id.clone(),
+                        content: result_json,
+                    });
+                }
+            }
+        }
+    }
+
+    // Max iterations reached — force a text response with no tools
+    tracing::warn!("Agentic loop reached max iterations ({}), forcing text response", max_iterations);
+    let final_response = providers
+        .generate_with_tools(&messages, Some(system_prompt), &[])
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    match final_response {
+        LlmResponse::Text(text) => Ok((text, all_citations, tool_records)),
+        _ => Ok(("I apologize, I was unable to complete my analysis. Please try rephrasing your question.".to_string(), all_citations, tool_records)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +247,7 @@ pub async fn chat(
     }
 
     // Phase 1: DB reads (no await across conn)
-    let (history, fts_citations) = {
+    let history = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let ai_enabled = conn
@@ -135,64 +266,24 @@ pub async fn chat(
         ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let history = load_history(&conn, &input.session_id, 10);
-        let fts_citations = search_relevant_emails_fts(&conn, &input.message);
-
-        (history, fts_citations)
+        history
     };
 
-    // Phase 2: Semantic search via Memories (async)
-    let semantic_results = state.memories.search(&input.message, 10, Some("iris/")).await;
-
-    // Phase 3: Resolve semantic results to citations (needs DB)
-    let citations = if !semantic_results.is_empty() {
-        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut citations = Vec::new();
-        for r in &semantic_results {
-            let msg_id = r.source.rsplit('/').next().unwrap_or("").to_string();
-            if msg_id.is_empty() {
-                continue;
-            }
-            if let Ok(c) = conn.query_row(
-                "SELECT subject, from_name, from_address, date, is_read FROM messages WHERE id = ?1",
-                rusqlite::params![msg_id],
-                |row| {
-                    let from_name: Option<String> = row.get(1)?;
-                    let from_addr: Option<String> = row.get(2)?;
-                    Ok(Citation {
-                        message_id: msg_id.clone(),
-                        subject: row.get(0)?,
-                        from: from_name.or(from_addr),
-                        snippet: r.text.chars().take(100).collect(),
-                        date: row.get(3)?,
-                        is_read: row.get::<_, Option<i32>>(4)?.map(|v| v != 0),
-                    })
-                },
-            ) {
-                citations.push(c);
-            }
-        }
-        if citations.is_empty() { fts_citations } else { citations }
-    } else {
-        fts_citations
-    };
-
-    // Phase 3b: Load cross-session context from Memories
-    let past_sessions = state.memories.search(&input.message, 3, Some("iris/chat/sessions/")).await;
-    let user_prefs = state.memories.search("user email preferences", 1, Some("iris/user/preferences")).await;
-
-    // Phase 4: Build prompt and call AI provider (async)
-    let prompt = build_chat_prompt(&history, &citations, &input.message, &past_sessions, &user_prefs);
-
+    // Phase 2-4: Agentic tool-use loop (replaces single-shot RAG)
     let system_prompt = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         chat_system_prompt_with_stats(&conn)
     };
 
-    let ai_response = state
-        .providers
-        .generate(&prompt, Some(&system_prompt))
-        .await
-        .ok_or(StatusCode::BAD_GATEWAY)?;
+    let (ai_response, citations, tool_records) = agentic_chat(
+        &state.providers,
+        &state.db,
+        &state.memories,
+        &system_prompt,
+        &input.message,
+        &history,
+        5, // max iterations
+    ).await?;
 
     let (clean_content, proposed_action) = parse_action_proposal(&ai_response);
 
@@ -241,6 +332,7 @@ pub async fn chat(
         content: clean_content,
         citations: if referenced_citations.is_empty() { None } else { Some(referenced_citations) },
         proposed_action,
+        tool_calls_made: if tool_records.is_empty() { None } else { Some(tool_records) },
         created_at: chrono::Utc::now().timestamp(),
     };
 
@@ -439,6 +531,7 @@ fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> 
             content: row.get(3)?,
             citations: citations_json.and_then(|s| serde_json::from_str(&s).ok()),
             proposed_action: action_json.and_then(|s| serde_json::from_str(&s).ok()),
+            tool_calls_made: None,
             created_at: row.get(6)?,
         })
     }) {
@@ -452,6 +545,7 @@ fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> 
     }
 }
 
+#[allow(dead_code)]
 fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<Citation> {
     // Sanitize query for FTS5 — wrap each word in quotes
     let terms: Vec<String> = query
@@ -506,6 +600,7 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
     }
 }
 
+#[allow(dead_code)]
 fn build_chat_prompt(
     history: &[ChatMessage],
     citations: &[Citation],
@@ -670,6 +765,17 @@ mod tests {
         let prompt = build_chat_prompt(&[], &[], "Hello", &past, &[]);
         assert!(prompt.contains("=== Past Conversations ==="));
         assert!(prompt.contains("quarterly reports"));
+    }
+
+    #[test]
+    fn test_tool_records_serialization() {
+        let record = crate::ai::tools::ToolCallRecord {
+            name: "search_emails".to_string(),
+            arguments: serde_json::json!({"query": "test"}),
+            result_preview: "[{\"id\":\"m1\"}]".to_string(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("search_emails"));
     }
 
     #[test]
