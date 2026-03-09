@@ -30,8 +30,8 @@ Core features every email client has. Without these, Iris isn't a real email cli
 | 7 | Rich text compose — font family, size, color | M | pending |
 | 8 | Undo send (5–30s configurable delay) | S | **done** |
 | 9 | Signatures — multiple, per-account, rich HTML | S | **done** |
-| 10 | Scheduled send | S | pending |
-| 11 | Templates / Canned responses | S | pending |
+| 10 | Scheduled send | S | **done** |
+| 11 | Templates / Canned responses | S | **done** |
 
 ### 1C. Inbox Management
 
@@ -41,7 +41,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 | 13 | Stars / Flags (toggle per message) | S | **done** (quick action) |
 | 14 | Labels / Tags — colored, multiple per message | M | **partial** (display done, management pending) |
 | 15 | Snooze (return email at specified time) | M | **done** |
-| 16 | Spam report + Block sender | S | pending |
+| 16 | Spam report + Block sender | S | **done** |
 | 17 | Mute thread | S | pending |
 | 18 | Archive vs Delete (distinct actions in UI) | XS | **done** |
 
