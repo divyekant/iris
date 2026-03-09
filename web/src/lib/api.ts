@@ -189,4 +189,12 @@ export const api = {
       ),
     delete: (id: string) => request<void>(`/api/signatures/${id}`, { method: 'DELETE' }),
   },
+  templates: {
+    list: () => request<any[]>('/api/templates'),
+    create: (data: { name: string; subject?: string; body_text: string; body_html?: string }) =>
+      request<any>('/api/templates', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: { name: string; subject?: string; body_text: string; body_html?: string }) =>
+      request<any>(`/api/templates/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string) => request<void>(`/api/templates/${id}`, { method: 'DELETE' }),
+  },
 };

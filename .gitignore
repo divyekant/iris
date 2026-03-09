@@ -7,3 +7,4 @@
 *.db-journal
 *.db-wal
 .worktrees/
+.claude/worktrees/

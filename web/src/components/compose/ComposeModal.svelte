@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../../lib/api';
+  import TemplatePicker from './TemplatePicker.svelte';
 
   type ComposeMode = 'new' | 'reply' | 'reply-all' | 'forward';
 
@@ -72,6 +73,32 @@
   let undoCountdown = $state(0);
   let undoTimer: ReturnType<typeof setInterval> | null = null;
   let undoCancelling = $state(false);
+
+  // Template picker state
+  let showTemplatePicker = $state(false);
+  let pendingTemplate = $state<{ subject: string; body_text: string } | null>(null);
+  let showOverwriteConfirm = $state(false);
+
+  function handleTemplatePick(template: { subject: string; body_text: string }) {
+    if ((subject.trim() || body.trim()) && (template.subject || template.body_text)) {
+      pendingTemplate = template;
+      showOverwriteConfirm = true;
+    } else {
+      applyTemplate(template);
+    }
+  }
+
+  function applyTemplate(template: { subject: string; body_text: string }) {
+    if (template.subject) subject = template.subject;
+    if (template.body_text) body = template.body_text;
+    pendingTemplate = null;
+    showOverwriteConfirm = false;
+  }
+
+  function cancelOverwrite() {
+    pendingTemplate = null;
+    showOverwriteConfirm = false;
+  }
 
   const aiActions = [
     { action: 'rewrite', label: 'Improve writing' },
@@ -631,6 +658,50 @@
               {/each}
             </div>
           {/if}
+        </div>
+      {/if}
+      <!-- Template picker -->
+      <div class="relative">
+        <button
+          class="px-3 py-1.5 text-sm transition-colors compose-secondary-btn flex items-center gap-1"
+          style="color: var(--iris-color-text-muted);"
+          onclick={() => (showTemplatePicker = !showTemplatePicker)}
+          disabled={sending}
+          title="Insert template"
+        >
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path>
+            <path d="M14 2v4a2 2 0 0 0 2 2h4"></path>
+            <path d="M10 13H8"></path>
+            <path d="M16 13h-2"></path>
+            <path d="M10 17H8"></path>
+            <path d="M16 17h-2"></path>
+          </svg>
+          Templates
+        </button>
+        {#if showTemplatePicker}
+          <TemplatePicker
+            onpick={handleTemplatePick}
+            onclose={() => (showTemplatePicker = false)}
+          />
+        {/if}
+      </div>
+      <!-- Overwrite confirmation -->
+      {#if showOverwriteConfirm && pendingTemplate}
+        <div class="absolute bottom-full left-0 mb-2 p-3 rounded-lg shadow-lg z-20" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); min-width: 240px;">
+          <p class="text-xs mb-2" style="color: var(--iris-color-text);">Replace current subject and body with template?</p>
+          <div class="flex gap-2">
+            <button
+              class="px-3 py-1 text-xs rounded-lg font-medium"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={() => pendingTemplate && applyTemplate(pendingTemplate)}
+            >Replace</button>
+            <button
+              class="px-3 py-1 text-xs rounded-lg border"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={cancelOverwrite}
+            >Cancel</button>
+          </div>
         </div>
       {/if}
       <!-- AI Assist dropdown -->
