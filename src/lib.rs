@@ -63,6 +63,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/ai/chat/{session_id}", get(api::chat::get_history))
         .route("/ai/queue-status", get(api::queue_status::queue_status))
         .route("/ai/reprocess", post(api::queue_status::reprocess_untagged))
+        .route("/ai/inbox-stats", get(api::inbox_stats::get_inbox_stats))
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/config/view-mode", put(api::config::set_view_mode))

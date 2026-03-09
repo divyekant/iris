@@ -156,6 +156,10 @@ impl SyncEngine {
         {
             let conn = self.db.get()?;
             Account::update_sync_status(&conn, account_id, "idle", None);
+            // Refresh inbox stats after sync
+            if let Err(e) = crate::api::inbox_stats::compute_and_store(&conn, account_id) {
+                tracing::warn!(account_id, error = %e, "Failed to update inbox stats");
+            }
         }
         self.ws_hub.broadcast(WsEvent::SyncComplete {
             account_id: account_id.to_string(),

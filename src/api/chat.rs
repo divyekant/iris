@@ -67,17 +67,28 @@ pub struct ConfirmActionResponse {
 // System prompt
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn chat_system_prompt() -> String {
+    chat_system_prompt_with_stats_str("")
+}
+
+fn chat_system_prompt_with_stats(conn: &rusqlite::Connection) -> String {
+    let stats_block = crate::api::inbox_stats::format_stats_for_prompt(conn);
+    chat_system_prompt_with_stats_str(&stats_block)
+}
+
+fn chat_system_prompt_with_stats_str(stats_block: &str) -> String {
     let today = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
     format!(
         r#"You are Iris, an AI email assistant. You help users understand and manage their inbox through natural conversation.
 
 Today's date is {today}.
-
+{stats_block}
 You have access to the user's recent emails provided as context below. Each email shows its date, read/unread status, sender, subject, and a snippet. When answering:
 - Reference specific emails by their [ID] markers when citing information
 - Be concise and helpful
 - Use the date and read/unread status to answer questions about "today's emails", "unread emails", "this week", etc.
+- Use the Inbox Overview stats above to answer aggregate questions like "how many emails", "who sends me the most", etc.
 - If the user asks to perform an action (archive, delete, mark read, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
   ACTION_PROPOSAL:{{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}}
 - Valid actions: archive, delete, mark_read, mark_unread, star
@@ -172,9 +183,14 @@ pub async fn chat(
     // Phase 4: Build prompt and call AI provider (async)
     let prompt = build_chat_prompt(&history, &citations, &input.message, &past_sessions, &user_prefs);
 
+    let system_prompt = {
+        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        chat_system_prompt_with_stats(&conn)
+    };
+
     let ai_response = state
         .providers
-        .generate(&prompt, Some(&chat_system_prompt()))
+        .generate(&prompt, Some(&system_prompt))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
@@ -654,5 +670,28 @@ mod tests {
         let prompt = build_chat_prompt(&[], &[], "Hello", &past, &[]);
         assert!(prompt.contains("=== Past Conversations ==="));
         assert!(prompt.contains("quarterly reports"));
+    }
+
+    #[test]
+    fn test_system_prompt_with_stats() {
+        let pool = crate::db::create_test_pool();
+        let conn = pool.get().unwrap();
+
+        // Insert test account and messages
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email) VALUES ('a1', 'gmail', 'test@test.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, from_address, subject, date, is_read, is_starred, is_draft)
+             VALUES ('m1', 'a1', 'x@y.com', 'Test', strftime('%s','now'), 0, 0, 0)",
+            [],
+        ).unwrap();
+
+        crate::api::inbox_stats::compute_and_store(&conn, "a1").unwrap();
+
+        let prompt = chat_system_prompt_with_stats(&conn);
+        assert!(prompt.contains("Inbox Overview"));
+        assert!(prompt.contains("Unread: 1"));
     }
 }
