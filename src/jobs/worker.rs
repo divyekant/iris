@@ -459,6 +459,7 @@ async fn send_pending_email(
         body_html: ps.body_html.clone(),
         in_reply_to: ps.in_reply_to.clone(),
         references: ps.references_header.clone(),
+        attachments: Vec::new(),
     };
 
     // Build the email
