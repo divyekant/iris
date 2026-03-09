@@ -68,6 +68,7 @@
 
   const overflowItems = [
     { path: '/starred', label: 'Starred', icon: 'star' },
+    { path: '/snoozed', label: 'Snoozed', icon: 'clock' },
     { path: '/archive', label: 'Archive', icon: 'archive' },
     { path: '/trash', label: 'Trash', icon: 'trash-2' },
     { divider: true },

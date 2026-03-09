@@ -67,10 +67,23 @@ impl JobWorker {
 
             if jobs.is_empty() {
                 tokio::time::sleep(self.poll_interval).await;
-                // Periodic cleanup
+                // Periodic cleanup + snooze wake-up
                 if iteration % 500 == 0 {
                     if let Ok(conn) = self.db.get() {
                         queue::cleanup_completed(&conn, self.cleanup_days);
+                    }
+                }
+                // Check for snoozed messages to wake up every 15 cycles (~30s at 2s poll)
+                if iteration % 15 == 0 {
+                    if let Ok(conn) = self.db.get() {
+                        let woken = message::wake_snoozed(&conn);
+                        if woken > 0 {
+                            tracing::info!("Unsnoozed {woken} message(s)");
+                            self.ws_hub.broadcast(WsEvent::NewEmail {
+                                account_id: String::new(),
+                                message_id: String::new(),
+                            });
+                        }
                     }
                 }
                 continue;

@@ -9,6 +9,7 @@
   import Settings from './pages/Settings.svelte';
   import Search from './pages/Search.svelte';
   import FolderView from './pages/FolderView.svelte';
+  import Snoozed from './pages/Snoozed.svelte';
   import { api } from './lib/api';
 
   // Sync theme from server config on mount
@@ -43,6 +44,7 @@
     '/starred': wrap({ component: FolderView as any, props: { folder: 'Starred', title: 'Starred' } }),
     '/archive': wrap({ component: FolderView as any, props: { folder: 'Archive', title: 'Archive' } }),
     '/trash': wrap({ component: FolderView as any, props: { folder: 'Trash', title: 'Trash' } }),
+    '/snoozed': Snoozed,
   };
 </script>
 

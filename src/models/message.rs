@@ -470,6 +470,75 @@ pub fn finalize_draft_as_sent(conn: &Conn, id: &str, message_id: Option<&str>, t
     .unwrap_or(false)
 }
 
+/// Set snooze on messages. Returns count of rows affected.
+pub fn snooze_messages(conn: &Conn, ids: &[&str], snooze_until: i64) -> usize {
+    if ids.is_empty() {
+        return 0;
+    }
+
+    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i + 1)).collect();
+    let in_clause = placeholders.join(", ");
+
+    let sql = format!(
+        "UPDATE messages SET snoozed_until = ?1, updated_at = unixepoch() WHERE id IN ({in_clause})"
+    );
+
+    let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(ids.len() + 1);
+    params.push(&snooze_until);
+    for id in ids {
+        params.push(id as &dyn rusqlite::types::ToSql);
+    }
+
+    conn.execute(&sql, params.as_slice()).unwrap_or(0)
+}
+
+/// Clear snooze on messages. Returns count of rows affected.
+pub fn unsnooze_messages(conn: &Conn, ids: &[&str]) -> usize {
+    if ids.is_empty() {
+        return 0;
+    }
+
+    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+    let in_clause = placeholders.join(", ");
+
+    let sql = format!(
+        "UPDATE messages SET snoozed_until = NULL, updated_at = unixepoch() WHERE id IN ({in_clause})"
+    );
+
+    let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+    conn.execute(&sql, params.as_slice()).unwrap_or(0)
+}
+
+/// List currently snoozed messages (snoozed_until > now).
+pub fn list_snoozed(conn: &Conn) -> Vec<MessageSummary> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
+                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+             FROM messages
+             WHERE snoozed_until IS NOT NULL AND snoozed_until > unixepoch() AND is_deleted = 0
+             ORDER BY snoozed_until ASC
+             LIMIT 500",
+        )
+        .expect("failed to prepare list_snoozed query");
+
+    stmt.query_map([], MessageSummary::from_row)
+        .expect("failed to query snoozed messages")
+        .filter_map(|r| r.map_err(|e| tracing::warn!("Snoozed row skip: {e}")).ok())
+        .collect()
+}
+
+/// Wake up snoozed messages whose snooze time has passed.
+/// Returns count of messages unsnoozed.
+pub fn wake_snoozed(conn: &Conn) -> usize {
+    conn.execute(
+        "UPDATE messages SET snoozed_until = NULL, updated_at = unixepoch()
+         WHERE snoozed_until IS NOT NULL AND snoozed_until <= unixepoch()",
+        [],
+    )
+    .unwrap_or(0)
+}
+
 /// Batch update messages by action. Returns count of rows affected.
 /// Supported actions: archive, delete, mark_read, mark_unread, star, unstar.
 pub fn batch_update(conn: &Conn, ids: &[&str], action: &str) -> usize {

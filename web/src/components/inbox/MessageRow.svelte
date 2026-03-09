@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen } from 'lucide-svelte';
+  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen, Clock } from 'lucide-svelte';
+  import SnoozePicker from '../SnoozePicker.svelte';
 
   interface Message {
     id: string;
@@ -15,13 +16,16 @@
     labels?: string;
   }
 
-  let { message, onclick, selected = false, onselect, onaction }: {
+  let { message, onclick, selected = false, onselect, onaction, onsnooze }: {
     message: Message;
     onclick: (id: string) => void;
     selected?: boolean;
     onselect?: (id: string, checked: boolean) => void;
     onaction?: (id: string, action: string) => void;
+    onsnooze?: (id: string, snoozeUntil: number) => void;
   } = $props();
+
+  let snoozePickerOpen = $state(false);
 
   let senderDisplay = $derived(message.from_name || message.from_address);
   let subjectDisplay = $derived(message.subject || '(no subject)');
@@ -154,10 +158,27 @@
       onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'star'); }}
       title="Star"
     ><Star size={14} /></button>
+    <div class="relative">
+      <button
+        class="p-1 rounded transition-colors quick-action-snooze"
+        style="color: var(--iris-color-text-faint);"
+        onclick={(e) => { e.stopPropagation(); snoozePickerOpen = !snoozePickerOpen; }}
+        title="Snooze"
+      ><Clock size={14} /></button>
+      {#if snoozePickerOpen}
+        <div class="absolute right-0 top-full mt-1">
+          <SnoozePicker
+            onpick={(epoch) => { snoozePickerOpen = false; onsnooze?.(message.id, epoch); }}
+            onclose={() => { snoozePickerOpen = false; }}
+          />
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 
 <style>
   .quick-action:hover { color: var(--iris-color-primary); }
   .quick-action-delete:hover { color: var(--iris-color-error); }
+  .quick-action-snooze:hover { color: var(--iris-color-warning); }
 </style>
