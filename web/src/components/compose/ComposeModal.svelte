@@ -43,6 +43,12 @@
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // AI assist state
+  // Signature state
+  type SignatureItem = { id: string; account_id: string; name: string; body_text: string; body_html: string; is_default: boolean; created_at: number };
+  let signatures = $state<SignatureItem[]>([]);
+  let selectedSignatureId = $state<string | null>(null);
+  let showSignatureMenu = $state(false);
+
   let aiAssisting = $state(false);
   let showAiMenu = $state(false);
 
@@ -72,6 +78,44 @@
       error = 'AI assist failed. Check AI settings.';
     } finally {
       aiAssisting = false;
+    }
+  }
+
+  const SIGNATURE_SEPARATOR = '\n\n--\n';
+
+  function getSignatureBlock(sig: SignatureItem | null | undefined): string {
+    if (!sig || !sig.body_text.trim()) return '';
+    return SIGNATURE_SEPARATOR + sig.body_text;
+  }
+
+  function stripSignature(text: string): string {
+    const sepIdx = text.lastIndexOf(SIGNATURE_SEPARATOR);
+    if (sepIdx === -1) return text;
+    return text.substring(0, sepIdx);
+  }
+
+  function switchSignature(sigId: string | null) {
+    const cleaned = stripSignature(body);
+    selectedSignatureId = sigId;
+    if (sigId) {
+      const sig = signatures.find(s => s.id === sigId);
+      body = cleaned + getSignatureBlock(sig);
+    } else {
+      body = cleaned;
+    }
+    showSignatureMenu = false;
+  }
+
+  async function loadSignatures() {
+    try {
+      signatures = await api.signatures.list(context.accountId);
+      const defaultSig = signatures.find(s => s.is_default);
+      if (defaultSig) {
+        selectedSignatureId = defaultSig.id;
+        body = body + getSignatureBlock(defaultSig);
+      }
+    } catch {
+      // Signatures not available — continue without
     }
   }
 
@@ -279,6 +323,7 @@
   // Initialize fields on mount
   $effect(() => {
     initFields();
+    loadSignatures();
     return () => {
       if (saveTimeout) clearTimeout(saveTimeout);
       clearUndoTimer();
@@ -409,6 +454,41 @@
       >
         Save Draft
       </button>
+      <!-- Signature dropdown -->
+      {#if signatures.length > 0}
+        <div class="relative">
+          <button
+            class="px-3 py-1.5 text-sm transition-colors compose-secondary-btn"
+            style="color: var(--iris-color-text-muted);"
+            onclick={() => (showSignatureMenu = !showSignatureMenu)}
+            disabled={sending}
+            title="Signature"
+          >
+            Sig{selectedSignatureId ? ': ' + (signatures.find(s => s.id === selectedSignatureId)?.name || '') : ''}
+          </button>
+          {#if showSignatureMenu}
+            <div class="absolute bottom-full left-0 mb-1 rounded-lg shadow-lg py-1 min-w-[160px] z-10" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
+              <button
+                class="w-full text-left px-3 py-1.5 text-sm compose-dropdown-item"
+                style="color: {selectedSignatureId === null ? 'var(--iris-color-primary)' : 'var(--iris-color-text-muted)'};"
+                onclick={() => switchSignature(null)}
+              >None</button>
+              {#each signatures as sig}
+                <button
+                  class="w-full text-left px-3 py-1.5 text-sm compose-dropdown-item flex items-center gap-2"
+                  style="color: {selectedSignatureId === sig.id ? 'var(--iris-color-primary)' : 'var(--iris-color-text-muted)'};"
+                  onclick={() => switchSignature(sig.id)}
+                >
+                  {sig.name}
+                  {#if sig.is_default}
+                    <span class="px-1.5 py-0.5 text-[10px] rounded-full" style="background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent); color: var(--iris-color-primary);">default</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
       <!-- AI Assist dropdown -->
       <div class="relative">
         <button

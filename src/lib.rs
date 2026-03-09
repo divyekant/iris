@@ -77,6 +77,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/config/undo-send-delay", get(api::compose::get_undo_send_delay).put(api::compose::set_undo_send_delay))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
         .route("/drafts/{id}", delete(api::compose::delete_draft))
+        .route("/signatures", get(api::signatures::list_signatures).post(api::signatures::create_signature))
+        .route("/signatures/{id}", put(api::signatures::update_signature).delete(api::signatures::delete_signature))
         .nest("/agent", agent_routes)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
