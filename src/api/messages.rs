@@ -56,7 +56,8 @@ pub async fn list_messages(
         "Trash" => "m.is_deleted = 1",
         "Drafts" => "m.is_draft = 1 AND m.is_deleted = 0",
         // Safe: folder is validated against ALLOWED_FOLDERS above
-        "INBOX" => "m.folder = 'INBOX' AND m.is_deleted = 0",
+        // Exclude snoozed messages from inbox (they reappear when snoozed_until passes)
+        "INBOX" => "m.folder = 'INBOX' AND m.is_deleted = 0 AND (m.snoozed_until IS NULL OR m.snoozed_until <= unixepoch())",
         "Sent" => "m.folder = 'Sent' AND m.is_deleted = 0",
         "Archive" => "m.folder = 'Archive' AND m.is_deleted = 0",
         _ => "m.folder = 'INBOX' AND m.is_deleted = 0",
@@ -261,6 +262,64 @@ pub async fn batch_update_messages(
     let updated = message::batch_update(&conn, &id_refs, &req.action);
 
     Ok(Json(BatchUpdateResponse { updated }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SnoozeRequest {
+    pub ids: Vec<String>,
+    pub snooze_until: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnoozeResponse {
+    pub updated: usize,
+}
+
+pub async fn snooze_messages(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SnoozeRequest>,
+) -> Result<Json<SnoozeResponse>, StatusCode> {
+    if req.ids.is_empty() || req.ids.len() > 1000 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if req.snooze_until <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let id_refs: Vec<&str> = req.ids.iter().map(|s| s.as_str()).collect();
+    let updated = message::snooze_messages(&conn, &id_refs, req.snooze_until);
+    Ok(Json(SnoozeResponse { updated }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnsnoozeRequest {
+    pub ids: Vec<String>,
+}
+
+pub async fn unsnooze_messages(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UnsnoozeRequest>,
+) -> Result<Json<SnoozeResponse>, StatusCode> {
+    if req.ids.is_empty() || req.ids.len() > 1000 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let id_refs: Vec<&str> = req.ids.iter().map(|s| s.as_str()).collect();
+    let updated = message::unsnooze_messages(&conn, &id_refs);
+    Ok(Json(SnoozeResponse { updated }))
+}
+
+pub async fn list_snoozed(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ListMessagesResponse>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let messages = message::list_snoozed(&conn);
+    let total = messages.len() as i64;
+    Ok(Json(ListMessagesResponse {
+        messages,
+        unread_count: 0,
+        total,
+    }))
 }
 
 #[derive(Debug, Serialize)]

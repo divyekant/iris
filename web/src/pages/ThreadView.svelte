@@ -2,8 +2,9 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock } from 'lucide-svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
+  import SnoozePicker from '../components/SnoozePicker.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
@@ -19,6 +20,9 @@
   let replyBody = $state('');
   let sending = $state(false);
   let sendError = $state('');
+
+  // Snooze picker state
+  let snoozePickerOpen = $state(false);
 
   // AI summary state
   let aiSummary = $state<string | null>(null);
@@ -169,6 +173,17 @@
       }
     } catch (e: any) {
       error = e.message || 'Action failed';
+    }
+  }
+
+  async function handleSnooze(snoozeUntil: number) {
+    if (!thread) return;
+    const ids = thread.messages.map((m: any) => m.id);
+    try {
+      await api.messages.snooze(ids, snoozeUntil);
+      push('/');
+    } catch (e: any) {
+      error = e.message || 'Snooze failed';
     }
   }
 
@@ -367,6 +382,17 @@
         <button class="p-1.5 transition-colors thread-action-btn star-btn" onclick={() => handleThreadAction('star')} title="Star"><Star size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('archive')} title="Archive"><Archive size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('mark_unread')} title="Mark unread"><MailOpen size={15} /></button>
+        <div class="relative">
+          <button class="p-1.5 transition-colors thread-action-btn snooze-btn" onclick={() => { snoozePickerOpen = !snoozePickerOpen; }} title="Snooze"><Clock size={15} /></button>
+          {#if snoozePickerOpen}
+            <div class="absolute right-0 top-full mt-1 z-50">
+              <SnoozePicker
+                onpick={(epoch) => { snoozePickerOpen = false; handleSnooze(epoch); }}
+                onclose={() => { snoozePickerOpen = false; }}
+              />
+            </div>
+          {/if}
+        </div>
         <button class="p-1.5 transition-colors thread-action-btn delete-btn" onclick={() => handleThreadAction('delete')} title="Delete"><Trash2 size={15} /></button>
       </div>
     {/if}
@@ -507,6 +533,9 @@
   }
   .thread-action-btn.star-btn:hover {
     color: var(--iris-color-primary);
+  }
+  .thread-action-btn.snooze-btn:hover {
+    color: var(--iris-color-warning);
   }
   .thread-action-btn.delete-btn:hover {
     color: var(--iris-color-error);

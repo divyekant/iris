@@ -1,11 +1,12 @@
 <script lang="ts">
   import MessageRow from './MessageRow.svelte';
 
-  let { messages, onclick, selectedIds = $bindable(new Set<string>()), onaction, focusedIndex = -1 }: {
+  let { messages, onclick, selectedIds = $bindable(new Set<string>()), onaction, onsnooze, focusedIndex = -1 }: {
     messages: any[];
     onclick: (id: string) => void;
     selectedIds?: Set<string>;
     onaction?: (id: string, action: string) => void;
+    onsnooze?: (id: string, snoozeUntil: number) => void;
     focusedIndex?: number;
   } = $props();
 
@@ -28,7 +29,7 @@
 {:else}
   <div>
     {#each messages as message, i (message.id)}
-      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} focused={i === focusedIndex} onselect={handleSelect} {onaction} />
+      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} focused={i === focusedIndex} onselect={handleSelect} {onaction} {onsnooze} />
     {/each}
   </div>
 {/if}

@@ -260,6 +260,17 @@
     }
   }
 
+  async function handleSnooze(id: string, snoozeUntil: number) {
+    try {
+      await api.messages.snooze([id], snoozeUntil);
+      toastMessage = 'Email snoozed';
+      toastVisible = true;
+      await loadMessages();
+    } catch (e: any) {
+      error = e.message || 'Snooze failed';
+    }
+  }
+
   $effect(() => {
     loadMessages();
     wsClient.connect();
@@ -326,7 +337,7 @@
     {:else if messages.length === 0}
       <EmptyState title="Inbox zero" subtitle="You've read everything. Time to go outside." />
     {:else}
-      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} {focusedIndex} />
+      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} onsnooze={handleSnooze} {focusedIndex} />
     {/if}
   </div>
 

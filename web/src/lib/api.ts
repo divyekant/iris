@@ -54,6 +54,18 @@ export const api = {
         body: JSON.stringify({ ids, action }),
       }),
     fixEncoding: () => request<{ fixed: number }>('/api/messages/fix-encoding', { method: 'POST' }),
+    snooze: (ids: string[], snoozeUntil: number) =>
+      request<{ updated: number }>('/api/messages/snooze', {
+        method: 'POST',
+        body: JSON.stringify({ ids, snooze_until: snoozeUntil }),
+      }),
+    unsnooze: (ids: string[]) =>
+      request<{ updated: number }>('/api/messages/unsnooze', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      }),
+    listSnoozed: () =>
+      request<{ messages: any[]; unread_count: number; total: number }>('/api/messages/snoozed'),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
