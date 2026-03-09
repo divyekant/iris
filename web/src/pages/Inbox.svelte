@@ -26,6 +26,166 @@
   let toastMessage = $state('');
   let toastVisible = $state(false);
 
+  // Keyboard navigation state
+  let focusedIndex = $state(-1);
+  let showShortcutHelp = $state(false);
+  let pendingGChord = $state(false);
+  let gChordTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function isInputFocused(): boolean {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || (el as HTMLElement).isContentEditable;
+  }
+
+  function focusSearch() {
+    const input = document.getElementById('topnav-search-input') as HTMLInputElement | null;
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    // Always allow shortcut help toggle
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (isInputFocused()) return;
+      e.preventDefault();
+      showShortcutHelp = !showShortcutHelp;
+      return;
+    }
+
+    // Close help overlay on Escape
+    if (e.key === 'Escape' && showShortcutHelp) {
+      e.preventDefault();
+      showShortcutHelp = false;
+      return;
+    }
+
+    // Cmd+K / Ctrl+K — focus search (works even in inputs)
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      focusSearch();
+      return;
+    }
+
+    // Skip all other shortcuts if user is typing
+    if (isInputFocused()) return;
+
+    // Handle "g" chord
+    if (pendingGChord) {
+      pendingGChord = false;
+      if (gChordTimer) { clearTimeout(gChordTimer); gChordTimer = null; }
+      switch (e.key) {
+        case 'i': e.preventDefault(); push('/'); return;
+        case 's': e.preventDefault(); push('/sent'); return;
+        case 'd': e.preventDefault(); push('/drafts'); return;
+      }
+      // Unrecognized second key — fall through
+      return;
+    }
+
+    if (e.key === 'g' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      pendingGChord = true;
+      gChordTimer = setTimeout(() => { pendingGChord = false; }, 1000);
+      return;
+    }
+
+    // "/" — focus search
+    if (e.key === '/' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      focusSearch();
+      return;
+    }
+
+    // "c" — compose
+    if (e.key === 'c' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      showCompose = true;
+      return;
+    }
+
+    // j/k — navigate list
+    if (e.key === 'j') {
+      e.preventDefault();
+      if (messages.length > 0) {
+        focusedIndex = Math.min(focusedIndex + 1, messages.length - 1);
+        scrollFocusedIntoView();
+      }
+      return;
+    }
+    if (e.key === 'k') {
+      e.preventDefault();
+      if (messages.length > 0) {
+        focusedIndex = Math.max(focusedIndex - 1, 0);
+        scrollFocusedIntoView();
+      }
+      return;
+    }
+
+    // Enter/o — open focused message
+    if ((e.key === 'Enter' || e.key === 'o') && focusedIndex >= 0 && focusedIndex < messages.length) {
+      e.preventDefault();
+      handleMessageClick(messages[focusedIndex].id);
+      return;
+    }
+
+    // Actions on focused message
+    if (focusedIndex >= 0 && focusedIndex < messages.length) {
+      const msg = messages[focusedIndex];
+
+      // e — archive
+      if (e.key === 'e' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        handleRowAction(msg.id, 'archive');
+        // Adjust focus if we removed the last item
+        if (focusedIndex >= messages.length - 1) {
+          focusedIndex = Math.max(0, messages.length - 2);
+        }
+        return;
+      }
+
+      // # — delete
+      if (e.key === '#') {
+        e.preventDefault();
+        handleRowAction(msg.id, 'delete');
+        if (focusedIndex >= messages.length - 1) {
+          focusedIndex = Math.max(0, messages.length - 2);
+        }
+        return;
+      }
+
+      // s — star/unstar
+      if (e.key === 's' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+        e.preventDefault();
+        handleRowAction(msg.id, 'star');
+        return;
+      }
+
+      // Shift+u — mark unread
+      if (e.key === 'U' || (e.key === 'u' && e.shiftKey)) {
+        e.preventDefault();
+        handleRowAction(msg.id, 'mark_unread');
+        return;
+      }
+    }
+  }
+
+  function scrollFocusedIntoView() {
+    // Defer to next tick so the DOM has updated
+    requestAnimationFrame(() => {
+      const container = document.querySelector('.flex-1.overflow-auto');
+      if (!container) return;
+      const rows = container.querySelectorAll('[role="button"]');
+      const row = rows[focusedIndex] as HTMLElement | undefined;
+      if (row) {
+        row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    });
+  }
+
   function onCategoryChange(e: Event) {
     const detail = (e as CustomEvent).detail;
     activeCategory = detail.category || '';
@@ -124,6 +284,8 @@
   });
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
+
 <div class="h-full flex flex-col">
   <!-- No sub-header — tabs are in TopNav. Just a sync status bar below. -->
 
@@ -164,7 +326,7 @@
     {:else if messages.length === 0}
       <EmptyState title="Inbox zero" subtitle="You've read everything. Time to go outside." />
     {:else}
-      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} />
+      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} {focusedIndex} />
     {/if}
   </div>
 
@@ -198,3 +360,123 @@
     onsent={loadMessages}
   />
 {/if}
+
+{#if showShortcutHelp}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center"
+    style="background: rgba(0,0,0,0.5);"
+    onclick={() => showShortcutHelp = false}
+    onkeydown={(e) => { if (e.key === 'Escape') showShortcutHelp = false; }}
+  >
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="w-[520px] max-h-[80vh] overflow-y-auto rounded-xl p-6"
+      style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-base font-semibold" style="color: var(--iris-color-text);">Keyboard Shortcuts</h2>
+        <button
+          class="p-1 rounded text-sm"
+          style="color: var(--iris-color-text-faint);"
+          onclick={() => showShortcutHelp = false}
+        >&times;</button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-x-8 gap-y-1">
+        <!-- Navigation -->
+        <div class="col-span-2 mt-2 mb-1">
+          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">Navigation</h3>
+        </div>
+        <div class="shortcut-row"><kbd>j</kbd> / <kbd>k</kbd></div>
+        <div class="shortcut-label">Move down / up</div>
+        <div class="shortcut-row"><kbd>Enter</kbd> or <kbd>o</kbd></div>
+        <div class="shortcut-label">Open message</div>
+        <div class="shortcut-row"><kbd>/</kbd> or <kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd></div>
+        <div class="shortcut-label">Focus search</div>
+        <div class="shortcut-row"><kbd>g</kbd> then <kbd>i</kbd></div>
+        <div class="shortcut-label">Go to Inbox</div>
+        <div class="shortcut-row"><kbd>g</kbd> then <kbd>s</kbd></div>
+        <div class="shortcut-label">Go to Sent</div>
+        <div class="shortcut-row"><kbd>g</kbd> then <kbd>d</kbd></div>
+        <div class="shortcut-label">Go to Drafts</div>
+
+        <!-- Actions -->
+        <div class="col-span-2 mt-3 mb-1">
+          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">Actions (Inbox)</h3>
+        </div>
+        <div class="shortcut-row"><kbd>c</kbd></div>
+        <div class="shortcut-label">Compose new email</div>
+        <div class="shortcut-row"><kbd>e</kbd></div>
+        <div class="shortcut-label">Archive</div>
+        <div class="shortcut-row"><kbd>#</kbd></div>
+        <div class="shortcut-label">Delete</div>
+        <div class="shortcut-row"><kbd>s</kbd></div>
+        <div class="shortcut-label">Star / unstar</div>
+        <div class="shortcut-row"><kbd>Shift+U</kbd></div>
+        <div class="shortcut-label">Mark unread</div>
+
+        <!-- Thread -->
+        <div class="col-span-2 mt-3 mb-1">
+          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">Thread View</h3>
+        </div>
+        <div class="shortcut-row"><kbd>r</kbd></div>
+        <div class="shortcut-label">Reply</div>
+        <div class="shortcut-row"><kbd>a</kbd></div>
+        <div class="shortcut-label">Reply all</div>
+        <div class="shortcut-row"><kbd>f</kbd></div>
+        <div class="shortcut-label">Forward</div>
+        <div class="shortcut-row"><kbd>e</kbd></div>
+        <div class="shortcut-label">Archive thread</div>
+        <div class="shortcut-row"><kbd>s</kbd></div>
+        <div class="shortcut-label">Star thread</div>
+        <div class="shortcut-row"><kbd>#</kbd></div>
+        <div class="shortcut-label">Delete thread</div>
+        <div class="shortcut-row"><kbd>u</kbd> or <kbd>Esc</kbd></div>
+        <div class="shortcut-label">Back to inbox</div>
+
+        <!-- General -->
+        <div class="col-span-2 mt-3 mb-1">
+          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">General</h3>
+        </div>
+        <div class="shortcut-row"><kbd>?</kbd></div>
+        <div class="shortcut-label">Show this help</div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<style>
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 0;
+    font-size: 13px;
+    color: var(--iris-color-text-muted);
+  }
+  .shortcut-label {
+    display: flex;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 13px;
+    color: var(--iris-color-text-faint);
+  }
+  .shortcut-row :global(kbd) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 22px;
+    padding: 0 6px;
+    font-family: 'SF Mono', 'Cascadia Mono', 'Menlo', monospace;
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 4px;
+    background: var(--iris-color-bg-surface);
+    border: 1px solid var(--iris-color-border);
+    color: var(--iris-color-text);
+    line-height: 1;
+  }
+</style>

@@ -286,6 +286,7 @@
   >
     <svg class="w-3.5 h-3.5 shrink-0" style="color: var(--iris-color-text-faint);" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" stroke-width="2"/><path stroke-linecap="round" stroke-width="2" d="M21 21l-4.35-4.35"/></svg>
     <input
+      id="topnav-search-input"
       type="text"
       bind:value={searchQuery}
       placeholder="Search emails..."
