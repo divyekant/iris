@@ -30,6 +30,10 @@
   let fixingEncoding = $state(false);
   let fixEncodingMessage = $state('');
 
+  // Undo send
+  let undoSendDelay = $state(10);
+  let undoSendSaving = $state(false);
+
   // Provider API keys (masked display)
   let anthropicKey = $state('');
   let anthropicModel = $state('');
@@ -176,6 +180,18 @@
     }
   }
 
+  async function saveUndoSendDelay() {
+    undoSendSaving = true;
+    try {
+      const result = await api.config.setUndoSendDelay(undoSendDelay);
+      undoSendDelay = result.delay_seconds;
+    } catch {
+      // Silently fail
+    } finally {
+      undoSendSaving = false;
+    }
+  }
+
   async function toggleAi() {
     aiEnabled = !aiEnabled;
     await saveAiConfig();
@@ -274,6 +290,13 @@
         // AI config not available
       }
 
+      try {
+        const undoConfig = await api.config.getUndoSendDelay();
+        undoSendDelay = undoConfig.delay_seconds;
+      } catch {
+        undoSendDelay = 10;
+      }
+
       await loadApiKeys();
       await loadAuditLog();
 
@@ -330,6 +353,35 @@
             style="accent-color: var(--iris-color-primary);"
           />
         </label>
+      </div>
+    </section>
+
+    <!-- Undo Send section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Undo Send</h3>
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium" style="color: var(--iris-color-text);">Send delay</p>
+          <p class="text-xs" style="color: var(--iris-color-text-faint);">Time to undo after clicking Send</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <select
+            bind:value={undoSendDelay}
+            onchange={saveUndoSendDelay}
+            class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+            disabled={undoSendSaving}
+          >
+            <option value={5}>5 seconds</option>
+            <option value={10}>10 seconds</option>
+            <option value={15}>15 seconds</option>
+            <option value={20}>20 seconds</option>
+            <option value={30}>30 seconds</option>
+          </select>
+          {#if undoSendSaving}
+            <span class="text-xs" style="color: var(--iris-color-text-faint);">Saving...</span>
+          {/if}
+        </div>
       </div>
     </section>
 

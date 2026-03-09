@@ -73,6 +73,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/api-keys/{id}", delete(api::agent::revoke_key_handler))
         .route("/audit-log", get(api::agent::get_audit_log_handler))
         .route("/send", post(api::compose::send_message))
+        .route("/send/cancel/{id}", post(api::compose::cancel_send))
+        .route("/config/undo-send-delay", get(api::compose::get_undo_send_delay).put(api::compose::set_undo_send_delay))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
         .route("/drafts/{id}", delete(api::compose::delete_draft))
         .nest("/agent", agent_routes)

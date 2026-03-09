@@ -70,7 +70,9 @@ export const api = {
     body_html?: string;
     in_reply_to?: string;
     references?: string;
-  }) => request<{ message_id: string }>('/api/send', { method: 'POST', body: JSON.stringify(data) }),
+  }) => request<{ id: string; send_at: number; can_undo: boolean }>('/api/send', { method: 'POST', body: JSON.stringify(data) }),
+  cancelSend: (id: string) =>
+    request<{ cancelled: boolean }>(`/api/send/cancel/${id}`, { method: 'POST' }),
   drafts: {
     list: (accountId: string) => request<any[]>(`/api/drafts?account_id=${accountId}`),
     save: (data: {
@@ -92,6 +94,12 @@ export const api = {
       request<{ theme: string; view_mode: string }>('/api/config/view-mode', {
         method: 'PUT',
         body: JSON.stringify({ view_mode }),
+      }),
+    getUndoSendDelay: () => request<{ delay_seconds: number }>('/api/config/undo-send-delay'),
+    setUndoSendDelay: (delay_seconds: number) =>
+      request<{ delay_seconds: number }>('/api/config/undo-send-delay', {
+        method: 'PUT',
+        body: JSON.stringify({ delay_seconds }),
       }),
   },
   search: (params: { q: string; has_attachment?: boolean; after?: number; before?: number; account_id?: string; limit?: number; offset?: number; semantic?: boolean }) => {

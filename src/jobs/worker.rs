@@ -5,9 +5,14 @@ use tokio::sync::Semaphore;
 use crate::ai::memories::MemoriesClient;
 use crate::ai::provider::ProviderPool;
 use crate::ai::pipeline;
+use crate::api::compose::{self, PendingSend};
+use crate::auth::refresh::ensure_fresh_token;
+use crate::config::Config;
 use crate::db::DbPool;
 use crate::jobs::queue::{self, Job};
-use crate::models::message;
+use crate::models::account::Account;
+use crate::models::message::{self, InsertMessage};
+use crate::smtp::{self, ComposeRequest};
 use crate::ws::hub::{WsEvent, WsHub};
 
 /// Background worker that polls the job queue and processes jobs.
@@ -16,6 +21,7 @@ pub struct JobWorker {
     ws_hub: WsHub,
     providers: ProviderPool,
     memories: MemoriesClient,
+    config: Config,
     poll_interval: Duration,
     semaphore: Arc<Semaphore>,
     cleanup_days: i64,
@@ -27,6 +33,7 @@ impl JobWorker {
         ws_hub: WsHub,
         providers: ProviderPool,
         memories: MemoriesClient,
+        config: Config,
         poll_interval_ms: u64,
         max_concurrency: usize,
         cleanup_days: i64,
@@ -36,6 +43,7 @@ impl JobWorker {
             ws_hub,
             providers,
             memories,
+            config,
             poll_interval: Duration::from_millis(poll_interval_ms),
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             cleanup_days,
@@ -51,6 +59,9 @@ impl JobWorker {
         let mut iteration: u64 = 0;
         loop {
             iteration += 1;
+
+            // --- Process pending sends ---
+            self.process_pending_sends().await;
 
             // Claim jobs
             let jobs = {
@@ -91,6 +102,42 @@ impl JobWorker {
 
             // Tight loop when there are jobs to process
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Check for pending sends that are ready and send them via SMTP.
+    async fn process_pending_sends(&self) {
+        let pending = {
+            let conn = match self.db.get() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            compose::claim_pending_sends(&conn)
+        };
+
+        for ps in pending {
+            let worker_db = self.db.clone();
+            let worker_config = self.config.clone();
+            let ws_hub = self.ws_hub.clone();
+            let ps_clone = ps;
+            // Process each pending send in its own task
+            tokio::spawn(async move {
+                if let Err(e) = send_pending_email(&worker_db, &worker_config, &ps_clone).await {
+                    tracing::error!(pending_send_id = %ps_clone.id, error = %e, "Failed to send pending email");
+                    if let Ok(conn) = worker_db.get() {
+                        compose::mark_pending_failed(&conn, &ps_clone.id);
+                    }
+                } else {
+                    if let Ok(conn) = worker_db.get() {
+                        compose::mark_pending_sent(&conn, &ps_clone.id);
+                    }
+                    ws_hub.broadcast(WsEvent::JobCompleted {
+                        message_id: Some(ps_clone.id.clone()),
+                        job_type: "pending_send".to_string(),
+                    });
+                    tracing::info!(pending_send_id = %ps_clone.id, "Pending email sent successfully");
+                }
+            });
         }
     }
 
@@ -353,4 +400,108 @@ impl JobWorker {
         tracing::info!("User preferences extracted and stored");
         Ok(())
     }
+}
+
+/// Actually send a pending email via SMTP and store in Sent folder.
+async fn send_pending_email(
+    db: &DbPool,
+    config: &Config,
+    ps: &PendingSend,
+) -> Result<(), String> {
+    let conn = db.get().map_err(|e| e.to_string())?;
+    let account = Account::get_by_id(&conn, &ps.account_id)
+        .ok_or_else(|| format!("Account {} not found", ps.account_id))?;
+    drop(conn);
+
+    if !account.is_active {
+        return Err("Account is inactive".to_string());
+    }
+
+    // Refresh OAuth token
+    let access_token = ensure_fresh_token(db, &account, config)
+        .await
+        .map_err(|e| format!("Token refresh failed: {e}"))?;
+
+    // Parse addresses from JSON
+    let to: Vec<String> = serde_json::from_str(&ps.to_addresses)
+        .map_err(|e| format!("Invalid to_addresses JSON: {e}"))?;
+    let cc: Vec<String> = ps
+        .cc_addresses
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let bcc: Vec<String> = ps
+        .bcc_addresses
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    let compose_req = ComposeRequest {
+        account_id: ps.account_id.clone(),
+        to: to.clone(),
+        cc: cc.clone(),
+        bcc: bcc.clone(),
+        subject: ps.subject.clone().unwrap_or_default(),
+        body_text: ps.body_text.clone().unwrap_or_default(),
+        body_html: ps.body_html.clone(),
+        in_reply_to: ps.in_reply_to.clone(),
+        references: ps.references_header.clone(),
+    };
+
+    // Build the email
+    let email = smtp::build_email(
+        &account.email,
+        account.display_name.as_deref(),
+        &compose_req,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Extract the Message-ID
+    let rfc_message_id = email
+        .headers()
+        .get_raw("Message-ID")
+        .map(|v| v.to_string());
+
+    // Send via SMTP
+    smtp::send_email(&account, access_token.as_deref(), email)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Store in Sent folder
+    let to_json = serde_json::to_string(&to).ok();
+    let cc_json = if cc.is_empty() { None } else { serde_json::to_string(&cc).ok() };
+    let bcc_json = if bcc.is_empty() { None } else { serde_json::to_string(&bcc).ok() };
+
+    let sent_msg = InsertMessage {
+        account_id: ps.account_id.clone(),
+        message_id: rfc_message_id,
+        thread_id: ps.in_reply_to.as_ref().map(|r| r.trim_matches(|c| c == '<' || c == '>').to_string()),
+        folder: "Sent".to_string(),
+        from_address: Some(account.email.clone()),
+        from_name: account.display_name.clone(),
+        to_addresses: to_json,
+        cc_addresses: cc_json,
+        bcc_addresses: bcc_json,
+        subject: ps.subject.clone(),
+        date: Some(chrono::Utc::now().timestamp()),
+        snippet: ps.body_text.as_ref().map(|t| t.chars().take(200).collect()),
+        body_text: ps.body_text.clone(),
+        body_html: ps.body_html.clone(),
+        is_read: true,
+        is_starred: false,
+        is_draft: false,
+        labels: None,
+        uid: None,
+        modseq: None,
+        raw_headers: None,
+        has_attachments: false,
+        attachment_names: None,
+        size_bytes: None,
+    };
+
+    let conn = db.get().map_err(|e| e.to_string())?;
+    InsertMessage::insert(&conn, &sent_msg).ok_or("Failed to store sent message")?;
+
+    tracing::info!(account = %account.email, to = ?to, subject = ?ps.subject, "Email sent (from pending queue)");
+    Ok(())
 }
