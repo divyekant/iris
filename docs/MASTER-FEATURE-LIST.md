@@ -25,11 +25,11 @@ Core features every email client has. Without these, Iris isn't a real email cli
 
 | # | Feature | Effort | Status |
 |---|---------|--------|--------|
-| 5 | Attachments — send, receive, drag-and-drop | M | pending |
-| 6 | Inline attachment preview (PDF, images) | M | pending |
+| 5 | Attachments — send, receive, drag-and-drop | M | **done** |
+| 6 | Inline attachment preview (PDF, images) | M | **done** |
 | 7 | Rich text compose — font family, size, color | M | pending |
-| 8 | Undo send (5–30s configurable delay) | S | pending |
-| 9 | Signatures — multiple, per-account, rich HTML | S | pending |
+| 8 | Undo send (5–30s configurable delay) | S | **done** |
+| 9 | Signatures — multiple, per-account, rich HTML | S | **done** |
 | 10 | Scheduled send | S | pending |
 | 11 | Templates / Canned responses | S | pending |
 
@@ -40,7 +40,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 | 12 | Folder navigation — Sent, Drafts, Starred, Archive, Trash | M | **done** |
 | 13 | Stars / Flags (toggle per message) | S | **done** (quick action) |
 | 14 | Labels / Tags — colored, multiple per message | M | **partial** (display done, management pending) |
-| 15 | Snooze (return email at specified time) | M | pending |
+| 15 | Snooze (return email at specified time) | M | **done** |
 | 16 | Spam report + Block sender | S | pending |
 | 17 | Mute thread | S | pending |
 | 18 | Archive vs Delete (distinct actions in UI) | XS | **done** |
@@ -61,7 +61,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 | 23 | Inbox pagination (25 per page) | S | **done** |
 | 24 | Quick actions on message row hover (archive, trash, star) | S | **done** |
 | 25 | Refresh button + 60s background polling | XS | **done** |
-| 26 | Keyboard shortcuts (j/k navigate, e archive, # delete, r reply, c compose) | M | pending |
+| 26 | Keyboard shortcuts (j/k navigate, e archive, # delete, r reply, c compose) | M | **done** |
 | 27 | New email toast notification + nav unread badge | S | **done** |
 | 28 | Fix checkbox + unread dot spacing | XS | **done** |
 | 29 | Improve compose button states (hover/active/disabled) | XS | **done** |
@@ -79,7 +79,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 
 | # | Feature | Effort | Status |
 |---|---------|--------|--------|
-| 34 | Desktop notifications (Notification API) | S | pending |
+| 34 | Desktop notifications (Notification API) | S | **done** |
 | 35 | Per-account notification control | S | pending |
 
 ### 1H. AI Polish
