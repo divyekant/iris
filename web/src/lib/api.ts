@@ -70,6 +70,11 @@ export const api = {
       }),
     listSnoozed: () =>
       request<{ messages: any[]; unread_count: number; total: number }>('/api/messages/snoozed'),
+    reportSpam: (ids: string[], blockSender?: boolean) =>
+      request<{ updated: number; blocked_sender?: string }>('/api/messages/report-spam', {
+        method: 'POST',
+        body: JSON.stringify({ ids, block_sender: blockSender }),
+      }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
@@ -162,6 +167,15 @@ export const api = {
         body: JSON.stringify(data),
       }),
     revoke: (id: string) => request<void>(`/api/api-keys/${id}`, { method: 'DELETE' }),
+  },
+  blockedSenders: {
+    list: () => request<{ id: string; email_address: string; reason?: string; created_at: number }[]>('/api/blocked-senders'),
+    block: (data: { email_address: string; reason?: string }) =>
+      request<{ id: string; email_address: string; reason?: string; created_at: number }>('/api/blocked-senders', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    unblock: (id: string) => request<void>(`/api/blocked-senders/${id}`, { method: 'DELETE' }),
   },
   auditLog: {
     list: (params?: { api_key_id?: string; limit?: number; offset?: number }) => {

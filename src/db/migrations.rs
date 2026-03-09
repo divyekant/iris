@@ -12,6 +12,7 @@ const MIGRATION_009: &str = include_str!("../../migrations/009_signatures.sql");
 const MIGRATION_010: &str = include_str!("../../migrations/010_snooze.sql");
 const MIGRATION_011: &str = include_str!("../../migrations/011_attachments.sql");
 const MIGRATION_012: &str = include_str!("../../migrations/012_templates.sql");
+const MIGRATION_013: &str = include_str!("../../migrations/013_blocked_senders.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -88,6 +89,11 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 12 {
         conn.execute_batch(MIGRATION_012)?;
         tracing::info!("Applied migration 012_templates");
+    }
+
+    if current_version < 13 {
+        conn.execute_batch(MIGRATION_013)?;
+        tracing::info!("Applied migration 013_blocked_senders");
     }
 
     Ok(())

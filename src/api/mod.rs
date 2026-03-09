@@ -4,6 +4,7 @@ pub mod ai_actions;
 pub mod ai_config;
 pub mod ai_feedback;
 pub mod attachments;
+pub mod blocked_senders;
 pub mod chat;
 pub mod compose;
 pub mod config;
@@ -13,9 +14,7 @@ pub mod messages;
 pub mod queue_status;
 pub mod search;
 pub mod session_auth;
-
 pub mod signatures;
-
 pub mod templates;
 pub mod threads;
 pub mod trust;
