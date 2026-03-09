@@ -27,6 +27,10 @@ pub struct Citation {
     pub subject: Option<String>,
     pub from: Option<String>,
     pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_read: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,17 +67,25 @@ pub struct ConfirmActionResponse {
 // System prompt
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM_PROMPT: &str = r#"You are Iris, an AI email assistant. You help users understand and manage their inbox through natural conversation.
+fn chat_system_prompt() -> String {
+    let today = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
+    format!(
+        r#"You are Iris, an AI email assistant. You help users understand and manage their inbox through natural conversation.
 
-You have access to the user's recent emails provided as context below. When answering:
+Today's date is {today}.
+
+You have access to the user's recent emails provided as context below. Each email shows its date, read/unread status, sender, subject, and a snippet. When answering:
 - Reference specific emails by their [ID] markers when citing information
 - Be concise and helpful
+- Use the date and read/unread status to answer questions about "today's emails", "unread emails", "this week", etc.
 - If the user asks to perform an action (archive, delete, mark read, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
-  ACTION_PROPOSAL:{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}
+  ACTION_PROPOSAL:{{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}}
 - Valid actions: archive, delete, mark_read, mark_unread, star
 - If you don't have enough context to answer, say so honestly
-- For briefing requests, summarize the most important unread emails
-- Do not make up information not present in the provided emails"#;
+- For briefing requests, summarize the most important unread emails first
+- Do not make up information not present in the provided emails"#
+    )
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/ai/chat — send a message and get AI response
@@ -130,7 +142,7 @@ pub async fn chat(
                 continue;
             }
             if let Ok(c) = conn.query_row(
-                "SELECT subject, from_name, from_address FROM messages WHERE id = ?1",
+                "SELECT subject, from_name, from_address, date, is_read FROM messages WHERE id = ?1",
                 rusqlite::params![msg_id],
                 |row| {
                     let from_name: Option<String> = row.get(1)?;
@@ -140,6 +152,8 @@ pub async fn chat(
                         subject: row.get(0)?,
                         from: from_name.or(from_addr),
                         snippet: r.text.chars().take(100).collect(),
+                        date: row.get(3)?,
+                        is_read: row.get::<_, Option<i32>>(4)?.map(|v| v != 0),
                     })
                 },
             ) {
@@ -160,7 +174,7 @@ pub async fn chat(
 
     let ai_response = state
         .providers
-        .generate(&prompt, Some(CHAT_SYSTEM_PROMPT))
+        .generate(&prompt, Some(&chat_system_prompt()))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
@@ -183,12 +197,12 @@ pub async fn chat(
         .and_then(|a| serde_json::to_string(a).ok());
 
     // Phase 5: Store assistant message and check for summary trigger (DB write, no await)
+    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
     {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let assistant_msg_id_inner = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO chat_messages (id, session_id, role, content, citations, proposed_action) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
-            rusqlite::params![assistant_msg_id_inner, input.session_id, clean_content, citations_json, action_json],
+            rusqlite::params![assistant_msg_id, input.session_id, clean_content, citations_json, action_json],
         ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         // Trigger chat summarization every 10 messages
@@ -205,7 +219,7 @@ pub async fn chat(
     }
 
     let msg = ChatMessage {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: assistant_msg_id.clone(),
         session_id: input.session_id,
         role: "assistant".to_string(),
         content: clean_content,
@@ -260,15 +274,42 @@ pub async fn confirm_action(
         }));
     }
 
+    // Resolve truncated IDs (8-char prefixes from AI) to full UUIDs
+    let resolved_ids: Vec<String> = action
+        .message_ids
+        .iter()
+        .filter_map(|id| {
+            if id.len() >= 36 {
+                // Already a full UUID
+                Some(id.clone())
+            } else {
+                // Truncated prefix — resolve via LIKE query
+                let pattern = format!("{}%", id);
+                conn.query_row(
+                    "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
+                    rusqlite::params![pattern],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            }
+        })
+        .collect();
+
+    if resolved_ids.is_empty() {
+        return Ok(Json(ConfirmActionResponse {
+            executed: false,
+            updated: 0,
+        }));
+    }
+
     // Map action to batch update
     let batch_action = match action.action.as_str() {
         "archive" | "delete" | "mark_read" | "mark_unread" | "star" => action.action.as_str(),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
-    // Execute via the same batch update logic
-    let placeholders: Vec<String> = (0..action.message_ids.len())
-        .map(|i| format!("?{}", i + 2))
+    let placeholders: Vec<String> = (0..resolved_ids.len())
+        .map(|i| format!("?{}", i + 1))
         .collect();
 
     let sql = match batch_action {
@@ -295,8 +336,7 @@ pub async fn confirm_action(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let params: Vec<Box<dyn rusqlite::types::ToSql>> = action
-        .message_ids
+    let params: Vec<Box<dyn rusqlite::types::ToSql>> = resolved_ids
         .iter()
         .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>)
         .collect();
@@ -413,7 +453,8 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
 
     let mut stmt = match conn.prepare(
         "SELECT m.id, m.subject, m.from_name, m.from_address,
-                snippet(fts_messages, -1, '', '', '...', 40) as snip
+                snippet(fts_messages, -1, '', '', '...', 40) as snip,
+                m.date, m.is_read
          FROM fts_messages fts
          JOIN messages m ON m.rowid = fts.rowid
          WHERE fts_messages MATCH ?1
@@ -435,6 +476,8 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
             subject: row.get(1)?,
             from: from_name.or(from_addr),
             snippet: row.get::<_, String>(4).unwrap_or_default(),
+            date: row.get(5)?,
+            is_read: row.get::<_, Option<i32>>(6)?.map(|v| v != 0),
         })
     }) {
         Ok(rows) => rows
@@ -478,9 +521,23 @@ fn build_chat_prompt(
         for c in citations {
             let from = c.from.as_deref().unwrap_or("Unknown");
             let subject = c.subject.as_deref().unwrap_or("(no subject)");
+            let date_str = c.date
+                .map(|ts| {
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.with_timezone(&chrono::Local).format("%b %-d, %Y %H:%M").to_string())
+                        .unwrap_or_else(|| "Unknown date".to_string())
+                })
+                .unwrap_or_else(|| "Unknown date".to_string());
+            let read_status = match c.is_read {
+                Some(true) => "read",
+                Some(false) => "UNREAD",
+                None => "unknown",
+            };
             prompt.push_str(&format!(
-                "[{}] From: {} | Subject: {} | {}\n",
+                "[{}] {} | {} | From: {} | Subject: {} | {}\n",
                 &c.message_id[..8.min(c.message_id.len())],
+                date_str,
+                read_status,
                 from,
                 subject,
                 c.snippet
@@ -566,12 +623,15 @@ mod tests {
             subject: Some("Meeting tomorrow".to_string()),
             from: Some("Alice".to_string()),
             snippet: "Let's meet at 3pm".to_string(),
+            date: Some(1741392000), // Mar 8, 2025
+            is_read: Some(false),
         }];
         let prompt = build_chat_prompt(&[], &citations, "What's happening tomorrow?", &[], &[]);
         assert!(prompt.contains("=== Relevant Emails ==="));
         assert!(prompt.contains("[abcdef12]"));
         assert!(prompt.contains("Alice"));
         assert!(prompt.contains("Meeting tomorrow"));
+        assert!(prompt.contains("UNREAD"));
         assert!(prompt.contains("What's happening tomorrow?"));
     }
 
