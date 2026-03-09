@@ -11,5 +11,6 @@ pub mod messages;
 pub mod queue_status;
 pub mod search;
 pub mod session_auth;
+pub mod signatures;
 pub mod threads;
 pub mod trust;

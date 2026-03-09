@@ -144,4 +144,21 @@ export const api = {
       return request<any[]>(`/api/audit-log?${query}`);
     },
   },
+  signatures: {
+    list: (accountId: string) =>
+      request<{ id: string; account_id: string; name: string; body_text: string; body_html: string; is_default: boolean; created_at: number }[]>(
+        `/api/signatures?account_id=${accountId}`
+      ),
+    create: (data: { account_id: string; name: string; body_text?: string; body_html?: string; is_default?: boolean }) =>
+      request<{ id: string; account_id: string; name: string; body_text: string; body_html: string; is_default: boolean; created_at: number }>(
+        '/api/signatures',
+        { method: 'POST', body: JSON.stringify(data) }
+      ),
+    update: (id: string, data: { name?: string; body_text?: string; body_html?: string; is_default?: boolean }) =>
+      request<{ id: string; account_id: string; name: string; body_text: string; body_html: string; is_default: boolean; created_at: number }>(
+        `/api/signatures/${id}`,
+        { method: 'PUT', body: JSON.stringify(data) }
+      ),
+    delete: (id: string) => request<void>(`/api/signatures/${id}`, { method: 'DELETE' }),
+  },
 };

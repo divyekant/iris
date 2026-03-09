@@ -35,6 +35,21 @@
   let openaiKey = $state('');
   let openaiModel = $state('');
 
+  // Signatures
+  type SignatureItem = { id: string; account_id: string; name: string; body_text: string; body_html: string; is_default: boolean; created_at: number };
+  let accounts = $state<any[]>([]);
+  let sigAccountId = $state('');
+  let sigList = $state<SignatureItem[]>([]);
+  let sigEditing = $state<string | null>(null);
+  let sigEditName = $state('');
+  let sigEditText = $state('');
+  let sigEditDefault = $state(false);
+  let sigNewName = $state('');
+  let sigNewText = $state('');
+  let sigNewDefault = $state(false);
+  let sigSaving = $state(false);
+  let sigShowNew = $state(false);
+
   // API key management
   let apiKeys = $state<any[]>([]);
   let newKeyName = $state('');
@@ -189,6 +204,79 @@
     }
   }
 
+  async function loadAccounts() {
+    try {
+      accounts = await api.accounts.list();
+      if (accounts.length > 0 && !sigAccountId) {
+        sigAccountId = accounts[0].id;
+        await loadSignatures();
+      }
+    } catch { accounts = []; }
+  }
+
+  async function loadSignatures() {
+    if (!sigAccountId) { sigList = []; return; }
+    try {
+      sigList = await api.signatures.list(sigAccountId);
+    } catch { sigList = []; }
+  }
+
+  async function createSignature() {
+    if (!sigNewName.trim() || !sigAccountId || sigSaving) return;
+    sigSaving = true;
+    try {
+      await api.signatures.create({
+        account_id: sigAccountId,
+        name: sigNewName.trim(),
+        body_text: sigNewText,
+        is_default: sigNewDefault,
+      });
+      sigNewName = '';
+      sigNewText = '';
+      sigNewDefault = false;
+      sigShowNew = false;
+      await loadSignatures();
+    } catch { /* silently fail */ }
+    finally { sigSaving = false; }
+  }
+
+  function startEditSignature(sig: SignatureItem) {
+    sigEditing = sig.id;
+    sigEditName = sig.name;
+    sigEditText = sig.body_text;
+    sigEditDefault = sig.is_default;
+  }
+
+  function cancelEditSignature() {
+    sigEditing = null;
+    sigEditName = '';
+    sigEditText = '';
+    sigEditDefault = false;
+  }
+
+  async function saveEditSignature() {
+    if (!sigEditing || sigSaving) return;
+    sigSaving = true;
+    try {
+      await api.signatures.update(sigEditing, {
+        name: sigEditName.trim(),
+        body_text: sigEditText,
+        is_default: sigEditDefault,
+      });
+      sigEditing = null;
+      await loadSignatures();
+    } catch { /* silently fail */ }
+    finally { sigSaving = false; }
+  }
+
+  async function deleteSignature(id: string) {
+    try {
+      await api.signatures.delete(id);
+      if (sigEditing === id) sigEditing = null;
+      await loadSignatures();
+    } catch { /* silently fail */ }
+  }
+
   async function loadApiKeys() {
     try {
       apiKeys = await api.apiKeys.list();
@@ -252,6 +340,7 @@
         // AI config not available
       }
 
+      await loadAccounts();
       await loadApiKeys();
       await loadAuditLog();
 
@@ -478,6 +567,151 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- Signatures section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Signatures</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Create email signatures per account. The default signature auto-appends when composing.</p>
+
+      <!-- Account picker -->
+      {#if accounts.length > 1}
+        <div class="mb-4">
+          <select
+            bind:value={sigAccountId}
+            onchange={() => loadSignatures()}
+            class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          >
+            {#each accounts as acct}
+              <option value={acct.id}>{acct.email}</option>
+            {/each}
+          </select>
+        </div>
+      {:else if accounts.length === 1}
+        <p class="text-xs mb-4" style="color: var(--iris-color-text-muted);">Account: {accounts[0].email}</p>
+      {/if}
+
+      <!-- Existing signatures -->
+      {#if sigList.length > 0}
+        <div class="space-y-3 mb-4">
+          {#each sigList as sig}
+            <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              {#if sigEditing === sig.id}
+                <!-- Edit mode -->
+                <div class="space-y-2">
+                  <input
+                    type="text"
+                    bind:value={sigEditName}
+                    placeholder="Signature name"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+                  />
+                  <textarea
+                    bind:value={sigEditText}
+                    rows="4"
+                    placeholder="Signature text"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm resize-y focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+                  ></textarea>
+                  <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
+                      <input type="checkbox" bind:checked={sigEditDefault} class="rounded" />
+                      Default
+                    </label>
+                    <span class="flex-1"></span>
+                    <button
+                      class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+                      onclick={cancelEditSignature}
+                    >Cancel</button>
+                    <button
+                      class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                      onclick={saveEditSignature}
+                      disabled={sigSaving || !sigEditName.trim()}
+                    >{sigSaving ? 'Saving...' : 'Save'}</button>
+                  </div>
+                </div>
+              {:else}
+                <!-- Display mode -->
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-1">
+                      <span class="text-sm font-medium" style="color: var(--iris-color-text);">{sig.name}</span>
+                      {#if sig.is_default}
+                        <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent); color: var(--iris-color-primary);">default</span>
+                      {/if}
+                    </div>
+                    <pre class="text-xs whitespace-pre-wrap" style="color: var(--iris-color-text-faint); font-family: inherit;">{sig.body_text || '(empty)'}</pre>
+                  </div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button
+                      class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                      onclick={() => startEditSignature(sig)}
+                    >Edit</button>
+                    <button
+                      class="settings-revoke-btn px-2 py-1 text-xs rounded transition-colors"
+                      style="color: var(--iris-color-error);"
+                      onclick={() => deleteSignature(sig.id)}
+                    >Delete</button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else if sigAccountId}
+        <p class="text-sm mb-4" style="color: var(--iris-color-text-faint);">No signatures yet for this account.</p>
+      {/if}
+
+      <!-- Add new signature -->
+      {#if sigShowNew}
+        <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
+          <input
+            type="text"
+            bind:value={sigNewName}
+            placeholder="Signature name (e.g., Work, Personal)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          />
+          <textarea
+            bind:value={sigNewText}
+            rows="4"
+            placeholder="Best regards,&#10;Your Name&#10;your@email.com"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm resize-y focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          ></textarea>
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
+              <input type="checkbox" bind:checked={sigNewDefault} class="rounded" />
+              Set as default
+            </label>
+            <span class="flex-1"></span>
+            <button
+              class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={() => { sigShowNew = false; sigNewName = ''; sigNewText = ''; sigNewDefault = false; }}
+            >Cancel</button>
+            <button
+              class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={createSignature}
+              disabled={sigSaving || !sigNewName.trim()}
+            >{sigSaving ? 'Creating...' : 'Create'}</button>
+          </div>
+        </div>
+      {:else}
+        <button
+          class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
+          style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+          onclick={() => (sigShowNew = true)}
+          disabled={!sigAccountId}
+        >
+          + Add Signature
+        </button>
+      {/if}
     </section>
 
     <!-- API Keys section -->
