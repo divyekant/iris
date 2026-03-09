@@ -2,6 +2,7 @@
   import { api } from '../../lib/api';
   import TemplatePicker from './TemplatePicker.svelte';
   import SchedulePicker from './SchedulePicker.svelte';
+  import RichTextEditor from './RichTextEditor.svelte';
   import { Clock } from 'lucide-svelte';
 
   type ComposeMode = 'new' | 'reply' | 'reply-all' | 'forward';
@@ -49,6 +50,8 @@
   let bcc = $state('');
   let subject = $state('');
   let body = $state('');
+  let bodyHtml = $state('');
+  let richEditor: RichTextEditor | undefined = $state();
   let showCcBcc = $state(false);
   let sending = $state(false);
   let error = $state('');
@@ -96,7 +99,10 @@
 
   function applyTemplate(template: { subject: string; body_text: string }) {
     if (template.subject) subject = template.subject;
-    if (template.body_text) body = template.body_text;
+    if (template.body_text) {
+      body = template.body_text;
+      richEditor?.setContent(`<p>${template.body_text.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`);
+    }
     pendingTemplate = null;
     showOverwriteConfirm = false;
   }
@@ -132,6 +138,8 @@
     try {
       const res = await api.ai.assist({ action, content: body });
       body = res.result;
+      // Update rich editor with the AI result as plain text
+      richEditor?.setContent(`<p>${res.result.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`);
     } catch {
       error = 'AI assist failed. Check AI settings.';
     } finally {
@@ -161,6 +169,8 @@
     } else {
       body = cleaned;
     }
+    // Sync to rich editor
+    richEditor?.setContent(`<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`);
     showSignatureMenu = false;
   }
 
@@ -330,6 +340,7 @@
         bcc: bcc ? splitAddresses(bcc) : [],
         subject,
         body_text: body,
+        body_html: bodyHtml || undefined,
       };
       // Add threading headers for replies
       if (context.mode === 'reply' || context.mode === 'reply-all') {
@@ -427,6 +438,7 @@
         bcc: bcc ? splitAddresses(bcc) : [],
         subject,
         body_text: body,
+        body_html: bodyHtml || undefined,
         schedule_at: epochSeconds,
       };
       if (context.mode === 'reply' || context.mode === 'reply-all') {
@@ -479,6 +491,7 @@
         bcc: bcc ? splitAddresses(bcc) : undefined,
         subject: subject || undefined,
         body_text: body,
+        body_html: bodyHtml || undefined,
       });
       draftId = res.draft_id;
     } catch {
@@ -512,6 +525,12 @@
   $effect(() => {
     initFields();
     loadSignatures();
+    // Sync initial body to rich editor after a tick (editor needs to mount first)
+    if (body) {
+      setTimeout(() => {
+        richEditor?.setContent(`<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`);
+      }, 50);
+    }
     return () => {
       if (saveTimeout) clearTimeout(saveTimeout);
       clearUndoTimer();
@@ -622,15 +641,15 @@
         />
       </div>
 
-      <!-- Body -->
-      <textarea
-        bind:value={body}
-        oninput={scheduleAutoSave}
-        class="w-full min-h-[200px] text-sm bg-transparent outline-none resize-y mt-2 leading-relaxed"
-        style="color: var(--iris-color-text);"
-        placeholder="Write your message..."
-        disabled={!!undoSendId}
-      ></textarea>
+      <!-- Body (Rich Text Editor) -->
+      <div class="mt-2 rounded-lg border overflow-hidden" style="border-color: var(--iris-color-border-subtle);">
+        <RichTextEditor
+          bind:this={richEditor}
+          content={body ? `<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>` : ''}
+          disabled={!!undoSendId}
+          onchange={(html, text) => { bodyHtml = html; body = text; scheduleAutoSave(); }}
+        />
+      </div>
 
       <!-- Attached files chips -->
       {#if attachedFiles.length > 0}
