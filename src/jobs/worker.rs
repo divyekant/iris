@@ -18,10 +18,10 @@ use crate::ws::hub::{WsEvent, WsHub};
 /// Background worker that polls the job queue and processes jobs.
 pub struct JobWorker {
     db: DbPool,
+    config: Config,
     ws_hub: WsHub,
     providers: ProviderPool,
     memories: MemoriesClient,
-    config: Config,
     poll_interval: Duration,
     semaphore: Arc<Semaphore>,
     cleanup_days: i64,
@@ -30,20 +30,20 @@ pub struct JobWorker {
 impl JobWorker {
     pub fn new(
         db: DbPool,
+        config: Config,
         ws_hub: WsHub,
         providers: ProviderPool,
         memories: MemoriesClient,
-        config: Config,
         poll_interval_ms: u64,
         max_concurrency: usize,
         cleanup_days: i64,
     ) -> Self {
         Self {
             db,
+            config,
             ws_hub,
             providers,
             memories,
-            config,
             poll_interval: Duration::from_millis(poll_interval_ms),
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             cleanup_days,
@@ -460,6 +460,7 @@ async fn send_pending_email(
         in_reply_to: ps.in_reply_to.clone(),
         references: ps.references_header.clone(),
         attachments: Vec::new(),
+        schedule_at: None,
     };
 
     // Build the email

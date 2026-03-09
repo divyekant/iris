@@ -899,6 +899,7 @@ pub async fn agent_send(
         in_reply_to: req.in_reply_to.clone(),
         references: req.references.clone(),
         attachments: vec![],
+        schedule_at: None,
     };
 
     // Build email

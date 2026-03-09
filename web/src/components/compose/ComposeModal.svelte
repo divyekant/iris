@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '../../lib/api';
   import TemplatePicker from './TemplatePicker.svelte';
+  import SchedulePicker from './SchedulePicker.svelte';
+  import { Clock } from 'lucide-svelte';
 
   type ComposeMode = 'new' | 'reply' | 'reply-all' | 'forward';
 
@@ -78,6 +80,10 @@
   let showTemplatePicker = $state(false);
   let pendingTemplate = $state<{ subject: string; body_text: string } | null>(null);
   let showOverwriteConfirm = $state(false);
+
+  // Schedule send state
+  let showSchedulePicker = $state(false);
+  let scheduleConfirmation = $state('');
 
   function handleTemplatePick(template: { subject: string; body_text: string }) {
     if ((subject.trim() || body.trim()) && (template.subject || template.body_text)) {
@@ -405,6 +411,64 @@
     }
   }
 
+  async function handleScheduleSend(epochSeconds: number) {
+    if (!to.trim()) {
+      error = 'Please add at least one recipient.';
+      return;
+    }
+    showSchedulePicker = false;
+    sending = true;
+    error = '';
+    try {
+      const req: any = {
+        account_id: context.accountId,
+        to: splitAddresses(to),
+        cc: cc ? splitAddresses(cc) : [],
+        bcc: bcc ? splitAddresses(bcc) : [],
+        subject,
+        body_text: body,
+        schedule_at: epochSeconds,
+      };
+      if (context.mode === 'reply' || context.mode === 'reply-all') {
+        if (context.original?.message_id) {
+          req.in_reply_to = context.original.message_id;
+          req.references = context.original.references
+            ? `${context.original.references} ${context.original.message_id}`
+            : context.original.message_id;
+        }
+      }
+      // Add attachments if present
+      if (attachedFiles.length > 0) {
+        req.attachments = attachedFiles.map((a) => ({
+          filename: a.filename,
+          content_type: a.content_type,
+          data_base64: a.data_base64,
+        }));
+      }
+      await api.send(req);
+      if (draftId) {
+        await api.drafts.delete(draftId);
+      }
+      const scheduledDate = new Date(epochSeconds * 1000);
+      const formatted = scheduledDate.toLocaleDateString(undefined, {
+        weekday: 'short', month: 'short', day: 'numeric',
+      }) + ' at ' + scheduledDate.toLocaleTimeString(undefined, {
+        hour: 'numeric', minute: '2-digit',
+      });
+      scheduleConfirmation = `Email scheduled for ${formatted}`;
+      // Show confirmation briefly then close
+      setTimeout(() => {
+        onsent?.();
+        onclose();
+      }, 1500);
+    } catch (e: any) {
+      const msg = e.message || 'Failed to schedule';
+      error = msg.includes('502') ? 'Schedule failed -- check account connection in Settings.' : msg;
+    } finally {
+      sending = false;
+    }
+  }
+
   async function handleSaveDraft() {
     try {
       const res = await api.drafts.save({
@@ -602,7 +666,9 @@
 
     <!-- Footer -->
     <div class="px-4 py-3 border-t flex items-center gap-2" style="border-color: var(--iris-color-border);">
-      {#if error}
+      {#if scheduleConfirmation}
+        <p class="text-xs flex-1 font-medium" style="color: var(--iris-color-success);">{scheduleConfirmation}</p>
+      {:else if error}
         <p class="text-xs flex-1" style="color: var(--iris-color-error);">{error}</p>
       {:else}
         <span class="flex-1"></span>
@@ -725,6 +791,25 @@
               >{label}</button>
             {/each}
           </div>
+        {/if}
+      </div>
+      <!-- Schedule Send -->
+      <div class="relative">
+        <button
+          class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn flex items-center gap-1"
+          style="color: var(--iris-color-text-muted);"
+          onclick={() => { showSchedulePicker = !showSchedulePicker; showAiMenu = false; }}
+          disabled={sending}
+          title="Schedule Send"
+        >
+          <Clock size={14} />
+          Schedule
+        </button>
+        {#if showSchedulePicker}
+          <SchedulePicker
+            onpick={handleScheduleSend}
+            onclose={() => (showSchedulePicker = false)}
+          />
         {/if}
       </div>
       <button

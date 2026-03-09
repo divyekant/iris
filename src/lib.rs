@@ -83,6 +83,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/send", post(api::compose::send_message))
         .route("/send/cancel/{id}", post(api::compose::cancel_send))
         .route("/config/undo-send-delay", get(api::compose::get_undo_send_delay).put(api::compose::set_undo_send_delay))
+        .route("/send/scheduled", get(api::compose::list_scheduled_sends))
+        .route("/send/scheduled/{id}", delete(api::compose::cancel_scheduled))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
         .route("/drafts/{id}", delete(api::compose::delete_draft))
         .route("/signatures", get(api::signatures::list_signatures).post(api::signatures::create_signature))

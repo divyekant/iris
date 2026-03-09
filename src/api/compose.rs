@@ -10,7 +10,7 @@ use crate::smtp::ComposeRequest;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
-// POST /api/send — queue an email for sending (with undo delay)
+// POST /api/send — queue an email for sending (with undo delay or scheduled)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -18,6 +18,7 @@ pub struct SendResponse {
     pub id: String,
     pub send_at: i64,
     pub can_undo: bool,
+    pub scheduled: bool,
 }
 
 pub async fn send_message(
@@ -37,19 +38,23 @@ pub async fn send_message(
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "account is inactive"}))));
     }
 
-    // Read undo-send delay from config
-    let delay_seconds: i64 = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'undo_send_delay_seconds'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| "10".to_string())
-        .parse()
-        .unwrap_or(10);
-
     let now = chrono::Utc::now().timestamp();
-    let send_at = now + delay_seconds;
+
+    // Determine send_at: if schedule_at is provided and in the future, use it;
+    // otherwise use undo-send delay
+    let (send_at, is_scheduled) = if let Some(schedule_at) = req.schedule_at {
+        if schedule_at > now + 5 {
+            (schedule_at, true)
+        } else {
+            // schedule_at too close to now, treat as normal undo-send
+            let delay_seconds = get_undo_delay(&conn);
+            (now + delay_seconds, false)
+        }
+    } else {
+        let delay_seconds = get_undo_delay(&conn);
+        (now + delay_seconds, false)
+    };
+
     let id = uuid::Uuid::new_v4().to_string();
 
     let to_json = serde_json::to_string(&req.to).unwrap_or_else(|_| "[]".to_string());
@@ -77,24 +82,33 @@ pub async fn send_message(
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("failed to queue send: {e}")})))
     })?;
 
-    tracing::info!(
-        account = %account.email,
-        to = ?req.to,
-        subject = %req.subject,
-        send_at = send_at,
-        delay = delay_seconds,
-        "Email queued for sending (undo available)"
-    );
+    if is_scheduled {
+        tracing::info!(account = %account.email, to = ?req.to, send_at, "Email scheduled for future delivery");
+    } else {
+        tracing::info!(account = %account.email, to = ?req.to, subject = %req.subject, send_at, "Email queued for sending (undo available)");
+    }
 
     Ok(Json(SendResponse {
         id,
         send_at,
-        can_undo: true,
+        can_undo: !is_scheduled,
+        scheduled: is_scheduled,
     }))
 }
 
+fn get_undo_delay(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row(
+        "SELECT value FROM config WHERE key = 'undo_send_delay_seconds'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| "10".to_string())
+    .parse()
+    .unwrap_or(10)
+}
+
 // ---------------------------------------------------------------------------
-// POST /api/send/cancel/:id — cancel a pending send
+// POST /api/send/cancel/:id — cancel a pending send (undo)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -123,7 +137,6 @@ pub async fn cancel_send(
         tracing::info!(pending_send_id = %id, "Pending send cancelled");
         Ok(Json(CancelResponse { cancelled: true }))
     } else {
-        // Check if it exists at all
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pending_sends WHERE id = ?1)",
@@ -135,9 +148,94 @@ pub async fn cancel_send(
         if !exists {
             Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "pending send not found"}))))
         } else {
-            // Already sent or already cancelled
             Ok(Json(CancelResponse { cancelled: false }))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/send/scheduled — list scheduled sends
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct ScheduledSend {
+    pub id: String,
+    pub account_id: String,
+    pub to_addresses: String,
+    pub cc_addresses: Option<String>,
+    pub bcc_addresses: Option<String>,
+    pub subject: String,
+    pub body_text: String,
+    pub send_at: i64,
+    pub created_at: i64,
+    pub status: String,
+}
+
+pub async fn list_scheduled_sends(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ScheduledSend>>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let now = chrono::Utc::now().timestamp();
+
+    // Only show sends scheduled more than 30s in the future (exclude undo-send items)
+    let threshold = now + 30;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, account_id, to_addresses, cc_addresses, bcc_addresses, subject, body_text, send_at, created_at, status
+             FROM pending_sends
+             WHERE status = 'pending' AND send_at > ?1
+             ORDER BY send_at ASC",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let items: Vec<ScheduledSend> = stmt
+        .query_map(rusqlite::params![threshold], |row| {
+            Ok(ScheduledSend {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                to_addresses: row.get(2)?,
+                cc_addresses: row.get(3)?,
+                bcc_addresses: row.get(4)?,
+                subject: row.get(5)?,
+                body_text: row.get(6)?,
+                send_at: row.get(7)?,
+                created_at: row.get(8)?,
+                status: row.get(9)?,
+            })
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(items))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/send/scheduled/:id — cancel a scheduled send
+// ---------------------------------------------------------------------------
+
+pub async fn cancel_scheduled(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let conn = state.db.get().map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
+    })?;
+
+    let updated = conn
+        .execute(
+            "UPDATE pending_sends SET status = 'cancelled' WHERE id = ?1 AND status = 'pending'",
+            rusqlite::params![id],
+        )
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
+        })?;
+
+    if updated > 0 {
+        tracing::info!(id = %id, "Scheduled send cancelled");
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "scheduled send not found or already sent"}))))
     }
 }
 
@@ -160,17 +258,7 @@ pub async fn get_undo_send_delay(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<UndoSendDelayResponse>, StatusCode> {
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let delay: i64 = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'undo_send_delay_seconds'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| "10".to_string())
-        .parse()
-        .unwrap_or(10);
-
+    let delay = get_undo_delay(&conn);
     Ok(Json(UndoSendDelayResponse { delay_seconds: delay }))
 }
 
@@ -274,7 +362,7 @@ pub fn mark_pending_failed(conn: &rusqlite::Connection, id: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Draft endpoints (unchanged)
+// Draft endpoints
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

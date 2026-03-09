@@ -46,6 +46,8 @@ pub struct ComposeRequest {
     /// Attachments to include (base64-encoded data).
     #[serde(default)]
     pub attachments: Vec<AttachmentData>,
+    /// If set, schedule the send for this epoch timestamp instead of sending immediately.
+    pub schedule_at: Option<i64>,
 }
 
 /// Build an RFC 2822 email message from a compose request.
@@ -198,6 +200,7 @@ mod tests {
             in_reply_to: None,
             references: None,
             attachments: vec![],
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", Some("Bob"), &req).unwrap();
         let raw = email.formatted();
@@ -221,6 +224,7 @@ mod tests {
             in_reply_to: None,
             references: None,
             attachments: vec![],
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", None, &req).unwrap();
         let raw = email.formatted();
@@ -242,6 +246,7 @@ mod tests {
             in_reply_to: Some("<orig-123@example.com>".into()),
             references: Some("<orig-123@example.com>".into()),
             attachments: vec![],
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", None, &req).unwrap();
         let raw = email.formatted();
@@ -269,6 +274,7 @@ mod tests {
                 content_type: "application/pdf".into(),
                 data_base64: data,
             }],
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", Some("Bob"), &req).unwrap();
         let raw = email.formatted();

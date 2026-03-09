@@ -105,10 +105,10 @@ async fn main() {
     // Spawn the background job worker
     let worker = Arc::new(jobs::worker::JobWorker::new(
         state.db.clone(),
+        state.config.clone(),
         state.ws_hub.clone(),
         state.providers.clone(),
         state.memories.clone(),
-        config.clone(),
         config.job_poll_interval_ms,
         config.job_max_concurrency,
         config.job_cleanup_days,
