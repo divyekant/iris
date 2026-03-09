@@ -1,0 +1,2 @@
+[{"id":"242750b0-66f1-496a-b1b0-43f4d5411ba3","account_id":"75e8dc75-058d-4bcb-b6a0-418af15eac09","to_addresses":"[\"test-gc041-scheduled@example.com\"]","cc_addresses":null,"bcc_addresses":null,"subject":"GC-041 Scheduled","body_text":"Test body","send_at":1773090182,"created_at":1773082982,"status":"pending"}]
+HTTP_CODE:200

@@ -1,0 +1,2 @@
+{"error":"delay must be between 5 and 30 seconds"}
+HTTP_CODE:400

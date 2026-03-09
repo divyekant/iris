@@ -42,7 +42,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 | 14 | Labels / Tags — colored, multiple per message | M | **partial** (display done, management pending) |
 | 15 | Snooze (return email at specified time) | M | **done** |
 | 16 | Spam report + Block sender | S | **done** |
-| 17 | Mute thread | S | pending |
+| 17 | Mute thread | S | **done** |
 | 18 | Archive vs Delete (distinct actions in UI) | XS | **done** |
 
 ### 1D. Search & Filtering
@@ -80,7 +80,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 | # | Feature | Effort | Status |
 |---|---------|--------|--------|
 | 34 | Desktop notifications (Notification API) | S | **done** |
-| 35 | Per-account notification control | S | pending |
+| 35 | Per-account notification control | S | **done** |
 
 ### 1H. AI Polish
 
