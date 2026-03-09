@@ -35,6 +35,11 @@
   let openaiKey = $state('');
   let openaiModel = $state('');
 
+  // Blocked senders
+  let blockedSenders = $state<{ id: string; email_address: string; reason?: string; created_at: number }[]>([]);
+  let newBlockEmail = $state('');
+  let blockingEmail = $state(false);
+
   // API key management
   let apiKeys = $state<any[]>([]);
   let newKeyName = $state('');
@@ -189,6 +194,30 @@
     }
   }
 
+  async function loadBlockedSenders() {
+    try {
+      blockedSenders = await api.blockedSenders.list();
+    } catch { blockedSenders = []; }
+  }
+
+  async function blockEmail() {
+    if (!newBlockEmail.trim() || blockingEmail) return;
+    blockingEmail = true;
+    try {
+      await api.blockedSenders.block({ email_address: newBlockEmail.trim() });
+      newBlockEmail = '';
+      await loadBlockedSenders();
+    } catch { /* silently fail */ }
+    finally { blockingEmail = false; }
+  }
+
+  async function unblockSender(id: string) {
+    try {
+      await api.blockedSenders.unblock(id);
+      await loadBlockedSenders();
+    } catch { /* silently fail */ }
+  }
+
   async function loadApiKeys() {
     try {
       apiKeys = await api.apiKeys.list();
@@ -252,6 +281,7 @@
         // AI config not available
       }
 
+      await loadBlockedSenders();
       await loadApiKeys();
       await loadAuditLog();
 
@@ -478,6 +508,66 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- Blocked Senders section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Blocked Senders</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Emails from blocked senders are automatically moved to Spam.</p>
+
+      <div class="flex gap-2 mb-4">
+        <input
+          type="email"
+          bind:value={newBlockEmail}
+          placeholder="Block a sender manually (email address)"
+          class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          onkeydown={(e) => { if (e.key === 'Enter') blockEmail(); }}
+        />
+        <button
+          class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+          onclick={blockEmail}
+          disabled={blockingEmail || !newBlockEmail.trim()}
+        >
+          {blockingEmail ? 'Blocking...' : 'Block'}
+        </button>
+      </div>
+
+      {#if blockedSenders.length > 0}
+        <div class="border rounded-lg overflow-hidden" style="border-color: var(--iris-color-border);">
+          <table class="w-full text-sm">
+            <thead style="background: var(--iris-color-bg-surface);">
+              <tr>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Email</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Reason</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Blocked</th>
+                <th class="text-right px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each blockedSenders as sender}
+                <tr class="border-t" style="border-color: var(--iris-color-border-subtle);">
+                  <td class="px-3 py-2 font-medium" style="color: var(--iris-color-text);">{sender.email_address}</td>
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text-faint);">{sender.reason || '--'}</td>
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text-faint);">
+                    {formatTimestamp(sender.created_at)}
+                  </td>
+                  <td class="px-3 py-2 text-right">
+                    <button
+                      class="settings-revoke-btn text-xs"
+                      style="color: var(--iris-color-error);"
+                      onclick={() => unblockSender(sender.id)}
+                    >Unblock</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else}
+        <p class="text-sm" style="color: var(--iris-color-text-faint);">No blocked senders.</p>
+      {/if}
     </section>
 
     <!-- API Keys section -->

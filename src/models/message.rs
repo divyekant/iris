@@ -471,7 +471,7 @@ pub fn finalize_draft_as_sent(conn: &Conn, id: &str, message_id: Option<&str>, t
 }
 
 /// Batch update messages by action. Returns count of rows affected.
-/// Supported actions: archive, delete, mark_read, mark_unread, star, unstar.
+/// Supported actions: archive, delete, mark_read, mark_unread, star, unstar, spam.
 pub fn batch_update(conn: &Conn, ids: &[&str], action: &str) -> usize {
     if ids.is_empty() {
         return 0;
@@ -498,6 +498,9 @@ pub fn batch_update(conn: &Conn, ids: &[&str], action: &str) -> usize {
         ),
         "unstar" => format!(
             "UPDATE messages SET is_starred = 0, updated_at = unixepoch() WHERE id IN ({in_clause})"
+        ),
+        "spam" => format!(
+            "UPDATE messages SET folder = 'Spam', updated_at = unixepoch() WHERE id IN ({in_clause})"
         ),
         _ => return 0,
     };

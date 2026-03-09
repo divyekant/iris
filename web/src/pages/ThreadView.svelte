@@ -2,7 +2,8 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, ShieldAlert } from 'lucide-svelte';
+  import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
 
   let { params }: { params: { id: string } } = $props();
@@ -19,6 +20,9 @@
   let replyBody = $state('');
   let sending = $state(false);
   let sendError = $state('');
+
+  // Spam dialog state
+  let showSpamDialog = $state(false);
 
   // AI summary state
   let aiSummary = $state<string | null>(null);
@@ -172,6 +176,23 @@
     }
   }
 
+  function openSpamDialog() {
+    showSpamDialog = true;
+  }
+
+  async function handleReportSpam(blockSender: boolean) {
+    if (!thread) return;
+    const ids = thread.messages.map((m: any) => m.id);
+    try {
+      await api.messages.reportSpam(ids, blockSender);
+      showSpamDialog = false;
+      push('/');
+    } catch (e: any) {
+      error = e.message || 'Failed to report spam';
+      showSpamDialog = false;
+    }
+  }
+
   async function toggleSummary() {
     if (summaryOpen) {
       summaryOpen = false;
@@ -234,6 +255,7 @@
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('archive')} title="Archive"><Archive size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('mark_unread')} title="Mark unread"><MailOpen size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn delete-btn" onclick={() => handleThreadAction('delete')} title="Delete"><Trash2 size={15} /></button>
+        <button class="p-1.5 transition-colors thread-action-btn spam-btn" onclick={openSpamDialog} title="Report Spam"><ShieldAlert size={15} /></button>
       </div>
     {/if}
   </div>
@@ -364,6 +386,15 @@
   {/if}
 </div>
 
+{#if showSpamDialog && thread}
+  <SpamDialog
+    senderEmail={thread.messages[0]?.from_address || 'Unknown sender'}
+    messageIds={thread.messages.map((m: any) => m.id)}
+    onconfirm={handleReportSpam}
+    onclose={() => { showSpamDialog = false; }}
+  />
+{/if}
+
 <style>
   .thread-action-btn {
     color: var(--iris-color-text-faint);
@@ -376,6 +407,9 @@
   }
   .thread-action-btn.delete-btn:hover {
     color: var(--iris-color-error);
+  }
+  .thread-action-btn.spam-btn:hover {
+    color: var(--iris-color-warning);
   }
   .retry-btn {
     background: var(--iris-color-primary);

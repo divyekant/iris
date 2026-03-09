@@ -40,7 +40,7 @@ pub async fn list_messages(
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Validate folder against allowlist to prevent SQL injection
-    const ALLOWED_FOLDERS: &[&str] = &["INBOX", "Sent", "Drafts", "Starred", "Archive", "Trash"];
+    const ALLOWED_FOLDERS: &[&str] = &["INBOX", "Sent", "Drafts", "Starred", "Archive", "Trash", "Spam"];
     let raw_folder = params.folder.as_deref().unwrap_or("INBOX");
     let folder = if ALLOWED_FOLDERS.contains(&raw_folder) { raw_folder } else { "INBOX" };
 
@@ -59,6 +59,7 @@ pub async fn list_messages(
         "INBOX" => "m.folder = 'INBOX' AND m.is_deleted = 0",
         "Sent" => "m.folder = 'Sent' AND m.is_deleted = 0",
         "Archive" => "m.folder = 'Archive' AND m.is_deleted = 0",
+        "Spam" => "m.folder = 'Spam' AND m.is_deleted = 0",
         _ => "m.folder = 'INBOX' AND m.is_deleted = 0",
     };
 
@@ -252,7 +253,7 @@ pub async fn batch_update_messages(
 
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let valid_actions = ["archive", "delete", "mark_read", "mark_unread", "star", "unstar"];
+    let valid_actions = ["archive", "delete", "mark_read", "mark_unread", "star", "unstar", "spam"];
     if !valid_actions.contains(&req.action.as_str()) {
         return Err(StatusCode::BAD_REQUEST);
     }

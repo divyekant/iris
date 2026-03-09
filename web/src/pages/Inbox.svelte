@@ -8,6 +8,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import SkeletonRow from '../components/SkeletonRow.svelte';
   import Toast from '../components/Toast.svelte';
+  import SpamDialog from '../components/SpamDialog.svelte';
 
 
   let messages = $state<any[]>([]);
@@ -24,6 +25,9 @@
   const PAGE_SIZE = 25;
   let toastMessage = $state('');
   let toastVisible = $state(false);
+  let showSpamDialog = $state(false);
+  let spamTargetId = $state('');
+  let spamTargetEmail = $state('');
 
   function onCategoryChange(e: Event) {
     const detail = (e as CustomEvent).detail;
@@ -91,11 +95,31 @@
   }
 
   async function handleRowAction(id: string, action: string) {
+    if (action === 'report_spam') {
+      const msg = messages.find(m => m.id === id);
+      spamTargetId = id;
+      spamTargetEmail = msg?.from_address || 'Unknown sender';
+      showSpamDialog = true;
+      return;
+    }
     try {
       await api.messages.batch([id], action);
       await loadMessages();
     } catch (e: any) {
       error = e.message || 'Action failed';
+    }
+  }
+
+  async function handleReportSpam(blockSender: boolean) {
+    try {
+      await api.messages.reportSpam([spamTargetId], blockSender);
+      showSpamDialog = false;
+      spamTargetId = '';
+      spamTargetEmail = '';
+      await loadMessages();
+    } catch (e: any) {
+      error = e.message || 'Failed to report spam';
+      showSpamDialog = false;
     }
   }
 
@@ -193,5 +217,14 @@
     context={{ mode: 'new', accountId: activeAccountId }}
     onclose={() => (showCompose = false)}
     onsent={loadMessages}
+  />
+{/if}
+
+{#if showSpamDialog}
+  <SpamDialog
+    senderEmail={spamTargetEmail}
+    messageIds={[spamTargetId]}
+    onconfirm={handleReportSpam}
+    onclose={() => { showSpamDialog = false; spamTargetId = ''; spamTargetEmail = ''; }}
   />
 {/if}
