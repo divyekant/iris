@@ -195,6 +195,138 @@
     }
   }
 
+  // Keyboard navigation state
+  let showShortcutHelp = $state(false);
+  let pendingGChord = $state(false);
+  let gChordTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function isInputFocused(): boolean {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || (el as HTMLElement).isContentEditable;
+  }
+
+  function focusSearch() {
+    const input = document.getElementById('topnav-search-input') as HTMLInputElement | null;
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    // Shortcut help toggle
+    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (isInputFocused()) return;
+      e.preventDefault();
+      showShortcutHelp = !showShortcutHelp;
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      if (showShortcutHelp) {
+        e.preventDefault();
+        showShortcutHelp = false;
+        return;
+      }
+      // Escape also goes back to inbox (unless in reply mode — handled by handleReplyKeydown)
+      if (!isInputFocused() && !replyMode) {
+        e.preventDefault();
+        push('/');
+        return;
+      }
+      return;
+    }
+
+    // Cmd+K / Ctrl+K — focus search
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      focusSearch();
+      return;
+    }
+
+    // Skip all other shortcuts if user is typing
+    if (isInputFocused()) return;
+
+    // Handle "g" chord
+    if (pendingGChord) {
+      pendingGChord = false;
+      if (gChordTimer) { clearTimeout(gChordTimer); gChordTimer = null; }
+      switch (e.key) {
+        case 'i': e.preventDefault(); push('/'); return;
+        case 's': e.preventDefault(); push('/sent'); return;
+        case 'd': e.preventDefault(); push('/drafts'); return;
+      }
+      return;
+    }
+
+    if (e.key === 'g' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      pendingGChord = true;
+      gChordTimer = setTimeout(() => { pendingGChord = false; }, 1000);
+      return;
+    }
+
+    // "/" — focus search
+    if (e.key === '/' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      focusSearch();
+      return;
+    }
+
+    if (!thread) return;
+
+    // u — back to inbox
+    if (e.key === 'u' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      push('/');
+      return;
+    }
+
+    // r — reply
+    if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      startReply('reply');
+      return;
+    }
+
+    // a — reply all
+    if (e.key === 'a' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      startReply('reply-all');
+      return;
+    }
+
+    // f — forward
+    if (e.key === 'f' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      startReply('forward');
+      return;
+    }
+
+    // e — archive
+    if (e.key === 'e' && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      handleThreadAction('archive');
+      return;
+    }
+
+    // # — delete
+    if (e.key === '#') {
+      e.preventDefault();
+      handleThreadAction('delete');
+      return;
+    }
+
+    // s — star
+    if (e.key === 's' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      handleThreadAction('star');
+      return;
+    }
+  }
+
   $effect(() => {
     if (params.id) {
       aiSummary = null;
@@ -209,6 +341,8 @@
     return () => off();
   });
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="h-full flex flex-col">
   <!-- Thread header -->

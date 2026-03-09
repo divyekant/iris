@@ -15,10 +15,11 @@
     labels?: string;
   }
 
-  let { message, onclick, selected = false, onselect, onaction }: {
+  let { message, onclick, selected = false, focused = false, onselect, onaction }: {
     message: Message;
     onclick: (id: string) => void;
     selected?: boolean;
+    focused?: boolean;
     onselect?: (id: string, checked: boolean) => void;
     onaction?: (id: string, action: string) => void;
   } = $props();
@@ -67,7 +68,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="group relative w-full text-left px-4 py-3 border-b transition-colors flex items-center gap-2 cursor-pointer"
-  style="border-color: var(--iris-color-border-subtle); {selected ? 'background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);' : ''}"
+  style="border-color: var(--iris-color-border-subtle); {selected ? 'background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);' : focused ? 'background: color-mix(in srgb, var(--iris-color-primary) 6%, transparent);' : ''}"
   role="button"
   tabindex="0"
   onclick={() => onclick(message.id)}
