@@ -34,8 +34,8 @@ pub fn compute_and_store(conn: &Connection, account_id: &str) -> Result<(), rusq
             .unwrap()
             .timestamp()
     };
-    let week_ago = now - 7 * 86400;
-    let month_ago = now - 30 * 86400;
+    let week_ago = today_midnight - 7 * 86400;
+    let month_ago = today_midnight - 30 * 86400;
 
     // Basic counts
     let total: i64 = conn.query_row(
@@ -174,7 +174,15 @@ pub fn get_all_stats(conn: &Connection) -> Result<Vec<InboxStats>, rusqlite::Err
                 last_updated: row.get(9)?,
             })
         })?
-        .filter_map(|r| r.ok())
+        .filter_map(|r| {
+            match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Skipping corrupted inbox_stats row");
+                    None
+                }
+            }
+        })
         .collect();
     Ok(rows)
 }
