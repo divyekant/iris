@@ -266,7 +266,7 @@ fn handle_search_emails(
 
     if let Some(category) = args.get("category").and_then(|v| v.as_str()) {
         if !category.is_empty() {
-            extra_conditions.push(format!("m.ai_category = ?{}", pidx));
+            extra_conditions.push(format!("LOWER(m.ai_category) = LOWER(?{})", pidx));
             extra_params.push(Box::new(category.to_string()));
             pidx += 1;
         }
@@ -483,10 +483,10 @@ fn handle_list_emails(
         param_idx += 1;
     }
 
-    // category: exact match on ai_category
+    // category: case-insensitive match on ai_category
     if let Some(category) = args.get("category").and_then(|v| v.as_str()) {
         if !category.is_empty() {
-            conditions.push(format!("ai_category = ?{}", param_idx));
+            conditions.push(format!("LOWER(ai_category) = LOWER(?{})", param_idx));
             param_values.push(Box::new(category.to_string()));
             param_idx += 1;
         }
