@@ -2,6 +2,7 @@
   import { api } from '../lib/api';
   import { push } from 'svelte-spa-router';
   import { wsClient } from '../lib/ws';
+  import { showNotification, init as initNotifications } from '../lib/notifications';
   import MessageList from '../components/inbox/MessageList.svelte';
   import SyncStatus from '../components/inbox/SyncStatus.svelte';
   import ComposeModal from '../components/compose/ComposeModal.svelte';
@@ -102,9 +103,11 @@
   $effect(() => {
     loadMessages();
     wsClient.connect();
+    initNotifications();
     const offNewEmail = wsClient.on('NewEmail', (evt: any) => {
       toastMessage = `New email received`;
       toastVisible = true;
+      showNotification('New email', { body: `From: ${evt.from || 'Unknown'}` });
       loadMessages(false);
     });
     const pollInterval = setInterval(() => { loadMessages(false); }, 60000);

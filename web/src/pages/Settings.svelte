@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api';
+  import { requestNotificationPermission, setEnabled as setNotificationsEnabled, getPermissionState } from '../lib/notifications';
 
   type Theme = 'light' | 'dark' | 'system';
 
@@ -42,6 +43,10 @@
   let createdKey = $state('');
   let keyCreating = $state(false);
 
+  // Desktop notifications
+  let notificationsEnabled = $state(localStorage.getItem('iris-notifications') !== 'false');
+  let notificationPermission = $state(getPermissionState());
+
   // Audit log
   let auditEntries = $state<any[]>([]);
 
@@ -75,6 +80,23 @@
       await api.config.setTheme(theme);
     } catch {
       // Silently fail — theme is already applied locally
+    }
+  }
+
+  async function toggleNotifications() {
+    if (!notificationsEnabled) {
+      // Turning on — request permission
+      const granted = await requestNotificationPermission();
+      notificationPermission = getPermissionState();
+      if (granted) {
+        notificationsEnabled = true;
+        setNotificationsEnabled(true);
+      }
+      // If denied, stay off
+    } else {
+      // Turning off
+      notificationsEnabled = false;
+      setNotificationsEnabled(false);
     }
   }
 
@@ -280,6 +302,34 @@
             <span class="text-sm font-medium">{theme.label}</span>
           </button>
         {/each}
+      </div>
+
+      <!-- Desktop Notifications -->
+      <div class="flex items-center justify-between mt-6 p-3 rounded-lg border" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
+        <div>
+          <p class="text-sm font-medium" style="color: var(--iris-color-text);">Desktop Notifications</p>
+          <p class="text-xs" style="color: var(--iris-color-text-faint);">
+            {#if notificationPermission === 'unsupported'}
+              Not available in this browser
+            {:else if notificationPermission === 'denied'}
+              Blocked by browser — update in site settings
+            {:else if notificationsEnabled && notificationPermission === 'granted'}
+              Enabled — you'll see alerts for new emails
+            {:else}
+              Get notified when new emails arrive
+            {/if}
+          </p>
+        </div>
+        <label class="inline-flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={notificationsEnabled && notificationPermission === 'granted'}
+            disabled={notificationPermission === 'unsupported' || notificationPermission === 'denied'}
+            onchange={toggleNotifications}
+            class="w-4 h-4 rounded"
+            style="accent-color: var(--iris-color-primary);"
+          />
+        </label>
       </div>
     </section>
 
