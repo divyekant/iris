@@ -70,7 +70,23 @@ export const api = {
     body_html?: string;
     in_reply_to?: string;
     references?: string;
-  }) => request<{ message_id: string }>('/api/send', { method: 'POST', body: JSON.stringify(data) }),
+    schedule_at?: number;
+  }) => request<{ id: string; send_at: number; scheduled: boolean }>('/api/send', { method: 'POST', body: JSON.stringify(data) }),
+  scheduled: {
+    list: () => request<{
+      id: string;
+      account_id: string;
+      to_addresses: string;
+      cc_addresses: string | null;
+      bcc_addresses: string | null;
+      subject: string;
+      body_text: string;
+      send_at: number;
+      created_at: number;
+      status: string;
+    }[]>('/api/send/scheduled'),
+    cancel: (id: string) => request<void>(`/api/send/scheduled/${id}`, { method: 'DELETE' }),
+  },
   drafts: {
     list: (accountId: string) => request<any[]>(`/api/drafts?account_id=${accountId}`),
     save: (data: {

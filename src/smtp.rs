@@ -34,6 +34,8 @@ pub struct ComposeRequest {
     pub in_reply_to: Option<String>,
     /// Set for replies — the References chain.
     pub references: Option<String>,
+    /// If set, schedule the send for this epoch timestamp instead of sending immediately.
+    pub schedule_at: Option<i64>,
 }
 
 /// Build an RFC 2822 email message from a compose request.
@@ -155,6 +157,7 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", Some("Bob"), &req).unwrap();
         let raw = email.formatted();
@@ -177,6 +180,7 @@ mod tests {
             body_html: Some("<p>Rich content</p>".into()),
             in_reply_to: None,
             references: None,
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", None, &req).unwrap();
         let raw = email.formatted();
@@ -197,6 +201,7 @@ mod tests {
             body_html: None,
             in_reply_to: Some("<orig-123@example.com>".into()),
             references: Some("<orig-123@example.com>".into()),
+            schedule_at: None,
         };
         let email = build_email("bob@example.com", None, &req).unwrap();
         let raw = email.formatted();

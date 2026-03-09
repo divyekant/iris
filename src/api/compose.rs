@@ -11,12 +11,14 @@ use crate::smtp::{self, ComposeRequest};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
-// POST /api/send — send an email
+// POST /api/send — send an email (immediate or scheduled)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct SendResponse {
-    pub message_id: String,
+    pub id: String,
+    pub send_at: i64,
+    pub scheduled: bool,
 }
 
 pub async fn send_message(
@@ -35,6 +37,46 @@ pub async fn send_message(
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "account is inactive"}))));
     }
 
+    // If schedule_at is set and in the future (more than 5s from now), insert as pending
+    let now = chrono::Utc::now().timestamp();
+    if let Some(schedule_at) = req.schedule_at {
+        if schedule_at > now + 5 {
+            let to_json = serde_json::to_string(&req.to).unwrap_or_default();
+            let cc_json = if req.cc.is_empty() { None } else { serde_json::to_string(&req.cc).ok() };
+            let bcc_json = if req.bcc.is_empty() { None } else { serde_json::to_string(&req.bcc).ok() };
+
+            let id: String = conn.query_row(
+                "INSERT INTO pending_sends (account_id, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references_header, send_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 RETURNING id",
+                rusqlite::params![
+                    req.account_id,
+                    to_json,
+                    cc_json,
+                    bcc_json,
+                    req.subject,
+                    req.body_text,
+                    req.body_html,
+                    req.in_reply_to,
+                    req.references,
+                    schedule_at,
+                ],
+                |row| row.get(0),
+            ).map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("failed to schedule: {e}")})))
+            })?;
+
+            tracing::info!(account = %account.email, to = ?req.to, schedule_at, "Email scheduled");
+
+            return Ok(Json(SendResponse {
+                id,
+                send_at: schedule_at,
+                scheduled: true,
+            }));
+        }
+    }
+
+    // Immediate send path
     // Refresh OAuth token if needed
     let access_token = ensure_fresh_token(&state.db, &account, &state.config)
         .await
@@ -102,8 +144,96 @@ pub async fn send_message(
     tracing::info!(account = %account.email, to = ?req.to, subject = %req.subject, "Email sent");
 
     Ok(Json(SendResponse {
-        message_id: id,
+        id,
+        send_at: now,
+        scheduled: false,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/send/scheduled — list scheduled sends
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct ScheduledSend {
+    pub id: String,
+    pub account_id: String,
+    pub to_addresses: String,
+    pub cc_addresses: Option<String>,
+    pub bcc_addresses: Option<String>,
+    pub subject: String,
+    pub body_text: String,
+    pub send_at: i64,
+    pub created_at: i64,
+    pub status: String,
+}
+
+pub async fn list_scheduled(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<ScheduledSend>>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let now = chrono::Utc::now().timestamp();
+
+    // Only show sends scheduled more than 30s in the future (exclude undo-send items)
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, account_id, to_addresses, cc_addresses, bcc_addresses, subject, body_text, send_at, created_at, status
+             FROM pending_sends
+             WHERE status = 'pending' AND send_at > ?1
+             ORDER BY send_at ASC",
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let threshold = now + 30;
+    let items: Vec<ScheduledSend> = stmt
+        .query_map(rusqlite::params![threshold], |row| {
+            Ok(ScheduledSend {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                to_addresses: row.get(2)?,
+                cc_addresses: row.get(3)?,
+                bcc_addresses: row.get(4)?,
+                subject: row.get(5)?,
+                body_text: row.get(6)?,
+                send_at: row.get(7)?,
+                created_at: row.get(8)?,
+                status: row.get(9)?,
+            })
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(Json(items))
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/send/scheduled/:id — cancel a scheduled send
+// ---------------------------------------------------------------------------
+
+pub async fn cancel_scheduled(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    let conn = state.db.get().map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
+    })?;
+
+    let updated = conn
+        .execute(
+            "UPDATE pending_sends SET status = 'cancelled' WHERE id = ?1 AND status = 'pending'",
+            rusqlite::params![id],
+        )
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
+        })?;
+
+    if updated > 0 {
+        tracing::info!(id = %id, "Scheduled send cancelled");
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "scheduled send not found or already sent"}))))
+    }
 }
 
 // ---------------------------------------------------------------------------

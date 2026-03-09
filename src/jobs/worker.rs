@@ -5,14 +5,19 @@ use tokio::sync::Semaphore;
 use crate::ai::memories::MemoriesClient;
 use crate::ai::provider::ProviderPool;
 use crate::ai::pipeline;
+use crate::auth::refresh::ensure_fresh_token;
+use crate::config::Config;
 use crate::db::DbPool;
 use crate::jobs::queue::{self, Job};
-use crate::models::message;
+use crate::models::account::Account;
+use crate::models::message::{self, InsertMessage};
+use crate::smtp::{self, ComposeRequest};
 use crate::ws::hub::{WsEvent, WsHub};
 
 /// Background worker that polls the job queue and processes jobs.
 pub struct JobWorker {
     db: DbPool,
+    config: Config,
     ws_hub: WsHub,
     providers: ProviderPool,
     memories: MemoriesClient,
@@ -24,6 +29,7 @@ pub struct JobWorker {
 impl JobWorker {
     pub fn new(
         db: DbPool,
+        config: Config,
         ws_hub: WsHub,
         providers: ProviderPool,
         memories: MemoriesClient,
@@ -33,6 +39,7 @@ impl JobWorker {
     ) -> Self {
         Self {
             db,
+            config,
             ws_hub,
             providers,
             memories,
@@ -64,6 +71,9 @@ impl JobWorker {
                 };
                 queue::claim_batch(&conn, 10)
             };
+
+            // Process pending scheduled sends
+            self.clone().process_pending_sends().await;
 
             if jobs.is_empty() {
                 tokio::time::sleep(self.poll_interval).await;
@@ -351,6 +361,209 @@ impl JobWorker {
         }
 
         tracing::info!("User preferences extracted and stored");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Scheduled send processing
+    // -----------------------------------------------------------------------
+
+    /// Check for pending_sends that are due (send_at <= now) and send them.
+    async fn process_pending_sends(self: Arc<Self>) {
+        #[derive(Debug)]
+        struct PendingSend {
+            id: String,
+            account_id: String,
+            to_addresses: String,
+            cc_addresses: Option<String>,
+            bcc_addresses: Option<String>,
+            subject: String,
+            body_text: String,
+            body_html: Option<String>,
+            in_reply_to: Option<String>,
+            references_header: Option<String>,
+        }
+
+        let due_sends: Vec<PendingSend> = {
+            let conn = match self.db.get() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let now = chrono::Utc::now().timestamp();
+
+            // Claim pending sends that are due: atomically set status to 'sending'
+            conn.execute(
+                "UPDATE pending_sends SET status = 'sending' WHERE status = 'pending' AND send_at <= ?1",
+                rusqlite::params![now],
+            ).ok();
+
+            let mut stmt = match conn.prepare(
+                "SELECT id, account_id, to_addresses, cc_addresses, bcc_addresses, subject, body_text, body_html, in_reply_to, references_header
+                 FROM pending_sends WHERE status = 'sending'"
+            ) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            stmt.query_map([], |row| {
+                Ok(PendingSend {
+                    id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    to_addresses: row.get(2)?,
+                    cc_addresses: row.get(3)?,
+                    bcc_addresses: row.get(4)?,
+                    subject: row.get(5)?,
+                    body_text: row.get(6)?,
+                    body_html: row.get(7)?,
+                    in_reply_to: row.get(8)?,
+                    references_header: row.get(9)?,
+                })
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        };
+
+        for ps in due_sends {
+            let worker = Arc::clone(&self);
+            let semaphore = self.semaphore.clone();
+            let ps_id = ps.id.clone();
+            tokio::spawn(async move {
+                let _permit = match semaphore.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+
+                let to: Vec<String> = serde_json::from_str(&ps.to_addresses).unwrap_or_default();
+                let cc: Vec<String> = ps.cc_addresses.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                let bcc: Vec<String> = ps.bcc_addresses.as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+
+                let result = worker.execute_scheduled_send(
+                    &ps.account_id,
+                    &to, &cc, &bcc,
+                    &ps.subject,
+                    &ps.body_text,
+                    ps.body_html.as_deref(),
+                    ps.in_reply_to.as_deref(),
+                    ps.references_header.as_deref(),
+                ).await;
+
+                if let Ok(conn) = worker.db.get() {
+                    match result {
+                        Ok(()) => {
+                            conn.execute(
+                                "UPDATE pending_sends SET status = 'sent' WHERE id = ?1",
+                                rusqlite::params![ps_id],
+                            ).ok();
+                            tracing::info!(id = %ps_id, "Scheduled send completed");
+                        }
+                        Err(e) => {
+                            conn.execute(
+                                "UPDATE pending_sends SET status = 'failed', error = ?1 WHERE id = ?2",
+                                rusqlite::params![e, ps_id],
+                            ).ok();
+                            tracing::error!(id = %ps_id, error = %e, "Scheduled send failed");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// Actually send a scheduled email via SMTP.
+    async fn execute_scheduled_send(
+        &self,
+        account_id: &str,
+        to: &[String],
+        cc: &[String],
+        bcc: &[String],
+        subject: &str,
+        body_text: &str,
+        body_html: Option<&str>,
+        in_reply_to: Option<&str>,
+        references: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.db.get().map_err(|e| e.to_string())?;
+        let account = Account::get_by_id(&conn, account_id)
+            .ok_or_else(|| "Account not found".to_string())?;
+        drop(conn);
+
+        if !account.is_active {
+            return Err("Account is inactive".to_string());
+        }
+
+        let access_token = ensure_fresh_token(&self.db, &account, &self.config)
+            .await
+            .map_err(|e| format!("Token refresh failed: {e}"))?;
+
+        let compose_req = ComposeRequest {
+            account_id: account_id.to_string(),
+            to: to.to_vec(),
+            cc: cc.to_vec(),
+            bcc: bcc.to_vec(),
+            subject: subject.to_string(),
+            body_text: body_text.to_string(),
+            body_html: body_html.map(|s| s.to_string()),
+            in_reply_to: in_reply_to.map(|s| s.to_string()),
+            references: references.map(|s| s.to_string()),
+            schedule_at: None,
+        };
+
+        let email = smtp::build_email(
+            &account.email,
+            account.display_name.as_deref(),
+            &compose_req,
+        ).map_err(|e| e.to_string())?;
+
+        let rfc_message_id = email
+            .headers()
+            .get_raw("Message-ID")
+            .map(|v| v.to_string());
+
+        smtp::send_email(&account, access_token.as_deref(), email)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Store in Sent folder
+        let conn = self.db.get().map_err(|e| e.to_string())?;
+        let to_json = serde_json::to_string(to).ok();
+        let cc_json = if cc.is_empty() { None } else { serde_json::to_string(cc).ok() };
+        let bcc_json = if bcc.is_empty() { None } else { serde_json::to_string(bcc).ok() };
+
+        let sent_msg = InsertMessage {
+            account_id: account_id.to_string(),
+            message_id: rfc_message_id,
+            thread_id: in_reply_to.map(|r| r.trim_matches(|c| c == '<' || c == '>').to_string()),
+            folder: "Sent".to_string(),
+            from_address: Some(account.email.clone()),
+            from_name: account.display_name.clone(),
+            to_addresses: to_json,
+            cc_addresses: cc_json,
+            bcc_addresses: bcc_json,
+            subject: Some(subject.to_string()),
+            date: Some(chrono::Utc::now().timestamp()),
+            snippet: Some(body_text.chars().take(200).collect()),
+            body_text: Some(body_text.to_string()),
+            body_html: body_html.map(|s| s.to_string()),
+            is_read: true,
+            is_starred: false,
+            is_draft: false,
+            labels: None,
+            uid: None,
+            modseq: None,
+            raw_headers: None,
+            has_attachments: false,
+            attachment_names: None,
+            size_bytes: None,
+        };
+
+        InsertMessage::insert(&conn, &sent_msg);
+        tracing::info!(account = %account.email, to = ?to, subject = %subject, "Scheduled email sent");
+
         Ok(())
     }
 }
