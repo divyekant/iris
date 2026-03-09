@@ -134,6 +134,38 @@
   let acctNotificationState = $state<Record<string, boolean>>({});
   let acctNotificationToggling = $state<Record<string, boolean>>({});
 
+  // Filter rules
+  type FilterCondition = { field: string; operator: string; value: string };
+  type FilterAction = { type: string; value?: string };
+  type FilterRuleItem = { id: string; name: string; conditions: FilterCondition[]; actions: FilterAction[]; is_active: boolean; account_id: string | null; created_at: number };
+  let filterRules = $state<FilterRuleItem[]>([]);
+  let frShowNew = $state(false);
+  let frNewName = $state('');
+  let frNewConditions = $state<FilterCondition[]>([{ field: 'from', operator: 'contains', value: '' }]);
+  let frNewActions = $state<FilterAction[]>([{ type: 'archive' }]);
+  let frSaving = $state(false);
+  let frEditing = $state<string | null>(null);
+  let frEditName = $state('');
+  let frEditConditions = $state<FilterCondition[]>([]);
+  let frEditActions = $state<FilterAction[]>([]);
+  let frEditActive = $state(true);
+
+  // Aliases
+  type AliasItem = { id: string; account_id: string; email: string; display_name: string; reply_to: string | null; is_default: boolean; created_at: number };
+  let aliases = $state<AliasItem[]>([]);
+  let aliasAccountId = $state('');
+  let aliasShowNew = $state(false);
+  let aliasNewEmail = $state('');
+  let aliasNewDisplayName = $state('');
+  let aliasNewReplyTo = $state('');
+  let aliasNewDefault = $state(false);
+  let aliasSaving = $state(false);
+  let aliasEditing = $state<string | null>(null);
+  let aliasEditEmail = $state('');
+  let aliasEditDisplayName = $state('');
+  let aliasEditReplyTo = $state('');
+  let aliasEditDefault = $state(false);
+
   // Audit log
   let auditEntries = $state<any[]>([]);
 
@@ -310,12 +342,158 @@
     }
   }
 
+  // Filter Rules functions
+  async function loadFilterRules() {
+    try { filterRules = await api.filterRules.list(); } catch { filterRules = []; }
+  }
+
+  function addCondition(list: FilterCondition[]) {
+    list.push({ field: 'from', operator: 'contains', value: '' });
+  }
+
+  function removeCondition(list: FilterCondition[], i: number) {
+    list.splice(i, 1);
+  }
+
+  function addAction(list: FilterAction[]) {
+    list.push({ type: 'archive' });
+  }
+
+  function removeAction(list: FilterAction[], i: number) {
+    list.splice(i, 1);
+  }
+
+  async function createFilterRule() {
+    if (!frNewName.trim() || frSaving) return;
+    const validConditions = frNewConditions.filter(c => c.value.trim());
+    if (validConditions.length === 0) return;
+    frSaving = true;
+    try {
+      await api.filterRules.create({ name: frNewName.trim(), conditions: validConditions, actions: frNewActions });
+      frNewName = '';
+      frNewConditions = [{ field: 'from', operator: 'contains', value: '' }];
+      frNewActions = [{ type: 'archive' }];
+      frShowNew = false;
+      await loadFilterRules();
+    } catch { /* silently fail */ }
+    finally { frSaving = false; }
+  }
+
+  function startEditRule(rule: FilterRuleItem) {
+    frEditing = rule.id;
+    frEditName = rule.name;
+    frEditConditions = rule.conditions.map(c => ({ ...c }));
+    frEditActions = rule.actions.map(a => ({ ...a }));
+    frEditActive = rule.is_active;
+  }
+
+  function cancelEditRule() {
+    frEditing = null;
+  }
+
+  async function saveEditRule() {
+    if (!frEditing || frSaving || !frEditName.trim()) return;
+    const validConditions = frEditConditions.filter(c => c.value.trim());
+    if (validConditions.length === 0) return;
+    frSaving = true;
+    try {
+      await api.filterRules.update(frEditing, { name: frEditName.trim(), conditions: validConditions, actions: frEditActions, is_active: frEditActive });
+      frEditing = null;
+      await loadFilterRules();
+    } catch { /* silently fail */ }
+    finally { frSaving = false; }
+  }
+
+  async function deleteFilterRule(id: string) {
+    try {
+      await api.filterRules.delete(id);
+      if (frEditing === id) frEditing = null;
+      await loadFilterRules();
+    } catch { /* silently fail */ }
+  }
+
+  async function toggleRuleActive(rule: FilterRuleItem) {
+    try {
+      await api.filterRules.update(rule.id, { name: rule.name, conditions: rule.conditions, actions: rule.actions, is_active: !rule.is_active });
+      await loadFilterRules();
+    } catch { /* silently fail */ }
+  }
+
+  // Aliases functions
+  async function loadAliases() {
+    const acctId = aliasAccountId || (accounts.length > 0 ? accounts[0].id : '');
+    if (!acctId) { aliases = []; return; }
+    try { aliases = await api.aliases.list(acctId); } catch { aliases = []; }
+  }
+
+  async function createAlias() {
+    if (!aliasNewEmail.trim() || aliasSaving) return;
+    const acctId = aliasAccountId || (accounts.length > 0 ? accounts[0].id : '');
+    if (!acctId) return;
+    aliasSaving = true;
+    try {
+      await api.aliases.create({
+        account_id: acctId,
+        email: aliasNewEmail.trim(),
+        display_name: aliasNewDisplayName.trim(),
+        reply_to: aliasNewReplyTo.trim() || undefined,
+        is_default: aliasNewDefault,
+      });
+      aliasNewEmail = '';
+      aliasNewDisplayName = '';
+      aliasNewReplyTo = '';
+      aliasNewDefault = false;
+      aliasShowNew = false;
+      await loadAliases();
+    } catch { /* silently fail */ }
+    finally { aliasSaving = false; }
+  }
+
+  function startEditAlias(a: AliasItem) {
+    aliasEditing = a.id;
+    aliasEditEmail = a.email;
+    aliasEditDisplayName = a.display_name;
+    aliasEditReplyTo = a.reply_to || '';
+    aliasEditDefault = a.is_default;
+  }
+
+  function cancelEditAlias() {
+    aliasEditing = null;
+  }
+
+  async function saveEditAlias() {
+    if (!aliasEditing || aliasSaving || !aliasEditEmail.trim()) return;
+    aliasSaving = true;
+    try {
+      await api.aliases.update(aliasEditing, {
+        email: aliasEditEmail.trim(),
+        display_name: aliasEditDisplayName.trim(),
+        reply_to: aliasEditReplyTo.trim() || undefined,
+        is_default: aliasEditDefault,
+      });
+      aliasEditing = null;
+      await loadAliases();
+    } catch { /* silently fail */ }
+    finally { aliasSaving = false; }
+  }
+
+  async function deleteAlias(id: string) {
+    try {
+      await api.aliases.delete(id);
+      if (aliasEditing === id) aliasEditing = null;
+      await loadAliases();
+    } catch { /* silently fail */ }
+  }
+
   async function loadAccounts() {
     try {
       accounts = await api.accounts.list();
       if (accounts.length > 0 && !sigAccountId) {
         sigAccountId = accounts[0].id;
         await loadSignatures();
+      }
+      if (accounts.length > 0 && !aliasAccountId) {
+        aliasAccountId = accounts[0].id;
       }
     } catch { accounts = []; }
   }
@@ -507,9 +685,11 @@
       await loadAccounts();
       await loadAccountNotifications();
       await loadTemplates();
+      await loadFilterRules();
       await loadBlockedSenders();
       await loadApiKeys();
       await loadAuditLog();
+      await loadAliases();
 
       loading = false;
     }
@@ -1062,6 +1242,307 @@
         </div>
       {:else if !editingTemplateId}
         <p class="text-sm" style="color: var(--iris-color-text-faint);">No templates created yet.</p>
+      {/if}
+    </section>
+
+    <!-- Filter Rules section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Filter Rules</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Auto-apply actions to incoming emails based on conditions.</p>
+
+      <!-- Existing rules -->
+      {#if filterRules.length > 0}
+        <div class="space-y-3 mb-4">
+          {#each filterRules as rule}
+            <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              {#if frEditing === rule.id}
+                <!-- Edit mode -->
+                <div class="space-y-3">
+                  <input type="text" bind:value={frEditName} placeholder="Rule name"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+
+                  <div>
+                    <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">When ALL conditions match:</p>
+                    {#each frEditConditions as cond, i}
+                      <div class="flex gap-2 mb-2">
+                        <select bind:value={cond.field} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                          <option value="from">From</option><option value="to">To</option><option value="subject">Subject</option>
+                          <option value="category">Category</option><option value="is_read">Is Read</option><option value="has_attachments">Has Attachments</option>
+                        </select>
+                        <select bind:value={cond.operator} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                          <option value="contains">contains</option><option value="equals">equals</option>
+                          <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
+                        </select>
+                        <input type="text" bind:value={cond.value} placeholder="Value"
+                          class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
+                          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                        {#if frEditConditions.length > 1}
+                          <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeCondition(frEditConditions, i)}>x</button>
+                        {/if}
+                      </div>
+                    {/each}
+                    <button class="text-xs" style="color: var(--iris-color-primary);" onclick={() => addCondition(frEditConditions)}>+ Add condition</button>
+                  </div>
+
+                  <div>
+                    <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">Then:</p>
+                    {#each frEditActions as act, i}
+                      <div class="flex gap-2 mb-2">
+                        <select bind:value={act.type} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                          <option value="archive">Archive</option><option value="delete">Delete</option><option value="mark_read">Mark Read</option>
+                          <option value="star">Star</option><option value="label">Add Label</option>
+                        </select>
+                        {#if act.type === 'label'}
+                          <input type="text" bind:value={act.value} placeholder="Label name"
+                            class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
+                            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                        {/if}
+                        {#if frEditActions.length > 1}
+                          <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeAction(frEditActions, i)}>x</button>
+                        {/if}
+                      </div>
+                    {/each}
+                    <button class="text-xs" style="color: var(--iris-color-primary);" onclick={() => addAction(frEditActions)}>+ Add action</button>
+                  </div>
+
+                  <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-2 text-xs cursor-pointer" style="color: var(--iris-color-text);">
+                      <input type="checkbox" bind:checked={frEditActive} class="rounded" /> Active
+                    </label>
+                    <span class="flex-1"></span>
+                    <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text);" onclick={cancelEditRule}>Cancel</button>
+                    <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                      onclick={saveEditRule} disabled={frSaving || !frEditName.trim()}>{frSaving ? 'Saving...' : 'Save'}</button>
+                  </div>
+                </div>
+              {:else}
+                <!-- Display mode -->
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-1">
+                      <span class="text-sm font-medium" style="color: var(--iris-color-text);">{rule.name}</span>
+                      <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium"
+                        style="background: {rule.is_active ? 'color-mix(in srgb, var(--iris-color-success) 20%, transparent)' : 'color-mix(in srgb, var(--iris-color-text-faint) 20%, transparent)'}; color: {rule.is_active ? 'var(--iris-color-success)' : 'var(--iris-color-text-faint)'};">
+                        {rule.is_active ? 'Active' : 'Paused'}
+                      </span>
+                    </div>
+                    <div class="flex flex-wrap gap-1 mb-1">
+                      {#each rule.conditions as cond}
+                        <span class="px-1.5 py-0.5 text-[10px] rounded" style="background: color-mix(in srgb, var(--iris-color-info) 15%, transparent); color: var(--iris-color-info);">
+                          {cond.field} {cond.operator} "{cond.value}"
+                        </span>
+                      {/each}
+                    </div>
+                    <div class="flex flex-wrap gap-1">
+                      {#each rule.actions as act}
+                        <span class="px-1.5 py-0.5 text-[10px] rounded" style="background: color-mix(in srgb, var(--iris-color-warning) 15%, transparent); color: var(--iris-color-warning);">
+                          {act.type}{act.value ? `: ${act.value}` : ''}
+                        </span>
+                      {/each}
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                      onclick={() => toggleRuleActive(rule)}>{rule.is_active ? 'Pause' : 'Resume'}</button>
+                    <button class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                      onclick={() => startEditRule(rule)}>Edit</button>
+                    <button class="settings-revoke-btn px-2 py-1 text-xs rounded transition-colors"
+                      style="color: var(--iris-color-error);" onclick={() => deleteFilterRule(rule.id)}>Delete</button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else if !frShowNew}
+        <p class="text-sm mb-4" style="color: var(--iris-color-text-faint);">No filter rules created yet.</p>
+      {/if}
+
+      <!-- New rule form -->
+      {#if frShowNew}
+        <div class="p-3 rounded-lg border space-y-3" style="border-color: var(--iris-color-border);">
+          <input type="text" bind:value={frNewName} placeholder="Rule name (e.g., Auto-archive newsletters)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+
+          <div>
+            <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">When ALL conditions match:</p>
+            {#each frNewConditions as cond, i}
+              <div class="flex gap-2 mb-2">
+                <select bind:value={cond.field} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                  <option value="from">From</option><option value="to">To</option><option value="subject">Subject</option>
+                  <option value="category">Category</option><option value="is_read">Is Read</option><option value="has_attachments">Has Attachments</option>
+                </select>
+                <select bind:value={cond.operator} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                  <option value="contains">contains</option><option value="equals">equals</option>
+                  <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
+                </select>
+                <input type="text" bind:value={cond.value} placeholder="Value"
+                  class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
+                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                {#if frNewConditions.length > 1}
+                  <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeCondition(frNewConditions, i)}>x</button>
+                {/if}
+              </div>
+            {/each}
+            <button class="text-xs" style="color: var(--iris-color-primary);" onclick={() => addCondition(frNewConditions)}>+ Add condition</button>
+          </div>
+
+          <div>
+            <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">Then:</p>
+            {#each frNewActions as act, i}
+              <div class="flex gap-2 mb-2">
+                <select bind:value={act.type} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                  <option value="archive">Archive</option><option value="delete">Delete</option><option value="mark_read">Mark Read</option>
+                  <option value="star">Star</option><option value="label">Add Label</option>
+                </select>
+                {#if act.type === 'label'}
+                  <input type="text" bind:value={act.value} placeholder="Label name"
+                    class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                {/if}
+                {#if frNewActions.length > 1}
+                  <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeAction(frNewActions, i)}>x</button>
+                {/if}
+              </div>
+            {/each}
+            <button class="text-xs" style="color: var(--iris-color-primary);" onclick={() => addAction(frNewActions)}>+ Add action</button>
+          </div>
+
+          <div class="flex gap-2">
+            <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={() => { frShowNew = false; frNewName = ''; frNewConditions = [{ field: 'from', operator: 'contains', value: '' }]; frNewActions = [{ type: 'archive' }]; }}>Cancel</button>
+            <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={createFilterRule} disabled={frSaving || !frNewName.trim()}>{frSaving ? 'Creating...' : 'Create Rule'}</button>
+          </div>
+        </div>
+      {:else}
+        <button class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors"
+          style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+          onclick={() => (frShowNew = true)}>+ Add Filter Rule</button>
+      {/if}
+    </section>
+
+    <!-- Send-as Aliases section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Send-as Aliases</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Alternative sender identities for composing emails. The default alias is used in the "From" field.</p>
+
+      <!-- Account picker -->
+      {#if accounts.length > 1}
+        <div class="mb-4">
+          <select bind:value={aliasAccountId}
+            onchange={() => loadAliases()}
+            class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);">
+            {#each accounts as acct}
+              <option value={acct.id}>{acct.email}</option>
+            {/each}
+          </select>
+        </div>
+      {:else if accounts.length === 1}
+        <p class="text-xs mb-4" style="color: var(--iris-color-text-muted);">Account: {accounts[0].email}</p>
+      {/if}
+
+      <!-- Existing aliases -->
+      {#if aliases.length > 0}
+        <div class="space-y-3 mb-4">
+          {#each aliases as a}
+            <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              {#if aliasEditing === a.id}
+                <!-- Edit mode -->
+                <div class="space-y-2">
+                  <input type="email" bind:value={aliasEditEmail} placeholder="Email address"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                  <input type="text" bind:value={aliasEditDisplayName} placeholder="Display name (e.g., John Doe)"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                  <input type="email" bind:value={aliasEditReplyTo} placeholder="Reply-to address (optional, defaults to alias email)"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                  <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
+                      <input type="checkbox" bind:checked={aliasEditDefault} class="rounded" /> Default
+                    </label>
+                    <span class="flex-1"></span>
+                    <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text);" onclick={cancelEditAlias}>Cancel</button>
+                    <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                      onclick={saveEditAlias} disabled={aliasSaving || !aliasEditEmail.trim()}>{aliasSaving ? 'Saving...' : 'Save'}</button>
+                  </div>
+                </div>
+              {:else}
+                <!-- Display mode -->
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-1">
+                      <span class="text-sm font-medium" style="color: var(--iris-color-text);">{a.email}</span>
+                      {#if a.is_default}
+                        <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent); color: var(--iris-color-primary);">default</span>
+                      {/if}
+                    </div>
+                    {#if a.display_name}
+                      <p class="text-xs" style="color: var(--iris-color-text-faint);">Display: {a.display_name}</p>
+                    {/if}
+                    {#if a.reply_to}
+                      <p class="text-xs" style="color: var(--iris-color-text-faint);">Reply-to: {a.reply_to}</p>
+                    {/if}
+                  </div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                      onclick={() => startEditAlias(a)}>Edit</button>
+                    <button class="settings-revoke-btn px-2 py-1 text-xs rounded transition-colors"
+                      style="color: var(--iris-color-error);" onclick={() => deleteAlias(a.id)}>Delete</button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else if aliasAccountId || accounts.length > 0}
+        <p class="text-sm mb-4" style="color: var(--iris-color-text-faint);">No aliases for this account.</p>
+      {/if}
+
+      <!-- Add new alias -->
+      {#if aliasShowNew}
+        <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
+          <input type="email" bind:value={aliasNewEmail} placeholder="Email address (e.g., support@myproduct.io)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+          <input type="text" bind:value={aliasNewDisplayName} placeholder="Display name (e.g., Support Team)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+          <input type="email" bind:value={aliasNewReplyTo} placeholder="Reply-to address (optional)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
+              <input type="checkbox" bind:checked={aliasNewDefault} class="rounded" /> Set as default
+            </label>
+            <span class="flex-1"></span>
+            <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={() => { aliasShowNew = false; aliasNewEmail = ''; aliasNewDisplayName = ''; aliasNewReplyTo = ''; aliasNewDefault = false; }}>Cancel</button>
+            <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={createAlias} disabled={aliasSaving || !aliasNewEmail.trim()}>{aliasSaving ? 'Creating...' : 'Create'}</button>
+          </div>
+        </div>
+      {:else}
+        <button class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors disabled:opacity-50"
+          style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+          onclick={() => (aliasShowNew = true)}
+          disabled={!aliasAccountId && accounts.length === 0}>+ Add Alias</button>
       {/if}
     </section>
 

@@ -88,6 +88,11 @@
   let showSchedulePicker = $state(false);
   let scheduleConfirmation = $state('');
 
+  // From alias state
+  type AliasOption = { id: string; email: string; display_name: string; reply_to: string | null; is_default: boolean };
+  let fromAliases = $state<AliasOption[]>([]);
+  let selectedFromAlias = $state<string | null>(null);
+
   function handleTemplatePick(template: { subject: string; body_text: string }) {
     if ((subject.trim() || body.trim()) && (template.subject || template.body_text)) {
       pendingTemplate = template;
@@ -184,6 +189,19 @@
       }
     } catch {
       // Signatures not available — continue without
+    }
+  }
+
+  async function loadFromAliases() {
+    try {
+      const all = await api.aliases.list(context.accountId);
+      fromAliases = all;
+      const defaultAlias = all.find(a => a.is_default);
+      if (defaultAlias) {
+        selectedFromAlias = defaultAlias.id;
+      }
+    } catch {
+      fromAliases = [];
     }
   }
 
@@ -525,6 +543,7 @@
   $effect(() => {
     initFields();
     loadSignatures();
+    loadFromAliases();
     // Sync initial body to rich editor after a tick (editor needs to mount first)
     if (body) {
       setTimeout(() => {
@@ -571,6 +590,27 @@
       ondragleave={handleDragLeave}
       ondrop={handleDrop}
     >
+      <!-- From (only shown when aliases exist) -->
+      {#if fromAliases.length > 0}
+        <div class="flex items-center gap-2">
+          <label class="text-xs w-8" style="color: var(--iris-color-text-faint);">From</label>
+          <select
+            bind:value={selectedFromAlias}
+            class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+            style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+            disabled={!!undoSendId}
+          >
+            <option value={null}>Account default</option>
+            {#each fromAliases as alias}
+              <option value={alias.id}>
+                {alias.display_name ? `${alias.display_name} <${alias.email}>` : alias.email}
+                {alias.is_default ? ' (default)' : ''}
+              </option>
+            {/each}
+          </select>
+        </div>
+      {/if}
+
       <!-- To -->
       <div class="flex items-center gap-2">
         <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-to">To</label>

@@ -96,6 +96,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/signatures/{id}", put(api::signatures::update_signature).delete(api::signatures::delete_signature))
         .route("/templates", get(api::templates::list_templates).post(api::templates::create_template))
         .route("/templates/{id}", put(api::templates::update_template).delete(api::templates::delete_template))
+        .route("/filter-rules", get(api::filter_rules::list_filter_rules).post(api::filter_rules::create_filter_rule))
+        .route("/filter-rules/{id}", put(api::filter_rules::update_filter_rule).delete(api::filter_rules::delete_filter_rule))
+        .route("/aliases", get(api::aliases::list_aliases).post(api::aliases::create_alias))
+        .route("/aliases/{id}", put(api::aliases::update_alias).delete(api::aliases::delete_alias))
         .nest("/agent", agent_routes)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

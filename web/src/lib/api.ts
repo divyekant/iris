@@ -164,6 +164,28 @@ export const api = {
       }),
     delete: (id: string) => request<void>(`/api/saved-searches/${id}`, { method: 'DELETE' }),
   },
+  filterRules: {
+    list: () => request<{ id: string; name: string; conditions: { field: string; operator: string; value: string }[]; actions: { type: string; value?: string }[]; is_active: boolean; account_id: string | null; created_at: number }[]>('/api/filter-rules'),
+    create: (data: { name: string; conditions: { field: string; operator: string; value: string }[]; actions: { type: string; value?: string }[]; account_id?: string }) =>
+      request<any>('/api/filter-rules', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: { name: string; conditions: { field: string; operator: string; value: string }[]; actions: { type: string; value?: string }[]; is_active: boolean }) =>
+      request<any>(`/api/filter-rules/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string) => request<void>(`/api/filter-rules/${id}`, { method: 'DELETE' }),
+  },
+  aliases: {
+    list: (accountId?: string) => {
+      const query = accountId ? `?account_id=${accountId}` : '';
+      return request<{ id: string; account_id: string; email: string; display_name: string; reply_to: string | null; is_default: boolean; created_at: number }[]>(`/api/aliases${query}`);
+    },
+    create: (data: { account_id: string; email: string; display_name: string; reply_to?: string; is_default: boolean }) =>
+      request<{ id: string; account_id: string; email: string; display_name: string; reply_to: string | null; is_default: boolean; created_at: number }>('/api/aliases', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: { email: string; display_name: string; reply_to?: string; is_default: boolean }) =>
+      request<any>(`/api/aliases/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string) => request<void>(`/api/aliases/${id}`, { method: 'DELETE' }),
+  },
   ai: {
     getConfig: () => request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai'),
     setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean; anthropic_api_key?: string; anthropic_model?: string; openai_api_key?: string; openai_model?: string; memories_url?: string; memories_api_key?: string }) =>

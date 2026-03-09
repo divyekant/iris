@@ -51,7 +51,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 |---|---------|--------|--------|
 | 19 | Search operators — from:, to:, subject:, is:unread, AND/OR | M | **done** |
 | 20 | Saved searches / Smart folders | M | **done** |
-| 21 | Filters / Rules — auto-label, auto-archive, auto-delete | L | pending |
+| 21 | Filters / Rules — auto-label, auto-archive, auto-delete | L | **done** |
 
 ### 1E. UI Essentials
 
@@ -73,7 +73,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 
 | # | Feature | Effort | Status |
 |---|---------|--------|--------|
-| 33 | Send-as / Alias support | M | pending |
+| 33 | Send-as / Alias support | M | **done** |
 
 ### 1G. Notifications & Sync
 

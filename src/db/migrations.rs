@@ -15,6 +15,8 @@ const MIGRATION_012: &str = include_str!("../../migrations/012_templates.sql");
 const MIGRATION_013: &str = include_str!("../../migrations/013_blocked_senders.sql");
 const MIGRATION_014: &str = include_str!("../../migrations/014_muted_threads.sql");
 const MIGRATION_015: &str = include_str!("../../migrations/015_saved_searches.sql");
+const MIGRATION_016: &str = include_str!("../../migrations/016_filter_rules.sql");
+const MIGRATION_017: &str = include_str!("../../migrations/017_aliases.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -106,6 +108,16 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 15 {
         conn.execute_batch(MIGRATION_015)?;
         tracing::info!("Applied migration 015_saved_searches");
+    }
+
+    if current_version < 16 {
+        conn.execute_batch(MIGRATION_016)?;
+        tracing::info!("Applied migration 016_filter_rules");
+    }
+
+    if current_version < 17 {
+        conn.execute_batch(MIGRATION_017)?;
+        tracing::info!("Applied migration 017_aliases");
     }
 
     Ok(())
