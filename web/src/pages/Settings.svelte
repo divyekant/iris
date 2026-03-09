@@ -35,6 +35,64 @@
   let openaiKey = $state('');
   let openaiModel = $state('');
 
+  // Templates
+  let templates = $state<any[]>([]);
+  let editingTemplateId = $state<string | null>(null);
+  let templateName = $state('');
+  let templateSubject = $state('');
+  let templateBody = $state('');
+  let templateSaving = $state(false);
+
+  async function loadTemplates() {
+    try {
+      templates = await api.templates.list();
+    } catch { templates = []; }
+  }
+
+  function startNewTemplate() {
+    editingTemplateId = 'new';
+    templateName = '';
+    templateSubject = '';
+    templateBody = '';
+  }
+
+  function startEditTemplate(t: any) {
+    editingTemplateId = t.id;
+    templateName = t.name;
+    templateSubject = t.subject || '';
+    templateBody = t.body_text;
+  }
+
+  function cancelEditTemplate() {
+    editingTemplateId = null;
+    templateName = '';
+    templateSubject = '';
+    templateBody = '';
+  }
+
+  async function saveTemplate() {
+    if (!templateName.trim() || !templateBody.trim()) return;
+    templateSaving = true;
+    try {
+      const data = { name: templateName.trim(), subject: templateSubject.trim() || undefined, body_text: templateBody };
+      if (editingTemplateId === 'new') {
+        await api.templates.create(data);
+      } else if (editingTemplateId) {
+        await api.templates.update(editingTemplateId, { ...data, body_text: templateBody });
+      }
+      cancelEditTemplate();
+      await loadTemplates();
+    } catch { /* silently fail */ }
+    finally { templateSaving = false; }
+  }
+
+  async function deleteTemplate(id: string) {
+    try {
+      await api.templates.delete(id);
+      await loadTemplates();
+    } catch { /* silently fail */ }
+  }
+
   // API key management
   let apiKeys = $state<any[]>([]);
   let newKeyName = $state('');
@@ -252,6 +310,7 @@
         // AI config not available
       }
 
+      await loadTemplates();
       await loadApiKeys();
       await loadAuditLog();
 
@@ -480,6 +539,97 @@
       </div>
     </section>
 
+    <!-- Templates section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Templates</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Create reusable email templates for quick composing.</p>
+
+      {#if editingTemplateId}
+        <div class="p-3 rounded-lg border mb-4" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
+          <div class="space-y-2">
+            <input
+              type="text"
+              bind:value={templateName}
+              placeholder="Template name"
+              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+              style="border-color: var(--iris-color-border); background: var(--iris-color-bg); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+            />
+            <input
+              type="text"
+              bind:value={templateSubject}
+              placeholder="Subject (optional)"
+              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+              style="border-color: var(--iris-color-border); background: var(--iris-color-bg); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+            />
+            <textarea
+              bind:value={templateBody}
+              placeholder="Template body"
+              rows="4"
+              class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 resize-y"
+              style="border-color: var(--iris-color-border); background: var(--iris-color-bg); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+            ></textarea>
+            <div class="flex gap-2">
+              <button
+                class="settings-btn-primary px-4 py-1.5 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+                style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                onclick={saveTemplate}
+                disabled={templateSaving || !templateName.trim() || !templateBody.trim()}
+              >
+                {templateSaving ? 'Saving...' : editingTemplateId === 'new' ? 'Create' : 'Save'}
+              </button>
+              <button
+                class="settings-btn-secondary px-4 py-1.5 text-sm rounded-lg border transition-colors"
+                style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+                onclick={cancelEditTemplate}
+              >Cancel</button>
+            </div>
+          </div>
+        </div>
+      {:else}
+        <button
+          class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors mb-4"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+          onclick={startNewTemplate}
+        >New Template</button>
+      {/if}
+
+      {#if templates.length > 0}
+        <div class="border rounded-lg overflow-hidden" style="border-color: var(--iris-color-border);">
+          <table class="w-full text-sm">
+            <thead style="background: var(--iris-color-bg-surface);">
+              <tr>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Name</th>
+                <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Subject</th>
+                <th class="text-right px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each templates as t}
+                <tr class="border-t" style="border-color: var(--iris-color-border-subtle);">
+                  <td class="px-3 py-2 font-medium" style="color: var(--iris-color-text);">{t.name}</td>
+                  <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text-faint);">{t.subject || '—'}</td>
+                  <td class="px-3 py-2 text-right">
+                    <button
+                      class="text-xs mr-2 settings-edit-btn"
+                      style="color: var(--iris-color-primary);"
+                      onclick={() => startEditTemplate(t)}
+                    >Edit</button>
+                    <button
+                      class="text-xs settings-revoke-btn"
+                      style="color: var(--iris-color-error);"
+                      onclick={() => deleteTemplate(t.id)}
+                    >Delete</button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {:else if !editingTemplateId}
+        <p class="text-sm" style="color: var(--iris-color-text-faint);">No templates created yet.</p>
+      {/if}
+    </section>
+
     <!-- API Keys section -->
     <section>
       <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">API Keys</h3>
@@ -633,6 +783,10 @@
 
   .settings-revoke-btn:hover {
     filter: brightness(1.3);
+  }
+
+  .settings-edit-btn:hover {
+    filter: brightness(1.2);
   }
 
   .settings-input::placeholder {

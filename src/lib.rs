@@ -74,6 +74,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/send", post(api::compose::send_message))
         .route("/drafts", get(api::compose::list_drafts).post(api::compose::save_draft))
         .route("/drafts/{id}", delete(api::compose::delete_draft))
+        .route("/templates", get(api::templates::list_templates).post(api::templates::create_template))
+        .route("/templates/{id}", put(api::templates::update_template).delete(api::templates::delete_template))
         .nest("/agent", agent_routes)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
