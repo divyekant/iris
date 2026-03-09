@@ -16,7 +16,7 @@
     labels?: string;
   }
 
-  let { message, onclick, selected = false, focused = false, onselect, onaction, onsnooze }: {
+  let { message, onclick, selected = false, focused = false, onselect, onaction, onsnooze, muted = false }: {
     message: Message;
     onclick: (id: string) => void;
     selected?: boolean;
@@ -24,6 +24,7 @@
     onselect?: (id: string, checked: boolean) => void;
     onaction?: (id: string, action: string) => void;
     onsnooze?: (id: string, snoozeUntil: number) => void;
+    muted?: boolean;
   } = $props();
 
   let snoozePickerOpen = $state(false);
@@ -122,8 +123,11 @@
         {formattedDate}
       </span>
     </div>
-    <div class="text-sm truncate {message.is_read ? '' : 'font-medium'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
-      {subjectDisplay}
+    <div class="text-sm truncate {message.is_read ? '' : 'font-medium'} flex items-center gap-1.5" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
+      <span class="truncate">{subjectDisplay}</span>
+      {#if muted}
+        <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium uppercase" style="background: color-mix(in srgb, var(--iris-color-text-faint) 15%, transparent); color: var(--iris-color-text-faint);">Muted</span>
+      {/if}
     </div>
     {#if message.snippet}
       <div class="text-xs truncate mt-0.5" style="color: var(--iris-color-text-faint);">

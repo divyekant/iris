@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import { requestNotificationPermission, setEnabled as setNotificationsEnabled, getPermissionState } from '../lib/notifications';
+  import { Bell, BellOff } from 'lucide-svelte';
 
   type Theme = 'light' | 'dark' | 'system';
 
@@ -128,6 +129,10 @@
   // Desktop notifications
   let notificationsEnabled = $state(localStorage.getItem('iris-notifications') !== 'false');
   let notificationPermission = $state(getPermissionState());
+
+  // Per-account notification control
+  let acctNotificationState = $state<Record<string, boolean>>({});
+  let acctNotificationToggling = $state<Record<string, boolean>>({});
 
   // Audit log
   let auditEntries = $state<any[]>([]);
@@ -428,6 +433,33 @@
     } catch { /* silently fail */ }
   }
 
+  async function loadAccountNotifications() {
+    try {
+      for (const account of accounts) {
+        try {
+          const res = await api.notifications.get(account.id);
+          acctNotificationState[account.id] = res.enabled;
+        } catch {
+          acctNotificationState[account.id] = true; // default enabled
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function toggleAccountNotification(accountId: string) {
+    if (acctNotificationToggling[accountId]) return;
+    acctNotificationToggling[accountId] = true;
+    const newValue = !acctNotificationState[accountId];
+    try {
+      const res = await api.notifications.set(accountId, newValue);
+      acctNotificationState[accountId] = res.enabled;
+    } catch {
+      // revert on failure
+    } finally {
+      acctNotificationToggling[accountId] = false;
+    }
+  }
+
   async function loadAuditLog() {
     try {
       auditEntries = await api.auditLog.list({ limit: 25 });
@@ -473,6 +505,7 @@
       }
 
       await loadAccounts();
+      await loadAccountNotifications();
       await loadTemplates();
       await loadBlockedSenders();
       await loadApiKeys();
@@ -532,6 +565,42 @@
           />
         </label>
       </div>
+
+      <!-- Per-account notification control -->
+      {#if accounts.length > 0}
+        <div class="mt-4 space-y-3">
+          <p class="text-xs font-medium" style="color: var(--iris-color-text-muted);">Per-account notifications</p>
+          {#each accounts as account}
+            <div class="flex items-center justify-between p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              <div class="flex items-center gap-3">
+                {#if acctNotificationState[account.id] !== false}
+                  <Bell size={18} style="color: var(--iris-color-success);" />
+                {:else}
+                  <BellOff size={18} style="color: var(--iris-color-text-faint);" />
+                {/if}
+                <div>
+                  <p class="text-sm font-medium" style="color: var(--iris-color-text);">{account.email}</p>
+                  <p class="text-xs" style="color: var(--iris-color-text-faint);">
+                    {acctNotificationState[account.id] !== false ? 'Notifications enabled' : 'Notifications disabled'}
+                  </p>
+                </div>
+              </div>
+              <button
+                class="relative w-11 h-6 rounded-full transition-colors"
+                style="background: {acctNotificationState[account.id] !== false ? 'var(--iris-color-success)' : 'var(--iris-color-border-subtle)'};"
+                onclick={() => toggleAccountNotification(account.id)}
+                disabled={acctNotificationToggling[account.id]}
+                aria-label="Toggle notifications for {account.email}"
+              >
+                <span
+                  class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full shadow transition-transform {acctNotificationState[account.id] !== false ? 'translate-x-5' : ''}"
+                  style="background: var(--iris-color-text);"
+                ></span>
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </section>
 
     <!-- Undo Send section -->

@@ -1,13 +1,14 @@
 <script lang="ts">
   import MessageRow from './MessageRow.svelte';
 
-  let { messages, onclick, selectedIds = $bindable(new Set<string>()), onaction, onsnooze, focusedIndex = -1 }: {
+  let { messages, onclick, selectedIds = $bindable(new Set<string>()), onaction, onsnooze, focusedIndex = -1, mutedThreadIds = new Set<string>() }: {
     messages: any[];
     onclick: (id: string) => void;
     selectedIds?: Set<string>;
     onaction?: (id: string, action: string) => void;
     onsnooze?: (id: string, snoozeUntil: number) => void;
     focusedIndex?: number;
+    mutedThreadIds?: Set<string>;
   } = $props();
 
   function handleSelect(id: string, checked: boolean) {
@@ -29,7 +30,7 @@
 {:else}
   <div>
     {#each messages as message, i (message.id)}
-      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} focused={i === focusedIndex} onselect={handleSelect} {onaction} {onsnooze} />
+      <MessageRow {message} {onclick} selected={selectedIds.has(message.id)} focused={i === focusedIndex} onselect={handleSelect} {onaction} {onsnooze} muted={mutedThreadIds.has(message.thread_id)} />
     {/each}
   </div>
 {/if}

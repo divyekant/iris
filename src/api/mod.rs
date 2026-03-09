@@ -11,6 +11,7 @@ pub mod config;
 pub mod health;
 pub mod inbox_stats;
 pub mod messages;
+pub mod muted_threads;
 pub mod queue_status;
 pub mod search;
 pub mod session_auth;

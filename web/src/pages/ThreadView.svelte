@@ -2,7 +2,7 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2 } from 'lucide-svelte';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -21,6 +21,10 @@
   let replyBody = $state('');
   let sending = $state(false);
   let sendError = $state('');
+
+  // Mute state
+  let isMuted = $state(false);
+  let muteLoading = $state(false);
 
   // Snooze picker state
   let snoozePickerOpen = $state(false);
@@ -45,10 +49,35 @@
           msg.is_read = true;
         }
       }
+      // Check mute status
+      try {
+        const muteRes = await api.mutedThreads.isMuted(params.id);
+        isMuted = muteRes.muted;
+      } catch {
+        // Ignore — mute status is non-critical
+      }
     } catch (e: any) {
       error = e.message || 'Failed to load thread';
     } finally {
       loading = false;
+    }
+  }
+
+  async function toggleMute() {
+    if (muteLoading) return;
+    muteLoading = true;
+    try {
+      if (isMuted) {
+        await api.mutedThreads.unmute(params.id);
+        isMuted = false;
+      } else {
+        await api.mutedThreads.mute(params.id);
+        isMuted = true;
+      }
+    } catch (e: any) {
+      error = e.message || 'Failed to toggle mute';
+    } finally {
+      muteLoading = false;
     }
   }
 
@@ -400,6 +429,9 @@
         </p>
       </div>
       <div class="flex items-center gap-0.5">
+        <button class="p-1.5 transition-colors thread-action-btn {isMuted ? 'mute-active' : ''}" onclick={toggleMute} title={isMuted ? 'Unmute thread' : 'Mute thread'} disabled={muteLoading}>
+          {#if isMuted}<VolumeX size={15} />{:else}<Volume2 size={15} />{/if}
+        </button>
         <button class="p-1.5 transition-colors thread-action-btn star-btn" onclick={() => handleThreadAction('star')} title="Star"><Star size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('archive')} title="Archive"><Archive size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('mark_unread')} title="Mark unread"><MailOpen size={15} /></button>
@@ -561,6 +593,9 @@
   }
   .thread-action-btn:hover {
     color: var(--iris-color-text-muted);
+  }
+  .thread-action-btn.mute-active {
+    color: var(--iris-color-primary);
   }
   .thread-action-btn.star-btn:hover {
     color: var(--iris-color-primary);

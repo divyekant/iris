@@ -29,6 +29,8 @@
   let showSpamDialog = $state(false);
   let spamTargetId = $state('');
   let spamTargetEmail = $state('');
+  let mutedThreadIds = $state(new Set<string>());
+  let notificationPrefs = $state<Record<string, boolean>>({});
 
   // Keyboard navigation state
   let focusedIndex = $state(-1);
@@ -190,6 +192,29 @@
     });
   }
 
+  async function loadMutedThreads() {
+    try {
+      const muted = await api.mutedThreads.list();
+      mutedThreadIds = new Set(muted);
+    } catch {
+      // Non-critical — silently ignore
+    }
+  }
+
+  async function loadNotificationPrefs() {
+    try {
+      const accounts = await api.accounts.list();
+      for (const account of accounts) {
+        try {
+          const res = await api.notifications.get(account.id);
+          notificationPrefs[account.id] = res.enabled;
+        } catch {
+          notificationPrefs[account.id] = true;
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   function onCategoryChange(e: Event) {
     const detail = (e as CustomEvent).detail;
     activeCategory = detail.category || '';
@@ -297,6 +322,8 @@
 
   $effect(() => {
     loadMessages();
+    loadMutedThreads();
+    loadNotificationPrefs();
     wsClient.connect();
     initNotifications();
     const offNewEmail = wsClient.on('NewEmail', (evt: any) => {
@@ -361,7 +388,7 @@
     {:else if messages.length === 0}
       <EmptyState title="Inbox zero" subtitle="You've read everything. Time to go outside." />
     {:else}
-      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} onsnooze={handleSnooze} {focusedIndex} />
+      <MessageList {messages} onclick={handleMessageClick} bind:selectedIds onaction={handleRowAction} onsnooze={handleSnooze} {focusedIndex} {mutedThreadIds} />
     {/if}
   </div>
 

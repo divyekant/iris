@@ -219,6 +219,20 @@ export const api = {
       ),
     delete: (id: string) => request<void>(`/api/signatures/${id}`, { method: 'DELETE' }),
   },
+  mutedThreads: {
+    mute: (threadId: string) => request<{ muted: boolean }>(`/api/threads/${threadId}/mute`, { method: 'PUT' }),
+    unmute: (threadId: string) => request<{ muted: boolean }>(`/api/threads/${threadId}/mute`, { method: 'DELETE' }),
+    isMuted: (threadId: string) => request<{ muted: boolean }>(`/api/threads/${threadId}/mute`),
+    list: () => request<string[]>('/api/muted-threads'),
+  },
+  notifications: {
+    get: (accountId: string) => request<{ enabled: boolean }>(`/api/accounts/${accountId}/notifications`),
+    set: (accountId: string, enabled: boolean) =>
+      request<{ enabled: boolean }>(`/api/accounts/${accountId}/notifications`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      }),
+  },
   templates: {
     list: () => request<any[]>('/api/templates'),
     create: (data: { name: string; subject?: string; body_text: string; body_html?: string }) =>
