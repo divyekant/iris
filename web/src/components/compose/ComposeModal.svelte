@@ -21,6 +21,16 @@
     };
   }
 
+  interface AttachedFile {
+    file: File;
+    filename: string;
+    content_type: string;
+    size: number;
+    data_base64: string;
+  }
+
+  const MAX_TOTAL_SIZE = 25 * 1024 * 1024; // 25MB
+
   let {
     context,
     onclose,
@@ -42,6 +52,11 @@
   let draftId = $state<string | null>(null);
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // Attachments state
+  let attachedFiles = $state<AttachedFile[]>([]);
+  let fileInputEl: HTMLInputElement | undefined = $state();
+  let dragOver = $state(false);
+
   // AI assist state
   let aiAssisting = $state(false);
   let showAiMenu = $state(false);
@@ -53,6 +68,16 @@
     { action: 'shorter', label: 'Make shorter' },
     { action: 'longer', label: 'Expand' },
   ];
+
+  let totalAttachmentSize = $derived(
+    attachedFiles.reduce((sum, f) => sum + f.size, 0)
+  );
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
 
   async function handleAiAssist(action: string) {
     if (!body.trim()) return;
@@ -66,6 +91,73 @@
       error = 'AI assist failed. Check AI settings.';
     } finally {
       aiAssisting = false;
+    }
+  }
+
+  // File attachment helpers
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        // Remove the data:...;base64, prefix
+        const base64 = result.split(',')[1] || '';
+        resolve(base64);
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addFiles(files: FileList | File[]) {
+    error = '';
+    for (const file of files) {
+      // Check total size limit
+      if (totalAttachmentSize + file.size > MAX_TOTAL_SIZE) {
+        error = `Total attachment size exceeds 25 MB limit.`;
+        return;
+      }
+      // Check for duplicates
+      if (attachedFiles.some((a) => a.filename === file.name && a.size === file.size)) {
+        continue;
+      }
+      const data_base64 = await fileToBase64(file);
+      attachedFiles = [...attachedFiles, {
+        file,
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+        size: file.size,
+        data_base64,
+      }];
+    }
+  }
+
+  function removeAttachment(index: number) {
+    attachedFiles = attachedFiles.filter((_, i) => i !== index);
+  }
+
+  function handleFileInput(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      addFiles(input.files);
+      input.value = ''; // Reset so same file can be re-added
+    }
+  }
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    dragOver = true;
+  }
+
+  function handleDragLeave() {
+    dragOver = false;
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+      addFiles(e.dataTransfer.files);
     }
   }
 
@@ -161,6 +253,14 @@
             : context.original.message_id;
         }
       }
+      // Add attachments
+      if (attachedFiles.length > 0) {
+        req.attachments = attachedFiles.map((a) => ({
+          filename: a.filename,
+          content_type: a.content_type,
+          data_base64: a.data_base64,
+        }));
+      }
       await api.send(req);
       // Clean up draft if we had one
       if (draftId) {
@@ -242,7 +342,13 @@
     </div>
 
     <!-- Form -->
-    <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+    <div
+      class="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+      class:drag-over={dragOver}
+      ondragover={handleDragOver}
+      ondragleave={handleDragLeave}
+      ondrop={handleDrop}
+    >
       <!-- To -->
       <div class="flex items-center gap-2">
         <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-to">To</label>
@@ -316,6 +422,37 @@
         style="color: var(--iris-color-text);"
         placeholder="Write your message..."
       ></textarea>
+
+      <!-- Attached files chips -->
+      {#if attachedFiles.length > 0}
+        <div class="flex flex-wrap gap-2 pt-2" style="border-top: 1px solid var(--iris-color-border-subtle);">
+          {#each attachedFiles as att, i}
+            <div class="flex items-center gap-1 px-2 py-1 rounded text-xs compose-attachment-chip">
+              <span>{'\u{1F4CE}'}</span>
+              <span class="truncate max-w-[160px]">{att.filename}</span>
+              <span style="color: var(--iris-color-text-faint);">({formatSize(att.size)})</span>
+              <button
+                class="ml-1 hover:opacity-100 opacity-60"
+                style="color: var(--iris-color-error);"
+                onclick={() => removeAttachment(i)}
+                title="Remove"
+              >&times;</button>
+            </div>
+          {/each}
+          <div class="text-xs self-center" style="color: var(--iris-color-text-faint);">
+            {formatSize(totalAttachmentSize)} / 25 MB
+          </div>
+        </div>
+      {/if}
+
+      <!-- Hidden file input -->
+      <input
+        bind:this={fileInputEl}
+        type="file"
+        multiple
+        class="hidden"
+        onchange={handleFileInput}
+      />
     </div>
 
     <!-- Footer -->
@@ -325,6 +462,16 @@
       {:else}
         <span class="flex-1"></span>
       {/if}
+      <!-- Attach button -->
+      <button
+        class="px-3 py-1.5 text-sm compose-secondary-btn"
+        style="color: var(--iris-color-text-muted);"
+        onclick={() => fileInputEl?.click()}
+        disabled={sending}
+        title="Attach files"
+      >
+        {'\u{1F4CE}'} Attach
+      </button>
       <button
         class="px-3 py-1.5 text-sm compose-secondary-btn"
         style="color: var(--iris-color-text-muted);"
@@ -387,12 +534,26 @@
     transform: scale(0.98);
   }
 
-  /* Secondary buttons (Save Draft, AI) */
+  /* Secondary buttons (Save Draft, AI, Attach) */
   .compose-secondary-btn {
     transition: all 120ms ease;
   }
   .compose-secondary-btn:hover:not(:disabled) {
     background: var(--iris-color-bg-surface);
     color: var(--iris-color-text);
+  }
+
+  /* Drag-over state */
+  .drag-over {
+    outline: 2px dashed var(--iris-color-primary);
+    outline-offset: -4px;
+    background: color-mix(in srgb, var(--iris-color-primary) 5%, transparent);
+  }
+
+  /* Attachment chips in compose */
+  .compose-attachment-chip {
+    background: var(--iris-color-bg-surface);
+    color: var(--iris-color-text-muted);
+    border: 1px solid var(--iris-color-border-subtle);
   }
 </style>

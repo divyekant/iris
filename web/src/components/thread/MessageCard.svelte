@@ -1,9 +1,12 @@
 <script lang="ts">
   import EmailBody from './EmailBody.svelte';
   import TrustBadge from '../TrustBadge.svelte';
+  import { api, getSessionToken } from '../../lib/api';
 
   let { message }: { message: any } = $props();
   let expanded = $state(true);
+  let loadedAttachments = $state<any[]>([]);
+  let attachmentsLoaded = $state(false);
 
   function formatDate(ts: number): string {
     return new Date(ts * 1000).toLocaleString([], {
@@ -29,6 +32,69 @@
       return json;
     }
   }
+
+  function getFileIcon(contentType: string): string {
+    if (contentType.startsWith('image/')) return '\u{1F5BC}';   // framed picture
+    if (contentType.includes('pdf')) return '\u{1F4C4}';         // page facing up
+    if (contentType.includes('zip') || contentType.includes('compressed') || contentType.includes('archive')) return '\u{1F4E6}'; // package
+    if (contentType.includes('spreadsheet') || contentType.includes('csv') || contentType.includes('excel')) return '\u{1F4CA}'; // bar chart
+    if (contentType.includes('word') || contentType.includes('document') || contentType.startsWith('text/')) return '\u{1F4DD}'; // memo
+    return '\u{1F4CE}'; // paperclip
+  }
+
+  function getIconColor(contentType: string): string {
+    if (contentType.startsWith('image/')) return 'var(--iris-color-info)';
+    if (contentType.includes('pdf') || contentType.includes('word') || contentType.includes('document') || contentType.startsWith('text/')) return 'var(--iris-color-warning)';
+    return 'var(--iris-color-text-muted)';
+  }
+
+  function downloadAttachment(attachmentId: string) {
+    const url = api.attachments.downloadUrl(attachmentId);
+    const token = getSessionToken();
+    // Use fetch + blob to pass session token
+    fetch(url, {
+      headers: token ? { 'x-session-token': token } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error('Download failed');
+        const disposition = res.headers.get('content-disposition');
+        const filenameMatch = disposition?.match(/filename="(.+?)"/);
+        const filename = filenameMatch?.[1] || 'download';
+        return res.blob().then((blob) => ({ blob, filename }));
+      })
+      .then(({ blob, filename }) => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      })
+      .catch(() => {
+        // Fallback: open in new tab
+        window.open(api.attachments.downloadUrl(attachmentId), '_blank');
+      });
+  }
+
+  // Load attachments from the API when expanded and message has attachments
+  $effect(() => {
+    if (expanded && message.has_attachments && !attachmentsLoaded) {
+      attachmentsLoaded = true;
+      api.messages.attachments(message.id).then((atts) => {
+        loadedAttachments = atts;
+      }).catch(() => {
+        // Fall back to metadata-only display
+        loadedAttachments = [];
+      });
+    }
+  });
+
+  // Determine which attachments to display: API-loaded (with download) or metadata-only fallback
+  let displayAttachments = $derived(
+    loadedAttachments.length > 0
+      ? loadedAttachments
+      : (message.attachments || [])
+  );
+  let hasDownloadIds = $derived(loadedAttachments.length > 0);
 </script>
 
 <div class="rounded-lg message-card">
@@ -66,20 +132,34 @@
 
       <EmailBody html={message.body_html} text={message.body_text} />
 
-      {#if message.attachments && message.attachments.length > 0}
-        <div class="mt-4 pt-3" style="border-top: 1px solid var(--iris-color-border-subtle);">
+      {#if displayAttachments.length > 0}
+        <div class="mt-4 pt-3 attachment-bar">
           <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">
-            Attachments ({message.attachments.length})
+            Attachments ({displayAttachments.length})
           </p>
           <div class="flex flex-wrap gap-2">
-            {#each message.attachments as att}
-              <div
-                class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs attachment-chip"
-              >
-                <span>{'\u{1F4CE}'}</span>
-                <span class="truncate max-w-[200px]">{att.filename}</span>
-                <span style="color: var(--iris-color-text-faint);">({formatSize(att.size)})</span>
-              </div>
+            {#each displayAttachments as att}
+              {@const ct = att.content_type || att.mime_type || 'application/octet-stream'}
+              {#if hasDownloadIds && att.id}
+                <button
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs attachment-chip attachment-download"
+                  onclick={() => downloadAttachment(att.id)}
+                  title="Download {att.filename || 'file'}"
+                >
+                  <span style="color: {getIconColor(ct)};">{getFileIcon(ct)}</span>
+                  <span class="truncate max-w-[200px]">{att.filename || 'unnamed'}</span>
+                  <span style="color: var(--iris-color-text-faint);">({formatSize(att.size)})</span>
+                  <span class="download-icon" style="color: var(--iris-color-primary);">{'\u2913'}</span>
+                </button>
+              {:else}
+                <div
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs attachment-chip"
+                >
+                  <span style="color: {getIconColor(ct)};">{getFileIcon(ct)}</span>
+                  <span class="truncate max-w-[200px]">{att.filename || 'unnamed'}</span>
+                  <span style="color: var(--iris-color-text-faint);">({formatSize(att.size)})</span>
+                </div>
+              {/if}
             {/each}
           </div>
         </div>
@@ -96,8 +176,28 @@
   .message-card-header:hover {
     background: var(--iris-color-bg-surface);
   }
-  .attachment-chip {
+  .attachment-bar {
+    border-top: 1px solid var(--iris-color-border);
     background: var(--iris-color-bg-surface);
+    border-radius: 0 0 8px 8px;
+    margin: 0 -16px -16px;
+    padding: 12px 16px 16px;
+  }
+  .attachment-chip {
+    background: var(--iris-color-bg-elevated);
     color: var(--iris-color-text-muted);
+    border: 1px solid var(--iris-color-border-subtle);
+  }
+  .attachment-download {
+    cursor: pointer;
+    transition: all 120ms ease;
+  }
+  .attachment-download:hover {
+    border-color: var(--iris-color-primary);
+    background: color-mix(in srgb, var(--iris-color-primary) 8%, var(--iris-color-bg-elevated));
+  }
+  .download-icon {
+    margin-left: 4px;
+    font-size: 14px;
   }
 </style>

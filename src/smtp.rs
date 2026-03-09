@@ -1,4 +1,5 @@
-use lettre::message::{Mailbox, MultiPart, SinglePart};
+use lettre::message::header::ContentType;
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -18,6 +19,14 @@ pub enum SmtpError {
     TokenRefresh(String),
 }
 
+/// Base64-encoded attachment sent from the client.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AttachmentData {
+    pub filename: String,
+    pub content_type: String,
+    pub data_base64: String,
+}
+
 /// Request to compose and send an email.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ComposeRequest {
@@ -34,6 +43,9 @@ pub struct ComposeRequest {
     pub in_reply_to: Option<String>,
     /// Set for replies — the References chain.
     pub references: Option<String>,
+    /// Attachments to include (base64-encoded data).
+    #[serde(default)]
+    pub attachments: Vec<AttachmentData>,
 }
 
 /// Build an RFC 2822 email message from a compose request.
@@ -79,17 +91,47 @@ pub fn build_email(
         builder = builder.references(refs.to_string());
     }
 
-    let email = if let Some(ref html) = req.body_html {
-        builder
-            .multipart(
-                MultiPart::alternative()
-                    .singlepart(SinglePart::plain(req.body_text.clone()))
-                    .singlepart(SinglePart::html(html.clone())),
-            )
-            .map_err(|e| SmtpError::Build(e.to_string()))?
+    // Build the body part (text-only or multipart/alternative with HTML)
+    let body_part = if let Some(ref html) = req.body_html {
+        MultiPart::alternative()
+            .singlepart(SinglePart::plain(req.body_text.clone()))
+            .singlepart(SinglePart::html(html.clone()))
     } else {
+        MultiPart::alternative()
+            .singlepart(SinglePart::plain(req.body_text.clone()))
+    };
+
+    // If we have attachments, wrap in multipart/mixed
+    let email = if req.attachments.is_empty() {
+        if req.body_html.is_some() {
+            builder
+                .multipart(body_part)
+                .map_err(|e| SmtpError::Build(e.to_string()))?
+        } else {
+            builder
+                .body(req.body_text.clone())
+                .map_err(|e| SmtpError::Build(e.to_string()))?
+        }
+    } else {
+        use base64::Engine;
+        let mut mixed = MultiPart::mixed().multipart(body_part);
+
+        for att in &req.attachments {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&att.data_base64)
+                .map_err(|e| SmtpError::Build(format!("invalid base64 attachment: {e}")))?;
+
+            let content_type: ContentType = att.content_type.parse()
+                .unwrap_or(ContentType::parse("application/octet-stream").unwrap());
+
+            let attachment = Attachment::new(att.filename.clone())
+                .body(decoded, content_type);
+
+            mixed = mixed.singlepart(attachment);
+        }
+
         builder
-            .body(req.body_text.clone())
+            .multipart(mixed)
             .map_err(|e| SmtpError::Build(e.to_string()))?
     };
 
@@ -155,6 +197,7 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: None,
+            attachments: vec![],
         };
         let email = build_email("bob@example.com", Some("Bob"), &req).unwrap();
         let raw = email.formatted();
@@ -177,6 +220,7 @@ mod tests {
             body_html: Some("<p>Rich content</p>".into()),
             in_reply_to: None,
             references: None,
+            attachments: vec![],
         };
         let email = build_email("bob@example.com", None, &req).unwrap();
         let raw = email.formatted();
@@ -197,11 +241,39 @@ mod tests {
             body_html: None,
             in_reply_to: Some("<orig-123@example.com>".into()),
             references: Some("<orig-123@example.com>".into()),
+            attachments: vec![],
         };
         let email = build_email("bob@example.com", None, &req).unwrap();
         let raw = email.formatted();
         let formatted = String::from_utf8_lossy(&raw);
         assert!(formatted.contains("In-Reply-To: <orig-123@example.com>"));
         assert!(formatted.contains("References: <orig-123@example.com>"));
+    }
+
+    #[test]
+    fn test_build_email_with_attachments() {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(b"Hello PDF content");
+        let req = ComposeRequest {
+            account_id: "acct-1".into(),
+            to: vec!["alice@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "With attachment".into(),
+            body_text: "See attached.".into(),
+            body_html: None,
+            in_reply_to: None,
+            references: None,
+            attachments: vec![AttachmentData {
+                filename: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                data_base64: data,
+            }],
+        };
+        let email = build_email("bob@example.com", Some("Bob"), &req).unwrap();
+        let raw = email.formatted();
+        let formatted = String::from_utf8_lossy(&raw);
+        assert!(formatted.contains("multipart/mixed"), "should be multipart/mixed");
+        assert!(formatted.contains("report.pdf"), "should contain filename");
     }
 }

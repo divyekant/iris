@@ -70,6 +70,26 @@ pub async fn send_message(
     let cc_json = if req.cc.is_empty() { None } else { serde_json::to_string(&req.cc).ok() };
     let bcc_json = if req.bcc.is_empty() { None } else { serde_json::to_string(&req.bcc).ok() };
 
+    let has_attachments = !req.attachments.is_empty();
+    let attachment_names = if has_attachments {
+        use crate::models::message::AttachmentMeta;
+        let metas: Vec<AttachmentMeta> = req.attachments.iter().map(|a| {
+            use base64::Engine;
+            let size = base64::engine::general_purpose::STANDARD
+                .decode(&a.data_base64)
+                .map(|d| d.len())
+                .unwrap_or(0);
+            AttachmentMeta {
+                filename: a.filename.clone(),
+                mime_type: a.content_type.clone(),
+                size,
+            }
+        }).collect();
+        serde_json::to_string(&metas).ok()
+    } else {
+        None
+    };
+
     let sent_msg = InsertMessage {
         account_id: req.account_id.clone(),
         message_id: rfc_message_id.clone(),
@@ -92,12 +112,34 @@ pub async fn send_message(
         uid: None,
         modseq: None,
         raw_headers: None,
-        has_attachments: false,
-        attachment_names: None,
+        has_attachments,
+        attachment_names,
         size_bytes: None,
     };
 
     let id = InsertMessage::insert(&conn, &sent_msg).expect("sent message should always insert");
+
+    // Store attachment data in the attachments table for sent messages
+    if has_attachments {
+        use base64::Engine;
+        for att in &req.attachments {
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&att.data_base64) {
+                let att_id = uuid::Uuid::new_v4().to_string();
+                let _ = conn.execute(
+                    "INSERT INTO attachments (id, message_id, filename, content_type, size, content_id, data)
+                     VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+                    rusqlite::params![
+                        att_id,
+                        id,
+                        att.filename,
+                        att.content_type,
+                        decoded.len() as i64,
+                        decoded,
+                    ],
+                );
+            }
+        }
+    }
 
     tracing::info!(account = %account.email, to = ?req.to, subject = %req.subject, "Email sent");
 
