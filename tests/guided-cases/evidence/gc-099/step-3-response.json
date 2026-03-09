@@ -1,0 +1,1 @@
+[{"id":"dfc57a3d-02e9-4a4b-ac20-1ee279ad9272","name":"Team Updates","query":"subject:standup OR subject:retro","account_id":null,"created_at":1773086635},{"id":"e21df44c-4908-4f46-8ec1-48fd5ea75b44","name":"VIP Unread","query":"from:boss@acme.com is:unread","account_id":null,"created_at":1773086622}]

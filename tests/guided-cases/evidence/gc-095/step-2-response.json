@@ -1,0 +1,11 @@
+{
+    "results": [],
+    "total": 0,
+    "query": "from:<script>alert(1)</script>",
+    "parsed_operators": [
+        {
+            "key": "from",
+            "value": "<script>alert(1)</script>"
+        }
+    ]
+}

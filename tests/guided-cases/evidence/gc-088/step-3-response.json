@@ -1,0 +1,11 @@
+{
+    "results": [],
+    "total": 0,
+    "query": "has:attachments invoice",
+    "parsed_operators": [
+        {
+            "key": "has",
+            "value": "attachments"
+        }
+    ]
+}

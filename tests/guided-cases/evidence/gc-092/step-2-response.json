@@ -1,0 +1,19 @@
+{
+    "results": [],
+    "total": 0,
+    "query": "from:sarah is:unread has:attachment",
+    "parsed_operators": [
+        {
+            "key": "from",
+            "value": "sarah"
+        },
+        {
+            "key": "is",
+            "value": "unread"
+        },
+        {
+            "key": "has",
+            "value": "attachment"
+        }
+    ]
+}

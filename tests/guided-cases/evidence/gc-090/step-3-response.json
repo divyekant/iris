@@ -1,0 +1,11 @@
+{
+    "results": [],
+    "total": 0,
+    "query": "subject:quarterly",
+    "parsed_operators": [
+        {
+            "key": "subject",
+            "value": "quarterly"
+        }
+    ]
+}

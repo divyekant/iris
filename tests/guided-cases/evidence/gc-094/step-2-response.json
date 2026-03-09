@@ -1,0 +1,31 @@
+{
+    "results": [
+        {
+            "id": "a208b7a0-b4d0-4dde-813f-b08a73561a62",
+            "account_id": "75e8dc75-058d-4bcb-b6a0-418af15eac09",
+            "thread_id": "69ab7a6d.050a0220.27fc4.2671@mx.google.com",
+            "from_address": "tataunistorescribe1@gmail.com",
+            "from_name": "TataUnistore1",
+            "subject": "Test from Iris",
+            "snippet": "<mark>Hello</mark> <mark>from</mark> Iris email client\r\n",
+            "date": 1772845676,
+            "is_read": false,
+            "has_attachments": false
+        },
+        {
+            "id": "603ae624-e36d-4a58-acf3-2861f81e94ba",
+            "account_id": "75e8dc75-058d-4bcb-b6a0-418af15eac09",
+            "thread_id": "69ab7a6d.050a0220.27fc4.2671@mx.google.com",
+            "from_address": "tataunistorescribe1@gmail.com",
+            "from_name": "TataUnistore1",
+            "subject": "Test from Iris",
+            "snippet": "<mark>Hello</mark> <mark>from</mark> Iris email client\r\n",
+            "date": 1772845676,
+            "is_read": false,
+            "has_attachments": false
+        }
+    ],
+    "total": 2,
+    "query": "from: hello",
+    "parsed_operators": []
+}

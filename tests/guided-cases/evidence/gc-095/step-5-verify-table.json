@@ -1,0 +1,23 @@
+{
+    "messages": [
+        {
+            "id": "2ca187a1-e9ec-410c-80e7-7dc72003f3bd",
+            "account_id": "75e8dc75-058d-4bcb-b6a0-418af15eac09",
+            "thread_id": "69af26c4.050a0220.1f9093.5d7a@mx.google.com",
+            "folder": "INBOX",
+            "from_address": "mailer-daemon@googlemail.com",
+            "from_name": "Mail Delivery Subsystem",
+            "subject": "Delivery Status Notification (Failure)",
+            "snippet": "** Address not found **Your message wasn't delivered to test@example.com because the domain example.com couldn't be found. Check for typos or unnecessary spaces and try again.Learn more here: https://",
+            "date": 1773086405,
+            "is_read": false,
+            "is_starred": false,
+            "has_attachments": true,
+            "labels": null,
+            "ai_priority_label": "high",
+            "ai_category": "Updates"
+        }
+    ],
+    "unread_count": 50,
+    "total": 56
+}

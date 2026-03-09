@@ -1,0 +1,11 @@
+{
+    "results": [],
+    "total": 0,
+    "query": "from:alice@example.com",
+    "parsed_operators": [
+        {
+            "key": "from",
+            "value": "alice@example.com"
+        }
+    ]
+}

@@ -6,3 +6,5 @@ CREATE TABLE IF NOT EXISTS saved_searches (
     account_id TEXT,  -- NULL = all accounts
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
+
+INSERT OR IGNORE INTO schema_version (version) VALUES (15);

@@ -1,0 +1,15 @@
+{
+    "results": [],
+    "total": 0,
+    "query": "after:2026-01-01 before:2026-03-01 report",
+    "parsed_operators": [
+        {
+            "key": "after",
+            "value": "2026-01-01"
+        },
+        {
+            "key": "before",
+            "value": "2026-03-01"
+        }
+    ]
+}
