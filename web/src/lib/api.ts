@@ -48,6 +48,10 @@ export const api = {
     },
     get: (id: string) => request<any>(`/api/messages/${id}`),
     markRead: (id: string) => request<void>(`/api/messages/${id}/read`, { method: 'PUT' }),
+    attachments: (messageId: string) =>
+      request<{ id: string; message_id: string; filename: string | null; content_type: string; size: number; content_id: string | null }[]>(
+        `/api/messages/${messageId}/attachments`
+      ),
     batch: (ids: string[], action: string) =>
       request<{ updated: number }>('/api/messages/batch', {
         method: 'PATCH',
@@ -72,6 +76,9 @@ export const api = {
     summarize: (id: string) =>
       request<{ summary: string; cached: boolean }>(`/api/threads/${id}/summarize`, { method: 'POST' }),
   },
+  attachments: {
+    downloadUrl: (attachmentId: string) => `/api/attachments/${attachmentId}/download`,
+  },
   send: (data: {
     account_id: string;
     to: string[];
@@ -82,6 +89,7 @@ export const api = {
     body_html?: string;
     in_reply_to?: string;
     references?: string;
+    attachments?: { filename: string; content_type: string; data_base64: string }[];
   }) => request<{ id: string; send_at: number; can_undo: boolean }>('/api/send', { method: 'POST', body: JSON.stringify(data) }),
   cancelSend: (id: string) =>
     request<{ cancelled: boolean }>(`/api/send/cancel/${id}`, { method: 'POST' }),

@@ -49,6 +49,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/messages", get(api::messages::list_messages))
         .route("/messages/{id}", get(api::messages::get_message))
         .route("/messages/{id}/read", put(api::messages::mark_message_read))
+        .route("/messages/{id}/attachments", get(api::attachments::list_attachments))
+        .route("/attachments/{id}/download", get(api::attachments::download_attachment))
         .route("/messages/fix-encoding", post(api::messages::fix_encoding))
         .route("/messages/snooze", post(api::messages::snooze_messages))
         .route("/messages/unsnooze", post(api::messages::unsnooze_messages))

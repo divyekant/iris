@@ -98,7 +98,7 @@ impl SyncEngine {
             tracing::info!(account_id, imap_folder, fetched_count, "Fetched {} messages", fetched_count);
 
             for (i, fetch) in fetches.iter().enumerate() {
-                let mut insert_msg = parse_fetch(account_id, fetch);
+                let (mut insert_msg, extracted_attachments) = parse_fetch(account_id, fetch);
                 insert_msg.folder = local_folder.to_string();
 
                 let msg_id = {
@@ -108,6 +108,26 @@ impl SyncEngine {
 
                 // Only process newly inserted messages (skip duplicates)
                 if let Some(ref msg_id) = msg_id {
+                    // Store attachment data in the attachments table
+                    if !extracted_attachments.is_empty() {
+                        let conn = self.db.get()?;
+                        for att in &extracted_attachments {
+                            let att_id = uuid::Uuid::new_v4().to_string();
+                            let _ = conn.execute(
+                                "INSERT INTO attachments (id, message_id, filename, content_type, size, content_id, data)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                rusqlite::params![
+                                    att_id,
+                                    msg_id,
+                                    att.filename,
+                                    att.content_type,
+                                    att.size as i64,
+                                    att.content_id,
+                                    att.data,
+                                ],
+                            );
+                        }
+                    }
                     // Broadcast new email event (only for INBOX)
                     if *local_folder == "INBOX" {
                         self.ws_hub.broadcast(WsEvent::NewEmail {
@@ -196,7 +216,7 @@ fn decode_rfc2047(raw: &[u8]) -> String {
 // Parse a single FETCH response into an InsertMessage
 // ---------------------------------------------------------------------------
 
-fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMessage {
+fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> (InsertMessage, Vec<ExtractedAttachment>) {
     let envelope = fetch.envelope();
 
     // Extract from address
@@ -300,6 +320,7 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
             text: body_text.clone(),
             html: None,
             attachments: Vec::new(),
+            attachment_data: Vec::new(),
         },
     };
 
@@ -341,7 +362,7 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         .as_deref()
         .and_then(extract_gmail_labels);
 
-    InsertMessage {
+    (InsertMessage {
         account_id: account_id.to_string(),
         message_id,
         thread_id,
@@ -366,17 +387,28 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> InsertMess
         has_attachments,
         attachment_names,
         size_bytes: fetch.size.map(|s| s as i64),
-    }
+    }, mime_parsed.attachment_data)
 }
 
 // ---------------------------------------------------------------------------
 // MIME parsing
 // ---------------------------------------------------------------------------
 
+/// Raw attachment data extracted from MIME parts, ready for DB storage.
+#[derive(Debug, Clone)]
+pub struct ExtractedAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub size: usize,
+    pub content_id: Option<String>,
+    pub data: Vec<u8>,
+}
+
 struct ParsedBody {
     text: Option<String>,
     html: Option<String>,
     attachments: Vec<AttachmentMeta>,
+    attachment_data: Vec<ExtractedAttachment>,
 }
 
 /// Parse the MIME body of a message.
@@ -395,6 +427,7 @@ fn parse_mime_body(raw_headers: &str, raw_body: &str) -> ParsedBody {
                 text: Some(raw_body.to_string()),
                 html: None,
                 attachments: Vec::new(),
+                attachment_data: Vec::new(),
             };
         }
     };
@@ -402,40 +435,63 @@ fn parse_mime_body(raw_headers: &str, raw_body: &str) -> ParsedBody {
     let mut text = None;
     let mut html = None;
     let mut attachments = Vec::new();
+    let mut attachment_data = Vec::new();
 
-    extract_mime_parts(&parsed, &mut text, &mut html, &mut attachments);
+    extract_mime_parts(&parsed, &mut text, &mut html, &mut attachments, &mut attachment_data);
 
     ParsedBody {
         text,
         html,
         attachments,
+        attachment_data,
     }
 }
 
-/// Recursively walk MIME parts to extract text, HTML, and attachment metadata.
+/// Recursively walk MIME parts to extract text, HTML, and attachment metadata + data.
 fn extract_mime_parts(
     part: &mailparse::ParsedMail,
     text: &mut Option<String>,
     html: &mut Option<String>,
     attachments: &mut Vec<AttachmentMeta>,
+    attachment_data: &mut Vec<ExtractedAttachment>,
 ) {
     let content_type = &part.ctype;
     let disposition = part.get_content_disposition();
 
-    // Check if this part is an attachment
-    if disposition.disposition == mailparse::DispositionType::Attachment {
+    // Check if this part is an attachment (explicit attachment disposition or
+    // inline with Content-ID for embedded images)
+    let is_attachment = disposition.disposition == mailparse::DispositionType::Attachment;
+    let is_inline_image = disposition.disposition == mailparse::DispositionType::Inline
+        && content_type.mimetype.starts_with("image/")
+        && part.headers.iter().any(|h| h.get_key_ref().eq_ignore_ascii_case("Content-ID"));
+
+    if is_attachment || is_inline_image {
         let filename = disposition
             .params
             .get("filename")
+            .or_else(|| content_type.params.get("name"))
             .cloned()
             .unwrap_or_else(|| "unnamed".to_string());
-        let mime_type = format!("{}/{}", content_type.mimetype.split('/').next().unwrap_or("application"),
-            content_type.mimetype.split('/').nth(1).unwrap_or("octet-stream"));
-        let size = part.get_body_raw().map(|b| b.len()).unwrap_or(0);
+        let mime_type = content_type.mimetype.clone();
+        let raw_data = part.get_body_raw().unwrap_or_default();
+        let size = raw_data.len();
+
+        // Extract Content-ID for inline images
+        let content_id = part.headers.iter()
+            .find(|h| h.get_key_ref().eq_ignore_ascii_case("Content-ID"))
+            .map(|h| h.get_value().trim_matches(|c| c == '<' || c == '>').to_string());
+
         attachments.push(AttachmentMeta {
-            filename,
-            mime_type,
+            filename: filename.clone(),
+            mime_type: mime_type.clone(),
             size,
+        });
+        attachment_data.push(ExtractedAttachment {
+            filename,
+            content_type: mime_type,
+            size,
+            content_id,
+            data: raw_data,
         });
         return;
     }
@@ -443,7 +499,7 @@ fn extract_mime_parts(
     // If this part has subparts, recurse into them
     if !part.subparts.is_empty() {
         for subpart in &part.subparts {
-            extract_mime_parts(subpart, text, html, attachments);
+            extract_mime_parts(subpart, text, html, attachments, attachment_data);
         }
         return;
     }
