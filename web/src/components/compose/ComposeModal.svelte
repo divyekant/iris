@@ -46,6 +46,12 @@
   let aiAssisting = $state(false);
   let showAiMenu = $state(false);
 
+  // Undo send state
+  let undoSendId = $state<string | null>(null);
+  let undoCountdown = $state(0);
+  let undoTimer: ReturnType<typeof setInterval> | null = null;
+  let undoCancelling = $state(false);
+
   const aiActions = [
     { action: 'rewrite', label: 'Improve writing' },
     { action: 'formal', label: 'Make formal' },
@@ -136,6 +142,13 @@
       .filter(Boolean);
   }
 
+  function clearUndoTimer() {
+    if (undoTimer) {
+      clearInterval(undoTimer);
+      undoTimer = null;
+    }
+  }
+
   async function handleSend() {
     if (!to.trim()) {
       error = 'Please add at least one recipient.';
@@ -161,18 +174,66 @@
             : context.original.message_id;
         }
       }
-      await api.send(req);
+      const result = await api.send(req);
+
       // Clean up draft if we had one
       if (draftId) {
-        await api.drafts.delete(draftId);
+        await api.drafts.delete(draftId).catch(() => {});
       }
-      onsent?.();
-      onclose();
+
+      if (result.can_undo) {
+        // Start undo countdown
+        const now = Math.floor(Date.now() / 1000);
+        undoCountdown = Math.max(1, result.send_at - now);
+        undoSendId = result.id;
+
+        undoTimer = setInterval(() => {
+          undoCountdown--;
+          if (undoCountdown <= 0) {
+            clearUndoTimer();
+            undoSendId = null;
+            onsent?.();
+            onclose();
+          }
+        }, 1000);
+      } else {
+        onsent?.();
+        onclose();
+      }
     } catch (e: any) {
       const msg = e.message || 'Failed to send';
-      error = msg.includes('502') ? 'Send failed — check account connection in Settings.' : msg;
+      error = msg.includes('502') ? 'Send failed -- check account connection in Settings.' : msg;
     } finally {
       sending = false;
+    }
+  }
+
+  async function handleUndoSend() {
+    if (!undoSendId || undoCancelling) return;
+    undoCancelling = true;
+    try {
+      const result = await api.cancelSend(undoSendId);
+      clearUndoTimer();
+      if (result.cancelled) {
+        // Successfully cancelled — keep compose modal open with same content
+        undoSendId = null;
+        undoCountdown = 0;
+        error = '';
+        // The compose modal stays open with the same content
+      } else {
+        // Already sent
+        undoSendId = null;
+        onsent?.();
+        onclose();
+      }
+    } catch {
+      // Cancel failed, message may already be sent
+      clearUndoTimer();
+      undoSendId = null;
+      onsent?.();
+      onclose();
+    } finally {
+      undoCancelling = false;
     }
   }
 
@@ -203,7 +264,15 @@
       handleSend();
     }
     if (e.key === 'Escape') {
-      onclose();
+      if (undoSendId) {
+        // Don't close during undo countdown, dismiss toast instead
+        clearUndoTimer();
+        undoSendId = null;
+        onsent?.();
+        onclose();
+      } else {
+        onclose();
+      }
     }
   }
 
@@ -212,6 +281,7 @@
     initFields();
     return () => {
       if (saveTimeout) clearTimeout(saveTimeout);
+      clearUndoTimer();
     };
   });
 </script>
@@ -254,12 +324,14 @@
           class="flex-1 text-sm bg-transparent border-b outline-none py-1"
           style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
           placeholder="recipient@example.com"
+          disabled={!!undoSendId}
         />
         {#if !showCcBcc}
           <button
             class="text-xs"
             style="color: var(--iris-color-primary);"
             onclick={() => (showCcBcc = true)}
+            disabled={!!undoSendId}
           >
             Cc/Bcc
           </button>
@@ -277,6 +349,7 @@
             oninput={scheduleAutoSave}
             class="flex-1 text-sm bg-transparent border-b outline-none py-1"
             style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+            disabled={!!undoSendId}
           />
         </div>
 
@@ -290,6 +363,7 @@
             oninput={scheduleAutoSave}
             class="flex-1 text-sm bg-transparent border-b outline-none py-1"
             style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+            disabled={!!undoSendId}
           />
         </div>
       {/if}
@@ -305,6 +379,7 @@
           class="flex-1 text-sm bg-transparent border-b outline-none py-1"
           style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
           placeholder="Subject"
+          disabled={!!undoSendId}
         />
       </div>
 
@@ -315,6 +390,7 @@
         class="w-full min-h-[200px] text-sm bg-transparent outline-none resize-y mt-2 leading-relaxed"
         style="color: var(--iris-color-text);"
         placeholder="Write your message..."
+        disabled={!!undoSendId}
       ></textarea>
     </div>
 
@@ -329,7 +405,7 @@
         class="px-3 py-1.5 text-sm compose-secondary-btn"
         style="color: var(--iris-color-text-muted);"
         onclick={handleSaveDraft}
-        disabled={sending}
+        disabled={sending || !!undoSendId}
       >
         Save Draft
       </button>
@@ -339,7 +415,7 @@
           class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn"
           style="color: var(--iris-color-text-muted);"
           onclick={() => (showAiMenu = !showAiMenu)}
-          disabled={aiAssisting || sending || !body.trim()}
+          disabled={aiAssisting || sending || !body.trim() || !!undoSendId}
           title="AI Assist"
         >
           {aiAssisting ? 'Thinking...' : 'AI'}
@@ -360,7 +436,7 @@
         class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors compose-send-btn"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
         onclick={handleSend}
-        disabled={sending}
+        disabled={sending || !!undoSendId}
       >
         {sending ? 'Sending...' : 'Send'}
       </button>
@@ -369,6 +445,25 @@
       </span>
     </div>
   </div>
+
+  <!-- Undo Send Toast -->
+  {#if undoSendId}
+    <div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] undo-toast" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
+      <div class="flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl">
+        <span class="text-sm" style="color: var(--iris-color-text);">
+          Message sent.
+        </span>
+        <button
+          class="px-3 py-1 text-sm font-medium rounded-lg transition-colors undo-btn"
+          style="color: var(--iris-color-primary); background: color-mix(in srgb, var(--iris-color-primary) 12%, transparent);"
+          onclick={handleUndoSend}
+          disabled={undoCancelling}
+        >
+          {undoCancelling ? 'Cancelling...' : `Undo (${undoCountdown}s)`}
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -394,5 +489,30 @@
   .compose-secondary-btn:hover:not(:disabled) {
     background: var(--iris-color-bg-surface);
     color: var(--iris-color-text);
+  }
+
+  /* Undo toast */
+  .undo-toast {
+    border-radius: 12px;
+    animation: slide-up 200ms ease;
+  }
+
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translate(-50%, 16px);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+  }
+
+  .undo-btn {
+    transition: all 120ms ease;
+  }
+  .undo-btn:hover:not(:disabled) {
+    filter: brightness(1.15);
+    background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent);
   }
 </style>
