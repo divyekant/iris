@@ -164,6 +164,20 @@ export const api = {
       }),
     delete: (id: string) => request<void>(`/api/saved-searches/${id}`, { method: 'DELETE' }),
   },
+  labels: {
+    list: () => request<{ id: string; name: string; color: string; created_at: number; message_count: number }[]>('/api/labels'),
+    create: (data: { name: string; color: string }) =>
+      request<{ id: string; name: string; color: string; created_at: number }>('/api/labels', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: string, data: { name: string; color: string }) =>
+      request<{ id: string; name: string; color: string; created_at: number }>(`/api/labels/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    delete: (id: string) => request<void>(`/api/labels/${id}`, { method: 'DELETE' }),
+  },
   filterRules: {
     list: () => request<{ id: string; name: string; conditions: { field: string; operator: string; value: string }[]; actions: { type: string; value?: string }[]; is_active: boolean; account_id: string | null; created_at: number }[]>('/api/filter-rules'),
     create: (data: { name: string; conditions: { field: string; operator: string; value: string }[]; actions: { type: string; value?: string }[]; account_id?: string }) =>

@@ -11,6 +11,7 @@ pub mod compose;
 pub mod config;
 pub mod filter_rules;
 pub mod health;
+pub mod labels;
 pub mod inbox_stats;
 pub mod messages;
 pub mod muted_threads;

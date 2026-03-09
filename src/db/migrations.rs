@@ -17,6 +17,7 @@ const MIGRATION_014: &str = include_str!("../../migrations/014_muted_threads.sql
 const MIGRATION_015: &str = include_str!("../../migrations/015_saved_searches.sql");
 const MIGRATION_016: &str = include_str!("../../migrations/016_filter_rules.sql");
 const MIGRATION_017: &str = include_str!("../../migrations/017_aliases.sql");
+const MIGRATION_018: &str = include_str!("../../migrations/018_labels.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -118,6 +119,11 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 17 {
         conn.execute_batch(MIGRATION_017)?;
         tracing::info!("Applied migration 017_aliases");
+    }
+
+    if current_version < 18 {
+        conn.execute_batch(MIGRATION_018)?;
+        tracing::info!("Applied migration 018_labels");
     }
 
     Ok(())

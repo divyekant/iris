@@ -96,6 +96,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/signatures/{id}", put(api::signatures::update_signature).delete(api::signatures::delete_signature))
         .route("/templates", get(api::templates::list_templates).post(api::templates::create_template))
         .route("/templates/{id}", put(api::templates::update_template).delete(api::templates::delete_template))
+        .route("/labels", get(api::labels::list_labels).post(api::labels::create_label))
+        .route("/labels/{id}", put(api::labels::update_label).delete(api::labels::delete_label))
         .route("/filter-rules", get(api::filter_rules::list_filter_rules).post(api::filter_rules::create_filter_rule))
         .route("/filter-rules/{id}", put(api::filter_rules::update_filter_rule).delete(api::filter_rules::delete_filter_rule))
         .route("/aliases", get(api::aliases::list_aliases).post(api::aliases::create_alias))

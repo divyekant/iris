@@ -39,7 +39,7 @@ Core features every email client has. Without these, Iris isn't a real email cli
 |---|---------|--------|--------|
 | 12 | Folder navigation — Sent, Drafts, Starred, Archive, Trash | M | **done** |
 | 13 | Stars / Flags (toggle per message) | S | **done** (quick action) |
-| 14 | Labels / Tags — colored, multiple per message | M | **partial** (display done, management pending) |
+| 14 | Labels / Tags — colored, multiple per message | M | **done** |
 | 15 | Snooze (return email at specified time) | M | **done** |
 | 16 | Spam report + Block sender | S | **done** |
 | 17 | Mute thread | S | **done** |

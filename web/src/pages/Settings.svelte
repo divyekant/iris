@@ -134,6 +134,19 @@
   let acctNotificationState = $state<Record<string, boolean>>({});
   let acctNotificationToggling = $state<Record<string, boolean>>({});
 
+  // Labels
+  type LabelItem = { id: string; name: string; color: string; created_at: number; message_count: number };
+  let labelList2 = $state<LabelItem[]>([]);
+  let labelShowNew = $state(false);
+  let labelNewName = $state('');
+  let labelNewColor = $state('#3B82F6');
+  let labelSaving = $state(false);
+  let labelEditing = $state<string | null>(null);
+  let labelEditName = $state('');
+  let labelEditColor = $state('');
+
+  const LABEL_COLORS = ['#3B82F6', '#16A34A', '#EF4444', '#d4af37', '#8B5CF6', '#EC4899', '#06B6D4', '#F97316'];
+
   // Filter rules
   type FilterCondition = { field: string; operator: string; value: string };
   type FilterAction = { type: string; value?: string };
@@ -340,6 +353,53 @@
     } finally {
       fixingEncoding = false;
     }
+  }
+
+  // Labels functions
+  async function loadLabels() {
+    try { labelList2 = await api.labels.list(); } catch { labelList2 = []; }
+  }
+
+  async function createLabel() {
+    if (!labelNewName.trim() || labelSaving) return;
+    labelSaving = true;
+    try {
+      await api.labels.create({ name: labelNewName.trim(), color: labelNewColor });
+      labelNewName = '';
+      labelNewColor = '#3B82F6';
+      labelShowNew = false;
+      await loadLabels();
+    } catch { /* silently fail */ }
+    finally { labelSaving = false; }
+  }
+
+  function startEditLabel(l: LabelItem) {
+    labelEditing = l.id;
+    labelEditName = l.name;
+    labelEditColor = l.color;
+  }
+
+  function cancelEditLabel() {
+    labelEditing = null;
+  }
+
+  async function saveEditLabel() {
+    if (!labelEditing || labelSaving || !labelEditName.trim()) return;
+    labelSaving = true;
+    try {
+      await api.labels.update(labelEditing, { name: labelEditName.trim(), color: labelEditColor });
+      labelEditing = null;
+      await loadLabels();
+    } catch { /* silently fail */ }
+    finally { labelSaving = false; }
+  }
+
+  async function deleteLabel(id: string) {
+    try {
+      await api.labels.delete(id);
+      if (labelEditing === id) labelEditing = null;
+      await loadLabels();
+    } catch { /* silently fail */ }
   }
 
   // Filter Rules functions
@@ -685,6 +745,7 @@
       await loadAccounts();
       await loadAccountNotifications();
       await loadTemplates();
+      await loadLabels();
       await loadFilterRules();
       await loadBlockedSenders();
       await loadApiKeys();
@@ -1242,6 +1303,93 @@
         </div>
       {:else if !editingTemplateId}
         <p class="text-sm" style="color: var(--iris-color-text-faint);">No templates created yet.</p>
+      {/if}
+    </section>
+
+    <!-- Labels section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Labels</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Organize emails with colored labels. Apply labels from inbox actions or filter rules.</p>
+
+      <!-- Existing labels -->
+      {#if labelList2.length > 0}
+        <div class="space-y-2 mb-4">
+          {#each labelList2 as label}
+            <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              {#if labelEditing === label.id}
+                <!-- Edit mode -->
+                <div class="space-y-2">
+                  <input type="text" bind:value={labelEditName} placeholder="Label name"
+                    class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+                    style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs" style="color: var(--iris-color-text-faint);">Color:</span>
+                    {#each LABEL_COLORS as c}
+                      <button
+                        class="w-5 h-5 rounded-full border-2 transition-transform"
+                        style="background: {c}; border-color: {labelEditColor === c ? 'var(--iris-color-text)' : 'transparent'}; transform: {labelEditColor === c ? 'scale(1.2)' : 'scale(1)'};"
+                        onclick={() => (labelEditColor = c)}
+                      ></button>
+                    {/each}
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="flex-1"></span>
+                    <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+                      style="border-color: var(--iris-color-border); color: var(--iris-color-text);" onclick={cancelEditLabel}>Cancel</button>
+                    <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                      onclick={saveEditLabel} disabled={labelSaving || !labelEditName.trim()}>{labelSaving ? 'Saving...' : 'Save'}</button>
+                  </div>
+                </div>
+              {:else}
+                <!-- Display mode -->
+                <div class="flex items-center gap-3">
+                  <div class="w-3.5 h-3.5 rounded-full shrink-0" style="background: {label.color};"></div>
+                  <span class="text-sm font-medium flex-1" style="color: var(--iris-color-text);">{label.name}</span>
+                  <span class="text-xs" style="color: var(--iris-color-text-faint);">{label.message_count} message{label.message_count !== 1 ? 's' : ''}</span>
+                  <button class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                    style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                    onclick={() => startEditLabel(label)}>Edit</button>
+                  <button class="settings-revoke-btn px-2 py-1 text-xs rounded transition-colors"
+                    style="color: var(--iris-color-error);" onclick={() => deleteLabel(label.id)}>Delete</button>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else if !labelShowNew}
+        <p class="text-sm mb-4" style="color: var(--iris-color-text-faint);">No labels created yet.</p>
+      {/if}
+
+      <!-- New label form -->
+      {#if labelShowNew}
+        <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
+          <input type="text" bind:value={labelNewName} placeholder="Label name (e.g., Work, Personal)"
+            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
+            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+          <div class="flex items-center gap-2">
+            <span class="text-xs" style="color: var(--iris-color-text-faint);">Color:</span>
+            {#each LABEL_COLORS as c}
+              <button
+                class="w-5 h-5 rounded-full border-2 transition-transform"
+                style="background: {c}; border-color: {labelNewColor === c ? 'var(--iris-color-text)' : 'transparent'}; transform: {labelNewColor === c ? 'scale(1.2)' : 'scale(1)'};"
+                onclick={() => (labelNewColor = c)}
+              ></button>
+            {/each}
+          </div>
+          <div class="flex gap-2">
+            <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={() => { labelShowNew = false; labelNewName = ''; labelNewColor = '#3B82F6'; }}>Cancel</button>
+            <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={createLabel} disabled={labelSaving || !labelNewName.trim()}>{labelSaving ? 'Creating...' : 'Create Label'}</button>
+          </div>
+        </div>
+      {:else}
+        <button class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors"
+          style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+          onclick={() => (labelShowNew = true)}>+ Add Label</button>
       {/if}
     </section>
 
