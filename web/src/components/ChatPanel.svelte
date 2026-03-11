@@ -227,34 +227,6 @@
               </svg>
               <span class="text-xs font-semibold" style="color: var(--iris-color-primary);">Daily Briefing</span>
             </div>
-          {:else}
-            <div class="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 text-sm leading-relaxed" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
-              <!-- Tool activity -->
-              {#if msg.tool_calls_made?.length}
-                <div class="flex flex-wrap gap-1 mb-2">
-                  {#each msg.tool_calls_made as tc}
-                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-md" style="background: color-mix(in srgb, var(--iris-color-primary) 12%, transparent); color: var(--iris-color-primary);">
-                      {#if tc.name === 'search_emails'}
-                        <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
-                        Searched: {tc.arguments?.query || '…'}
-                      {:else if tc.name === 'read_email'}
-                        <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75"/></svg>
-                        Read email
-                      {:else if tc.name === 'list_emails'}
-                        <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z"/></svg>
-                        Listed emails
-                      {:else if tc.name === 'inbox_stats'}
-                        <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/></svg>
-                        Inbox stats
-                      {:else}
-                        {tc.name}
-                      {/if}
-                    </span>
-                  {/each}
-                </div>
-              {/if}
-
-              {msg.content}
 
             <!-- Stats grid -->
             <div class="grid grid-cols-2 gap-px" style="background: var(--iris-color-border);">
@@ -336,6 +308,31 @@
               </div>
             {:else}
               <div class="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 text-sm leading-relaxed" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                <!-- Tool activity -->
+                {#if msg.tool_calls_made?.length}
+                  <div class="flex flex-wrap gap-1 mb-2">
+                    {#each msg.tool_calls_made as tc}
+                      <span class="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded-md" style="background: color-mix(in srgb, var(--iris-color-primary) 12%, transparent); color: var(--iris-color-primary);">
+                        {#if tc.name === 'search_emails'}
+                          <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+                          Searched: {tc.arguments?.query || '\u2026'}
+                        {:else if tc.name === 'read_email'}
+                          <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75"/></svg>
+                          Read email
+                        {:else if tc.name === 'list_emails'}
+                          <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z"/></svg>
+                          Listed emails
+                        {:else if tc.name === 'inbox_stats'}
+                          <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z"/></svg>
+                          Inbox stats
+                        {:else}
+                          {tc.name}
+                        {/if}
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
+
                 {msg.content}
 
                 <!-- Citations -->
