@@ -259,6 +259,11 @@ export const api = {
         '/api/ai/extract-tasks',
         { method: 'POST', body: JSON.stringify({ message_id: messageId, thread_id: threadId }) }
       ),
+    multiReply: (threadId: string, messageId?: string, context?: string) =>
+      request<{ options: { tone: string; subject: string; body: string }[] }>(
+        '/api/ai/multi-reply',
+        { method: 'POST', body: JSON.stringify({ thread_id: threadId, message_id: messageId, context }) }
+      ),
   },
   contacts: {
     topics: (email: string) =>

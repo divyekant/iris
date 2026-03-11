@@ -661,6 +661,172 @@ pub async fn extract_tasks(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/ai/multi-reply
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct MultiReplyRequest {
+    pub thread_id: String,
+    pub message_id: Option<String>,
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReplyOption {
+    pub tone: String,
+    pub subject: String,
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MultiReplyResponse {
+    pub options: Vec<ReplyOption>,
+}
+
+const MULTI_REPLY_SYSTEM_PROMPT: &str = "Return ONLY a valid JSON array with no surrounding text. Each element must have \"tone\" (one of \"formal\", \"casual\", \"brief\"), \"subject\" (reply subject line), and \"body\" (the email body text). Generate exactly 3 options: one formal (professional, complete sentences), one casual (friendly, conversational), and one brief (1-3 sentences max, direct).";
+
+/// Build the prompt for multi-reply generation from thread messages.
+pub fn build_multi_reply_prompt(
+    subject: &str,
+    messages: &[MessageDetail],
+    context: Option<&str>,
+) -> String {
+    let mut prompt = String::from("Generate 3 reply options (formal, casual, brief) for the following email thread.\n\n");
+
+    if let Some(ctx) = context {
+        prompt.push_str(&format!("User's intent/instruction: {}\n\n", ctx));
+    }
+
+    prompt.push_str(&format!("Thread subject: {}\n\n", subject));
+
+    let recent: Vec<&MessageDetail> = messages.iter().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+    let max_total = 3000;
+
+    for (i, msg) in recent.iter().enumerate() {
+        let from = msg.from_name.as_deref().unwrap_or(
+            msg.from_address.as_deref().unwrap_or("Unknown"),
+        );
+        let date = msg
+            .date
+            .map(|d| {
+                chrono::DateTime::from_timestamp(d, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
+        let body = msg.body_text.as_deref().unwrap_or("");
+        let body_truncated: String = if body.chars().count() > 500 {
+            let mut s: String = body.chars().take(500).collect();
+            s.push_str("...");
+            s
+        } else {
+            body.to_string()
+        };
+
+        let section = format!(
+            "Message {} (from {}, {}):\n{}\n\n",
+            i + 1,
+            from,
+            date,
+            body_truncated
+        );
+
+        if prompt.len() + section.len() > max_total {
+            prompt.push_str("...(remaining messages truncated)\n");
+            break;
+        }
+        prompt.push_str(&section);
+    }
+
+    prompt.push_str("Reply to the most recent message. Generate a reply subject and body for each of the 3 tones.");
+
+    prompt
+}
+
+/// Parse the AI response into reply options.
+pub fn parse_multi_reply_response(raw: &str) -> Option<Vec<ReplyOption>> {
+    let trimmed = raw.trim();
+    let json_str = if trimmed.starts_with("```") {
+        trimmed
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+    } else {
+        trimmed
+    };
+
+    if let Ok(options) = serde_json::from_str::<Vec<ReplyOption>>(json_str) {
+        if !options.is_empty() {
+            return Some(options);
+        }
+    }
+
+    if let Some(start) = json_str.find('[') {
+        if let Some(end) = json_str.rfind(']') {
+            let slice = &json_str[start..=end];
+            if let Ok(options) = serde_json::from_str::<Vec<ReplyOption>>(slice) {
+                if !options.is_empty() {
+                    return Some(options);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub async fn multi_reply(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<MultiReplyRequest>,
+) -> Result<Json<MultiReplyResponse>, StatusCode> {
+    if input.thread_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let ai_enabled = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "false".to_string());
+
+    if ai_enabled != "true" || !state.providers.has_providers() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let messages = MessageDetail::list_by_thread(&conn, &input.thread_id);
+    if messages.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let subject = messages.last()
+        .and_then(|m| m.subject.as_deref())
+        .unwrap_or("(no subject)");
+
+    let prompt = build_multi_reply_prompt(
+        subject,
+        &messages,
+        input.context.as_deref(),
+    );
+
+    let raw = state
+        .providers
+        .generate(&prompt, Some(MULTI_REPLY_SYSTEM_PROMPT))
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    let options = parse_multi_reply_response(&raw)
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    Ok(Json(MultiReplyResponse { options }))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1130,5 +1296,115 @@ mod tests {
     fn test_extract_tasks_system_prompt_exists() {
         assert!(EXTRACT_TASKS_SYSTEM_PROMPT.contains("action items"));
         assert!(EXTRACT_TASKS_SYSTEM_PROMPT.contains("JSON"));
+    }
+
+    // ---- Multi-reply tests ----
+
+    #[test]
+    fn test_build_multi_reply_prompt_basic() {
+        let msg = MessageDetail {
+            id: "m1".to_string(),
+            message_id: None,
+            account_id: "a1".to_string(),
+            thread_id: Some("t1".to_string()),
+            folder: "INBOX".to_string(),
+            from_address: Some("alice@example.com".to_string()),
+            from_name: Some("Alice".to_string()),
+            to_addresses: None,
+            cc_addresses: None,
+            subject: Some("Meeting Tomorrow".to_string()),
+            snippet: None,
+            date: Some(1709500800),
+            body_text: Some("Can we meet at 3pm?".to_string()),
+            body_html: None,
+            is_read: true,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let prompt = build_multi_reply_prompt("Meeting Tomorrow", &[msg], None);
+        assert!(prompt.contains("Meeting Tomorrow"));
+        assert!(prompt.contains("Can we meet at 3pm?"));
+        assert!(prompt.contains("3 reply options"));
+    }
+
+    #[test]
+    fn test_build_multi_reply_prompt_with_context() {
+        let msg = MessageDetail {
+            id: "m1".to_string(),
+            message_id: None,
+            account_id: "a1".to_string(),
+            thread_id: Some("t1".to_string()),
+            folder: "INBOX".to_string(),
+            from_address: Some("bob@example.com".to_string()),
+            from_name: None,
+            to_addresses: None,
+            cc_addresses: None,
+            subject: Some("Request".to_string()),
+            snippet: None,
+            date: None,
+            body_text: Some("Please review.".to_string()),
+            body_html: None,
+            is_read: true,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let prompt = build_multi_reply_prompt("Request", &[msg], Some("Decline politely"));
+        assert!(prompt.contains("Decline politely"));
+    }
+
+    #[test]
+    fn test_parse_multi_reply_response_valid_json() {
+        let json = r#"[
+            {"tone": "formal", "subject": "Re: Hello", "body": "Dear Sir, ..."},
+            {"tone": "casual", "subject": "Re: Hello", "body": "Hey! ..."},
+            {"tone": "brief", "subject": "Re: Hello", "body": "Got it."}
+        ]"#;
+        let result = parse_multi_reply_response(json);
+        assert!(result.is_some());
+        let options = result.unwrap();
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].tone, "formal");
+        assert_eq!(options[1].tone, "casual");
+        assert_eq!(options[2].tone, "brief");
+    }
+
+    #[test]
+    fn test_parse_multi_reply_response_markdown_wrapped() {
+        let json = "```json\n[\n{\"tone\": \"formal\", \"subject\": \"Re: Test\", \"body\": \"Formal reply\"}, {\"tone\": \"casual\", \"subject\": \"Re: Test\", \"body\": \"Casual reply\"}, {\"tone\": \"brief\", \"subject\": \"Re: Test\", \"body\": \"Brief reply\"}\n]\n```";
+        let result = parse_multi_reply_response(json);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_parse_multi_reply_response_embedded_json() {
+        let raw = "Here are your reply options:\n[{\"tone\": \"formal\", \"subject\": \"Re: X\", \"body\": \"A\"}, {\"tone\": \"casual\", \"subject\": \"Re: X\", \"body\": \"B\"}, {\"tone\": \"brief\", \"subject\": \"Re: X\", \"body\": \"C\"}]\nHope these help!";
+        let result = parse_multi_reply_response(raw);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_parse_multi_reply_response_malformed() {
+        assert!(parse_multi_reply_response("I can't generate replies right now.").is_none());
+    }
+
+    #[test]
+    fn test_parse_multi_reply_response_empty_array() {
+        assert!(parse_multi_reply_response("[]").is_none());
     }
 }

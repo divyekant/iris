@@ -3,6 +3,7 @@
   import TemplatePicker from './TemplatePicker.svelte';
   import SchedulePicker from './SchedulePicker.svelte';
   import RichTextEditor from './RichTextEditor.svelte';
+  import MultiReplyPicker from './MultiReplyPicker.svelte';
   import { Clock } from 'lucide-svelte';
 
   type ComposeMode = 'new' | 'reply' | 'reply-all' | 'forward';
@@ -10,6 +11,8 @@
   interface ComposeContext {
     mode: ComposeMode;
     accountId: string;
+    /** Thread ID for multi-reply generation */
+    threadId?: string;
     /** Original message for reply/forward context */
     original?: {
       message_id?: string;
@@ -112,6 +115,14 @@
   let intentGenerating = $state(false);
   let intentCollapsed = $state(false);
 
+  // Multi-reply state
+  let showMultiReply = $state(false);
+  let multiReplyLoading = $state(false);
+  let multiReplyOptions = $state<{ tone: string; subject: string; body: string }[]>([]);
+  let multiReplyError = $state('');
+
+  const isReplyMode = $derived(context.mode === 'reply' || context.mode === 'reply-all');
+
   function handleTemplatePick(template: { subject: string; body_text: string }) {
     if ((subject.trim() || body.trim()) && (template.subject || template.body_text)) {
       pendingTemplate = template;
@@ -134,6 +145,36 @@
   function cancelOverwrite() {
     pendingTemplate = null;
     showOverwriteConfirm = false;
+  }
+
+  async function handleGenerateReplies() {
+    if (!context.threadId) {
+      multiReplyError = 'No thread context available.';
+      showMultiReply = true;
+      return;
+    }
+    showMultiReply = true;
+    multiReplyLoading = true;
+    multiReplyError = '';
+    multiReplyOptions = [];
+    try {
+      const res = await api.ai.multiReply(context.threadId, context.original?.message_id);
+      multiReplyOptions = res.options;
+    } catch (e: any) {
+      if (e.message?.includes('503')) {
+        multiReplyError = 'Enable AI in Settings to use this feature.';
+      } else {
+        multiReplyError = 'Failed to generate reply options.';
+      }
+    } finally {
+      multiReplyLoading = false;
+    }
+  }
+
+  function handlePickReply(option: { tone: string; subject: string; body: string }) {
+    subject = option.subject;
+    body = option.body;
+    showMultiReply = false;
   }
 
   const aiActions = [
@@ -1005,6 +1046,17 @@
           {/if}
         </div>
       {/if}
+
+      <!-- Multi-reply picker (reply/reply-all only) -->
+      {#if showMultiReply && isReplyMode}
+        <MultiReplyPicker
+          options={multiReplyOptions}
+          loading={multiReplyLoading}
+          error={multiReplyError}
+          onpick={handlePickReply}
+          onclose={() => (showMultiReply = false)}
+        />
+      {/if}
     </div>
 
     <!-- Footer -->
@@ -1112,6 +1164,18 @@
             >Cancel</button>
           </div>
         </div>
+      {/if}
+      <!-- AI Reply Options (reply/reply-all only) -->
+      {#if isReplyMode}
+        <button
+          class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn"
+          style="color: var(--iris-color-primary);"
+          onclick={handleGenerateReplies}
+          disabled={multiReplyLoading || sending}
+          title="Generate 3 AI reply options in different tones"
+        >
+          {multiReplyLoading ? 'Generating...' : 'AI Reply Options'}
+        </button>
       {/if}
       <!-- AI Assist dropdown -->
       <div class="relative">
