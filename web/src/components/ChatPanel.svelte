@@ -7,6 +7,7 @@
   let messages = $state<any[]>([]);
   let input = $state('');
   let loading = $state(false);
+  let briefingLoading = $state(false);
   let error = $state('');
   let messagesContainer: HTMLDivElement | undefined = $state();
 
@@ -36,7 +37,6 @@
   }
 
   const suggestions = [
-    { label: 'Briefing', prompt: 'Give me a briefing of my important unread emails' },
     { label: 'Action items', prompt: 'What action items do I have from recent emails?' },
     { label: 'Unread summary', prompt: 'Summarize my unread emails from today' },
   ];
@@ -46,6 +46,51 @@
       setTimeout(() => {
         messagesContainer!.scrollTop = messagesContainer!.scrollHeight;
       }, 50);
+    }
+  }
+
+  function reasonLabel(reason: string): string {
+    switch (reason) {
+      case 'urgent': return 'Urgent';
+      case 'needs_reply': return 'Needs reply';
+      case 'high_priority': return 'High priority';
+      default: return reason;
+    }
+  }
+
+  function reasonColor(reason: string): string {
+    switch (reason) {
+      case 'urgent': return 'var(--iris-color-error)';
+      case 'needs_reply': return 'var(--iris-color-warning)';
+      case 'high_priority': return 'var(--iris-color-warning)';
+      default: return 'var(--iris-color-text-muted)';
+    }
+  }
+
+  async function fetchBriefing() {
+    if (briefingLoading || loading) return;
+    error = '';
+    briefingLoading = true;
+
+    try {
+      const res = await api.ai.briefing();
+      // Add a briefing message to the chat as a special type
+      messages = [...messages, {
+        role: 'briefing',
+        content: res.summary,
+        stats: res.stats,
+        highlights: res.highlights,
+        id: crypto.randomUUID(),
+      }];
+      scrollToBottom();
+    } catch (e: any) {
+      if (e.message?.includes('503')) {
+        error = 'Enable AI in Settings to use briefing.';
+      } else {
+        error = 'Failed to generate briefing. Try again.';
+      }
+    } finally {
+      briefingLoading = false;
     }
   }
 
@@ -141,9 +186,22 @@
 
     <!-- Messages -->
     <div class="flex-1 overflow-y-auto p-3 space-y-3" bind:this={messagesContainer}>
-      {#if messages.length === 0 && !loading}
-        <div class="text-center py-8">
-          <p class="text-sm mb-4" style="color: var(--iris-color-text-muted);">Ask me anything about your inbox</p>
+      {#if messages.length === 0 && !loading && !briefingLoading}
+        <div class="text-center py-6">
+          <!-- Brief me button -->
+          <button
+            class="w-full flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium transition-all hover:opacity-90 mb-4"
+            style="background: color-mix(in srgb, var(--iris-color-primary) 12%, transparent); color: var(--iris-color-primary); border: 1px solid color-mix(in srgb, var(--iris-color-primary) 25%, transparent); border-radius: 12px;"
+            onclick={fetchBriefing}
+            disabled={briefingLoading}
+          >
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 0 1-2.25 2.25M16.5 7.5V18a2.25 2.25 0 0 0 2.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 0 0 2.25 2.25h13.5M6 7.5h3v3H6V7.5Z" />
+            </svg>
+            Brief me on today
+          </button>
+
+          <p class="text-sm mb-3" style="color: var(--iris-color-text-muted);">Or ask anything about your inbox</p>
           <div class="space-y-2">
             {#each suggestions as { label, prompt }}
               <button
@@ -159,39 +217,15 @@
       {/if}
 
       {#each messages as msg (msg.id)}
-        <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}">
-          {#if msg.role === 'user'}
-            <div class="max-w-[85%] rounded-2xl rounded-br-sm px-3 py-2 text-sm leading-relaxed" style="background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-text); align-self: end;">
-              {msg.content}
-
-              <!-- Citations -->
-              {#if msg.citations?.length}
-                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border);">
-                  <p class="text-[10px] font-medium mb-1" style="color: var(--iris-color-text-muted);">
-                    <svg class="w-3 h-3 inline-block mr-0.5" style="color: var(--iris-color-text-muted);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
-                    References:
-                  </p>
-                  {#each msg.citations as citation}
-                    <p class="text-[11px] truncate" style="color: var(--iris-color-text-muted);">
-                      {citation.from}: {citation.subject}
-                    </p>
-                  {/each}
-                </div>
-              {/if}
-
-              <!-- Action proposal -->
-              {#if msg.proposed_action}
-                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border);">
-                  <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
-                  <button
-                    class="px-3 py-1 text-xs font-medium rounded-lg hover:opacity-90 transition-colors"
-                    style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
-                    onclick={() => confirmAction(msg.id)}
-                  >
-                    Confirm
-                  </button>
-                </div>
-              {/if}
+        {#if msg.role === 'briefing'}
+          <!-- Briefing card -->
+          <div class="rounded-xl overflow-hidden" style="border: 1px solid var(--iris-color-border); background: var(--iris-color-bg-surface);">
+            <!-- Briefing header -->
+            <div class="px-3 py-2 flex items-center gap-2" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); border-bottom: 1px solid var(--iris-color-border);">
+              <svg class="w-4 h-4" style="color: var(--iris-color-primary);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 0 1-2.25 2.25M16.5 7.5V18a2.25 2.25 0 0 0 2.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 0 0 2.25 2.25h13.5M6 7.5h3v3H6V7.5Z" />
+              </svg>
+              <span class="text-xs font-semibold" style="color: var(--iris-color-primary);">Daily Briefing</span>
             </div>
           {:else}
             <div class="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 text-sm leading-relaxed" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
@@ -222,49 +256,136 @@
 
               {msg.content}
 
-              <!-- Citations -->
-              {#if msg.citations?.length}
-                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
-                  <p class="text-[10px] font-medium mb-1" style="color: var(--iris-color-text-muted);">
-                    <svg class="w-3 h-3 inline-block mr-0.5" style="color: var(--iris-color-text-muted);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
-                    References:
-                  </p>
-                  {#each msg.citations as citation}
-                    <p class="text-[11px] truncate" style="color: var(--iris-color-text-muted);">
-                      {citation.from}: {citation.subject}
-                    </p>
-                  {/each}
-                </div>
-              {/if}
-
-              <!-- Action proposal -->
-              {#if msg.proposed_action}
-                <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
-                  <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
-                  <button
-                    class="px-3 py-1 text-xs font-medium rounded-lg hover:opacity-90 transition-colors"
-                    style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
-                    onclick={() => confirmAction(msg.id)}
-                  >
-                    Confirm
-                  </button>
-                </div>
-              {/if}
+            <!-- Stats grid -->
+            <div class="grid grid-cols-2 gap-px" style="background: var(--iris-color-border);">
+              <div class="px-3 py-2" style="background: var(--iris-color-bg-surface);">
+                <div class="text-lg font-bold" style="color: var(--iris-color-text);">{msg.stats.total_today}</div>
+                <div class="text-[10px]" style="color: var(--iris-color-text-muted);">Total today</div>
+              </div>
+              <div class="px-3 py-2" style="background: var(--iris-color-bg-surface);">
+                <div class="text-lg font-bold" style="color: var(--iris-color-primary);">{msg.stats.unread}</div>
+                <div class="text-[10px]" style="color: var(--iris-color-text-muted);">Unread</div>
+              </div>
+              <div class="px-3 py-2" style="background: var(--iris-color-bg-surface);">
+                <div class="text-lg font-bold" style="color: var(--iris-color-error);">{msg.stats.urgent}</div>
+                <div class="text-[10px]" style="color: var(--iris-color-text-muted);">Urgent</div>
+              </div>
+              <div class="px-3 py-2" style="background: var(--iris-color-bg-surface);">
+                <div class="text-lg font-bold" style="color: var(--iris-color-warning);">{msg.stats.needs_reply}</div>
+                <div class="text-[10px]" style="color: var(--iris-color-text-muted);">Needs reply</div>
+              </div>
             </div>
-          {/if}
-        </div>
+
+            <!-- AI Summary -->
+            <div class="px-3 py-2.5 text-xs leading-relaxed" style="color: var(--iris-color-text); border-top: 1px solid var(--iris-color-border);">
+              {msg.content}
+            </div>
+
+            <!-- Highlights -->
+            {#if msg.highlights?.length}
+              <div class="px-3 pb-2.5" style="border-top: 1px solid var(--iris-color-border);">
+                <div class="text-[10px] font-medium pt-2 pb-1" style="color: var(--iris-color-text-muted);">Highlights</div>
+                {#each msg.highlights as highlight}
+                  <div class="flex items-start gap-2 py-1.5" style="border-top: 1px solid color-mix(in srgb, var(--iris-color-border) 50%, transparent);">
+                    <span class="shrink-0 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded" style="color: {reasonColor(highlight.reason)}; background: color-mix(in srgb, {reasonColor(highlight.reason)} 12%, transparent);">
+                      {reasonLabel(highlight.reason)}
+                    </span>
+                    <div class="min-w-0 flex-1">
+                      <div class="text-[11px] font-medium truncate" style="color: var(--iris-color-text);">{highlight.subject}</div>
+                      <div class="text-[10px] truncate" style="color: var(--iris-color-text-muted);">{highlight.from}</div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <div class="flex {msg.role === 'user' ? 'justify-end' : 'justify-start'}">
+            {#if msg.role === 'user'}
+              <div class="max-w-[85%] rounded-2xl rounded-br-sm px-3 py-2 text-sm leading-relaxed" style="background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent); color: var(--iris-color-text); align-self: end;">
+                {msg.content}
+
+                <!-- Citations -->
+                {#if msg.citations?.length}
+                  <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border);">
+                    <p class="text-[10px] font-medium mb-1" style="color: var(--iris-color-text-muted);">
+                      <svg class="w-3 h-3 inline-block mr-0.5" style="color: var(--iris-color-text-muted);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
+                      References:
+                    </p>
+                    {#each msg.citations as citation}
+                      <p class="text-[11px] truncate" style="color: var(--iris-color-text-muted);">
+                        {citation.from}: {citation.subject}
+                      </p>
+                    {/each}
+                  </div>
+                {/if}
+
+                <!-- Action proposal -->
+                {#if msg.proposed_action}
+                  <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border);">
+                    <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
+                    <button
+                      class="px-3 py-1 text-xs font-medium rounded-lg hover:opacity-90 transition-colors"
+                      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                      onclick={() => confirmAction(msg.id)}
+                    >
+                      Confirm
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <div class="max-w-[85%] rounded-2xl rounded-bl-sm px-3 py-2 text-sm leading-relaxed" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                {msg.content}
+
+                <!-- Citations -->
+                {#if msg.citations?.length}
+                  <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
+                    <p class="text-[10px] font-medium mb-1" style="color: var(--iris-color-text-muted);">
+                      <svg class="w-3 h-3 inline-block mr-0.5" style="color: var(--iris-color-text-muted);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
+                      References:
+                    </p>
+                    {#each msg.citations as citation}
+                      <p class="text-[11px] truncate" style="color: var(--iris-color-text-muted);">
+                        {citation.from}: {citation.subject}
+                      </p>
+                    {/each}
+                  </div>
+                {/if}
+
+                <!-- Action proposal -->
+                {#if msg.proposed_action}
+                  <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
+                    <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
+                    <button
+                      class="px-3 py-1 text-xs font-medium rounded-lg hover:opacity-90 transition-colors"
+                      style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                      onclick={() => confirmAction(msg.id)}
+                    >
+                      Confirm
+                    </button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
       {/each}
 
-      {#if loading}
+      {#if loading || briefingLoading}
         <div class="flex justify-start">
           <div class="rounded-2xl rounded-bl-sm px-3 py-2 text-sm" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-faint);">
-            <span class="inline-flex items-center gap-1.5">
+            <span class="inline-flex items-center gap-2">
+              {#if briefingLoading}
+                <span class="text-xs" style="color: var(--iris-color-text-muted);">Generating briefing</span>
+              {:else}
+                <span class="text-[11px]" style="color: var(--iris-color-text-muted);">Thinking…</span>
+              {/if}
               <span class="inline-flex gap-1">
                 <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--iris-color-primary); opacity: 0.6; animation-delay: 0ms"></span>
                 <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--iris-color-primary); opacity: 0.6; animation-delay: 150ms"></span>
                 <span class="w-1.5 h-1.5 rounded-full animate-bounce" style="background: var(--iris-color-primary); opacity: 0.6; animation-delay: 300ms"></span>
               </span>
-              <span class="text-[11px]" style="color: var(--iris-color-text-muted);">Thinking…</span>
             </span>
           </div>
         </div>
@@ -277,6 +398,23 @@
       {/if}
     </div>
 
+    <!-- Brief me button (always visible when there are messages) -->
+    {#if messages.length > 0}
+      <div class="px-3 pt-2" style="border-top: 1px solid var(--iris-color-border);">
+        <button
+          class="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all hover:opacity-90 disabled:opacity-50"
+          style="color: var(--iris-color-primary); border: 1px solid color-mix(in srgb, var(--iris-color-primary) 25%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--iris-color-primary) 6%, transparent);"
+          onclick={fetchBriefing}
+          disabled={briefingLoading || loading}
+        >
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 0 1-2.25 2.25M16.5 7.5V18a2.25 2.25 0 0 0 2.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 0 0 2.25 2.25h13.5M6 7.5h3v3H6V7.5Z" />
+          </svg>
+          Brief me
+        </button>
+      </div>
+    {/if}
+
     <!-- Input -->
     <div class="px-3 py-3 border-t" style="border-color: var(--iris-color-border);">
       <div class="flex gap-2">
@@ -285,7 +423,7 @@
           bind:value={input}
           onkeydown={handleKeydown}
           placeholder="Ask about your inbox..."
-          disabled={loading}
+          disabled={loading || briefingLoading}
           class="flex-1 px-3 py-2 text-sm rounded-lg focus:outline-none disabled:opacity-50"
           style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border); color: var(--iris-color-text);"
         />
@@ -293,7 +431,7 @@
           class="px-3 py-2 text-sm rounded-lg hover:opacity-90 disabled:opacity-50 transition-colors"
           style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
           onclick={() => sendMessage()}
-          disabled={loading || !input.trim()}
+          disabled={loading || briefingLoading || !input.trim()}
         >
           Send
         </button>

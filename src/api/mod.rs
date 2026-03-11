@@ -6,6 +6,7 @@ pub mod ai_feedback;
 pub mod aliases;
 pub mod attachments;
 pub mod blocked_senders;
+pub mod briefing;
 pub mod chat;
 pub mod compose;
 pub mod config;

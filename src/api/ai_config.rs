@@ -133,9 +133,15 @@ pub async fn set_ai_config(
             set_config_value(&conn, "decay_enabled", if decay_enabled { "true" } else { "false" })?;
         }
         if let Some(days) = input.decay_threshold_days {
+            if days < 1 {
+                return Err(StatusCode::BAD_REQUEST);
+            }
             set_config_value(&conn, "decay_threshold_days", &days.to_string())?;
         }
         if let Some(factor) = input.decay_factor {
+            if !(0.0..=1.0).contains(&factor) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
             set_config_value(&conn, "decay_factor", &factor.to_string())?;
         }
     }
