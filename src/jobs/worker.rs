@@ -57,11 +57,19 @@ impl JobWorker {
             self.semaphore.available_permits());
 
         let mut iteration: u64 = 0;
+        let mut last_decay = std::time::Instant::now();
+
         loop {
             iteration += 1;
 
             // --- Process pending sends ---
             self.process_pending_sends().await;
+
+            // Periodic priority decay (every hour)
+            if last_decay.elapsed() > std::time::Duration::from_secs(3600) {
+                self.run_priority_decay();
+                last_decay = std::time::Instant::now();
+            }
 
             // Claim jobs
             let jobs = {
@@ -188,6 +196,48 @@ impl JobWorker {
                     queue::fail_job(&conn, job.id, &job.job_type, job.message_id.as_deref(), &e, job.attempts + 1, job.max_attempts);
                 }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Periodic tasks
+    // -----------------------------------------------------------------------
+
+    /// Run priority decay on stale messages, reading config from the DB.
+    fn run_priority_decay(&self) {
+        let conn = match self.db.get() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Priority decay: DB error: {e}");
+                return;
+            }
+        };
+
+        // Read decay config from DB (defaults: enabled=true, threshold=7, factor=0.85)
+        let enabled = conn
+            .query_row("SELECT value FROM config WHERE key = 'decay_enabled'", [], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|_| "true".to_string())
+            == "true";
+
+        if !enabled {
+            return;
+        }
+
+        let threshold_days: i64 = conn
+            .query_row("SELECT value FROM config WHERE key = 'decay_threshold_days'", [], |row| row.get::<_, String>(0))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7);
+
+        let decay_factor: f64 = conn
+            .query_row("SELECT value FROM config WHERE key = 'decay_factor'", [], |row| row.get::<_, String>(0))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.85);
+
+        let decayed = message::decay_priority_scores(&conn, threshold_days, decay_factor);
+        if decayed > 0 {
+            tracing::info!("Decayed priority for {} messages (threshold={}d, factor={})", decayed, threshold_days, decay_factor);
         }
     }
 

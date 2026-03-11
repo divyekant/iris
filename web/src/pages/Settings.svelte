@@ -35,6 +35,11 @@
   let undoSendDelay = $state(10);
   let undoSendSaving = $state(false);
 
+  // Priority decay settings
+  let decayEnabled = $state(true);
+  let decayThresholdDays = $state(7);
+  let decaySaving = $state(false);
+
   // Provider API keys (masked display)
   let anthropicKey = $state('');
   let anthropicModel = $state('');
@@ -323,6 +328,27 @@
   async function toggleAi() {
     aiEnabled = !aiEnabled;
     await saveAiConfig();
+  }
+
+  async function saveDecayConfig() {
+    decaySaving = true;
+    try {
+      const result = await api.ai.setConfig({
+        decay_enabled: decayEnabled,
+        decay_threshold_days: decayThresholdDays,
+      });
+      decayEnabled = result.decay_enabled;
+      decayThresholdDays = result.decay_threshold_days;
+    } catch {
+      // Silently fail
+    } finally {
+      decaySaving = false;
+    }
+  }
+
+  async function toggleDecay() {
+    decayEnabled = !decayEnabled;
+    await saveDecayConfig();
   }
 
   async function reprocessUntagged() {
@@ -731,6 +757,8 @@
         memoriesUrl = aiConfig.memories_url || '';
         memoriesConnected = aiConfig.memories_connected;
         memoriesKey = '';
+        decayEnabled = aiConfig.decay_enabled ?? true;
+        decayThresholdDays = aiConfig.decay_threshold_days ?? 7;
       } catch {
         // AI config not available
       }
@@ -1066,6 +1094,45 @@
               <span class="text-xs" style="color: {memoriesStatus.includes('fail') || memoriesStatus.includes('not') ? 'var(--iris-color-error)' : 'var(--iris-color-success)'};">{memoriesStatus}</span>
             {/if}
           </div>
+        </div>
+
+        <!-- Priority Decay -->
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <div class="flex items-center justify-between mb-0.5">
+            <p class="text-sm font-medium" style="color: var(--iris-color-text);">Priority Decay</p>
+            <button
+              class="relative w-11 h-6 rounded-full transition-colors"
+              style="background: {decayEnabled ? 'var(--iris-color-primary)' : 'var(--iris-color-border-subtle)'};"
+              onclick={toggleDecay}
+              aria-label="Toggle priority decay"
+            >
+              <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full shadow transition-transform {decayEnabled ? 'translate-x-5' : ''}" style="background: var(--iris-color-text);"></span>
+            </button>
+          </div>
+          <p class="text-xs mb-3" style="color: var(--iris-color-text-faint);">Automatically reduce priority of inactive threads over time</p>
+          {#if decayEnabled}
+            <div class="flex items-center gap-2">
+              <label for="decay-days" class="text-xs" style="color: var(--iris-color-text-muted);">Decay after</label>
+              <input
+                id="decay-days"
+                type="number"
+                min="1"
+                max="90"
+                bind:value={decayThresholdDays}
+                class="settings-input w-16 px-2 py-1.5 rounded-lg border text-sm text-center focus:outline-none focus:ring-2"
+                style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+              />
+              <span class="text-xs" style="color: var(--iris-color-text-muted);">days of inactivity</span>
+              <button
+                class="settings-btn-primary ml-auto px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+                style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                onclick={saveDecayConfig}
+                disabled={decaySaving}
+              >
+                {decaySaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          {/if}
         </div>
       </div>
     </section>

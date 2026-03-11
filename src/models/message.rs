@@ -462,6 +462,30 @@ pub fn delete_draft(conn: &Conn, id: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Decay priority scores for messages older than `threshold_days` with no recent activity.
+/// Only decays messages with ai_priority_score > 0.3 (i.e., above "low").
+/// Returns the number of messages updated.
+pub fn decay_priority_scores(conn: &Conn, threshold_days: i64, decay_factor: f64) -> usize {
+    let cutoff = chrono::Utc::now().timestamp() - (threshold_days * 86400);
+
+    conn.execute(
+        "UPDATE messages SET
+            ai_priority_score = MAX(0.1, ai_priority_score * ?1),
+            ai_priority_label = CASE
+                WHEN ai_priority_score * ?1 >= 0.8 THEN 'urgent'
+                WHEN ai_priority_score * ?1 >= 0.6 THEN 'high'
+                WHEN ai_priority_score * ?1 >= 0.3 THEN 'normal'
+                ELSE 'low'
+            END,
+            updated_at = unixepoch()
+        WHERE ai_priority_score > 0.3
+            AND date < ?2
+            AND is_deleted = 0",
+        rusqlite::params![decay_factor, cutoff],
+    )
+    .unwrap_or(0)
+}
+
 /// Convert a draft to a sent message (mark as not-draft, move to Sent folder).
 pub fn finalize_draft_as_sent(conn: &Conn, id: &str, message_id: Option<&str>, thread_id: Option<&str>) -> bool {
     conn.execute(
@@ -1039,5 +1063,101 @@ mod tests {
         assert_eq!(detail.ai_priority_label.as_deref(), Some("high"));
         assert_eq!(detail.ai_category.as_deref(), Some("Primary"));
         assert_eq!(detail.ai_summary.as_deref(), Some("Test email requesting action"));
+    }
+
+    #[test]
+    fn test_decay_priority_scores() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        // Insert a message with an old date (30 days ago) and high priority
+        let mut msg = make_insert_message(&account.id, "INBOX", "Old High Priority", false);
+        msg.date = Some(chrono::Utc::now().timestamp() - 30 * 86400);
+        msg.message_id = Some("<decay-test-1@example.com>".to_string());
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
+
+        // Set AI metadata: high priority (0.85)
+        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test", None, None);
+
+        // Run decay with 7-day threshold and 0.85 factor
+        let decayed = decay_priority_scores(&conn, 7, 0.85);
+        assert_eq!(decayed, 1);
+
+        // Verify score was reduced: 0.85 * 0.85 = 0.7225
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        let score = detail.ai_priority_score.unwrap();
+        assert!(score < 0.85, "Score should have been reduced from 0.85, got {}", score);
+        assert!(score >= 0.7, "Score should be around 0.7225, got {}", score);
+        assert_eq!(detail.ai_priority_label.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_decay_skips_recent() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        // Insert a message with a recent date (1 day ago) and high priority
+        let mut msg = make_insert_message(&account.id, "INBOX", "Recent High Priority", false);
+        msg.date = Some(chrono::Utc::now().timestamp() - 86400);
+        msg.message_id = Some("<decay-recent@example.com>".to_string());
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
+
+        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test", None, None);
+
+        // Decay with 7-day threshold: recent message should NOT be affected
+        let decayed = decay_priority_scores(&conn, 7, 0.85);
+        assert_eq!(decayed, 0);
+
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert_eq!(detail.ai_priority_score, Some(0.85));
+    }
+
+    #[test]
+    fn test_decay_skips_low_priority() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        // Insert old message with low priority (score 0.2 < 0.3 threshold)
+        let mut msg = make_insert_message(&account.id, "INBOX", "Old Low Priority", false);
+        msg.date = Some(chrono::Utc::now().timestamp() - 30 * 86400);
+        msg.message_id = Some("<decay-low@example.com>".to_string());
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
+
+        update_ai_metadata(&conn, &id, "FYI", 0.2, "low", "Updates", "Test", None, None);
+
+        // Decay should skip messages with score <= 0.3
+        let decayed = decay_priority_scores(&conn, 7, 0.85);
+        assert_eq!(decayed, 0);
+
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert_eq!(detail.ai_priority_score, Some(0.2));
+    }
+
+    #[test]
+    fn test_decay_label_update() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        // Insert old message with urgent priority (0.9)
+        let mut msg = make_insert_message(&account.id, "INBOX", "Old Urgent", false);
+        msg.date = Some(chrono::Utc::now().timestamp() - 30 * 86400);
+        msg.message_id = Some("<decay-label@example.com>".to_string());
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
+
+        update_ai_metadata(&conn, &id, "URGENT", 0.9, "urgent", "Primary", "Test", None, None);
+
+        // Run decay multiple times to push score down through label thresholds
+        // 0.9 * 0.5 = 0.45 (normal range: 0.3-0.6)
+        let decayed = decay_priority_scores(&conn, 7, 0.5);
+        assert_eq!(decayed, 1);
+
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        let score = detail.ai_priority_score.unwrap();
+        assert!(score < 0.6, "Score should be below high threshold, got {}", score);
+        assert_eq!(detail.ai_priority_label.as_deref(), Some("normal"));
     }
 }
