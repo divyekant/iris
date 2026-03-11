@@ -254,6 +254,11 @@ export const api = {
       request<{ score: number; tone: string; issues: { kind: string; description: string; suggestion: string }[]; improved_content?: string }>('/api/ai/grammar-check', {
         method: 'POST', body: JSON.stringify(data),
       }),
+    extractTasks: (messageId?: string, threadId?: string) =>
+      request<{ tasks: { task: string; priority: string; deadline: string | null; source_subject: string | null }[] }>(
+        '/api/ai/extract-tasks',
+        { method: 'POST', body: JSON.stringify({ message_id: messageId, thread_id: threadId }) }
+      ),
   },
   contacts: {
     topics: (email: string) =>
