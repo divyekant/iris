@@ -214,6 +214,10 @@ export const api = {
       request<{ result: string }>('/api/ai/assist', { method: 'POST', body: JSON.stringify(data) }),
     suggestSubject: (data: { body: string; current_subject?: string }) =>
       request<{ suggestions: string[] }>('/api/ai/suggest-subject', { method: 'POST', body: JSON.stringify(data) }),
+    draftFromIntent: (data: { intent: string; context?: string }) =>
+      request<{ subject: string; body: string; suggested_to: string[] }>('/api/ai/draft-from-intent', {
+        method: 'POST', body: JSON.stringify(data),
+      }),
     chat: (data: { session_id: string; message: string }) =>
       request<{ message: any }>('/api/ai/chat', { method: 'POST', body: JSON.stringify(data) }),
     chatHistory: (sessionId: string) => request<any[]>(`/api/ai/chat/${sessionId}`),

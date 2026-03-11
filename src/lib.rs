@@ -72,6 +72,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/ai/assist", post(api::ai_actions::ai_assist))
         .route("/ai/suggest-subject", post(api::ai_actions::suggest_subject))
         .route("/ai/grammar-check", post(api::ai_actions::grammar_check))
+        .route("/ai/draft-from-intent", post(api::ai_actions::draft_from_intent))
         .route("/ai/feedback-stats", get(api::ai_feedback::feedback_stats))
         .route("/ai/briefing", get(api::briefing::get_briefing))
         .route("/ai/chat", post(api::chat::chat))
