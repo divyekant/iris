@@ -10,6 +10,7 @@ pub struct AiMetadata {
     pub summary: String,
     pub entities: Option<String>,
     pub deadline: Option<String>,
+    pub sentiment: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +22,7 @@ struct AiResponse {
     summary: Option<String>,
     entities: Option<AiEntities>,
     deadline: Option<String>,
+    sentiment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ const SYSTEM_PROMPT: &str = r#"You are an email classification assistant. Analyz
 - "summary": 1-2 sentence summary of the email
 - "entities": object with arrays: "people" (names mentioned), "dates" (dates/deadlines mentioned), "amounts" (monetary amounts), "topics" (key topics/projects). Omit empty arrays.
 - "deadline": ISO date string if a deadline is mentioned, null otherwise
+- "sentiment": one of "positive", "negative", "neutral", "mixed"
 
 Respond with valid JSON only."#;
 
@@ -95,6 +98,7 @@ fn parse_ai_response(response: &str) -> Option<AiMetadata> {
                 summary: parsed.summary.unwrap_or_default(),
                 entities: entities_json,
                 deadline: parsed.deadline,
+                sentiment: parsed.sentiment,
             })
         }
         Err(e) => {
@@ -183,5 +187,19 @@ mod tests {
     fn test_extract_json_code_block() {
         let input = "Here's the result:\n```json\n{\"key\": \"val\"}\n```\nDone.";
         assert_eq!(extract_json(input), r#"{"key": "val"}"#);
+    }
+
+    #[test]
+    fn test_parse_response_with_sentiment() {
+        let response = r#"{"intent":"ACTION_REQUEST","priority_score":0.9,"priority_label":"urgent","category":"Primary","summary":"Urgent request","sentiment":"negative"}"#;
+        let meta = parse_ai_response(response).unwrap();
+        assert_eq!(meta.sentiment.as_deref(), Some("negative"));
+    }
+
+    #[test]
+    fn test_parse_response_without_sentiment_backward_compat() {
+        let response = r#"{"intent":"INFORMATIONAL","priority_score":0.3,"priority_label":"low","category":"Updates","summary":"Status update"}"#;
+        let meta = parse_ai_response(response).unwrap();
+        assert!(meta.sentiment.is_none());
     }
 }
