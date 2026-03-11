@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::models::account::Account;
+use crate::auth::refresh::ensure_fresh_token;
 use crate::models::message::{self, InsertMessage, MessageDetail, MessageSummary};
 use crate::smtp::{self, ComposeRequest};
 use crate::AppState;
@@ -614,6 +615,8 @@ mod tests {
             has_attachments: false,
             attachment_names: None,
             size_bytes: Some(2048),
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let id = InsertMessage::insert(&conn, &msg).unwrap();

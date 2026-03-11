@@ -1221,6 +1221,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         }
     }
 
@@ -1326,6 +1330,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let prompt = build_multi_reply_prompt("Meeting Tomorrow", &[msg], None);
@@ -1360,6 +1368,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let prompt = build_multi_reply_prompt("Request", &[msg], Some("Decline politely"));

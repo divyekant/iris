@@ -388,6 +388,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let email = build_redirect_email("me@example.com", "target@example.com", &original).unwrap();
@@ -436,6 +440,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let email = build_redirect_email("me@example.com", "target@example.com", &original).unwrap();
@@ -472,6 +480,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let result = build_redirect_email("me@example.com", "target@example.com", &original);
