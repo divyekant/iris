@@ -242,6 +242,16 @@ export const api = {
         method: 'POST', body: JSON.stringify(data),
       }),
   },
+  contacts: {
+    topics: (email: string) =>
+      request<{ email: string; topics: { topic: string; count: number }[]; total_emails: number; cached: boolean }>(
+        `/api/contacts/${encodeURIComponent(email)}/topics`,
+      ),
+    top: () =>
+      request<{ contacts: { email: string; name: string | null; email_count: number; last_contact: number | null }[] }>(
+        '/api/contacts/top',
+      ),
+  },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },

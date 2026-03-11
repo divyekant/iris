@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod blocked_senders;
 pub mod briefing;
 pub mod chat;
+pub mod contacts;
 pub mod compose;
 pub mod config;
 pub mod filter_rules;

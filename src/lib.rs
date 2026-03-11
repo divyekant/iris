@@ -91,6 +91,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/api-keys", get(api::agent::list_keys_handler).post(api::agent::create_key_handler))
         .route("/api-keys/{id}", delete(api::agent::revoke_key_handler))
         .route("/audit-log", get(api::agent::get_audit_log_handler))
+        .route("/contacts/top", get(api::contacts::get_top_contacts))
+        .route("/contacts/{email}/topics", get(api::contacts::get_contact_topics))
         .route("/subscriptions/audit", get(api::subscriptions::subscription_audit))
         .route("/send", post(api::compose::send_message))
         .route("/send/cancel/{id}", post(api::compose::cancel_send))
