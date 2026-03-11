@@ -184,6 +184,105 @@ pub async fn ai_assist(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/ai/draft-from-intent
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct DraftFromIntentRequest {
+    pub intent: String,
+    pub context: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DraftFromIntentResponse {
+    pub subject: String,
+    pub body: String,
+    pub suggested_to: Vec<String>,
+}
+
+const DRAFT_INTENT_SYSTEM_PROMPT: &str = "You are an email drafting assistant. Given the user's intent, generate a professional email. Respond with ONLY a JSON object (no markdown fences, no extra text):\n{\"subject\": \"...\", \"body\": \"...\", \"suggested_to\": [\"email@example.com\"]}\nIf recipients can be inferred from the intent, include them in suggested_to. Otherwise use an empty array.\nThe body should be a complete, polished email text ready to send. Do not include a subject line in the body.";
+
+/// Build the user prompt for draft-from-intent, optionally including reply context.
+pub fn build_draft_intent_prompt(intent: &str, context: Option<&str>) -> String {
+    let mut prompt = format!("Draft an email for this intent: {}", intent);
+    if let Some(ctx) = context {
+        prompt.push_str(&format!("\n\nReply context:\n{}", ctx));
+    }
+    prompt
+}
+
+/// Parse the AI response JSON into a DraftFromIntentResponse, handling common issues.
+pub fn parse_draft_response(raw: &str) -> Option<DraftFromIntentResponse> {
+    // Strip markdown code fences if present
+    let cleaned = raw
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| raw.trim().strip_prefix("```"))
+        .unwrap_or(raw.trim());
+    let cleaned = cleaned
+        .strip_suffix("```")
+        .unwrap_or(cleaned)
+        .trim();
+
+    // Try parsing as our response type
+    if let Ok(resp) = serde_json::from_str::<DraftFromIntentResponse>(cleaned) {
+        return Some(resp);
+    }
+
+    // Fallback: try to extract JSON object from the string
+    if let Some(start) = cleaned.find('{') {
+        if let Some(end) = cleaned.rfind('}') {
+            let json_str = &cleaned[start..=end];
+            if let Ok(resp) = serde_json::from_str::<DraftFromIntentResponse>(json_str) {
+                return Some(resp);
+            }
+        }
+    }
+
+    None
+}
+
+pub async fn draft_from_intent(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<DraftFromIntentRequest>,
+) -> Result<Json<DraftFromIntentResponse>, StatusCode> {
+    // Validate intent
+    let intent = input.intent.trim();
+    if intent.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if intent.len() > 2000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // Check AI is enabled
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let ai_enabled = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "false".to_string());
+
+    if ai_enabled != "true" || !state.providers.has_providers() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let prompt = build_draft_intent_prompt(intent, input.context.as_deref());
+
+    let raw = state
+        .providers
+        .generate(&prompt, Some(DRAFT_INTENT_SYSTEM_PROMPT))
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    let response = parse_draft_response(&raw).ok_or(StatusCode::BAD_GATEWAY)?;
+
+    Ok(Json(response))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -331,5 +430,63 @@ mod tests {
     fn test_get_assist_prompt_invalid_action() {
         assert!(get_assist_system_prompt("invalid").is_none());
         assert!(get_assist_system_prompt("").is_none());
+    }
+
+    // Draft-from-intent tests
+
+    #[test]
+    fn test_build_draft_intent_prompt_without_context() {
+        let prompt = build_draft_intent_prompt("tell Bob I can't make Tuesday", None);
+        assert!(prompt.contains("tell Bob I can't make Tuesday"));
+        assert!(!prompt.contains("Reply context"));
+    }
+
+    #[test]
+    fn test_build_draft_intent_prompt_with_context() {
+        let prompt = build_draft_intent_prompt(
+            "decline the meeting",
+            Some("From: Bob\nSubject: Meeting Tuesday\nHey, can you make it?"),
+        );
+        assert!(prompt.contains("decline the meeting"));
+        assert!(prompt.contains("Reply context:"));
+        assert!(prompt.contains("From: Bob"));
+    }
+
+    #[test]
+    fn test_parse_draft_response_valid_json() {
+        let raw = r#"{"subject": "Meeting Reschedule", "body": "Hi Bob,\n\nI can't make Tuesday.", "suggested_to": ["bob@example.com"]}"#;
+        let resp = parse_draft_response(raw).unwrap();
+        assert_eq!(resp.subject, "Meeting Reschedule");
+        assert!(resp.body.contains("I can't make Tuesday"));
+        assert_eq!(resp.suggested_to, vec!["bob@example.com"]);
+    }
+
+    #[test]
+    fn test_parse_draft_response_with_markdown_fences() {
+        let raw = "```json\n{\"subject\": \"Hello\", \"body\": \"World\", \"suggested_to\": []}\n```";
+        let resp = parse_draft_response(raw).unwrap();
+        assert_eq!(resp.subject, "Hello");
+        assert_eq!(resp.body, "World");
+        assert!(resp.suggested_to.is_empty());
+    }
+
+    #[test]
+    fn test_parse_draft_response_empty_suggested_to() {
+        let raw = r#"{"subject": "Test", "body": "Body text", "suggested_to": []}"#;
+        let resp = parse_draft_response(raw).unwrap();
+        assert!(resp.suggested_to.is_empty());
+    }
+
+    #[test]
+    fn test_parse_draft_response_with_preamble() {
+        let raw = "Here is your draft:\n{\"subject\": \"Test\", \"body\": \"Hello\", \"suggested_to\": []}";
+        let resp = parse_draft_response(raw).unwrap();
+        assert_eq!(resp.subject, "Test");
+    }
+
+    #[test]
+    fn test_parse_draft_response_invalid_json() {
+        let raw = "This is not JSON at all";
+        assert!(parse_draft_response(raw).is_none());
     }
 }

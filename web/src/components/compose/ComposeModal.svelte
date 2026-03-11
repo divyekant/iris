@@ -46,6 +46,11 @@
   let aiAssisting = $state(false);
   let showAiMenu = $state(false);
 
+  // Draft from intent state
+  let intentText = $state('');
+  let intentGenerating = $state(false);
+  let intentCollapsed = $state(false);
+
   const aiActions = [
     { action: 'rewrite', label: 'Improve writing' },
     { action: 'formal', label: 'Make formal' },
@@ -66,6 +71,30 @@
       error = 'AI assist failed. Check AI settings.';
     } finally {
       aiAssisting = false;
+    }
+  }
+
+  async function handleDraftFromIntent() {
+    if (!intentText.trim()) return;
+    intentGenerating = true;
+    error = '';
+    try {
+      const payload: { intent: string; context?: string } = { intent: intentText.trim() };
+      // Include reply context if available
+      if (context.original?.body_text && context.mode !== 'new') {
+        payload.context = context.original.body_text.slice(0, 1000);
+      }
+      const res = await api.ai.draftFromIntent(payload);
+      subject = res.subject;
+      body = res.body;
+      if (res.suggested_to.length > 0 && !to.trim()) {
+        to = res.suggested_to.join(', ');
+      }
+      intentCollapsed = true;
+    } catch {
+      error = 'Draft generation failed. Check AI settings.';
+    } finally {
+      intentGenerating = false;
     }
   }
 
@@ -243,6 +272,56 @@
 
     <!-- Form -->
     <div class="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+      <!-- Draft from Intent -->
+      {#if context.mode === 'new' || context.mode === 'reply' || context.mode === 'reply-all'}
+        {#if intentCollapsed}
+          <button
+            class="text-xs py-1 compose-intent-toggle"
+            style="color: var(--iris-color-primary);"
+            onclick={() => (intentCollapsed = false)}
+          >
+            Show AI draft input
+          </button>
+        {:else}
+          <div
+            class="rounded-lg p-3 mb-2"
+            style="background: color-mix(in srgb, var(--iris-color-primary) 6%, var(--iris-color-bg-surface)); border: 1px solid color-mix(in srgb, var(--iris-color-primary) 20%, var(--iris-color-border));"
+          >
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs font-medium" style="color: var(--iris-color-primary);">Draft from intent</span>
+              {#if intentCollapsed === false && (subject || body)}
+                <button
+                  class="text-xs"
+                  style="color: var(--iris-color-text-faint);"
+                  onclick={() => (intentCollapsed = true)}
+                >
+                  Hide
+                </button>
+              {/if}
+            </div>
+            <div class="flex gap-2">
+              <input
+                type="text"
+                bind:value={intentText}
+                class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+                style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+                placeholder="Describe what you want to say..."
+                disabled={intentGenerating}
+                onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleDraftFromIntent(); } }}
+              />
+              <button
+                class="px-3 py-1 text-xs rounded-md font-medium disabled:opacity-50 transition-colors compose-send-btn"
+                style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                onclick={handleDraftFromIntent}
+                disabled={intentGenerating || !intentText.trim()}
+              >
+                {intentGenerating ? 'Generating...' : 'Generate'}
+              </button>
+            </div>
+          </div>
+        {/if}
+      {/if}
+
       <!-- To -->
       <div class="flex items-center gap-2">
         <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-to">To</label>
