@@ -2,8 +2,9 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Forward } from 'lucide-svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
+  import RedirectDialog from '../components/thread/RedirectDialog.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
@@ -25,6 +26,25 @@
   let summaryLoading = $state(false);
   let summaryOpen = $state(false);
   let summaryError = $state('');
+
+  // Redirect dialog state
+  let redirectOpen = $state(false);
+  let redirectMessageId = $state('');
+  let redirectFromAddress = $state('');
+  let redirectSubject = $state('');
+
+  function openRedirect() {
+    const msg = lastMessage();
+    if (!msg) return;
+    redirectMessageId = msg.id;
+    redirectFromAddress = msg.from_address || '';
+    redirectSubject = thread?.subject || '';
+    redirectOpen = true;
+  }
+
+  function closeRedirect() {
+    redirectOpen = false;
+  }
 
   async function loadThread() {
     loading = true;
@@ -360,9 +380,22 @@
       <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn" onclick={() => startReply('reply')}>Reply</button>
       <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('reply-all')}>Reply All</button>
       <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('forward')}>Forward</button>
+      <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={openRedirect}>
+        <Forward size={14} />
+        Redirect
+      </button>
     </div>
   {/if}
 </div>
+
+{#if redirectOpen}
+  <RedirectDialog
+    messageId={redirectMessageId}
+    fromAddress={redirectFromAddress}
+    subject={redirectSubject}
+    onclose={closeRedirect}
+  />
+{/if}
 
 <style>
   .thread-action-btn {

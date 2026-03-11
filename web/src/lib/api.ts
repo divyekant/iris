@@ -54,6 +54,11 @@ export const api = {
         body: JSON.stringify({ ids, action }),
       }),
     fixEncoding: () => request<{ fixed: number }>('/api/messages/fix-encoding', { method: 'POST' }),
+    redirect: (messageId: string, to: string) =>
+      request<{ redirected: boolean; to: string }>(`/api/messages/${messageId}/redirect`, {
+        method: 'POST',
+        body: JSON.stringify({ to }),
+      }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),

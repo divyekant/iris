@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::auth::refresh::ensure_fresh_token;
 use crate::models::account::Account;
-use crate::models::message::{self, InsertMessage, MessageSummary};
+use crate::models::message::{self, InsertMessage, MessageDetail, MessageSummary};
 use crate::smtp::{self, ComposeRequest};
 use crate::AppState;
 
@@ -171,5 +171,205 @@ pub async fn delete_draft(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(StatusCode::NOT_FOUND)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/messages/{id}/redirect — bounce/redirect an email
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RedirectRequest {
+    pub to: String,
+}
+
+#[derive(Serialize)]
+pub struct RedirectResponse {
+    pub redirected: bool,
+    pub to: String,
+}
+
+/// Validates that a string looks like a valid email address.
+fn is_valid_email(email: &str) -> bool {
+    let trimmed = email.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Must contain exactly one @, with text on both sides, and a dot in the domain
+    let parts: Vec<&str> = trimmed.splitn(2, '@').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let (local, domain) = (parts[0], parts[1]);
+    !local.is_empty() && !domain.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+}
+
+pub async fn redirect_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<RedirectRequest>,
+) -> Result<Json<RedirectResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Validate email
+    let to = req.to.trim().to_string();
+    if !is_valid_email(&to) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid recipient email address"})),
+        ));
+    }
+
+    let conn = state.db.get().map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
+    })?;
+
+    // Look up the original message
+    let original = MessageDetail::get_by_id(&conn, &id).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "message not found"})))
+    })?;
+
+    // Get the account for SMTP credentials
+    let account = Account::get_by_id(&conn, &original.account_id).ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "account not found"})))
+    })?;
+
+    if !account.is_active {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "account is inactive"})),
+        ));
+    }
+
+    // Refresh OAuth token if needed
+    let access_token = ensure_fresh_token(&state.db, &account, &state.config)
+        .await
+        .map_err(|e| {
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": format!("token refresh: {e}")})))
+        })?;
+
+    // Build the redirected email with Resent-* headers
+    let email = smtp::build_redirect_email(&account.email, &to, &original)
+        .map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()})))
+        })?;
+
+    // Send via SMTP
+    smtp::send_email(&account, access_token.as_deref(), email)
+        .await
+        .map_err(|e| {
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()})))
+        })?;
+
+    tracing::info!(
+        account = %account.email,
+        message_id = %id,
+        to = %to,
+        "Email redirected"
+    );
+
+    Ok(Json(RedirectResponse {
+        redirected: true,
+        to,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_email_accepts_valid() {
+        assert!(is_valid_email("user@example.com"));
+        assert!(is_valid_email("name+tag@sub.domain.org"));
+        assert!(is_valid_email("  alice@test.co  ")); // trimmed
+    }
+
+    #[test]
+    fn test_is_valid_email_rejects_invalid() {
+        assert!(!is_valid_email(""));
+        assert!(!is_valid_email("   "));
+        assert!(!is_valid_email("noatsign"));
+        assert!(!is_valid_email("@nodomain"));
+        assert!(!is_valid_email("nolocal@"));
+        assert!(!is_valid_email("user@nodot"));
+        assert!(!is_valid_email("user@.dot"));
+        assert!(!is_valid_email("user@dot."));
+    }
+
+    #[test]
+    fn test_redirect_request_deserialization() {
+        let json = r#"{"to": "alice@example.com"}"#;
+        let req: RedirectRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.to, "alice@example.com");
+    }
+
+    #[test]
+    fn test_redirect_response_serialization() {
+        let resp = RedirectResponse {
+            redirected: true,
+            to: "bob@test.com".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"redirected\":true"));
+        assert!(json.contains("\"to\":\"bob@test.com\""));
+    }
+
+    #[test]
+    fn test_message_lookup_for_redirect() {
+        use crate::db::create_test_pool;
+        use crate::models::account::{Account, CreateAccount};
+        use crate::models::message::InsertMessage;
+
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+
+        let account = Account::create(&conn, &CreateAccount {
+            provider: "gmail".to_string(),
+            email: "redirect-test@example.com".to_string(),
+            display_name: Some("Redirect Test".to_string()),
+            imap_host: Some("imap.gmail.com".to_string()),
+            imap_port: Some(993),
+            smtp_host: Some("smtp.gmail.com".to_string()),
+            smtp_port: Some(587),
+            username: Some("redirect-test@example.com".to_string()),
+            password: None,
+        });
+
+        let msg = InsertMessage {
+            account_id: account.id.clone(),
+            message_id: Some("<redirect-orig@example.com>".to_string()),
+            thread_id: None,
+            folder: "INBOX".to_string(),
+            from_address: Some("sender@example.com".to_string()),
+            from_name: Some("Original Sender".to_string()),
+            to_addresses: Some(r#"["redirect-test@example.com"]"#.to_string()),
+            cc_addresses: None,
+            bcc_addresses: None,
+            subject: Some("Important message".to_string()),
+            date: Some(1700000000),
+            snippet: Some("Preview...".to_string()),
+            body_text: Some("Full body of the original email".to_string()),
+            body_html: Some("<p>Full body of the original email</p>".to_string()),
+            is_read: true,
+            is_starred: false,
+            is_draft: false,
+            labels: None,
+            uid: Some(1),
+            modseq: None,
+            raw_headers: None,
+            has_attachments: false,
+            attachment_names: None,
+            size_bytes: Some(2048),
+        };
+
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
+
+        // Verify message can be looked up
+        let detail = MessageDetail::get_by_id(&conn, &id).unwrap();
+        assert_eq!(detail.from_address.as_deref(), Some("sender@example.com"));
+        assert_eq!(detail.subject.as_deref(), Some("Important message"));
+        assert_eq!(detail.account_id, account.id);
+
+        // Verify non-existent message returns None
+        assert!(MessageDetail::get_by_id(&conn, "nonexistent-id").is_none());
     }
 }

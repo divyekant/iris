@@ -51,6 +51,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/messages/{id}/read", put(api::messages::mark_message_read))
         .route("/messages/fix-encoding", post(api::messages::fix_encoding))
         .route("/messages/{id}/ai-feedback", put(api::ai_feedback::submit_feedback))
+        .route("/messages/{id}/redirect", post(api::compose::redirect_message))
         .route("/messages/batch", patch(api::messages::batch_update_messages))
         .route("/threads/{id}", get(api::threads::get_thread))
         .route("/threads/{id}/summarize", post(api::ai_actions::summarize_thread))
