@@ -135,6 +135,19 @@ export const api = {
       }),
     revoke: (id: string) => request<void>(`/api/api-keys/${id}`, { method: 'DELETE' }),
   },
+  contacts: {
+    responseTimes: (email: string) =>
+      request<{
+        email: string;
+        their_avg_reply_hours: number | null;
+        your_avg_reply_hours: number | null;
+        their_reply_count: number;
+        your_reply_count: number;
+        fastest_reply_hours: number | null;
+        slowest_reply_hours: number | null;
+        total_exchanges: number;
+      }>(`/api/contacts/${encodeURIComponent(email)}/response-times`),
+  },
   auditLog: {
     list: (params?: { api_key_id?: string; limit?: number; offset?: number }) => {
       const query = new URLSearchParams();

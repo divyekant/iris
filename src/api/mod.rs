@@ -6,6 +6,7 @@ pub mod ai_feedback;
 pub mod chat;
 pub mod compose;
 pub mod config;
+pub mod contacts;
 pub mod health;
 pub mod messages;
 pub mod queue_status;
