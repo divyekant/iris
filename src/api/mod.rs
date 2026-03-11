@@ -23,4 +23,5 @@ pub mod session_auth;
 pub mod signatures;
 pub mod templates;
 pub mod threads;
+pub mod subscriptions;
 pub mod trust;
