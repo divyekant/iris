@@ -21,6 +21,7 @@ pub struct ThreadMessageResponse {
     pub message: MessageDetail,
     pub trust: trust::TrustIndicators,
     pub tracking_pixels: Vec<trust::TrackingPixel>,
+    pub impersonation_risk: Option<trust::ImpersonationRisk>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,10 +88,16 @@ pub async fn get_thread(
             let trust_indicators = trust::extract_trust_indicators(raw_headers);
             let tracking_pixels =
                 trust::detect_tracking_pixels(msg.body_html.as_deref().unwrap_or(""));
+            let impersonation_risk = msg
+                .from_address
+                .as_deref()
+                .and_then(trust::domain_from_email)
+                .and_then(trust::check_impersonation);
             ThreadMessageResponse {
                 message: msg,
                 trust: trust_indicators,
                 tracking_pixels,
+                impersonation_risk,
             }
         })
         .collect();
