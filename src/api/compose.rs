@@ -95,6 +95,8 @@ pub async fn send_message(
         has_attachments: false,
         attachment_names: None,
         size_bytes: None,
+        list_unsubscribe: None,
+        list_unsubscribe_post: false,
     };
 
     let id = InsertMessage::insert(&conn, &sent_msg).expect("sent message should always insert");

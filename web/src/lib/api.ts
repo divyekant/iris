@@ -54,6 +54,8 @@ export const api = {
         body: JSON.stringify({ ids, action }),
       }),
     fixEncoding: () => request<{ fixed: number }>('/api/messages/fix-encoding', { method: 'POST' }),
+    unsubscribe: (id: string) =>
+      request<{ success: boolean; method: string; url?: string }>(`/api/messages/${id}/unsubscribe`, { method: 'POST' }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),

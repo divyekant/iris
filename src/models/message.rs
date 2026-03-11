@@ -107,6 +107,8 @@ pub struct MessageDetail {
     pub ai_priority_label: Option<String>,
     pub ai_category: Option<String>,
     pub ai_summary: Option<String>,
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: bool,
 }
 
 impl MessageDetail {
@@ -140,6 +142,8 @@ impl MessageDetail {
             ai_priority_label: row.get("ai_priority_label")?,
             ai_category: row.get("ai_category")?,
             ai_summary: row.get("ai_summary")?,
+            list_unsubscribe: row.get("list_unsubscribe")?,
+            list_unsubscribe_post: row.get::<_, bool>("list_unsubscribe_post").unwrap_or(false),
         })
     }
 
@@ -148,7 +152,8 @@ impl MessageDetail {
             "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                     to_addresses, cc_addresses, subject, snippet, date,
                     body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
+                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary,
+                    list_unsubscribe, list_unsubscribe_post
              FROM messages WHERE id = ?1 AND is_deleted = 0",
             rusqlite::params![id],
             Self::from_row,
@@ -188,7 +193,8 @@ impl MessageDetail {
                 SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
                         body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
+                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary,
+                        list_unsubscribe, list_unsubscribe_post
                  FROM ranked WHERE rn = 1
                  ORDER BY date ASC",
             )
@@ -238,6 +244,8 @@ pub struct InsertMessage {
     pub has_attachments: bool,
     pub attachment_names: Option<String>,
     pub size_bytes: Option<i64>,
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: bool,
 }
 
 impl InsertMessage {
@@ -279,14 +287,16 @@ impl InsertMessage {
                 subject, date, snippet, body_text, body_html,
                 is_read, is_starred, is_draft, labels,
                 uid, modseq, raw_headers,
-                has_attachments, attachment_names, size_bytes
+                has_attachments, attachment_names, size_bytes,
+                list_unsubscribe, list_unsubscribe_post
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15,
                 ?16, ?17, ?18, ?19,
                 ?20, ?21, ?22,
-                ?23, ?24, ?25
+                ?23, ?24, ?25,
+                ?26, ?27
             )",
             rusqlite::params![
                 id,
@@ -314,6 +324,8 @@ impl InsertMessage {
                 msg.has_attachments,
                 msg.attachment_names,
                 msg.size_bytes,
+                msg.list_unsubscribe,
+                msg.list_unsubscribe_post,
             ],
         )
         .expect("failed to insert message");
@@ -554,6 +566,8 @@ mod tests {
             has_attachments: false,
             attachment_names: None,
             size_bytes: Some(1024),
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         }
     }
 

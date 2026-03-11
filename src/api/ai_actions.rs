@@ -217,6 +217,8 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let prompt = build_summary_prompt("Project Update", &[msg]);
@@ -252,6 +254,8 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let prompt = build_summary_prompt("Test", &[msg]);
@@ -289,6 +293,8 @@ mod tests {
                 ai_priority_label: None,
                 ai_category: None,
                 ai_summary: None,
+                list_unsubscribe: None,
+                list_unsubscribe_post: false,
             })
             .collect();
 

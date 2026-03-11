@@ -10,6 +10,71 @@ use crate::AppState;
 extern crate mailparse;
 
 #[derive(Debug, Serialize)]
+pub struct UnsubscribeResponse {
+    pub success: bool,
+    pub method: String,
+    pub url: Option<String>,
+}
+
+pub async fn unsubscribe(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<UnsubscribeResponse>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Get the message's list_unsubscribe URL and post flag
+    let (url, has_post): (String, bool) = conn
+        .query_row(
+            "SELECT list_unsubscribe, list_unsubscribe_post FROM messages WHERE id = ?1 AND is_deleted = 0",
+            rusqlite::params![id],
+            |row| {
+                let url: Option<String> = row.get(0)?;
+                let post: bool = row.get::<_, bool>(1).unwrap_or(false);
+                Ok((url.unwrap_or_default(), post))
+            },
+        )
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    if url.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    if url.starts_with("http") && has_post {
+        // RFC 8058: Send POST request with List-Unsubscribe=One-Click
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body("List-Unsubscribe=One-Click")
+            .send()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+        Ok(Json(UnsubscribeResponse {
+            success: resp.status().is_success(),
+            method: "one-click".to_string(),
+            url: Some(url),
+        }))
+    } else if url.starts_with("http") {
+        // Return the URL for the frontend to open in a new tab
+        Ok(Json(UnsubscribeResponse {
+            success: true,
+            method: "url".to_string(),
+            url: Some(url),
+        }))
+    } else if url.starts_with("mailto:") {
+        // Return mailto URL for frontend to handle
+        Ok(Json(UnsubscribeResponse {
+            success: true,
+            method: "mailto".to_string(),
+            url: Some(url),
+        }))
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct MessageDetailResponse {
     #[serde(flatten)]
     pub message: MessageDetail,
