@@ -56,6 +56,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/threads/{id}/summarize", post(api::ai_actions::summarize_thread))
         .route("/search", get(api::search::search))
         .route("/ai/assist", post(api::ai_actions::ai_assist))
+        .route("/ai/extract-tasks", post(api::ai_actions::extract_tasks))
         .route("/ai/feedback-stats", get(api::ai_feedback::feedback_stats))
         .route("/ai/chat", post(api::chat::chat))
         .route("/ai/chat/confirm", post(api::chat::confirm_action))

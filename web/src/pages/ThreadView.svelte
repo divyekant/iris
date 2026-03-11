@@ -2,7 +2,7 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, ListChecks } from 'lucide-svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
 
   let { params }: { params: { id: string } } = $props();
@@ -25,6 +25,14 @@
   let summaryLoading = $state(false);
   let summaryOpen = $state(false);
   let summaryError = $state('');
+
+  // Task extraction state
+  type ExtractedTask = { task: string; priority: string; deadline: string | null; source_subject: string | null };
+  let extractedTasks = $state<ExtractedTask[]>([]);
+  let tasksLoading = $state(false);
+  let tasksOpen = $state(false);
+  let tasksError = $state('');
+  let checkedTasks = $state<Set<number>>(new Set());
 
   async function loadThread() {
     loading = true;
@@ -195,11 +203,49 @@
     }
   }
 
+  async function toggleTasks() {
+    if (tasksOpen) {
+      tasksOpen = false;
+      return;
+    }
+    tasksOpen = true;
+    if (extractedTasks.length > 0) return;
+    tasksLoading = true;
+    tasksError = '';
+    try {
+      const res = await api.ai.extractTasks(undefined, params.id);
+      extractedTasks = res.tasks;
+      checkedTasks = new Set();
+    } catch (e: any) {
+      if (e.message?.includes('503')) {
+        tasksError = 'Enable AI in Settings to use this feature.';
+      } else {
+        tasksError = 'Failed to extract tasks.';
+      }
+    } finally {
+      tasksLoading = false;
+    }
+  }
+
+  function toggleTaskCheck(index: number) {
+    const next = new Set(checkedTasks);
+    if (next.has(index)) {
+      next.delete(index);
+    } else {
+      next.add(index);
+    }
+    checkedTasks = next;
+  }
+
   $effect(() => {
     if (params.id) {
       aiSummary = null;
       summaryOpen = false;
       summaryError = '';
+      extractedTasks = [];
+      tasksOpen = false;
+      tasksError = '';
+      checkedTasks = new Set();
       cancelReply();
       loadThread();
     }
@@ -230,6 +276,7 @@
         </p>
       </div>
       <div class="flex items-center gap-0.5">
+        <button class="p-1.5 transition-colors thread-action-btn tasks-btn" onclick={toggleTasks} title="Extract Tasks"><ListChecks size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn star-btn" onclick={() => handleThreadAction('star')} title="Star"><Star size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('archive')} title="Archive"><Archive size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('mark_unread')} title="Mark unread"><MailOpen size={15} /></button>
@@ -261,6 +308,65 @@
         {:else if summaryError}
           <div class="mt-2 text-xs" style="color: var(--iris-color-text-faint);">{summaryError}</div>
         {/if}
+      {/if}
+    </div>
+  {/if}
+
+  <!-- Extracted Tasks panel -->
+  {#if tasksOpen}
+    <div class="px-4 py-2" style="border-bottom: 1px solid var(--iris-color-border);">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-xs font-medium flex items-center gap-1" style="color: var(--iris-color-primary);">
+          <ListChecks size={14} /> Extracted Tasks
+        </span>
+        <button class="text-xs px-2 py-0.5 rounded" style="color: var(--iris-color-text-faint);" onclick={() => { tasksOpen = false; }}>&times;</button>
+      </div>
+      {#if tasksLoading}
+        <div class="flex items-center gap-2 py-2" style="color: var(--iris-color-text-faint);">
+          <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
+          <span class="text-xs">Extracting tasks...</span>
+        </div>
+      {:else if tasksError}
+        <div class="text-xs py-1" style="color: var(--iris-color-text-faint);">{tasksError}</div>
+      {:else if extractedTasks.length === 0}
+        <div class="text-xs py-1" style="color: var(--iris-color-text-faint);">No action items found in this thread.</div>
+      {:else}
+        <div class="space-y-1.5">
+          {#each extractedTasks as task, i (i)}
+            <div class="flex items-start gap-2 rounded-lg px-2 py-1.5" style="background: var(--iris-color-bg-surface);">
+              <button
+                class="mt-0.5 w-4 h-4 rounded flex-shrink-0 flex items-center justify-center task-checkbox"
+                class:checked={checkedTasks.has(i)}
+                onclick={() => toggleTaskCheck(i)}
+                aria-label="Toggle task"
+              >
+                {#if checkedTasks.has(i)}
+                  <span class="text-[10px]">&#10003;</span>
+                {/if}
+              </button>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm leading-snug" style="color: var(--iris-color-text);" class:line-through={checkedTasks.has(i)} class:opacity-50={checkedTasks.has(i)}>
+                  {task.task}
+                </p>
+                <div class="flex items-center gap-2 mt-0.5">
+                  <span class="text-[10px] font-medium px-1.5 py-0.5 rounded-full task-priority-badge"
+                    class:priority-high={task.priority === 'high'}
+                    class:priority-medium={task.priority === 'medium'}
+                    class:priority-low={task.priority === 'low'}
+                  >
+                    {task.priority}
+                  </span>
+                  {#if task.deadline}
+                    <span class="text-[10px]" style="color: var(--iris-color-text-faint);">Due: {task.deadline}</span>
+                  {/if}
+                  {#if task.source_subject}
+                    <span class="text-[10px] truncate" style="color: var(--iris-color-text-faint);">from: {task.source_subject}</span>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
       {/if}
     </div>
   {/if}
@@ -406,5 +512,34 @@
   }
   .reply-send-btn:hover:not(:disabled) {
     filter: brightness(1.1);
+  }
+  .thread-action-btn.tasks-btn:hover {
+    color: var(--iris-color-primary);
+  }
+  .task-checkbox {
+    border: 1.5px solid var(--iris-color-primary);
+    background: transparent;
+    color: var(--iris-color-primary);
+    cursor: pointer;
+  }
+  .task-checkbox.checked {
+    background: var(--iris-color-primary);
+    color: var(--iris-color-bg);
+  }
+  .task-priority-badge {
+    color: var(--iris-color-text-faint);
+    background: var(--iris-color-bg-elevated);
+  }
+  .task-priority-badge.priority-high {
+    color: #DC2626;
+    background: rgba(220, 38, 38, 0.12);
+  }
+  .task-priority-badge.priority-medium {
+    color: #CA8A04;
+    background: rgba(202, 138, 4, 0.12);
+  }
+  .task-priority-badge.priority-low {
+    color: #16A34A;
+    background: rgba(22, 163, 74, 0.12);
   }
 </style>
