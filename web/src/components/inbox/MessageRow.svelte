@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen } from 'lucide-svelte';
+  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen, Reply } from 'lucide-svelte';
 
   interface Message {
     id: string;
@@ -12,6 +12,7 @@
     has_attachments?: boolean;
     ai_priority_label?: string;
     ai_category?: string;
+    ai_needs_reply?: boolean;
     labels?: string;
   }
 
@@ -102,6 +103,11 @@
       {#if message.ai_category}
         <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
           {message.ai_category}
+        </span>
+      {/if}
+      {#if message.ai_needs_reply}
+        <span class="flex-shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent); color: var(--iris-color-warning);" title="Needs reply">
+          <Reply size={10} />Reply
         </span>
       {/if}
       {#each parsedLabels as label}

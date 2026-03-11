@@ -217,6 +217,7 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_needs_reply: false,
         };
 
         let prompt = build_summary_prompt("Project Update", &[msg]);
@@ -252,6 +253,7 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_needs_reply: false,
         };
 
         let prompt = build_summary_prompt("Test", &[msg]);
@@ -289,6 +291,7 @@ mod tests {
                 ai_priority_label: None,
                 ai_category: None,
                 ai_summary: None,
+                ai_needs_reply: false,
             })
             .collect();
 

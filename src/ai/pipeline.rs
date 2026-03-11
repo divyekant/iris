@@ -10,6 +10,7 @@ pub struct AiMetadata {
     pub summary: String,
     pub entities: Option<String>,
     pub deadline: Option<String>,
+    pub needs_reply: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +22,7 @@ struct AiResponse {
     summary: Option<String>,
     entities: Option<AiEntities>,
     deadline: Option<String>,
+    needs_reply: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ const SYSTEM_PROMPT: &str = r#"You are an email classification assistant. Analyz
 - "summary": 1-2 sentence summary of the email
 - "entities": object with arrays: "people" (names mentioned), "dates" (dates/deadlines mentioned), "amounts" (monetary amounts), "topics" (key topics/projects). Omit empty arrays.
 - "deadline": ISO date string if a deadline is mentioned, null otherwise
+- "needs_reply": boolean, true if the sender is asking a question, making a request, or expecting a response
 
 Respond with valid JSON only."#;
 
@@ -95,6 +98,7 @@ fn parse_ai_response(response: &str) -> Option<AiMetadata> {
                 summary: parsed.summary.unwrap_or_default(),
                 entities: entities_json,
                 deadline: parsed.deadline,
+                needs_reply: parsed.needs_reply.unwrap_or(false),
             })
         }
         Err(e) => {
@@ -147,6 +151,7 @@ mod tests {
         assert_eq!(meta.priority_label, "high");
         assert_eq!(meta.category, "Primary");
         assert_eq!(meta.summary, "Request to review PR");
+        assert!(!meta.needs_reply); // default when absent
     }
 
     #[test]
@@ -183,5 +188,20 @@ mod tests {
     fn test_extract_json_code_block() {
         let input = "Here's the result:\n```json\n{\"key\": \"val\"}\n```\nDone.";
         assert_eq!(extract_json(input), r#"{"key": "val"}"#);
+    }
+
+    #[test]
+    fn test_parse_needs_reply_true() {
+        let response = r#"{"intent":"ACTION_REQUEST","priority_score":0.9,"priority_label":"urgent","category":"Primary","summary":"Can you review this PR?","needs_reply":true}"#;
+        let meta = parse_ai_response(response).unwrap();
+        assert!(meta.needs_reply);
+        assert_eq!(meta.intent, "ACTION_REQUEST");
+    }
+
+    #[test]
+    fn test_parse_needs_reply_defaults_false() {
+        let response = r#"{"intent":"INFORMATIONAL","summary":"Monthly report"}"#;
+        let meta = parse_ai_response(response).unwrap();
+        assert!(!meta.needs_reply);
     }
 }

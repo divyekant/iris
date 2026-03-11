@@ -194,6 +194,7 @@ impl JobWorker {
             &metadata.summary,
             metadata.entities.as_deref(),
             metadata.deadline.as_deref(),
+            metadata.needs_reply,
         );
 
         if !updated {

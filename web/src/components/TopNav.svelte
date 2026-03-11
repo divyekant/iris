@@ -1,6 +1,7 @@
 <script lang="ts">
   import { push, location } from 'svelte-spa-router';
   import { api } from '../lib/api';
+  import { Reply } from 'lucide-svelte';
 
   interface Props {
     accounts?: any[];
@@ -30,6 +31,20 @@
   let overflowOpen = $state(false);
   let isDark = $state(!document.documentElement.hasAttribute('data-brand'));
   let activeCategory = $state('');
+  let needsReplyCount = $state(0);
+
+  async function loadNeedsReplyCount() {
+    try {
+      const res = await api.messages.needsReply({ limit: 0 });
+      needsReplyCount = res.total;
+    } catch { /* ignore */ }
+  }
+
+  $effect(() => {
+    loadNeedsReplyCount();
+    const interval = setInterval(loadNeedsReplyCount, 60000);
+    return () => clearInterval(interval);
+  });
 
   const categories = [
     { id: '', label: 'All' },
@@ -94,6 +109,11 @@
   function selectCategory(id: string) {
     activeCategory = id;
     window.dispatchEvent(new CustomEvent('category-change', { detail: { category: id } }));
+  }
+
+  function selectNeedsReply() {
+    activeCategory = '__needs_reply__';
+    window.dispatchEvent(new CustomEvent('category-change', { detail: { category: '__needs_reply__' } }));
   }
 
   const activeAccount = $derived(
@@ -210,6 +230,22 @@
           {cat.label}
         </button>
       {/each}
+      <button
+        class="flex items-center gap-1 h-12 px-2.5 text-[13px] font-medium border-b-2 transition-colors"
+        style={activeCategory === '__needs_reply__'
+          ? 'border-color: var(--iris-color-warning); color: var(--iris-color-warning);'
+          : 'border-color: transparent; color: var(--iris-color-text-muted);'}
+        onclick={selectNeedsReply}
+      >
+        <Reply size={13} />
+        Needs Reply
+        {#if needsReplyCount > 0}
+          <span
+            class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-semibold rounded-full leading-none"
+            style="background: var(--iris-color-warning); color: var(--iris-color-bg);"
+          >{needsReplyCount > 99 ? '99+' : needsReplyCount}</span>
+        {/if}
+      </button>
     </div>
 
     <!-- Divider -->

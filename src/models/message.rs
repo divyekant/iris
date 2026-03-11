@@ -31,6 +31,7 @@ pub struct MessageSummary {
     pub labels: Option<String>,
     pub ai_priority_label: Option<String>,
     pub ai_category: Option<String>,
+    pub ai_needs_reply: bool,
 }
 
 impl MessageSummary {
@@ -51,6 +52,7 @@ impl MessageSummary {
             labels: row.get("labels")?,
             ai_priority_label: row.get("ai_priority_label")?,
             ai_category: row.get("ai_category")?,
+            ai_needs_reply: row.get::<_, Option<bool>>("ai_needs_reply")?.unwrap_or(false),
         })
     }
 
@@ -66,7 +68,7 @@ impl MessageSummary {
         let mut stmt = conn
             .prepare(
                 "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_needs_reply
                  FROM messages
                  WHERE account_id = ?1 AND folder = ?2 AND is_deleted = 0
                  ORDER BY date DESC
@@ -107,6 +109,7 @@ pub struct MessageDetail {
     pub ai_priority_label: Option<String>,
     pub ai_category: Option<String>,
     pub ai_summary: Option<String>,
+    pub ai_needs_reply: bool,
 }
 
 impl MessageDetail {
@@ -140,6 +143,7 @@ impl MessageDetail {
             ai_priority_label: row.get("ai_priority_label")?,
             ai_category: row.get("ai_category")?,
             ai_summary: row.get("ai_summary")?,
+            ai_needs_reply: row.get::<_, Option<bool>>("ai_needs_reply")?.unwrap_or(false),
         })
     }
 
@@ -148,7 +152,7 @@ impl MessageDetail {
             "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                     to_addresses, cc_addresses, subject, snippet, date,
                     body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
+                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_needs_reply
              FROM messages WHERE id = ?1 AND is_deleted = 0",
             rusqlite::params![id],
             Self::from_row,
@@ -188,7 +192,7 @@ impl MessageDetail {
                 SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
                         body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
+                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_needs_reply
                  FROM ranked WHERE rn = 1
                  ORDER BY date ASC",
             )
@@ -343,6 +347,7 @@ pub fn update_ai_metadata(
     summary: &str,
     entities: Option<&str>,
     deadline: Option<&str>,
+    needs_reply: bool,
 ) -> bool {
     let updated = conn
         .execute(
@@ -354,12 +359,68 @@ pub fn update_ai_metadata(
                 ai_summary = ?6,
                 ai_entities = ?7,
                 ai_deadline = ?8,
+                ai_needs_reply = ?9,
                 updated_at = unixepoch()
              WHERE id = ?1",
-            rusqlite::params![id, intent, priority_score, priority_label, category, summary, entities, deadline],
+            rusqlite::params![id, intent, priority_score, priority_label, category, summary, entities, deadline, needs_reply],
         )
         .unwrap_or(0);
     updated > 0
+}
+
+/// List messages that need a reply, paginated, ordered by date DESC.
+/// Returns non-deleted, unread messages where ai_needs_reply = 1.
+pub fn list_needs_reply(
+    conn: &Conn,
+    account_id: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> (Vec<MessageSummary>, i64) {
+    let (where_clause, count_query) = if let Some(_) = account_id {
+        (
+            "WHERE ai_needs_reply = 1 AND is_read = 0 AND is_deleted = 0 AND account_id = ?1",
+            "SELECT COUNT(*) FROM messages WHERE ai_needs_reply = 1 AND is_read = 0 AND is_deleted = 0 AND account_id = ?1",
+        )
+    } else {
+        (
+            "WHERE ai_needs_reply = 1 AND is_read = 0 AND is_deleted = 0",
+            "SELECT COUNT(*) FROM messages WHERE ai_needs_reply = 1 AND is_read = 0 AND is_deleted = 0",
+        )
+    };
+
+    let total: i64 = if let Some(aid) = account_id {
+        conn.query_row(count_query, rusqlite::params![aid], |row| row.get(0))
+            .unwrap_or(0)
+    } else {
+        conn.query_row(count_query, [], |row| row.get(0))
+            .unwrap_or(0)
+    };
+
+    let query = format!(
+        "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
+                date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_needs_reply
+         FROM messages
+         {where_clause}
+         ORDER BY date DESC
+         LIMIT ?{} OFFSET ?{}",
+        if account_id.is_some() { "2" } else { "1" },
+        if account_id.is_some() { "3" } else { "2" },
+    );
+
+    let mut stmt = conn
+        .prepare(&query)
+        .expect("failed to prepare list_needs_reply query");
+
+    let messages: Vec<MessageSummary> = if let Some(aid) = account_id {
+        stmt.query_map(rusqlite::params![aid, limit, offset], MessageSummary::from_row)
+    } else {
+        stmt.query_map(rusqlite::params![limit, offset], MessageSummary::from_row)
+    }
+        .expect("failed to query needs_reply messages")
+        .filter_map(|r| r.map_err(|e| tracing::warn!("NeedsReply row skip: {e}")).ok())
+        .collect();
+
+    (messages, total)
 }
 
 /// Save a draft message. If `draft_id` is Some, update existing; otherwise create new.
@@ -432,7 +493,7 @@ pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
     let mut stmt = conn
         .prepare(
             "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_needs_reply
              FROM messages
              WHERE account_id = ?1 AND is_draft = 1 AND is_deleted = 0
              ORDER BY updated_at DESC
@@ -950,7 +1011,7 @@ mod tests {
         let entities = r#"{"people":["Alice","Bob"],"dates":["2024-03-15"],"amounts":[],"topics":["project review"]}"#;
         let updated = update_ai_metadata(
             &conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test email requesting action",
-            Some(entities), Some("2024-03-15"),
+            Some(entities), Some("2024-03-15"), true,
         );
         assert!(updated);
 
@@ -961,5 +1022,53 @@ mod tests {
         assert_eq!(detail.ai_priority_label.as_deref(), Some("high"));
         assert_eq!(detail.ai_category.as_deref(), Some("Primary"));
         assert_eq!(detail.ai_summary.as_deref(), Some("Test email requesting action"));
+        assert!(detail.ai_needs_reply);
+    }
+
+    #[test]
+    fn test_list_needs_reply() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        // Create 3 messages: 2 unread needing reply, 1 read needing reply
+        let mut msg1 = make_insert_message(&account.id, "INBOX", "Question 1", false);
+        msg1.message_id = Some("<nr-1@example.com>".to_string());
+        let id1 = InsertMessage::insert(&conn, &msg1).unwrap();
+
+        let mut msg2 = make_insert_message(&account.id, "INBOX", "Question 2", false);
+        msg2.message_id = Some("<nr-2@example.com>".to_string());
+        let id2 = InsertMessage::insert(&conn, &msg2).unwrap();
+
+        let mut msg3 = make_insert_message(&account.id, "INBOX", "Question 3 (read)", true);
+        msg3.message_id = Some("<nr-3@example.com>".to_string());
+        let id3 = InsertMessage::insert(&conn, &msg3).unwrap();
+
+        // Mark all as needing reply
+        update_ai_metadata(&conn, &id1, "ACTION_REQUEST", 0.9, "urgent", "Primary", "Q1", None, None, true);
+        update_ai_metadata(&conn, &id2, "ACTION_REQUEST", 0.8, "high", "Primary", "Q2", None, None, true);
+        update_ai_metadata(&conn, &id3, "ACTION_REQUEST", 0.7, "high", "Primary", "Q3", None, None, true);
+
+        // Only unread messages that need reply
+        let (needs_reply, total) = list_needs_reply(&conn, Some(&account.id), 50, 0);
+        assert_eq!(total, 2);
+        assert_eq!(needs_reply.len(), 2);
+        assert!(needs_reply.iter().all(|m| m.ai_needs_reply));
+    }
+
+    #[test]
+    fn test_list_needs_reply_all_accounts() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let account = create_test_account(&conn);
+
+        let mut msg = make_insert_message(&account.id, "INBOX", "Reply me", false);
+        msg.message_id = Some("<nr-all-1@example.com>".to_string());
+        let id = InsertMessage::insert(&conn, &msg).unwrap();
+        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.9, "urgent", "Primary", "Q", None, None, true);
+
+        let (needs_reply, total) = list_needs_reply(&conn, None, 50, 0);
+        assert_eq!(total, 1);
+        assert_eq!(needs_reply.len(), 1);
     }
 }
