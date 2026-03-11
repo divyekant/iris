@@ -4,6 +4,7 @@
   import { push } from 'svelte-spa-router';
   import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send } from 'lucide-svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
+  import MultiReplyPicker from '../components/compose/MultiReplyPicker.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
@@ -25,6 +26,38 @@
   let summaryLoading = $state(false);
   let summaryOpen = $state(false);
   let summaryError = $state('');
+
+  // Multi-reply state
+  let showMultiReply = $state(false);
+  let multiReplyLoading = $state(false);
+  let multiReplyOptions = $state<{ tone: string; subject: string; body: string }[]>([]);
+  let multiReplyError = $state('');
+
+  async function handleGenerateReplies() {
+    showMultiReply = true;
+    multiReplyLoading = true;
+    multiReplyError = '';
+    multiReplyOptions = [];
+    try {
+      const msg = lastMessage();
+      const res = await api.ai.multiReply(params.id, msg?.message_id || msg?.id);
+      multiReplyOptions = res.options;
+    } catch (e: any) {
+      if (e.message?.includes('503')) {
+        multiReplyError = 'Enable AI in Settings to use this feature.';
+      } else {
+        multiReplyError = 'Failed to generate reply options.';
+      }
+    } finally {
+      multiReplyLoading = false;
+    }
+  }
+
+  function handlePickReply(option: { tone: string; subject: string; body: string }) {
+    replySubject = option.subject;
+    replyBody = option.body;
+    showMultiReply = false;
+  }
 
   async function loadThread() {
     loading = true;
@@ -105,6 +138,9 @@
     replySubject = '';
     replyBody = '';
     sendError = '';
+    showMultiReply = false;
+    multiReplyOptions = [];
+    multiReplyError = '';
   }
 
   async function handleSend() {
@@ -330,12 +366,33 @@
             placeholder="Write your reply..."
           ></textarea>
 
+          <!-- Multi-reply picker (reply/reply-all only) -->
+          {#if showMultiReply && (replyMode === 'reply' || replyMode === 'reply-all')}
+            <MultiReplyPicker
+              options={multiReplyOptions}
+              loading={multiReplyLoading}
+              error={multiReplyError}
+              onpick={handlePickReply}
+              onclose={() => (showMultiReply = false)}
+            />
+          {/if}
+
           <!-- Send bar -->
           <div class="flex items-center gap-2">
             {#if sendError}
               <p class="text-xs flex-1" style="color: var(--iris-color-error);">{sendError}</p>
             {:else}
               <span class="flex-1"></span>
+            {/if}
+            {#if replyMode === 'reply' || replyMode === 'reply-all'}
+              <button
+                class="px-3 py-1.5 text-xs rounded-lg font-medium transition-colors disabled:opacity-50 reply-ai-btn"
+                onclick={handleGenerateReplies}
+                disabled={multiReplyLoading || sending}
+                title="Generate 3 AI reply options in different tones"
+              >
+                {multiReplyLoading ? 'Generating...' : 'AI Reply Options'}
+              </button>
             {/if}
             <span class="text-[10px]" style="color: var(--iris-color-text-faint);">
               {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+Enter to send
@@ -406,5 +463,13 @@
   }
   .reply-send-btn:hover:not(:disabled) {
     filter: brightness(1.1);
+  }
+  .reply-ai-btn {
+    color: var(--iris-color-primary);
+    background: transparent;
+    border: 1px solid var(--iris-color-primary);
+  }
+  .reply-ai-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent);
   }
 </style>
