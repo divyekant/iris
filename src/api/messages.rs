@@ -75,6 +75,35 @@ pub async fn unsubscribe(
 }
 
 #[derive(Debug, Serialize)]
+pub struct NeedsReplyResponse {
+    pub messages: Vec<MessageSummary>,
+    pub total: i64,
+}
+
+pub async fn list_needs_reply(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<NeedsReplyResponse>, StatusCode> {
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let account_id = params.get("account_id").map(|s| s.as_str());
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(50)
+        .min(500);
+    let offset = params
+        .get("offset")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
+
+    let (messages, total) = message::list_needs_reply(&conn, account_id, limit, offset);
+
+    Ok(Json(NeedsReplyResponse { messages, total }))
+}
+
+#[derive(Debug, Serialize)]
 pub struct MessageDetailResponse {
     #[serde(flatten)]
     pub message: MessageDetail,
@@ -132,7 +161,7 @@ pub async fn list_messages(
 
     let select_cols = "m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                       m.labels, m.ai_priority_label, m.ai_category, m.ai_sentiment";
+                       m.labels, m.ai_priority_label, m.ai_category, m.ai_sentiment, m.ai_needs_reply";
 
     // Thread grouping: show only the latest message per thread using ROW_NUMBER()
     let (messages, unread, total) = if let Some(ref account_id) = params.account_id {

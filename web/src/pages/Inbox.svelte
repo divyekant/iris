@@ -226,19 +226,34 @@
     if (showLoading) loading = true;
     error = '';
     try {
-      const res = await api.messages.list({
-        account_id: filterAccountId || undefined,
-        category: activeCategory || undefined,
-        limit: PAGE_SIZE,
-        offset: (page - 1) * PAGE_SIZE,
-      });
-      // Only update if data actually changed to prevent unnecessary re-renders
-      if (JSON.stringify(res.messages.map((m: any) => m.id + m.is_read + m.is_starred)) !==
-          JSON.stringify(messages.map((m: any) => m.id + m.is_read + m.is_starred))) {
-        messages = res.messages;
+      if (activeCategory === '__needs_reply__') {
+        // Fetch from dedicated needs-reply endpoint
+        const res = await api.messages.needsReply({
+          account_id: filterAccountId || undefined,
+          limit: PAGE_SIZE,
+          offset: (page - 1) * PAGE_SIZE,
+        });
+        if (JSON.stringify(res.messages.map((m: any) => m.id + m.is_read + m.is_starred)) !==
+            JSON.stringify(messages.map((m: any) => m.id + m.is_read + m.is_starred))) {
+          messages = res.messages;
+        }
+        unreadCount = res.total;
+        total = res.total;
+      } else {
+        const res = await api.messages.list({
+          account_id: filterAccountId || undefined,
+          category: activeCategory || undefined,
+          limit: PAGE_SIZE,
+          offset: (page - 1) * PAGE_SIZE,
+        });
+        // Only update if data actually changed to prevent unnecessary re-renders
+        if (JSON.stringify(res.messages.map((m: any) => m.id + m.is_read + m.is_starred)) !==
+            JSON.stringify(messages.map((m: any) => m.id + m.is_read + m.is_starred))) {
+          messages = res.messages;
+        }
+        unreadCount = res.unread_count;
+        total = res.total;
       }
-      unreadCount = res.unread_count;
-      total = res.total;
       // Track first account for compose
       if (messages.length > 0 && !activeAccountId) {
         activeAccountId = messages[0].account_id;

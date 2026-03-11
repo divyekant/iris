@@ -141,6 +141,8 @@ mod tests {
             has_attachments: false,
             attachment_names: None,
             size_bytes: Some(512),
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         }
     }
 

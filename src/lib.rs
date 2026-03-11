@@ -48,6 +48,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/accounts/{id}", get(api::accounts::get_account).delete(api::accounts::delete_account))
         .route("/accounts/{id}/notifications", get(api::accounts::get_notifications).put(api::accounts::set_notifications))
         .route("/messages", get(api::messages::list_messages))
+        .route("/messages/needs-reply", get(api::messages::list_needs_reply))
         .route("/messages/{id}", get(api::messages::get_message))
         .route("/messages/{id}/read", put(api::messages::mark_message_read))
         .route("/messages/{id}/attachments", get(api::attachments::list_attachments))

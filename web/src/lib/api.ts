@@ -77,6 +77,13 @@ export const api = {
       }),
     unsubscribe: (id: string) =>
       request<{ success: boolean; method: string; url?: string }>(`/api/messages/${id}/unsubscribe`, { method: 'POST' }),
+    needsReply: (params?: { account_id?: string; limit?: number; offset?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.account_id) query.set('account_id', params.account_id);
+      if (params?.limit) query.set('limit', String(params.limit));
+      if (params?.offset) query.set('offset', String(params.offset));
+      return request<{ messages: any[]; total: number }>(`/api/messages/needs-reply?${query}`);
+    },
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
