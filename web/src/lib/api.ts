@@ -122,6 +122,12 @@ export const api = {
     chatConfirm: (data: { session_id: string; message_id: string }) =>
       request<{ executed: boolean; updated: number }>('/api/ai/chat/confirm', { method: 'POST', body: JSON.stringify(data) }),
     reprocess: () => request<{ enqueued: number }>('/api/ai/reprocess', { method: 'POST' }),
+    briefing: () =>
+      request<{
+        summary: string;
+        stats: { total_today: number; unread: number; needs_reply: number; urgent: number };
+        highlights: { message_id: string; from: string; subject: string; reason: string }[];
+      }>('/api/ai/briefing'),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),

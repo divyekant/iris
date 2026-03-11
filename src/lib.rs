@@ -57,6 +57,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/search", get(api::search::search))
         .route("/ai/assist", post(api::ai_actions::ai_assist))
         .route("/ai/feedback-stats", get(api::ai_feedback::feedback_stats))
+        .route("/ai/briefing", get(api::briefing::get_briefing))
         .route("/ai/chat", post(api::chat::chat))
         .route("/ai/chat/confirm", post(api::chat::confirm_action))
         .route("/ai/chat/memory", get(api::chat::get_chat_memory))
