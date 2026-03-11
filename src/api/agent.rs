@@ -990,6 +990,8 @@ pub async fn agent_send(
         has_attachments: false,
         attachment_names: None,
         size_bytes: None,
+        list_unsubscribe: None,
+        list_unsubscribe_post: false,
     };
 
     let msg_id = message::InsertMessage::insert(&conn, &sent_msg).expect("sent message should always insert");

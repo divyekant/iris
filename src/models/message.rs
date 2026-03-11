@@ -110,6 +110,8 @@ pub struct MessageDetail {
     pub ai_category: Option<String>,
     pub ai_summary: Option<String>,
     pub ai_sentiment: Option<String>,
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: bool,
 }
 
 impl MessageDetail {
@@ -144,6 +146,8 @@ impl MessageDetail {
             ai_category: row.get("ai_category")?,
             ai_summary: row.get("ai_summary")?,
             ai_sentiment: row.get("ai_sentiment")?,
+            list_unsubscribe: row.get("list_unsubscribe")?,
+            list_unsubscribe_post: row.get::<_, bool>("list_unsubscribe_post").unwrap_or(false),
         })
     }
 
@@ -152,7 +156,8 @@ impl MessageDetail {
             "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                     to_addresses, cc_addresses, subject, snippet, date,
                     body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_sentiment
+                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_sentiment,
+                    list_unsubscribe, list_unsubscribe_post
              FROM messages WHERE id = ?1 AND is_deleted = 0",
             rusqlite::params![id],
             Self::from_row,
@@ -192,7 +197,8 @@ impl MessageDetail {
                 SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
                         body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_sentiment
+                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_sentiment,
+                        list_unsubscribe, list_unsubscribe_post
                  FROM ranked WHERE rn = 1
                  ORDER BY date ASC",
             )
@@ -242,6 +248,8 @@ pub struct InsertMessage {
     pub has_attachments: bool,
     pub attachment_names: Option<String>,
     pub size_bytes: Option<i64>,
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: bool,
 }
 
 impl InsertMessage {
@@ -283,14 +291,16 @@ impl InsertMessage {
                 subject, date, snippet, body_text, body_html,
                 is_read, is_starred, is_draft, labels,
                 uid, modseq, raw_headers,
-                has_attachments, attachment_names, size_bytes
+                has_attachments, attachment_names, size_bytes,
+                list_unsubscribe, list_unsubscribe_post
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15,
                 ?16, ?17, ?18, ?19,
                 ?20, ?21, ?22,
-                ?23, ?24, ?25
+                ?23, ?24, ?25,
+                ?26, ?27
             )",
             rusqlite::params![
                 id,
@@ -318,6 +328,8 @@ impl InsertMessage {
                 msg.has_attachments,
                 msg.attachment_names,
                 msg.size_bytes,
+                msg.list_unsubscribe,
+                msg.list_unsubscribe_post,
             ],
         )
         .expect("failed to insert message");
@@ -656,6 +668,8 @@ mod tests {
             has_attachments: false,
             attachment_names: None,
             size_bytes: Some(1024),
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         }
     }
 
@@ -1078,7 +1092,7 @@ mod tests {
         let id = InsertMessage::insert(&conn, &msg).unwrap();
 
         // Set AI metadata: high priority (0.85)
-        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test", None, None);
+        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test", None, None, None);
 
         // Run decay with 7-day threshold and 0.85 factor
         let decayed = decay_priority_scores(&conn, 7, 0.85);
@@ -1104,7 +1118,7 @@ mod tests {
         msg.message_id = Some("<decay-recent@example.com>".to_string());
         let id = InsertMessage::insert(&conn, &msg).unwrap();
 
-        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test", None, None);
+        update_ai_metadata(&conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test", None, None, None);
 
         // Decay with 7-day threshold: recent message should NOT be affected
         let decayed = decay_priority_scores(&conn, 7, 0.85);
@@ -1126,7 +1140,7 @@ mod tests {
         msg.message_id = Some("<decay-low@example.com>".to_string());
         let id = InsertMessage::insert(&conn, &msg).unwrap();
 
-        update_ai_metadata(&conn, &id, "FYI", 0.2, "low", "Updates", "Test", None, None);
+        update_ai_metadata(&conn, &id, "FYI", 0.2, "low", "Updates", "Test", None, None, None);
 
         // Decay should skip messages with score <= 0.3
         let decayed = decay_priority_scores(&conn, 7, 0.85);
@@ -1148,7 +1162,7 @@ mod tests {
         msg.message_id = Some("<decay-label@example.com>".to_string());
         let id = InsertMessage::insert(&conn, &msg).unwrap();
 
-        update_ai_metadata(&conn, &id, "URGENT", 0.9, "urgent", "Primary", "Test", None, None);
+        update_ai_metadata(&conn, &id, "URGENT", 0.9, "urgent", "Primary", "Test", None, None, None);
 
         // Run decay multiple times to push score down through label thresholds
         // 0.9 * 0.5 = 0.45 (normal range: 0.3-0.6)

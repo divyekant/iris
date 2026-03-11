@@ -362,6 +362,24 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> (InsertMes
         .as_deref()
         .and_then(extract_gmail_labels);
 
+    // Parse List-Unsubscribe and List-Unsubscribe-Post headers (RFC 2369 / RFC 8058)
+    let (list_unsubscribe, list_unsubscribe_post) = raw_headers
+        .as_deref()
+        .map(|h| {
+            let headers = match mailparse::parse_headers(h.as_bytes()) {
+                Ok((hdrs, _)) => hdrs,
+                Err(_) => return (None, false),
+            };
+            let unsub_url = headers
+                .get_first_value("List-Unsubscribe")
+                .and_then(|v| parse_list_unsubscribe(&v));
+            let has_post = headers
+                .get_first_value("List-Unsubscribe-Post")
+                .is_some();
+            (unsub_url, has_post)
+        })
+        .unwrap_or((None, false));
+
     (InsertMessage {
         account_id: account_id.to_string(),
         message_id,
@@ -387,6 +405,8 @@ fn parse_fetch(account_id: &str, fetch: &async_imap::types::Fetch) -> (InsertMes
         has_attachments,
         attachment_names,
         size_bytes: fetch.size.map(|s| s as i64),
+        list_unsubscribe,
+        list_unsubscribe_post,
     }, mime_parsed.attachment_data)
 }
 
@@ -561,6 +581,45 @@ fn extract_thread_id(raw_headers: &str, message_id: &Option<String>) -> Option<S
 
     // Fall back to own message-id
     message_id.as_ref().map(|id| strip_brackets(id))
+}
+
+// ---------------------------------------------------------------------------
+// List-Unsubscribe parsing (RFC 2369 / RFC 8058)
+// ---------------------------------------------------------------------------
+
+/// Parse the List-Unsubscribe header value and extract the best URL.
+/// Prefers https:// over http:// over mailto: URLs.
+/// URLs are enclosed in angle brackets, comma-separated:
+/// e.g. `<https://example.com/unsub>, <mailto:unsub@example.com>`
+fn parse_list_unsubscribe(header_value: &str) -> Option<String> {
+    // First pass: prefer HTTPS URLs
+    for part in header_value.split(',') {
+        let trimmed = part.trim();
+        if let Some(url) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            if url.starts_with("https://") {
+                return Some(url.to_string());
+            }
+        }
+    }
+    // Second pass: accept HTTP URLs
+    for part in header_value.split(',') {
+        let trimmed = part.trim();
+        if let Some(url) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            if url.starts_with("http://") {
+                return Some(url.to_string());
+            }
+        }
+    }
+    // Third pass: fall back to mailto
+    for part in header_value.split(',') {
+        let trimmed = part.trim();
+        if let Some(url) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            if url.starts_with("mailto:") {
+                return Some(url.to_string());
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -814,5 +873,47 @@ mod tests {
         assert!(result.is_some());
         let labels: Vec<String> = serde_json::from_str(&result.unwrap()).unwrap();
         assert_eq!(labels, vec!["Inbox"]);
+    }
+
+    #[test]
+    fn test_parse_list_unsubscribe_http() {
+        let header = "<https://example.com/unsubscribe?id=123>";
+        let result = parse_list_unsubscribe(header);
+        assert_eq!(result, Some("https://example.com/unsubscribe?id=123".to_string()));
+    }
+
+    #[test]
+    fn test_parse_list_unsubscribe_mailto() {
+        let header = "<mailto:unsubscribe@example.com?subject=Unsubscribe>";
+        let result = parse_list_unsubscribe(header);
+        assert_eq!(result, Some("mailto:unsubscribe@example.com?subject=Unsubscribe".to_string()));
+    }
+
+    #[test]
+    fn test_parse_list_unsubscribe_both_prefers_http() {
+        let header = "<mailto:unsub@example.com>, <https://example.com/unsub>";
+        let result = parse_list_unsubscribe(header);
+        assert_eq!(result, Some("https://example.com/unsub".to_string()));
+    }
+
+    #[test]
+    fn test_parse_list_unsubscribe_empty() {
+        let header = "";
+        let result = parse_list_unsubscribe(header);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_list_unsubscribe_http_fallback() {
+        let header = "<http://example.com/unsub>";
+        let result = parse_list_unsubscribe(header);
+        assert_eq!(result, Some("http://example.com/unsub".to_string()));
+    }
+
+    #[test]
+    fn test_parse_list_unsubscribe_https_preferred_over_http() {
+        let header = "<http://example.com/unsub>, <https://example.com/unsub-secure>";
+        let result = parse_list_unsubscribe(header);
+        assert_eq!(result, Some("https://example.com/unsub-secure".to_string()));
     }
 }

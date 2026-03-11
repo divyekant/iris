@@ -563,6 +563,8 @@ async fn send_pending_email(
         has_attachments: false,
         attachment_names: None,
         size_bytes: None,
+        list_unsubscribe: None,
+        list_unsubscribe_post: false,
     };
 
     let conn = db.get().map_err(|e| e.to_string())?;

@@ -1,12 +1,14 @@
 <script lang="ts">
+  import { api, getSessionToken } from '../../lib/api';
   import EmailBody from './EmailBody.svelte';
   import TrustBadge from '../TrustBadge.svelte';
-  import { api, getSessionToken } from '../../lib/api';
 
   let { message }: { message: any } = $props();
   let expanded = $state(true);
   let loadedAttachments = $state<any[]>([]);
   let attachmentsLoaded = $state(false);
+  let unsubscribing = $state(false);
+  let unsubscribeResult = $state<string | null>(null);
 
   function formatDate(ts: number): string {
     return new Date(ts * 1000).toLocaleString([], {
@@ -75,6 +77,27 @@
       });
   }
 
+  async function handleUnsubscribe() {
+    unsubscribing = true;
+    unsubscribeResult = null;
+    try {
+      const res = await api.messages.unsubscribe(message.id);
+      if (res.method === 'one-click') {
+        unsubscribeResult = res.success ? 'Unsubscribed successfully.' : 'Unsubscribe request sent.';
+      } else if (res.method === 'url' && res.url) {
+        window.open(res.url, '_blank', 'noopener,noreferrer');
+        unsubscribeResult = 'Opened unsubscribe page in new tab.';
+      } else if (res.method === 'mailto' && res.url) {
+        window.location.href = res.url;
+        unsubscribeResult = 'Opening email client to unsubscribe.';
+      }
+    } catch {
+      unsubscribeResult = 'Failed to unsubscribe.';
+    } finally {
+      unsubscribing = false;
+    }
+  }
+
   // Load attachments from the API when expanded and message has attachments
   $effect(() => {
     if (expanded && message.has_attachments && !attachmentsLoaded) {
@@ -127,6 +150,23 @@
       {#if message.trust || (message.tracking_pixels && message.tracking_pixels.length > 0) || message.impersonation_risk}
         <div class="mb-3">
           <TrustBadge trust={message.trust || {}} trackingPixels={message.tracking_pixels || []} impersonationRisk={message.impersonation_risk || null} />
+        </div>
+      {/if}
+
+      {#if message.list_unsubscribe}
+        <div class="mb-3 flex items-center gap-2">
+          {#if unsubscribeResult}
+            <span class="text-xs" style="color: var(--iris-color-text-faint);">{unsubscribeResult}</span>
+          {:else}
+            <button
+              class="text-xs px-3 py-1 rounded-md transition-colors unsubscribe-btn"
+              onclick={handleUnsubscribe}
+              disabled={unsubscribing}
+            >
+              {unsubscribing ? 'Unsubscribing...' : 'Unsubscribe'}
+            </button>
+            <span class="text-xs" style="color: var(--iris-color-text-faint);">from this mailing list</span>
+          {/if}
         </div>
       {/if}
 
@@ -199,5 +239,18 @@
   .download-icon {
     margin-left: 4px;
     font-size: 14px;
+  }
+  .unsubscribe-btn {
+    background: var(--iris-color-bg-surface);
+    color: var(--iris-color-text-muted);
+    border: 1px solid var(--iris-color-border);
+  }
+  .unsubscribe-btn:hover:not(:disabled) {
+    background: var(--iris-color-bg-elevated);
+    color: var(--iris-color-text);
+    border-color: var(--iris-color-border-subtle);
+  }
+  .unsubscribe-btn:disabled {
+    opacity: 0.5;
   }
 </style>

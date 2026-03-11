@@ -75,6 +75,8 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ ids, block_sender: blockSender }),
       }),
+    unsubscribe: (id: string) =>
+      request<{ success: boolean; method: string; url?: string }>(`/api/messages/${id}/unsubscribe`, { method: 'POST' }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
