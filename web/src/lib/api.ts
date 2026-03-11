@@ -107,9 +107,9 @@ export const api = {
     return request<{ results: any[]; total: number; query: string }>(`/api/search?${query}`);
   },
   ai: {
-    getConfig: () => request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai'),
-    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean; anthropic_api_key?: string; anthropic_model?: string; openai_api_key?: string; openai_model?: string; memories_url?: string; memories_api_key?: string }) =>
-      request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean }>('/api/config/ai', {
+    getConfig: () => request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean; decay_enabled: boolean; decay_threshold_days: number; decay_factor: number }>('/api/config/ai'),
+    setConfig: (data: { ollama_url?: string; model?: string; enabled?: boolean; anthropic_api_key?: string; anthropic_model?: string; openai_api_key?: string; openai_model?: string; memories_url?: string; memories_api_key?: string; decay_enabled?: boolean; decay_threshold_days?: number; decay_factor?: number }) =>
+      request<{ enabled: boolean; connected: boolean; providers: { name: string; model: string; healthy: boolean }[]; ollama_url: string; model: string; memories_url: string; memories_connected: boolean; decay_enabled: boolean; decay_threshold_days: number; decay_factor: number }>('/api/config/ai', {
         method: 'PUT',
         body: JSON.stringify(data),
       }),

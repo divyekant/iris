@@ -17,6 +17,10 @@ pub struct AiConfigResponse {
     pub ollama_url: String,
     pub model: String,
     pub connected: bool,
+    // Priority decay settings
+    pub decay_enabled: bool,
+    pub decay_threshold_days: i64,
+    pub decay_factor: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +34,9 @@ pub struct SetAiConfigRequest {
     pub openai_model: Option<String>,
     pub memories_url: Option<String>,
     pub memories_api_key: Option<String>,
+    pub decay_enabled: Option<bool>,
+    pub decay_threshold_days: Option<i64>,
+    pub decay_factor: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,12 +66,15 @@ fn set_config_value(conn: &rusqlite::Connection, key: &str, value: &str) -> Resu
 pub async fn get_ai_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AiConfigResponse>, StatusCode> {
-    let (ollama_url, model, enabled) = {
+    let (ollama_url, model, enabled, decay_enabled, decay_threshold_days, decay_factor) = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let ollama_url = get_config_value(&conn, "ai_ollama_url", &state.config.ollama_url);
         let model = get_config_value(&conn, "ai_model", "");
         let enabled = get_config_value(&conn, "ai_enabled", "false") == "true";
-        (ollama_url, model, enabled)
+        let decay_enabled = get_config_value(&conn, "decay_enabled", "true") == "true";
+        let decay_threshold_days: i64 = get_config_value(&conn, "decay_threshold_days", "7").parse().unwrap_or(7);
+        let decay_factor: f64 = get_config_value(&conn, "decay_factor", "0.85").parse().unwrap_or(0.85);
+        (ollama_url, model, enabled, decay_enabled, decay_threshold_days, decay_factor)
     };
 
     let providers = state.providers.health_status().await;
@@ -79,6 +89,9 @@ pub async fn get_ai_config(
         ollama_url,
         model,
         connected,
+        decay_enabled,
+        decay_threshold_days,
+        decay_factor,
     }))
 }
 
@@ -116,6 +129,15 @@ pub async fn set_ai_config(
         if let Some(ref key) = input.memories_api_key {
             set_config_value(&conn, "memories_api_key", key)?;
         }
+        if let Some(decay_enabled) = input.decay_enabled {
+            set_config_value(&conn, "decay_enabled", if decay_enabled { "true" } else { "false" })?;
+        }
+        if let Some(days) = input.decay_threshold_days {
+            set_config_value(&conn, "decay_threshold_days", &days.to_string())?;
+        }
+        if let Some(factor) = input.decay_factor {
+            set_config_value(&conn, "decay_factor", &factor.to_string())?;
+        }
     }
 
     // Apply memories config change live (no restart needed)
@@ -128,12 +150,15 @@ pub async fn set_ai_config(
     }
 
     // Re-read to return current state
-    let (ollama_url, model, enabled) = {
+    let (ollama_url, model, enabled, decay_enabled, decay_threshold_days, decay_factor) = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let ollama_url = get_config_value(&conn, "ai_ollama_url", &state.config.ollama_url);
         let model = get_config_value(&conn, "ai_model", "");
         let enabled = get_config_value(&conn, "ai_enabled", "false") == "true";
-        (ollama_url, model, enabled)
+        let decay_enabled = get_config_value(&conn, "decay_enabled", "true") == "true";
+        let decay_threshold_days: i64 = get_config_value(&conn, "decay_threshold_days", "7").parse().unwrap_or(7);
+        let decay_factor: f64 = get_config_value(&conn, "decay_factor", "0.85").parse().unwrap_or(0.85);
+        (ollama_url, model, enabled, decay_enabled, decay_threshold_days, decay_factor)
     };
 
     let providers = state.providers.health_status().await;
@@ -148,6 +173,9 @@ pub async fn set_ai_config(
         ollama_url,
         model,
         connected,
+        decay_enabled,
+        decay_threshold_days,
+        decay_factor,
     }))
 }
 
