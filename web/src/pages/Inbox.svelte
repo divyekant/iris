@@ -10,6 +10,7 @@
   import SkeletonRow from '../components/SkeletonRow.svelte';
   import Toast from '../components/Toast.svelte';
   import SpamDialog from '../components/SpamDialog.svelte';
+  import ContactTopicsPanel from '../components/contacts/ContactTopicsPanel.svelte';
 
 
   let messages = $state<any[]>([]);
@@ -30,6 +31,8 @@
   let spamTargetId = $state('');
   let spamTargetEmail = $state('');
   let mutedThreadIds = $state(new Set<string>());
+  let topicsEmail = $state<string | null>(null);
+  let topicsName = $state<string | null>(null);
   let notificationPrefs = $state<Record<string, boolean>>({});
 
   // Keyboard navigation state
@@ -296,6 +299,14 @@
   }
 
   async function handleRowAction(id: string, action: string) {
+    if (action === 'show_topics') {
+      const msg = messages.find(m => m.id === id);
+      if (msg) {
+        topicsEmail = msg.from_address;
+        topicsName = msg.from_name || null;
+      }
+      return;
+    }
     if (action === 'report_spam') {
       const msg = messages.find(m => m.id === id);
       spamTargetId = id;
@@ -530,6 +541,14 @@
     messageIds={[spamTargetId]}
     onconfirm={handleReportSpam}
     onclose={() => { showSpamDialog = false; spamTargetId = ''; spamTargetEmail = ''; }}
+  />
+{/if}
+
+{#if topicsEmail}
+  <ContactTopicsPanel
+    email={topicsEmail}
+    name={topicsName}
+    onclose={() => { topicsEmail = null; topicsName = null; }}
   />
 {/if}
 

@@ -6,6 +6,7 @@
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
+  import ContactTopicsPanel from '../components/contacts/ContactTopicsPanel.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
@@ -31,6 +32,10 @@
 
   // Spam dialog state
   let showSpamDialog = $state(false);
+
+  // Contact topics state
+  let topicsEmail = $state<string | null>(null);
+  let topicsName = $state<string | null>(null);
 
   // AI summary state
   let aiSummary = $state<string | null>(null);
@@ -423,9 +428,17 @@
     {#if thread}
       <div class="flex-1 min-w-0">
         <h2 class="text-base font-semibold truncate" style="color: var(--iris-color-text);">{thread.subject || '(no subject)'}</h2>
-        <p class="text-xs truncate" style="color: var(--iris-color-text-faint);">
-          {thread.participants.map((p: any) => p.name || p.email).join(', ')}
-          &middot; {thread.message_count} message{thread.message_count === 1 ? '' : 's'}
+        <p class="text-xs truncate flex items-center gap-1.5" style="color: var(--iris-color-text-faint);">
+          <span class="truncate">
+            {thread.participants.map((p: any) => p.name || p.email).join(', ')}
+            &middot; {thread.message_count} message{thread.message_count === 1 ? '' : 's'}
+          </span>
+          {#if thread.messages?.[0]?.from_address}
+            <button
+              class="flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded transition-colors topics-link"
+              onclick={(e) => { e.stopPropagation(); topicsEmail = thread.messages[0].from_address; topicsName = thread.messages[0].from_name || null; }}
+            >Topics</button>
+          {/if}
         </p>
       </div>
       <div class="flex items-center gap-0.5">
@@ -587,6 +600,14 @@
   />
 {/if}
 
+{#if topicsEmail}
+  <ContactTopicsPanel
+    email={topicsEmail}
+    name={topicsName}
+    onclose={() => { topicsEmail = null; topicsName = null; }}
+  />
+{/if}
+
 <style>
   .thread-action-btn {
     color: var(--iris-color-text-faint);
@@ -638,5 +659,12 @@
   }
   .reply-send-btn:hover:not(:disabled) {
     filter: brightness(1.1);
+  }
+  .topics-link {
+    color: var(--iris-color-primary);
+    background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);
+  }
+  .topics-link:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 15%, transparent);
   }
 </style>

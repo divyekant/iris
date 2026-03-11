@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen, Clock, ShieldAlert, Reply } from 'lucide-svelte';
+  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen, Clock, ShieldAlert, Reply, Tag } from 'lucide-svelte';
   import SnoozePicker from '../SnoozePicker.svelte';
 
   interface Message {
@@ -203,6 +203,12 @@
       {/if}
     </div>
     <button
+      class="p-1 rounded transition-colors quick-action-topics"
+      style="color: var(--iris-color-text-faint);"
+      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'show_topics'); }}
+      title="Contact topics"
+    ><Tag size={14} /></button>
+    <button
       class="p-1 rounded transition-colors quick-action-spam"
       style="color: var(--iris-color-text-faint);"
       onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'report_spam'); }}
@@ -215,5 +221,6 @@
   .quick-action:hover { color: var(--iris-color-primary); }
   .quick-action-delete:hover { color: var(--iris-color-error); }
   .quick-action-snooze:hover { color: var(--iris-color-warning); }
+  .quick-action-topics:hover { color: var(--iris-color-primary); }
   .quick-action-spam:hover { color: var(--iris-color-warning); }
 </style>
