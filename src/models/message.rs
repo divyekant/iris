@@ -31,6 +31,7 @@ pub struct MessageSummary {
     pub labels: Option<String>,
     pub ai_priority_label: Option<String>,
     pub ai_category: Option<String>,
+    pub ai_sentiment: Option<String>,
 }
 
 impl MessageSummary {
@@ -51,6 +52,7 @@ impl MessageSummary {
             labels: row.get("labels")?,
             ai_priority_label: row.get("ai_priority_label")?,
             ai_category: row.get("ai_category")?,
+            ai_sentiment: row.get("ai_sentiment")?,
         })
     }
 
@@ -66,7 +68,7 @@ impl MessageSummary {
         let mut stmt = conn
             .prepare(
                 "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment
                  FROM messages
                  WHERE account_id = ?1 AND folder = ?2 AND is_deleted = 0
                  ORDER BY date DESC
@@ -107,6 +109,7 @@ pub struct MessageDetail {
     pub ai_priority_label: Option<String>,
     pub ai_category: Option<String>,
     pub ai_summary: Option<String>,
+    pub ai_sentiment: Option<String>,
 }
 
 impl MessageDetail {
@@ -140,6 +143,7 @@ impl MessageDetail {
             ai_priority_label: row.get("ai_priority_label")?,
             ai_category: row.get("ai_category")?,
             ai_summary: row.get("ai_summary")?,
+            ai_sentiment: row.get("ai_sentiment")?,
         })
     }
 
@@ -148,7 +152,7 @@ impl MessageDetail {
             "SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                     to_addresses, cc_addresses, subject, snippet, date,
                     body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
+                    ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_sentiment
              FROM messages WHERE id = ?1 AND is_deleted = 0",
             rusqlite::params![id],
             Self::from_row,
@@ -188,7 +192,7 @@ impl MessageDetail {
                 SELECT id, message_id, account_id, thread_id, folder, from_address, from_name,
                         to_addresses, cc_addresses, subject, snippet, date,
                         body_text, body_html, is_read, is_starred, has_attachments, attachment_names,
-                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary
+                        ai_intent, ai_priority_score, ai_priority_label, ai_category, ai_summary, ai_sentiment
                  FROM ranked WHERE rn = 1
                  ORDER BY date ASC",
             )
@@ -343,6 +347,7 @@ pub fn update_ai_metadata(
     summary: &str,
     entities: Option<&str>,
     deadline: Option<&str>,
+    sentiment: Option<&str>,
 ) -> bool {
     let updated = conn
         .execute(
@@ -354,9 +359,10 @@ pub fn update_ai_metadata(
                 ai_summary = ?6,
                 ai_entities = ?7,
                 ai_deadline = ?8,
+                ai_sentiment = ?9,
                 updated_at = unixepoch()
              WHERE id = ?1",
-            rusqlite::params![id, intent, priority_score, priority_label, category, summary, entities, deadline],
+            rusqlite::params![id, intent, priority_score, priority_label, category, summary, entities, deadline, sentiment],
         )
         .unwrap_or(0);
     updated > 0
@@ -432,7 +438,7 @@ pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
     let mut stmt = conn
         .prepare(
             "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment
              FROM messages
              WHERE account_id = ?1 AND is_draft = 1 AND is_deleted = 0
              ORDER BY updated_at DESC
@@ -1022,7 +1028,7 @@ mod tests {
         let entities = r#"{"people":["Alice","Bob"],"dates":["2024-03-15"],"amounts":[],"topics":["project review"]}"#;
         let updated = update_ai_metadata(
             &conn, &id, "ACTION_REQUEST", 0.85, "high", "Primary", "Test email requesting action",
-            Some(entities), Some("2024-03-15"),
+            Some(entities), Some("2024-03-15"), Some("positive"),
         );
         assert!(updated);
 

@@ -13,6 +13,7 @@
     has_attachments?: boolean;
     ai_priority_label?: string;
     ai_category?: string;
+    ai_sentiment?: string;
     labels?: string;
   }
 
@@ -57,6 +58,13 @@
   let priorityStyle = $derived(
     message.ai_priority_label ? priorityStyles[message.ai_priority_label] || '' : ''
   );
+
+  const sentimentConfig: Record<string, { color: string; label: string }> = {
+    positive: { color: 'var(--iris-color-success)', label: 'Positive' },
+    negative: { color: 'var(--iris-color-error)', label: 'Negative' },
+    neutral: { color: 'var(--iris-color-text-faint)', label: 'Neutral' },
+    mixed: { color: 'var(--iris-color-warning)', label: 'Mixed' },
+  };
 
   let parsedLabels: string[] = $derived.by(() => {
     if (!message.labels) return [];
@@ -108,6 +116,15 @@
       {#if message.ai_category}
         <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
           {message.ai_category}
+        </span>
+      {/if}
+      {#if message.ai_sentiment && sentimentConfig[message.ai_sentiment]}
+        <span
+          class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
+          style="background: color-mix(in srgb, {sentimentConfig[message.ai_sentiment].color} 12%, transparent); color: {sentimentConfig[message.ai_sentiment].color};"
+          title="Sentiment: {sentimentConfig[message.ai_sentiment].label}"
+        >
+          {sentimentConfig[message.ai_sentiment].label}
         </span>
       {/if}
       {#each parsedLabels as label}
