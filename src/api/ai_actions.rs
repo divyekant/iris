@@ -184,6 +184,130 @@ pub async fn ai_assist(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/ai/grammar-check
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct GrammarCheckRequest {
+    pub content: String,
+    pub subject: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GrammarIssue {
+    pub kind: String,
+    pub description: String,
+    pub suggestion: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GrammarCheckResponse {
+    pub score: u8,
+    pub tone: String,
+    pub issues: Vec<GrammarIssue>,
+    pub improved_content: Option<String>,
+}
+
+const GRAMMAR_SYSTEM_PROMPT: &str = r#"You are a professional email editor. Analyze the following email for grammar, spelling, tone, and clarity. Respond with ONLY a JSON object (no markdown, no code fences):
+{"score": <0-100 quality score>, "tone": "<detected tone: formal, casual, mixed, aggressive, neutral, friendly, etc.>", "issues": [{"kind": "<grammar|spelling|tone|clarity|punctuation>", "description": "<what's wrong>", "suggestion": "<how to fix it>"}], "improved_content": "<full corrected email text>"}
+Be constructive. Only flag real issues. If the email is perfect, return an empty issues array and a score of 100."#;
+
+/// Build the grammar check prompt from the email content and optional subject.
+pub fn build_grammar_prompt(content: &str, subject: Option<&str>) -> String {
+    let mut prompt = String::new();
+    if let Some(subj) = subject {
+        prompt.push_str(&format!("Subject: {}\n\n", subj));
+    }
+    prompt.push_str(content);
+    prompt
+}
+
+/// Parse a grammar check JSON response from the AI provider.
+pub fn parse_grammar_response(raw: &str) -> Option<GrammarCheckResponse> {
+    // Strip markdown code fences if present
+    let cleaned = raw
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| raw.trim().strip_prefix("```"))
+        .unwrap_or(raw.trim());
+    let cleaned = cleaned
+        .strip_suffix("```")
+        .unwrap_or(cleaned)
+        .trim();
+
+    #[derive(Deserialize)]
+    struct RawResponse {
+        score: u8,
+        tone: String,
+        issues: Vec<RawIssue>,
+        improved_content: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawIssue {
+        kind: String,
+        description: String,
+        suggestion: String,
+    }
+
+    let parsed: RawResponse = serde_json::from_str(cleaned).ok()?;
+
+    Some(GrammarCheckResponse {
+        score: parsed.score.min(100),
+        tone: parsed.tone,
+        issues: parsed
+            .issues
+            .into_iter()
+            .map(|i| GrammarIssue {
+                kind: i.kind,
+                description: i.description,
+                suggestion: i.suggestion,
+            })
+            .collect(),
+        improved_content: parsed.improved_content,
+    })
+}
+
+pub async fn grammar_check(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<GrammarCheckRequest>,
+) -> Result<Json<GrammarCheckResponse>, StatusCode> {
+    // Validate content
+    if input.content.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if input.content.len() > 50_000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let ai_enabled = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "false".to_string());
+
+    if ai_enabled != "true" || !state.providers.has_providers() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let prompt = build_grammar_prompt(&input.content, input.subject.as_deref());
+
+    let raw = state
+        .providers
+        .generate(&prompt, Some(GRAMMAR_SYSTEM_PROMPT))
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    let response = parse_grammar_response(&raw).ok_or(StatusCode::BAD_GATEWAY)?;
+
+    Ok(Json(response))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -331,5 +455,81 @@ mod tests {
     fn test_get_assist_prompt_invalid_action() {
         assert!(get_assist_system_prompt("invalid").is_none());
         assert!(get_assist_system_prompt("").is_none());
+    }
+
+    // Grammar check tests
+
+    #[test]
+    fn test_build_grammar_prompt_without_subject() {
+        let prompt = build_grammar_prompt("Hello world", None);
+        assert_eq!(prompt, "Hello world");
+        assert!(!prompt.contains("Subject:"));
+    }
+
+    #[test]
+    fn test_build_grammar_prompt_with_subject() {
+        let prompt = build_grammar_prompt("Hello world", Some("Meeting Tomorrow"));
+        assert!(prompt.contains("Subject: Meeting Tomorrow"));
+        assert!(prompt.contains("Hello world"));
+    }
+
+    #[test]
+    fn test_parse_grammar_response_with_issues() {
+        let raw = r#"{"score": 72, "tone": "casual", "issues": [{"kind": "grammar", "description": "Subject-verb disagreement", "suggestion": "Use 'are' instead of 'is'"}], "improved_content": "They are ready."}"#;
+        let res = parse_grammar_response(raw).unwrap();
+        assert_eq!(res.score, 72);
+        assert_eq!(res.tone, "casual");
+        assert_eq!(res.issues.len(), 1);
+        assert_eq!(res.issues[0].kind, "grammar");
+        assert_eq!(res.issues[0].description, "Subject-verb disagreement");
+        assert_eq!(res.issues[0].suggestion, "Use 'are' instead of 'is'");
+        assert_eq!(res.improved_content.as_deref(), Some("They are ready."));
+    }
+
+    #[test]
+    fn test_parse_grammar_response_perfect_email() {
+        let raw = r#"{"score": 100, "tone": "formal", "issues": [], "improved_content": null}"#;
+        let res = parse_grammar_response(raw).unwrap();
+        assert_eq!(res.score, 100);
+        assert_eq!(res.tone, "formal");
+        assert!(res.issues.is_empty());
+        assert!(res.improved_content.is_none());
+    }
+
+    #[test]
+    fn test_parse_grammar_response_with_code_fences() {
+        let raw = "```json\n{\"score\": 85, \"tone\": \"neutral\", \"issues\": [], \"improved_content\": \"Hello.\"}\n```";
+        let res = parse_grammar_response(raw).unwrap();
+        assert_eq!(res.score, 85);
+        assert_eq!(res.tone, "neutral");
+    }
+
+    #[test]
+    fn test_parse_grammar_response_invalid_json() {
+        let raw = "This is not JSON";
+        assert!(parse_grammar_response(raw).is_none());
+    }
+
+    #[test]
+    fn test_parse_grammar_response_score_capped_at_100() {
+        // Score > 100 should be capped
+        let raw = r#"{"score": 255, "tone": "formal", "issues": [], "improved_content": null}"#;
+        let res = parse_grammar_response(raw).unwrap();
+        assert_eq!(res.score, 100);
+    }
+
+    #[test]
+    fn test_parse_grammar_response_multiple_issues() {
+        let raw = r#"{"score": 45, "tone": "aggressive", "issues": [
+            {"kind": "tone", "description": "Aggressive language", "suggestion": "Soften the tone"},
+            {"kind": "spelling", "description": "Misspelled word", "suggestion": "Use 'their' instead of 'there'"},
+            {"kind": "punctuation", "description": "Missing period", "suggestion": "Add period at end"}
+        ], "improved_content": "Fixed version."}"#;
+        let res = parse_grammar_response(raw).unwrap();
+        assert_eq!(res.score, 45);
+        assert_eq!(res.issues.len(), 3);
+        assert_eq!(res.issues[0].kind, "tone");
+        assert_eq!(res.issues[1].kind, "spelling");
+        assert_eq!(res.issues[2].kind, "punctuation");
     }
 }

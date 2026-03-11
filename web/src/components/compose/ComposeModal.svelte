@@ -46,6 +46,15 @@
   let aiAssisting = $state(false);
   let showAiMenu = $state(false);
 
+  // Grammar check state
+  let grammarChecking = $state(false);
+  let grammarResult = $state<{
+    score: number;
+    tone: string;
+    issues: { kind: string; description: string; suggestion: string }[];
+    improved_content?: string;
+  } | null>(null);
+
   const aiActions = [
     { action: 'rewrite', label: 'Improve writing' },
     { action: 'formal', label: 'Make formal' },
@@ -66,6 +75,51 @@
       error = 'AI assist failed. Check AI settings.';
     } finally {
       aiAssisting = false;
+    }
+  }
+
+  async function handleGrammarCheck() {
+    if (!body.trim()) return;
+    grammarChecking = true;
+    grammarResult = null;
+    error = '';
+    try {
+      grammarResult = await api.ai.grammarCheck({
+        content: body,
+        subject: subject || undefined,
+      });
+    } catch {
+      error = 'Grammar check failed. Check AI settings.';
+    } finally {
+      grammarChecking = false;
+    }
+  }
+
+  function applyGrammarFixes() {
+    if (grammarResult?.improved_content) {
+      body = grammarResult.improved_content;
+      grammarResult = null;
+    }
+  }
+
+  function dismissGrammarCheck() {
+    grammarResult = null;
+  }
+
+  function scoreColor(score: number): string {
+    if (score >= 80) return 'var(--iris-color-success)';
+    if (score >= 60) return 'var(--iris-color-warning)';
+    return 'var(--iris-color-error)';
+  }
+
+  function issueKindColor(kind: string): string {
+    switch (kind) {
+      case 'grammar': return 'var(--iris-color-error)';
+      case 'spelling': return 'var(--iris-color-error)';
+      case 'tone': return 'var(--iris-color-warning)';
+      case 'clarity': return 'var(--iris-color-info)';
+      case 'punctuation': return 'var(--iris-color-warning)';
+      default: return 'var(--iris-color-text-muted)';
     }
   }
 
@@ -316,6 +370,89 @@
         style="color: var(--iris-color-text);"
         placeholder="Write your message..."
       ></textarea>
+
+      <!-- Grammar Check Results Panel -->
+      {#if grammarChecking}
+        <div class="flex items-center gap-2 py-3 px-3 rounded-lg mt-2" style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);">
+          <svg class="animate-spin h-4 w-4" style="color: var(--iris-color-primary);" viewBox="0 0 24 24" fill="none">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <span class="text-xs" style="color: var(--iris-color-text-muted);">Checking grammar and tone...</span>
+        </div>
+      {/if}
+
+      {#if grammarResult}
+        <div class="mt-2 rounded-lg overflow-hidden" style="background: var(--iris-color-bg-surface); border: 1px solid var(--iris-color-border);">
+          <!-- Score and tone header -->
+          <div class="flex items-center gap-3 px-3 py-2 border-b" style="border-color: var(--iris-color-border);">
+            <span
+              class="inline-flex items-center justify-center w-8 h-8 rounded-lg text-xs font-bold"
+              style="background: color-mix(in srgb, {scoreColor(grammarResult.score)} 15%, transparent); color: {scoreColor(grammarResult.score)};"
+            >
+              {grammarResult.score}
+            </span>
+            <div class="flex-1">
+              <span class="text-xs font-medium" style="color: var(--iris-color-text);">Quality Score</span>
+              <span class="text-xs ml-2 px-2 py-0.5 rounded-full" style="background: color-mix(in srgb, var(--iris-color-primary) 15%, transparent); color: var(--iris-color-primary);">
+                {grammarResult.tone}
+              </span>
+            </div>
+            <button
+              class="text-xs px-2 py-1 rounded transition-colors compose-secondary-btn"
+              style="color: var(--iris-color-text-faint);"
+              onclick={dismissGrammarCheck}
+              title="Dismiss"
+            >
+              &times;
+            </button>
+          </div>
+
+          <!-- Issues list -->
+          {#if grammarResult.issues.length > 0}
+            <div class="px-3 py-2 space-y-2 max-h-[160px] overflow-y-auto">
+              {#each grammarResult.issues as issue}
+                <div class="flex items-start gap-2">
+                  <span
+                    class="text-[10px] font-medium px-1.5 py-0.5 rounded mt-0.5 shrink-0 uppercase"
+                    style="background: color-mix(in srgb, {issueKindColor(issue.kind)} 15%, transparent); color: {issueKindColor(issue.kind)};"
+                  >
+                    {issue.kind}
+                  </span>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-xs" style="color: var(--iris-color-text-muted);">{issue.description}</p>
+                    <p class="text-xs mt-0.5" style="color: var(--iris-color-text);">{issue.suggestion}</p>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="px-3 py-2">
+              <p class="text-xs" style="color: var(--iris-color-success);">No issues found. Your email looks great!</p>
+            </div>
+          {/if}
+
+          <!-- Actions -->
+          {#if grammarResult.improved_content}
+            <div class="px-3 py-2 border-t flex items-center gap-2" style="border-color: var(--iris-color-border);">
+              <button
+                class="px-3 py-1 text-xs rounded-lg font-medium transition-colors"
+                style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                onclick={applyGrammarFixes}
+              >
+                Apply fixes
+              </button>
+              <button
+                class="px-3 py-1 text-xs rounded-lg transition-colors compose-secondary-btn"
+                style="color: var(--iris-color-text-muted);"
+                onclick={dismissGrammarCheck}
+              >
+                Dismiss
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
 
     <!-- Footer -->
@@ -356,6 +493,15 @@
           </div>
         {/if}
       </div>
+      <button
+        class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn"
+        style="color: var(--iris-color-text-muted);"
+        onclick={handleGrammarCheck}
+        disabled={grammarChecking || sending || !body.trim()}
+        title="Grammar & tone check"
+      >
+        {grammarChecking ? 'Checking...' : 'Check'}
+      </button>
       <button
         class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors compose-send-btn"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
