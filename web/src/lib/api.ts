@@ -1,3 +1,11 @@
+export interface ThreadNote {
+  id: string;
+  thread_id: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}
+
 const BASE = '';
 
 let sessionToken: string | null = null;
@@ -122,6 +130,12 @@ export const api = {
     chatConfirm: (data: { session_id: string; message_id: string }) =>
       request<{ executed: boolean; updated: number }>('/api/ai/chat/confirm', { method: 'POST', body: JSON.stringify(data) }),
     reprocess: () => request<{ enqueued: number }>('/api/ai/reprocess', { method: 'POST' }),
+  },
+  threadNotes: {
+    list: (threadId: string) => request<{ notes: ThreadNote[] }>(`/api/threads/${threadId}/notes`),
+    create: (threadId: string, content: string) => request<ThreadNote>(`/api/threads/${threadId}/notes`, { method: 'POST', body: JSON.stringify({ content }) }),
+    update: (threadId: string, noteId: string, content: string) => request<ThreadNote>(`/api/threads/${threadId}/notes/${noteId}`, { method: 'PUT', body: JSON.stringify({ content }) }),
+    delete: (threadId: string, noteId: string) => request<void>(`/api/threads/${threadId}/notes/${noteId}`, { method: 'DELETE' }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),

@@ -54,6 +54,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/messages/batch", patch(api::messages::batch_update_messages))
         .route("/threads/{id}", get(api::threads::get_thread))
         .route("/threads/{id}/summarize", post(api::ai_actions::summarize_thread))
+        .route("/threads/{thread_id}/notes", get(api::thread_notes::list_notes).post(api::thread_notes::create_note))
+        .route("/threads/{thread_id}/notes/{id}", put(api::thread_notes::update_note).delete(api::thread_notes::delete_note))
         .route("/search", get(api::search::search))
         .route("/ai/assist", post(api::ai_actions::ai_assist))
         .route("/ai/feedback-stats", get(api::ai_feedback::feedback_stats))
