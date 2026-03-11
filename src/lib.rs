@@ -59,6 +59,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/messages/unsnooze", post(api::messages::unsnooze_messages))
         .route("/messages/snoozed", get(api::messages::list_snoozed))
         .route("/messages/{id}/ai-feedback", put(api::ai_feedback::submit_feedback))
+        .route("/messages/{id}/redirect", post(api::compose::redirect_message))
         .route("/messages/batch", patch(api::messages::batch_update_messages))
         .route("/messages/report-spam", post(api::blocked_senders::report_spam))
         .route("/blocked-senders", get(api::blocked_senders::list_blocked_senders).post(api::blocked_senders::block_sender))

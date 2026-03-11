@@ -1,9 +1,10 @@
-use lettre::message::header::ContentType;
+use lettre::message::header::{ContentType, HeaderName, HeaderValue};
 use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
 use crate::models::account::Account;
+use crate::models::message::MessageDetail;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SmtpError {
@@ -134,6 +135,84 @@ pub fn build_email(
 
         builder
             .multipart(mixed)
+            .map_err(|e| SmtpError::Build(e.to_string()))?
+    };
+
+    Ok(email)
+}
+
+/// Build a redirected/bounced email that preserves the original sender info
+/// and adds RFC 2822 Resent-* headers.
+pub fn build_redirect_email(
+    resent_from_email: &str,
+    resent_to_email: &str,
+    original: &MessageDetail,
+) -> Result<Message, SmtpError> {
+    // Parse addresses
+    let from_addr: Mailbox = if let (Some(name), Some(email)) = (&original.from_name, &original.from_address) {
+        format!("{name} <{email}>").parse()
+    } else if let Some(ref email) = original.from_address {
+        email.parse()
+    } else {
+        return Err(SmtpError::Build("original message has no from address".into()));
+    }
+    .map_err(|e| SmtpError::Build(format!("invalid original from address: {e}")))?;
+
+    let to_mailbox: Mailbox = resent_to_email
+        .parse()
+        .map_err(|e| SmtpError::Build(format!("invalid redirect-to address: {e}")))?;
+
+    let resent_from_mailbox: Mailbox = resent_from_email
+        .parse()
+        .map_err(|e| SmtpError::Build(format!("invalid resent-from address: {e}")))?;
+
+    let subject = original.subject.as_deref().unwrap_or("(no subject)");
+
+    // Build the message preserving original From + subject, with Resent-* headers
+    let mut builder = Message::builder()
+        .from(from_addr)
+        .to(to_mailbox.clone())
+        .subject(subject);
+
+    // Set original Date if available
+    if let Some(ts) = original.date {
+        use chrono::{DateTime, Utc};
+        if let Some(dt) = DateTime::from_timestamp(ts, 0) {
+            let dt_utc: DateTime<Utc> = dt;
+            builder = builder.date(dt_utc.into());
+        }
+    }
+
+    // Add Resent-* headers (RFC 2822 Section 3.6.6)
+    let now = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S %z").to_string();
+    builder = builder
+        .raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("Resent-From"),
+            resent_from_mailbox.to_string(),
+        ))
+        .raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("Resent-To"),
+            to_mailbox.to_string(),
+        ))
+        .raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("Resent-Date"),
+            now,
+        ));
+
+    // Build body — prefer HTML with text fallback
+    let email = if let Some(ref html) = original.body_html {
+        let text = original.body_text.clone().unwrap_or_default();
+        builder
+            .multipart(
+                MultiPart::alternative()
+                    .singlepart(SinglePart::plain(text))
+                    .singlepart(SinglePart::html(html.clone())),
+            )
+            .map_err(|e| SmtpError::Build(e.to_string()))?
+    } else {
+        let text = original.body_text.clone().unwrap_or_default();
+        builder
+            .body(text)
             .map_err(|e| SmtpError::Build(e.to_string()))?
     };
 
@@ -281,5 +360,122 @@ mod tests {
         let formatted = String::from_utf8_lossy(&raw);
         assert!(formatted.contains("multipart/mixed"), "should be multipart/mixed");
         assert!(formatted.contains("report.pdf"), "should contain filename");
+    }
+
+    #[test]
+    fn test_build_redirect_email_plain_text() {
+        let original = MessageDetail {
+            id: "msg-1".into(),
+            message_id: Some("<orig@example.com>".into()),
+            account_id: "acct-1".into(),
+            thread_id: None,
+            folder: "INBOX".into(),
+            from_address: Some("sender@example.com".into()),
+            from_name: Some("Original Sender".into()),
+            to_addresses: Some(r#"["me@example.com"]"#.into()),
+            cc_addresses: None,
+            subject: Some("Important Update".into()),
+            snippet: Some("Preview...".into()),
+            date: Some(1700000000),
+            body_text: Some("This is the original body.".into()),
+            body_html: None,
+            is_read: true,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let email = build_redirect_email("me@example.com", "target@example.com", &original).unwrap();
+        let raw = email.formatted();
+        let formatted = String::from_utf8_lossy(&raw);
+
+        // Preserves original From (lettre quotes display names)
+        assert!(formatted.contains("From: \"Original Sender\" <sender@example.com>"));
+        // Sets redirect target as To
+        assert!(formatted.contains("To: target@example.com"));
+        // Preserves subject
+        assert!(formatted.contains("Subject: Important Update"));
+        // Has Resent-From header
+        assert!(formatted.contains("Resent-From: me@example.com"));
+        // Has Resent-To header
+        assert!(formatted.contains("Resent-To: target@example.com"));
+        // Has Resent-Date header
+        assert!(formatted.contains("Resent-Date:"));
+        // Body preserved
+        assert!(formatted.contains("This is the original body."));
+    }
+
+    #[test]
+    fn test_build_redirect_email_html() {
+        let original = MessageDetail {
+            id: "msg-2".into(),
+            message_id: None,
+            account_id: "acct-1".into(),
+            thread_id: None,
+            folder: "INBOX".into(),
+            from_address: Some("html-sender@example.com".into()),
+            from_name: None,
+            to_addresses: None,
+            cc_addresses: None,
+            subject: Some("HTML Message".into()),
+            snippet: None,
+            date: None,
+            body_text: Some("Plain text".into()),
+            body_html: Some("<p>Rich HTML</p>".into()),
+            is_read: false,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let email = build_redirect_email("me@example.com", "target@example.com", &original).unwrap();
+        let raw = email.formatted();
+        let formatted = String::from_utf8_lossy(&raw);
+
+        assert!(formatted.contains("multipart/alternative"));
+        assert!(formatted.contains("Resent-From: me@example.com"));
+    }
+
+    #[test]
+    fn test_build_redirect_email_no_from_address() {
+        let original = MessageDetail {
+            id: "msg-3".into(),
+            message_id: None,
+            account_id: "acct-1".into(),
+            thread_id: None,
+            folder: "INBOX".into(),
+            from_address: None,
+            from_name: None,
+            to_addresses: None,
+            cc_addresses: None,
+            subject: None,
+            snippet: None,
+            date: None,
+            body_text: None,
+            body_html: None,
+            is_read: false,
+            is_starred: false,
+            has_attachments: false,
+            attachments: vec![],
+            ai_intent: None,
+            ai_priority_score: None,
+            ai_priority_label: None,
+            ai_category: None,
+            ai_summary: None,
+        };
+
+        let result = build_redirect_email("me@example.com", "target@example.com", &original);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no from address"));
     }
 }

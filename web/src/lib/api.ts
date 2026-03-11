@@ -84,6 +84,11 @@ export const api = {
       if (params?.offset) query.set('offset', String(params.offset));
       return request<{ messages: any[]; total: number }>(`/api/messages/needs-reply?${query}`);
     },
+    redirect: (messageId: string, to: string) =>
+      request<{ redirected: boolean; to: string }>(`/api/messages/${messageId}/redirect`, {
+        method: 'POST',
+        body: JSON.stringify({ to }),
+      }),
   },
   threads: {
     get: (id: string) => request<any>(`/api/threads/${id}`),
