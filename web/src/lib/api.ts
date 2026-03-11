@@ -226,6 +226,10 @@ export const api = {
         stats: { total_today: number; unread: number; needs_reply: number; urgent: number };
         highlights: { message_id: string; from: string; subject: string; reason: string }[];
       }>('/api/ai/briefing'),
+    grammarCheck: (data: { content: string; subject?: string }) =>
+      request<{ score: number; tone: string; issues: { kind: string; description: string; suggestion: string }[]; improved_content?: string }>('/api/ai/grammar-check', {
+        method: 'POST', body: JSON.stringify(data),
+      }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
