@@ -15,6 +15,7 @@ pub struct MessageDetailResponse {
     pub message: MessageDetail,
     pub trust: trust::TrustIndicators,
     pub tracking_pixels: Vec<trust::TrackingPixel>,
+    pub impersonation_risk: Option<trust::ImpersonationRisk>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,11 +211,17 @@ pub async fn get_message(
         trust::extract_trust_indicators(raw_headers.as_deref().unwrap_or(""));
     let tracking_pixels =
         trust::detect_tracking_pixels(message.body_html.as_deref().unwrap_or(""));
+    let impersonation_risk = message
+        .from_address
+        .as_deref()
+        .and_then(trust::domain_from_email)
+        .and_then(trust::check_impersonation);
 
     Ok(Json(MessageDetailResponse {
         message,
         trust: trust_indicators,
         tracking_pixels,
+        impersonation_risk,
     }))
 }
 

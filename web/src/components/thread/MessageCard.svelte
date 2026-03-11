@@ -58,9 +58,9 @@
         {/if}
       </div>
 
-      {#if message.trust || (message.tracking_pixels && message.tracking_pixels.length > 0)}
+      {#if message.trust || (message.tracking_pixels && message.tracking_pixels.length > 0) || message.impersonation_risk}
         <div class="mb-3">
-          <TrustBadge trust={message.trust || {}} trackingPixels={message.tracking_pixels || []} />
+          <TrustBadge trust={message.trust || {}} trackingPixels={message.tracking_pixels || []} impersonationRisk={message.impersonation_risk || null} />
         </div>
       {/if}
 
