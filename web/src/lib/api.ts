@@ -210,6 +210,8 @@ export const api = {
     testConnection: () => request<{ providers: { name: string; model: string; healthy: boolean }[] }>('/api/config/ai/test', { method: 'POST' }),
     assist: (data: { action: string; content: string }) =>
       request<{ result: string }>('/api/ai/assist', { method: 'POST', body: JSON.stringify(data) }),
+    suggestSubject: (data: { body: string; current_subject?: string }) =>
+      request<{ suggestions: string[] }>('/api/ai/suggest-subject', { method: 'POST', body: JSON.stringify(data) }),
     chat: (data: { session_id: string; message: string }) =>
       request<{ message: any }>('/api/ai/chat', { method: 'POST', body: JSON.stringify(data) }),
     chatHistory: (sessionId: string) => request<any[]>(`/api/ai/chat/${sessionId}`),

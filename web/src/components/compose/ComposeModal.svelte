@@ -93,6 +93,11 @@
   let fromAliases = $state<AliasOption[]>([]);
   let selectedFromAlias = $state<string | null>(null);
 
+  // Subject suggestion state
+  let suggestingSubject = $state(false);
+  let subjectSuggestions = $state<string[]>([]);
+  let showSubjectSuggestions = $state(false);
+
   function handleTemplatePick(template: { subject: string; body_text: string }) {
     if ((subject.trim() || body.trim()) && (template.subject || template.body_text)) {
       pendingTemplate = template;
@@ -203,6 +208,33 @@
     } catch {
       fromAliases = [];
     }
+  }
+
+  async function handleSuggestSubject() {
+    if (!body.trim()) return;
+    suggestingSubject = true;
+    showSubjectSuggestions = false;
+    subjectSuggestions = [];
+    error = '';
+    try {
+      const res = await api.ai.suggestSubject({
+        body: body,
+        current_subject: subject || undefined,
+      });
+      subjectSuggestions = res.suggestions;
+      showSubjectSuggestions = true;
+    } catch {
+      error = 'Subject suggestion failed. Check AI settings.';
+    } finally {
+      suggestingSubject = false;
+    }
+  }
+
+  function pickSubjectSuggestion(s: string) {
+    subject = s;
+    showSubjectSuggestions = false;
+    subjectSuggestions = [];
+    scheduleAutoSave();
   }
 
   // File attachment helpers
@@ -667,18 +699,54 @@
       {/if}
 
       <!-- Subject -->
-      <div class="flex items-center gap-2">
-        <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-subject">Subj</label>
-        <input
-          id="compose-subject"
-          type="text"
-          bind:value={subject}
-          oninput={scheduleAutoSave}
-          class="flex-1 text-sm bg-transparent border-b outline-none py-1"
-          style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
-          placeholder="Subject"
-          disabled={!!undoSendId}
-        />
+      <div class="relative">
+        <div class="flex items-center gap-2">
+          <label class="text-xs w-8" style="color: var(--iris-color-text-faint);" for="compose-subject">Subj</label>
+          <input
+            id="compose-subject"
+            type="text"
+            bind:value={subject}
+            oninput={scheduleAutoSave}
+            class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+            style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+            placeholder="Subject"
+            disabled={!!undoSendId}
+          />
+          <button
+            class="suggest-subject-btn p-1 rounded transition-colors disabled:opacity-40"
+            style="color: var(--iris-color-primary);"
+            onclick={handleSuggestSubject}
+            disabled={suggestingSubject || !body.trim() || !!undoSendId}
+            title="Suggest subject lines"
+          >
+            {#if suggestingSubject}
+              <svg class="w-4 h-4 animate-spin" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="2" stroke-dasharray="28" stroke-dashoffset="8" />
+              </svg>
+            {:else}
+              <svg class="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M8 1l1.5 3.5L13 6l-3.5 1.5L8 11 6.5 7.5 3 6l3.5-1.5L8 1zM3 11l.75 1.75L5.5 13.5l-1.75.75L3 16l-.75-1.75L.5 13.5l1.75-.75L3 11zM12 10l1 2.25L15.25 13.25l-2.25 1L12 16.5l-1-2.25-2.25-1 2.25-1L12 10z"/>
+              </svg>
+            {/if}
+          </button>
+        </div>
+        {#if showSubjectSuggestions && subjectSuggestions.length > 0}
+          <div class="absolute left-8 right-0 mt-1 rounded-lg shadow-lg py-1 z-10" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
+            <div class="px-3 py-1 text-xs" style="color: var(--iris-color-text-faint);">Pick a subject</div>
+            {#each subjectSuggestions as suggestion}
+              <button
+                class="w-full text-left px-3 py-1.5 text-sm compose-dropdown-item"
+                style="color: var(--iris-color-text);"
+                onclick={() => pickSubjectSuggestion(suggestion)}
+              >{suggestion}</button>
+            {/each}
+            <button
+              class="w-full text-left px-3 py-1 text-xs compose-dropdown-item"
+              style="color: var(--iris-color-text-faint);"
+              onclick={() => { showSubjectSuggestions = false; }}
+            >Dismiss</button>
+          </div>
+        {/if}
       </div>
 
       <!-- Body (Rich Text Editor) -->
@@ -908,6 +976,10 @@
 <style>
   .compose-dropdown-item:hover {
     background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent);
+  }
+
+  .suggest-subject-btn:hover:not(:disabled) {
+    background: var(--iris-color-bg-surface);
   }
 
   /* Send button */

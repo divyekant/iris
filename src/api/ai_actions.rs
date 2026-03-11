@@ -184,6 +184,120 @@ pub async fn ai_assist(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/ai/suggest-subject
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct SuggestSubjectRequest {
+    pub body: String,
+    pub current_subject: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SuggestSubjectResponse {
+    pub suggestions: Vec<String>,
+}
+
+const SUGGEST_SUBJECT_SYSTEM_PROMPT: &str = "You are an email subject line assistant. Given the email body, suggest 3 concise, clear subject lines. Respond with ONLY a JSON array of 3 strings, no explanation or markdown.";
+
+/// Build prompt for subject line suggestion.
+pub fn build_suggest_subject_prompt(body: &str, current_subject: Option<&str>) -> String {
+    let truncated: String = if body.chars().count() > 3000 {
+        let mut s: String = body.chars().take(3000).collect();
+        s.push_str("...");
+        s
+    } else {
+        body.to_string()
+    };
+
+    let mut prompt = format!("Email body:\n{}\n", truncated);
+    if let Some(subj) = current_subject {
+        if !subj.is_empty() {
+            prompt.push_str(&format!(
+                "\nThe current subject is: '{}'. Improve it or suggest alternatives.",
+                subj
+            ));
+        }
+    }
+    prompt
+}
+
+/// Parse LLM response into a vec of subject suggestions.
+fn parse_subject_suggestions(raw: &str) -> Vec<String> {
+    // Try JSON array first
+    if let Ok(arr) = serde_json::from_str::<Vec<String>>(raw) {
+        return arr.into_iter().filter(|s| !s.is_empty()).collect();
+    }
+
+    // Try to extract a JSON array from within the response (LLM may wrap with text)
+    if let Some(start) = raw.find('[') {
+        if let Some(end) = raw.rfind(']') {
+            if let Ok(arr) = serde_json::from_str::<Vec<String>>(&raw[start..=end]) {
+                return arr.into_iter().filter(|s| !s.is_empty()).collect();
+            }
+        }
+    }
+
+    // Fallback: split by newlines, strip numbering
+    raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            // Strip leading "1. ", "2) ", "- ", etc.
+            let stripped = l
+                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == '-')
+                .trim_start_matches(|c: char| c == ' ' || c == '"')
+                .trim_end_matches('"');
+            stripped.to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .take(3)
+        .collect()
+}
+
+pub async fn suggest_subject(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SuggestSubjectRequest>,
+) -> Result<Json<SuggestSubjectResponse>, StatusCode> {
+    if input.body.len() > 50_000 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    if input.body.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let ai_enabled = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'ai_enabled'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "false".to_string());
+
+    if ai_enabled != "true" || !state.providers.has_providers() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let prompt = build_suggest_subject_prompt(&input.body, input.current_subject.as_deref());
+
+    let raw = state
+        .providers
+        .generate(&prompt, Some(SUGGEST_SUBJECT_SYSTEM_PROMPT))
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    let suggestions = parse_subject_suggestions(&raw);
+
+    if suggestions.is_empty() {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    Ok(Json(SuggestSubjectResponse { suggestions }))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -331,5 +445,75 @@ mod tests {
     fn test_get_assist_prompt_invalid_action() {
         assert!(get_assist_system_prompt("invalid").is_none());
         assert!(get_assist_system_prompt("").is_none());
+    }
+
+    #[test]
+    fn test_build_suggest_subject_prompt_without_current() {
+        let prompt = build_suggest_subject_prompt("Hello, let's schedule a meeting.", None);
+        assert!(prompt.contains("Email body:"));
+        assert!(prompt.contains("Hello, let's schedule a meeting."));
+        assert!(!prompt.contains("current subject"));
+    }
+
+    #[test]
+    fn test_build_suggest_subject_prompt_with_current() {
+        let prompt = build_suggest_subject_prompt(
+            "Please review the attached Q3 report.",
+            Some("stuff"),
+        );
+        assert!(prompt.contains("Email body:"));
+        assert!(prompt.contains("current subject is: 'stuff'"));
+    }
+
+    #[test]
+    fn test_build_suggest_subject_prompt_empty_current_ignored() {
+        let prompt = build_suggest_subject_prompt("body text", Some(""));
+        assert!(!prompt.contains("current subject"));
+    }
+
+    #[test]
+    fn test_build_suggest_subject_prompt_truncates_long_body() {
+        let long_body = "x".repeat(5000);
+        let prompt = build_suggest_subject_prompt(&long_body, None);
+        // Should be truncated to ~3000 chars + overhead
+        assert!(prompt.len() < 3200);
+        assert!(prompt.contains("..."));
+    }
+
+    #[test]
+    fn test_parse_subject_suggestions_json_array() {
+        let raw = r#"["Meeting Tomorrow", "Q3 Review", "Follow-up"]"#;
+        let suggestions = parse_subject_suggestions(raw);
+        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions[0], "Meeting Tomorrow");
+        assert_eq!(suggestions[1], "Q3 Review");
+        assert_eq!(suggestions[2], "Follow-up");
+    }
+
+    #[test]
+    fn test_parse_subject_suggestions_json_embedded() {
+        let raw = r#"Here are some suggestions: ["Option A", "Option B", "Option C"] hope that helps!"#;
+        let suggestions = parse_subject_suggestions(raw);
+        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions[0], "Option A");
+    }
+
+    #[test]
+    fn test_parse_subject_suggestions_numbered_fallback() {
+        let raw = "1. Meeting Tomorrow\n2. Q3 Review\n3. Follow-up";
+        let suggestions = parse_subject_suggestions(raw);
+        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions[0], "Meeting Tomorrow");
+        assert_eq!(suggestions[1], "Q3 Review");
+        assert_eq!(suggestions[2], "Follow-up");
+    }
+
+    #[test]
+    fn test_parse_subject_suggestions_filters_empty() {
+        let raw = r#"["Good Subject", "", "Another"]"#;
+        let suggestions = parse_subject_suggestions(raw);
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0], "Good Subject");
+        assert_eq!(suggestions[1], "Another");
     }
 }
