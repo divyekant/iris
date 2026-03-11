@@ -2,6 +2,7 @@
   import { api, getSessionToken } from '../../lib/api';
   import EmailBody from './EmailBody.svelte';
   import TrustBadge from '../TrustBadge.svelte';
+  import ContactPopover from '../contacts/ContactPopover.svelte';
 
   let { message }: { message: any } = $props();
   let expanded = $state(true);
@@ -9,6 +10,14 @@
   let attachmentsLoaded = $state(false);
   let unsubscribing = $state(false);
   let unsubscribeResult = $state<string | null>(null);
+  let showContactPopover = $state(false);
+
+  function handleSenderClick(e: MouseEvent) {
+    e.stopPropagation();
+    if (message.from_address) {
+      showContactPopover = true;
+    }
+  }
 
   function formatDate(ts: number): string {
     return new Date(ts * 1000).toLocaleString([], {
@@ -121,20 +130,24 @@
 </script>
 
 <div class="rounded-lg message-card">
-  <button
-    class="w-full flex items-center justify-between p-4 text-left transition-colors message-card-header"
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="w-full flex items-center justify-between p-4 text-left transition-colors message-card-header cursor-pointer"
+    role="button"
+    tabindex="0"
     onclick={() => (expanded = !expanded)}
+    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); expanded = !expanded; } }}
   >
     <div class="flex items-center gap-3 min-w-0">
-      <span class="font-medium text-sm truncate" style="color: var(--iris-color-text);">
+      <button class="font-medium text-sm truncate sender-name-btn" onclick={handleSenderClick}>
         {message.from_name || message.from_address || 'Unknown'}
-      </span>
+      </button>
       <span class="text-xs flex-shrink-0" style="color: var(--iris-color-text-faint);">
         {message.date ? formatDate(message.date) : ''}
       </span>
     </div>
     <span class="ml-2 flex-shrink-0" style="color: var(--iris-color-text-muted);">{expanded ? '\u25BE' : '\u25B8'}</span>
-  </button>
+  </div>
 
   {#if expanded}
     <div class="px-4 pb-4">
@@ -208,7 +221,27 @@
   {/if}
 </div>
 
+{#if showContactPopover && message.from_address}
+  <ContactPopover
+    email={message.from_address}
+    name={message.from_name}
+    onclose={() => showContactPopover = false}
+  />
+{/if}
+
 <style>
+  .sender-name-btn {
+    color: var(--iris-color-text);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+    transition: color var(--iris-transition-fast);
+  }
+  .sender-name-btn:hover {
+    color: var(--iris-color-primary);
+  }
   .message-card {
     border: 1px solid var(--iris-color-border-subtle);
     background: var(--iris-color-bg-elevated);

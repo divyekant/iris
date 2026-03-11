@@ -274,6 +274,17 @@ export const api = {
       request<{ contacts: { email: string; name: string | null; email_count: number; last_contact: number | null }[] }>(
         '/api/contacts/top',
       ),
+    responseTimes: (email: string) =>
+      request<{
+        email: string;
+        their_avg_reply_hours: number | null;
+        your_avg_reply_hours: number | null;
+        their_reply_count: number;
+        your_reply_count: number;
+        fastest_reply_hours: number | null;
+        slowest_reply_hours: number | null;
+        total_exchanges: number;
+      }>(`/api/contacts/${encodeURIComponent(email)}/response-times`),
   },
   threadNotes: {
     list: (threadId: string) => request<{ notes: ThreadNote[] }>(`/api/threads/${threadId}/notes`),

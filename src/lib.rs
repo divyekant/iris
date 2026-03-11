@@ -98,6 +98,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/audit-log", get(api::agent::get_audit_log_handler))
         .route("/contacts/top", get(api::contacts::get_top_contacts))
         .route("/contacts/{email}/topics", get(api::contacts::get_contact_topics))
+        .route("/contacts/{email}/response-times", get(api::contacts::get_response_times))
         .route("/subscriptions/audit", get(api::subscriptions::subscription_audit))
         .route("/send", post(api::compose::send_message))
         .route("/send/cancel/{id}", post(api::compose::cancel_send))
