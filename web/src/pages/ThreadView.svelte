@@ -8,6 +8,7 @@
   import SnoozePicker from '../components/SnoozePicker.svelte';
   import ContactTopicsPanel from '../components/contacts/ContactTopicsPanel.svelte';
   import RedirectDialog from '../components/thread/RedirectDialog.svelte';
+  import NotesPanel from '../components/thread/NotesPanel.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
@@ -510,6 +511,11 @@
         {/if}
       {/if}
     </div>
+  {/if}
+
+  <!-- Notes panel -->
+  {#if thread && !loading}
+    <NotesPanel threadId={params.id} />
   {/if}
 
   <!-- Messages -->

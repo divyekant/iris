@@ -1,3 +1,11 @@
+export interface ThreadNote {
+  id: string;
+  thread_id: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}
+
 const BASE = '';
 
 let sessionToken: string | null = null;
@@ -256,6 +264,12 @@ export const api = {
       request<{ contacts: { email: string; name: string | null; email_count: number; last_contact: number | null }[] }>(
         '/api/contacts/top',
       ),
+  },
+  threadNotes: {
+    list: (threadId: string) => request<{ notes: ThreadNote[] }>(`/api/threads/${threadId}/notes`),
+    create: (threadId: string, content: string) => request<ThreadNote>(`/api/threads/${threadId}/notes`, { method: 'POST', body: JSON.stringify({ content }) }),
+    update: (threadId: string, noteId: string, content: string) => request<ThreadNote>(`/api/threads/${threadId}/notes/${noteId}`, { method: 'PUT', body: JSON.stringify({ content }) }),
+    delete: (threadId: string, noteId: string) => request<void>(`/api/threads/${threadId}/notes/${noteId}`, { method: 'DELETE' }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),

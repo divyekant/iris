@@ -23,6 +23,7 @@ pub mod search;
 pub mod session_auth;
 pub mod signatures;
 pub mod templates;
+pub mod thread_notes;
 pub mod threads;
 pub mod subscriptions;
 pub mod trust;

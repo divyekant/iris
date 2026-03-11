@@ -68,6 +68,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/threads/{id}/mute", get(api::muted_threads::get_mute_status).put(api::muted_threads::mute_thread).delete(api::muted_threads::unmute_thread))
         .route("/threads/{id}/summarize", post(api::ai_actions::summarize_thread))
         .route("/muted-threads", get(api::muted_threads::list_muted))
+        .route("/threads/{thread_id}/notes", get(api::thread_notes::list_notes).post(api::thread_notes::create_note))
+        .route("/threads/{thread_id}/notes/{id}", put(api::thread_notes::update_note).delete(api::thread_notes::delete_note))
         .route("/search", get(api::search::search))
         .route("/saved-searches", get(api::saved_searches::list_saved_searches).post(api::saved_searches::create_saved_search))
         .route("/saved-searches/{id}", delete(api::saved_searches::delete_saved_search))
