@@ -12,4 +12,5 @@ pub mod queue_status;
 pub mod search;
 pub mod session_auth;
 pub mod threads;
+pub mod subscriptions;
 pub mod trust;

@@ -135,6 +135,20 @@ export const api = {
       }),
     revoke: (id: string) => request<void>(`/api/api-keys/${id}`, { method: 'DELETE' }),
   },
+  subscriptions: {
+    audit: () => request<{
+      subscriptions: {
+        sender: string;
+        sender_name: string | null;
+        total_count: number;
+        read_count: number;
+        read_rate: number;
+        last_received: number;
+        has_unsubscribe: boolean;
+        category: string | null;
+      }[];
+    }>('/api/subscriptions/audit'),
+  },
   auditLog: {
     list: (params?: { api_key_id?: string; limit?: number; offset?: number }) => {
       const query = new URLSearchParams();

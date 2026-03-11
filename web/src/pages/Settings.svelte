@@ -42,6 +42,21 @@
   let createdKey = $state('');
   let keyCreating = $state(false);
 
+  // Subscription audit
+  type SubscriptionInfo = {
+    sender: string;
+    sender_name: string | null;
+    total_count: number;
+    read_count: number;
+    read_rate: number;
+    last_received: number;
+    has_unsubscribe: boolean;
+    category: string | null;
+  };
+  let subscriptions = $state<SubscriptionInfo[]>([]);
+  let auditRunning = $state(false);
+  let auditLoaded = $state(false);
+
   // Audit log
   let auditEntries = $state<any[]>([]);
 
@@ -219,6 +234,26 @@
     try {
       auditEntries = await api.auditLog.list({ limit: 25 });
     } catch { auditEntries = []; }
+  }
+
+  async function runSubscriptionAudit() {
+    auditRunning = true;
+    try {
+      const result = await api.subscriptions.audit();
+      subscriptions = result.subscriptions;
+      auditLoaded = true;
+    } catch {
+      subscriptions = [];
+      auditLoaded = true;
+    } finally {
+      auditRunning = false;
+    }
+  }
+
+  function readRateColor(rate: number): string {
+    if (rate < 0.2) return 'var(--iris-color-error)';
+    if (rate < 0.5) return 'var(--iris-color-warning)';
+    return 'var(--iris-color-success)';
   }
 
   function formatTimestamp(ts: number): string {
@@ -478,6 +513,81 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <!-- Subscription Audit section -->
+    <section>
+      <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Subscription Audit</h3>
+      <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Find mailing lists you never read. Senders with 3+ emails are analyzed by read rate.</p>
+
+      <button
+        class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50 mb-4"
+        style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+        onclick={runSubscriptionAudit}
+        disabled={auditRunning}
+      >
+        {auditRunning ? 'Analyzing...' : 'Run Audit'}
+      </button>
+
+      {#if auditLoaded}
+        {#if subscriptions.length > 0}
+          <div class="border rounded-lg overflow-hidden" style="border-color: var(--iris-color-border);">
+            <table class="w-full text-sm">
+              <thead style="background: var(--iris-color-bg-surface);">
+                <tr>
+                  <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Sender</th>
+                  <th class="text-right px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Emails</th>
+                  <th class="text-right px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Read Rate</th>
+                  <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Last Received</th>
+                  <th class="text-left px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Category</th>
+                  <th class="text-right px-3 py-2 text-xs font-medium" style="color: var(--iris-color-text-muted);">Unsub</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each subscriptions as sub}
+                  <tr class="border-t" style="border-color: var(--iris-color-border-subtle);">
+                    <td class="px-3 py-2" style="color: var(--iris-color-text);">
+                      <div class="font-medium text-xs">{sub.sender_name || sub.sender}</div>
+                      {#if sub.sender_name}
+                        <div class="text-[10px]" style="color: var(--iris-color-text-faint);">{sub.sender}</div>
+                      {/if}
+                    </td>
+                    <td class="px-3 py-2 text-right text-xs tabular-nums" style="color: var(--iris-color-text);">
+                      {sub.total_count}
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <span class="text-xs font-semibold tabular-nums" style="color: {readRateColor(sub.read_rate)};">
+                        {Math.round(sub.read_rate * 100)}%
+                      </span>
+                    </td>
+                    <td class="px-3 py-2 text-xs" style="color: var(--iris-color-text-faint);">
+                      {formatTimestamp(sub.last_received)}
+                    </td>
+                    <td class="px-3 py-2">
+                      {#if sub.category}
+                        <span class="px-2 py-0.5 text-[10px] rounded-full" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-muted);">
+                          {sub.category}
+                        </span>
+                      {:else}
+                        <span class="text-xs" style="color: var(--iris-color-text-faint);">--</span>
+                      {/if}
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      {#if sub.has_unsubscribe}
+                        <span class="px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-info) 15%, transparent); color: var(--iris-color-info);">Available</span>
+                      {:else}
+                        <span class="text-[10px]" style="color: var(--iris-color-text-faint);">--</span>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <p class="text-sm" style="color: var(--iris-color-text-faint);">No recurring senders found. Your inbox is clean!</p>
+        {/if}
+      {/if}
     </section>
 
     <!-- API Keys section -->
