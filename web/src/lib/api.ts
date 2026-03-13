@@ -1,3 +1,15 @@
+export interface Deadline {
+  id: string;
+  message_id: string;
+  thread_id: string | null;
+  description: string;
+  deadline_date: string;
+  deadline_source: string;
+  is_explicit: boolean;
+  completed: boolean;
+  created_at: number;
+}
+
 const BASE = '';
 
 let sessionToken: string | null = null;
@@ -143,5 +155,14 @@ export const api = {
       if (params?.offset) query.set('offset', String(params.offset));
       return request<any[]>(`/api/audit-log?${query}`);
     },
+  },
+  deadlines: {
+    list: (days?: number) => request<{ deadlines: Deadline[] }>(`/api/deadlines${days ? `?days=${days}` : ''}`),
+    forThread: (threadId: string) => request<{ deadlines: Deadline[] }>(`/api/threads/${threadId}/deadlines`),
+    extract: (messageId: string) => request<{ deadlines: Deadline[] }>('/api/ai/extract-deadlines', {
+      method: 'POST', body: JSON.stringify({ message_id: messageId })
+    }),
+    complete: (id: string) => request<void>(`/api/deadlines/${id}/complete`, { method: 'PUT' }),
+    delete: (id: string) => request<void>(`/api/deadlines/${id}`, { method: 'DELETE' }),
   },
 };
