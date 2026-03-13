@@ -31,6 +31,7 @@ pub struct MessageSummary {
     pub labels: Option<String>,
     pub ai_priority_label: Option<String>,
     pub ai_category: Option<String>,
+    pub intent: Option<String>,
 }
 
 impl MessageSummary {
@@ -51,6 +52,7 @@ impl MessageSummary {
             labels: row.get("labels")?,
             ai_priority_label: row.get("ai_priority_label")?,
             ai_category: row.get("ai_category")?,
+            intent: row.get("intent")?,
         })
     }
 
@@ -66,7 +68,7 @@ impl MessageSummary {
         let mut stmt = conn
             .prepare(
                 "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, intent
                  FROM messages
                  WHERE account_id = ?1 AND folder = ?2 AND is_deleted = 0
                  ORDER BY date DESC
@@ -432,7 +434,7 @@ pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
     let mut stmt = conn
         .prepare(
             "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category
+                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, intent
              FROM messages
              WHERE account_id = ?1 AND is_draft = 1 AND is_deleted = 0
              ORDER BY updated_at DESC

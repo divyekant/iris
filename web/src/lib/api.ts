@@ -123,6 +123,12 @@ export const api = {
       request<{ executed: boolean; updated: number }>('/api/ai/chat/confirm', { method: 'POST', body: JSON.stringify(data) }),
     reprocess: () => request<{ enqueued: number }>('/api/ai/reprocess', { method: 'POST' }),
   },
+  intent: {
+    get: (messageId: string) => request<{ intent: string; confidence: number }>(`/api/messages/${messageId}/intent`),
+    detect: (messageId: string) => request<{ intent: string; confidence: number }>('/api/ai/detect-intent', {
+      method: 'POST', body: JSON.stringify({ message_id: messageId })
+    }),
+  },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },

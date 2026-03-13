@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Paperclip, Archive, Trash2, Star, Mail, MailOpen } from 'lucide-svelte';
+  import IntentBadge from './IntentBadge.svelte';
 
   interface Message {
     id: string;
@@ -12,6 +13,7 @@
     has_attachments?: boolean;
     ai_priority_label?: string;
     ai_category?: string;
+    intent?: string;
     labels?: string;
   }
 
@@ -104,6 +106,7 @@
           {message.ai_category}
         </span>
       {/if}
+      <IntentBadge intent={message.intent} />
       {#each parsedLabels as label}
         <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
           style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">

@@ -7,6 +7,7 @@ pub mod chat;
 pub mod compose;
 pub mod config;
 pub mod health;
+pub mod intent;
 pub mod messages;
 pub mod queue_status;
 pub mod search;
