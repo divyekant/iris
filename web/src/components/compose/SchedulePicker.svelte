@@ -293,7 +293,7 @@
   }
 
   .schedule-custom-confirm:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
 
   .schedule-custom-confirm:disabled {

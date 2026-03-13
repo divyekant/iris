@@ -137,7 +137,7 @@
         disabled={sending || success || !to.trim()}
       >
         {#if sending}
-          <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid rgba(0,0,0,0.2); border-top-color: var(--iris-color-bg);"></div>
+          <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border-subtle); border-top-color: var(--iris-color-bg);"></div>
           Redirecting...
         {:else}
           <Forward size={14} />
@@ -150,12 +150,12 @@
 
 <style>
   .redirect-backdrop {
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--iris-color-overlay);
   }
   .redirect-dialog {
     background: var(--iris-color-bg-elevated);
     border: 1px solid var(--iris-color-border);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 20px 60px var(--iris-color-overlay);
   }
   .redirect-input {
     background: var(--iris-color-bg);
@@ -182,6 +182,6 @@
     color: var(--iris-color-bg);
   }
   .redirect-send-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
 </style>

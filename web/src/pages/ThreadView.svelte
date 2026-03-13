@@ -824,14 +824,14 @@
     color: var(--iris-color-bg);
   }
   .retry-btn:hover {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .reply-primary-btn {
     background: var(--iris-color-primary);
     color: var(--iris-color-bg);
   }
   .reply-primary-btn:hover {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .reply-secondary-btn {
     background: var(--iris-color-bg-surface);
@@ -847,7 +847,7 @@
     color: var(--iris-color-bg);
   }
   .reply-send-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .topics-link {
     color: var(--iris-color-primary);
@@ -874,16 +874,16 @@
     background: var(--iris-color-bg-elevated);
   }
   .task-priority-badge.priority-high {
-    color: #DC2626;
-    background: rgba(220, 38, 38, 0.12);
+    color: var(--iris-color-error);
+    background: color-mix(in srgb, var(--iris-color-error) 12%, transparent);
   }
   .task-priority-badge.priority-medium {
-    color: #CA8A04;
-    background: rgba(202, 138, 4, 0.12);
+    color: var(--iris-color-warning);
+    background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent);
   }
   .task-priority-badge.priority-low {
-    color: #16A34A;
-    background: rgba(22, 163, 74, 0.12);
+    color: var(--iris-color-success);
+    background: color-mix(in srgb, var(--iris-color-success) 12%, transparent);
   }
   .reply-ai-btn {
     color: var(--iris-color-primary);

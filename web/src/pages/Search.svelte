@@ -23,16 +23,16 @@
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // Operator color mapping
-  const operatorColors: Record<string, { bg: string; text: string; border: string }> = {
-    from: { bg: 'color-mix(in srgb, #2563EB 12%, transparent)', text: '#60a5fa', border: '#2563EB' },
-    to: { bg: 'color-mix(in srgb, #9333EA 12%, transparent)', text: '#c084fc', border: '#9333EA' },
-    subject: { bg: 'color-mix(in srgb, #16A34A 12%, transparent)', text: '#4ade80', border: '#16A34A' },
-    is: { bg: 'color-mix(in srgb, #CA8A04 12%, transparent)', text: '#fbbf24', border: '#CA8A04' },
-    has: { bg: 'color-mix(in srgb, #DC2626 12%, transparent)', text: '#f87171', border: '#DC2626' },
-    before: { bg: 'color-mix(in srgb, #0891B2 12%, transparent)', text: '#67e8f9', border: '#0891B2' },
-    after: { bg: 'color-mix(in srgb, #0891B2 12%, transparent)', text: '#67e8f9', border: '#0891B2' },
-    category: { bg: 'color-mix(in srgb, #D97706 12%, transparent)', text: '#fbbf24', border: '#D97706' },
+  // Operator → CSS class mapping (colors defined in <style> block via design tokens)
+  const operatorClassMap: Record<string, string> = {
+    from: 'operator-from',
+    to: 'operator-to',
+    subject: 'operator-subject',
+    is: 'operator-is',
+    has: 'operator-has',
+    before: 'operator-before',
+    after: 'operator-after',
+    category: 'operator-category',
   };
 
   const operatorHelp = [
@@ -299,10 +299,8 @@
             </button>
           {/if}
           {#each parsedOperators as op, i}
-            {@const colors = operatorColors[op.key] || { bg: 'color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent)', text: 'var(--iris-color-text-muted)', border: 'var(--iris-color-border)' }}
             <button
-              class="px-2.5 py-1 text-xs rounded-full border transition-colors flex items-center gap-1"
-              style="background: {colors.bg}; color: {colors.text}; border-color: {colors.border};"
+              class="px-2.5 py-1 text-xs rounded-full border transition-colors flex items-center gap-1 operator-chip {operatorClassMap[op.key] || 'operator-default'}"
               onclick={() => removeOperator(i)}
               title="Click to remove"
             >
@@ -339,12 +337,11 @@
         </div>
         <div class="grid grid-cols-2 gap-x-6 gap-y-1">
           {#each operatorHelp as h}
-            {@const colors = operatorColors[h.op.replace(':', '')] || { text: 'var(--iris-color-text-muted)' }}
             <button
               class="text-left flex items-baseline gap-2 py-1 rounded transition-colors operator-help-row"
               onclick={() => insertOperator(h.op)}
             >
-              <code class="text-xs font-mono font-semibold" style="color: {colors.text};">{h.op}</code>
+              <code class="text-xs font-mono font-semibold {operatorClassMap[h.op.replace(':', '')] || 'operator-default'} operator-help-label">{h.op}</code>
               <span class="text-xs" style="color: var(--iris-color-text-faint);">{h.desc}</span>
             </button>
           {/each}
@@ -443,4 +440,58 @@
   .operator-help-row:hover {
     background: color-mix(in srgb, var(--iris-color-primary) 5%, transparent);
   }
+
+  /* Operator chip token-based colors */
+  .operator-chip {
+    background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent);
+    color: var(--iris-color-text-muted);
+    border-color: var(--iris-color-border);
+  }
+  .operator-chip.operator-from {
+    background: color-mix(in srgb, var(--iris-color-info) 12%, transparent);
+    color: var(--iris-color-info);
+    border-color: color-mix(in srgb, var(--iris-color-info) 30%, transparent);
+  }
+  .operator-chip.operator-to {
+    background: color-mix(in srgb, var(--iris-color-info) 12%, transparent);
+    color: var(--iris-color-info);
+    border-color: color-mix(in srgb, var(--iris-color-info) 30%, transparent);
+  }
+  .operator-chip.operator-subject {
+    background: color-mix(in srgb, var(--iris-color-success) 12%, transparent);
+    color: var(--iris-color-success);
+    border-color: color-mix(in srgb, var(--iris-color-success) 30%, transparent);
+  }
+  .operator-chip.operator-is {
+    background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent);
+    color: var(--iris-color-warning);
+    border-color: color-mix(in srgb, var(--iris-color-warning) 30%, transparent);
+  }
+  .operator-chip.operator-has {
+    background: color-mix(in srgb, var(--iris-color-error) 12%, transparent);
+    color: var(--iris-color-error);
+    border-color: color-mix(in srgb, var(--iris-color-error) 30%, transparent);
+  }
+  .operator-chip.operator-before,
+  .operator-chip.operator-after {
+    background: color-mix(in srgb, var(--iris-color-info) 12%, transparent);
+    color: var(--iris-color-info);
+    border-color: color-mix(in srgb, var(--iris-color-info) 30%, transparent);
+  }
+  .operator-chip.operator-category {
+    background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent);
+    color: var(--iris-color-warning);
+    border-color: color-mix(in srgb, var(--iris-color-warning) 30%, transparent);
+  }
+
+  /* Operator help label colors (text color only) */
+  .operator-help-label.operator-default { color: var(--iris-color-text-muted); }
+  .operator-help-label.operator-from { color: var(--iris-color-info); }
+  .operator-help-label.operator-to { color: var(--iris-color-info); }
+  .operator-help-label.operator-subject { color: var(--iris-color-success); }
+  .operator-help-label.operator-is { color: var(--iris-color-warning); }
+  .operator-help-label.operator-has { color: var(--iris-color-error); }
+  .operator-help-label.operator-before { color: var(--iris-color-info); }
+  .operator-help-label.operator-after { color: var(--iris-color-info); }
+  .operator-help-label.operator-category { color: var(--iris-color-warning); }
 </style>

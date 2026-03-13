@@ -32,7 +32,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="fixed inset-0 z-50 flex items-center justify-center"
-  style="background: rgba(0,0,0,0.5);"
+  style="background: var(--iris-color-overlay);"
   onclick={handleBackdrop}
 >
   <div
@@ -101,6 +101,6 @@
     color: white;
   }
   .spam-confirm-btn:hover {
-    filter: brightness(1.1);
+    background: color-mix(in srgb, var(--iris-color-error) 85%, white);
   }
 </style>

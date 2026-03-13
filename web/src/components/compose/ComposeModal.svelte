@@ -1330,7 +1330,7 @@
     transition: all 120ms ease;
   }
   .compose-send-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .compose-send-btn:active:not(:disabled) {
     transform: scale(0.98);
@@ -1366,7 +1366,6 @@
     transition: all 120ms ease;
   }
   .undo-btn:hover:not(:disabled) {
-    filter: brightness(1.15);
     background: color-mix(in srgb, var(--iris-color-primary) 20%, transparent);
   }
 

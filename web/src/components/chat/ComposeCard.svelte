@@ -88,7 +88,7 @@
 
 <style>
   .compose-card-edit-btn:hover {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .compose-card-edit-btn:active {
     transform: scale(0.98);

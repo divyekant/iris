@@ -166,12 +166,12 @@
     color: var(--iris-color-bg);
   }
   .retry-btn:hover {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .topic-pill {
     transition: all var(--iris-transition-fast);
   }
   .topic-pill:hover {
-    filter: brightness(1.15);
+    background: var(--iris-color-bg-hover);
   }
 </style>
