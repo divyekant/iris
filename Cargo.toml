@@ -46,6 +46,10 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 sha2 = "0.10"
 rand = "0.8"
 
+# Markdown
+pulldown-cmark = "0.12"
+regex-lite = "0.1"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
