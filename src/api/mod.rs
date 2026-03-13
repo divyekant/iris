@@ -13,3 +13,4 @@ pub mod search;
 pub mod session_auth;
 pub mod threads;
 pub mod trust;
+pub mod vip;

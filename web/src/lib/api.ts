@@ -29,6 +29,19 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface VipContact {
+  email: string;
+  display_name: string | null;
+  vip_score: number;
+  is_manual: boolean;
+  message_count: number;
+  reply_count: number;
+  last_contact: number | null;
+  first_contact: number | null;
+  avg_reply_time_secs: number | null;
+  is_vip: boolean;
+}
+
 export const api = {
   health: () => request<{ status: string; version: string }>('/api/health'),
   accounts: {
@@ -143,5 +156,22 @@ export const api = {
       if (params?.offset) query.set('offset', String(params.offset));
       return request<any[]>(`/api/audit-log?${query}`);
     },
+  },
+  vip: {
+    list: (threshold?: number, limit?: number) => {
+      const query = new URLSearchParams();
+      if (threshold !== undefined) query.set('threshold', String(threshold));
+      if (limit !== undefined) query.set('limit', String(limit));
+      const qs = query.toString();
+      return request<{ vip_contacts: VipContact[]; threshold: number }>(`/api/contacts/vip${qs ? `?${qs}` : ''}`);
+    },
+    compute: () => request<{ contacts_scored: number; vip_count: number }>('/api/contacts/vip/compute', { method: 'POST' }),
+    setVip: (email: string, isVip: boolean) =>
+      request<{ email: string; is_vip: boolean }>(`/api/contacts/${encodeURIComponent(email)}/vip`, {
+        method: 'PUT',
+        body: JSON.stringify({ is_vip: isVip }),
+      }),
+    getScore: (email: string) =>
+      request<VipContact>(`/api/contacts/${encodeURIComponent(email)}/vip-score`),
   },
 };
