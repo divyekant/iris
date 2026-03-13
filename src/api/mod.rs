@@ -13,6 +13,7 @@ pub mod contacts;
 pub mod compose;
 pub mod config;
 pub mod deadlines;
+pub mod dlp;
 pub mod filter_rules;
 pub mod followups;
 pub mod health;
