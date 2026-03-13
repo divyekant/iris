@@ -38,6 +38,7 @@
     '/setup': AccountSetup,
     '/setup/*': AccountSetup,
     '/settings': Settings,
+    '/settings/*': Settings,
     // Cast needed: svelte-spa-router v4 types expect class-based ComponentType, but Svelte 5 uses function components
     '/sent': wrap({ component: FolderView as any, props: { folder: 'Sent', title: 'Sent' } }),
     '/drafts': wrap({ component: FolderView as any, props: { folder: 'Drafts', title: 'Drafts' } }),
