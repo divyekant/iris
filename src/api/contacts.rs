@@ -81,15 +81,16 @@ pub async fn get_contact_topics(
     }
 
     // Fetch up to 20 most recent messages with this contact
-    let like_pattern = format!("%{}%", email);
+    let escaped = email.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let like_pattern = format!("%{}%", escaped);
     let rows: Vec<(Option<String>, Option<String>)> = {
         let mut stmt = conn
             .prepare(
                 "SELECT subject, snippet FROM messages
                  WHERE is_deleted = 0
                    AND (LOWER(from_address) = ?1
-                        OR to_addresses LIKE ?2
-                        OR cc_addresses LIKE ?2)
+                        OR to_addresses LIKE ?2 ESCAPE '\\'
+                        OR cc_addresses LIKE ?2 ESCAPE '\\')
                  ORDER BY date DESC
                  LIMIT 20",
             )
@@ -280,7 +281,8 @@ pub async fn get_response_times(
     }
 
     let contact_email = email.to_lowercase();
-    let like_pattern = format!("%{}%", contact_email);
+    let escaped = contact_email.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let like_pattern = format!("%{}%", escaped);
 
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -316,8 +318,8 @@ pub async fn get_response_times(
                AND m.thread_id IS NOT NULL
                AND m.date IS NOT NULL
                AND (LOWER(m.from_address) = ?1
-                    OR m.to_addresses LIKE ?2
-                    OR m.cc_addresses LIKE ?2)
+                    OR m.to_addresses LIKE ?2 ESCAPE '\\'
+                    OR m.cc_addresses LIKE ?2 ESCAPE '\\')
              ORDER BY m.thread_id, m.date ASC",
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

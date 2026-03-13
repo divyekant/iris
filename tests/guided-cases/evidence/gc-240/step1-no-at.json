@@ -1,0 +1,4 @@
+HTTP Status: 400 Bad Request
+Request: GET /api/contacts/aliceexample.com/response-times
+Input: aliceexample.com (no @ sign)
+Expected: 400 Bad Request

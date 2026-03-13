@@ -1,0 +1,4 @@
+Step 1: No XSS reflected - error: failed to build email: invalid redirect-to address: Invalid input
+Step 2: No XSS reflected - error: failed to build email: invalid redirect-to address: Invalid input
+Step 3: No XSS reflected - error: failed to build email: invalid redirect-to address: Invalid input
+All responses are safe JSON, no raw HTML/script tags in response body.

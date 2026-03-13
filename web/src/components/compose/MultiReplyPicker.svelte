@@ -18,9 +18,9 @@
   let selectedTone = $state<string | null>(null);
 
   const toneStyles: Record<string, { bg: string; text: string; label: string }> = {
-    formal: { bg: '#b8960f22', text: '#b8960f', label: 'Formal' },
-    casual: { bg: '#2563EB22', text: '#2563EB', label: 'Casual' },
-    brief: { bg: '#16A34A22', text: '#16A34A', label: 'Brief' },
+    formal: { bg: 'color-mix(in srgb, var(--iris-color-primary) 13%, transparent)', text: 'var(--iris-color-primary)', label: 'Formal' },
+    casual: { bg: 'color-mix(in srgb, var(--iris-color-info) 13%, transparent)', text: 'var(--iris-color-info)', label: 'Casual' },
+    brief: { bg: 'color-mix(in srgb, var(--iris-color-success) 13%, transparent)', text: 'var(--iris-color-success)', label: 'Brief' },
   };
 
   function getToneStyle(tone: string) {

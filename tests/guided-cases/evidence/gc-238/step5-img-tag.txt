@@ -1,0 +1,21 @@
+* Host localhost:3000 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:3000...
+* Connected to localhost (::1) port 3000
+> GET /api/contacts/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E%40evil.com/topics HTTP/1.1
+> Host: localhost:3000
+> User-Agent: curl/8.7.1
+> Accept: */*
+> x-session-token: 5417a2450f82b510a74c6ce6faa9f60edf9a6b3e091f5977f41ecd3cca5d0ab4
+> 
+* Request completely sent off
+< HTTP/1.1 200 OK
+< content-type: application/json
+< vary: origin, access-control-request-method, access-control-request-headers
+< content-length: 93
+< date: Fri, 13 Mar 2026 15:58:14 GMT
+< 
+{ [93 bytes data]
+* Connection #0 to host localhost left intact
+{"email":"<img src=x onerror=alert(1)>@evil.com","topics":[],"total_emails":0,"cached":false}

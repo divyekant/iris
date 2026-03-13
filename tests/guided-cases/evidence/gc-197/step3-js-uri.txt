@@ -1,0 +1,2 @@
+{"id":"9638eea8feed5028","thread_id":"test-thread-delphi-197","content":"<a href=\"javascript:alert('xss')\">click me</a>","created_at":1773417631,"updated_at":1773417631}
+__STATUS:201

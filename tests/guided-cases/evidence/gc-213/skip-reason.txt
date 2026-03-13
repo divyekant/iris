@@ -1,0 +1,2 @@
+GC-213: SKIPPED
+Reason: Cannot toggle AI state via API — there is no endpoint to set ai_enabled=false without modifying the DB directly or restarting the server with a config change. The test requires disabling AI and re-enabling it, which cannot be done safely via API in an automated test run.

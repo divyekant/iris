@@ -1,0 +1,2 @@
+GC-217: SKIPPED
+Reason: Cannot control AI response to produce an empty array [] — the live AI model consistently generates content. The behavior is verified by the unit test `test_parse_multi_reply_response_empty_array` which asserts parse_multi_reply_response("[]").is_none(). Cannot trigger this condition via API in a live test.

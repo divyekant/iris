@@ -1,0 +1,10 @@
+[2m2026-03-13T15:56:33.025029Z[0m [34mDEBUG[0m [2miris_server::imap::sync[0m[2m:[0m Folder not available, skipping [3maccount_id[0m[2m=[0m"75e8dc75-058d-4bcb-b6a0-418af15eac09" [3mimap_folder[0m[2m=[0m"Sent"
+[2m2026-03-13T15:56:33.136802Z[0m [32m INFO[0m [2miris_server::imap::sync[0m[2m:[0m Initial sync complete [3maccount_id[0m[2m=[0m"75e8dc75-058d-4bcb-b6a0-418af15eac09"
+[2m2026-03-13T15:56:33.138930Z[0m [32m INFO[0m [2miris_server::imap::idle[0m[2m:[0m IDLE: connecting [3maccount_id[0m[2m=[0m"75e8dc75-058d-4bcb-b6a0-418af15eac09"
+[2m2026-03-13T15:56:33.138996Z[0m [32m INFO[0m [2miris_server::imap::connection[0m[2m:[0m IMAP: connecting... [3mhost[0m[2m=[0mimap.gmail.com [3mport[0m[2m=[0m993
+[2m2026-03-13T15:56:33.288315Z[0m [34mDEBUG[0m [2miris_server::imap::connection[0m[2m:[0m IMAP: server greeting [3mgreeting[0m[2m=[0m"* OK Gimap ready for requests from 74.66.192.177 af79cd13be357-8cda6fb37f1mb10785961085a"
+[2m2026-03-13T15:56:33.497426Z[0m [32m INFO[0m [2miris_server::imap::connection[0m[2m:[0m IMAP: authenticated successfully
+[2m2026-03-13T15:56:33.576541Z[0m [32m INFO[0m [2miris_server::imap::idle[0m[2m:[0m IDLE: entering IDLE mode [3maccount_id[0m[2m=[0m"75e8dc75-058d-4bcb-b6a0-418af15eac09"
+[2m2026-03-13T15:56:53.312703Z[0m [33m WARN[0m [2miris_server::ai::ollama[0m[2m:[0m Ollama returned status 404 Not Found
+[2m2026-03-13T15:56:53.312883Z[0m [34mDEBUG[0m [2miris_server::ai::provider[0m[2m:[0m Provider ollama failed, trying next
+[2m2026-03-13T15:57:04.132246Z[0m [32m INFO[0m [2miris_server::api::compose[0m[2m:[0m Email redirected [3maccount[0m[2m=[0mtataunistorescribe1@gmail.com [3mmessage_id[0m[2m=[0mf62fdf93-f463-4c43-8dcd-d722dff8584a [3mto[0m[2m=[0mcolleague@example.com

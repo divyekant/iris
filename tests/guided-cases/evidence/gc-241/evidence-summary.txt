@@ -1,0 +1,6 @@
+Step 1 (321-char email): HTTP 400 Bad Request ✓
+- Email: aaa...aaa@example.com (322 chars total, 310 a's + @example.com)
+
+Step 2 (320-char boundary): HTTP 200 OK ✓  
+- Email: aaa...aaa@example.com (320 chars total, 308 a's + @example.com)
+- Response: zero stats returned (email accepted, no data)

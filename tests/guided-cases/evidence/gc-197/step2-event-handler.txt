@@ -1,0 +1,2 @@
+{"id":"5592de91f1a1b7da","thread_id":"test-thread-delphi-197","content":"<img src=x onerror=alert('xss')>","created_at":1773417631,"updated_at":1773417631}
+__STATUS:201

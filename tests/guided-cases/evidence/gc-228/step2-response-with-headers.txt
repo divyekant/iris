@@ -1,0 +1,25 @@
+* Host localhost:3000 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:3000...
+* Connected to localhost (::1) port 3000
+> POST /api/ai/extract-tasks HTTP/1.1
+> Host: localhost:3000
+> User-Agent: curl/8.7.1
+> Accept: */*
+> x-session-token: 5417a2450f82b510a74c6ce6faa9f60edf9a6b3e091f5977f41ecd3cca5d0ab4
+> Content-Type: application/json
+> Content-Length: 64
+> 
+} [64 bytes data]
+* upload completely sent off: 64 bytes
+< HTTP/1.1 200 OK
+< content-type: application/json
+< vary: origin, access-control-request-method, access-control-request-headers
+< content-length: 281
+< date: Fri, 13 Mar 2026 15:58:57 GMT
+< 
+{ [281 bytes data]
+* Connection #0 to host localhost left intact
+{"tasks":[{"task":"Check and secure Google account - verify if passkey was authorized","priority":"high","deadline":null,"source_subject":"Security alert"},{"task":"Review security activity and account changes","priority":"high","deadline":null,"source_subject":"Security alert"}]}
+200

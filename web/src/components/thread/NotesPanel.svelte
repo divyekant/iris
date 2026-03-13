@@ -294,8 +294,8 @@
     font-weight: 600;
   }
   .note-card {
-    background: #2a2a1e;
-    border: 1px solid rgba(184, 150, 15, 0.2);
+    background: color-mix(in srgb, var(--iris-color-primary) 8%, var(--iris-color-bg));
+    border: 1px solid color-mix(in srgb, var(--iris-color-primary) 20%, transparent);
   }
   .note-card:hover .note-actions {
     opacity: 1;
