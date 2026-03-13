@@ -11,6 +11,7 @@ pub mod chat;
 pub mod contacts;
 pub mod compose;
 pub mod config;
+pub mod deadlines;
 pub mod filter_rules;
 pub mod health;
 pub mod labels;

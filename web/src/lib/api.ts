@@ -6,6 +6,18 @@ export interface ThreadNote {
   updated_at: number;
 }
 
+export interface Deadline {
+  id: string;
+  message_id: string;
+  thread_id: string | null;
+  description: string;
+  deadline_date: string;
+  deadline_source: string;
+  is_explicit: boolean;
+  completed: boolean;
+  created_at: number;
+}
+
 const BASE = '';
 
 let sessionToken: string | null = null;
@@ -380,5 +392,14 @@ export const api = {
     update: (id: string, data: { name: string; subject?: string; body_text: string; body_html?: string }) =>
       request<any>(`/api/templates/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: string) => request<void>(`/api/templates/${id}`, { method: 'DELETE' }),
+  },
+  deadlines: {
+    list: (days?: number) => request<{ deadlines: Deadline[] }>(`/api/deadlines${days ? `?days=${days}` : ''}`),
+    forThread: (threadId: string) => request<{ deadlines: Deadline[] }>(`/api/threads/${threadId}/deadlines`),
+    extract: (messageId: string) => request<{ deadlines: Deadline[] }>('/api/ai/extract-deadlines', {
+      method: 'POST', body: JSON.stringify({ message_id: messageId })
+    }),
+    complete: (id: string) => request<void>(`/api/deadlines/${id}/complete`, { method: 'PUT' }),
+    delete: (id: string) => request<void>(`/api/deadlines/${id}`, { method: 'DELETE' }),
   },
 };
