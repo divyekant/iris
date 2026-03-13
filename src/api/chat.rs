@@ -18,6 +18,8 @@ pub struct ChatMessage {
     pub content: String,
     pub citations: Option<Vec<Citation>>,
     pub proposed_action: Option<ProposedAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls_made: Option<Vec<crate::ai::tools::ToolCallRecord>>,
     pub created_at: i64,
 }
 
@@ -27,6 +29,10 @@ pub struct Citation {
     pub subject: Option<String>,
     pub from: Option<String>,
     pub snippet: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_read: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -63,17 +69,198 @@ pub struct ConfirmActionResponse {
 // System prompt
 // ---------------------------------------------------------------------------
 
-const CHAT_SYSTEM_PROMPT: &str = r#"You are Iris, an AI email assistant. You help users understand and manage their inbox through natural conversation.
+#[allow(dead_code)]
+fn chat_system_prompt() -> String {
+    chat_system_prompt_with_stats_str("")
+}
 
-You have access to the user's recent emails provided as context below. When answering:
-- Reference specific emails by their [ID] markers when citing information
+fn chat_system_prompt_with_stats(conn: &rusqlite::Connection) -> String {
+    let stats_block = crate::api::inbox_stats::format_stats_for_prompt(conn);
+    chat_system_prompt_with_stats_str(&stats_block)
+}
+
+fn chat_system_prompt_with_stats_str(stats_block: &str) -> String {
+    let today = chrono::Local::now().format("%A, %B %-d, %Y").to_string();
+    format!(
+        r#"You are Iris, an AI email assistant. You help users understand and manage their inbox through natural conversation.
+
+Today's date is {today}.
+{stats_block}
+You have access to tools that let you search, list, read, and bulk-update the user's emails. Use them to find relevant information before answering. When answering:
+- When you need information, use the available tools (search_emails, list_emails, read_email, inbox_stats)
+- Use list_emails for browsing/filtering by metadata (date, sender, category, read status)
+- Use search_emails for keyword searches with optional filters
+- Read specific emails for full details
+- Cite emails by referencing their ID from tool results
 - Be concise and helpful
-- If the user asks to perform an action (archive, delete, mark read, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
-  ACTION_PROPOSAL:{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}
-- Valid actions: archive, delete, mark_read, mark_unread, star
+- Use the date and read/unread status to answer questions about "today's emails", "unread emails", "this week", etc.
+- Use inbox_stats to answer aggregate questions like "how many emails", "who sends me the most", etc.
+
+## Bulk Operations
+When a user asks to perform actions on multiple emails (e.g. "archive all emails from LinkedIn", "mark all newsletters as read", "delete old emails from noreply@example.com"):
+1. First use list_emails or search_emails to find matching messages
+2. Tell the user how many messages match and show a sample of up to 5 subject lines
+3. ALWAYS include an ACTION_PROPOSAL so the user can confirm before execution
+4. Only after the user confirms should you call bulk_update_emails
+5. Available bulk actions: archive, mark_read, mark_unread, trash, star, unstar, move_to_category
+6. Maximum 500 messages per bulk operation
+
+## Action Proposals
+- If the user asks to perform an action (archive, delete, mark read, bulk operations, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
+  ACTION_PROPOSAL:{{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}}
+- Valid actions: archive, delete, mark_read, mark_unread, star, unstar, trash, move_to_category
 - If you don't have enough context to answer, say so honestly
-- For briefing requests, summarize the most important unread emails
-- Do not make up information not present in the provided emails"#;
+- For briefing requests, summarize the most important unread emails first
+- Do not make up information not present in the provided emails"#
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Agentic tool-use loop
+// ---------------------------------------------------------------------------
+
+/// Run the agentic tool-use loop. Calls the LLM with tools, executes any tool calls,
+/// appends results, and repeats until the LLM produces a text response or max iterations.
+async fn agentic_chat(
+    providers: &crate::ai::provider::ProviderPool,
+    db: &crate::db::DbPool,
+    memories: &crate::ai::memories::MemoriesClient,
+    system_prompt: &str,
+    initial_user_message: &str,
+    history: &[ChatMessage],
+    max_iterations: usize,
+) -> Result<(String, Vec<Citation>, Vec<crate::ai::tools::ToolCallRecord>), StatusCode> {
+    use crate::ai::tools::{self, LlmMessage, LlmResponse, ToolCallRecord};
+
+    let tools = tools::all_tools();
+    let mut tool_records: Vec<ToolCallRecord> = Vec::new();
+    let mut all_citations: Vec<Citation> = Vec::new();
+
+    // Build initial message list from conversation history
+    let mut messages: Vec<LlmMessage> = Vec::new();
+    for msg in history.iter().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+        match msg.role.as_str() {
+            "user" => messages.push(LlmMessage::User(msg.content.clone())),
+            "assistant" => messages.push(LlmMessage::AssistantText(msg.content.clone())),
+            _ => {}
+        }
+    }
+    messages.push(LlmMessage::User(initial_user_message.to_string()));
+
+    for iteration in 0..max_iterations {
+        let response = providers
+            .generate_with_tools(&messages, Some(system_prompt), &tools)
+            .await
+            .ok_or(StatusCode::BAD_GATEWAY)?;
+
+        match response {
+            LlmResponse::Text(text) => {
+                return Ok((text, all_citations, tool_records));
+            }
+            LlmResponse::ToolCalls { text, calls } => {
+                tracing::info!(iteration, num_calls = calls.len(), "Agentic loop: tool calls");
+
+                // Append assistant message with tool calls
+                messages.push(LlmMessage::AssistantToolCalls {
+                    text: text.clone(),
+                    tool_calls: calls.clone(),
+                });
+
+                // Execute each tool call
+                let conn = db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                for call in &calls {
+                    let result = tools::execute_tool(&conn, Some(memories), &call.name, &call.arguments);
+                    let result_json = match &result {
+                        Ok(v) => serde_json::to_string(v).unwrap_or_default(),
+                        Err(e) => serde_json::json!({"error": e}).to_string(),
+                    };
+
+                    // Track for response metadata
+                    tool_records.push(ToolCallRecord {
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        result_preview: result_json.chars().take(200).collect(),
+                    });
+
+                    // Extract citations from search results (deduplicate by message_id)
+                    if call.name == "search_emails" {
+                        if let Ok(ref v) = result {
+                            if let Some(arr) = v.as_array() {
+                                for item in arr {
+                                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                        if !all_citations.iter().any(|c| c.message_id == id) {
+                                            all_citations.push(Citation {
+                                                message_id: id.to_string(),
+                                                subject: item.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                from: item.get("from").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                date: None,
+                                                is_read: item.get("is_read").and_then(|v| v.as_bool()),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if call.name == "read_email" {
+                        if let Ok(ref v) = result {
+                            if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
+                                if !all_citations.iter().any(|c| c.message_id == id) {
+                                    all_citations.push(Citation {
+                                        message_id: id.to_string(),
+                                        subject: v.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        from: v.get("from").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                        snippet: v.get("body").and_then(|v| v.as_str()).unwrap_or("").chars().take(100).collect(),
+                                        date: None,
+                                        is_read: v.get("is_read").and_then(|v| v.as_bool()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if call.name == "list_emails" {
+                        if let Ok(ref v) = result {
+                            if let Some(emails) = v.get("emails").and_then(|v| v.as_array()) {
+                                for item in emails {
+                                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                        if !all_citations.iter().any(|c| c.message_id == id) {
+                                            all_citations.push(Citation {
+                                                message_id: id.to_string(),
+                                                subject: item.get("subject").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                from: item.get("from").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                                snippet: item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                date: None,
+                                                is_read: item.get("is_read").and_then(|v| v.as_bool()),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Append tool result message
+                    messages.push(LlmMessage::ToolResult {
+                        tool_call_id: call.id.clone(),
+                        content: result_json,
+                    });
+                }
+            }
+        }
+    }
+
+    // Max iterations reached — force a text response with no tools
+    tracing::warn!("Agentic loop reached max iterations ({}), forcing text response", max_iterations);
+    let final_response = providers
+        .generate_with_tools(&messages, Some(system_prompt), &[])
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    match final_response {
+        LlmResponse::Text(text) => Ok((text, all_citations, tool_records)),
+        _ => Ok(("I apologize, I was unable to complete my analysis. Please try rephrasing your question.".to_string(), all_citations, tool_records)),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/ai/chat — send a message and get AI response
@@ -93,7 +280,7 @@ pub async fn chat(
     }
 
     // Phase 1: DB reads (no await across conn)
-    let (history, fts_citations) = {
+    let history = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let ai_enabled = conn
@@ -112,57 +299,24 @@ pub async fn chat(
         ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let history = load_history(&conn, &input.session_id, 10);
-        let fts_citations = search_relevant_emails_fts(&conn, &input.message);
-
-        (history, fts_citations)
+        history
     };
 
-    // Phase 2: Semantic search via Memories (async)
-    let semantic_results = state.memories.search(&input.message, 10, Some("iris/")).await;
-
-    // Phase 3: Resolve semantic results to citations (needs DB)
-    let citations = if !semantic_results.is_empty() {
+    // Phase 2-4: Agentic tool-use loop (replaces single-shot RAG)
+    let system_prompt = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut citations = Vec::new();
-        for r in &semantic_results {
-            let msg_id = r.source.rsplit('/').next().unwrap_or("").to_string();
-            if msg_id.is_empty() {
-                continue;
-            }
-            if let Ok(c) = conn.query_row(
-                "SELECT subject, from_name, from_address FROM messages WHERE id = ?1",
-                rusqlite::params![msg_id],
-                |row| {
-                    let from_name: Option<String> = row.get(1)?;
-                    let from_addr: Option<String> = row.get(2)?;
-                    Ok(Citation {
-                        message_id: msg_id.clone(),
-                        subject: row.get(0)?,
-                        from: from_name.or(from_addr),
-                        snippet: r.text.chars().take(100).collect(),
-                    })
-                },
-            ) {
-                citations.push(c);
-            }
-        }
-        if citations.is_empty() { fts_citations } else { citations }
-    } else {
-        fts_citations
+        chat_system_prompt_with_stats(&conn)
     };
 
-    // Phase 3b: Load cross-session context from Memories
-    let past_sessions = state.memories.search(&input.message, 3, Some("iris/chat/sessions/")).await;
-    let user_prefs = state.memories.search("user email preferences", 1, Some("iris/user/preferences")).await;
-
-    // Phase 4: Build prompt and call AI provider (async)
-    let prompt = build_chat_prompt(&history, &citations, &input.message, &past_sessions, &user_prefs);
-
-    let ai_response = state
-        .providers
-        .generate(&prompt, Some(CHAT_SYSTEM_PROMPT))
-        .await
-        .ok_or(StatusCode::BAD_GATEWAY)?;
+    let (ai_response, citations, tool_records) = agentic_chat(
+        &state.providers,
+        &state.db,
+        &state.memories,
+        &system_prompt,
+        &input.message,
+        &history,
+        5, // max iterations
+    ).await?;
 
     let (clean_content, proposed_action) = parse_action_proposal(&ai_response);
 
@@ -183,12 +337,12 @@ pub async fn chat(
         .and_then(|a| serde_json::to_string(a).ok());
 
     // Phase 5: Store assistant message and check for summary trigger (DB write, no await)
+    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
     {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let assistant_msg_id_inner = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO chat_messages (id, session_id, role, content, citations, proposed_action) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
-            rusqlite::params![assistant_msg_id_inner, input.session_id, clean_content, citations_json, action_json],
+            rusqlite::params![assistant_msg_id, input.session_id, clean_content, citations_json, action_json],
         ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         // Trigger chat summarization every 10 messages
@@ -205,12 +359,13 @@ pub async fn chat(
     }
 
     let msg = ChatMessage {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: assistant_msg_id.clone(),
         session_id: input.session_id,
         role: "assistant".to_string(),
         content: clean_content,
         citations: if referenced_citations.is_empty() { None } else { Some(referenced_citations) },
         proposed_action,
+        tool_calls_made: if tool_records.is_empty() { None } else { Some(tool_records) },
         created_at: chrono::Utc::now().timestamp(),
     };
 
@@ -260,46 +415,117 @@ pub async fn confirm_action(
         }));
     }
 
-    // Map action to batch update
-    let batch_action = match action.action.as_str() {
-        "archive" | "delete" | "mark_read" | "mark_unread" | "star" => action.action.as_str(),
-        _ => return Err(StatusCode::BAD_REQUEST),
-    };
-
-    // Execute via the same batch update logic
-    let placeholders: Vec<String> = (0..action.message_ids.len())
-        .map(|i| format!("?{}", i + 2))
-        .collect();
-
-    let sql = match batch_action {
-        "archive" => format!(
-            "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
-        ),
-        "delete" => format!(
-            "UPDATE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
-        ),
-        "mark_read" => format!(
-            "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
-        ),
-        "mark_unread" => format!(
-            "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
-        ),
-        "star" => format!(
-            "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
-        ),
-        _ => return Err(StatusCode::BAD_REQUEST),
-    };
-
-    let params: Vec<Box<dyn rusqlite::types::ToSql>> = action
+    // Resolve truncated IDs (8-char prefixes from AI) to full UUIDs
+    let resolved_ids: Vec<String> = action
         .message_ids
         .iter()
-        .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>)
+        .filter_map(|id| {
+            if id.len() >= 36 {
+                // Already a full UUID
+                Some(id.clone())
+            } else {
+                // Truncated prefix — resolve via LIKE query
+                let pattern = format!("{}%", id);
+                conn.query_row(
+                    "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
+                    rusqlite::params![pattern],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            }
+        })
         .collect();
+
+    if resolved_ids.is_empty() {
+        return Ok(Json(ConfirmActionResponse {
+            executed: false,
+            updated: 0,
+        }));
+    }
+
+    // Map action to batch update
+    let batch_action = match action.action.as_str() {
+        "archive" | "delete" | "mark_read" | "mark_unread" | "star" | "unstar" | "trash"
+        | "move_to_category" => action.action.as_str(),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let placeholders: Vec<String> = (0..resolved_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect();
+
+    // For move_to_category, we need an extra parameter for the category
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match batch_action {
+        "archive" => (
+            format!(
+                "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "delete" | "trash" => (
+            format!(
+                "UPDATE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "mark_read" => (
+            format!(
+                "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "mark_unread" => (
+            format!(
+                "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "star" => (
+            format!(
+                "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "unstar" => (
+            format!(
+                "UPDATE messages SET is_starred = 0, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "move_to_category" => {
+            // Extract category from the description (format: "Move N emails to <category>")
+            // Default to "primary" if not found
+            let category = action
+                .description
+                .rsplit(" to ")
+                .next()
+                .unwrap_or("primary")
+                .trim()
+                .to_lowercase();
+            let cat_placeholders: Vec<String> = (0..resolved_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect();
+            let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            p.push(Box::new(category));
+            for id in &resolved_ids {
+                p.push(Box::new(id.clone()));
+            }
+            (
+                format!(
+                    "UPDATE messages SET ai_category = ?1, updated_at = unixepoch() WHERE id IN ({})",
+                    cat_placeholders.join(",")
+                ),
+                p,
+            )
+        }
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
 
     let updated = conn
         .execute(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))
@@ -383,6 +609,7 @@ fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> 
             content: row.get(3)?,
             citations: citations_json.and_then(|s| serde_json::from_str(&s).ok()),
             proposed_action: action_json.and_then(|s| serde_json::from_str(&s).ok()),
+            tool_calls_made: None,
             created_at: row.get(6)?,
         })
     }) {
@@ -396,6 +623,7 @@ fn load_history(conn: &rusqlite::Connection, session_id: &str, limit: usize) -> 
     }
 }
 
+#[allow(dead_code)]
 fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<Citation> {
     // Sanitize query for FTS5 — wrap each word in quotes
     let terms: Vec<String> = query
@@ -413,7 +641,8 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
 
     let mut stmt = match conn.prepare(
         "SELECT m.id, m.subject, m.from_name, m.from_address,
-                snippet(fts_messages, -1, '', '', '...', 40) as snip
+                snippet(fts_messages, -1, '', '', '...', 40) as snip,
+                m.date, m.is_read
          FROM fts_messages fts
          JOIN messages m ON m.rowid = fts.rowid
          WHERE fts_messages MATCH ?1
@@ -435,6 +664,8 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
             subject: row.get(1)?,
             from: from_name.or(from_addr),
             snippet: row.get::<_, String>(4).unwrap_or_default(),
+            date: row.get(5)?,
+            is_read: row.get::<_, Option<i32>>(6)?.map(|v| v != 0),
         })
     }) {
         Ok(rows) => rows
@@ -447,6 +678,7 @@ fn search_relevant_emails_fts(conn: &rusqlite::Connection, query: &str) -> Vec<C
     }
 }
 
+#[allow(dead_code)]
 fn build_chat_prompt(
     history: &[ChatMessage],
     citations: &[Citation],
@@ -478,9 +710,23 @@ fn build_chat_prompt(
         for c in citations {
             let from = c.from.as_deref().unwrap_or("Unknown");
             let subject = c.subject.as_deref().unwrap_or("(no subject)");
+            let date_str = c.date
+                .map(|ts| {
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.with_timezone(&chrono::Local).format("%b %-d, %Y %H:%M").to_string())
+                        .unwrap_or_else(|| "Unknown date".to_string())
+                })
+                .unwrap_or_else(|| "Unknown date".to_string());
+            let read_status = match c.is_read {
+                Some(true) => "read",
+                Some(false) => "UNREAD",
+                None => "unknown",
+            };
             prompt.push_str(&format!(
-                "[{}] From: {} | Subject: {} | {}\n",
+                "[{}] {} | {} | From: {} | Subject: {} | {}\n",
                 &c.message_id[..8.min(c.message_id.len())],
+                date_str,
+                read_status,
                 from,
                 subject,
                 c.snippet
@@ -566,12 +812,15 @@ mod tests {
             subject: Some("Meeting tomorrow".to_string()),
             from: Some("Alice".to_string()),
             snippet: "Let's meet at 3pm".to_string(),
+            date: Some(1741392000), // Mar 8, 2025
+            is_read: Some(false),
         }];
         let prompt = build_chat_prompt(&[], &citations, "What's happening tomorrow?", &[], &[]);
         assert!(prompt.contains("=== Relevant Emails ==="));
         assert!(prompt.contains("[abcdef12]"));
         assert!(prompt.contains("Alice"));
         assert!(prompt.contains("Meeting tomorrow"));
+        assert!(prompt.contains("UNREAD"));
         assert!(prompt.contains("What's happening tomorrow?"));
     }
 
@@ -594,5 +843,39 @@ mod tests {
         let prompt = build_chat_prompt(&[], &[], "Hello", &past, &[]);
         assert!(prompt.contains("=== Past Conversations ==="));
         assert!(prompt.contains("quarterly reports"));
+    }
+
+    #[test]
+    fn test_tool_records_serialization() {
+        let record = crate::ai::tools::ToolCallRecord {
+            name: "search_emails".to_string(),
+            arguments: serde_json::json!({"query": "test"}),
+            result_preview: "[{\"id\":\"m1\"}]".to_string(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("search_emails"));
+    }
+
+    #[test]
+    fn test_system_prompt_with_stats() {
+        let pool = crate::db::create_test_pool();
+        let conn = pool.get().unwrap();
+
+        // Insert test account and messages
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email) VALUES ('a1', 'gmail', 'test@test.com')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, from_address, subject, date, is_read, is_starred, is_draft)
+             VALUES ('m1', 'a1', 'x@y.com', 'Test', strftime('%s','now'), 0, 0, 0)",
+            [],
+        ).unwrap();
+
+        crate::api::inbox_stats::compute_and_store(&conn, "a1").unwrap();
+
+        let prompt = chat_system_prompt_with_stats(&conn);
+        assert!(prompt.contains("Inbox Overview"));
+        assert!(prompt.contains("Unread: 1"));
     }
 }

@@ -40,6 +40,19 @@ impl LlmProvider {
         }
     }
 
+    pub async fn generate_with_tools(
+        &self,
+        messages: &[crate::ai::tools::LlmMessage],
+        system: Option<&str>,
+        tools: &[crate::ai::tools::Tool],
+    ) -> Option<crate::ai::tools::LlmResponse> {
+        match self {
+            Self::Ollama(c) => c.generate_with_tools(messages, system, tools).await,
+            Self::Anthropic(c) => c.generate_with_tools(messages, system, tools).await,
+            Self::OpenAI(c) => c.generate_with_tools(messages, system, tools).await,
+        }
+    }
+
     pub fn model(&self) -> &str {
         match self {
             Self::Ollama(c) => &c.model,
@@ -88,6 +101,30 @@ impl ProviderPool {
                 return Some(result);
             }
             tracing::debug!("Provider {} failed, trying next", provider.name());
+        }
+        None
+    }
+
+    /// Generate a completion with tool-use support, using round-robin with fallback.
+    pub async fn generate_with_tools(
+        &self,
+        messages: &[crate::ai::tools::LlmMessage],
+        system: Option<&str>,
+        tools: &[crate::ai::tools::Tool],
+    ) -> Option<crate::ai::tools::LlmResponse> {
+        let n = self.providers.len();
+        if n == 0 {
+            return None;
+        }
+
+        let start = self.counter.fetch_add(1, Ordering::Relaxed) % n;
+        for i in 0..n {
+            let idx = (start + i) % n;
+            let provider = &self.providers[idx];
+            if let Some(result) = provider.generate_with_tools(messages, system, tools).await {
+                return Some(result);
+            }
+            tracing::debug!("Provider {} (tools) failed, trying next", provider.name());
         }
         None
     }
