@@ -4,3 +4,4 @@ pub mod ollama;
 pub mod openai;
 pub mod pipeline;
 pub mod provider;
+pub mod tools;
