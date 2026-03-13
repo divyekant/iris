@@ -159,6 +159,36 @@ pub fn all_tools() -> Vec<Tool> {
                 "required": []
             }),
         },
+        Tool {
+            name: "bulk_update_emails".to_string(),
+            description: "Execute a batch operation on multiple emails matching criteria. \
+                          Use this after finding emails with list_emails or search_emails. \
+                          Actions: archive, mark_read, mark_unread, trash, star, unstar, \
+                          move_to_category. IMPORTANT: Always show the user how many emails \
+                          will be affected and what action will be taken BEFORE executing. \
+                          The user must confirm the action proposal before you call this tool."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["archive", "mark_read", "mark_unread", "trash", "star", "unstar", "move_to_category"],
+                        "description": "The batch action to perform"
+                    },
+                    "message_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of message IDs to act on (from list_emails/search_emails results). Max 500."
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Target category (only required for move_to_category action)"
+                    }
+                },
+                "required": ["action", "message_ids"]
+            }),
+        },
     ]
 }
 
@@ -187,6 +217,7 @@ pub fn execute_tool(
             handle_read_email(conn, message_id)
         }
         "list_emails" => handle_list_emails(conn, arguments),
+        "bulk_update_emails" => handle_bulk_update_emails(conn, arguments),
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }
@@ -578,6 +609,178 @@ fn handle_list_emails(
     }))
 }
 
+/// Maximum number of messages per bulk operation for safety.
+const BULK_UPDATE_MAX: usize = 500;
+
+fn handle_bulk_update_emails(
+    conn: &Connection,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required parameter: action".to_string())?;
+
+    let message_ids: Vec<String> = args
+        .get("message_ids")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if message_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "error": "No message IDs provided. Use list_emails or search_emails first to find messages.",
+            "updated": 0
+        }));
+    }
+
+    if message_ids.len() > BULK_UPDATE_MAX {
+        return Ok(serde_json::json!({
+            "error": format!("Too many messages ({}). Maximum is {} per bulk operation.", message_ids.len(), BULK_UPDATE_MAX),
+            "updated": 0
+        }));
+    }
+
+    // Validate action
+    let valid_actions = [
+        "archive",
+        "mark_read",
+        "mark_unread",
+        "trash",
+        "star",
+        "unstar",
+        "move_to_category",
+    ];
+    if !valid_actions.contains(&action) {
+        return Ok(serde_json::json!({
+            "error": format!("Unknown action: {}. Valid actions: {}", action, valid_actions.join(", ")),
+            "updated": 0
+        }));
+    }
+
+    // Resolve truncated IDs (8-char prefixes) to full UUIDs
+    let resolved_ids: Vec<String> = message_ids
+        .iter()
+        .filter_map(|id| {
+            let sanitized: String = id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if sanitized.len() >= 36 {
+                Some(sanitized)
+            } else {
+                conn.query_row(
+                    "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
+                    params![format!("{}%", sanitized)],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            }
+        })
+        .collect();
+
+    if resolved_ids.is_empty() {
+        return Ok(serde_json::json!({
+            "error": "None of the provided message IDs could be resolved.",
+            "updated": 0
+        }));
+    }
+
+    // Build and execute batch update
+    let placeholders: Vec<String> = (0..resolved_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect();
+    let in_clause = placeholders.join(",");
+
+    let sql = match action {
+        "archive" => format!(
+            "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
+            in_clause
+        ),
+        "mark_read" => format!(
+            "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({})",
+            in_clause
+        ),
+        "mark_unread" => format!(
+            "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({})",
+            in_clause
+        ),
+        "trash" => format!(
+            "UPDATE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
+            in_clause
+        ),
+        "star" => format!(
+            "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({})",
+            in_clause
+        ),
+        "unstar" => format!(
+            "UPDATE messages SET is_starred = 0, updated_at = unixepoch() WHERE id IN ({})",
+            in_clause
+        ),
+        "move_to_category" => {
+            let _cat = args
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("primary");
+            // For move_to_category, the category param goes first, then the IDs
+            let id_placeholders: Vec<String> = (0..resolved_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect();
+            format!(
+                "UPDATE messages SET ai_category = ?1, updated_at = unixepoch() WHERE id IN ({})",
+                id_placeholders.join(",")
+            )
+        }
+        _ => unreachable!(), // validated above
+    };
+
+    let updated = if action == "move_to_category" {
+        let cat = args
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("primary")
+            .to_string();
+        let mut sql_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        sql_params.push(Box::new(cat));
+        for id in &resolved_ids {
+            sql_params.push(Box::new(id.clone()));
+        }
+        conn.execute(
+            &sql,
+            rusqlite::params_from_iter(sql_params.iter().map(|p| p.as_ref())),
+        )
+        .map_err(|e| format!("DB error: {}", e))?
+    } else {
+        let sql_params: Vec<Box<dyn rusqlite::types::ToSql>> = resolved_ids
+            .iter()
+            .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        conn.execute(
+            &sql,
+            rusqlite::params_from_iter(sql_params.iter().map(|p| p.as_ref())),
+        )
+        .map_err(|e| format!("DB error: {}", e))?
+    };
+
+    let status = if updated == resolved_ids.len() {
+        "all successful"
+    } else {
+        "some messages may not exist"
+    };
+
+    Ok(serde_json::json!({
+        "action": action,
+        "requested": message_ids.len(),
+        "resolved": resolved_ids.len(),
+        "updated": updated,
+        "status": status
+    }))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -641,11 +844,12 @@ mod tests {
     #[test]
     fn test_all_tools_defined() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[0].name, "inbox_stats");
         assert_eq!(tools[1].name, "search_emails");
         assert_eq!(tools[2].name, "read_email");
         assert_eq!(tools[3].name, "list_emails");
+        assert_eq!(tools[4].name, "bulk_update_emails");
     }
 
     #[test]
@@ -786,10 +990,11 @@ mod tests {
     }
 
     #[test]
-    fn test_all_tools_includes_list_emails() {
+    fn test_all_tools_includes_list_emails_and_bulk() {
         let tools = all_tools();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[3].name, "list_emails");
+        assert_eq!(tools[4].name, "bulk_update_emails");
     }
 
     #[test]
@@ -967,5 +1172,276 @@ mod tests {
         let arr = val.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["subject"], "Security Alert Unread");
+    }
+
+    // ── Bulk Update Tests ────────────────────────────────────────
+
+    fn setup_bulk_test_db() -> (crate::db::DbPool, Vec<String>) {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name) \
+             VALUES ('acct1', 'gmail', 'test@example.com', 'Test')",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let ids: Vec<String> = (0..5)
+            .map(|i| {
+                let id = format!("bulk-msg-{:04}-0000-0000-000000000000", i);
+                conn.execute(
+                    "INSERT INTO messages (id, account_id, subject, from_address, date, is_read, is_starred, is_draft, folder, ai_category) \
+                     VALUES (?1, 'acct1', ?2, 'sender@test.com', ?3, 0, 0, 0, 'INBOX', 'primary')",
+                    params![id, format!("Bulk Email {}", i), now + i as i64 * 100],
+                )
+                .unwrap();
+                id
+            })
+            .collect();
+
+        (pool, ids)
+    }
+
+    #[test]
+    fn test_bulk_update_tool_in_all_tools() {
+        let tools = all_tools();
+        let bulk = tools.iter().find(|t| t.name == "bulk_update_emails");
+        assert!(bulk.is_some());
+        let schema = &bulk.unwrap().input_schema;
+        let props = schema.get("properties").unwrap();
+        assert!(props.get("action").is_some());
+        assert!(props.get("message_ids").is_some());
+        assert!(props.get("category").is_some());
+    }
+
+    #[test]
+    fn test_bulk_update_empty_ids() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "archive", "message_ids": []}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val.get("error").is_some());
+        assert_eq!(val["updated"], 0);
+    }
+
+    #[test]
+    fn test_bulk_update_unknown_action() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "explode", "message_ids": [ids[0]]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val["error"].as_str().unwrap().contains("Unknown action"));
+    }
+
+    #[test]
+    fn test_bulk_update_archive() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "archive", "message_ids": [ids[0], ids[1]]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["action"], "archive");
+        assert_eq!(val["updated"], 2);
+        assert_eq!(val["status"], "all successful");
+
+        // Verify DB state
+        let folder: String = conn
+            .query_row("SELECT folder FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(folder, "Archive");
+    }
+
+    #[test]
+    fn test_bulk_update_mark_read() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "mark_read", "message_ids": [ids[0], ids[1], ids[2]]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["updated"], 3);
+
+        let is_read: i32 = conn
+            .query_row("SELECT is_read FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(is_read, 1);
+    }
+
+    #[test]
+    fn test_bulk_update_mark_unread() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+
+        // First mark as read
+        conn.execute("UPDATE messages SET is_read = 1 WHERE id = ?1", params![ids[0]]).unwrap();
+
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "mark_unread", "message_ids": [ids[0]]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["updated"], 1);
+
+        let is_read: i32 = conn
+            .query_row("SELECT is_read FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(is_read, 0);
+    }
+
+    #[test]
+    fn test_bulk_update_trash() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "trash", "message_ids": [ids[0]]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["updated"], 1);
+
+        let folder: String = conn
+            .query_row("SELECT folder FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(folder, "Trash");
+    }
+
+    #[test]
+    fn test_bulk_update_star_unstar() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+
+        // Star
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "star", "message_ids": [ids[0], ids[1]]}),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["updated"], 2);
+
+        let starred: i32 = conn
+            .query_row("SELECT is_starred FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(starred, 1);
+
+        // Unstar
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "unstar", "message_ids": [ids[0]]}),
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["updated"], 1);
+
+        let starred: i32 = conn
+            .query_row("SELECT is_starred FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(starred, 0);
+    }
+
+    #[test]
+    fn test_bulk_update_move_to_category() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({
+                "action": "move_to_category",
+                "message_ids": [ids[0], ids[1]],
+                "category": "promotions"
+            }),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["updated"], 2);
+
+        let category: String = conn
+            .query_row("SELECT ai_category FROM messages WHERE id = ?1", params![ids[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(category, "promotions");
+    }
+
+    #[test]
+    fn test_bulk_update_nonexistent_ids() {
+        let pool = create_test_pool();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "archive", "message_ids": ["nonexistent-id-here"]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val.get("error").is_some());
+        assert!(val["error"].as_str().unwrap().contains("could be resolved"));
+    }
+
+    #[test]
+    fn test_bulk_update_truncated_ids() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+
+        // Use 8-char prefix
+        let truncated = &ids[0][..10]; // "bulk-msg-0"
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "mark_read", "message_ids": [truncated]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["updated"], 1);
+    }
+
+    #[test]
+    fn test_bulk_update_message_count_in_response() {
+        let (pool, ids) = setup_bulk_test_db();
+        let conn = pool.get().unwrap();
+        let result = execute_tool(
+            &conn,
+            None,
+            "bulk_update_emails",
+            &serde_json::json!({"action": "star", "message_ids": [ids[0], ids[1], ids[2]]}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["requested"], 3);
+        assert_eq!(val["resolved"], 3);
+        assert_eq!(val["updated"], 3);
     }
 }

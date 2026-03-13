@@ -86,7 +86,7 @@ fn chat_system_prompt_with_stats_str(stats_block: &str) -> String {
 
 Today's date is {today}.
 {stats_block}
-You have access to tools that let you search, list, and read the user's emails. Use them to find relevant information before answering. When answering:
+You have access to tools that let you search, list, read, and bulk-update the user's emails. Use them to find relevant information before answering. When answering:
 - When you need information, use the available tools (search_emails, list_emails, read_email, inbox_stats)
 - Use list_emails for browsing/filtering by metadata (date, sender, category, read status)
 - Use search_emails for keyword searches with optional filters
@@ -95,9 +95,20 @@ You have access to tools that let you search, list, and read the user's emails. 
 - Be concise and helpful
 - Use the date and read/unread status to answer questions about "today's emails", "unread emails", "this week", etc.
 - Use inbox_stats to answer aggregate questions like "how many emails", "who sends me the most", etc.
-- If the user asks to perform an action (archive, delete, mark read, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
+
+## Bulk Operations
+When a user asks to perform actions on multiple emails (e.g. "archive all emails from LinkedIn", "mark all newsletters as read", "delete old emails from noreply@example.com"):
+1. First use list_emails or search_emails to find matching messages
+2. Tell the user how many messages match and show a sample of up to 5 subject lines
+3. ALWAYS include an ACTION_PROPOSAL so the user can confirm before execution
+4. Only after the user confirms should you call bulk_update_emails
+5. Available bulk actions: archive, mark_read, mark_unread, trash, star, unstar, move_to_category
+6. Maximum 500 messages per bulk operation
+
+## Action Proposals
+- If the user asks to perform an action (archive, delete, mark read, bulk operations, etc.), describe what you'd do and include ACTION_PROPOSAL at the end of your response in this exact format:
   ACTION_PROPOSAL:{{"action":"archive","description":"Archive 3 emails from LinkedIn","message_ids":["id1","id2","id3"]}}
-- Valid actions: archive, delete, mark_read, mark_unread, star
+- Valid actions: archive, delete, mark_read, mark_unread, star, unstar, trash, move_to_category
 - If you don't have enough context to answer, say so honestly
 - For briefing requests, summarize the most important unread emails first
 - Do not make up information not present in the provided emails"#
@@ -434,7 +445,8 @@ pub async fn confirm_action(
 
     // Map action to batch update
     let batch_action = match action.action.as_str() {
-        "archive" | "delete" | "mark_read" | "mark_unread" | "star" => action.action.as_str(),
+        "archive" | "delete" | "mark_read" | "mark_unread" | "star" | "unstar" | "trash"
+        | "move_to_category" => action.action.as_str(),
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
@@ -442,34 +454,78 @@ pub async fn confirm_action(
         .map(|i| format!("?{}", i + 1))
         .collect();
 
-    let sql = match batch_action {
-        "archive" => format!(
-            "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
+    // For move_to_category, we need an extra parameter for the category
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match batch_action {
+        "archive" => (
+            format!(
+                "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
         ),
-        "delete" => format!(
-            "UPDATE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
+        "delete" | "trash" => (
+            format!(
+                "UPDATE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
         ),
-        "mark_read" => format!(
-            "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
+        "mark_read" => (
+            format!(
+                "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
         ),
-        "mark_unread" => format!(
-            "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
+        "mark_unread" => (
+            format!(
+                "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
         ),
-        "star" => format!(
-            "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({})",
-            placeholders.join(",")
+        "star" => (
+            format!(
+                "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
         ),
+        "unstar" => (
+            format!(
+                "UPDATE messages SET is_starred = 0, updated_at = unixepoch() WHERE id IN ({})",
+                placeholders.join(",")
+            ),
+            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+        ),
+        "move_to_category" => {
+            // Extract category from the description (format: "Move N emails to <category>")
+            // Default to "primary" if not found
+            let category = action
+                .description
+                .rsplit(" to ")
+                .next()
+                .unwrap_or("primary")
+                .trim()
+                .to_lowercase();
+            let cat_placeholders: Vec<String> = (0..resolved_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect();
+            let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            p.push(Box::new(category));
+            for id in &resolved_ids {
+                p.push(Box::new(id.clone()));
+            }
+            (
+                format!(
+                    "UPDATE messages SET ai_category = ?1, updated_at = unixepoch() WHERE id IN ({})",
+                    cat_placeholders.join(",")
+                ),
+                p,
+            )
+        }
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-
-    let params: Vec<Box<dyn rusqlite::types::ToSql>> = resolved_ids
-        .iter()
-        .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>)
-        .collect();
 
     let updated = conn
         .execute(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))
