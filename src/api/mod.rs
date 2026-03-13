@@ -29,3 +29,4 @@ pub mod thread_notes;
 pub mod threads;
 pub mod subscriptions;
 pub mod trust;
+pub mod vip;
