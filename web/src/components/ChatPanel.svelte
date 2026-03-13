@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api';
+  import ComposeCard from './chat/ComposeCard.svelte';
 
   let { open, onclose }: { open: boolean; onclose: () => void } = $props();
 
@@ -122,18 +123,58 @@
 
   async function confirmAction(messageId: string) {
     try {
-      const res = await api.ai.chatConfirm({ session_id: sessionId, message_id: messageId });
+      const res: any = await api.ai.chatConfirm({ session_id: sessionId, message_id: messageId });
       if (res.executed) {
-        messages = [...messages, {
-          role: 'assistant',
-          content: `Done! Updated ${res.updated} email${res.updated === 1 ? '' : 's'}.`,
-          id: crypto.randomUUID(),
-        }];
-        scrollToBottom();
+        if (res.draft_id) {
+          // Compose action confirmed — open compose modal with the draft
+          messages = [...messages, {
+            role: 'assistant',
+            content: 'Draft saved! Opening compose window...',
+            id: crypto.randomUUID(),
+          }];
+          scrollToBottom();
+          // Dispatch event to open compose modal (handled by Inbox page)
+          window.dispatchEvent(new CustomEvent('open-compose', {
+            detail: { mode: 'new', accountId: null, draftId: res.draft_id }
+          }));
+        } else {
+          messages = [...messages, {
+            role: 'assistant',
+            content: `Done! Updated ${res.updated} email${res.updated === 1 ? '' : 's'}.`,
+            id: crypto.randomUUID(),
+          }];
+          scrollToBottom();
+        }
       }
     } catch {
       error = 'Failed to execute action.';
     }
+  }
+
+  function handleComposeEdit(data: any) {
+    // Dispatch open-compose event with pre-filled data from the AI draft
+    window.dispatchEvent(new CustomEvent('open-compose', {
+      detail: {
+        mode: data.reply_to_message_id ? 'reply' : 'new',
+        accountId: null,
+        prefill: {
+          to: data.to?.join(', ') || '',
+          cc: data.cc?.join(', ') || '',
+          subject: data.subject || '',
+          body: data.body?.replace(/<[^>]*>/g, '') || '',
+        }
+      }
+    }));
+  }
+
+  function handleComposeDiscard(messageId: string) {
+    // Remove the compose proposal from the message
+    messages = messages.map(m => {
+      if (m.id === messageId && m.proposed_action?.action === 'compose_email') {
+        return { ...m, proposed_action: null };
+      }
+      return m;
+    });
   }
 
   function newSession() {
@@ -350,8 +391,15 @@
                   </div>
                 {/if}
 
-                <!-- Action proposal -->
-                {#if msg.proposed_action}
+                <!-- Compose email proposal (rendered as ComposeCard) -->
+                {#if msg.proposed_action?.action === 'compose_email' && msg.proposed_action?.data}
+                  <ComposeCard
+                    data={msg.proposed_action.data}
+                    onedit={(data) => handleComposeEdit(data)}
+                    ondiscard={() => handleComposeDiscard(msg.id)}
+                  />
+                {:else if msg.proposed_action}
+                  <!-- Generic action proposal -->
                   <div class="mt-2 pt-2 border-t" style="border-color: var(--iris-color-border-subtle);">
                     <p class="text-xs font-medium mb-1" style="color: var(--iris-color-text);">{msg.proposed_action.description}</p>
                     <button

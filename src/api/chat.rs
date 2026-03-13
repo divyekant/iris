@@ -40,6 +40,9 @@ pub struct ProposedAction {
     pub action: String,
     pub description: String,
     pub message_ids: Vec<String>,
+    /// Extra structured data for tool-specific proposals (e.g. compose_email).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +66,9 @@ pub struct ConfirmActionRequest {
 pub struct ConfirmActionResponse {
     pub executed: bool,
     pub updated: usize,
+    /// Draft ID returned when confirming a compose_email action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +117,15 @@ When a user asks to perform actions on multiple emails (e.g. "archive all emails
 - Valid actions: archive, delete, mark_read, mark_unread, star, unstar, trash, move_to_category
 - If you don't have enough context to answer, say so honestly
 - For briefing requests, summarize the most important unread emails first
-- Do not make up information not present in the provided emails"#
+- Do not make up information not present in the provided emails
+
+## Email Composition
+You can draft emails for the user. When they ask to "write an email to...", "draft a reply to...", "compose a message about...", include a COMPOSE_PROPOSAL at the end of your response in this exact format:
+  COMPOSE_PROPOSAL:{{"to":["recipient@example.com"],"cc":[],"subject":"Subject line","body":"<p>Email body in HTML</p>","reply_to_message_id":null,"tone":"formal"}}
+- Always confirm the recipients and subject before drafting
+- Match the requested tone (formal by default, or casual/brief if asked)
+- For replies, include the reply_to_message_id to get thread context
+- The draft will be saved for user review before sending"#
     )
 }
 
@@ -250,7 +264,7 @@ async fn agentic_chat(
         }
     }
 
-    // Max iterations reached — force a text response with no tools
+    // Max iterations reached -- force a text response with no tools
     tracing::warn!("Agentic loop reached max iterations ({}), forcing text response", max_iterations);
     let final_response = providers
         .generate_with_tools(&messages, Some(system_prompt), &[])
@@ -408,10 +422,39 @@ pub async fn confirm_action(
     let action: ProposedAction =
         serde_json::from_str(&action_json).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Handle compose_email action — save draft and return draft_id
+    if action.action == "compose_email" {
+        if let Some(ref data_val) = action.data {
+            let compose_data: crate::ai::tools::ComposeEmailData =
+                serde_json::from_value(data_val.clone())
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            // Find the first active account to associate the draft with
+            let account_id: String = conn
+                .query_row(
+                    "SELECT id FROM accounts WHERE is_active = 1 ORDER BY created_at ASC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+            let draft_id = crate::ai::tools::execute_compose_email(&*conn, &compose_data, &account_id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            return Ok(Json(ConfirmActionResponse {
+                executed: true,
+                updated: 1,
+                draft_id: Some(draft_id),
+            }));
+        }
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     if action.message_ids.is_empty() {
         return Ok(Json(ConfirmActionResponse {
             executed: false,
             updated: 0,
+            draft_id: None,
         }));
     }
 
@@ -440,6 +483,7 @@ pub async fn confirm_action(
         return Ok(Json(ConfirmActionResponse {
             executed: false,
             updated: 0,
+            draft_id: None,
         }));
     }
 
@@ -537,6 +581,7 @@ pub async fn confirm_action(
     Ok(Json(ConfirmActionResponse {
         executed: true,
         updated,
+        draft_id: None,
     }))
 }
 
@@ -753,10 +798,37 @@ fn build_chat_prompt(
     prompt
 }
 
-/// Parse AI response to extract action proposals.
+/// Parse AI response to extract action proposals (ACTION_PROPOSAL or COMPOSE_PROPOSAL).
 /// Returns (clean_content, optional_action).
 pub fn parse_action_proposal(response: &str) -> (String, Option<ProposedAction>) {
-    if let Some(idx) = response.find("ACTION_PROPOSAL:") {
+    // Check for COMPOSE_PROPOSAL first (more specific)
+    if let Some(idx) = response.find("COMPOSE_PROPOSAL:") {
+        let clean = response[..idx].trim().to_string();
+        let json_str = &response[idx + 17..];
+        let json_str = json_str.trim();
+
+        if let Some(start) = json_str.find('{') {
+            if let Some(end) = json_str.rfind('}') {
+                if let Ok(compose_data) = serde_json::from_str::<crate::ai::tools::ComposeEmailArgs>(&json_str[start..=end]) {
+                    let recipients = compose_data.to.join(", ");
+                    let description = format!(
+                        "Draft email to {} with subject '{}'",
+                        recipients, compose_data.subject
+                    );
+                    return (
+                        clean,
+                        Some(ProposedAction {
+                            action: "compose_email".to_string(),
+                            description,
+                            message_ids: Vec::new(),
+                            data: serde_json::to_value(&compose_data).ok(),
+                        }),
+                    );
+                }
+            }
+        }
+        (clean, None)
+    } else if let Some(idx) = response.find("ACTION_PROPOSAL:") {
         let clean = response[..idx].trim().to_string();
         let json_str = &response[idx + 16..];
         let json_str = json_str.trim();
@@ -880,5 +952,34 @@ mod tests {
         let prompt = chat_system_prompt_with_stats(&conn);
         assert!(prompt.contains("Inbox Overview"));
         assert!(prompt.contains("Unread: 1"));
+    }
+
+    #[test]
+    fn test_parse_compose_proposal_valid() {
+        let response = "I'll draft that email for you.\n\nCOMPOSE_PROPOSAL:{\"to\":[\"alice@example.com\"],\"cc\":[],\"subject\":\"Meeting Tomorrow\",\"body\":\"<p>Hi Alice</p>\",\"reply_to_message_id\":null,\"tone\":\"formal\"}";
+        let (content, action) = parse_action_proposal(response);
+        assert_eq!(content, "I'll draft that email for you.");
+        let action = action.unwrap();
+        assert_eq!(action.action, "compose_email");
+        assert!(action.description.contains("alice@example.com"));
+        assert!(action.description.contains("Meeting Tomorrow"));
+        assert!(action.data.is_some());
+    }
+
+    #[test]
+    fn test_parse_compose_proposal_malformed() {
+        let response = "Here it is.\nCOMPOSE_PROPOSAL:bad json";
+        let (content, action) = parse_action_proposal(response);
+        assert_eq!(content, "Here it is.");
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_system_prompt_contains_compose_section() {
+        let prompt = chat_system_prompt();
+        assert!(prompt.contains("Email Composition"));
+        assert!(prompt.contains("COMPOSE_PROPOSAL"));
+        assert!(prompt.contains("reply_to_message_id"));
+        assert!(prompt.contains("draft"));
     }
 }
