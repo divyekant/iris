@@ -3,7 +3,7 @@
 
 CREATE TABLE followup_reminders (
     id TEXT PRIMARY KEY,
-    message_id TEXT NOT NULL REFERENCES messages(message_id),
+    message_id TEXT NOT NULL,
     thread_id TEXT,
     reason TEXT NOT NULL,
     suggested_date TEXT NOT NULL,

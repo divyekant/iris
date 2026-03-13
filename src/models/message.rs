@@ -72,11 +72,7 @@ impl MessageSummary {
         let mut stmt = conn
             .prepare(
                 "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-<<<<<<< HEAD
-                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment, ai_needs_reply
-=======
-                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, intent
->>>>>>> worktree-agent-a8e453ed
+                        date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment, ai_needs_reply, intent
                  FROM messages
                  WHERE account_id = ?1 AND folder = ?2 AND is_deleted = 0
                  ORDER BY date DESC
@@ -422,7 +418,7 @@ pub fn list_needs_reply(
 
     let query = format!(
         "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-                date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment, ai_needs_reply
+                date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment, ai_needs_reply, intent
          FROM messages
          {where_clause}
          ORDER BY date DESC
@@ -517,11 +513,7 @@ pub fn list_drafts(conn: &Conn, account_id: &str) -> Vec<MessageSummary> {
     let mut stmt = conn
         .prepare(
             "SELECT id, account_id, thread_id, folder, from_address, from_name, subject, snippet,
-<<<<<<< HEAD
-                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment, ai_needs_reply
-=======
-                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, intent
->>>>>>> worktree-agent-a8e453ed
+                    date, is_read, is_starred, has_attachments, labels, ai_priority_label, ai_category, ai_sentiment, ai_needs_reply, intent
              FROM messages
              WHERE account_id = ?1 AND is_draft = 1 AND is_deleted = 0
              ORDER BY updated_at DESC

@@ -366,6 +366,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let context = build_thread_context(&[msg]);
@@ -402,6 +406,10 @@ mod tests {
             ai_priority_label: None,
             ai_category: None,
             ai_summary: None,
+            ai_sentiment: None,
+            ai_needs_reply: false,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         };
 
         let context = build_thread_context(&[msg]);
@@ -438,6 +446,10 @@ mod tests {
                 ai_priority_label: None,
                 ai_category: None,
                 ai_summary: None,
+                ai_sentiment: None,
+                ai_needs_reply: false,
+                list_unsubscribe: None,
+                list_unsubscribe_post: false,
             })
             .collect();
 
