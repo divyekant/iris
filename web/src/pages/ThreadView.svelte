@@ -2,7 +2,7 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis } from 'lucide-svelte';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -35,6 +35,9 @@
 
   // Spam dialog state
   let showSpamDialog = $state(false);
+
+  // More menu state (ThreadView action grouping)
+  let moreMenuOpen = $state(false);
 
   // Contact topics state
   let topicsEmail = $state<string | null>(null);
@@ -502,7 +505,7 @@
   });
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={() => { moreMenuOpen = false; }} />
 
 <div class="h-full flex flex-col">
   <!-- Thread header -->
@@ -532,13 +535,15 @@
         </p>
       </div>
       <div class="flex items-center gap-0.5">
-        <button class="p-1.5 transition-colors thread-action-btn {isMuted ? 'mute-active' : ''}" onclick={toggleMute} title={isMuted ? 'Unmute thread' : 'Mute thread'} disabled={muteLoading}>
-          {#if isMuted}<VolumeX size={15} />{:else}<Volume2 size={15} />{/if}
-        </button>
-        <button class="p-1.5 transition-colors thread-action-btn tasks-btn" onclick={toggleTasks} title="Extract Tasks"><ListChecks size={15} /></button>
+        <!-- Primary actions group -->
         <button class="p-1.5 transition-colors thread-action-btn star-btn" onclick={() => handleThreadAction('star')} title="Star"><Star size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('archive')} title="Archive"><Archive size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('mark_unread')} title="Mark unread"><MailOpen size={15} /></button>
+
+        <!-- Separator -->
+        <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
+
+        <!-- Organize group: Snooze -->
         <div class="relative">
           <button class="p-1.5 transition-colors thread-action-btn snooze-btn" onclick={() => { snoozePickerOpen = !snoozePickerOpen; }} title="Snooze"><Clock size={15} /></button>
           {#if snoozePickerOpen}
@@ -550,8 +555,47 @@
             </div>
           {/if}
         </div>
+
+        <!-- Separator -->
+        <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
+
+        <!-- Danger group -->
         <button class="p-1.5 transition-colors thread-action-btn delete-btn" onclick={() => handleThreadAction('delete')} title="Delete"><Trash2 size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn spam-btn" onclick={openSpamDialog} title="Report Spam"><ShieldAlert size={15} /></button>
+
+        <!-- Separator -->
+        <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
+
+        <!-- More menu -->
+        <div class="relative">
+          <button
+            class="p-1.5 transition-colors thread-action-btn"
+            onclick={(e) => { e.stopPropagation(); moreMenuOpen = !moreMenuOpen; }}
+            title="More actions"
+          ><Ellipsis size={15} /></button>
+          {#if moreMenuOpen}
+            <div
+              class="absolute right-0 top-full mt-1 z-50 py-1 rounded-lg"
+              style="background: var(--iris-color-bg-elevated); box-shadow: 0 4px 12px rgba(0,0,0,.15); border: 1px solid var(--iris-color-border); min-width: 160px;"
+            >
+              <button
+                class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors more-menu-item {isMuted ? 'mute-active' : ''}"
+                onclick={(e) => { e.stopPropagation(); moreMenuOpen = false; toggleMute(); }}
+                disabled={muteLoading}
+              >
+                {#if isMuted}<VolumeX size={14} />{:else}<Volume2 size={14} />{/if}
+                <span>{isMuted ? 'Unmute thread' : 'Mute thread'}</span>
+              </button>
+              <button
+                class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors more-menu-item"
+                onclick={(e) => { e.stopPropagation(); moreMenuOpen = false; toggleTasks(); }}
+              >
+                <ListChecks size={14} />
+                <span>Extract Tasks</span>
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
     {/if}
   </div>
@@ -892,5 +936,15 @@
   }
   .reply-ai-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent);
+  }
+  .more-menu-item {
+    color: var(--iris-color-text-muted);
+  }
+  .more-menu-item:hover {
+    color: var(--iris-color-text);
+    background: color-mix(in srgb, var(--iris-color-text-faint) 8%, transparent);
+  }
+  .more-menu-item.mute-active {
+    color: var(--iris-color-primary);
   }
 </style>
