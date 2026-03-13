@@ -14,6 +14,7 @@ pub mod compose;
 pub mod config;
 pub mod deadlines;
 pub mod filter_rules;
+pub mod followups;
 pub mod health;
 pub mod labels;
 pub mod inbox_stats;
