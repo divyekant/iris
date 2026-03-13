@@ -319,6 +319,6 @@
     color: var(--iris-color-bg);
   }
   .add-note-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
 </style>

@@ -17,7 +17,7 @@
   {#if onaction}
     <button
       class="px-3.5 py-1.5 rounded-lg text-xs font-semibold"
-      style="background: var(--iris-color-error); color: #fff;"
+      style="background: var(--iris-color-error); color: white;"
       onclick={onaction}
     >{actionLabel}</button>
   {/if}

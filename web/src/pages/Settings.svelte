@@ -2075,7 +2075,7 @@
   }
 
   .settings-btn-primary:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
 
   .settings-btn-secondary:hover:not(:disabled) {
@@ -2083,11 +2083,11 @@
   }
 
   .settings-revoke-btn:hover {
-    filter: brightness(1.3);
+    background: color-mix(in srgb, var(--iris-color-error) 12%, transparent);
   }
 
   .settings-edit-btn:hover {
-    filter: brightness(1.2);
+    background: var(--iris-color-bg-hover);
   }
 
   .settings-input::placeholder {

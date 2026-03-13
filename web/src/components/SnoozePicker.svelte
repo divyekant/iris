@@ -123,6 +123,6 @@
     color: var(--iris-color-bg);
   }
   .snooze-confirm-btn:hover:not(:disabled) {
-    filter: brightness(1.1);
+    background: color-mix(in srgb, var(--iris-color-warning) 85%, white);
   }
 </style>

@@ -96,10 +96,10 @@
 
 <style>
   .multi-reply-card:hover {
-    filter: brightness(1.05);
+    background: var(--iris-color-bg-hover);
   }
   .multi-reply-use-btn:hover {
-    filter: brightness(1.1);
+    background: var(--iris-color-primary-hover);
   }
   .line-clamp-6 {
     display: -webkit-box;
