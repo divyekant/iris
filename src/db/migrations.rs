@@ -27,6 +27,8 @@ const MIGRATION_024: &str = include_str!("../../migrations/024_intent_detection.
 const MIGRATION_025: &str = include_str!("../../migrations/025_deadlines.sql");
 const MIGRATION_026: &str = include_str!("../../migrations/026_vip_contacts.sql");
 const MIGRATION_027: &str = include_str!("../../migrations/027_followup_reminders.sql");
+const MIGRATION_028: &str = include_str!("../../migrations/028_relationship_priority.sql");
+const MIGRATION_029: &str = include_str!("../../migrations/029_social_engineering.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -178,6 +180,16 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 27 {
         conn.execute_batch(MIGRATION_027)?;
         tracing::info!("Applied migration 027_followup_reminders");
+    }
+
+    if current_version < 28 {
+        conn.execute_batch(MIGRATION_028)?;
+        tracing::info!("Applied migration 028_relationship_priority");
+    }
+
+    if current_version < 29 {
+        conn.execute_batch(MIGRATION_029)?;
+        tracing::info!("Applied migration 029_social_engineering");
     }
 
     Ok(())

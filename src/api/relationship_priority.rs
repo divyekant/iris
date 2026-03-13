@@ -556,6 +556,8 @@ mod tests {
             has_attachments: false,
             attachment_names: None,
             size_bytes: Some(100),
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
         }
     }
 
@@ -926,16 +928,16 @@ mod tests {
     fn test_composite_score_weights() {
         // If all component scores are 1.0, the composite should be 1.0
         // 0.25*1.0 + 0.25*1.0 + 0.25*1.0 + 0.15*1.0 + 0.10*1.0 = 1.0
-        let score = 0.25 * 1.0 + 0.25 * 1.0 + 0.25 * 1.0 + 0.15 * 1.0 + 0.10 * 1.0;
-        assert!((score - 1.0).abs() < f64::EPSILON);
+        let score: f64 = 0.25 * 1.0 + 0.25 * 1.0 + 0.25 * 1.0 + 0.15 * 1.0 + 0.10 * 1.0;
+        assert!((score - 1.0_f64).abs() < f64::EPSILON);
 
         // If all are 0, composite is 0
-        let score = 0.25 * 0.0 + 0.25 * 0.0 + 0.25 * 0.0 + 0.15 * 0.0 + 0.10 * 0.0;
+        let score: f64 = 0.25 * 0.0 + 0.25 * 0.0 + 0.25 * 0.0 + 0.15 * 0.0 + 0.10 * 0.0;
         assert!(score.abs() < f64::EPSILON);
 
         // Mixed: freq=0.8, recency=0.5, reply=1.0, bidir=0.6, depth=0.3
-        let score = 0.25 * 0.8 + 0.25 * 0.5 + 0.25 * 1.0 + 0.15 * 0.6 + 0.10 * 0.3;
-        let expected = 0.2 + 0.125 + 0.25 + 0.09 + 0.03;
+        let score: f64 = 0.25 * 0.8 + 0.25 * 0.5 + 0.25 * 1.0 + 0.15 * 0.6 + 0.10 * 0.3;
+        let expected: f64 = 0.2 + 0.125 + 0.25 + 0.09 + 0.03;
         assert!((score - expected).abs() < 1e-10);
     }
 

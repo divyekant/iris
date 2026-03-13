@@ -14638,7 +14638,8 @@
                       "fill": "#999",
                       "content": "John Doe",
                       "fontFamily": "Inter",
-                      "fontSize": 13
+                      "fontSize": 13,
+                      "fontWeight": "normal"
                     },
                     {
                       "type": "frame",
@@ -15359,6 +15360,7 @@
                       "content": "I",
                       "fontFamily": "Inter",
                       "fontSize": 13,
+                      "fontWeight": "normal",
                       "fontStyle": "italic"
                     }
                   ]
@@ -17987,6 +17989,1591 @@
                       "fontFamily": "Inter",
                       "fontSize": 11,
                       "fontWeight": "600"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "NlNbg",
+      "x": 0,
+      "y": 20100,
+      "name": "P10 — Thread Private Notes",
+      "clip": true,
+      "width": 1200,
+      "height": 700,
+      "fill": "#1a1a1a",
+      "cornerRadius": 12,
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "qLtzs",
+          "name": "topBar",
+          "width": "fill_container",
+          "height": 48,
+          "fill": "#222222",
+          "gap": 12,
+          "padding": 16,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "xnbFN",
+              "name": "title",
+              "fill": "#ffffff",
+              "content": "Thread View — Private Notes Panel",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "700"
+            },
+            {
+              "type": "text",
+              "id": "dFgst",
+              "name": "subtitle",
+              "fill": "#888888",
+              "content": "Notes visible only to you, attached per thread",
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "cXp41",
+          "name": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "none",
+          "children": [
+            {
+              "type": "frame",
+              "id": "lfoXi",
+              "x": 0,
+              "y": 0,
+              "name": "threadMessages",
+              "width": 720,
+              "height": "fill_container(0)",
+              "layout": "vertical",
+              "gap": 16,
+              "padding": 24,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "6Gtjw",
+                  "name": "message1",
+                  "width": "fill_container",
+                  "height": 120,
+                  "fill": "#242424",
+                  "cornerRadius": 8,
+                  "layout": "vertical",
+                  "gap": 8,
+                  "padding": 16,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "uhTdO",
+                      "name": "msg1From",
+                      "fill": "#d4af37",
+                      "content": "Sarah Chen <sarah@work.com>",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "9gd92",
+                      "name": "msg1Body",
+                      "fill": "#cccccc",
+                      "content": "Hi team, here's the Q1 budget proposal. Please review the numbers in section 3 and let me know if the marketing allocation looks right.",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "BE0ee",
+                      "name": "msg1Date",
+                      "fill": "#666666",
+                      "content": "Mar 8, 2026 · 10:23 AM",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "oPeXc",
+                  "name": "message2",
+                  "width": "fill_container",
+                  "height": 100,
+                  "fill": "#242424",
+                  "cornerRadius": 8,
+                  "layout": "vertical",
+                  "gap": 8,
+                  "padding": 16,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "NrQrb",
+                      "name": "msg2From",
+                      "fill": "#b8960f",
+                      "content": "You",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "ErH6T",
+                      "name": "msg2Body",
+                      "fill": "#cccccc",
+                      "content": "Looks good overall. I think section 3 needs a 15% increase for the social ads line item. Let me check the numbers.",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "Y0EdU",
+                      "name": "msg2Date",
+                      "fill": "#666666",
+                      "content": "Mar 8, 2026 · 11:45 AM",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "g9XPt",
+              "x": 720,
+              "y": 0,
+              "name": "divider",
+              "width": 1,
+              "height": "fill_container(0)",
+              "fill": "#333333"
+            },
+            {
+              "type": "frame",
+              "id": "c6NxR",
+              "x": 721,
+              "y": 0,
+              "name": "notesPanel",
+              "width": 479,
+              "height": "fill_container(0)",
+              "fill": "#1e1e1e",
+              "layout": "vertical",
+              "gap": 16,
+              "padding": 20,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "aWJeH",
+                  "name": "notesHeader",
+                  "width": "fill_container",
+                  "height": 32,
+                  "gap": 8,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "AiVxU",
+                      "name": "noteIcon",
+                      "content": "📝",
+                      "fontFamily": "Inter",
+                      "fontSize": 16,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "JL7tR",
+                      "name": "noteTitle",
+                      "fill": "#ffffff",
+                      "content": "Private Notes",
+                      "fontFamily": "Inter",
+                      "fontSize": 14,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "QPmdG",
+                      "name": "badge",
+                      "width": 20,
+                      "height": 20,
+                      "fill": "#b8960f",
+                      "cornerRadius": 9999,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "mtWOw",
+                          "name": "noteCountText",
+                          "fill": "#000000",
+                          "content": "2",
+                          "fontFamily": "Inter",
+                          "fontSize": 11,
+                          "fontWeight": "700"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "SslP9",
+                  "name": "note1",
+                  "width": "fill_container",
+                  "fill": "#2a2a1e",
+                  "cornerRadius": 8,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#b8960f33"
+                  },
+                  "layout": "vertical",
+                  "gap": 6,
+                  "padding": 12,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "mJmXQ",
+                      "name": "note1Time",
+                      "fill": "#b8960f",
+                      "content": "Mar 8 · 10:30 AM",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "Sn6hO",
+                      "name": "note1Text",
+                      "fill": "#cccccc",
+                      "content": "Need to verify the marketing budget numbers before responding. Check last quarter's actuals in the finance sheet.",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "YFGGP",
+                  "name": "note2",
+                  "width": "fill_container",
+                  "fill": "#2a2a1e",
+                  "cornerRadius": 8,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#b8960f33"
+                  },
+                  "layout": "vertical",
+                  "gap": 6,
+                  "padding": 12,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "pudLk",
+                      "name": "note2Time",
+                      "fill": "#b8960f",
+                      "content": "Mar 8 · 11:50 AM",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "text",
+                      "id": "Z35WI",
+                      "name": "note2Text",
+                      "fill": "#cccccc",
+                      "content": "Sarah agreed on the 15% increase. Follow up next week for final sign-off from David.",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "XS9TK",
+                  "name": "inputArea",
+                  "width": "fill_container",
+                  "height": 80,
+                  "fill": "#242424",
+                  "cornerRadius": 8,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#333333"
+                  },
+                  "layout": "vertical",
+                  "gap": 8,
+                  "padding": 12,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "Gwg7G",
+                      "name": "inputPlaceholder",
+                      "fill": "#666666",
+                      "content": "Add a private note...",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "7rdk2",
+                      "name": "addBtn",
+                      "width": 80,
+                      "height": 28,
+                      "fill": "#b8960f",
+                      "cornerRadius": 6,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "4HKbJ",
+                          "name": "addBtnText",
+                          "fill": "#000000",
+                          "content": "Add Note",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "600"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "Cdpt2",
+      "x": 1300,
+      "y": 20100,
+      "name": "P11 — Bounce / Redirect",
+      "clip": true,
+      "width": 500,
+      "height": 420,
+      "fill": "#1a1a1a",
+      "cornerRadius": 12,
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "fjjCM",
+          "name": "topBar",
+          "width": "fill_container",
+          "height": 48,
+          "fill": "#222222",
+          "gap": 12,
+          "padding": 16,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "SbMK2",
+              "name": "title",
+              "fill": "#ffffff",
+              "content": "Bounce / Redirect Email",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "700"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "hLeUK",
+          "name": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "gap": 20,
+          "padding": 24,
+          "children": [
+            {
+              "type": "text",
+              "id": "P9ask",
+              "name": "desc",
+              "fill": "#999999",
+              "content": "Send this email to another recipient as if it came from the original sender. Your address won't appear.",
+              "fontFamily": "Inter",
+              "fontSize": 13,
+              "fontWeight": "normal"
+            },
+            {
+              "type": "frame",
+              "id": "Wy6hs",
+              "name": "origRow",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "nbLeO",
+                  "name": "origLabel",
+                  "fill": "#888888",
+                  "content": "Original From",
+                  "fontFamily": "Inter",
+                  "fontSize": 11,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "Zauma",
+                  "name": "origVal",
+                  "fill": "#d4af37",
+                  "content": "Sarah Chen <sarah@work.com>",
+                  "fontFamily": "Inter",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "NzoPh",
+              "name": "subjRow",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "KOYCV",
+                  "name": "subjLabel",
+                  "fill": "#888888",
+                  "content": "Subject",
+                  "fontFamily": "Inter",
+                  "fontSize": 11,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "kvt83",
+                  "name": "subjVal",
+                  "fill": "#cccccc",
+                  "content": "Q1 Budget Proposal",
+                  "fontFamily": "Inter",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "vtQij",
+              "name": "toRow",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 4,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "1v1u9",
+                  "name": "toLabel",
+                  "fill": "#888888",
+                  "content": "Redirect To",
+                  "fontFamily": "Inter",
+                  "fontSize": 11,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "frame",
+                  "id": "zTnBJ",
+                  "name": "toInput",
+                  "width": "fill_container",
+                  "height": 36,
+                  "fill": "#242424",
+                  "cornerRadius": 6,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#444444"
+                  },
+                  "padding": [
+                    0,
+                    12
+                  ],
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "IwHB0",
+                      "name": "toInputText",
+                      "fill": "#cccccc",
+                      "content": "david@work.com",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "P1NPx",
+              "name": "btnRow",
+              "width": "fill_container",
+              "gap": 12,
+              "justifyContent": "end",
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "eSvEZ",
+                  "name": "cancelBtn",
+                  "width": 80,
+                  "height": 32,
+                  "cornerRadius": 6,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#444444"
+                  },
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "JEmPO",
+                      "name": "cancelText",
+                      "fill": "#cccccc",
+                      "content": "Cancel",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "Fm9yO",
+                  "name": "bounceBtn",
+                  "width": 100,
+                  "height": 32,
+                  "fill": "#b8960f",
+                  "cornerRadius": 6,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "7Yi03",
+                      "name": "bounceText",
+                      "fill": "#000000",
+                      "content": "Redirect",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "600"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "hxLrk",
+      "x": 0,
+      "y": 20900,
+      "name": "P12 — Multi-Option Reply",
+      "clip": true,
+      "width": 1200,
+      "height": 650,
+      "fill": "#1a1a1a",
+      "cornerRadius": 12,
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "Opouv",
+          "name": "topBar",
+          "width": "fill_container",
+          "height": 48,
+          "fill": "#222222",
+          "gap": 12,
+          "padding": 16,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "1kPjH",
+              "name": "title",
+              "fill": "#ffffff",
+              "content": "Multi-Option Reply — 3 AI-Generated Drafts",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "700"
+            },
+            {
+              "type": "text",
+              "id": "oTlZs",
+              "name": "subtitle",
+              "fill": "#888888",
+              "content": "Pick a tone, edit, and send",
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "lHaOt",
+          "name": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "gap": 20,
+          "padding": 24,
+          "children": [
+            {
+              "type": "frame",
+              "id": "t6agp",
+              "name": "formalCol",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "#242424",
+              "cornerRadius": 8,
+              "stroke": {
+                "align": "inside",
+                "thickness": 2,
+                "fill": "#b8960f"
+              },
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 16,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "Ux631",
+                  "name": "badge1",
+                  "width": 70,
+                  "height": 24,
+                  "fill": "#b8960f22",
+                  "cornerRadius": 12,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "WqFtT",
+                      "name": "col1BadgeText",
+                      "fill": "#b8960f",
+                      "content": "Formal",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "600"
+                    }
+                  ]
+                },
+                {
+                  "type": "text",
+                  "id": "Aa9zZ",
+                  "name": "col1Text",
+                  "fill": "#cccccc",
+                  "content": "Dear Sarah,\n\nThank you for sharing the Q1 budget proposal. I have reviewed section 3 and believe the marketing allocation would benefit from a 15% increase to the social advertising line item, based on our Q4 performance data.\n\nI would be happy to discuss this further at your convenience.\n\nBest regards",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "frame",
+                  "id": "lYX4N",
+                  "name": "useBtn1",
+                  "width": "fill_container",
+                  "height": 32,
+                  "fill": "#b8960f",
+                  "cornerRadius": 6,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "JnudQ",
+                      "name": "col1BtnText",
+                      "fill": "#000000",
+                      "content": "Use This Draft",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "600"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "TickF",
+              "name": "casualCol",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "#242424",
+              "cornerRadius": 8,
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 16,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "yPQ2n",
+                  "name": "badge2",
+                  "width": 70,
+                  "height": 24,
+                  "fill": "#2563EB22",
+                  "cornerRadius": 12,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "lYzSB",
+                      "name": "col2BadgeText",
+                      "fill": "#2563EB",
+                      "content": "Casual",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "600"
+                    }
+                  ]
+                },
+                {
+                  "type": "text",
+                  "id": "NohuI",
+                  "name": "col2Text",
+                  "fill": "#cccccc",
+                  "content": "Hey Sarah!\n\nLooked over the budget — nice work! Just one thing: I think we should bump the social ads budget by about 15%. Our Q4 numbers showed great ROI there.\n\nLet me know what you think!",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "frame",
+                  "id": "R2kMe",
+                  "name": "useBtn2",
+                  "width": "fill_container",
+                  "height": 32,
+                  "cornerRadius": 6,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#444444"
+                  },
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "9b2jO",
+                      "name": "col2BtnText",
+                      "fill": "#cccccc",
+                      "content": "Use This Draft",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "JjERh",
+              "name": "briefCol",
+              "width": "fill_container",
+              "height": "fill_container",
+              "fill": "#242424",
+              "cornerRadius": 8,
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 16,
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "j6dMs",
+                  "name": "badge3",
+                  "width": 55,
+                  "height": 24,
+                  "fill": "#16A34A22",
+                  "cornerRadius": 12,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "ZdQu7",
+                      "name": "col3BadgeText",
+                      "fill": "#16A34A",
+                      "content": "Brief",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "600"
+                    }
+                  ]
+                },
+                {
+                  "type": "text",
+                  "id": "kPvKk",
+                  "name": "col3Text",
+                  "fill": "#cccccc",
+                  "content": "Sarah — section 3 looks good. Suggest bumping social ads 15% based on Q4 ROI. Thoughts?",
+                  "fontFamily": "Inter",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "frame",
+                  "id": "jiVrS",
+                  "name": "useBtn3",
+                  "width": "fill_container",
+                  "height": 32,
+                  "cornerRadius": 6,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#444444"
+                  },
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "v4R22",
+                      "name": "col3BtnText",
+                      "fill": "#cccccc",
+                      "content": "Use This Draft",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "GUMMv",
+      "x": 0,
+      "y": 21650,
+      "name": "P13 — Task Extraction",
+      "clip": true,
+      "width": 900,
+      "height": 600,
+      "fill": "#1a1a1a",
+      "cornerRadius": 12,
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "D9Ym6",
+          "name": "topBar",
+          "width": "fill_container",
+          "height": 48,
+          "fill": "#222222",
+          "gap": 12,
+          "padding": 16,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "ULJ3I",
+              "name": "title",
+              "fill": "#ffffff",
+              "content": "Task Extraction — Chat Response",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "700"
+            },
+            {
+              "type": "text",
+              "id": "rmf5V",
+              "name": "subtitle",
+              "fill": "#888888",
+              "content": "\"What am I supposed to do from this email?\"",
+              "fontFamily": "Inter",
+              "fontSize": 12,
+              "fontWeight": "normal"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "faEsZ",
+          "name": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "gap": 16,
+          "padding": 24,
+          "children": [
+            {
+              "type": "frame",
+              "id": "GK1Qm",
+              "name": "userBubble",
+              "width": 300,
+              "fill": "#b8960f22",
+              "cornerRadius": [
+                12,
+                12,
+                4,
+                12
+              ],
+              "layout": "vertical",
+              "gap": 4,
+              "padding": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "8CwbN",
+                  "name": "chatUserText",
+                  "fill": "#d4af37",
+                  "content": "What tasks do I need to do from Sarah's email?",
+                  "fontFamily": "Inter",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "BAzO8",
+              "name": "aiBubble",
+              "width": "fill_container",
+              "fill": "#242424",
+              "cornerRadius": [
+                12,
+                12,
+                12,
+                4
+              ],
+              "layout": "vertical",
+              "gap": 12,
+              "padding": 16,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "4eSDs",
+                  "name": "aiIntro",
+                  "fill": "#cccccc",
+                  "content": "I found 3 action items from Sarah's Q1 Budget Proposal email:",
+                  "fontFamily": "Inter",
+                  "fontSize": 13,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "frame",
+                  "id": "wORKy",
+                  "name": "task1",
+                  "width": "fill_container",
+                  "fill": "#1e1e1e",
+                  "cornerRadius": 8,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#333333"
+                  },
+                  "layout": "vertical",
+                  "gap": 6,
+                  "padding": 12,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "XxU00",
+                      "name": "t1header",
+                      "width": "fill_container",
+                      "gap": 8,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "KzmkD",
+                          "name": "check1",
+                          "width": 16,
+                          "height": 16,
+                          "cornerRadius": 4,
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1.5,
+                            "fill": "#b8960f"
+                          }
+                        },
+                        {
+                          "type": "text",
+                          "id": "my0AU",
+                          "name": "task1Text",
+                          "fill": "#ffffff",
+                          "content": "Review marketing allocation in section 3",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "9TtSS",
+                      "name": "task1Meta",
+                      "fill": "#b8960f",
+                      "content": "Priority: High · Deadline: Mar 12",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "43pkP",
+                  "name": "task2",
+                  "width": "fill_container",
+                  "fill": "#1e1e1e",
+                  "cornerRadius": 8,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#333333"
+                  },
+                  "layout": "vertical",
+                  "gap": 6,
+                  "padding": 12,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "YWk7U",
+                      "name": "t2header",
+                      "width": "fill_container",
+                      "gap": 8,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "2DcoV",
+                          "name": "check2",
+                          "width": 16,
+                          "height": 16,
+                          "cornerRadius": 4,
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1.5,
+                            "fill": "#666666"
+                          }
+                        },
+                        {
+                          "type": "text",
+                          "id": "WsyMX",
+                          "name": "task2Text",
+                          "fill": "#ffffff",
+                          "content": "Confirm if social ads line item needs 15% bump",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "uBG6H",
+                      "name": "task2Meta",
+                      "fill": "#888888",
+                      "content": "Priority: Medium · No deadline specified",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "ygLxU",
+                  "name": "task3",
+                  "width": "fill_container",
+                  "fill": "#1e1e1e",
+                  "cornerRadius": 8,
+                  "stroke": {
+                    "align": "inside",
+                    "thickness": 1,
+                    "fill": "#333333"
+                  },
+                  "layout": "vertical",
+                  "gap": 6,
+                  "padding": 12,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "zaTuL",
+                      "name": "t3header",
+                      "width": "fill_container",
+                      "gap": 8,
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "doqrJ",
+                          "name": "check3",
+                          "width": 16,
+                          "height": 16,
+                          "cornerRadius": 4,
+                          "stroke": {
+                            "align": "inside",
+                            "thickness": 1.5,
+                            "fill": "#666666"
+                          }
+                        },
+                        {
+                          "type": "text",
+                          "id": "IOcvE",
+                          "name": "task3Text",
+                          "fill": "#ffffff",
+                          "content": "Reply to Sarah with feedback",
+                          "fontFamily": "Inter",
+                          "fontSize": 13,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "text",
+                      "id": "hQSiw",
+                      "name": "task3Meta",
+                      "fill": "#b8960f",
+                      "content": "Priority: High · Implied ASAP",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "oY5Ff",
+      "x": 1000,
+      "y": 21650,
+      "name": "P14 — Key Topics Per Contact",
+      "clip": true,
+      "width": 500,
+      "height": 600,
+      "fill": "#1a1a1a",
+      "cornerRadius": 12,
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "lV5Yq",
+          "name": "topBar",
+          "width": "fill_container",
+          "height": 48,
+          "fill": "#222222",
+          "gap": 12,
+          "padding": 16,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "wYKXQ",
+              "name": "title",
+              "fill": "#ffffff",
+              "content": "Contact — Key Topics",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "700"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "udqCu",
+          "name": "body",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "gap": 20,
+          "padding": 24,
+          "children": [
+            {
+              "type": "frame",
+              "id": "r1FLR",
+              "name": "contactHeader",
+              "width": "fill_container",
+              "gap": 12,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "guarh",
+                  "name": "avatar",
+                  "width": 48,
+                  "height": 48,
+                  "fill": "#b8960f",
+                  "cornerRadius": 9999,
+                  "justifyContent": "center",
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "hCN3J",
+                      "name": "avatarText",
+                      "fill": "#000000",
+                      "content": "SC",
+                      "fontFamily": "Inter",
+                      "fontSize": 16,
+                      "fontWeight": "700"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "56s8c",
+                  "name": "contactInfo",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "c4rTw",
+                      "name": "contactName",
+                      "fill": "#ffffff",
+                      "content": "Sarah Chen",
+                      "fontFamily": "Inter",
+                      "fontSize": 16,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "1ms5W",
+                      "name": "contactEmail",
+                      "fill": "#888888",
+                      "content": "sarah@work.com · 47 emails",
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "7tcja",
+              "name": "divider",
+              "width": "fill_container",
+              "height": 1,
+              "fill": "#333333"
+            },
+            {
+              "type": "frame",
+              "id": "C3IXl",
+              "name": "topicsSection",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 12,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "rl22K",
+                  "name": "topicsLabel",
+                  "fill": "#888888",
+                  "content": "KEY TOPICS",
+                  "fontFamily": "Inter",
+                  "fontSize": 11,
+                  "fontWeight": "700",
+                  "letterSpacing": 1
+                },
+                {
+                  "type": "frame",
+                  "id": "7vVjZ",
+                  "name": "topicsWrap",
+                  "width": "fill_container",
+                  "gap": 8,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "e5G3K",
+                      "name": "topic1",
+                      "height": 28,
+                      "fill": "#b8960f22",
+                      "cornerRadius": 14,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "SuFgC",
+                          "name": "topic1Text",
+                          "fill": "#d4af37",
+                          "content": "Budget Planning",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Usoj9",
+                      "name": "topic2",
+                      "height": 28,
+                      "fill": "#2563EB22",
+                      "cornerRadius": 14,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "pFSVL",
+                          "name": "topic2Text",
+                          "fill": "#2563EB",
+                          "content": "Q1 Reports",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "MOZJo",
+                      "name": "topic3",
+                      "height": 28,
+                      "fill": "#16A34A22",
+                      "cornerRadius": 14,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "do0sk",
+                          "name": "topic3Text",
+                          "fill": "#16A34A",
+                          "content": "Marketing",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "nlshk",
+                      "name": "topic4",
+                      "height": 28,
+                      "fill": "#DC262622",
+                      "cornerRadius": 14,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "6Nyg7",
+                          "name": "topic4Text",
+                          "fill": "#DC2626",
+                          "content": "Team Sync",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "A1FUU",
+                      "name": "topic5",
+                      "height": 28,
+                      "fill": "#CA8A0422",
+                      "cornerRadius": 14,
+                      "padding": [
+                        0,
+                        12
+                      ],
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "FuQef",
+                          "name": "topic5Text",
+                          "fill": "#CA8A04",
+                          "content": "Social Ads",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "YH0GW",
+              "name": "divider2",
+              "width": "fill_container",
+              "height": 1,
+              "fill": "#333333"
+            },
+            {
+              "type": "frame",
+              "id": "HBEBK",
+              "name": "recentSection",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 10,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "qtCvR",
+                  "name": "recentLabel",
+                  "fill": "#888888",
+                  "content": "RECENT CONVERSATIONS",
+                  "fontFamily": "Inter",
+                  "fontSize": 11,
+                  "fontWeight": "700",
+                  "letterSpacing": 1
+                },
+                {
+                  "type": "frame",
+                  "id": "R99Y5",
+                  "name": "conv1",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "padding": [
+                    8,
+                    0
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "Tdo6m",
+                      "name": "conv1Subj",
+                      "fill": "#cccccc",
+                      "content": "Q1 Budget Proposal",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "text",
+                      "id": "A7yBg",
+                      "name": "conv1Date",
+                      "fill": "#666666",
+                      "content": "Mar 8 · Budget Planning",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "RTfzQ",
+                  "name": "conv2",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "padding": [
+                    8,
+                    0
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "mU7oK",
+                      "name": "conv2Subj",
+                      "fill": "#cccccc",
+                      "content": "Weekly Team Sync Notes",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "text",
+                      "id": "wF9CD",
+                      "name": "conv2Date",
+                      "fill": "#666666",
+                      "content": "Mar 5 · Team Sync",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "YZPoT",
+                  "name": "conv3",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "padding": [
+                    8,
+                    0
+                  ],
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "2pJYz",
+                      "name": "conv3Subj",
+                      "fill": "#cccccc",
+                      "content": "Social Ads Performance Report",
+                      "fontFamily": "Inter",
+                      "fontSize": 13,
+                      "fontWeight": "500"
+                    },
+                    {
+                      "type": "text",
+                      "id": "LTguf",
+                      "name": "conv3Date",
+                      "fill": "#666666",
+                      "content": "Mar 1 · Social Ads, Marketing",
+                      "fontFamily": "Inter",
+                      "fontSize": 11,
+                      "fontWeight": "normal"
                     }
                   ]
                 }
