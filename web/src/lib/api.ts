@@ -2,6 +2,21 @@ const BASE = '';
 
 let sessionToken: string | null = null;
 
+export interface FollowupReminder {
+  id: string;
+  message_id: string;
+  thread_id: string | null;
+  subject: string | null;
+  reason: string;
+  suggested_date: string;
+  urgency: string;
+  status: string;
+  snoozed_until: string | null;
+  created_at: number;
+  dismissed_at: number | null;
+  acted_at: number | null;
+}
+
 export async function initSession(): Promise<void> {
   const res = await fetch(`${BASE}/api/auth/bootstrap`, {
     headers: { 'Sec-Fetch-Site': 'same-origin' },
@@ -143,5 +158,18 @@ export const api = {
       if (params?.offset) query.set('offset', String(params.offset));
       return request<any[]>(`/api/audit-log?${query}`);
     },
+  },
+  followups: {
+    list: (status?: string, limit?: number) => {
+      const query = new URLSearchParams();
+      if (status) query.set('status', status);
+      if (limit) query.set('limit', String(limit));
+      const qs = query.toString();
+      return request<{ reminders: FollowupReminder[]; total: number }>(`/api/followups${qs ? `?${qs}` : ''}`);
+    },
+    scan: () => request<{ scanned: number; reminders_created: number }>('/api/ai/scan-followups', { method: 'POST' }),
+    snooze: (id: string, until: string) => request<void>(`/api/followups/${id}/snooze`, { method: 'PUT', body: JSON.stringify({ until }) }),
+    dismiss: (id: string) => request<void>(`/api/followups/${id}/dismiss`, { method: 'PUT' }),
+    acted: (id: string) => request<void>(`/api/followups/${id}/acted`, { method: 'PUT' }),
   },
 };
