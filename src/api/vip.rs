@@ -247,7 +247,7 @@ pub async fn compute_vip(
             )
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let my_reply_threads: Vec<String> = stmt
+        let my_reply_threads: std::collections::HashSet<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .filter_map(|r| r.ok())

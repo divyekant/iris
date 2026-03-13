@@ -62,7 +62,7 @@
     border-radius: var(--iris-radius-md);
     border: 1px solid var(--iris-color-border);
     background: var(--iris-color-bg-elevated);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--iris-color-text) 30%, transparent);
     padding: calc(var(--iris-spacing-base) * 1) 0;
     opacity: 1;
     transition: opacity var(--iris-transition-fast);
