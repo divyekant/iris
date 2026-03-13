@@ -2,6 +2,12 @@ const BASE = '';
 
 let sessionToken: string | null = null;
 
+export interface AutocompleteSuggestion {
+  text: string;
+  full_sentence: string;
+  confidence: number;
+}
+
 export async function initSession(): Promise<void> {
   const res = await fetch(`${BASE}/api/auth/bootstrap`, {
     headers: { 'Sec-Fetch-Site': 'same-origin' },
@@ -122,6 +128,11 @@ export const api = {
     chatConfirm: (data: { session_id: string; message_id: string }) =>
       request<{ executed: boolean; updated: number }>('/api/ai/chat/confirm', { method: 'POST', body: JSON.stringify(data) }),
     reprocess: () => request<{ enqueued: number }>('/api/ai/reprocess', { method: 'POST' }),
+    autocomplete: (threadId: string | null, partialText: string, cursorPosition: number, composeMode: string) =>
+      request<{ suggestions: AutocompleteSuggestion[]; debounce_ms: number }>('/api/ai/autocomplete', {
+        method: 'POST',
+        body: JSON.stringify({ thread_id: threadId, partial_text: partialText, cursor_position: cursorPosition, compose_mode: composeMode }),
+      }),
   },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
