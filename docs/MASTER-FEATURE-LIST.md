@@ -102,8 +102,8 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 |---|---------|--------|--------|--------|
 | 37 | Draft version history (no client has this) | Innovation #1 | M | **done** |
 | 38 | Thread-level private notes (only HEY) | Innovation #2 | M | **done** |
-| 39 | Newsletter feed view (only HEY, Shortwave) | Innovation #4 | L | pending |
-| 40 | Subscription management dashboard (nobody) | Innovation #6 | L | pending |
+| 39 | Newsletter feed view (only HEY, Shortwave) | Innovation #4 | L | **done** |
+| 40 | Subscription management dashboard (nobody) | Innovation #6 | L | **done** |
 | 41 | Search in attachment content — PDFs, docs (only Gmail/Outlook) | Innovation #11 | L | pending |
 | 42 | Bounce/redirect on web (rare) | Innovation #12 | S | **done** |
 
@@ -180,15 +180,15 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
 | 81 | MCP Server (expose email as tools via MCP protocol) | 8.1 | L | pending |
-| 82 | Webhook triggers on email events | 8.4 | M | pending |
-| 83 | Structured data extraction API | 8.5 | M | pending |
+| 82 | Webhook triggers on email events | 8.4 | M | **done** |
+| 83 | Structured data extraction API | 8.5 | M | **done** |
 
 ### 2I. Productivity & Insights
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
-| 84 | Email analytics dashboard | 9.1 | L | pending |
-| 85 | Communication health reports | 9.2 | M | pending |
+| 84 | Email analytics dashboard | 9.1 | L | **done** |
+| 85 | Communication health reports | 9.2 | M | **done** |
 | 86 | Follow-up if no reply (Superhuman-style) | Audit | M | **done** |
 | 87 | Email effectiveness scoring (before-send) | 9.6 | M | **done** |
 

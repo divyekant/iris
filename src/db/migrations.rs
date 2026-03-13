@@ -39,6 +39,12 @@ const MIGRATION_036: &str = include_str!("../../migrations/036_template_suggesti
 const MIGRATION_037: &str = include_str!("../../migrations/037_notification_routing.sql");
 const MIGRATION_038: &str = include_str!("../../migrations/038_followup_tracking.sql");
 const MIGRATION_039: &str = include_str!("../../migrations/039_effectiveness_scores.sql");
+const MIGRATION_040: &str = include_str!("../../migrations/040_webhooks.sql");
+const MIGRATION_041: &str = include_str!("../../migrations/041_extracted_data.sql");
+const MIGRATION_042: &str = include_str!("../../migrations/042_health_reports.sql");
+const MIGRATION_043: &str = include_str!("../../migrations/043_newsletter_feeds.sql");
+const MIGRATION_044: &str = include_str!("../../migrations/044_subscriptions.sql");
+const MIGRATION_045: &str = include_str!("../../migrations/045_analytics.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -250,6 +256,36 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 39 {
         conn.execute_batch(MIGRATION_039)?;
         tracing::info!("Applied migration 039_effectiveness_scores");
+    }
+
+    if current_version < 40 {
+        conn.execute_batch(MIGRATION_040)?;
+        tracing::info!("Applied migration 040_webhooks");
+    }
+
+    if current_version < 41 {
+        conn.execute_batch(MIGRATION_041)?;
+        tracing::info!("Applied migration 041_extracted_data");
+    }
+
+    if current_version < 42 {
+        conn.execute_batch(MIGRATION_042)?;
+        tracing::info!("Applied migration 042_health_reports");
+    }
+
+    if current_version < 43 {
+        conn.execute_batch(MIGRATION_043)?;
+        tracing::info!("Applied migration 043_newsletter_feeds");
+    }
+
+    if current_version < 44 {
+        conn.execute_batch(MIGRATION_044)?;
+        tracing::info!("Applied migration 044_subscriptions");
+    }
+
+    if current_version < 45 {
+        conn.execute_batch(MIGRATION_045)?;
+        tracing::info!("Applied migration 045_analytics");
     }
 
     Ok(())
