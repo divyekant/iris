@@ -177,8 +177,9 @@ pub fn build_cc_prompt(
 
     prompt.push_str(&format!("Subject: {}\n", subject));
 
-    let preview = if body_preview.len() > 500 {
-        format!("{}...", &body_preview[..500])
+    let preview = if body_preview.chars().count() > 500 {
+        let end = body_preview.char_indices().nth(500).map(|(i, _)| i).unwrap_or(body_preview.len());
+        format!("{}...", &body_preview[..end])
     } else {
         body_preview.to_string()
     };

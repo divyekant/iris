@@ -409,7 +409,8 @@ pub async fn get_prioritized_messages(
 
     let select_cols = "m.id, m.account_id, m.thread_id, m.folder, m.from_address, m.from_name,
                        m.subject, m.snippet, m.date, m.is_read, m.is_starred, m.has_attachments,
-                       m.labels, m.ai_priority_label, m.ai_category";
+                       m.labels, m.ai_priority_label, m.ai_category,
+                       m.ai_sentiment, m.ai_needs_reply, m.intent";
 
     // Fetch all matching messages (we'll sort in-memory after blending)
     let query = if let Some(ref account_id) = params.account_id {

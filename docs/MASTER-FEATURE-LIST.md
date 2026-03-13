@@ -116,7 +116,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 45 | Deadline extraction → task creation | 1.5 | M | **done** |
 | 46 | Sentiment analysis on incoming email | 1.6 | S | **done** |
 | 47 | VIP auto-detection from behavior patterns | 1.10 | M | **done** |
-| 48 | Relationship-aware prioritization | 1.3 | M | pending |
+| 48 | Relationship-aware prioritization | 1.3 | M | **done** |
 | 49 | Thread importance decay over time | 1.7 | S | **done** |
 | 50 | Duplicate/related thread clustering | 1.9 | L | pending |
 
@@ -127,11 +127,11 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 51 | Draft from intent (plain English → full email) | 2.1 | M | **done** |
 | 52 | Multi-option reply (3 tones: formal/casual/brief) | 2.2 | M | **done** |
 | 53 | Context-aware autocomplete (knows thread history) | 2.5 | L | **done** |
-| 54 | Smart CC/BCC suggestions | 2.7 | M | pending |
+| 54 | Smart CC/BCC suggestions | 2.7 | M | **done** |
 | 55 | Subject line generation/improvement | 2.8 | S | **done** |
 | 56 | Grammar & tone check (before-send) | 2.10 | M | **done** |
 | 57 | Multi-language compose + translate | 2.4 | M | pending |
-| 58 | Markdown compose support | Audit | S | pending |
+| 58 | Markdown compose support | Audit | S | **done** |
 
 ### 2D. Chat & Agent Enhancements (AI)
 
@@ -141,7 +141,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 60 | Task extraction from email ("what am I supposed to do?") | 4.3 | M | **done** |
 | 61 | Relationship intelligence queries | 4.4 | M | pending |
 | 62 | Bulk operations via chat ("archive all from LinkedIn") | 4.7 | M | **done** |
-| 63 | Email composition via chat | 4.6 | S | pending |
+| 63 | Email composition via chat | 4.6 | S | **done** |
 
 ### 2E. Automation & Workflows (AI)
 
@@ -160,10 +160,10 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
 | 71 | Contextual phishing detection | 6.1 | L | pending |
-| 72 | Social engineering detection | 6.2 | M | pending |
+| 72 | Social engineering detection | 6.2 | M | **done** |
 | 73 | Impersonation detection (lookalike domains) | 6.3 | S | **done** |
 | 74 | Link safety with context | 6.4 | M | pending |
-| 75 | Data leak prevention (before-send scan) | 6.5 | M | pending |
+| 75 | Data leak prevention (before-send scan) | 6.5 | M | **done** |
 | 76 | Privacy report (who tracks you, HEY-style) | Audit | M | pending |
 
 ### 2G. Contact Intelligence (AI)

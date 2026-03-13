@@ -178,8 +178,9 @@ pub fn build_analysis_prompt(
     subject: &str,
     body: &str,
 ) -> String {
-    let body_truncated = if body.len() > 5000 {
-        format!("{}...(truncated)", &body[..5000])
+    let body_truncated = if body.chars().count() > 5000 {
+        let end = body.char_indices().nth(5000).map(|(i, _)| i).unwrap_or(body.len());
+        format!("{}...(truncated)", &body[..end])
     } else {
         body.to_string()
     };
@@ -289,8 +290,10 @@ pub async fn get_social_engineering(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let cached = get_cached_result(&conn, &id);
-    Ok(Json(cached))
+    match get_cached_result(&conn, &id) {
+        Some(result) => Ok(Json(Some(result))),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 // ---------------------------------------------------------------------------

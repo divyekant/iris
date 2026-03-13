@@ -337,3 +337,33 @@ async fn search_with_data_returns_results() {
     assert_eq!(json["total"], 1);
     assert_eq!(json["results"].as_array().unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// CC Suggestions route registration check
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn suggest_cc_route_is_registered() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = r#"{"to":["alice@example.com"],"cc":[],"subject":"test","body_preview":"test"}"#;
+    let res = app
+        .oneshot(
+            Request::post("/api/ai/suggest-cc")
+                .header("content-type", "application/json")
+                .header("x-session-token", TEST_TOKEN)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should NOT be 405 - the route must be registered
+    // Expected: 503 (AI not available in test) or 200, but NOT 405
+    assert_ne!(
+        res.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "Route POST /api/ai/suggest-cc must be registered in the router"
+    );
+}

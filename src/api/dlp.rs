@@ -318,19 +318,19 @@ pub fn determine_risk_level(findings: &[DlpFinding]) -> RiskLevel {
         return RiskLevel::None;
     }
 
-    let has_high = findings.iter().any(|f| {
+    let has_critical = findings.iter().any(|f| {
         matches!(
             f.finding_type,
             FindingType::CreditCard
                 | FindingType::PrivateKey
                 | FindingType::Ssn
-                | FindingType::ApiKey
         )
     });
 
-    if has_high {
+    if has_critical || findings.len() > 1 {
         RiskLevel::High
     } else {
+        // Single finding of password or API key = low risk
         RiskLevel::Low
     }
 }
