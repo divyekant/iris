@@ -455,48 +455,48 @@ pub async fn confirm_action(
         .collect();
 
     // For move_to_category, we need an extra parameter for the category
-    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match batch_action {
+    let (sql, params): (String, Vec<rusqlite::types::Value>) = match batch_action {
         "archive" => (
             format!(
-                "UPDATE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
+                "UPDATE OR IGNORE messages SET folder = 'Archive', updated_at = unixepoch() WHERE id IN ({})",
                 placeholders.join(",")
             ),
-            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+            resolved_ids.iter().map(|id| rusqlite::types::Value::Text(id.clone())).collect(),
         ),
         "delete" | "trash" => (
             format!(
-                "UPDATE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
+                "UPDATE OR IGNORE messages SET folder = 'Trash', updated_at = unixepoch() WHERE id IN ({})",
                 placeholders.join(",")
             ),
-            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+            resolved_ids.iter().map(|id| rusqlite::types::Value::Text(id.clone())).collect(),
         ),
         "mark_read" => (
             format!(
                 "UPDATE messages SET is_read = 1, updated_at = unixepoch() WHERE id IN ({})",
                 placeholders.join(",")
             ),
-            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+            resolved_ids.iter().map(|id| rusqlite::types::Value::Text(id.clone())).collect(),
         ),
         "mark_unread" => (
             format!(
                 "UPDATE messages SET is_read = 0, updated_at = unixepoch() WHERE id IN ({})",
                 placeholders.join(",")
             ),
-            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+            resolved_ids.iter().map(|id| rusqlite::types::Value::Text(id.clone())).collect(),
         ),
         "star" => (
             format!(
                 "UPDATE messages SET is_starred = 1, updated_at = unixepoch() WHERE id IN ({})",
                 placeholders.join(",")
             ),
-            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+            resolved_ids.iter().map(|id| rusqlite::types::Value::Text(id.clone())).collect(),
         ),
         "unstar" => (
             format!(
                 "UPDATE messages SET is_starred = 0, updated_at = unixepoch() WHERE id IN ({})",
                 placeholders.join(",")
             ),
-            resolved_ids.iter().map(|id| Box::new(id.clone()) as Box<dyn rusqlite::types::ToSql>).collect(),
+            resolved_ids.iter().map(|id| rusqlite::types::Value::Text(id.clone())).collect(),
         ),
         "move_to_category" => {
             // Extract category from the description (format: "Move N emails to <category>")
@@ -511,10 +511,10 @@ pub async fn confirm_action(
             let cat_placeholders: Vec<String> = (0..resolved_ids.len())
                 .map(|i| format!("?{}", i + 2))
                 .collect();
-            let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-            p.push(Box::new(category));
+            let mut p: Vec<rusqlite::types::Value> = Vec::new();
+            p.push(rusqlite::types::Value::Text(category));
             for id in &resolved_ids {
-                p.push(Box::new(id.clone()));
+                p.push(rusqlite::types::Value::Text(id.clone()));
             }
             (
                 format!(
@@ -528,8 +528,11 @@ pub async fn confirm_action(
     };
 
     let updated = conn
-        .execute(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .execute(&sql, rusqlite::params_from_iter(params.iter()))
+        .map_err(|e| {
+            tracing::error!("confirm_action execute failed: {:?} sql={}", e, sql);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(ConfirmActionResponse {
         executed: true,
