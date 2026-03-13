@@ -5,6 +5,7 @@ pub mod ai_config;
 pub mod ai_feedback;
 pub mod aliases;
 pub mod attachments;
+pub mod autocomplete;
 pub mod blocked_senders;
 pub mod briefing;
 pub mod chat;
