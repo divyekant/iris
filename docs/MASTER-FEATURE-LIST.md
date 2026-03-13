@@ -104,7 +104,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 38 | Thread-level private notes (only HEY) | Innovation #2 | M | **done** |
 | 39 | Newsletter feed view (only HEY, Shortwave) | Innovation #4 | L | **done** |
 | 40 | Subscription management dashboard (nobody) | Innovation #6 | L | **done** |
-| 41 | Search in attachment content — PDFs, docs (only Gmail/Outlook) | Innovation #11 | L | pending |
+| 41 | Search in attachment content — PDFs, docs (only Gmail/Outlook) | Innovation #11 | L | **done** |
 | 42 | Bounce/redirect on web (rare) | Innovation #12 | S | **done** |
 
 ### 2B. Inbox Intelligence (AI — Automatic)
@@ -118,7 +118,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 47 | VIP auto-detection from behavior patterns | 1.10 | M | **done** |
 | 48 | Relationship-aware prioritization | 1.3 | M | **done** |
 | 49 | Thread importance decay over time | 1.7 | S | **done** |
-| 50 | Duplicate/related thread clustering | 1.9 | L | pending |
+| 50 | Duplicate/related thread clustering | 1.9 | L | **done** |
 
 ### 2C. Composing & Writing (AI)
 
@@ -159,7 +159,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
-| 71 | Contextual phishing detection | 6.1 | L | pending |
+| 71 | Contextual phishing detection | 6.1 | L | **done** |
 | 72 | Social engineering detection | 6.2 | M | **done** |
 | 73 | Impersonation detection (lookalike domains) | 6.3 | S | **done** |
 | 74 | Link safety with context | 6.4 | M | **done** |
@@ -170,7 +170,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
-| 77 | Auto-generated contact profiles | 7.1 | L | pending |
+| 77 | Auto-generated contact profiles | 7.1 | L | **done** |
 | 78 | Relationship strength scoring | 7.2 | M | **done** |
 | 79 | Key topics per contact | 7.4 | S | **done** |
 | 80 | Response time patterns | 7.5 | S | **done** |
@@ -179,7 +179,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
-| 81 | MCP Server (expose email as tools via MCP protocol) | 8.1 | L | pending |
+| 81 | MCP Server (expose email as tools via MCP protocol) | 8.1 | L | **done** |
 | 82 | Webhook triggers on email events | 8.4 | M | **done** |
 | 83 | Structured data extraction API | 8.5 | M | **done** |
 

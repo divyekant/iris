@@ -45,6 +45,11 @@ const MIGRATION_042: &str = include_str!("../../migrations/042_health_reports.sq
 const MIGRATION_043: &str = include_str!("../../migrations/043_newsletter_feeds.sql");
 const MIGRATION_044: &str = include_str!("../../migrations/044_subscriptions.sql");
 const MIGRATION_045: &str = include_str!("../../migrations/045_analytics.sql");
+const MIGRATION_046: &str = include_str!("../../migrations/046_attachment_search.sql");
+const MIGRATION_047: &str = include_str!("../../migrations/047_thread_clusters.sql");
+const MIGRATION_048: &str = include_str!("../../migrations/048_phishing_detection.sql");
+const MIGRATION_049: &str = include_str!("../../migrations/049_contact_profiles.sql");
+const MIGRATION_050: &str = include_str!("../../migrations/050_mcp_server.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -286,6 +291,31 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 45 {
         conn.execute_batch(MIGRATION_045)?;
         tracing::info!("Applied migration 045_analytics");
+    }
+
+    if current_version < 46 {
+        conn.execute_batch(MIGRATION_046)?;
+        tracing::info!("Applied migration 046_attachment_search");
+    }
+
+    if current_version < 47 {
+        conn.execute_batch(MIGRATION_047)?;
+        tracing::info!("Applied migration 047_thread_clusters");
+    }
+
+    if current_version < 48 {
+        conn.execute_batch(MIGRATION_048)?;
+        tracing::info!("Applied migration 048_phishing_detection");
+    }
+
+    if current_version < 49 {
+        conn.execute_batch(MIGRATION_049)?;
+        tracing::info!("Applied migration 049_contact_profiles");
+    }
+
+    if current_version < 50 {
+        conn.execute_batch(MIGRATION_050)?;
+        tracing::info!("Applied migration 050_mcp_server");
     }
 
     Ok(())
