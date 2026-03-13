@@ -15,6 +15,7 @@ pub mod filter_rules;
 pub mod health;
 pub mod labels;
 pub mod inbox_stats;
+pub mod intent;
 pub mod messages;
 pub mod muted_threads;
 pub mod queue_status;

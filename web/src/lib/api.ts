@@ -292,6 +292,12 @@ export const api = {
     update: (threadId: string, noteId: string, content: string) => request<ThreadNote>(`/api/threads/${threadId}/notes/${noteId}`, { method: 'PUT', body: JSON.stringify({ content }) }),
     delete: (threadId: string, noteId: string) => request<void>(`/api/threads/${threadId}/notes/${noteId}`, { method: 'DELETE' }),
   },
+  intent: {
+    get: (messageId: string) => request<{ intent: string; confidence: number }>(`/api/messages/${messageId}/intent`),
+    detect: (messageId: string) => request<{ intent: string; confidence: number }>('/api/ai/detect-intent', {
+      method: 'POST', body: JSON.stringify({ message_id: messageId })
+    }),
+  },
   auth: {
     startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },

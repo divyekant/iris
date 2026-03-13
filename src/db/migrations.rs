@@ -23,6 +23,7 @@ const MIGRATION_020: &str = include_str!("../../migrations/020_unsubscribe.sql")
 const MIGRATION_021: &str = include_str!("../../migrations/021_needs_reply.sql");
 const MIGRATION_022: &str = include_str!("../../migrations/022_contact_topics_cache.sql");
 const MIGRATION_023: &str = include_str!("../../migrations/023_thread_notes.sql");
+const MIGRATION_024: &str = include_str!("../../migrations/024_intent_detection.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -71,6 +72,7 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
         tracing::info!("Applied migration 006_dedup_messages");
     }
 
+<<<<<<< HEAD
     if current_version < 7 {
         conn.execute_batch(MIGRATION_007)?;
         tracing::info!("Applied migration 007_inbox_stats");
@@ -154,6 +156,11 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 23 {
         conn.execute_batch(MIGRATION_023)?;
         tracing::info!("Applied migration 023_thread_notes");
+    }
+
+    if current_version < 24 {
+        conn.execute_batch(MIGRATION_024)?;
+        tracing::info!("Applied migration 024_intent_detection");
     }
 
     Ok(())

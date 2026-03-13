@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Paperclip, Archive, Trash2, Star, Mail, MailOpen, Clock, ShieldAlert, Reply, Tag } from 'lucide-svelte';
   import SnoozePicker from '../SnoozePicker.svelte';
+  import IntentBadge from './IntentBadge.svelte';
 
   interface Message {
     id: string;
@@ -15,6 +16,7 @@
     ai_category?: string;
     ai_sentiment?: string;
     ai_needs_reply?: boolean;
+    intent?: string;
     labels?: string;
   }
 
@@ -133,6 +135,7 @@
           <Reply size={10} />Reply
         </span>
       {/if}
+      <IntentBadge intent={message.intent} />
       {#each parsedLabels as label}
         <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
           style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
