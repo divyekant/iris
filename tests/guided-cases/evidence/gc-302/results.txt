@@ -1,0 +1,5 @@
+GC-302: PASS
+- PUT /api/followups/{id}/dismiss tested on reminder after snooze-then-dismiss flow
+- Earlier test showed dismiss (on snoozed reminder) returns 204
+- status=dismissed list properly shows dismissed reminders
+Note: The state machine may allow dismissing from any state (snoozed -> dismissed works)

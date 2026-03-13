@@ -1,0 +1,5 @@
+GC-300: PASS
+- GET /api/followups: 200, returns reminders array
+- GET /api/followups?status=pending: 200, only pending reminders
+- GET /api/followups?limit=20: 200, count<=20
+- Required fields all present

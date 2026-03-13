@@ -1,0 +1,5 @@
+GC-296: PASS
+- Chat: proposed_action={action:'move_to_category', 20 email IDs, description mentions promotions}
+- Confirm: {"executed":true,"updated":20}
+200
+- Category verified: ai_category: the promotions category

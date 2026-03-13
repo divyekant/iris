@@ -1,0 +1,12 @@
+GC-305: FAIL
+- The snooze endpoint validates date FORMAT only (validate_date checks YYYY-MM-DD format)
+- Past dates are NOT rejected by the validation logic in src/api/followups.rs
+- validate_date() at line 112: uses chrono::NaiveDate::parse_from_str only
+- A past date like 2026-03-12 passes format validation but is NOT rejected with 400
+- Instead: past date + valid ID returns 204 (accepted), past date + no ID returns 404
+- Malformed date (not-a-date): returns 400 (format validation works)
+- Malformed date test: PASS (400 returned)
+- Past date validation: FAIL (spec requires 400, actual behavior accepts past dates)
+- Today's date validation: FAIL (spec requires 400, actual behavior accepts it)
+- Remaining status unchanged: N/A (no pending reminders available to verify)
+Note: The implementation is missing a future-date validation check.

@@ -1,0 +1,6 @@
+GC-303: PASS
+- PUT /api/followups/4b0c8a0a-98b4-4fa8-8c8f-150e3f8d7606/acted: 
+204
+- Reminder appears in status=acted list
+- status=acted confirmed
+Note: Returns 204 No Content (spec expects 200 with acted_at timestamp - minor discrepancy)

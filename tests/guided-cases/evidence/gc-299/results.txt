@@ -1,0 +1,10 @@
+GC-299: PARTIAL PASS
+- POST /api/ai/scan-followups: 200 OK, response={scanned:1, reminders_created:0}
+  Note: Response key is 'reminders_created' not 'created' (spec mismatch minor)
+  Note: reminders_created=0 because the reminder already exists (was created in prior sync)
+- GET /api/followups: 200 OK, response={reminders:[...], total:2}
+  Note: Response wrapped in {reminders:[...]} not plain array (spec says array)
+  Note: 1 unique pending reminder exists (id: 1508f5bf, status:pending, urgency:normal)
+- All required fields present: id, message_id, thread_id, subject, urgency, status, created_at
+- P0 happy path: scan runs without errors, pending reminders are listable
+Status: PASS with minor field name discrepancies

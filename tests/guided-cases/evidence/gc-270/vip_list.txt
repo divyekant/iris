@@ -1,0 +1,2 @@
+{"vip_contacts":[{"email":"mailer-daemon@googlemail.com","display_name":"Mail Delivery Subsystem","vip_score":0.6167807712246984,"is_manual":false,"message_count":10,"reply_count":9,"last_contact":1773417574,"first_contact":1772844511,"avg_reply_time_secs":null,"is_vip":true}],"threshold":0.6}
+HTTP:200

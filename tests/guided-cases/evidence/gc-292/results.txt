@@ -1,0 +1,6 @@
+GC-292: PASS
+- Chat returns 200 with content explaining no matching emails found
+- proposed_action: null (no action proposed)
+- Confirm with null proposed_action returns 400 Bad Request (not 500)
+- Confirm HTTP: 
+400

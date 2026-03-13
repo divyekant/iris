@@ -1,0 +1,4 @@
+GC-301: PASS
+- PUT /api/followups/{id}/snooze with {until: '2026-03-20'}: 204
+- Reminder not in pending list after snooze
+- Reminder appears in snoozed list with snoozed_until=2026-03-20

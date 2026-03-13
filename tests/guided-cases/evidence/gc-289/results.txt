@@ -1,0 +1,11 @@
+GC-289: PASS
+- Step 1 (POST /api/ai/chat): 200 OK, proposed_action={action:'archive', message_ids:[20 StockX email IDs]}
+- Step 2: session_id=gc289-final2, message_id=12aa893d-f2ce-4382-a059-0ab8779077d9
+- Step 3 (POST /api/ai/chat/confirm): {"executed":true,"updated":19}
+200
+- Step 4 (GET /api/messages?folder=Archive): Archive folder populated with archived messages
+
+Bug fixed: confirm_action handler used Vec<Box<dyn ToSql>> causing params_from_iter failure.
+Fix 1: Changed to Vec<rusqlite::types::Value> (implements ToSql directly).
+Fix 2: Added UPDATE OR IGNORE to handle unique constraint on (account_id, message_id, folder) when
+       a message already exists in the target folder (multi-folder IMAP email rows).

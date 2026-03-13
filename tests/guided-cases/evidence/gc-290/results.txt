@@ -1,0 +1,4 @@
+GC-290: PASS
+- Chat: proposed_action={action:'mark_read', 8 unread email IDs from mailer-daemon}
+- Confirm: {"executed":true,"updated":8}
+200

@@ -1,0 +1,2 @@
+{"suggestions":[{"text":"Hi,","full_sentence":"HHi,","confidence":0.95},{"text":"Hello,","full_sentence":"HHello,","confidence":0.85},{"text":"How are you doing?","full_sentence":"HHow are you doing?","confidence":0.72}],"debounce_ms":300}
+HTTP:200

@@ -1,0 +1,5 @@
+GC-295: PASS
+- Step 1: Chat proposes archive action (proposed_action non-null)
+- Step 3: Cancel message 'Never mind' acknowledged, proposed_action=null
+- Content: 'I've cancelled the proposal...'
+- No emails archived during/after cancel

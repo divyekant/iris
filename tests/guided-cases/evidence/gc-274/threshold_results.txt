@@ -1,0 +1,2 @@
+{"vip_contacts":[{"email":"manual-vip-test@example.com","display_name":null,"vip_score":1.0,"is_manual":true,"message_count":0,"reply_count":0,"last_contact":null,"first_contact":null,"avg_reply_time_secs":null,"is_vip":true}],"threshold":0.9}
+HTTP:200

@@ -111,11 +111,11 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
-| 43 | Intent detection (action request, FYI, sales, social) | 1.4 | M | pending |
+| 43 | Intent detection (action request, FYI, sales, social) | 1.4 | M | done |
 | 44 | "Needs Reply" detection + queue | 1.8 | M | **done** |
-| 45 | Deadline extraction → task creation | 1.5 | M | pending |
+| 45 | Deadline extraction → task creation | 1.5 | M | done |
 | 46 | Sentiment analysis on incoming email | 1.6 | S | **done** |
-| 47 | VIP auto-detection from behavior patterns | 1.10 | M | pending |
+| 47 | VIP auto-detection from behavior patterns | 1.10 | M | done |
 | 48 | Relationship-aware prioritization | 1.3 | M | pending |
 | 49 | Thread importance decay over time | 1.7 | S | **done** |
 | 50 | Duplicate/related thread clustering | 1.9 | L | pending |
@@ -126,7 +126,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 |---|---------|-------------|--------|--------|
 | 51 | Draft from intent (plain English → full email) | 2.1 | M | **done** |
 | 52 | Multi-option reply (3 tones: formal/casual/brief) | 2.2 | M | pending |
-| 53 | Context-aware autocomplete (knows thread history) | 2.5 | L | pending |
+| 53 | Context-aware autocomplete (knows thread history) | 2.5 | L | done |
 | 54 | Smart CC/BCC suggestions | 2.7 | M | pending |
 | 55 | Subject line generation/improvement | 2.8 | S | **done** |
 | 56 | Grammar & tone check (before-send) | 2.10 | M | **done** |
@@ -140,7 +140,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 59 | On-demand briefing ("brief me on today") | 4.2 | S | **done** |
 | 60 | Task extraction from email ("what am I supposed to do?") | 4.3 | M | pending |
 | 61 | Relationship intelligence queries | 4.4 | M | pending |
-| 62 | Bulk operations via chat ("archive all from LinkedIn") | 4.7 | M | pending |
+| 62 | Bulk operations via chat ("archive all from LinkedIn") | 4.7 | M | done |
 | 63 | Email composition via chat | 4.6 | S | pending |
 
 ### 2E. Automation & Workflows (AI)
@@ -148,7 +148,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
 | 64 | Auto-archive patterns (learn what user always archives) | 5.2 | M | pending |
-| 65 | Content-based follow-up reminders | 5.3 | M | pending |
+| 65 | Content-based follow-up reminders | 5.3 | M | done |
 | 66 | Newsletter digest generation (consolidate into 1 summary) | 5.6 | M | pending |
 | 67 | Subscription audit (surface never-opened subscriptions) | 5.7 | S | **done** |
 | 68 | One-click unsubscribe | Audit | S | **done** |

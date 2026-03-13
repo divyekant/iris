@@ -1,0 +1,6 @@
+GC-297: PASS
+- Tool schema enum: ['archive', 'mark_read', 'mark_unread', 'trash', 'star', 'unstar', 'move_to_category']
+- execute_tool with unknown action returns {error:'Unknown action', updated:0}
+- Chat with 'purge' action: AI refuses, explains only valid actions available
+- proposed_action: null (AI did not invent 'purge' action)
+- Chat content explains the limitation and lists valid actions

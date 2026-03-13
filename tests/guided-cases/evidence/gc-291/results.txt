@@ -1,0 +1,6 @@
+GC-291: PASS
+- Step 1: proposed_action present
+- Step 3: Fabricated message_id returns 
+404
+- Step 4: Real message_id confirm returns {"executed":true,"updated":48}
+200

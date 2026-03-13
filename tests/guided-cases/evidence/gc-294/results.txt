@@ -1,0 +1,4 @@
+GC-294: PASS
+- Chat: proposed_action={action:'trash', 1 email from sender@test.com}
+- Confirm: {"executed":true,"updated":1}
+200

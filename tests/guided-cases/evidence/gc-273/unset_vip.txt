@@ -1,0 +1,2 @@
+{"email":"unset-vip-test@example.com","is_vip":false}
+HTTP:200

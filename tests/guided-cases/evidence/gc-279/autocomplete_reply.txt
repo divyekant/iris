@@ -1,0 +1,2 @@
+{"suggestions":[{"text":"fix this email address issue right away.","full_sentence":"Thanks for reaching out. I willfix this email address issue right away.","confidence":0.85},{"text":"look into why this delivery failed.","full_sentence":"Thanks for reaching out. I willlook into why this delivery failed.","confidence":0.82},{"text":"need to correct the email domain.","full_sentence":"Thanks for reaching out. I willneed to correct the email domain.","confidence":0.79}],"debounce_ms":300}
+HTTP:200

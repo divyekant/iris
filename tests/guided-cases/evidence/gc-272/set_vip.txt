@@ -1,0 +1,2 @@
+{"email":"manual-vip-test@example.com","is_vip":true}
+HTTP:200

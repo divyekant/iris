@@ -1,0 +1,7 @@
+GC-307: PASS
+- status=snoozed: returns only snoozed reminders
+- status=dismissed: returns only dismissed reminders
+- status=acted: returns only acted reminders
+- unknown_value: empty list (200 with empty reminders array, graceful degradation)
+- No 500 errors from unknown status
+- Default (no status): returns active reminders (pending + snoozed-and-due)

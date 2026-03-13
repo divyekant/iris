@@ -1,0 +1,5 @@
+GC-304: PASS
+- POST /api/ai/scan-followups: {"scanned":1,"reminders_created":0}
+200 (returns scanned/reminders_created, no crash)
+- API handles empty or already-processed scenario gracefully
+- No 500 errors or panics

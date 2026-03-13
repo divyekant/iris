@@ -1,0 +1,2 @@
+{"email":"nobody-unknown-xyz@notareal.example","vip_score":0.0,"is_manual":false,"is_vip":false,"stats":{"message_count":0,"reply_count":0,"last_contact":null,"first_contact":null,"avg_reply_time_secs":null}}
+HTTP:200

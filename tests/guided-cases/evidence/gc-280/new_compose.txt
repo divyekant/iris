@@ -1,0 +1,2 @@
+{"suggestions":[{"text":"the project timeline and next steps.","full_sentence":"I wanted to follow up on our discussion aboutthe project timeline and next steps.","confidence":0.85},{"text":"your feedback from last week's meeting.","full_sentence":"I wanted to follow up on our discussion aboutyour feedback from last week's meeting.","confidence":0.82},{"text":"implementing the new marketing strategy.","full_sentence":"I wanted to follow up on our discussion aboutimplementing the new marketing strategy.","confidence":0.78}],"debounce_ms":300}
+HTTP:200

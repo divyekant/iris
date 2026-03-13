@@ -1,0 +1,4 @@
+{"message":{"id":"c39d7b98-d823-449b-82d9-6815916d8f97","session_id":"gc289-session","role":"assistant","content":"It looks like you don't have any emails from LinkedIn in your inbox. There are 0 emails matching that sender, so there's nothing to archive.
+
+If you're looking to archive emails from a different sender or would like to search for LinkedIn-related emails using keywords instead, let me know!","citations":null,"proposed_action":null,"tool_calls_made":[{"name":"list_emails","arguments":{"sender":"LinkedIn"},"result_preview":"{\"count\":0,\"emails\":[]}"}],"created_at":1773424317}}
+HTTP:200

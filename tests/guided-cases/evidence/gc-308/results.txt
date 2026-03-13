@@ -1,0 +1,10 @@
+GC-308: PASS
+- OR injection in reminder ID path: 
+404 (not 200 with data)
+- UNION SELECT injection in dismiss: 
+404 (not 200 with data)
+- DROP TABLE injection in acted: 
+404 (not 200)
+- Database intact after injection attempts (followup_reminders table still accessible)
+- rusqlite parameterized queries prevent injection (path param is bound as parameter)
+- All injection IDs treated as literal string values, not SQL

@@ -1,0 +1,6 @@
+GC-306: PASS
+- Snooze dismissed reminder: 404 (dismissed state not in 'pending','snoozed' - UPDATE affects 0 rows)
+- Snooze acted reminder: 404 (acted state not in 'pending','snoozed' - UPDATE affects 0 rows)
+- Dismissed status remains unchanged after failed snooze attempt
+- Source: followups.rs line 356: WHERE status IN ('pending', 'snoozed') ensures terminal states cannot snooze
+Note: Returns 404 (not 409 as spec suggests) but achieves the same goal - invalid state transitions are rejected

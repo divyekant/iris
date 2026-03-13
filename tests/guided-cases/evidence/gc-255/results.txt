@@ -1,0 +1,3 @@
+MSG 109daa68-c2a0-46f2-bc77-12af1ac9e4a7: intent=fyi, confidence=0.95, in_range=YES
+MSG d4075986-0e23-4eda-9de9-ee4dc9c5268d: intent=fyi, confidence=0.95, in_range=YES
+MSG f62fdf93-f463-4c43-8dcd-d722dff8584a: intent=sales, confidence=0.95, in_range=YES

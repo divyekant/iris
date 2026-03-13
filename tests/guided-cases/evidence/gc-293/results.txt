@@ -1,0 +1,7 @@
+GC-293: PASS
+- BULK_UPDATE_MAX = 500 in src/ai/tools.rs
+- Tool description includes 'Max 500'
+- Cap enforcement: message_ids.len() > BULK_UPDATE_MAX returns error
+- Chat API: inbox archive returned 81 message_ids (well under 500)
+- Confirm: {"executed":true,"updated":78}
+200
