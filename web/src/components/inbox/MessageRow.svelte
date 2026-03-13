@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Paperclip, Archive, Trash2, Star, Mail, MailOpen, Clock, ShieldAlert, Reply, Tag } from 'lucide-svelte';
+  import { Paperclip, Archive, Trash2, Star, Clock, Reply } from 'lucide-svelte';
   import SnoozePicker from '../SnoozePicker.svelte';
   import IntentBadge from './IntentBadge.svelte';
 
@@ -74,6 +74,41 @@
     try { return JSON.parse(message.labels); } catch { return []; }
   });
 
+  // --- Smart Badge Priority (Shape F) ---
+  // Priority ranking: needs_reply > deadline > intent > sentiment > category > labels
+  const MAX_VISIBLE_BADGES = 2;
+
+  type BadgeEntry = {
+    priority: number;
+    type: 'needs_reply' | 'intent' | 'sentiment' | 'category' | 'label';
+    key: string;
+  };
+
+  let allBadges: BadgeEntry[] = $derived.by(() => {
+    const badges: BadgeEntry[] = [];
+    if (message.ai_needs_reply) {
+      badges.push({ priority: 0, type: 'needs_reply', key: 'needs_reply' });
+    }
+    // deadline slot (priority 1) reserved for future use
+    if (message.intent) {
+      badges.push({ priority: 2, type: 'intent', key: `intent_${message.intent}` });
+    }
+    if (message.ai_sentiment && sentimentConfig[message.ai_sentiment]) {
+      badges.push({ priority: 3, type: 'sentiment', key: `sentiment_${message.ai_sentiment}` });
+    }
+    if (message.ai_category) {
+      badges.push({ priority: 4, type: 'category', key: `category_${message.ai_category}` });
+    }
+    for (const label of parsedLabels) {
+      badges.push({ priority: 5, type: 'label', key: `label_${label}` });
+    }
+    badges.sort((a, b) => a.priority - b.priority);
+    return badges;
+  });
+
+  let visibleBadges = $derived(allBadges.slice(0, MAX_VISIBLE_BADGES));
+  let overflowCount = $derived(Math.max(0, allBadges.length - MAX_VISIBLE_BADGES));
+
   function handleCheckbox(e: Event) {
     e.stopPropagation();
     const checked = (e.target as HTMLInputElement).checked;
@@ -111,37 +146,47 @@
   </div>
 
   <!-- Content -->
-  <div class="flex-1 min-w-0">
+  <div class="flex-1 min-w-0 overflow-hidden">
     <div class="flex items-center gap-2">
-      <span class="text-sm truncate {message.is_read ? '' : 'font-semibold'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
+      <span class="text-sm truncate flex-shrink {message.is_read ? '' : 'font-semibold'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'}; min-width: 60px;">
         {senderDisplay}
       </span>
-      {#if message.ai_category}
-        <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
-          {message.ai_category}
-        </span>
-      {/if}
-      {#if message.ai_sentiment && sentimentConfig[message.ai_sentiment]}
-        <span
-          class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
-          style="background: color-mix(in srgb, {sentimentConfig[message.ai_sentiment].color} 12%, transparent); color: {sentimentConfig[message.ai_sentiment].color};"
-          title="Sentiment: {sentimentConfig[message.ai_sentiment].label}"
-        >
-          {sentimentConfig[message.ai_sentiment].label}
-        </span>
-      {/if}
-      {#if message.ai_needs_reply}
-        <span class="flex-shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent); color: var(--iris-color-warning);" title="Needs reply">
-          <Reply size={10} />Reply
-        </span>
-      {/if}
-      <IntentBadge intent={message.intent} />
-      {#each parsedLabels as label}
-        <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
-          style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
-          {label}
-        </span>
-      {/each}
+      <!-- Smart Badge Priority: show top 2 badges + overflow count -->
+      <div class="flex items-center gap-1 flex-shrink-0 overflow-hidden">
+        {#each visibleBadges as badge (badge.key)}
+          {#if badge.type === 'needs_reply'}
+            <span class="flex-shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent); color: var(--iris-color-warning);" title="Needs reply">
+              <Reply size={10} />Reply
+            </span>
+          {:else if badge.type === 'intent'}
+            <IntentBadge intent={message.intent} />
+          {:else if badge.type === 'sentiment'}
+            <span
+              class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
+              style="background: color-mix(in srgb, {sentimentConfig[message.ai_sentiment!].color} 12%, transparent); color: {sentimentConfig[message.ai_sentiment!].color};"
+              title="Sentiment: {sentimentConfig[message.ai_sentiment!].label}"
+            >
+              {sentimentConfig[message.ai_sentiment!].label}
+            </span>
+          {:else if badge.type === 'category'}
+            <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
+              {message.ai_category}
+            </span>
+          {:else if badge.type === 'label'}
+            <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
+              style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
+              {badge.key.replace('label_', '')}
+            </span>
+          {/if}
+        {/each}
+        {#if overflowCount > 0}
+          <span
+            class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
+            style="background: color-mix(in srgb, var(--iris-color-text-faint) 10%, transparent); color: var(--iris-color-text-faint);"
+            title="{overflowCount} more badge{overflowCount > 1 ? 's' : ''}"
+          >+{overflowCount}</span>
+        {/if}
+      </div>
       <span class="flex-shrink-0 text-xs ml-auto flex items-center gap-1.5" style="color: var(--iris-color-text-faint);">
         {#if message.has_attachments}
           <span title="Has attachments"><Paperclip size={12} /></span>
@@ -162,7 +207,7 @@
     {/if}
   </div>
 
-  <!-- Hover quick actions -->
+  <!-- Hover quick actions (streamlined: Archive, Delete, Star, Snooze) -->
   <div class="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1 px-2 py-1 rounded-lg"
        style="background: var(--iris-color-bg-elevated); box-shadow: 0 1px 3px rgba(0,0,0,.15);">
     <button
@@ -177,12 +222,6 @@
       onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'delete'); }}
       title="Delete"
     ><Trash2 size={14} /></button>
-    <button
-      class="p-1 rounded transition-colors quick-action"
-      style="color: var(--iris-color-text-faint);"
-      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, message.is_read ? 'mark_unread' : 'mark_read'); }}
-      title={message.is_read ? 'Mark unread' : 'Mark read'}
-    >{#if message.is_read}<Mail size={14} />{:else}<MailOpen size={14} />{/if}</button>
     <button
       class="p-1 rounded transition-colors quick-action"
       style="color: var(--iris-color-text-faint);"
@@ -205,18 +244,6 @@
         </div>
       {/if}
     </div>
-    <button
-      class="p-1 rounded transition-colors quick-action-topics"
-      style="color: var(--iris-color-text-faint);"
-      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'show_topics'); }}
-      title="Contact topics"
-    ><Tag size={14} /></button>
-    <button
-      class="p-1 rounded transition-colors quick-action-spam"
-      style="color: var(--iris-color-text-faint);"
-      onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'report_spam'); }}
-      title="Report Spam"
-    ><ShieldAlert size={14} /></button>
   </div>
 </div>
 
@@ -224,6 +251,4 @@
   .quick-action:hover { color: var(--iris-color-primary); }
   .quick-action-delete:hover { color: var(--iris-color-error); }
   .quick-action-snooze:hover { color: var(--iris-color-warning); }
-  .quick-action-topics:hover { color: var(--iris-color-primary); }
-  .quick-action-spam:hover { color: var(--iris-color-warning); }
 </style>
