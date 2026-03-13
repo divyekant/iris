@@ -29,6 +29,10 @@ const MIGRATION_026: &str = include_str!("../../migrations/026_vip_contacts.sql"
 const MIGRATION_027: &str = include_str!("../../migrations/027_followup_reminders.sql");
 const MIGRATION_028: &str = include_str!("../../migrations/028_relationship_priority.sql");
 const MIGRATION_029: &str = include_str!("../../migrations/029_social_engineering.sql");
+const MIGRATION_030: &str = include_str!("../../migrations/030_relationship_details.sql");
+const MIGRATION_031: &str = include_str!("../../migrations/031_draft_versions.sql");
+const MIGRATION_032: &str = include_str!("../../migrations/032_relationship_scores.sql");
+const MIGRATION_033: &str = include_str!("../../migrations/033_tracking_pixels.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -190,6 +194,26 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 29 {
         conn.execute_batch(MIGRATION_029)?;
         tracing::info!("Applied migration 029_social_engineering");
+    }
+
+    if current_version < 30 {
+        conn.execute_batch(MIGRATION_030)?;
+        tracing::info!("Applied migration 030_relationship_details");
+    }
+
+    if current_version < 31 {
+        conn.execute_batch(MIGRATION_031)?;
+        tracing::info!("Applied migration 031_draft_versions");
+    }
+
+    if current_version < 32 {
+        conn.execute_batch(MIGRATION_032)?;
+        tracing::info!("Applied migration 032_relationship_scores");
+    }
+
+    if current_version < 33 {
+        conn.execute_batch(MIGRATION_033)?;
+        tracing::info!("Applied migration 033_tracking_pixels");
     }
 
     Ok(())

@@ -100,7 +100,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 
 | # | Feature | Source | Effort | Status |
 |---|---------|--------|--------|--------|
-| 37 | Draft version history (no client has this) | Innovation #1 | M | pending |
+| 37 | Draft version history (no client has this) | Innovation #1 | M | **done** |
 | 38 | Thread-level private notes (only HEY) | Innovation #2 | M | **done** |
 | 39 | Newsletter feed view (only HEY, Shortwave) | Innovation #4 | L | pending |
 | 40 | Subscription management dashboard (nobody) | Innovation #6 | L | pending |
@@ -130,7 +130,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 54 | Smart CC/BCC suggestions | 2.7 | M | **done** |
 | 55 | Subject line generation/improvement | 2.8 | S | **done** |
 | 56 | Grammar & tone check (before-send) | 2.10 | M | **done** |
-| 57 | Multi-language compose + translate | 2.4 | M | pending |
+| 57 | Multi-language compose + translate | 2.4 | M | **done** |
 | 58 | Markdown compose support | Audit | S | **done** |
 
 ### 2D. Chat & Agent Enhancements (AI)
@@ -139,7 +139,7 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 |---|---------|-------------|--------|--------|
 | 59 | On-demand briefing ("brief me on today") | 4.2 | S | **done** |
 | 60 | Task extraction from email ("what am I supposed to do?") | 4.3 | M | **done** |
-| 61 | Relationship intelligence queries | 4.4 | M | pending |
+| 61 | Relationship intelligence queries | 4.4 | M | **done** |
 | 62 | Bulk operations via chat ("archive all from LinkedIn") | 4.7 | M | **done** |
 | 63 | Email composition via chat | 4.6 | S | **done** |
 
@@ -162,16 +162,16 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 | 71 | Contextual phishing detection | 6.1 | L | pending |
 | 72 | Social engineering detection | 6.2 | M | **done** |
 | 73 | Impersonation detection (lookalike domains) | 6.3 | S | **done** |
-| 74 | Link safety with context | 6.4 | M | pending |
+| 74 | Link safety with context | 6.4 | M | **done** |
 | 75 | Data leak prevention (before-send scan) | 6.5 | M | **done** |
-| 76 | Privacy report (who tracks you, HEY-style) | Audit | M | pending |
+| 76 | Privacy report (who tracks you, HEY-style) | Audit | M | **done** |
 
 ### 2G. Contact Intelligence (AI)
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
 | 77 | Auto-generated contact profiles | 7.1 | L | pending |
-| 78 | Relationship strength scoring | 7.2 | M | pending |
+| 78 | Relationship strength scoring | 7.2 | M | **done** |
 | 79 | Key topics per contact | 7.4 | S | **done** |
 | 80 | Response time patterns | 7.5 | S | **done** |
 

@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::api::draft_versions;
 use crate::models::account::Account;
 use crate::auth::refresh::ensure_fresh_token;
 use crate::models::message::{self, InsertMessage, MessageDetail, MessageSummary};
@@ -392,6 +393,19 @@ pub async fn save_draft(
     let to_json = req.to.as_ref().and_then(|v| serde_json::to_string(v).ok());
     let cc_json = req.cc.as_ref().and_then(|v| serde_json::to_string(v).ok());
     let bcc_json = req.bcc.as_ref().and_then(|v| serde_json::to_string(v).ok());
+
+    // Auto-version on update: capture a snapshot when the body has changed
+    if let Some(ref existing_id) = req.draft_id {
+        draft_versions::auto_version_if_changed(
+            &conn,
+            existing_id,
+            &req.account_id,
+            req.subject.as_deref(),
+            &req.body_text,
+            to_json.as_deref(),
+            cc_json.as_deref(),
+        );
+    }
 
     let draft_id = message::save_draft(
         &conn,
