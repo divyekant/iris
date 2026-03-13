@@ -1,5 +1,12 @@
 <script lang="ts">
   import { api } from '../../lib/api';
+  import DlpWarning from './DlpWarning.svelte';
+
+  interface DlpScanResult {
+    findings: { type: string; match: string; location: string; line: number }[];
+    risk_level: 'none' | 'low' | 'high';
+    allow_send: boolean;
+  }
 
   type ComposeMode = 'new' | 'reply' | 'reply-all' | 'forward';
 
@@ -41,6 +48,11 @@
   let error = $state('');
   let draftId = $state<string | null>(null);
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // DLP state
+  let dlpResult = $state<DlpScanResult | null>(null);
+  let scanning = $state(false);
+  let dlpOverrideToken = $state<string | null>(null);
 
   // AI assist state
   let aiAssisting = $state(false);
@@ -136,11 +148,34 @@
       .filter(Boolean);
   }
 
-  async function handleSend() {
+  async function handleSend(overrideToken?: string) {
     if (!to.trim()) {
       error = 'Please add at least one recipient.';
       return;
     }
+
+    // Run DLP scan before sending (skip if we have an override token)
+    if (!overrideToken && !dlpOverrideToken) {
+      scanning = true;
+      error = '';
+      try {
+        const scanResult = await api.dlp.scan({
+          subject,
+          body,
+          to: splitAddresses(to),
+        });
+        if (scanResult.findings.length > 0) {
+          dlpResult = scanResult;
+          scanning = false;
+          return; // Show DLP warning dialog
+        }
+      } catch {
+        // If scan fails, allow send to proceed (fail-open)
+      } finally {
+        scanning = false;
+      }
+    }
+
     sending = true;
     error = '';
     try {
@@ -174,6 +209,17 @@
     } finally {
       sending = false;
     }
+  }
+
+  function handleDlpCancel() {
+    dlpResult = null;
+    dlpOverrideToken = null;
+  }
+
+  function handleDlpOverride(token: string) {
+    dlpResult = null;
+    dlpOverrideToken = token;
+    handleSend(token);
   }
 
   async function handleSaveDraft() {
@@ -359,10 +405,10 @@
       <button
         class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors compose-send-btn"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
-        onclick={handleSend}
-        disabled={sending}
+        onclick={() => handleSend()}
+        disabled={sending || scanning}
       >
-        {sending ? 'Sending...' : 'Send'}
+        {scanning ? 'Scanning...' : sending ? 'Sending...' : 'Send'}
       </button>
       <span class="text-xs" style="color: var(--iris-color-text-faint);" title="Cmd/Ctrl + Enter to send">
         {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+&#x23CE;
@@ -370,6 +416,14 @@
     </div>
   </div>
 </div>
+
+{#if dlpResult}
+  <DlpWarning
+    result={dlpResult}
+    oncancel={handleDlpCancel}
+    onoverride={handleDlpOverride}
+  />
+{/if}
 
 <style>
   .compose-dropdown-item:hover {
