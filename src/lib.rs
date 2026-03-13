@@ -139,6 +139,35 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/contacts/intelligence/summary", get(api::relationship_intel::get_intelligence_summary))
         .route("/contacts/{email}/intelligence", get(api::relationship_intel::get_contact_intelligence))
         .route("/contacts/{email}/intelligence/ai-summary", post(api::relationship_intel::get_contact_ai_summary))
+        // Batch 7: Auto-archive patterns
+        .route("/ai/archive-patterns/compute", post(api::archive_patterns::compute_patterns))
+        .route("/ai/archive-patterns", get(api::archive_patterns::list_patterns))
+        .route("/ai/archive-patterns/suggest", post(api::archive_patterns::suggest_archive))
+        .route("/ai/archive-patterns/{id}", delete(api::archive_patterns::delete_pattern).put(api::archive_patterns::update_pattern))
+        // Batch 7: Newsletter digest
+        .route("/ai/newsletter-digest", post(api::newsletter_digest::generate_digest))
+        .route("/ai/newsletter-digest/sources", get(api::newsletter_digest::list_sources))
+        .route("/ai/newsletter-digest/preview", post(api::newsletter_digest::preview_digest))
+        .route("/ai/newsletter-digest/history", get(api::newsletter_digest::digest_history))
+        // Batch 7: Template suggestions
+        .route("/ai/template-suggestions/scan", post(api::template_suggestions::scan_templates))
+        .route("/ai/template-suggestions", get(api::template_suggestions::list_suggestions))
+        .route("/ai/template-suggestions/{id}/accept", post(api::template_suggestions::accept_suggestion))
+        .route("/ai/template-suggestions/{id}", delete(api::template_suggestions::dismiss_suggestion))
+        // Batch 7: Notification routing
+        .route("/notifications/routing/config", get(api::notification_routing::get_config).put(api::notification_routing::update_config))
+        .route("/notifications/routing/classify", post(api::notification_routing::classify))
+        .route("/notifications/digest", get(api::notification_routing::get_digest))
+        .route("/notifications/digest/clear", post(api::notification_routing::clear_digest))
+        // Batch 7: Follow-up tracking
+        .route("/followup-tracking", get(api::followup_tracking::list_followups).post(api::followup_tracking::create_followup))
+        .route("/followup-tracking/due", get(api::followup_tracking::due_followups))
+        .route("/followup-tracking/check-replies", post(api::followup_tracking::check_replies))
+        .route("/followup-tracking/{id}", put(api::followup_tracking::update_followup).delete(api::followup_tracking::delete_followup))
+        // Batch 7: Effectiveness scoring
+        .route("/compose/effectiveness-score", post(api::effectiveness::score_effectiveness))
+        .route("/compose/effectiveness-history", get(api::effectiveness::effectiveness_history))
+        .route("/compose/effectiveness-tips", post(api::effectiveness::effectiveness_tips))
         .route("/send", post(api::compose::send_message))
         .route("/send/cancel/{id}", post(api::compose::cancel_send))
         .route("/config/undo-send-delay", get(api::compose::get_undo_send_delay).put(api::compose::set_undo_send_delay))

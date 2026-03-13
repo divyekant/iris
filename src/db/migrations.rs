@@ -33,6 +33,12 @@ const MIGRATION_030: &str = include_str!("../../migrations/030_relationship_deta
 const MIGRATION_031: &str = include_str!("../../migrations/031_draft_versions.sql");
 const MIGRATION_032: &str = include_str!("../../migrations/032_relationship_scores.sql");
 const MIGRATION_033: &str = include_str!("../../migrations/033_tracking_pixels.sql");
+const MIGRATION_034: &str = include_str!("../../migrations/034_archive_patterns.sql");
+const MIGRATION_035: &str = include_str!("../../migrations/035_newsletter_digests.sql");
+const MIGRATION_036: &str = include_str!("../../migrations/036_template_suggestions.sql");
+const MIGRATION_037: &str = include_str!("../../migrations/037_notification_routing.sql");
+const MIGRATION_038: &str = include_str!("../../migrations/038_followup_tracking.sql");
+const MIGRATION_039: &str = include_str!("../../migrations/039_effectiveness_scores.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -214,6 +220,36 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 33 {
         conn.execute_batch(MIGRATION_033)?;
         tracing::info!("Applied migration 033_tracking_pixels");
+    }
+
+    if current_version < 34 {
+        conn.execute_batch(MIGRATION_034)?;
+        tracing::info!("Applied migration 034_archive_patterns");
+    }
+
+    if current_version < 35 {
+        conn.execute_batch(MIGRATION_035)?;
+        tracing::info!("Applied migration 035_newsletter_digests");
+    }
+
+    if current_version < 36 {
+        conn.execute_batch(MIGRATION_036)?;
+        tracing::info!("Applied migration 036_template_suggestions");
+    }
+
+    if current_version < 37 {
+        conn.execute_batch(MIGRATION_037)?;
+        tracing::info!("Applied migration 037_notification_routing");
+    }
+
+    if current_version < 38 {
+        conn.execute_batch(MIGRATION_038)?;
+        tracing::info!("Applied migration 038_followup_tracking");
+    }
+
+    if current_version < 39 {
+        conn.execute_batch(MIGRATION_039)?;
+        tracing::info!("Applied migration 039_effectiveness_scores");
     }
 
     Ok(())

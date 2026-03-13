@@ -147,13 +147,13 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 
 | # | Feature | Brainstorm # | Effort | Status |
 |---|---------|-------------|--------|--------|
-| 64 | Auto-archive patterns (learn what user always archives) | 5.2 | M | pending |
+| 64 | Auto-archive patterns (learn what user always archives) | 5.2 | M | **done** |
 | 65 | Content-based follow-up reminders | 5.3 | M | **done** |
-| 66 | Newsletter digest generation (consolidate into 1 summary) | 5.6 | M | pending |
+| 66 | Newsletter digest generation (consolidate into 1 summary) | 5.6 | M | **done** |
 | 67 | Subscription audit (surface never-opened subscriptions) | 5.7 | S | **done** |
 | 68 | One-click unsubscribe | Audit | S | **done** |
-| 69 | Template auto-generation from repeated patterns | 2.9 | M | pending |
-| 70 | Smart notification routing (urgent → push, FYI → digest) | 5.8 | M | pending |
+| 69 | Template auto-generation from repeated patterns | 2.9 | M | **done** |
+| 70 | Smart notification routing (urgent → push, FYI → digest) | 5.8 | M | **done** |
 
 ### 2F. Security & Trust (AI)
 
@@ -189,8 +189,8 @@ Features that set Iris apart from Gmail/Outlook/Superhuman. Mix of innovation ga
 |---|---------|-------------|--------|--------|
 | 84 | Email analytics dashboard | 9.1 | L | pending |
 | 85 | Communication health reports | 9.2 | M | pending |
-| 86 | Follow-up if no reply (Superhuman-style) | Audit | M | pending |
-| 87 | Email effectiveness scoring (before-send) | 9.6 | M | pending |
+| 86 | Follow-up if no reply (Superhuman-style) | Audit | M | **done** |
+| 87 | Email effectiveness scoring (before-send) | 9.6 | M | **done** |
 
 **Wave 2 Total: 51 items**
 
