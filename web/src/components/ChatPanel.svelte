@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api } from '../lib/api';
+  import { renderMarkdown } from '../lib/markdown';
   import ComposeCard from './chat/ComposeCard.svelte';
 
   let { open, onclose }: { open: boolean; onclose: () => void } = $props();
@@ -374,7 +375,9 @@
                   </div>
                 {/if}
 
-                {msg.content}
+                <div class="chat-markdown">
+                  {@html renderMarkdown(msg.content)}
+                </div>
 
                 <!-- Citations -->
                 {#if msg.citations?.length}
@@ -484,3 +487,88 @@
     </div>
   </div>
 {/if}
+
+<style>
+  /* Markdown rendering inside chat bubbles */
+  :global(.chat-markdown p) {
+    margin: 0 0 0.5em 0;
+  }
+  :global(.chat-markdown p:last-child) {
+    margin-bottom: 0;
+  }
+  :global(.chat-markdown strong) {
+    font-weight: 600;
+  }
+  :global(.chat-markdown em) {
+    font-style: italic;
+  }
+  :global(.chat-markdown ul),
+  :global(.chat-markdown ol) {
+    margin: 0.25em 0;
+    padding-left: 1.4em;
+  }
+  :global(.chat-markdown li) {
+    margin: 0.15em 0;
+  }
+  :global(.chat-markdown code) {
+    font-family: var(--iris-font-mono);
+    font-size: 0.85em;
+    padding: 0.15em 0.35em;
+    border-radius: var(--iris-radius-sm);
+    background: rgba(255, 255, 255, 0.08);
+  }
+  :global(.chat-markdown pre) {
+    margin: 0.5em 0;
+    padding: 0.6em 0.8em;
+    border-radius: var(--iris-radius-md);
+    background: rgba(0, 0, 0, 0.25);
+    overflow-x: auto;
+    font-size: 0.85em;
+  }
+  :global(.chat-markdown pre code) {
+    padding: 0;
+    background: none;
+  }
+  :global(.chat-markdown h1),
+  :global(.chat-markdown h2),
+  :global(.chat-markdown h3) {
+    font-weight: 600;
+    margin: 0.5em 0 0.25em 0;
+  }
+  :global(.chat-markdown h1) { font-size: 1.15em; }
+  :global(.chat-markdown h2) { font-size: 1.05em; }
+  :global(.chat-markdown h3) { font-size: 1em; }
+  :global(.chat-markdown blockquote) {
+    border-left: 2px solid var(--iris-color-primary);
+    padding-left: 0.6em;
+    margin: 0.4em 0;
+    color: var(--iris-color-text-muted);
+    font-style: italic;
+  }
+  :global(.chat-markdown table) {
+    border-collapse: collapse;
+    margin: 0.5em 0;
+    font-size: 0.9em;
+    width: 100%;
+  }
+  :global(.chat-markdown th),
+  :global(.chat-markdown td) {
+    border: 1px solid var(--iris-color-border);
+    padding: 0.3em 0.5em;
+    text-align: left;
+  }
+  :global(.chat-markdown th) {
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.04);
+  }
+  :global(.chat-markdown a) {
+    color: var(--iris-color-primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  :global(.chat-markdown hr) {
+    border: none;
+    border-top: 1px solid var(--iris-color-border-subtle);
+    margin: 0.5em 0;
+  }
+</style>

@@ -106,6 +106,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/config", get(api::config::get_config))
         .route("/config/theme", put(api::config::set_theme))
         .route("/config/view-mode", put(api::config::set_view_mode))
+        .route("/config/appearance", get(api::config::get_appearance).put(api::config::set_appearance))
         .route("/config/ai", get(api::ai_config::get_ai_config).put(api::ai_config::set_ai_config))
         .route("/config/ai/test", post(api::ai_config::test_ai_connection))
         .route("/api-keys", get(api::agent::list_keys_handler).post(api::agent::create_key_handler))

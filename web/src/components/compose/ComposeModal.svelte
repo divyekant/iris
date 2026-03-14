@@ -3,6 +3,7 @@
   import TemplatePicker from './TemplatePicker.svelte';
   import SchedulePicker from './SchedulePicker.svelte';
   import RichTextEditor from './RichTextEditor.svelte';
+  import MarkdownCompose from './MarkdownCompose.svelte';
   import MultiReplyPicker from './MultiReplyPicker.svelte';
   import DlpWarning from './DlpWarning.svelte';
   import { Clock, Wand2, Sparkles, Check, AlertTriangle, Loader2 } from 'lucide-svelte';
@@ -62,6 +63,8 @@
   let body = $state('');
   let bodyHtml = $state('');
   let richEditor: RichTextEditor | undefined = $state();
+  let mdEditor: MarkdownCompose | undefined = $state();
+  let useMarkdown = $state(false);
   let showCcBcc = $state(false);
   let sending = $state(false);
   let error = $state('');
@@ -555,6 +558,12 @@
       }
     }
 
+    // Generate HTML from markdown before sending
+    if (useMarkdown && mdEditor) {
+      const mdHtml = mdEditor.getHtml();
+      if (mdHtml) bodyHtml = mdHtml;
+    }
+
     sending = true;
     error = '';
     try {
@@ -992,14 +1001,40 @@
         {/if}
       </div>
 
-      <!-- Body (Rich Text Editor) -->
-      <div class="mt-2 rounded-lg border overflow-hidden" style="border-color: var(--iris-color-border-subtle);">
-        <RichTextEditor
-          bind:this={richEditor}
-          content={body ? `<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>` : ''}
-          disabled={!!undoSendId}
-          onchange={(html, text) => { bodyHtml = html; body = text; scheduleAutoSave(); }}
-        />
+      <!-- Body editor mode toggle -->
+      <div class="flex items-center gap-2 mt-2 mb-1">
+        <button
+          class="px-2 py-0.5 text-[11px] font-medium rounded transition-colors"
+          style="border: 1px solid {useMarkdown ? 'var(--iris-color-border)' : 'var(--iris-color-primary)'}; background: {useMarkdown ? 'transparent' : 'color-mix(in srgb, var(--iris-color-primary) 12%, transparent)'}; color: {useMarkdown ? 'var(--iris-color-text-faint)' : 'var(--iris-color-primary)'};"
+          onclick={() => { useMarkdown = false; }}
+          type="button"
+        >Rich Text</button>
+        <button
+          class="px-2 py-0.5 text-[11px] font-medium rounded transition-colors"
+          style="border: 1px solid {useMarkdown ? 'var(--iris-color-primary)' : 'var(--iris-color-border)'}; background: {useMarkdown ? 'color-mix(in srgb, var(--iris-color-primary) 12%, transparent)' : 'transparent'}; color: {useMarkdown ? 'var(--iris-color-primary)' : 'var(--iris-color-text-faint)'};"
+          onclick={() => { useMarkdown = true; }}
+          type="button"
+        >Markdown</button>
+      </div>
+
+      <!-- Body (Rich Text Editor or Markdown Compose) -->
+      <div class="rounded-lg border overflow-hidden" style="border-color: var(--iris-color-border-subtle);">
+        {#if useMarkdown}
+          <div class="p-2">
+            <MarkdownCompose
+              bind:this={mdEditor}
+              value={body}
+              onchange={(text, html) => { body = text; if (html) bodyHtml = html; scheduleAutoSave(); }}
+            />
+          </div>
+        {:else}
+          <RichTextEditor
+            bind:this={richEditor}
+            content={body ? `<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>` : ''}
+            disabled={!!undoSendId}
+            onchange={(html, text) => { bodyHtml = html; body = text; scheduleAutoSave(); }}
+          />
+        {/if}
       </div>
 
       <!-- Attached files chips -->

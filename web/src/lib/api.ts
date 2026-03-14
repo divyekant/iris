@@ -210,6 +210,12 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ delay_seconds }),
       }),
+    getAppearance: () => request<{ accent_color: string; font_family: string; font_mono: string }>('/api/config/appearance'),
+    setAppearance: (data: { accent_color?: string; font_family?: string; font_mono?: string }) =>
+      request<{ accent_color: string; font_family: string; font_mono: string }>('/api/config/appearance', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
   },
   search: (params: { q: string; has_attachment?: boolean; after?: number; before?: number; account_id?: string; limit?: number; offset?: number; semantic?: boolean }) => {
     const query = new URLSearchParams();

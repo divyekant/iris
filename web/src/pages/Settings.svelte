@@ -1,15 +1,17 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import SettingsGeneral from '../components/settings/SettingsGeneral.svelte';
+  import SettingsAppearance from '../components/settings/SettingsAppearance.svelte';
   import SettingsAI from '../components/settings/SettingsAI.svelte';
   import SettingsCompose from '../components/settings/SettingsCompose.svelte';
   import SettingsOrganization from '../components/settings/SettingsOrganization.svelte';
   import SettingsSecurity from '../components/settings/SettingsSecurity.svelte';
 
-  type TabId = 'general' | 'ai' | 'compose' | 'organization' | 'security';
+  type TabId = 'general' | 'appearance' | 'ai' | 'compose' | 'organization' | 'security';
 
   const tabs: { id: TabId; label: string }[] = [
     { id: 'general', label: 'General' },
+    { id: 'appearance', label: 'Appearance' },
     { id: 'ai', label: 'AI' },
     { id: 'compose', label: 'Compose' },
     { id: 'organization', label: 'Organization' },
@@ -77,6 +79,8 @@
   <div class="settings-content" role="tabpanel">
     {#if activeTab === 'general'}
       <SettingsGeneral bind:accounts />
+    {:else if activeTab === 'appearance'}
+      <SettingsAppearance />
     {:else if activeTab === 'ai'}
       <SettingsAI />
     {:else if activeTab === 'compose'}

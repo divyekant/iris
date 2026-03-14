@@ -5,11 +5,8 @@
   import FormToggle from '../shared/FormToggle.svelte';
   import FormSelect from '../shared/FormSelect.svelte';
 
-  type Theme = 'light' | 'dark' | 'system';
-
   let { accounts = $bindable([]) }: { accounts: any[] } = $props();
 
-  let currentTheme = $state<Theme>('system');
   let loading = $state(true);
 
   // Undo send
@@ -24,12 +21,6 @@
   let acctNotificationState = $state<Record<string, boolean>>({});
   let acctNotificationToggling = $state<Record<string, boolean>>({});
 
-  const themes: { value: Theme; label: string; icon: string }[] = [
-    { value: 'light', label: 'Light', icon: '\u{2600}\u{FE0F}' },
-    { value: 'dark', label: 'Dark', icon: '\u{1F319}' },
-    { value: 'system', label: 'System', icon: '\u{1F4BB}' },
-  ];
-
   const undoSendOptions = [
     { value: '5', label: '5 seconds' },
     { value: '10', label: '10 seconds' },
@@ -37,33 +28,6 @@
     { value: '20', label: '20 seconds' },
     { value: '30', label: '30 seconds' },
   ];
-
-  function applyTheme(theme: string) {
-    if (theme === 'system') {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      if (!prefersDark) {
-        document.documentElement.setAttribute('data-brand', 'light');
-      } else {
-        document.documentElement.removeAttribute('data-brand');
-      }
-    } else if (theme === 'light') {
-      document.documentElement.setAttribute('data-brand', 'light');
-    } else {
-      // dark is the default (:root), remove attribute
-      document.documentElement.removeAttribute('data-brand');
-    }
-    localStorage.setItem('iris-theme', theme);
-  }
-
-  async function setTheme(theme: Theme) {
-    currentTheme = theme;
-    applyTheme(theme);
-    try {
-      await api.config.setTheme(theme);
-    } catch {
-      // Silently fail — theme is already applied locally
-    }
-  }
 
   // notificationsEnabled is toggled by FormToggle's bind:checked.
   // This effect watches for changes and handles the async permission logic.
@@ -140,14 +104,6 @@
   $effect(() => {
     async function loadSettings() {
       try {
-        const config = await api.config.get();
-        currentTheme = (config.theme as Theme) || 'system';
-        applyTheme(currentTheme);
-      } catch {
-        currentTheme = 'system';
-      }
-
-      try {
         const undoConfig = await api.config.getUndoSendDelay();
         undoSendDelay = String(undoConfig.delay_seconds);
         prevUndoSendDelay = undoSendDelay;
@@ -166,25 +122,11 @@
 </script>
 
 <div class="space-y-8">
-  <!-- Theme section -->
+  <!-- Notifications section -->
   <section>
-    <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Appearance</h3>
-    <div class="flex gap-3">
-      {#each themes as theme}
-        <button
-          class="settings-theme-card flex-1 flex flex-col items-center gap-2 px-4 py-4 rounded-xl border-2 transition-colors"
-          style="border-color: {currentTheme === theme.value ? 'var(--iris-color-primary)' : 'var(--iris-color-border-subtle)'}; background: {currentTheme === theme.value ? 'color-mix(in srgb, var(--iris-color-primary) 10%, transparent)' : 'transparent'}; color: {currentTheme === theme.value ? 'var(--iris-color-primary)' : 'var(--iris-color-text)'};"
-          onclick={() => setTheme(theme.value)}
-          disabled={loading}
-        >
-          <span class="text-2xl">{theme.icon}</span>
-          <span class="text-sm font-medium">{theme.label}</span>
-        </button>
-      {/each}
-    </div>
-
+    <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Notifications</h3>
     <!-- Desktop Notifications -->
-    <div class="mt-6 p-3 rounded-lg border" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
+    <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
       <div class="flex items-center justify-between">
         <div>
           <p class="text-sm font-medium" style="color: var(--iris-color-text);">Desktop Notifications</p>
@@ -266,8 +208,3 @@
   </section>
 </div>
 
-<style>
-  .settings-theme-card:hover {
-    border-color: var(--iris-color-primary) !important;
-  }
-</style>

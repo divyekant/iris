@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api } from '../../lib/api';
+  import { renderMarkdown } from '../../lib/markdown';
 
   let {
     value = '',
@@ -11,9 +11,7 @@
 
   let markdownMode = $state(false);
   let previewHtml = $state('');
-  let previewLoading = $state(false);
   let previewTab = $state<'edit' | 'preview'>('edit');
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let editorEl: HTMLTextAreaElement | undefined = $state();
 
   // Track narrow screen for tab layout vs side-by-side
@@ -33,20 +31,12 @@
     };
   }
 
-  async function fetchPreview(md: string) {
+  function updatePreview(md: string) {
     if (!md.trim()) {
       previewHtml = '';
       return;
     }
-    previewLoading = true;
-    try {
-      const res: { html: string } = await api.markdown.preview(md);
-      previewHtml = res.html;
-    } catch {
-      previewHtml = '<p style="color: var(--iris-color-error);">Preview failed</p>';
-    } finally {
-      previewLoading = false;
-    }
+    previewHtml = renderMarkdown(md);
   }
 
   function handleInput(e: Event) {
@@ -55,28 +45,26 @@
     onchange?.(value, null);
 
     if (markdownMode) {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => fetchPreview(value), 300);
+      updatePreview(value);
     }
   }
 
   function toggleMode() {
     markdownMode = !markdownMode;
     if (markdownMode && value.trim()) {
-      fetchPreview(value);
+      updatePreview(value);
     }
     if (!markdownMode) {
       previewHtml = '';
       previewTab = 'edit';
-      // When switching back, notify parent with no HTML
       onchange?.(value, null);
     }
   }
 
-  /** Convert markdown and pass HTML to parent (call before send). */
-  export async function getHtml(): Promise<string | null> {
+  /** Convert markdown and return HTML (call before send). */
+  export function getHtml(): string | null {
     if (!markdownMode || !value.trim()) return null;
-    await fetchPreview(value);
+    updatePreview(value);
     return previewHtml;
   }
 
@@ -92,12 +80,6 @@
       toggleMode();
     }
   }
-
-  $effect(() => {
-    return () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-    };
-  });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -131,7 +113,7 @@
           class:mc-tab-active={previewTab === 'preview'}
           onclick={() => {
             previewTab = 'preview';
-            fetchPreview(value);
+            updatePreview(value);
           }}
           type="button"
         >Preview</button>
@@ -159,9 +141,7 @@
       <!-- Preview pane (side-by-side on wide, tab on narrow) -->
       {#if !narrow || previewTab === 'preview'}
         <div class="mc-pane mc-preview-pane">
-          {#if previewLoading}
-            <p class="mc-loading">Rendering...</p>
-          {:else if previewHtml}
+          {#if previewHtml}
             <div class="mc-preview-content">
               {@html previewHtml}
             </div>
@@ -427,12 +407,6 @@
   }
 
   /* States */
-  .mc-loading {
-    font-size: 0.75rem;
-    color: var(--iris-color-text-faint);
-    font-style: italic;
-  }
-
   .mc-placeholder {
     font-size: 0.75rem;
     color: var(--iris-color-text-faint);
