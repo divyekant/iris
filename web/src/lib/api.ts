@@ -125,7 +125,7 @@ export const api = {
     listSnoozed: () =>
       request<{ messages: any[]; unread_count: number; total: number }>('/api/messages/snoozed'),
     reportSpam: (ids: string[], blockSender?: boolean) =>
-      request<{ updated: number; blocked_sender?: string }>('/api/messages/report-spam', {
+      request<{ updated: number; blocked_senders: string[] }>('/api/messages/report-spam', {
         method: 'POST',
         body: JSON.stringify({ ids, block_sender: blockSender }),
       }),
