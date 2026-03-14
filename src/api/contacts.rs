@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::utils::escape_sql_like;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -81,7 +82,7 @@ pub async fn get_contact_topics(
     }
 
     // Fetch up to 20 most recent messages with this contact
-    let escaped = email.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let escaped = escape_sql_like(&email);
     let like_pattern = format!("%{}%", escaped);
     let rows: Vec<(Option<String>, Option<String>)> = {
         let mut stmt = conn
@@ -281,7 +282,7 @@ pub async fn get_response_times(
     }
 
     let contact_email = email.to_lowercase();
-    let escaped = contact_email.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let escaped = escape_sql_like(&contact_email);
     let like_pattern = format!("%{}%", escaped);
 
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

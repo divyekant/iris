@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::api::draft_versions;
 use crate::models::account::Account;
 use crate::auth::refresh::ensure_fresh_token;
-use crate::models::message::{self, InsertMessage, MessageDetail, MessageSummary};
+use crate::models::message::{self, MessageDetail, MessageSummary};
 use crate::smtp::{self, ComposeRequest};
 use crate::AppState;
 

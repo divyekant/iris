@@ -1,6 +1,8 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use crate::utils::{escape_sql_like, resolve_message_id, strip_html_tags};
+
 // ── Core types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,7 +334,7 @@ fn handle_search_emails(
 
     if let Some(sender) = args.get("sender").and_then(|v| v.as_str()) {
         if !sender.is_empty() {
-            let escaped = sender.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let escaped = escape_sql_like(sender);
             let pattern = format!("%{}%", escaped);
             extra_conditions.push(format!(
                 "(m.from_address LIKE ?{p} ESCAPE '\\' OR m.from_name LIKE ?{p} ESCAPE '\\')",
@@ -426,22 +428,8 @@ fn handle_search_emails(
 }
 
 fn handle_read_email(conn: &Connection, message_id: &str) -> Result<serde_json::Value, String> {
-    // Resolve potentially truncated ID (8-char prefix)
-    // Strip LIKE wildcards to prevent matching arbitrary messages
-    let sanitized_id: String = message_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    let full_id = if sanitized_id.len() < 36 {
-        conn.query_row(
-            "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
-            params![format!("{}%", sanitized_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| format!("No message found matching ID: {}", message_id))?
-    } else {
-        message_id.to_string()
-    };
+    let full_id = resolve_message_id(conn, message_id)
+        .ok_or_else(|| format!("No message found matching ID: {}", message_id))?;
 
     let result = conn
         .query_row(
@@ -550,7 +538,7 @@ fn handle_list_emails(
     // sender: LIKE match on from_address or from_name
     if let Some(sender) = args.get("sender").and_then(|v| v.as_str()) {
         if !sender.is_empty() {
-            let escaped = sender.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let escaped = escape_sql_like(sender);
             let pattern = format!("%{}%", escaped);
             conditions.push(format!(
                 "(from_address LIKE ?{p} ESCAPE '\\' OR from_name LIKE ?{p} ESCAPE '\\')",
@@ -719,22 +707,7 @@ fn handle_bulk_update_emails(
     // Resolve truncated IDs (8-char prefixes) to full UUIDs
     let resolved_ids: Vec<String> = message_ids
         .iter()
-        .filter_map(|id| {
-            let sanitized: String = id
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect();
-            if sanitized.len() >= 36 {
-                Some(sanitized)
-            } else {
-                conn.query_row(
-                    "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
-                    params![format!("{}%", sanitized)],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            }
-        })
+        .filter_map(|id| resolve_message_id(conn, id))
         .collect();
 
     if resolved_ids.is_empty() {
@@ -1029,20 +1002,7 @@ pub fn execute_compose_email(
     Ok(id)
 }
 
-/// Simple HTML tag stripper for generating plain text from HTML body.
-fn strip_html_tags(html: &str) -> String {
-    let mut result = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result
-}
+// strip_html_tags is imported from crate::utils
 
 // ── Tests ───────────────────────────────────────────────────────────
 

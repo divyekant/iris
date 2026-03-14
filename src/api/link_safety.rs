@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Serialize;
 use std::sync::Arc;
 
+use crate::utils::strip_html_tags;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -188,7 +189,7 @@ pub fn extract_links(html: &str) -> Vec<ExtractedLink> {
                 let display_text = match html_lower[tag_end..].find("</a>") {
                     Some(close_pos) => {
                         let raw = &html[tag_end..tag_end + close_pos];
-                        strip_tags(raw).trim().to_string()
+                        strip_html_tags(raw).trim().to_string()
                     }
                     None => String::new(),
                 };
@@ -274,20 +275,7 @@ fn is_inside_tag(text: &str, pos: usize) -> bool {
     }
 }
 
-/// Strip all HTML tags from a string, returning only text content.
-fn strip_tags(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
-        }
-    }
-    result
-}
+// strip_html_tags is imported from crate::utils
 
 /// Extract the value of an HTML attribute (handles double, single, unquoted).
 fn extract_attr_value(tag: &str, tag_lower: &str, attr: &str) -> Option<String> {
@@ -415,18 +403,6 @@ pub fn normalize_homoglyphs(domain: &str) -> String {
         })
         .collect();
     labels.join(".")
-}
-
-/// Extract the registered domain (last two labels) from a hostname.
-/// e.g. "docs.google.com" → "google.com"
-fn registered_domain(domain: &str) -> &str {
-    let parts: Vec<&str> = domain.splitn(100, '.').collect();
-    if parts.len() >= 2 {
-        let split_at = domain.len() - parts[parts.len() - 1].len() - parts[parts.len() - 2].len() - 1;
-        &domain[split_at..]
-    } else {
-        domain
-    }
 }
 
 /// Extract the second-level domain label (the part just before the TLD).

@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::utils::escape_sql_like;
 use crate::AppState;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -235,7 +236,7 @@ pub async fn get_contact_intelligence(
     // Use LIKE on to_addresses JSON for efficiency (parameterized, no injection).
 
     let sent: i64 = {
-        let escaped = email_lower.replace('%', "\\%").replace('_', "\\_");
+        let escaped = escape_sql_like(&email_lower);
     let contact_like = format!("%{}%", escaped);
         let mut total = 0i64;
         for user_email in &user_emails {
@@ -280,7 +281,7 @@ pub async fn get_contact_intelligence(
 
     // ── First / last contact ─────────────────────────────────────────────────
 
-    let escaped = email_lower.replace('%', "\\%").replace('_', "\\_");
+    let escaped = escape_sql_like(&email_lower);
     let contact_like = format!("%{}%", escaped);
 
     let first_contact: Option<i64> = conn
