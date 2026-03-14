@@ -462,21 +462,7 @@ pub async fn confirm_action(
     let resolved_ids: Vec<String> = action
         .message_ids
         .iter()
-        .filter_map(|id| {
-            if id.len() >= 36 {
-                // Already a full UUID
-                Some(id.clone())
-            } else {
-                // Truncated prefix — resolve via LIKE query
-                let pattern = format!("{}%", id);
-                conn.query_row(
-                    "SELECT id FROM messages WHERE id LIKE ?1 LIMIT 1",
-                    rusqlite::params![pattern],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            }
-        })
+        .filter_map(|id| crate::utils::resolve_message_id(&conn, id))
         .collect();
 
     if resolved_ids.is_empty() {

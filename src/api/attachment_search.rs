@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::utils::strip_html_tags;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -100,20 +101,7 @@ fn extract_text(content_type: &str, content: &[u8]) -> Result<String, String> {
     }
 }
 
-/// Minimal HTML tag stripper for indexing purposes.
-fn strip_html_tags(html: &str) -> String {
-    let mut result = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result
-}
+// strip_html_tags is imported from crate::utils
 
 // ---------------------------------------------------------------------------
 // Handlers

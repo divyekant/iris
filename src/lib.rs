@@ -7,6 +7,7 @@ pub mod imap;
 pub mod jobs;
 pub mod models;
 pub mod smtp;
+pub mod utils;
 pub mod ws;
 
 use axum::{middleware, routing::{delete, get, patch, post, put}, Router};
