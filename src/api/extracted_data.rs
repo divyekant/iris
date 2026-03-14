@@ -3,9 +3,19 @@ use axum::http::StatusCode;
 use axum::Json;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::AppState;
+
+// Pre-compiled regex patterns for data extraction (compiled once, reused)
+static RE_DOLLAR_AMOUNT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?").unwrap());
+static RE_DATE_MDY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/(\d{4})\b").unwrap());
+static RE_DATE_ISO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b").unwrap());
+static RE_EMAIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap());
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"']+"#).unwrap());
+static RE_UPS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b1Z[0-9A-Z]{16}\b").unwrap());
+static RE_FEDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{12,15}\b").unwrap());
+static RE_USPS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{20,22}\b").unwrap());
 
 // --- Types ---
 
@@ -95,8 +105,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
     let mut results = Vec::new();
 
     // Dollar amounts: $X.XX or $X,XXX.XX
-    let amount_re = Regex::new(r"\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?").unwrap();
-    for m in amount_re.find_iter(text) {
+    for m in RE_DOLLAR_AMOUNT.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "amount".to_string(),
             data_key: "dollar_amount".to_string(),
@@ -106,8 +115,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
     }
 
     // Dates: MM/DD/YYYY
-    let date_mdy_re = Regex::new(r"\b(0[1-9]|1[0-2])/(0[1-9]|[12]\d|3[01])/(\d{4})\b").unwrap();
-    for m in date_mdy_re.find_iter(text) {
+    for m in RE_DATE_MDY.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "date".to_string(),
             data_key: "date_mdy".to_string(),
@@ -117,8 +125,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
     }
 
     // Dates: YYYY-MM-DD
-    let date_iso_re = Regex::new(r"\b(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b").unwrap();
-    for m in date_iso_re.find_iter(text) {
+    for m in RE_DATE_ISO.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "date".to_string(),
             data_key: "date_iso".to_string(),
@@ -128,8 +135,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
     }
 
     // Email addresses
-    let email_re = Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap();
-    for m in email_re.find_iter(text) {
+    for m in RE_EMAIL.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "contact".to_string(),
             data_key: "email_address".to_string(),
@@ -139,8 +145,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
     }
 
     // URLs (http/https)
-    let url_re = Regex::new(r#"https?://[^\s<>"']+"#).unwrap();
-    for m in url_re.find_iter(text) {
+    for m in RE_URL.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "link".to_string(),
             data_key: "url".to_string(),
@@ -150,8 +155,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
     }
 
     // Tracking numbers: UPS (1Z...), FedEx (12-34 digits), USPS (20-22 digits)
-    let ups_re = Regex::new(r"\b1Z[0-9A-Z]{16}\b").unwrap();
-    for m in ups_re.find_iter(text) {
+    for m in RE_UPS.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "tracking".to_string(),
             data_key: "ups_tracking".to_string(),
@@ -160,11 +164,10 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
         });
     }
 
-    let fedex_re = Regex::new(r"\b\d{12,15}\b").unwrap();
     // Only match FedEx-like numbers in context of "tracking" or "fedex"
     let text_lower = text.to_lowercase();
     if text_lower.contains("tracking") || text_lower.contains("fedex") {
-        for m in fedex_re.find_iter(text) {
+        for m in RE_FEDEX.find_iter(text) {
             results.push(RegexExtraction {
                 data_type: "tracking".to_string(),
                 data_key: "tracking_number".to_string(),
@@ -174,8 +177,7 @@ fn extract_with_regex(text: &str) -> Vec<RegexExtraction> {
         }
     }
 
-    let usps_re = Regex::new(r"\b\d{20,22}\b").unwrap();
-    for m in usps_re.find_iter(text) {
+    for m in RE_USPS.find_iter(text) {
         results.push(RegexExtraction {
             data_type: "tracking".to_string(),
             data_key: "usps_tracking".to_string(),

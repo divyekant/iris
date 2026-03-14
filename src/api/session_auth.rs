@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 
-const SESSION_TOKEN_HEADER: &str = "x-session-token";
+pub const SESSION_TOKEN_HEADER: &str = "x-session-token";
 
 /// Middleware that checks X-Session-Token header against the startup token.
 pub async fn session_auth_middleware(

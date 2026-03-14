@@ -7,7 +7,7 @@ use tower_governor::{
     GovernorLayer,
 };
 
-const SESSION_TOKEN_HEADER: &str = "x-session-token";
+use super::session_auth::SESSION_TOKEN_HEADER;
 
 /// Extracts the session token from the X-Session-Token header for per-session rate limiting.
 ///

@@ -313,10 +313,12 @@ fn build_cors_origins() -> AllowOrigin {
 
     if origins.is_empty() {
         tracing::warn!("No valid CORS origins configured, falling back to defaults");
-        AllowOrigin::list([
-            default_origins.split(',').next().unwrap().parse().unwrap(),
-            default_origins.split(',').nth(1).unwrap().parse().unwrap(),
-        ])
+        // Re-parse defaults through the same pipeline (no separate unwrap path)
+        let fallback: Vec<HeaderValue> = default_origins
+            .split(',')
+            .filter_map(|s| s.trim().parse::<HeaderValue>().ok())
+            .collect();
+        AllowOrigin::list(fallback)
     } else {
         tracing::info!("CORS origins: {:?}", origins);
         AllowOrigin::list(origins)

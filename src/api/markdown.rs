@@ -2,6 +2,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+use regex_lite::Regex;
 
 // ---------------------------------------------------------------------------
 // POST /api/compose/markdown-preview — convert markdown to sanitized HTML
@@ -40,29 +42,22 @@ fn markdown_to_safe_html(input: &str) -> String {
     sanitize_html(&raw_html)
 }
 
+// Pre-compiled regex patterns for HTML sanitization (compiled once, reused)
+static RE_SCRIPT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<script[\s>].*?</script>").unwrap());
+static RE_IFRAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<iframe[\s>].*?</iframe>").unwrap());
+static RE_DANGEROUS_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<(script|iframe)\b[^>]*/?>").unwrap());
+static RE_EVENT_ATTRS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#).unwrap());
+static RE_JS_HREF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)href\s*=\s*["']?\s*javascript:"#).unwrap());
+
 /// Basic HTML sanitization: strip dangerous tags and attributes.
 fn sanitize_html(html: &str) -> String {
     let mut result = html.to_string();
 
-    // Remove <script>...</script> tags (including multiline)
-    let script_re = regex_lite::Regex::new(r"(?is)<script[\s>].*?</script>").unwrap();
-    result = script_re.replace_all(&result, "").to_string();
-
-    // Remove <iframe>...</iframe> tags
-    let iframe_re = regex_lite::Regex::new(r"(?is)<iframe[\s>].*?</iframe>").unwrap();
-    result = iframe_re.replace_all(&result, "").to_string();
-
-    // Remove standalone <script> or <iframe> tags (self-closing or unclosed)
-    let tag_re = regex_lite::Regex::new(r"(?i)<(script|iframe)\b[^>]*/?>").unwrap();
-    result = tag_re.replace_all(&result, "").to_string();
-
-    // Remove on* event attributes (onclick, onerror, onload, etc.)
-    let on_attr_re = regex_lite::Regex::new(r#"(?i)\s+on\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#).unwrap();
-    result = on_attr_re.replace_all(&result, "").to_string();
-
-    // Remove javascript: URLs from href attributes
-    let js_href_re = regex_lite::Regex::new(r#"(?i)href\s*=\s*["']?\s*javascript:"#).unwrap();
-    result = js_href_re.replace_all(&result, r#"href=""#).to_string();
+    result = RE_SCRIPT.replace_all(&result, "").to_string();
+    result = RE_IFRAME.replace_all(&result, "").to_string();
+    result = RE_DANGEROUS_TAGS.replace_all(&result, "").to_string();
+    result = RE_EVENT_ATTRS.replace_all(&result, "").to_string();
+    result = RE_JS_HREF.replace_all(&result, r#"href=""#).to_string();
 
     result
 }

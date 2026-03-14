@@ -135,25 +135,19 @@ impl SyncEngine {
                 let (mut insert_msg, extracted_attachments) = parse_fetch(account_id, fetch);
                 insert_msg.folder = local_folder.to_string();
 
-                let msg_id = {
-                    let conn = self.db.get()?;
-                    InsertMessage::insert(&conn, &insert_msg)
-                };
+                let conn = self.db.get()?;
+                let msg_id = InsertMessage::insert(&conn, &insert_msg);
 
                 // Only process newly inserted messages (skip duplicates)
                 if let Some(ref msg_id) = msg_id {
                     // Check if the sender is blocked — auto-move to Spam
-                    let sender_blocked = {
-                        let conn = self.db.get()?;
-                        insert_msg
-                            .from_address
-                            .as_deref()
-                            .map(|addr| BlockedSender::is_blocked(&conn, addr))
-                            .unwrap_or(false)
-                    };
+                    let sender_blocked = insert_msg
+                        .from_address
+                        .as_deref()
+                        .map(|addr| BlockedSender::is_blocked(&conn, addr))
+                        .unwrap_or(false);
 
                     if sender_blocked {
-                        let conn = self.db.get()?;
                         conn.execute(
                             "UPDATE messages SET folder = 'Spam', updated_at = unixepoch() WHERE id = ?1",
                             rusqlite::params![msg_id],
@@ -169,7 +163,6 @@ impl SyncEngine {
                     } else {
                         // Store attachment data in the attachments table
                         if !extracted_attachments.is_empty() {
-                            let conn = self.db.get()?;
                             for att in &extracted_attachments {
                                 let att_id = uuid::Uuid::new_v4().to_string();
                                 let _ = conn.execute(
@@ -197,7 +190,6 @@ impl SyncEngine {
 
                         // Enqueue AI classification and Memories storage jobs
                         {
-                            let conn = self.db.get().unwrap();
                             queue::enqueue_ai_classify(
                                 &conn,
                                 msg_id,

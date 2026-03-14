@@ -85,10 +85,6 @@
     return `<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;">${escaped}</pre>`;
   }
 
-  function handleLoadImages() {
-    showRemoteImages = true;
-  }
-
   $effect(() => {
     if (iframeEl) {
       const doc = iframeEl.contentDocument;
@@ -100,29 +96,28 @@
         const baseStyle = `<style>body{margin:0;padding:8px;color:#333;background:#fff;}img{max-width:100%;height:auto;}</style>`;
 
         let content: string;
+        let newBlockedCount = 0;
+
         if (html) {
-          // WHOLE_DOCUMENT returns full <!DOCTYPE><html>…</html>
-          // Inject our base styles at the start of <head>
           const sanitized = sanitizeHtml(html);
 
           let finalHtml: string;
           if (showRemoteImages) {
             finalHtml = sanitized;
-            blockedImageCount = 0;
           } else {
             const result = stripRemoteImages(sanitized);
             finalHtml = result.html;
-            blockedImageCount = result.count;
+            newBlockedCount = result.count;
           }
 
           content = finalHtml.replace(/<head>/i, `<head>${baseStyle}`);
         } else if (text) {
-          blockedImageCount = 0;
           content = `<!DOCTYPE html><html><head>${baseStyle}</head><body>${getTextContent(text)}</body></html>`;
         } else {
-          blockedImageCount = 0;
           content = `<!DOCTYPE html><html><head>${baseStyle}</head><body><p style="color:#999;">No content</p></body></html>`;
         }
+
+        blockedImageCount = newBlockedCount;
 
         doc.open();
         doc.write(content);
@@ -148,7 +143,7 @@
       </svg>
       <span>{blockedImageCount} remote image{blockedImageCount > 1 ? 's' : ''} blocked</span>
     </div>
-    <button class="load-images-btn" onclick={handleLoadImages}>
+    <button class="load-images-btn" onclick={() => showRemoteImages = true}>
       Load images
     </button>
   </div>
