@@ -2,6 +2,8 @@
   import { api } from '../../lib/api';
   import { requestNotificationPermission, setEnabled as setNotificationsEnabled, getPermissionState } from '../../lib/notifications';
   import { Bell, BellOff } from 'lucide-svelte';
+  import FormToggle from '../shared/FormToggle.svelte';
+  import FormSelect from '../shared/FormSelect.svelte';
 
   type Theme = 'light' | 'dark' | 'system';
 
@@ -11,7 +13,7 @@
   let loading = $state(true);
 
   // Undo send
-  let undoSendDelay = $state(10);
+  let undoSendDelay = $state('10');
   let undoSendSaving = $state(false);
 
   // Desktop notifications
@@ -26,6 +28,14 @@
     { value: 'light', label: 'Light', icon: '\u{2600}\u{FE0F}' },
     { value: 'dark', label: 'Dark', icon: '\u{1F319}' },
     { value: 'system', label: 'System', icon: '\u{1F4BB}' },
+  ];
+
+  const undoSendOptions = [
+    { value: '5', label: '5 seconds' },
+    { value: '10', label: '10 seconds' },
+    { value: '15', label: '15 seconds' },
+    { value: '20', label: '20 seconds' },
+    { value: '30', label: '30 seconds' },
   ];
 
   function applyTheme(theme: string) {
@@ -55,28 +65,34 @@
     }
   }
 
-  async function toggleNotifications() {
-    if (!notificationsEnabled) {
+  // notificationsEnabled is toggled by FormToggle's bind:checked.
+  // This effect watches for changes and handles the async permission logic.
+  let notifInitialized = $state(false);
+  $effect(() => {
+    const val = notificationsEnabled;
+    if (!notifInitialized) return;
+    if (val) {
       // Turning on — request permission
-      const granted = await requestNotificationPermission();
-      notificationPermission = getPermissionState();
-      if (granted) {
-        notificationsEnabled = true;
-        setNotificationsEnabled(true);
-      }
-      // If denied, stay off
+      requestNotificationPermission().then(granted => {
+        notificationPermission = getPermissionState();
+        if (!granted) {
+          // Revert if permission denied
+          notificationsEnabled = false;
+        } else {
+          setNotificationsEnabled(true);
+        }
+      });
     } else {
       // Turning off
-      notificationsEnabled = false;
       setNotificationsEnabled(false);
     }
-  }
+  });
 
   async function saveUndoSendDelay() {
     undoSendSaving = true;
     try {
-      const result = await api.config.setUndoSendDelay(undoSendDelay);
-      undoSendDelay = result.delay_seconds;
+      const result = await api.config.setUndoSendDelay(parseInt(undoSendDelay));
+      undoSendDelay = String(result.delay_seconds);
     } catch {
       // Silently fail
     } finally {
@@ -111,6 +127,15 @@
     }
   }
 
+  // Watch undo send delay changes from FormSelect
+  let prevUndoSendDelay = $state('10');
+  $effect(() => {
+    if (undoSendDelay !== prevUndoSendDelay) {
+      prevUndoSendDelay = undoSendDelay;
+      saveUndoSendDelay();
+    }
+  });
+
   // Load settings on mount
   $effect(() => {
     async function loadSettings() {
@@ -124,13 +149,16 @@
 
       try {
         const undoConfig = await api.config.getUndoSendDelay();
-        undoSendDelay = undoConfig.delay_seconds;
+        undoSendDelay = String(undoConfig.delay_seconds);
+        prevUndoSendDelay = undoSendDelay;
       } catch {
-        undoSendDelay = 10;
+        undoSendDelay = '10';
+        prevUndoSendDelay = '10';
       }
 
       await loadAccountNotifications();
 
+      notifInitialized = true;
       loading = false;
     }
     loadSettings();
@@ -156,31 +184,27 @@
     </div>
 
     <!-- Desktop Notifications -->
-    <div class="flex items-center justify-between mt-6 p-3 rounded-lg border" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
-      <div>
-        <p class="text-sm font-medium" style="color: var(--iris-color-text);">Desktop Notifications</p>
-        <p class="text-xs" style="color: var(--iris-color-text-faint);">
-          {#if notificationPermission === 'unsupported'}
-            Not available in this browser
-          {:else if notificationPermission === 'denied'}
-            Blocked by browser — update in site settings
-          {:else if notificationsEnabled && notificationPermission === 'granted'}
-            Enabled — you'll see alerts for new emails
-          {:else}
-            Get notified when new emails arrive
-          {/if}
-        </p>
-      </div>
-      <label class="inline-flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={notificationsEnabled && notificationPermission === 'granted'}
+    <div class="mt-6 p-3 rounded-lg border" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium" style="color: var(--iris-color-text);">Desktop Notifications</p>
+          <p class="text-xs" style="color: var(--iris-color-text-faint);">
+            {#if notificationPermission === 'unsupported'}
+              Not available in this browser
+            {:else if notificationPermission === 'denied'}
+              Blocked by browser — update in site settings
+            {:else if notificationsEnabled && notificationPermission === 'granted'}
+              Enabled — you'll see alerts for new emails
+            {:else}
+              Get notified when new emails arrive
+            {/if}
+          </p>
+        </div>
+        <FormToggle
+          bind:checked={notificationsEnabled}
           disabled={notificationPermission === 'unsupported' || notificationPermission === 'denied'}
-          onchange={toggleNotifications}
-          class="w-4 h-4 rounded"
-          style="accent-color: var(--iris-color-primary);"
         />
-      </label>
+      </div>
     </div>
 
     <!-- Per-account notification control -->
@@ -229,19 +253,11 @@
         <p class="text-xs" style="color: var(--iris-color-text-faint);">Time to undo after clicking Send</p>
       </div>
       <div class="flex items-center gap-2">
-        <select
+        <FormSelect
           bind:value={undoSendDelay}
-          onchange={saveUndoSendDelay}
-          class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
+          options={undoSendOptions}
           disabled={undoSendSaving}
-        >
-          <option value={5}>5 seconds</option>
-          <option value={10}>10 seconds</option>
-          <option value={15}>15 seconds</option>
-          <option value={20}>20 seconds</option>
-          <option value={30}>30 seconds</option>
-        </select>
+        />
         {#if undoSendSaving}
           <span class="text-xs" style="color: var(--iris-color-text-faint);">Saving...</span>
         {/if}
@@ -253,9 +269,5 @@
 <style>
   .settings-theme-card:hover {
     border-color: var(--iris-color-primary) !important;
-  }
-
-  .settings-input::placeholder {
-    color: var(--iris-color-text-faint);
   }
 </style>

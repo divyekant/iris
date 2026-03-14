@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api';
+  import FormInput from '../shared/FormInput.svelte';
+  import FormSelect from '../shared/FormSelect.svelte';
 
   let { accounts = $bindable([]) }: { accounts: any[] } = $props();
 
@@ -32,6 +34,13 @@
 
   // Audit log
   let auditEntries = $state<any[]>([]);
+
+  const permissionOptions = [
+    { value: 'read_only', label: 'Read Only' },
+    { value: 'draft_only', label: 'Draft Only' },
+    { value: 'send_with_approval', label: 'Send w/ Approval' },
+    { value: 'autonomous', label: 'Autonomous' },
+  ];
 
   function readRateColor(rate: number): string {
     if (rate < 0.2) return 'var(--iris-color-error)';
@@ -133,14 +142,13 @@
     <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Emails from blocked senders are automatically moved to Spam.</p>
 
     <div class="flex gap-2 mb-4">
-      <input
-        type="email"
-        bind:value={newBlockEmail}
-        placeholder="Block a sender manually (email address)"
-        class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-        style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        onkeydown={(e) => { if (e.key === 'Enter') blockEmail(); }}
-      />
+      <div class="flex-1">
+        <FormInput
+          type="email"
+          bind:value={newBlockEmail}
+          placeholder="Block a sender manually (email address)"
+        />
+      </div>
       <button
         class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
@@ -268,23 +276,16 @@
     <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Create API keys for external agents to access your inbox.</p>
 
     <div class="flex gap-2 mb-4">
-      <input
-        type="text"
-        bind:value={newKeyName}
-        placeholder="Key name (e.g., Claude agent)"
-        class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-        style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-      />
-      <select
+      <div class="flex-1">
+        <FormInput
+          bind:value={newKeyName}
+          placeholder="Key name (e.g., Claude agent)"
+        />
+      </div>
+      <FormSelect
         bind:value={newKeyPermission}
-        class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-        style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-      >
-        <option value="read_only">Read Only</option>
-        <option value="draft_only">Draft Only</option>
-        <option value="send_with_approval">Send w/ Approval</option>
-        <option value="autonomous">Autonomous</option>
-      </select>
+        options={permissionOptions}
+      />
       <button
         class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
@@ -406,9 +407,5 @@
 
   .settings-revoke-btn:hover {
     filter: brightness(1.3);
-  }
-
-  .settings-input::placeholder {
-    color: var(--iris-color-text-faint);
   }
 </style>

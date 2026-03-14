@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api';
+  import FormInput from '../shared/FormInput.svelte';
+  import FormToggle from '../shared/FormToggle.svelte';
 
   // Labels
   type LabelItem = { id: string; name: string; color: string; created_at: number; message_count: number };
@@ -178,9 +180,7 @@
             {#if labelEditing === label.id}
               <!-- Edit mode -->
               <div class="space-y-2">
-                <input type="text" bind:value={labelEditName} placeholder="Label name"
-                  class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                <FormInput bind:value={labelEditName} placeholder="Label name" />
                 <div class="flex items-center gap-2">
                   <span class="text-xs" style="color: var(--iris-color-text-faint);">Color:</span>
                   {#each LABEL_COLORS as c}
@@ -223,9 +223,7 @@
     <!-- New label form -->
     {#if labelShowNew}
       <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
-        <input type="text" bind:value={labelNewName} placeholder="Label name (e.g., Work, Personal)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+        <FormInput bind:value={labelNewName} placeholder="Label name (e.g., Work, Personal)" />
         <div class="flex items-center gap-2">
           <span class="text-xs" style="color: var(--iris-color-text-faint);">Color:</span>
           {#each LABEL_COLORS as c}
@@ -265,25 +263,23 @@
             {#if frEditing === rule.id}
               <!-- Edit mode -->
               <div class="space-y-3">
-                <input type="text" bind:value={frEditName} placeholder="Rule name"
-                  class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                <FormInput bind:value={frEditName} placeholder="Rule name" />
 
                 <div>
                   <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">When ALL conditions match:</p>
                   {#each frEditConditions as cond, i}
                     <div class="flex gap-2 mb-2">
-                      <select bind:value={cond.field} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                      <select bind:value={cond.field} class="inline-select px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
                         <option value="from">From</option><option value="to">To</option><option value="subject">Subject</option>
                         <option value="category">Category</option><option value="is_read">Is Read</option><option value="has_attachments">Has Attachments</option>
                       </select>
-                      <select bind:value={cond.operator} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                      <select bind:value={cond.operator} class="inline-select px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
                         <option value="contains">contains</option><option value="equals">equals</option>
                         <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
                       </select>
-                      <input type="text" bind:value={cond.value} placeholder="Value"
-                        class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
-                        style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                      <div class="flex-1">
+                        <FormInput bind:value={cond.value} placeholder="Value" />
+                      </div>
                       {#if frEditConditions.length > 1}
                         <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeCondition(frEditConditions, i)}>x</button>
                       {/if}
@@ -296,14 +292,14 @@
                   <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">Then:</p>
                   {#each frEditActions as act, i}
                     <div class="flex gap-2 mb-2">
-                      <select bind:value={act.type} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+                      <select bind:value={act.type} class="inline-select px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
                         <option value="archive">Archive</option><option value="delete">Delete</option><option value="mark_read">Mark Read</option>
                         <option value="star">Star</option><option value="label">Add Label</option>
                       </select>
                       {#if act.type === 'label'}
-                        <input type="text" bind:value={act.value} placeholder="Label name"
-                          class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
-                          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                        <div class="flex-1">
+                          <FormInput bind:value={act.value} placeholder="Label name" />
+                        </div>
                       {/if}
                       {#if frEditActions.length > 1}
                         <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeAction(frEditActions, i)}>x</button>
@@ -314,9 +310,7 @@
                 </div>
 
                 <div class="flex items-center gap-3">
-                  <label class="flex items-center gap-2 text-xs cursor-pointer" style="color: var(--iris-color-text);">
-                    <input type="checkbox" bind:checked={frEditActive} class="rounded" /> Active
-                  </label>
+                  <FormToggle label="Active" bind:checked={frEditActive} />
                   <span class="flex-1"></span>
                   <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
                     style="border-color: var(--iris-color-border); color: var(--iris-color-text);" onclick={cancelEditRule}>Cancel</button>
@@ -373,25 +367,23 @@
     <!-- New rule form -->
     {#if frShowNew}
       <div class="p-3 rounded-lg border space-y-3" style="border-color: var(--iris-color-border);">
-        <input type="text" bind:value={frNewName} placeholder="Rule name (e.g., Auto-archive newsletters)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+        <FormInput bind:value={frNewName} placeholder="Rule name (e.g., Auto-archive newsletters)" />
 
         <div>
           <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">When ALL conditions match:</p>
           {#each frNewConditions as cond, i}
             <div class="flex gap-2 mb-2">
-              <select bind:value={cond.field} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+              <select bind:value={cond.field} class="inline-select px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
                 <option value="from">From</option><option value="to">To</option><option value="subject">Subject</option>
                 <option value="category">Category</option><option value="is_read">Is Read</option><option value="has_attachments">Has Attachments</option>
               </select>
-              <select bind:value={cond.operator} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+              <select bind:value={cond.operator} class="inline-select px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
                 <option value="contains">contains</option><option value="equals">equals</option>
                 <option value="starts_with">starts with</option><option value="ends_with">ends with</option>
               </select>
-              <input type="text" bind:value={cond.value} placeholder="Value"
-                class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
-                style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+              <div class="flex-1">
+                <FormInput bind:value={cond.value} placeholder="Value" />
+              </div>
               {#if frNewConditions.length > 1}
                 <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeCondition(frNewConditions, i)}>x</button>
               {/if}
@@ -404,14 +396,14 @@
           <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">Then:</p>
           {#each frNewActions as act, i}
             <div class="flex gap-2 mb-2">
-              <select bind:value={act.type} class="settings-input px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
+              <select bind:value={act.type} class="inline-select px-2 py-1.5 rounded border text-xs" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);">
                 <option value="archive">Archive</option><option value="delete">Delete</option><option value="mark_read">Mark Read</option>
                 <option value="star">Star</option><option value="label">Add Label</option>
               </select>
               {#if act.type === 'label'}
-                <input type="text" bind:value={act.value} placeholder="Label name"
-                  class="settings-input flex-1 px-2 py-1.5 rounded border text-xs focus:outline-none"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text);" />
+                <div class="flex-1">
+                  <FormInput bind:value={act.value} placeholder="Label name" />
+                </div>
               {/if}
               {#if frNewActions.length > 1}
                 <button class="text-xs" style="color: var(--iris-color-error);" onclick={() => removeAction(frNewActions, i)}>x</button>
@@ -451,7 +443,13 @@
     filter: brightness(1.3);
   }
 
-  .settings-input::placeholder {
-    color: var(--iris-color-text-faint);
+  .inline-select {
+    font-family: var(--iris-font-family);
+    outline: none;
+  }
+
+  .inline-select:focus {
+    border-color: var(--iris-color-input-border-focus);
+    box-shadow: 0 0 0 3px var(--iris-color-focus-ring);
   }
 </style>
