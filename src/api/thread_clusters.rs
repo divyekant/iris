@@ -14,7 +14,7 @@ use crate::AppState;
 #[derive(Debug, Serialize)]
 pub struct ClusterSummary {
     pub id: i64,
-    pub account_id: i64,
+    pub account_id: String,
     pub cluster_name: String,
     pub cluster_type: String,
     pub member_count: i64,
@@ -33,7 +33,7 @@ pub struct ClusterMember {
 #[derive(Debug, Serialize)]
 pub struct ClusterDetail {
     pub id: i64,
-    pub account_id: i64,
+    pub account_id: String,
     pub cluster_name: String,
     pub cluster_type: String,
     pub members: Vec<ClusterMember>,
@@ -43,7 +43,7 @@ pub struct ClusterDetail {
 
 #[derive(Debug, Deserialize)]
 pub struct ComputeRequest {
-    pub account_id: i64,
+    pub account_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,7 +54,7 @@ pub struct ComputeResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ListClustersParams {
-    pub account_id: i64,
+    pub account_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,7 +354,7 @@ pub async fn get_cluster(
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
