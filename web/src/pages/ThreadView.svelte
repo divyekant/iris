@@ -2,7 +2,7 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote } from 'lucide-svelte';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -46,7 +46,6 @@
   // AI summary state
   let aiSummary = $state<string | null>(null);
   let summaryLoading = $state(false);
-  let summaryOpen = $state(false);
   let summaryError = $state('');
 
   // Redirect dialog state
@@ -72,9 +71,22 @@
   type ExtractedTask = { task: string; priority: string; deadline: string | null; source_subject: string | null };
   let extractedTasks = $state<ExtractedTask[]>([]);
   let tasksLoading = $state(false);
-  let tasksOpen = $state(false);
   let tasksError = $state('');
   let checkedTasks = $state<Set<number>>(new Set());
+
+  // Side panel state
+  type SidePanelTab = 'summary' | 'notes' | 'tasks';
+  let sidePanelOpen = $state(
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('iris-thread-panel-open') !== 'false'
+      : true
+  );
+  let activeTab = $state<SidePanelTab>('summary');
+
+  function toggleSidePanel() {
+    sidePanelOpen = !sidePanelOpen;
+    localStorage.setItem('iris-thread-panel-open', String(sidePanelOpen));
+  }
 
   // Multi-reply state
   let showMultiReply = $state(false);
@@ -310,13 +322,8 @@
     }
   }
 
-  async function toggleSummary() {
-    if (summaryOpen) {
-      summaryOpen = false;
-      return;
-    }
-    summaryOpen = true;
-    if (aiSummary) return;
+  async function loadSummary() {
+    if (aiSummary || summaryLoading) return;
     summaryLoading = true;
     summaryError = '';
     try {
@@ -452,13 +459,8 @@
     }
   }
 
-  async function toggleTasks() {
-    if (tasksOpen) {
-      tasksOpen = false;
-      return;
-    }
-    tasksOpen = true;
-    if (extractedTasks.length > 0) return;
+  async function loadTasks() {
+    if (extractedTasks.length > 0 || tasksLoading) return;
     tasksLoading = true;
     tasksError = '';
     try {
@@ -486,13 +488,21 @@
     checkedTasks = next;
   }
 
+  // Auto-load content when side panel tab changes
+  $effect(() => {
+    if (!thread || !sidePanelOpen) return;
+    if (activeTab === 'summary' && thread.message_count > 1) {
+      loadSummary();
+    } else if (activeTab === 'tasks') {
+      loadTasks();
+    }
+  });
+
   $effect(() => {
     if (params.id) {
       aiSummary = null;
-      summaryOpen = false;
       summaryError = '';
       extractedTasks = [];
-      tasksOpen = false;
       tasksError = '';
       checkedTasks = new Set();
       cancelReply();
@@ -563,6 +573,14 @@
         <button class="p-1.5 transition-colors thread-action-btn delete-btn" onclick={() => handleThreadAction('delete')} title="Delete"><Trash2 size={15} /></button>
         <button class="p-1.5 transition-colors thread-action-btn spam-btn" onclick={openSpamDialog} title="Report Spam"><ShieldAlert size={15} /></button>
 
+        <!-- Panel toggle -->
+        <button
+          class="p-1.5 transition-colors thread-action-btn"
+          class:panel-active={sidePanelOpen}
+          onclick={toggleSidePanel}
+          title={sidePanelOpen ? 'Hide side panel' : 'Show side panel'}
+        ><PanelRight size={15} /></button>
+
         <!-- Separator -->
         <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
 
@@ -588,7 +606,7 @@
               </button>
               <button
                 class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors more-menu-item"
-                onclick={(e) => { e.stopPropagation(); moreMenuOpen = false; toggleTasks(); }}
+                onclick={(e) => { e.stopPropagation(); moreMenuOpen = false; activeTab = 'tasks'; if (!sidePanelOpen) toggleSidePanel(); }}
               >
                 <ListChecks size={14} />
                 <span>Extract Tasks</span>
@@ -600,219 +618,250 @@
     {/if}
   </div>
 
-  <!-- AI Summary panel -->
-  {#if thread && thread.message_count > 1}
-    <div class="px-4 py-2" style="border-bottom: 1px solid var(--iris-color-border);">
-      <button
-        class="text-xs flex items-center gap-1"
-        style="color: var(--iris-color-primary);"
-        onclick={toggleSummary}
-      >
-        <span class="text-[10px]">{summaryOpen ? '\u25BE' : '\u25B8'}</span> <Sparkles size={14} /> AI Summary
-      </button>
-      {#if summaryOpen}
-        {#if summaryLoading}
-          <div class="mt-2 text-xs flex items-center gap-2" style="color: var(--iris-color-text-faint);">
-            <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
-            Summarizing thread...
+  <!-- Main content: messages + side panel -->
+  <div class="flex-1 flex min-h-0">
+    <!-- Messages column -->
+    <div class="flex-1 flex flex-col min-w-0">
+      <!-- Messages scroll area -->
+      <div class="flex-1 overflow-y-auto p-4 space-y-3">
+        {#if loading}
+          <div class="flex items-center justify-center py-16">
+            <div class="w-8 h-8 rounded-full animate-spin" style="border: 4px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
           </div>
-        {:else if aiSummary}
-          <div class="mt-2 text-sm rounded-lg px-3 py-2 leading-relaxed" style="color: var(--iris-color-text); background: var(--iris-color-bg-surface);">
-            {aiSummary}
+        {:else if error}
+          <div class="text-center py-16">
+            <p class="mb-4" style="color: var(--iris-color-error);">{error}</p>
+            <button class="px-4 py-2 rounded-lg text-sm font-medium transition-colors retry-btn" onclick={loadThread}>Retry</button>
           </div>
-        {:else if summaryError}
-          <div class="mt-2 text-xs" style="color: var(--iris-color-text-faint);">{summaryError}</div>
-        {/if}
-      {/if}
-    </div>
-  {/if}
+        {:else if thread}
+          {#each thread.messages as message (message.id)}
+            <MessageCard {message} />
+          {/each}
 
-  <!-- Notes panel -->
-  {#if thread && !loading}
-    <NotesPanel threadId={params.id} />
-  {/if}
+          <!-- Inline reply area -->
+          {#if replyMode}
+            <div class="rounded-xl p-4 space-y-3" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-medium" style="color: var(--iris-color-text-faint);">
+                  {replyMode === 'reply' ? 'Reply' : replyMode === 'reply-all' ? 'Reply All' : 'Forward'}
+                </span>
+                <span class="flex-1"></span>
+                <button class="text-xs px-2 py-0.5 rounded" style="color: var(--iris-color-text-faint);" onclick={cancelReply}>&times; Cancel</button>
+              </div>
 
-  <!-- Extracted Tasks panel -->
-  {#if tasksOpen}
-    <div class="px-4 py-2" style="border-bottom: 1px solid var(--iris-color-border);">
-      <div class="flex items-center justify-between mb-2">
-        <span class="text-xs font-medium flex items-center gap-1" style="color: var(--iris-color-primary);">
-          <ListChecks size={14} /> Extracted Tasks
-        </span>
-        <button class="text-xs px-2 py-0.5 rounded" style="color: var(--iris-color-text-faint);" onclick={() => { tasksOpen = false; }}>&times;</button>
-      </div>
-      {#if tasksLoading}
-        <div class="flex items-center gap-2 py-2" style="color: var(--iris-color-text-faint);">
-          <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
-          <span class="text-xs">Extracting tasks...</span>
-        </div>
-      {:else if tasksError}
-        <div class="text-xs py-1" style="color: var(--iris-color-text-faint);">{tasksError}</div>
-      {:else if extractedTasks.length === 0}
-        <div class="text-xs py-1" style="color: var(--iris-color-text-faint);">No action items found in this thread.</div>
-      {:else}
-        <div class="space-y-1.5">
-          {#each extractedTasks as task, i (i)}
-            <div class="flex items-start gap-2 rounded-lg px-2 py-1.5" style="background: var(--iris-color-bg-surface);">
-              <button
-                class="mt-0.5 w-4 h-4 rounded flex-shrink-0 flex items-center justify-center task-checkbox"
-                class:checked={checkedTasks.has(i)}
-                onclick={() => toggleTaskCheck(i)}
-                aria-label="Toggle task"
-              >
-                {#if checkedTasks.has(i)}
-                  <span class="text-[10px]">&#10003;</span>
-                {/if}
-              </button>
-              <div class="flex-1 min-w-0">
-                <p class="text-sm leading-snug" style="color: var(--iris-color-text);" class:line-through={checkedTasks.has(i)} class:opacity-50={checkedTasks.has(i)}>
-                  {task.task}
-                </p>
-                <div class="flex items-center gap-2 mt-0.5">
-                  <span class="text-[10px] font-medium px-1.5 py-0.5 rounded-full task-priority-badge"
-                    class:priority-high={task.priority === 'high'}
-                    class:priority-medium={task.priority === 'medium'}
-                    class:priority-low={task.priority === 'low'}
-                  >
-                    {task.priority}
-                  </span>
-                  {#if task.deadline}
-                    <span class="text-[10px]" style="color: var(--iris-color-text-faint);">Due: {task.deadline}</span>
-                  {/if}
-                  {#if task.source_subject}
-                    <span class="text-[10px] truncate" style="color: var(--iris-color-text-faint);">from: {task.source_subject}</span>
-                  {/if}
+              <!-- To field -->
+              <div class="flex items-center gap-2">
+                <label class="text-xs w-6" style="color: var(--iris-color-text-faint);" for="reply-to">To</label>
+                <input
+                  id="reply-to"
+                  type="text"
+                  bind:value={replyTo}
+                  class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+                  style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+                  placeholder="recipient@example.com"
+                />
+              </div>
+
+              <!-- Cc field (reply-all or if user adds) -->
+              {#if replyMode === 'reply-all' || replyCc}
+                <div class="flex items-center gap-2">
+                  <label class="text-xs w-6" style="color: var(--iris-color-text-faint);" for="reply-cc">Cc</label>
+                  <input
+                    id="reply-cc"
+                    type="text"
+                    bind:value={replyCc}
+                    class="flex-1 text-sm bg-transparent border-b outline-none py-1"
+                    style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
+                  />
                 </div>
+              {/if}
+
+              <!-- Body -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <textarea
+                id="inline-reply-body"
+                bind:value={replyBody}
+                onkeydown={handleReplyKeydown}
+                class="w-full min-h-[120px] text-sm bg-transparent outline-none resize-y leading-relaxed rounded-lg p-2"
+                style="color: var(--iris-color-text); border: 1px solid var(--iris-color-border);"
+                placeholder="Write your reply..."
+              ></textarea>
+
+              <!-- Multi-reply picker (reply/reply-all only) -->
+              {#if showMultiReply && (replyMode === 'reply' || replyMode === 'reply-all')}
+                <MultiReplyPicker
+                  options={multiReplyOptions}
+                  loading={multiReplyLoading}
+                  error={multiReplyError}
+                  onpick={handlePickReply}
+                  onclose={() => (showMultiReply = false)}
+                />
+              {/if}
+
+              <!-- Send bar -->
+              <div class="flex items-center gap-2">
+                {#if sendError}
+                  <p class="text-xs flex-1" style="color: var(--iris-color-error);">{sendError}</p>
+                {:else}
+                  <span class="flex-1"></span>
+                {/if}
+                {#if replyMode === 'reply' || replyMode === 'reply-all'}
+                  <button
+                    class="px-3 py-1.5 text-xs rounded-lg font-medium transition-colors disabled:opacity-50 reply-ai-btn"
+                    onclick={handleGenerateReplies}
+                    disabled={multiReplyLoading || sending}
+                    title="Generate 3 AI reply options in different tones"
+                  >
+                    {multiReplyLoading ? 'Generating...' : 'AI Reply Options'}
+                  </button>
+                {/if}
+                <span class="text-[10px]" style="color: var(--iris-color-text-faint);">
+                  {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+Enter to send
+                </span>
+                <button
+                  class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors flex items-center gap-1.5 reply-send-btn"
+                  onclick={handleSend}
+                  disabled={sending}
+                >
+                  <Send size={13} />
+                  {sending ? 'Sending...' : 'Send'}
+                </button>
               </div>
             </div>
-          {/each}
+          {/if}
+        {/if}
+      </div>
+
+      <!-- Reply buttons footer (only when not already replying) -->
+      {#if thread && !loading && !replyMode}
+        <div class="px-4 py-3 flex gap-2" style="border-top: 1px solid var(--iris-color-border); background: var(--iris-color-bg-elevated);">
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn" onclick={() => startReply('reply')}>Reply</button>
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('reply-all')}>Reply All</button>
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('forward')}>Forward</button>
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={openRedirect}>
+            <Forward size={14} />
+            Redirect
+          </button>
         </div>
       {/if}
     </div>
-  {/if}
 
-  <!-- Messages -->
-  <div class="flex-1 overflow-y-auto p-4 space-y-3">
-    {#if loading}
-      <div class="flex items-center justify-center py-16">
-        <div class="w-8 h-8 rounded-full animate-spin" style="border: 4px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
-      </div>
-    {:else if error}
-      <div class="text-center py-16">
-        <p class="mb-4" style="color: var(--iris-color-error);">{error}</p>
-        <button class="px-4 py-2 rounded-lg text-sm font-medium transition-colors retry-btn" onclick={loadThread}>Retry</button>
-      </div>
-    {:else if thread}
-      {#each thread.messages as message (message.id)}
-        <MessageCard {message} />
-      {/each}
+    <!-- Side panel divider + panel -->
+    {#if sidePanelOpen && thread && !loading}
+      <!-- Vertical divider -->
+      <div class="flex-shrink-0" style="width: 1px; background: var(--iris-color-border);"></div>
 
-      <!-- Inline reply area -->
-      {#if replyMode}
-        <div class="rounded-xl p-4 space-y-3" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-medium" style="color: var(--iris-color-text-faint);">
-              {replyMode === 'reply' ? 'Reply' : replyMode === 'reply-all' ? 'Reply All' : 'Forward'}
-            </span>
-            <span class="flex-1"></span>
-            <button class="text-xs px-2 py-0.5 rounded" style="color: var(--iris-color-text-faint);" onclick={cancelReply}>&times; Cancel</button>
-          </div>
+      <!-- Side panel -->
+      <div class="flex-shrink-0 flex flex-col" style="width: 300px; background: var(--iris-color-bg-surface);">
+        <!-- Tab bar -->
+        <div class="flex" style="border-bottom: 1px solid var(--iris-color-border);">
+          <button
+            class="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors side-panel-tab"
+            class:active={activeTab === 'summary'}
+            onclick={() => { activeTab = 'summary'; }}
+          >
+            <Sparkles size={13} />
+            Summary
+          </button>
+          <button
+            class="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors side-panel-tab"
+            class:active={activeTab === 'notes'}
+            onclick={() => { activeTab = 'notes'; }}
+          >
+            <StickyNote size={13} />
+            Notes
+          </button>
+          <button
+            class="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 text-xs font-medium transition-colors side-panel-tab"
+            class:active={activeTab === 'tasks'}
+            onclick={() => { activeTab = 'tasks'; }}
+          >
+            <ListChecks size={13} />
+            Tasks
+          </button>
+        </div>
 
-          <!-- To field -->
-          <div class="flex items-center gap-2">
-            <label class="text-xs w-6" style="color: var(--iris-color-text-faint);" for="reply-to">To</label>
-            <input
-              id="reply-to"
-              type="text"
-              bind:value={replyTo}
-              class="flex-1 text-sm bg-transparent border-b outline-none py-1"
-              style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
-              placeholder="recipient@example.com"
-            />
-          </div>
-
-          <!-- Cc field (reply-all or if user adds) -->
-          {#if replyMode === 'reply-all' || replyCc}
-            <div class="flex items-center gap-2">
-              <label class="text-xs w-6" style="color: var(--iris-color-text-faint);" for="reply-cc">Cc</label>
-              <input
-                id="reply-cc"
-                type="text"
-                bind:value={replyCc}
-                class="flex-1 text-sm bg-transparent border-b outline-none py-1"
-                style="color: var(--iris-color-text); border-color: var(--iris-color-border);"
-              />
+        <!-- Tab content -->
+        <div class="flex-1 overflow-y-auto">
+          {#if activeTab === 'summary'}
+            <!-- Summary tab content -->
+            <div class="p-3">
+              {#if thread.message_count <= 1}
+                <p class="text-xs" style="color: var(--iris-color-text-faint);">No summary available for single-message threads.</p>
+              {:else if summaryLoading}
+                <div class="flex items-center gap-2 py-4" style="color: var(--iris-color-text-faint);">
+                  <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
+                  <span class="text-xs">Summarizing thread...</span>
+                </div>
+              {:else if aiSummary}
+                <div class="text-sm leading-relaxed" style="color: var(--iris-color-text);">
+                  {aiSummary}
+                </div>
+              {:else if summaryError}
+                <p class="text-xs" style="color: var(--iris-color-text-faint);">{summaryError}</p>
+              {:else}
+                <p class="text-xs" style="color: var(--iris-color-text-faint);">Loading summary...</p>
+              {/if}
+            </div>
+          {:else if activeTab === 'notes'}
+            <!-- Notes tab content -->
+            <NotesPanel threadId={params.id} alwaysOpen={true} />
+          {:else if activeTab === 'tasks'}
+            <!-- Tasks tab content -->
+            <div class="p-3">
+              {#if tasksLoading}
+                <div class="flex items-center gap-2 py-4" style="color: var(--iris-color-text-faint);">
+                  <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
+                  <span class="text-xs">Extracting tasks...</span>
+                </div>
+              {:else if tasksError}
+                <p class="text-xs py-1" style="color: var(--iris-color-text-faint);">{tasksError}</p>
+              {:else if extractedTasks.length === 0}
+                <p class="text-xs py-1" style="color: var(--iris-color-text-faint);">No action items found in this thread.</p>
+              {:else}
+                <div class="space-y-1.5">
+                  {#each extractedTasks as task, i (i)}
+                    <div class="flex items-start gap-2 rounded-lg px-2 py-1.5" style="background: var(--iris-color-bg-elevated);">
+                      <button
+                        class="mt-0.5 w-4 h-4 rounded flex-shrink-0 flex items-center justify-center task-checkbox"
+                        class:checked={checkedTasks.has(i)}
+                        onclick={() => toggleTaskCheck(i)}
+                        aria-label="Toggle task"
+                      >
+                        {#if checkedTasks.has(i)}
+                          <span class="text-[10px]">&#10003;</span>
+                        {/if}
+                      </button>
+                      <div class="flex-1 min-w-0">
+                        <p class="text-sm leading-snug" style="color: var(--iris-color-text);" class:line-through={checkedTasks.has(i)} class:opacity-50={checkedTasks.has(i)}>
+                          {task.task}
+                        </p>
+                        <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+                          <span class="text-[10px] font-medium px-1.5 py-0.5 rounded-full task-priority-badge"
+                            class:priority-high={task.priority === 'high'}
+                            class:priority-medium={task.priority === 'medium'}
+                            class:priority-low={task.priority === 'low'}
+                          >
+                            {task.priority}
+                          </span>
+                          {#if task.deadline}
+                            <span class="text-[10px]" style="color: var(--iris-color-text-faint);">Due: {task.deadline}</span>
+                          {/if}
+                          {#if task.source_subject}
+                            <span class="text-[10px] truncate" style="color: var(--iris-color-text-faint);">from: {task.source_subject}</span>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           {/if}
-
-          <!-- Body -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <textarea
-            id="inline-reply-body"
-            bind:value={replyBody}
-            onkeydown={handleReplyKeydown}
-            class="w-full min-h-[120px] text-sm bg-transparent outline-none resize-y leading-relaxed rounded-lg p-2"
-            style="color: var(--iris-color-text); border: 1px solid var(--iris-color-border);"
-            placeholder="Write your reply..."
-          ></textarea>
-
-          <!-- Multi-reply picker (reply/reply-all only) -->
-          {#if showMultiReply && (replyMode === 'reply' || replyMode === 'reply-all')}
-            <MultiReplyPicker
-              options={multiReplyOptions}
-              loading={multiReplyLoading}
-              error={multiReplyError}
-              onpick={handlePickReply}
-              onclose={() => (showMultiReply = false)}
-            />
-          {/if}
-
-          <!-- Send bar -->
-          <div class="flex items-center gap-2">
-            {#if sendError}
-              <p class="text-xs flex-1" style="color: var(--iris-color-error);">{sendError}</p>
-            {:else}
-              <span class="flex-1"></span>
-            {/if}
-            {#if replyMode === 'reply' || replyMode === 'reply-all'}
-              <button
-                class="px-3 py-1.5 text-xs rounded-lg font-medium transition-colors disabled:opacity-50 reply-ai-btn"
-                onclick={handleGenerateReplies}
-                disabled={multiReplyLoading || sending}
-                title="Generate 3 AI reply options in different tones"
-              >
-                {multiReplyLoading ? 'Generating...' : 'AI Reply Options'}
-              </button>
-            {/if}
-            <span class="text-[10px]" style="color: var(--iris-color-text-faint);">
-              {navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+Enter to send
-            </span>
-            <button
-              class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors flex items-center gap-1.5 reply-send-btn"
-              onclick={handleSend}
-              disabled={sending}
-            >
-              <Send size={13} />
-              {sending ? 'Sending...' : 'Send'}
-            </button>
-          </div>
         </div>
-      {/if}
+      </div>
     {/if}
   </div>
-
-  <!-- Reply buttons footer (only when not already replying) -->
-  {#if thread && !loading && !replyMode}
-    <div class="px-4 py-3 flex gap-2" style="border-top: 1px solid var(--iris-color-border); background: var(--iris-color-bg-elevated);">
-      <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn" onclick={() => startReply('reply')}>Reply</button>
-      <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('reply-all')}>Reply All</button>
-      <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('forward')}>Forward</button>
-      <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={openRedirect}>
-        <Forward size={14} />
-        Redirect
-      </button>
-    </div>
-  {/if}
 </div>
 
 {#if showSpamDialog && thread}
@@ -847,9 +896,6 @@
   }
   .thread-action-btn:hover {
     color: var(--iris-color-text-muted);
-  }
-  .thread-action-btn.mute-active {
-    color: var(--iris-color-primary);
   }
   .thread-action-btn.star-btn:hover {
     color: var(--iris-color-primary);
@@ -900,9 +946,6 @@
   .topics-link:hover {
     background: color-mix(in srgb, var(--iris-color-primary) 15%, transparent);
   }
-  .thread-action-btn.tasks-btn:hover {
-    color: var(--iris-color-primary);
-  }
   .task-checkbox {
     border: 1.5px solid var(--iris-color-primary);
     background: transparent;
@@ -946,5 +989,22 @@
   }
   .more-menu-item.mute-active {
     color: var(--iris-color-primary);
+  }
+  .thread-action-btn.panel-active {
+    color: var(--iris-color-primary);
+  }
+  .side-panel-tab {
+    color: var(--iris-color-text-faint);
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    cursor: pointer;
+  }
+  .side-panel-tab:hover {
+    color: var(--iris-color-text-muted);
+    background: var(--iris-color-bg-elevated);
+  }
+  .side-panel-tab.active {
+    color: var(--iris-color-text);
+    border-bottom-color: var(--iris-color-primary);
   }
 </style>
