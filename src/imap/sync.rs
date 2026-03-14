@@ -50,14 +50,44 @@ impl SyncEngine {
         })?;
 
         // Folders to sync: (IMAP name, local folder name, batch size)
-        // Gmail uses [Gmail]/Sent Mail etc; standard IMAP uses Sent, Drafts, Trash
-        let folders_to_sync = vec![
-            ("INBOX", "INBOX", 50u32),
+        // Gmail uses [Gmail]/Sent Mail etc; standard IMAP uses Sent, Drafts, Trash, etc.
+        // For each logical folder we try the Gmail name first, then fall back to
+        // standard IMAP names. Because we skip folders that don't exist, at most
+        // one entry per logical folder will succeed on a given provider.
+        let folders_to_sync: Vec<(&str, &str, u32)> = vec![
+            // Inbox
+            ("INBOX", "INBOX", 50),
+            // Sent
             ("[Gmail]/Sent Mail", "Sent", 25),
             ("Sent", "Sent", 25),
+            // Trash
+            ("[Gmail]/Trash", "Trash", 25),
+            ("Trash", "Trash", 25),
+            // Drafts
+            ("[Gmail]/Drafts", "Drafts", 25),
+            ("Drafts", "Drafts", 25),
+            // Archive (Gmail "All Mail" contains everything — keep batch small to avoid duplicates)
+            ("[Gmail]/All Mail", "Archive", 25),
+            ("Archive", "Archive", 25),
+            // Spam
+            ("[Gmail]/Spam", "Spam", 25),
+            ("Spam", "Spam", 25),
+            ("Junk", "Spam", 25),
         ];
 
+        // Track which local folders we've already synced so we don't
+        // fetch the same logical folder twice (e.g. Gmail name succeeds,
+        // skip the standard fallback).
+        let mut synced_folders: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for (imap_folder, local_folder, batch_size) in &folders_to_sync {
+            // Skip if we already synced this logical folder via a provider-specific name
+            // (e.g. "[Gmail]/Sent Mail" succeeded, so skip "Sent")
+            if synced_folders.contains(*local_folder) {
+                tracing::debug!(account_id, imap_folder, local_folder, "Already synced via another name, skipping");
+                continue;
+            }
+
             // SELECT the folder — skip if it doesn't exist (different providers)
             let mailbox = match session.select(*imap_folder).await {
                 Ok(mb) => mb,
@@ -67,8 +97,11 @@ impl SyncEngine {
                 }
             };
 
+            // Mark this logical folder as synced so we skip fallback names
+            synced_folders.insert(local_folder.to_string());
+
             let total = mailbox.exists;
-            tracing::info!(account_id, imap_folder, total, "{} has {} messages", imap_folder, total);
+            tracing::info!(account_id, imap_folder, local_folder, total, "{} has {} messages", imap_folder, total);
 
             if total == 0 {
                 continue;
