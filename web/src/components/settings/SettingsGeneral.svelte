@@ -86,14 +86,14 @@
 
   async function loadAccountNotifications() {
     try {
-      for (const account of accounts) {
+      await Promise.all(accounts.map(async (account: any) => {
         try {
           const res = await api.notifications.get(account.id);
           acctNotificationState[account.id] = res.enabled;
         } catch {
           acctNotificationState[account.id] = true; // default enabled
         }
-      }
+      }));
     } catch { /* ignore */ }
   }
 
