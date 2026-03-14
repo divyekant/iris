@@ -125,10 +125,11 @@
     error = '';
     try {
       thread = await api.threads.get(params.id);
-      for (const msg of thread.messages) {
-        if (!msg.is_read) {
-          await api.messages.markRead(msg.id);
-          msg.is_read = true;
+      const unreadIds = thread.messages.filter((m: any) => !m.is_read).map((m: any) => m.id);
+      if (unreadIds.length > 0) {
+        await api.messages.batch(unreadIds, 'mark_read');
+        for (const msg of thread.messages) {
+          if (!msg.is_read) msg.is_read = true;
         }
       }
       // Check mute status

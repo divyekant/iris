@@ -207,14 +207,14 @@
   async function loadNotificationPrefs() {
     try {
       const accounts = await api.accounts.list();
-      for (const account of accounts) {
+      await Promise.all(accounts.map(async (account: any) => {
         try {
           const res = await api.notifications.get(account.id);
           notificationPrefs[account.id] = res.enabled;
         } catch {
           notificationPrefs[account.id] = true;
         }
-      }
+      }));
     } catch { /* ignore */ }
   }
 

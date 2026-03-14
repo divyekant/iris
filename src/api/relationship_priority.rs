@@ -390,7 +390,7 @@ pub async fn get_prioritized_messages(
     }
 
     // Allowed folders
-    const ALLOWED_FOLDERS: &[&str] = &["INBOX", "Sent", "Drafts", "Starred", "Archive", "Trash"];
+    const ALLOWED_FOLDERS: &[&str] = &["INBOX", "Sent", "Drafts", "Starred", "Archive", "Trash", "Spam"];
     let folder = params
         .folder
         .as_deref()
@@ -404,6 +404,7 @@ pub async fn get_prioritized_messages(
         "INBOX" => "m.folder = 'INBOX' AND m.is_deleted = 0",
         "Sent" => "m.folder = 'Sent' AND m.is_deleted = 0",
         "Archive" => "m.folder = 'Archive' AND m.is_deleted = 0",
+        "Spam" => "m.folder = 'Spam' AND m.is_deleted = 0",
         _ => "m.folder = 'INBOX' AND m.is_deleted = 0",
     };
 
