@@ -23,6 +23,7 @@ serde_json = "1"
 oauth2 = "5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", features = ["std"] }
 
 # IMAP
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }

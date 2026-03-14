@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::ai::provider::ProviderStatus;
+use crate::secrets;
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -112,13 +113,15 @@ pub async fn set_ai_config(
             set_config_value(&conn, "ai_enabled", if enabled { "true" } else { "false" })?;
         }
         if let Some(ref key) = input.anthropic_api_key {
-            set_config_value(&conn, "anthropic_api_key", key)?;
+            secrets::set_secret_config_value(&conn, "anthropic_api_key", key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
         if let Some(ref model) = input.anthropic_model {
             set_config_value(&conn, "ai_model_anthropic", model)?;
         }
         if let Some(ref key) = input.openai_api_key {
-            set_config_value(&conn, "openai_api_key", key)?;
+            secrets::set_secret_config_value(&conn, "openai_api_key", key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
         if let Some(ref model) = input.openai_model {
             set_config_value(&conn, "ai_model_openai", model)?;
@@ -127,7 +130,8 @@ pub async fn set_ai_config(
             set_config_value(&conn, "memories_url", url)?;
         }
         if let Some(ref key) = input.memories_api_key {
-            set_config_value(&conn, "memories_api_key", key)?;
+            secrets::set_secret_config_value(&conn, "memories_api_key", key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
         if let Some(decay_enabled) = input.decay_enabled {
             set_config_value(&conn, "decay_enabled", if decay_enabled { "true" } else { "false" })?;
@@ -150,7 +154,9 @@ pub async fn set_ai_config(
     if input.memories_url.is_some() || input.memories_api_key.is_some() {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let url = get_config_value(&conn, "memories_url", &state.config.memories_url);
-        let key = get_config_value(&conn, "memories_api_key", "");
+        let key = secrets::get_secret_config_value(&conn, "memories_api_key")
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .unwrap_or_default();
         let key = if key.is_empty() { state.config.memories_api_key.clone() } else { Some(key) };
         state.memories.update_config(&url, key);
     }

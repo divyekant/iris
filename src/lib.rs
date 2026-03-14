@@ -6,6 +6,7 @@ pub mod db;
 pub mod imap;
 pub mod jobs;
 pub mod models;
+pub mod secrets;
 pub mod smtp;
 pub mod utils;
 pub mod ws;

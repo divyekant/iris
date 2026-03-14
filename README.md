@@ -72,6 +72,8 @@ docker compose up --build
 
 Open `http://localhost:3000`. Ollama runs as a sidecar container. If `IRIS_AUTH_PASSWORD_HASH` is set, the web UI will require that password before it issues a session cookie.
 
+For at-rest encryption of stored account credentials and provider API keys, set `IRIS_SECRETS_KEY` to a 32-byte base64 or 64-character hex key before first run. Existing plaintext secrets will be re-encrypted on startup once the key is configured.
+
 ### OAuth Setup
 
 **Gmail:**
@@ -158,6 +160,7 @@ cargo test --test api_integration
 | `OUTLOOK_CLIENT_SECRET` | | Outlook OAuth2 client secret |
 | `MEMORIES_API_KEY` | | Memories MCP API key |
 | `IRIS_AUTH_PASSWORD_HASH` | | Optional Argon2 password hash for the web UI login gate |
+| `IRIS_SECRETS_KEY` | | Optional 32-byte base64 or 64-character hex key for encrypting persisted secrets at rest |
 | `SESSION_TOKEN_FILE` | | Write session token to file (for Docker/scripts) |
 
 ## License

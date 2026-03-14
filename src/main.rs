@@ -1,4 +1,4 @@
-use iris_server::{ai, auth, build_app, config::Config, db, imap, jobs, models, ws, AppState};
+use iris_server::{ai, auth, build_app, config::Config, db, imap, jobs, models, secrets, ws, AppState};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,15 +10,43 @@ async fn main() {
         .init();
 
     let config = Config::from_env();
+    secrets::configure_from_env().expect("Failed to configure secrets encryption");
     let pool = db::create_pool(&config.database_url).expect("Failed to create database pool");
 
     // Run migrations
     {
         let conn = pool.get().expect("Failed to get DB connection");
         db::migrations::run(&conn).expect("Failed to run migrations");
+        let report = secrets::migrate_persisted_secrets(&conn).expect("Failed to migrate persisted secrets");
+        if report.migrated_values > 0 {
+            tracing::info!(migrated = report.migrated_values, "Encrypted persisted secrets at rest");
+        } else if report.plaintext_values_remaining > 0 {
+            tracing::warn!(
+                plaintext = report.plaintext_values_remaining,
+                "Secrets remain plaintext at rest; set IRIS_SECRETS_KEY to encrypt persisted credentials"
+            );
+        }
     }
 
-    let memories = ai::memories::MemoriesClient::new(&config.memories_url, config.memories_api_key.clone());
+    let (memories_url, memories_api_key) = pool
+        .get()
+        .ok()
+        .map(|conn| {
+            let url = conn
+                .query_row("SELECT value FROM config WHERE key = 'memories_url'", [], |row| row.get::<_, String>(0))
+                .ok()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| config.memories_url.clone());
+            let key = secrets::get_secret_config_value(&conn, "memories_api_key")
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty())
+                .or_else(|| config.memories_api_key.clone());
+            (url, key)
+        })
+        .unwrap_or_else(|| (config.memories_url.clone(), config.memories_api_key.clone()));
+
+    let memories = ai::memories::MemoriesClient::new(&memories_url, memories_api_key);
 
     // Build LLM provider pool from configured keys
     let providers = {
@@ -45,7 +73,9 @@ async fn main() {
         // Anthropic (from env or DB config)
         let anthropic_key = config.anthropic_api_key.clone().or_else(|| {
             pool.get().ok().and_then(|conn| {
-                conn.query_row("SELECT value FROM config WHERE key = 'anthropic_api_key'", [], |row| row.get::<_, String>(0)).ok()
+                secrets::get_secret_config_value(&conn, "anthropic_api_key")
+                    .ok()
+                    .flatten()
             })
         });
         if let Some(ref key) = anthropic_key {
@@ -62,7 +92,9 @@ async fn main() {
         // OpenAI (from env or DB config)
         let openai_key = config.openai_api_key.clone().or_else(|| {
             pool.get().ok().and_then(|conn| {
-                conn.query_row("SELECT value FROM config WHERE key = 'openai_api_key'", [], |row| row.get::<_, String>(0)).ok()
+                secrets::get_secret_config_value(&conn, "openai_api_key")
+                    .ok()
+                    .flatten()
             })
         });
         if let Some(ref key) = openai_key {
