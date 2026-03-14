@@ -2,6 +2,8 @@
   let { html, text }: { html?: string | null; text?: string | null } = $props();
 
   let iframeEl: HTMLIFrameElement;
+  let showRemoteImages = $state(false);
+  let blockedImageCount = $state(0);
 
   function sanitizeHtml(raw: string): string {
     // Security model: the iframe sandbox (no allow-scripts, no allow-forms,
@@ -18,12 +20,73 @@
       .replace(/<meta\s+http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
   }
 
+  /**
+   * Strip remote images from HTML, replacing them with a placeholder.
+   * Preserves inline/embedded images (data: URIs and cid: references).
+   * Also blocks CSS background-image with remote URLs in style attributes.
+   * Returns the processed HTML and the count of blocked images.
+   */
+  function stripRemoteImages(raw: string): { html: string; count: number } {
+    let count = 0;
+
+    // Replace remote <img> tags — keep data: and cid: src values
+    const processed = raw.replace(/<img\b([^>]*)>/gi, (match, attrs: string) => {
+      const srcMatch = attrs.match(/src\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))/i);
+      if (!srcMatch) return match; // no src — leave as-is
+      const src = srcMatch[1] ?? srcMatch[2] ?? srcMatch[3] ?? '';
+
+      // Preserve inline/embedded images
+      if (src.startsWith('data:') || src.startsWith('cid:')) {
+        return match;
+      }
+
+      // Block remote images (http/https or protocol-relative)
+      if (src.startsWith('http:') || src.startsWith('https:') || src.startsWith('//')) {
+        count++;
+        // Extract alt text if available
+        const altMatch = attrs.match(/alt\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        const alt = altMatch ? (altMatch[1] ?? altMatch[2] ?? '') : '';
+        const label = alt || 'Image blocked';
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px dashed #ccc;border-radius:4px;font-size:12px;color:#888;background:#f5f5f5;margin:2px 0;" title="${src.replace(/"/g, '&quot;')}">` +
+          `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/><line x1="2" y1="2" x2="22" y2="22"/></svg>` +
+          `${label.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>`;
+      }
+
+      return match; // relative or other — leave as-is
+    });
+
+    // Block CSS background-image with remote URLs in style attributes
+    const withBgBlocked = processed.replace(
+      /style\s*=\s*"([^"]*)"/gi,
+      (match, styleContent: string) => {
+        // Replace background-image: url(http...) and background: ... url(http...) patterns
+        const cleaned = styleContent.replace(
+          /background(?:-image)?\s*:[^;]*url\(\s*(?:["']?)(https?:\/\/[^"')]+)(?:["']?)\s*\)[^;]*/gi,
+          (bgMatch) => {
+            count++;
+            return '/* remote bg blocked */';
+          }
+        );
+        if (cleaned !== styleContent) {
+          return `style="${cleaned}"`;
+        }
+        return match;
+      }
+    );
+
+    return { html: withBgBlocked, count };
+  }
+
   function getTextContent(raw: string): string {
     const escaped = raw
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
     return `<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;">${escaped}</pre>`;
+  }
+
+  function handleLoadImages() {
+    showRemoteImages = true;
   }
 
   $effect(() => {
@@ -41,10 +104,23 @@
           // WHOLE_DOCUMENT returns full <!DOCTYPE><html>…</html>
           // Inject our base styles at the start of <head>
           const sanitized = sanitizeHtml(html);
-          content = sanitized.replace(/<head>/i, `<head>${baseStyle}`);
+
+          let finalHtml: string;
+          if (showRemoteImages) {
+            finalHtml = sanitized;
+            blockedImageCount = 0;
+          } else {
+            const result = stripRemoteImages(sanitized);
+            finalHtml = result.html;
+            blockedImageCount = result.count;
+          }
+
+          content = finalHtml.replace(/<head>/i, `<head>${baseStyle}`);
         } else if (text) {
+          blockedImageCount = 0;
           content = `<!DOCTYPE html><html><head>${baseStyle}</head><body>${getTextContent(text)}</body></html>`;
         } else {
+          blockedImageCount = 0;
           content = `<!DOCTYPE html><html><head>${baseStyle}</head><body><p style="color:#999;">No content</p></body></html>`;
         }
 
@@ -61,9 +137,77 @@
   });
 </script>
 
+{#if blockedImageCount > 0 && !showRemoteImages}
+  <div class="image-block-bar">
+    <div class="image-block-info">
+      <svg class="image-block-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+        <line x1="2" y1="2" x2="22" y2="22"/>
+      </svg>
+      <span>{blockedImageCount} remote image{blockedImageCount > 1 ? 's' : ''} blocked</span>
+    </div>
+    <button class="load-images-btn" onclick={handleLoadImages}>
+      Load images
+    </button>
+  </div>
+{/if}
+
 <iframe
   bind:this={iframeEl}
   sandbox="allow-same-origin"
   class="w-full border-0 min-h-[100px]"
   title="Email content"
 ></iframe>
+
+<style>
+  .image-block-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border-radius: var(--iris-radius-md);
+    background: color-mix(in srgb, var(--iris-color-warning) 10%, var(--iris-color-bg-surface));
+    border: 1px solid color-mix(in srgb, var(--iris-color-warning) 25%, transparent);
+  }
+
+  .image-block-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--iris-color-warning);
+    font-weight: 500;
+  }
+
+  .image-block-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .load-images-btn {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: var(--iris-radius-sm);
+    border: 1px solid var(--iris-color-border);
+    background: var(--iris-color-bg-elevated);
+    color: var(--iris-color-text);
+    cursor: pointer;
+    transition: all var(--iris-transition-fast);
+    white-space: nowrap;
+  }
+
+  .load-images-btn:hover {
+    border-color: var(--iris-color-primary);
+    background: color-mix(in srgb, var(--iris-color-primary) 10%, var(--iris-color-bg-elevated));
+    color: var(--iris-color-primary);
+  }
+
+  .load-images-btn:active {
+    background: color-mix(in srgb, var(--iris-color-primary) 20%, var(--iris-color-bg-elevated));
+  }
+</style>
