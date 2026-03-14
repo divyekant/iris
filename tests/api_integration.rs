@@ -43,6 +43,7 @@ fn create_test_state() -> Arc<AppState> {
             gmail_client_secret: None,
             outlook_client_id: None,
             outlook_client_secret: None,
+            app_password_hash: None,
             public_url: "http://localhost:3000".to_string(),
             job_poll_interval_ms: 2000,
             job_max_concurrency: 4,

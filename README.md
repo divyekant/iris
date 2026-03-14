@@ -31,7 +31,7 @@
 **Privacy**
 - Self-hosted: your data never leaves your machine
 - No telemetry, no cloud dependencies
-- Session-token auth (no passwords, no accounts)
+- Optional password gate for remote/self-hosted access
 - Semantic memory via local Memories MCP server
 
 ## Quick Start
@@ -59,7 +59,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in your browser. The app will bootstrap a session token automatically.
+Open `http://localhost:5173` in your browser. The app will bootstrap a session cookie automatically. If `IRIS_AUTH_PASSWORD_HASH` is set, Iris will show a login screen before loading the mailbox UI.
 
 ### Docker
 
@@ -70,7 +70,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:3000`. Ollama runs as a sidecar container.
+Open `http://localhost:3000`. Ollama runs as a sidecar container. If `IRIS_AUTH_PASSWORD_HASH` is set, the web UI will require that password before it issues a session cookie.
 
 ### OAuth Setup
 
@@ -157,6 +157,7 @@ cargo test --test api_integration
 | `OUTLOOK_CLIENT_ID` | | Outlook OAuth2 client ID |
 | `OUTLOOK_CLIENT_SECRET` | | Outlook OAuth2 client secret |
 | `MEMORIES_API_KEY` | | Memories MCP API key |
+| `IRIS_AUTH_PASSWORD_HASH` | | Optional Argon2 password hash for the web UI login gate |
 | `SESSION_TOKEN_FILE` | | Write session token to file (for Docker/scripts) |
 
 ## License

@@ -1,15 +1,15 @@
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Json, State},
     http::{
         header::{HOST, ORIGIN, REFERER, SET_COOKIE},
         HeaderMap, Method, Request, StatusCode,
     },
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde::Serialize;
+use argon2::{password_hash::PasswordHash, PasswordVerifier};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
@@ -70,8 +70,20 @@ pub fn is_same_origin_browser_context(headers: &HeaderMap) -> bool {
 }
 
 pub fn build_session_cookie(token: &str) -> String {
+    build_session_cookie_with_security(token, false)
+}
+
+pub fn build_session_cookie_with_security(token: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict"
+        "{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict{secure_attr}"
+    )
+}
+
+pub fn clear_session_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!(
+        "{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure_attr}"
     )
 }
 
@@ -94,6 +106,24 @@ fn expected_origin(headers: &HeaderMap) -> Option<String> {
 
 fn is_safe_method(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+fn session_matches_state(state: &AppState, headers: &HeaderMap) -> bool {
+    extract_session_token(headers)
+        .map(|(token, _)| token == state.session_token)
+        .unwrap_or(false)
+}
+
+fn login_required(state: &AppState) -> bool {
+    state
+        .config
+        .app_password_hash
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn secure_cookie_required(state: &AppState) -> bool {
+    state.config.public_url.starts_with("https://")
 }
 
 /// Middleware that checks X-Session-Token header against the startup token.
@@ -122,24 +152,91 @@ pub async fn session_auth_middleware(
 #[derive(Serialize)]
 pub struct BootstrapResponse {
     pub authenticated: bool,
+    pub requires_login: bool,
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub password: String,
 }
 
 /// Issues an HttpOnly session cookie for same-origin browser requests only.
 pub async fn bootstrap_token(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Response, StatusCode> {
     if !is_same_origin_browser_context(request.headers()) {
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let cookie = build_session_cookie(&state.session_token);
+    if login_required(&state) && !session_matches_state(&state, request.headers()) {
+        return Ok(Json(BootstrapResponse {
+            authenticated: false,
+            requires_login: true,
+        })
+        .into_response());
+    }
+
+    let cookie = build_session_cookie_with_security(&state.session_token, secure_cookie_required(&state));
     let response = (
         [(SET_COOKIE, cookie)],
         Json(BootstrapResponse {
             authenticated: true,
+            requires_login: login_required(&state),
         }),
-    );
+    )
+        .into_response();
 
     Ok(response)
+}
+
+pub async fn login(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<LoginRequest>,
+) -> Result<Response, StatusCode> {
+    if !is_same_origin_browser_context(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let password_hash = state
+        .config
+        .app_password_hash
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let parsed_hash = PasswordHash::new(password_hash).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    argon2::Argon2::default()
+        .verify_password(input.password.as_bytes(), &parsed_hash)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    let cookie = build_session_cookie_with_security(&state.session_token, secure_cookie_required(&state));
+    Ok((
+        [(SET_COOKIE, cookie)],
+        Json(BootstrapResponse {
+            authenticated: true,
+            requires_login: true,
+        }),
+    )
+        .into_response())
+}
+
+pub async fn logout(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, StatusCode> {
+    if !is_same_origin_browser_context(&headers) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let cookie = clear_session_cookie(secure_cookie_required(&state));
+    Ok((
+        [(SET_COOKIE, cookie)],
+        Json(BootstrapResponse {
+            authenticated: false,
+            requires_login: login_required(&state),
+        }),
+    )
+        .into_response())
 }

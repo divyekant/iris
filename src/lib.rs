@@ -49,6 +49,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     let public_api = Router::new()
         .route("/health", get(api::health::health))
         .route("/auth/bootstrap", get(api::session_auth::bootstrap_token))
+        .route("/auth/login", post(api::session_auth::login))
+        .route("/auth/logout", post(api::session_auth::logout))
         .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
 
     // Protected API routes (session auth required)

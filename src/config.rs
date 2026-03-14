@@ -14,6 +14,7 @@ pub struct Config {
     pub gmail_client_secret: Option<String>,
     pub outlook_client_id: Option<String>,
     pub outlook_client_secret: Option<String>,
+    pub app_password_hash: Option<String>,
     pub public_url: String,
     pub job_poll_interval_ms: u64,
     pub job_max_concurrency: usize,
@@ -34,6 +35,7 @@ impl fmt::Debug for Config {
             .field("gmail_client_secret", &"[REDACTED]")
             .field("outlook_client_id", &self.outlook_client_id)
             .field("outlook_client_secret", &"[REDACTED]")
+            .field("app_password_hash", &"[REDACTED]")
             .field("public_url", &self.public_url)
             .field("job_poll_interval_ms", &self.job_poll_interval_ms)
             .field("job_max_concurrency", &self.job_max_concurrency)
@@ -56,6 +58,7 @@ impl Config {
             gmail_client_secret: env::var("GMAIL_CLIENT_SECRET").ok(),
             outlook_client_id: env::var("OUTLOOK_CLIENT_ID").ok(),
             outlook_client_secret: env::var("OUTLOOK_CLIENT_SECRET").ok(),
+            app_password_hash: env::var("IRIS_AUTH_PASSWORD_HASH").ok(),
             public_url: env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into()),
             job_poll_interval_ms: env::var("JOB_POLL_INTERVAL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000),
             job_max_concurrency: env::var("JOB_MAX_CONCURRENCY").ok().and_then(|v| v.parse().ok()).unwrap_or(4),

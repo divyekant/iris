@@ -2,6 +2,7 @@ import './app.css';
 import App from './App.svelte';
 import { mount } from 'svelte';
 import { initSession } from './lib/api';
+import { authState } from './lib/auth';
 
 // Apply saved theme before first render to prevent flash
 const savedTheme = localStorage.getItem('iris-theme') || 'light';
@@ -68,13 +69,25 @@ for (const fontName of loadedFonts) {
   }
 }
 
-// Bootstrap the HttpOnly session cookie, then mount the app.
+mount(App, { target: document.getElementById('app')! });
+
+// Bootstrap the auth/session state after the app mounts so the UI can
+// render a loading or login view instead of failing open.
 initSession()
-  .then(() => {
-    mount(App, { target: document.getElementById('app')! });
+  .then((session) => {
+    authState.set({
+      bootstrapping: false,
+      authenticated: session.authenticated,
+      requiresLogin: session.requires_login,
+      error: null,
+    });
   })
-  .catch((err) => {
+  .catch((err: unknown) => {
     console.error('Session bootstrap failed:', err);
-    // Mount anyway — health endpoint still works, user sees error on protected routes
-    mount(App, { target: document.getElementById('app')! });
+    authState.set({
+      bootstrapping: false,
+      authenticated: false,
+      requiresLogin: false,
+      error: err instanceof Error ? err.message : 'Session bootstrap failed',
+    });
   });

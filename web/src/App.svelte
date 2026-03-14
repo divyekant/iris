@@ -11,9 +11,12 @@
   import FolderView from './pages/FolderView.svelte';
   import Snoozed from './pages/Snoozed.svelte';
   import { api } from './lib/api';
+  import { authState } from './lib/auth';
+  import Login from './pages/Login.svelte';
 
   // Sync theme from server config on mount
   $effect(() => {
+    if (!$authState.authenticated) return;
     api.config.get().then(config => {
       if (config?.theme) {
         localStorage.setItem('iris-theme', config.theme);
@@ -49,6 +52,14 @@
   };
 </script>
 
-<AppShell>
-  <Router {routes} />
-</AppShell>
+{#if $authState.bootstrapping}
+  <div class="min-h-screen flex items-center justify-center px-6" style="background: var(--iris-color-bg); color: var(--iris-color-text-muted);">
+    <div class="text-sm">Checking session...</div>
+  </div>
+{:else if $authState.requiresLogin && !$authState.authenticated}
+  <Login />
+{:else}
+  <AppShell>
+    <Router {routes} />
+  </AppShell>
+{/if}

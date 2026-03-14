@@ -6,6 +6,10 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use argon2::{
+    password_hash::{PasswordHasher, SaltString},
+    Argon2,
+};
 use http_body_util::BodyExt;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -22,6 +26,10 @@ use iris_server::{build_app, AppState};
 const TEST_TOKEN: &str = "test-session-token-security-auth";
 
 fn create_test_state() -> Arc<AppState> {
+    create_test_state_with_password_hash(None)
+}
+
+fn create_test_state_with_password_hash(app_password_hash: Option<String>) -> Arc<AppState> {
     let manager = SqliteConnectionManager::memory().with_init(|conn| {
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -51,6 +59,7 @@ fn create_test_state() -> Arc<AppState> {
             gmail_client_secret: None,
             outlook_client_id: None,
             outlook_client_secret: None,
+            app_password_hash,
             public_url: "http://localhost:3000".to_string(),
             job_poll_interval_ms: 2000,
             job_max_concurrency: 4,
@@ -61,6 +70,14 @@ fn create_test_state() -> Arc<AppState> {
         memories: MemoriesClient::new("http://localhost:8900", None),
         session_token: TEST_TOKEN.to_string(),
     })
+}
+
+fn test_password_hash(password: &str) -> String {
+    let salt = SaltString::encode_b64(b"fixedsaltfixed12").unwrap();
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .unwrap()
+        .to_string()
 }
 
 fn create_test_state_with_agent_key() -> (Arc<AppState>, String) {
@@ -579,6 +596,29 @@ async fn bootstrap_accepts_none_fetch_site() {
 }
 
 #[tokio::test]
+async fn bootstrap_requires_login_when_password_hash_configured() {
+    let state = create_test_state_with_password_hash(Some(test_password_hash("hunter2")));
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(
+            Request::get("/api/auth/bootstrap")
+                .header("sec-fetch-site", "same-origin")
+                .header("host", "localhost:3000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().get("set-cookie").is_none());
+    let json = body_to_json(res.into_body()).await;
+    assert_eq!(json["authenticated"], false);
+    assert_eq!(json["requires_login"], true);
+}
+
+#[tokio::test]
 async fn bootstrap_rejects_same_site() {
     let state = create_test_state();
     let app = build_app(state);
@@ -594,6 +634,55 @@ async fn bootstrap_rejects_same_site() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn login_sets_cookie_for_valid_password() {
+    let state = create_test_state_with_password_hash(Some(test_password_hash("hunter2")));
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(
+            Request::post("/api/auth/login")
+                .header("sec-fetch-site", "same-origin")
+                .header("host", "localhost:3000")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"password":"hunter2"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(set_cookie.contains("iris_session="));
+    let json = body_to_json(res.into_body()).await;
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["requires_login"], true);
+}
+
+#[tokio::test]
+async fn login_rejects_invalid_password() {
+    let state = create_test_state_with_password_hash(Some(test_password_hash("hunter2")));
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(
+            Request::post("/api/auth/login")
+                .header("sec-fetch-site", "same-origin")
+                .header("host", "localhost:3000")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"password":"wrong"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

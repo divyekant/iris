@@ -41,12 +41,18 @@ export interface FollowupReminder {
   acted_at: number | null;
 }
 
-export async function initSession(): Promise<void> {
+export interface BootstrapSessionResponse {
+  authenticated: boolean;
+  requires_login: boolean;
+}
+
+export async function initSession(): Promise<BootstrapSessionResponse> {
   const res = await fetch(`${BASE}/api/auth/bootstrap`, {
     credentials: 'same-origin',
     headers: { 'Sec-Fetch-Site': 'same-origin' },
   });
   if (!res.ok) throw new Error(`Bootstrap failed: ${res.status}`);
+  return res.json();
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -75,6 +81,16 @@ export interface VipContact {
 }
 
 export const api = {
+  auth: {
+    bootstrap: () => initSession(),
+    login: (password: string) =>
+      request<BootstrapSessionResponse>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ password }),
+      }),
+    logout: () => request<BootstrapSessionResponse>('/api/auth/logout', { method: 'POST' }),
+    startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
+  },
   health: () => request<{ status: string; version: string }>('/api/health'),
   accounts: {
     list: () => request<any[]>('/api/accounts'),
@@ -345,9 +361,6 @@ export const api = {
     detect: (messageId: string) => request<{ intent: string; confidence: number }>('/api/ai/detect-intent', {
       method: 'POST', body: JSON.stringify({ message_id: messageId })
     }),
-  },
-  auth: {
-    startOAuth: (provider: string) => request<{ url: string }>(`/api/auth/oauth/${provider}`),
   },
   apiKeys: {
     list: () => request<any[]>('/api/api-keys'),
