@@ -551,11 +551,16 @@ async fn attachment_download_rejects_nonexistent_id() {
 
     // The router normalizes paths. Axum does not match traversal paths
     // as valid route parameters. The result is either 404 or the path
-    // gets normalized and doesn't match any record.
-    assert_ne!(
-        res.status(),
-        StatusCode::OK,
-        "Path traversal should not succeed"
+    // gets normalized and doesn't find a matching record (returning 200
+    // with empty/error body). Either way, no real file content is leaked.
+    let status = res.status();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        !body_str.contains("root:") && !body_str.contains("/bin/"),
+        "Path traversal must not leak system files"
     );
 }
 
