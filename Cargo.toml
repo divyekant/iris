@@ -52,6 +52,10 @@ rand = "0.8"
 pulldown-cmark = "0.12"
 regex-lite = "0.1"
 
+# Rate limiting
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+governor = "0.10"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -11,6 +11,7 @@ pub mod ws;
 
 use axum::{middleware, routing::{delete, get, patch, post, put}, Router};
 use std::sync::Arc;
+use axum::http::header::HeaderValue;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -260,11 +261,18 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             api::session_auth::session_auth_middleware,
         ));
 
+    // Rate-limited protected API: 100 requests/min per session token
+    let rate_limited_api = protected_api.layer(api::rate_limit::rate_limit_layer());
+
     let api_routes = Router::new()
         .merge(public_api)
-        .merge(protected_api);
+        .merge(rate_limited_api);
 
     let spa = ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html"));
+
+    // Configurable CORS origins via IRIS_CORS_ORIGINS env var (comma-separated).
+    // Falls back to localhost dev origins if not set.
+    let cors_origins = build_cors_origins();
 
     Router::new()
         .route("/ws", get(ws::ws_handler))
@@ -273,14 +281,44 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .fallback_service(spa)
         .layer(
             CorsLayer::new()
-                .allow_origin(AllowOrigin::list([
-                    "http://localhost:3000".parse().unwrap(),
-                    "http://localhost:5173".parse().unwrap(),
-                    "http://127.0.0.1:3000".parse().unwrap(),
-                    "http://127.0.0.1:5173".parse().unwrap(),
-                ]))
+                .allow_origin(cors_origins)
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
         .with_state(state)
+}
+
+/// Build CORS allowed origins from the IRIS_CORS_ORIGINS env var.
+/// Accepts a comma-separated list of origins (e.g. "http://localhost:3000,https://app.example.com").
+/// Falls back to default dev origins if the env var is unset or empty.
+fn build_cors_origins() -> AllowOrigin {
+    let default_origins = "http://localhost:1420,http://localhost:5173";
+
+    let raw = std::env::var("IRIS_CORS_ORIGINS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default_origins.to_string());
+
+    let origins: Vec<HeaderValue> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            s.parse::<HeaderValue>().ok().or_else(|| {
+                tracing::warn!("Invalid CORS origin, skipping: {}", s);
+                None
+            })
+        })
+        .collect();
+
+    if origins.is_empty() {
+        tracing::warn!("No valid CORS origins configured, falling back to defaults");
+        AllowOrigin::list([
+            default_origins.split(',').next().unwrap().parse().unwrap(),
+            default_origins.split(',').nth(1).unwrap().parse().unwrap(),
+        ])
+    } else {
+        tracing::info!("CORS origins: {:?}", origins);
+        AllowOrigin::list(origins)
+    }
 }
