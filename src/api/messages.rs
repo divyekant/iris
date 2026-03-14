@@ -2,6 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use crate::api::trust;
@@ -14,6 +15,66 @@ pub struct UnsubscribeResponse {
     pub success: bool,
     pub method: String,
     pub url: Option<String>,
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(addr) => {
+            !addr.is_private()
+                && !addr.is_loopback()
+                && !addr.is_link_local()
+                && !addr.is_documentation()
+                && !addr.is_multicast()
+                && !addr.is_unspecified()
+                && addr != Ipv4Addr::BROADCAST
+                && addr.octets()[0] != 0
+        }
+        IpAddr::V6(addr) => {
+            !addr.is_loopback()
+                && !addr.is_unspecified()
+                && !addr.is_multicast()
+                && !addr.is_unique_local()
+                && !addr.is_unicast_link_local()
+        }
+    }
+}
+
+async fn validate_public_unsubscribe_url(raw_url: &str) -> Result<reqwest::Url, StatusCode> {
+    let url = reqwest::Url::parse(raw_url).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if url.scheme() != "https" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let host = url.host_str().ok_or(StatusCode::BAD_REQUEST)?;
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".local") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !is_public_ip(ip) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        return Ok(url);
+    }
+
+    let port = url.port_or_known_default().ok_or(StatusCode::BAD_REQUEST)?;
+    let mut resolved_any = false;
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    for addr in addrs {
+        resolved_any = true;
+        if !is_public_ip(addr.ip()) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    if !resolved_any {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    Ok(url)
 }
 
 pub async fn unsubscribe(
@@ -40,10 +101,14 @@ pub async fn unsubscribe(
     }
 
     if url.starts_with("http") && has_post {
+        let safe_url = validate_public_unsubscribe_url(&url).await?;
         // RFC 8058: Send POST request with List-Unsubscribe=One-Click
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
         let resp = client
-            .post(&url)
+            .post(safe_url.clone())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body("List-Unsubscribe=One-Click")
             .send()
@@ -53,14 +118,15 @@ pub async fn unsubscribe(
         Ok(Json(UnsubscribeResponse {
             success: resp.status().is_success(),
             method: "one-click".to_string(),
-            url: Some(url),
+            url: Some(safe_url.to_string()),
         }))
     } else if url.starts_with("http") {
+        let safe_url = validate_public_unsubscribe_url(&url).await?;
         // Return the URL for the frontend to open in a new tab
         Ok(Json(UnsubscribeResponse {
             success: true,
             method: "url".to_string(),
-            url: Some(url),
+            url: Some(safe_url.to_string()),
         }))
     } else if url.starts_with("mailto:") {
         // Return mailto URL for frontend to handle

@@ -868,6 +868,44 @@ pub async fn agent_send(
         )
     })?;
 
+    if api_key.permission == "send_with_approval" {
+        let to_json = serde_json::to_string(&req.to).ok();
+        let cc_json = (!req.cc.is_empty())
+            .then(|| serde_json::to_string(&req.cc).ok())
+            .flatten();
+        let bcc_json = (!req.bcc.is_empty())
+            .then(|| serde_json::to_string(&req.bcc).ok())
+            .flatten();
+
+        let draft_id = message::save_draft(
+            &conn,
+            None,
+            &req.account_id,
+            to_json.as_deref(),
+            cc_json.as_deref(),
+            bcc_json.as_deref(),
+            Some(&req.subject),
+            &req.body_text,
+            req.body_html.as_deref(),
+        );
+
+        log_audit(
+            &conn,
+            &api_key.id,
+            "send",
+            Some("message"),
+            Some(&draft_id),
+            Some("saved as draft pending approval"),
+            "success",
+        );
+
+        return Ok(Json(serde_json::json!({
+            "sent": false,
+            "requires_approval": true,
+            "draft_id": draft_id,
+        })));
+    }
+
     // Refresh OAuth token if needed
     let access_token = ensure_fresh_token(&state.db, &account, &state.config)
         .await

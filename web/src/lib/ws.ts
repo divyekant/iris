@@ -1,5 +1,3 @@
-import { getSessionToken } from './api';
-
 type WsEventHandler = (event: WsEvent) => void;
 
 interface WsEvent {
@@ -14,9 +12,8 @@ class WebSocketClient {
 
   private buildUrl(): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const token = getSessionToken();
     const base = `${protocol}//${window.location.host}/ws`;
-    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    return base;
   }
 
   connect() {

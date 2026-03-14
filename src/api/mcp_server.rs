@@ -676,6 +676,25 @@ pub async fn initialize(
         )
     })?;
 
+    let account_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM accounts WHERE id = ?1 AND is_active = 1",
+            params![req.account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "database error"})),
+            )
+        })?;
+    if account_exists == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "account not found"})),
+        ));
+    }
+
     let session_id = generate_session_id();
     let capabilities = req.capabilities.unwrap_or_default();
 

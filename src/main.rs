@@ -80,13 +80,13 @@ async fn main() {
         ai::provider::ProviderPool::new(providers)
     };
 
-    // Generate a random session token for this server instance
+    // Generate a random session secret for this server instance.
     let session_token: String = (0..32)
         .map(|_| format!("{:02x}", rand::random::<u8>()))
         .collect();
-    tracing::info!("Session token generated (use /api/auth/bootstrap to retrieve)");
+    tracing::info!("Session cookie secret generated");
 
-    // Optionally write token to file for Docker/script integration
+    // Optionally write the session secret to a file for trusted local scripts.
     if let Ok(path) = std::env::var("SESSION_TOKEN_FILE") {
         if let Err(e) = std::fs::write(&path, &session_token) {
             tracing::warn!("Failed to write session token to {}: {}", path, e);

@@ -93,6 +93,7 @@ async fn bootstrap_returns_token_for_same_origin() {
         .oneshot(
             Request::get("/api/auth/bootstrap")
                 .header("sec-fetch-site", "same-origin")
+                .header("host", "localhost:3000")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -100,8 +101,15 @@ async fn bootstrap_returns_token_for_same_origin() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(set_cookie.contains("iris_session="));
+    assert!(set_cookie.contains("HttpOnly"));
     let json = body_to_json(res.into_body()).await;
-    assert_eq!(json["token"], TEST_TOKEN);
+    assert_eq!(json["authenticated"], true);
 }
 
 #[tokio::test]

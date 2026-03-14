@@ -7,13 +7,8 @@ use tower_governor::{
     GovernorLayer,
 };
 
-use super::session_auth::SESSION_TOKEN_HEADER;
-
-/// Extracts the session token from the X-Session-Token header for per-session rate limiting.
-///
-/// If the header is missing (e.g. unauthenticated request), falls back to a shared
-/// "anonymous" bucket so unauthenticated requests are still rate-limited collectively.
-/// The session auth middleware will reject them independently.
+/// Extracts the session token from either the legacy header or the new session cookie
+/// for per-session rate limiting.
 #[derive(Clone, Debug)]
 pub struct SessionTokenKeyExtractor;
 
@@ -21,11 +16,8 @@ impl KeyExtractor for SessionTokenKeyExtractor {
     type Key = String;
 
     fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
-        let key = req
-            .headers()
-            .get(SESSION_TOKEN_HEADER)
-            .and_then(|v: &http::HeaderValue| v.to_str().ok())
-            .map(|s: &str| s.to_owned())
+        let key = crate::api::session_auth::extract_session_token(req.headers())
+            .map(|(token, _)| token)
             .unwrap_or_else(|| "__anonymous__".to_owned());
         Ok(key)
     }

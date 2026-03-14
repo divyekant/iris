@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, getSessionToken } from '../../lib/api';
+  import { api } from '../../lib/api';
   import EmailBody from './EmailBody.svelte';
   import TrustBadge from '../TrustBadge.svelte';
   import ContactPopover from '../contacts/ContactPopover.svelte';
@@ -61,10 +61,9 @@
 
   function downloadAttachment(attachmentId: string) {
     const url = api.attachments.downloadUrl(attachmentId);
-    const token = getSessionToken();
-    // Use fetch + blob to pass session token
+    // Use fetch + blob so the browser sends the HttpOnly session cookie.
     fetch(url, {
-      headers: token ? { 'x-session-token': token } : {},
+      credentials: 'same-origin',
     })
       .then((res) => {
         if (!res.ok) throw new Error('Download failed');

@@ -183,6 +183,16 @@ async fn agentic_chat(
                 // Execute each tool call
                 let conn = db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 for call in &calls {
+                    if call.name == "bulk_update_emails" {
+                        let deferred = build_bulk_update_confirmation(&conn, call, text.as_deref());
+                        tool_records.push(ToolCallRecord {
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                            result_preview: "Deferred pending user confirmation".to_string(),
+                        });
+                        return Ok((deferred, all_citations, tool_records));
+                    }
+
                     let result = tools::execute_tool(&conn, Some(memories), &call.name, &call.arguments);
                     let result_json = match &result {
                         Ok(v) => serde_json::to_string(v).unwrap_or_default(),
@@ -273,6 +283,119 @@ async fn agentic_chat(
     match final_response {
         LlmResponse::Text(text) => Ok((text, all_citations, tool_records)),
         _ => Ok(("I apologize, I was unable to complete my analysis. Please try rephrasing your question.".to_string(), all_citations, tool_records)),
+    }
+}
+
+fn build_bulk_update_confirmation(
+    conn: &rusqlite::Connection,
+    call: &crate::ai::tools::ToolCall,
+    assistant_text: Option<&str>,
+) -> String {
+    let requested_ids: Vec<String> = call
+        .arguments
+        .get("message_ids")
+        .and_then(|v| v.as_array())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let resolved_ids: Vec<String> = requested_ids
+        .iter()
+        .filter_map(|id| crate::utils::resolve_message_id(conn, id))
+        .collect();
+
+    let sample_subjects = sample_subjects_for_ids(conn, &resolved_ids, 5);
+    let action = call
+        .arguments
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("update");
+    let category = call
+        .arguments
+        .get("category")
+        .and_then(|v| v.as_str());
+
+    let description = bulk_action_description(action, resolved_ids.len(), category);
+    let proposed_action = ProposedAction {
+        action: action.to_string(),
+        description,
+        message_ids: if resolved_ids.is_empty() {
+            requested_ids.clone()
+        } else {
+            resolved_ids.clone()
+        },
+        data: None,
+    };
+
+    let mut content = assistant_text.unwrap_or("").trim().to_string();
+    if content.is_empty() {
+        content = format!(
+            "I found {} email{} for this action.",
+            resolved_ids.len(),
+            if resolved_ids.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    if !sample_subjects.is_empty() {
+        let subject_list = sample_subjects
+            .iter()
+            .map(|subject| format!("- {}", subject))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        content.push_str("Here are a few of the affected messages:\n");
+        content.push_str(&subject_list);
+    }
+
+    if !content.to_lowercase().contains("confirm") {
+        if !content.is_empty() {
+            content.push_str("\n\n");
+        }
+        content.push_str("Review the proposed action below and confirm before anything is changed.");
+    }
+
+    let action_json = serde_json::to_string(&proposed_action).unwrap_or_else(|_| "{}".to_string());
+    format!("{content}\n\nACTION_PROPOSAL:{action_json}")
+}
+
+fn sample_subjects_for_ids(
+    conn: &rusqlite::Connection,
+    ids: &[String],
+    limit: usize,
+) -> Vec<String> {
+    ids.iter()
+        .take(limit)
+        .filter_map(|id| {
+            conn.query_row(
+                "SELECT subject FROM messages WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+        .collect()
+}
+
+fn bulk_action_description(action: &str, count: usize, category: Option<&str>) -> String {
+    match action {
+        "archive" => format!("Archive {count} email{}", if count == 1 { "" } else { "s" }),
+        "delete" | "trash" => format!("Move {count} email{} to Trash", if count == 1 { "" } else { "s" }),
+        "mark_read" => format!("Mark {count} email{} as read", if count == 1 { "" } else { "s" }),
+        "mark_unread" => format!("Mark {count} email{} as unread", if count == 1 { "" } else { "s" }),
+        "star" => format!("Star {count} email{}", if count == 1 { "" } else { "s" }),
+        "unstar" => format!("Remove stars from {count} email{}", if count == 1 { "" } else { "s" }),
+        "move_to_category" => format!(
+            "Move {count} email{} to {}",
+            if count == 1 { "" } else { "s" },
+            category.unwrap_or("primary")
+        ),
+        other => format!("Apply '{other}' to {count} email{}", if count == 1 { "" } else { "s" }),
     }
 }
 

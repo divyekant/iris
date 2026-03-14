@@ -68,7 +68,7 @@ for (const fontName of loadedFonts) {
   }
 }
 
-// Bootstrap session token, then mount the app
+// Bootstrap the HttpOnly session cookie, then mount the app.
 initSession()
   .then(() => {
     mount(App, { target: document.getElementById('app')! });

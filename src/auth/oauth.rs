@@ -1,10 +1,14 @@
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Redirect},
     Json,
 };
+use once_cell::sync::Lazy;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
     EndpointNotSet, EndpointSet, RedirectUrl, Scope, TokenResponse, TokenUrl,
@@ -13,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::account::CreateAccount;
 use crate::AppState;
+
+static PENDING_OAUTH_STATES: Lazy<Mutex<HashSet<String>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Fully-configured BasicClient with auth URL and token URL set.
 pub(crate) type ConfiguredClient = BasicClient<
@@ -129,6 +136,8 @@ pub enum OAuthError {
     UnsupportedProvider,
     #[error("missing config: {0}")]
     MissingConfig(&'static str),
+    #[error("invalid oauth state")]
+    InvalidState,
     #[error("token exchange failed: {0}")]
     TokenExchange(String),
     #[error("failed to fetch user info: {0}")]
@@ -142,6 +151,7 @@ impl IntoResponse for OAuthError {
         let status = match &self {
             OAuthError::UnsupportedProvider => axum::http::StatusCode::BAD_REQUEST,
             OAuthError::MissingConfig(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            OAuthError::InvalidState => axum::http::StatusCode::BAD_REQUEST,
             OAuthError::TokenExchange(_) => axum::http::StatusCode::BAD_GATEWAY,
             OAuthError::UserInfo(_) => axum::http::StatusCode::BAD_GATEWAY,
             OAuthError::Internal(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -171,6 +181,10 @@ pub async fn start_oauth(
     // Encode provider in the state parameter: "{provider}:{csrf_random}"
     let csrf_random = CsrfToken::new_random();
     let state_value = format!("{}:{}", provider, csrf_random.secret());
+    PENDING_OAUTH_STATES
+        .lock()
+        .map_err(|_| OAuthError::Internal("oauth state lock poisoned".to_string()))?
+        .insert(state_value.clone());
 
     let mut auth_request = client.authorize_url(|| CsrfToken::new(state_value));
 
@@ -222,6 +236,14 @@ pub async fn oauth_callback(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CallbackParams>,
 ) -> Result<impl IntoResponse, OAuthError> {
+    let valid_state = PENDING_OAUTH_STATES
+        .lock()
+        .map_err(|_| OAuthError::Internal("oauth state lock poisoned".to_string()))?
+        .remove(&params.state);
+    if !valid_state {
+        return Err(OAuthError::InvalidState);
+    }
+
     // Parse provider from state: "{provider}:{csrf_random}"
     let provider = params
         .state

@@ -3,30 +3,31 @@ pub mod hub;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        Query, State, WebSocketUpgrade,
+        State, WebSocketUpgrade,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::AppState;
 
-#[derive(Deserialize)]
-pub struct WsParams {
-    token: Option<String>,
-}
-
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    Query(params): Query<WsParams>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    match params.token.as_deref() {
-        Some(t) if t == state.session_token => {}
+    match crate::api::session_auth::extract_session_token(&headers) {
+        Some((token, transport)) if token == state.session_token => {
+            if transport == crate::api::session_auth::SessionTransport::Cookie
+                && !crate::api::session_auth::is_same_origin_browser_context(&headers)
+            {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
         _ => return Err(StatusCode::UNAUTHORIZED),
     }
+
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 

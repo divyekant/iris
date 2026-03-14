@@ -38,7 +38,7 @@
   const permissionOptions = [
     { value: 'read_only', label: 'Read Only' },
     { value: 'draft_only', label: 'Draft Only' },
-    { value: 'send_with_approval', label: 'Send w/ Approval' },
+    { value: 'send_with_approval', label: 'Draft for Approval' },
     { value: 'autonomous', label: 'Autonomous' },
   ];
 

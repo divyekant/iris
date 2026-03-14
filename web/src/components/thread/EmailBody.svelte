@@ -10,8 +10,8 @@
     // no allow-top-navigation) is the primary boundary. We strip <script>,
     // event handlers, and dangerous tags as defense-in-depth, but preserve
     // all CSS (<style>, @font-face, url(), class selectors) since email
-    // layout depends on it. DOMPurify's CSS sanitizer is too aggressive —
-    // it strips url() in @font-face, breaking marketing email layouts.
+    // layout depends on it. A CSP injected into the iframe blocks outbound
+    // network fetches by default, so preserving CSS no longer leaks opens.
     return raw
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<(iframe|object|embed|applet|form|input|textarea|select|button)[\s\S]*?<\/\1>/gi, '')
@@ -85,6 +85,39 @@
     return `<pre style="white-space:pre-wrap;word-wrap:break-word;font-family:inherit;">${escaped}</pre>`;
   }
 
+  function escapeAttribute(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function buildEmailCsp(allowRemoteImages: boolean): string {
+    const imgSrc = allowRemoteImages ? "img-src data: cid: https: http:;" : "img-src data: cid:;";
+    return [
+      "default-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-src 'none'",
+      "connect-src 'none'",
+      "media-src 'none'",
+      "object-src 'none'",
+      "script-src 'none'",
+      "style-src 'unsafe-inline'",
+      "font-src 'none'",
+      imgSrc,
+    ].join('; ');
+  }
+
+  function injectHeadPrelude(raw: string, prelude: string): string {
+    if (/<head[\s>]/i.test(raw)) {
+      return raw.replace(/<head([^>]*)>/i, `<head$1>${prelude}`);
+    }
+    if (/<html[\s>]/i.test(raw)) {
+      return raw.replace(/<html([^>]*)>/i, `<html$1><head>${prelude}</head>`);
+    }
+    return `<!DOCTYPE html><html><head>${prelude}</head><body>${raw}</body></html>`;
+  }
+
   $effect(() => {
     if (iframeEl) {
       const doc = iframeEl.contentDocument;
@@ -97,6 +130,8 @@
 
         let content: string;
         let newBlockedCount = 0;
+        const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(buildEmailCsp(showRemoteImages))}">`;
+        const headPrelude = `${cspMeta}${baseStyle}`;
 
         if (html) {
           const sanitized = sanitizeHtml(html);
@@ -110,11 +145,11 @@
             newBlockedCount = result.count;
           }
 
-          content = finalHtml.replace(/<head>/i, `<head>${baseStyle}`);
+          content = injectHeadPrelude(finalHtml, headPrelude);
         } else if (text) {
-          content = `<!DOCTYPE html><html><head>${baseStyle}</head><body>${getTextContent(text)}</body></html>`;
+          content = `<!DOCTYPE html><html><head>${headPrelude}</head><body>${getTextContent(text)}</body></html>`;
         } else {
-          content = `<!DOCTYPE html><html><head>${baseStyle}</head><body><p style="color:#999;">No content</p></body></html>`;
+          content = `<!DOCTYPE html><html><head>${headPrelude}</head><body><p style="color:#999;">No content</p></body></html>`;
         }
 
         blockedImageCount = newBlockedCount;

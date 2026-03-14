@@ -7,7 +7,7 @@
 > Host: localhost:3000
 > User-Agent: curl/8.7.1
 > Accept: */*
-> x-session-token: 5417a2450f82b510a74c6ce6faa9f60edf9a6b3e091f5977f41ecd3cca5d0ab4
+> x-session-token: REDACTED_SESSION_TOKEN
 > Content-Type: application/json
 > Content-Length: 64
 > 

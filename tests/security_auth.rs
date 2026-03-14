@@ -379,6 +379,64 @@ async fn agent_read_only_key_cannot_send() {
 }
 
 #[tokio::test]
+async fn agent_send_with_approval_creates_draft_instead_of_sending() {
+    let state = create_test_state();
+    let raw_key;
+    {
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email) VALUES ('acc1', 'imap', 'alice@example.com')",
+            [],
+        )
+        .unwrap();
+        let (key, _) = iris_server::api::agent::create_api_key(
+            &conn,
+            "Approval Agent",
+            "send_with_approval",
+            Some("acc1"),
+        )
+        .unwrap();
+        raw_key = key;
+    }
+
+    let app = build_app(state.clone());
+    let body = serde_json::json!({
+        "account_id": "acc1",
+        "to": ["victim@example.com"],
+        "subject": "Needs approval",
+        "body_text": "Hello from the agent"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/agent/send")
+                .header("x-session-token", TEST_TOKEN)
+                .header("authorization", format!("Bearer {}", raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = body_to_json(res.into_body()).await;
+    assert_eq!(json["sent"], false);
+    assert_eq!(json["requires_approval"], true);
+    let draft_id = json["draft_id"].as_str().unwrap();
+
+    let conn = state.db.get().unwrap();
+    let draft_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE id = ?1 AND is_draft = 1",
+            [draft_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(draft_exists, 1);
+}
+
+#[tokio::test]
 async fn agent_scoped_key_cannot_read_other_accounts_messages() {
     let state = create_test_state();
     let raw_key;
@@ -482,6 +540,7 @@ async fn bootstrap_accepts_same_origin() {
         .oneshot(
             Request::get("/api/auth/bootstrap")
                 .header("sec-fetch-site", "same-origin")
+                .header("host", "localhost:3000")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -489,8 +548,15 @@ async fn bootstrap_accepts_same_origin() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
+    let set_cookie = res
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(set_cookie.contains("iris_session="));
+    assert!(set_cookie.contains("HttpOnly"));
     let json = body_to_json(res.into_body()).await;
-    assert_eq!(json["token"], TEST_TOKEN);
+    assert_eq!(json["authenticated"], true);
 }
 
 #[tokio::test]
@@ -513,7 +579,7 @@ async fn bootstrap_accepts_none_fetch_site() {
 }
 
 #[tokio::test]
-async fn bootstrap_accepts_same_site() {
+async fn bootstrap_rejects_same_site() {
     let state = create_test_state();
     let app = build_app(state);
 
@@ -527,7 +593,68 @@ async fn bootstrap_accepts_same_site() {
         .await
         .unwrap();
 
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn cookie_auth_rejects_mutation_without_browser_context() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = serde_json::json!({ "ids": ["msg1"], "action": "mark_read" });
+    let res = app
+        .oneshot(
+            Request::patch("/api/messages/batch")
+                .header("cookie", format!("iris_session={}", TEST_TOKEN))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn cookie_auth_allows_mutation_for_same_origin_browser_context() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = serde_json::json!({ "ids": [], "action": "mark_read" });
+    let res = app
+        .oneshot(
+            Request::patch("/api/messages/batch")
+                .header("cookie", format!("iris_session={}", TEST_TOKEN))
+                .header("sec-fetch-site", "same-origin")
+                .header("host", "localhost:3000")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn oauth_callback_rejects_unknown_state() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(
+            Request::get("/auth/callback?code=test-code&state=gmail:forged-state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let json = body_to_json(res.into_body()).await;
+    assert_eq!(json["error"], "invalid oauth state");
 }
 
 // =========================================================================
@@ -553,7 +680,6 @@ async fn attachment_download_rejects_nonexistent_id() {
     // as valid route parameters. The result is either 404 or the path
     // gets normalized and doesn't find a matching record (returning 200
     // with empty/error body). Either way, no real file content is leaked.
-    let status = res.status();
     let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
         .await
         .unwrap_or_default();
@@ -667,6 +793,38 @@ async fn batch_update_rejects_invalid_action() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn unsubscribe_rejects_private_https_targets() {
+    let state = create_test_state();
+    {
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email) VALUES ('acc1', 'imap', 'alice@example.com')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, account_id, folder, from_address, subject, date, is_read, list_unsubscribe, list_unsubscribe_post)
+             VALUES ('msg-ssrf', 'acc1', 'INBOX', 'x@y.com', 'Unsafe', 1710000000, 0, 'https://127.0.0.1/unsubscribe', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let app = build_app(state);
+    let res = app
+        .oneshot(
+            Request::post("/api/messages/msg-ssrf/unsubscribe")
+                .header("x-session-token", TEST_TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 // =========================================================================

@@ -10,10 +10,17 @@ pub mod smtp;
 pub mod utils;
 pub mod ws;
 
-use axum::{middleware, routing::{delete, get, patch, post, put}, Router};
+use axum::{
+    http::{
+        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ORIGIN},
+        HeaderName, HeaderValue, Method,
+    },
+    middleware,
+    routing::{delete, get, patch, post, put},
+    Router,
+};
 use std::sync::Arc;
-use axum::http::header::HeaderValue;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 pub struct AppState {
@@ -284,8 +291,23 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .layer(
             CorsLayer::new()
                 .allow_origin(cors_origins)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_credentials(true)
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::PATCH,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers([
+                    ACCEPT,
+                    AUTHORIZATION,
+                    CONTENT_TYPE,
+                    ORIGIN,
+                    HeaderName::from_static("sec-fetch-site"),
+                    HeaderName::from_static("x-session-token"),
+                ]),
         )
         .with_state(state)
 }
