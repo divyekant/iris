@@ -1,5 +1,7 @@
 <script lang="ts">
   import { api } from '../../lib/api';
+  import FormInput from '../shared/FormInput.svelte';
+  import FormToggle from '../shared/FormToggle.svelte';
 
   // AI settings
   let aiOllamaUrl = $state('');
@@ -26,7 +28,7 @@
 
   // Priority decay settings
   let decayEnabled = $state(true);
-  let decayThresholdDays = $state(7);
+  let decayThresholdDays = $state('7');
   let decaySaving = $state(false);
 
   // Provider API keys (masked display)
@@ -34,6 +36,10 @@
   let anthropicModel = $state('');
   let openaiKey = $state('');
   let openaiModel = $state('');
+
+  // Track initialization to avoid firing effects on load
+  let aiInitialized = $state(false);
+  let decayInitialized = $state(false);
 
   async function testAiConnection() {
     aiTesting = true;
@@ -111,20 +117,23 @@
     }
   }
 
-  async function toggleAi() {
-    aiEnabled = !aiEnabled;
-    await saveAiConfig();
-  }
+  // Watch aiEnabled toggle changes (after initialization)
+  $effect(() => {
+    const val = aiEnabled;
+    if (aiInitialized) {
+      saveAiConfig();
+    }
+  });
 
   async function saveDecayConfig() {
     decaySaving = true;
     try {
       const result = await api.ai.setConfig({
         decay_enabled: decayEnabled,
-        decay_threshold_days: decayThresholdDays,
+        decay_threshold_days: parseInt(decayThresholdDays),
       });
       decayEnabled = result.decay_enabled;
-      decayThresholdDays = result.decay_threshold_days;
+      decayThresholdDays = String(result.decay_threshold_days);
     } catch {
       // Silently fail
     } finally {
@@ -132,10 +141,13 @@
     }
   }
 
-  async function toggleDecay() {
-    decayEnabled = !decayEnabled;
-    await saveDecayConfig();
-  }
+  // Watch decayEnabled toggle changes (after initialization)
+  $effect(() => {
+    const val = decayEnabled;
+    if (decayInitialized) {
+      saveDecayConfig();
+    }
+  });
 
   async function reprocessUntagged() {
     reprocessing = true;
@@ -181,10 +193,13 @@
         memoriesConnected = aiConfig.memories_connected;
         memoriesKey = '';
         decayEnabled = aiConfig.decay_enabled ?? true;
-        decayThresholdDays = aiConfig.decay_threshold_days ?? 7;
+        decayThresholdDays = String(aiConfig.decay_threshold_days ?? 7);
       } catch {
         // AI config not available
       }
+      // Mark as initialized after load so effects don't fire during setup
+      aiInitialized = true;
+      decayInitialized = true;
     }
     loadSettings();
   });
@@ -196,20 +211,11 @@
     <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">AI Processing</h3>
     <div class="space-y-4">
       <!-- Enable/disable toggle -->
-      <div class="flex items-center justify-between">
-        <div>
-          <p class="text-sm font-medium" style="color: var(--iris-color-text);">Enable AI classification</p>
-          <p class="text-xs" style="color: var(--iris-color-text-faint);">Classify and summarize emails using AI providers</p>
-        </div>
-        <button
-          class="relative w-11 h-6 rounded-full transition-colors"
-          style="background: {aiEnabled ? 'var(--iris-color-primary)' : 'var(--iris-color-border-subtle)'};"
-          onclick={toggleAi}
-          aria-label="Toggle AI classification"
-        >
-          <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full shadow transition-transform {aiEnabled ? 'translate-x-5' : ''}" style="background: var(--iris-color-text);"></span>
-        </button>
-      </div>
+      <FormToggle
+        label="Enable AI classification"
+        description="Classify and summarize emails using AI providers"
+        bind:checked={aiEnabled}
+      />
 
       <!-- Provider Status -->
       {#if aiProviders.length > 0}
@@ -230,40 +236,34 @@
       <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
         <p class="text-sm font-medium mb-0.5" style="color: var(--iris-color-text);">Anthropic</p>
         <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">API key (sk-ant-api03-...) or OAuth token (sk-ant-oat01-...)</p>
-        <input
-          type="password"
-          bind:value={anthropicKey}
-          placeholder="Paste Anthropic API key or OAuth token"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        />
-        <input
-          type="text"
-          bind:value={anthropicModel}
-          placeholder="Model (default: claude-haiku-4-5-20251001)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        />
+        <div class="space-y-2">
+          <FormInput
+            type="password"
+            bind:value={anthropicKey}
+            placeholder="Paste Anthropic API key or OAuth token"
+          />
+          <FormInput
+            bind:value={anthropicModel}
+            placeholder="Model (default: claude-haiku-4-5-20251001)"
+          />
+        </div>
       </div>
 
       <!-- OpenAI -->
       <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
         <p class="text-sm font-medium mb-0.5" style="color: var(--iris-color-text);">OpenAI</p>
         <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">API key (sk-...) or ChatGPT subscription token</p>
-        <input
-          type="password"
-          bind:value={openaiKey}
-          placeholder="Paste OpenAI API key or ChatGPT token"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        />
-        <input
-          type="text"
-          bind:value={openaiModel}
-          placeholder="Model (default: gpt-4o-mini)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        />
+        <div class="space-y-2">
+          <FormInput
+            type="password"
+            bind:value={openaiKey}
+            placeholder="Paste OpenAI API key or ChatGPT token"
+          />
+          <FormInput
+            bind:value={openaiModel}
+            placeholder="Model (default: gpt-4o-mini)"
+          />
+        </div>
       </div>
 
       <!-- Ollama -->
@@ -271,20 +271,18 @@
         <p class="text-sm font-medium mb-0.5" style="color: var(--iris-color-text);">Ollama (local)</p>
         <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">Free local AI — requires Ollama running on your machine</p>
         <div class="flex gap-2">
-          <input
-            type="text"
-            bind:value={aiOllamaUrl}
-            placeholder="http://localhost:11434"
-            class="settings-input flex-1 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-          />
-          <input
-            type="text"
-            bind:value={aiModel}
-            placeholder="e.g. llama3.2:3b"
-            class="settings-input w-40 px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-            style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-          />
+          <div class="flex-1">
+            <FormInput
+              bind:value={aiOllamaUrl}
+              placeholder="http://localhost:11434"
+            />
+          </div>
+          <div class="w-40">
+            <FormInput
+              bind:value={aiModel}
+              placeholder="e.g. llama3.2:3b"
+            />
+          </div>
         </div>
       </div>
 
@@ -350,21 +348,18 @@
           </div>
         </div>
         <p class="text-xs mb-2" style="color: var(--iris-color-text-faint);">Vector-based search for meaning, not just keywords</p>
-        <input
-          type="text"
-          bind:value={memoriesUrl}
-          placeholder="http://localhost:8900"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        />
-        <input
-          type="password"
-          bind:value={memoriesKey}
-          placeholder="API key (optional)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm mb-2 focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        />
-        <div class="flex items-center gap-2">
+        <div class="space-y-2">
+          <FormInput
+            bind:value={memoriesUrl}
+            placeholder="http://localhost:8900"
+          />
+          <FormInput
+            type="password"
+            bind:value={memoriesKey}
+            placeholder="API key (optional)"
+          />
+        </div>
+        <div class="flex items-center gap-2 mt-2">
           <button
             class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
             style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
@@ -389,30 +384,21 @@
 
       <!-- Priority Decay -->
       <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
-        <div class="flex items-center justify-between mb-0.5">
-          <p class="text-sm font-medium" style="color: var(--iris-color-text);">Priority Decay</p>
-          <button
-            class="relative w-11 h-6 rounded-full transition-colors"
-            style="background: {decayEnabled ? 'var(--iris-color-primary)' : 'var(--iris-color-border-subtle)'};"
-            onclick={toggleDecay}
-            aria-label="Toggle priority decay"
-          >
-            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full shadow transition-transform {decayEnabled ? 'translate-x-5' : ''}" style="background: var(--iris-color-text);"></span>
-          </button>
-        </div>
-        <p class="text-xs mb-3" style="color: var(--iris-color-text-faint);">Automatically reduce priority of inactive threads over time</p>
+        <FormToggle
+          label="Priority Decay"
+          description="Automatically reduce priority of inactive threads over time"
+          bind:checked={decayEnabled}
+        />
         {#if decayEnabled}
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 mt-3">
             <label for="decay-days" class="text-xs" style="color: var(--iris-color-text-muted);">Decay after</label>
-            <input
-              id="decay-days"
-              type="number"
-              min="1"
-              max="90"
-              bind:value={decayThresholdDays}
-              class="settings-input w-16 px-2 py-1.5 rounded-lg border text-sm text-center focus:outline-none focus:ring-2"
-              style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-            />
+            <div class="w-16">
+              <FormInput
+                name="decay-days"
+                type="number"
+                bind:value={decayThresholdDays}
+              />
+            </div>
             <span class="text-xs" style="color: var(--iris-color-text-muted);">days of inactivity</span>
             <button
               class="settings-btn-primary ml-auto px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
@@ -436,9 +422,5 @@
 
   .settings-btn-secondary:hover:not(:disabled) {
     background: var(--iris-color-bg-surface);
-  }
-
-  .settings-input::placeholder {
-    color: var(--iris-color-text-faint);
   }
 </style>

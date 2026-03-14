@@ -1,5 +1,8 @@
 <script lang="ts">
   import { api } from '../../lib/api';
+  import FormInput from '../shared/FormInput.svelte';
+  import FormSelect from '../shared/FormSelect.svelte';
+  import FormToggle from '../shared/FormToggle.svelte';
 
   let { accounts = $bindable([]) }: { accounts: any[] } = $props();
 
@@ -40,6 +43,9 @@
   let aliasEditDisplayName = $state('');
   let aliasEditReplyTo = $state('');
   let aliasEditDefault = $state(false);
+
+  // Derived account options for FormSelect
+  let accountOptions = $derived(accounts.map((a: any) => ({ value: a.id, label: a.email })));
 
   // Templates functions
   async function loadTemplates() {
@@ -222,15 +228,35 @@
     } catch { /* silently fail */ }
   }
 
+  // Watch sigAccountId changes to reload signatures
+  let prevSigAccountId = $state('');
+  $effect(() => {
+    if (sigAccountId && sigAccountId !== prevSigAccountId) {
+      prevSigAccountId = sigAccountId;
+      loadSignatures();
+    }
+  });
+
+  // Watch aliasAccountId changes to reload aliases
+  let prevAliasAccountId = $state('');
+  $effect(() => {
+    if (aliasAccountId && aliasAccountId !== prevAliasAccountId) {
+      prevAliasAccountId = aliasAccountId;
+      loadAliases();
+    }
+  });
+
   // Load data on mount
   $effect(() => {
     async function loadData() {
       if (accounts.length > 0 && !sigAccountId) {
         sigAccountId = accounts[0].id;
+        prevSigAccountId = sigAccountId;
         await loadSignatures();
       }
       if (accounts.length > 0 && !aliasAccountId) {
         aliasAccountId = accounts[0].id;
+        prevAliasAccountId = aliasAccountId;
       }
       await loadTemplates();
       await loadAliases();
@@ -248,16 +274,10 @@
     <!-- Account picker -->
     {#if accounts.length > 1}
       <div class="mb-4">
-        <select
+        <FormSelect
           bind:value={sigAccountId}
-          onchange={() => loadSignatures()}
-          class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
-        >
-          {#each accounts as acct}
-            <option value={acct.id}>{acct.email}</option>
-          {/each}
-        </select>
+          options={accountOptions}
+        />
       </div>
     {:else if accounts.length === 1}
       <p class="text-xs mb-4" style="color: var(--iris-color-text-muted);">Account: {accounts[0].email}</p>
@@ -271,12 +291,9 @@
             {#if sigEditing === sig.id}
               <!-- Edit mode -->
               <div class="space-y-2">
-                <input
-                  type="text"
+                <FormInput
                   bind:value={sigEditName}
                   placeholder="Signature name"
-                  class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
                 />
                 <textarea
                   bind:value={sigEditText}
@@ -286,10 +303,7 @@
                   style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
                 ></textarea>
                 <div class="flex items-center gap-3">
-                  <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
-                    <input type="checkbox" bind:checked={sigEditDefault} class="rounded" />
-                    Default
-                  </label>
+                  <FormToggle label="Default" bind:checked={sigEditDefault} />
                   <span class="flex-1"></span>
                   <button
                     class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
@@ -340,12 +354,9 @@
     <!-- Add new signature -->
     {#if sigShowNew}
       <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
-        <input
-          type="text"
+        <FormInput
           bind:value={sigNewName}
           placeholder="Signature name (e.g., Work, Personal)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
         />
         <textarea
           bind:value={sigNewText}
@@ -355,10 +366,7 @@
           style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
         ></textarea>
         <div class="flex items-center gap-3">
-          <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
-            <input type="checkbox" bind:checked={sigNewDefault} class="rounded" />
-            Set as default
-          </label>
+          <FormToggle label="Set as default" bind:checked={sigNewDefault} />
           <span class="flex-1"></span>
           <button
             class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
@@ -393,19 +401,13 @@
     {#if editingTemplateId}
       <div class="p-3 rounded-lg border mb-4" style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface);">
         <div class="space-y-2">
-          <input
-            type="text"
+          <FormInput
             bind:value={templateName}
             placeholder="Template name"
-            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-            style="border-color: var(--iris-color-border); background: var(--iris-color-bg); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
           />
-          <input
-            type="text"
+          <FormInput
             bind:value={templateSubject}
             placeholder="Subject (optional)"
-            class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-            style="border-color: var(--iris-color-border); background: var(--iris-color-bg); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);"
           />
           <textarea
             bind:value={templateBody}
@@ -484,14 +486,10 @@
     <!-- Account picker -->
     {#if accounts.length > 1}
       <div class="mb-4">
-        <select bind:value={aliasAccountId}
-          onchange={() => loadAliases()}
-          class="settings-input px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);">
-          {#each accounts as acct}
-            <option value={acct.id}>{acct.email}</option>
-          {/each}
-        </select>
+        <FormSelect
+          bind:value={aliasAccountId}
+          options={accountOptions}
+        />
       </div>
     {:else if accounts.length === 1}
       <p class="text-xs mb-4" style="color: var(--iris-color-text-muted);">Account: {accounts[0].email}</p>
@@ -505,19 +503,11 @@
             {#if aliasEditing === a.id}
               <!-- Edit mode -->
               <div class="space-y-2">
-                <input type="email" bind:value={aliasEditEmail} placeholder="Email address"
-                  class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
-                <input type="text" bind:value={aliasEditDisplayName} placeholder="Display name (e.g., John Doe)"
-                  class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
-                <input type="email" bind:value={aliasEditReplyTo} placeholder="Reply-to address (optional, defaults to alias email)"
-                  class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-                  style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+                <FormInput type="email" bind:value={aliasEditEmail} placeholder="Email address" />
+                <FormInput bind:value={aliasEditDisplayName} placeholder="Display name (e.g., John Doe)" />
+                <FormInput type="email" bind:value={aliasEditReplyTo} placeholder="Reply-to address (optional, defaults to alias email)" />
                 <div class="flex items-center gap-3">
-                  <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
-                    <input type="checkbox" bind:checked={aliasEditDefault} class="rounded" /> Default
-                  </label>
+                  <FormToggle label="Default" bind:checked={aliasEditDefault} />
                   <span class="flex-1"></span>
                   <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
                     style="border-color: var(--iris-color-border); color: var(--iris-color-text);" onclick={cancelEditAlias}>Cancel</button>
@@ -562,19 +552,11 @@
     <!-- Add new alias -->
     {#if aliasShowNew}
       <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
-        <input type="email" bind:value={aliasNewEmail} placeholder="Email address (e.g., support@myproduct.io)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
-        <input type="text" bind:value={aliasNewDisplayName} placeholder="Display name (e.g., Support Team)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
-        <input type="email" bind:value={aliasNewReplyTo} placeholder="Reply-to address (optional)"
-          class="settings-input w-full px-3 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2"
-          style="border-color: var(--iris-color-border); background: var(--iris-color-bg-surface); color: var(--iris-color-text); --tw-ring-color: var(--iris-color-primary);" />
+        <FormInput type="email" bind:value={aliasNewEmail} placeholder="Email address (e.g., support@myproduct.io)" />
+        <FormInput bind:value={aliasNewDisplayName} placeholder="Display name (e.g., Support Team)" />
+        <FormInput type="email" bind:value={aliasNewReplyTo} placeholder="Reply-to address (optional)" />
         <div class="flex items-center gap-3">
-          <label class="flex items-center gap-2 text-sm cursor-pointer" style="color: var(--iris-color-text);">
-            <input type="checkbox" bind:checked={aliasNewDefault} class="rounded" /> Set as default
-          </label>
+          <FormToggle label="Set as default" bind:checked={aliasNewDefault} />
           <span class="flex-1"></span>
           <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
             style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
