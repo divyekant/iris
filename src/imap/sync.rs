@@ -5,6 +5,7 @@ use crate::db::DbPool;
 use crate::imap::connection::{connect, ImapCredentials};
 use crate::jobs::queue::{self, MemoriesStorePayload};
 use crate::models::account::Account;
+use crate::models::blocked_sender::BlockedSender;
 use crate::models::message::{AttachmentMeta, InsertMessage};
 use crate::ws::hub::{WsEvent, WsHub};
 
@@ -108,57 +109,83 @@ impl SyncEngine {
 
                 // Only process newly inserted messages (skip duplicates)
                 if let Some(ref msg_id) = msg_id {
-                    // Store attachment data in the attachments table
-                    if !extracted_attachments.is_empty() {
+                    // Check if the sender is blocked — auto-move to Spam
+                    let sender_blocked = {
                         let conn = self.db.get()?;
-                        for att in &extracted_attachments {
-                            let att_id = uuid::Uuid::new_v4().to_string();
-                            let _ = conn.execute(
-                                "INSERT INTO attachments (id, message_id, filename, content_type, size, content_id, data)
-                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                                rusqlite::params![
-                                    att_id,
-                                    msg_id,
-                                    att.filename,
-                                    att.content_type,
-                                    att.size as i64,
-                                    att.content_id,
-                                    att.data,
-                                ],
+                        insert_msg
+                            .from_address
+                            .as_deref()
+                            .map(|addr| BlockedSender::is_blocked(&conn, addr))
+                            .unwrap_or(false)
+                    };
+
+                    if sender_blocked {
+                        let conn = self.db.get()?;
+                        conn.execute(
+                            "UPDATE messages SET folder = 'Spam', updated_at = unixepoch() WHERE id = ?1",
+                            rusqlite::params![msg_id],
+                        )
+                        .ok();
+                        tracing::info!(
+                            account_id,
+                            msg_id,
+                            from = ?insert_msg.from_address,
+                            "Blocked sender: auto-moved to Spam"
+                        );
+                        // Skip inbox broadcast and AI jobs for blocked messages
+                    } else {
+                        // Store attachment data in the attachments table
+                        if !extracted_attachments.is_empty() {
+                            let conn = self.db.get()?;
+                            for att in &extracted_attachments {
+                                let att_id = uuid::Uuid::new_v4().to_string();
+                                let _ = conn.execute(
+                                    "INSERT INTO attachments (id, message_id, filename, content_type, size, content_id, data)
+                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                                    rusqlite::params![
+                                        att_id,
+                                        msg_id,
+                                        att.filename,
+                                        att.content_type,
+                                        att.size as i64,
+                                        att.content_id,
+                                        att.data,
+                                    ],
+                                );
+                            }
+                        }
+                        // Broadcast new email event (only for INBOX)
+                        if *local_folder == "INBOX" {
+                            self.ws_hub.broadcast(WsEvent::NewEmail {
+                                account_id: account_id.to_string(),
+                                message_id: msg_id.clone(),
+                            });
+                        }
+
+                        // Enqueue AI classification and Memories storage jobs
+                        {
+                            let conn = self.db.get().unwrap();
+                            queue::enqueue_ai_classify(
+                                &conn,
+                                msg_id,
+                                &insert_msg.subject.clone().unwrap_or_default(),
+                                &insert_msg.from_address.clone().unwrap_or_default(),
+                                &insert_msg.body_text.clone().unwrap_or_default(),
+                            );
+                            queue::enqueue_memories_store(
+                                &conn,
+                                msg_id,
+                                &MemoriesStorePayload {
+                                    account_id: account_id.to_string(),
+                                    rfc_message_id: insert_msg.message_id.clone(),
+                                    from_name: insert_msg.from_name.clone(),
+                                    from_address: insert_msg.from_address.clone(),
+                                    subject: insert_msg.subject.clone(),
+                                    body_text: insert_msg.body_text.clone(),
+                                    date: insert_msg.date,
+                                },
                             );
                         }
-                    }
-                    // Broadcast new email event (only for INBOX)
-                    if *local_folder == "INBOX" {
-                        self.ws_hub.broadcast(WsEvent::NewEmail {
-                            account_id: account_id.to_string(),
-                            message_id: msg_id.clone(),
-                        });
-                    }
-
-                    // Enqueue AI classification and Memories storage jobs
-                    {
-                        let conn = self.db.get().unwrap();
-                        queue::enqueue_ai_classify(
-                            &conn,
-                            msg_id,
-                            &insert_msg.subject.clone().unwrap_or_default(),
-                            &insert_msg.from_address.clone().unwrap_or_default(),
-                            &insert_msg.body_text.clone().unwrap_or_default(),
-                        );
-                        queue::enqueue_memories_store(
-                            &conn,
-                            msg_id,
-                            &MemoriesStorePayload {
-                                account_id: account_id.to_string(),
-                                rfc_message_id: insert_msg.message_id.clone(),
-                                from_name: insert_msg.from_name.clone(),
-                                from_address: insert_msg.from_address.clone(),
-                                subject: insert_msg.subject.clone(),
-                                body_text: insert_msg.body_text.clone(),
-                                date: insert_msg.date,
-                            },
-                        );
                     }
                 }
 

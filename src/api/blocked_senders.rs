@@ -57,7 +57,7 @@ pub struct ReportSpamRequest {
 #[derive(Debug, Serialize)]
 pub struct ReportSpamResponse {
     pub updated: usize,
-    pub blocked_sender: Option<String>,
+    pub blocked_senders: Vec<String>,
 }
 
 /// POST /api/messages/report-spam — report messages as spam and optionally block sender
@@ -75,31 +75,37 @@ pub async fn report_spam(
     let id_refs: Vec<&str> = req.ids.iter().map(|s| s.as_str()).collect();
     let updated = message::batch_update(&conn, &id_refs, "spam");
 
-    // Optionally block the sender — look up from_address of the first message
-    let blocked_sender = if req.block_sender.unwrap_or(false) {
-        // Get the sender's email from the first message
-        let sender: Option<String> = req.ids.first().and_then(|id| {
-            conn.query_row(
-                "SELECT from_address FROM messages WHERE id = ?1",
-                rusqlite::params![id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten()
-        });
+    // Optionally block ALL senders from the batch
+    let blocked_senders = if req.block_sender.unwrap_or(false) {
+        let mut senders = Vec::new();
+        let mut seen = std::collections::HashSet::new();
 
-        if let Some(ref email) = sender {
-            BlockedSender::block(&conn, email, Some("Reported as spam"));
-            sender
-        } else {
-            None
+        for id in &req.ids {
+            let sender: Option<String> = conn
+                .query_row(
+                    "SELECT from_address FROM messages WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            if let Some(email) = sender {
+                let normalized = email.trim().to_lowercase();
+                if seen.insert(normalized.clone()) {
+                    BlockedSender::block(&conn, &email, Some("Reported as spam"));
+                    senders.push(normalized);
+                }
+            }
         }
+
+        senders
     } else {
-        None
+        Vec::new()
     };
 
     Ok(Json(ReportSpamResponse {
         updated,
-        blocked_sender,
+        blocked_senders,
     }))
 }
