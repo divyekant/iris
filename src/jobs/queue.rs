@@ -191,13 +191,16 @@ pub fn claim_batch(conn: &Connection, limit: usize) -> Vec<Job> {
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
 
-    // Mark claimed jobs as 'processing'
-    for job in &jobs {
-        conn.execute(
-            "UPDATE processing_jobs SET status = 'processing', attempts = attempts + 1, updated_at = unixepoch() WHERE id = ?1",
-            rusqlite::params![job.id],
-        )
-        .ok();
+    // Mark claimed jobs as 'processing' in a single batch UPDATE
+    if !jobs.is_empty() {
+        let placeholders: Vec<String> = (1..=jobs.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "UPDATE processing_jobs SET status = 'processing', attempts = attempts + 1, updated_at = unixepoch() WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let ids: Vec<rusqlite::types::Value> = jobs.iter().map(|j| rusqlite::types::Value::Integer(j.id)).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|v| v as &dyn rusqlite::types::ToSql).collect();
+        conn.execute(&sql, params.as_slice()).ok();
     }
 
     jobs
@@ -269,32 +272,8 @@ pub fn fail_job(conn: &Connection, job_id: i64, job_type: &str, message_id: Opti
 // Status / cleanup
 // ---------------------------------------------------------------------------
 
-/// Get queue status counts.
+/// Get queue status counts — single table scan instead of 4 separate queries.
 pub fn get_queue_status(conn: &Connection) -> QueueStatus {
-    let pending: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM processing_jobs WHERE status = 'pending'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    let processing: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM processing_jobs WHERE status = 'processing'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    let failed: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM processing_jobs WHERE status = 'failed'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
     let today_start = chrono::Utc::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
@@ -302,13 +281,25 @@ pub fn get_queue_status(conn: &Connection) -> QueueStatus {
         .and_utc()
         .timestamp();
 
-    let done_today: i64 = conn
+    let (pending, processing, failed, done_today) = conn
         .query_row(
-            "SELECT COUNT(*) FROM processing_jobs WHERE status = 'done' AND updated_at >= ?1",
+            "SELECT \
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), \
+                SUM(CASE WHEN status = 'done' AND updated_at >= ?1 THEN 1 ELSE 0 END) \
+             FROM processing_jobs",
             rusqlite::params![today_start],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                ))
+            },
         )
-        .unwrap_or(0);
+        .unwrap_or((0, 0, 0, 0));
 
     QueueStatus {
         pending,

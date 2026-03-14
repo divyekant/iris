@@ -50,6 +50,7 @@ const MIGRATION_047: &str = include_str!("../../migrations/047_thread_clusters.s
 const MIGRATION_048: &str = include_str!("../../migrations/048_phishing_detection.sql");
 const MIGRATION_049: &str = include_str!("../../migrations/049_contact_profiles.sql");
 const MIGRATION_050: &str = include_str!("../../migrations/050_mcp_server.sql");
+const MIGRATION_051: &str = include_str!("../../migrations/051_performance_indexes.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -316,6 +317,11 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 50 {
         conn.execute_batch(MIGRATION_050)?;
         tracing::info!("Applied migration 050_mcp_server");
+    }
+
+    if current_version < 51 {
+        conn.execute_batch(MIGRATION_051)?;
+        tracing::info!("Applied migration 051_performance_indexes");
     }
 
     Ok(())

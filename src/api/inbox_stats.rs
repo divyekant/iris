@@ -37,42 +37,27 @@ pub fn compute_and_store(conn: &Connection, account_id: &str) -> Result<(), rusq
     let week_ago = today_midnight - 7 * 86400;
     let month_ago = today_midnight - 30 * 86400;
 
-    // Basic counts
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND is_draft = 0",
-        params![account_id],
-        |row| row.get(0),
-    )?;
-
-    let unread: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND is_draft = 0 AND is_read = 0",
-        params![account_id],
-        |row| row.get(0),
-    )?;
-
-    let starred: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND is_draft = 0 AND is_starred = 1",
-        params![account_id],
-        |row| row.get(0),
-    )?;
-
-    // Date range counts
-    let today_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND is_draft = 0 AND date >= ?2",
-        params![account_id, today_midnight],
-        |row| row.get(0),
-    )?;
-
-    let week_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND is_draft = 0 AND date >= ?2",
-        params![account_id, week_ago],
-        |row| row.get(0),
-    )?;
-
-    let month_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND is_draft = 0 AND date >= ?2",
-        params![account_id, month_ago],
-        |row| row.get(0),
+    // Consolidated counts — single table scan instead of 6 separate queries
+    let (total, unread, starred, today_count, week_count, month_count): (i64, i64, i64, i64, i64, i64) = conn.query_row(
+        "SELECT \
+            COUNT(*), \
+            SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END), \
+            SUM(CASE WHEN is_starred = 1 THEN 1 ELSE 0 END), \
+            SUM(CASE WHEN date >= ?2 THEN 1 ELSE 0 END), \
+            SUM(CASE WHEN date >= ?3 THEN 1 ELSE 0 END), \
+            SUM(CASE WHEN date >= ?4 THEN 1 ELSE 0 END) \
+         FROM messages WHERE account_id = ?1 AND is_draft = 0 AND is_deleted = 0",
+        params![account_id, today_midnight, week_ago, month_ago],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(5)?.unwrap_or(0),
+            ))
+        },
     )?;
 
     // by_category: GROUP BY category
