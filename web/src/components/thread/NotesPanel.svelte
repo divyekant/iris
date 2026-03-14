@@ -2,7 +2,7 @@
   import { api, type ThreadNote } from '../../lib/api';
   import { StickyNote, Plus, Pencil, Trash2, Check, X } from 'lucide-svelte';
 
-  let { threadId }: { threadId: string } = $props();
+  let { threadId, alwaysOpen = false }: { threadId: string; alwaysOpen?: boolean } = $props();
 
   let notes = $state<ThreadNote[]>([]);
   let loading = $state(true);
@@ -127,21 +127,23 @@
   });
 </script>
 
-<div class="notes-panel" style="border-bottom: 1px solid var(--iris-color-border);">
-  <button
-    class="notes-toggle px-4 py-2 w-full flex items-center gap-2 text-xs"
-    onclick={toggle}
-  >
-    <span class="text-[10px]">{open ? '\u25BE' : '\u25B8'}</span>
-    <StickyNote size={14} />
-    <span>Notes</span>
-    {#if notes.length > 0}
-      <span class="notes-badge">{notes.length}</span>
-    {/if}
-  </button>
+<div class="notes-panel" style={alwaysOpen ? '' : 'border-bottom: 1px solid var(--iris-color-border);'}>
+  {#if !alwaysOpen}
+    <button
+      class="notes-toggle px-4 py-2 w-full flex items-center gap-2 text-xs"
+      onclick={toggle}
+    >
+      <span class="text-[10px]">{open ? '\u25BE' : '\u25B8'}</span>
+      <StickyNote size={14} />
+      <span>Notes</span>
+      {#if notes.length > 0}
+        <span class="notes-badge">{notes.length}</span>
+      {/if}
+    </button>
+  {/if}
 
-  {#if open}
-    <div class="px-4 pb-3 space-y-2">
+  {#if open || alwaysOpen}
+    <div class="{alwaysOpen ? 'p-3' : 'px-4 pb-3'} space-y-2">
       {#if loading}
         <div class="flex items-center gap-2 py-2">
           <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
