@@ -5,7 +5,7 @@
   import RichTextEditor from './RichTextEditor.svelte';
   import MultiReplyPicker from './MultiReplyPicker.svelte';
   import DlpWarning from './DlpWarning.svelte';
-  import { Clock } from 'lucide-svelte';
+  import { Clock, Wand2, Sparkles, Check, AlertTriangle, Loader2 } from 'lucide-svelte';
 
   interface DlpScanResult {
     findings: { type: string; match: string; location: string; line: number }[];
@@ -87,6 +87,16 @@
 
   let aiAssisting = $state(false);
   let showAiMenu = $state(false);
+  let activeAiAction = $state<string | null>(null);
+
+  // AI side panel state — default open for new compose, closed for replies
+  const AI_PANEL_KEY = 'iris-compose-ai-panel';
+  function getInitialPanelState(): boolean {
+    const stored = localStorage.getItem(AI_PANEL_KEY);
+    if (stored !== null) return stored === 'true';
+    return context.mode === 'new';
+  }
+  let aiPanelOpen = $state(getInitialPanelState());
 
   // Undo send state
   let undoSendId = $state<string | null>(null);
@@ -211,6 +221,7 @@
     if (!body.trim()) return;
     showAiMenu = false;
     aiAssisting = true;
+    activeAiAction = action;
     error = '';
     try {
       const res = await api.ai.assist({ action, content: body });
@@ -221,6 +232,7 @@
       error = 'AI assist failed. Check AI settings.';
     } finally {
       aiAssisting = false;
+      activeAiAction = null;
     }
   }
 
@@ -330,6 +342,10 @@
 
   function dismissGrammarCheck() {
     grammarResult = null;
+  }
+
+  async function handleRunChecks() {
+    await handleGrammarCheck();
   }
 
   function scoreColor(score: number): string {
@@ -741,6 +757,11 @@
     }
   }
 
+  // Persist AI panel state
+  $effect(() => {
+    localStorage.setItem(AI_PANEL_KEY, String(aiPanelOpen));
+  });
+
   // Initialize fields on mount
   $effect(() => {
     initFields();
@@ -768,7 +789,7 @@
   aria-modal="true"
   onkeydown={handleKeydown}
 >
-  <div class="w-full sm:max-w-2xl sm:rounded-xl shadow-2xl flex flex-col max-h-[90vh]" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
+  <div class="w-full sm:rounded-xl shadow-2xl flex flex-col max-h-[90vh]" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border); max-width: {aiPanelOpen ? '56rem' : '42rem'}; transition: max-width var(--iris-transition-normal);">
     <!-- Header -->
     <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color: var(--iris-color-border);">
       <h3 class="font-semibold text-sm" style="color: var(--iris-color-text);">
@@ -784,9 +805,11 @@
       </button>
     </div>
 
-    <!-- Form -->
+    <!-- Form + AI Panel flex row -->
+    <div class="flex-1 flex flex-row min-h-0 overflow-hidden">
+    <!-- Main compose area -->
     <div
-      class="flex-1 overflow-y-auto px-4 py-3 space-y-2"
+      class="flex-1 overflow-y-auto px-4 py-3 space-y-2 min-w-0"
       class:drag-over={dragOver}
       ondragover={handleDragOver}
       ondragleave={handleDragLeave}
@@ -1105,6 +1128,145 @@
       {/if}
     </div>
 
+    <!-- AI Assist Side Panel -->
+    {#if aiPanelOpen}
+      <!-- Divider -->
+      <div class="shrink-0" style="width: 1px; background: var(--iris-color-border);"></div>
+
+      <!-- Side Panel -->
+      <div class="ai-side-panel shrink-0 overflow-y-auto py-3 px-3 space-y-4" style="width: 260px;">
+        <!-- Panel Header -->
+        <div class="flex items-center gap-2">
+          <Sparkles size={16} style="color: var(--iris-color-primary);" />
+          <span class="text-sm font-semibold" style="color: var(--iris-color-primary);">AI Assist</span>
+        </div>
+
+        <!-- REWRITE AS Section -->
+        <div class="space-y-2">
+          <span class="text-[10px] font-semibold uppercase tracking-wider" style="color: var(--iris-color-text-faint);">Rewrite as</span>
+          <button
+            class="ai-panel-card w-full text-left px-3 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+            style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);"
+            onclick={() => handleAiAssist('formal')}
+            disabled={aiAssisting || !body.trim() || !!undoSendId}
+          >
+            {#if activeAiAction === 'formal'}
+              <span class="flex items-center gap-2">
+                <Loader2 size={14} class="animate-spin" style="color: var(--iris-color-primary);" />
+                Rewriting...
+              </span>
+            {:else}
+              More Formal
+            {/if}
+          </button>
+          <button
+            class="ai-panel-card w-full text-left px-3 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+            style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);"
+            onclick={() => handleAiAssist('casual')}
+            disabled={aiAssisting || !body.trim() || !!undoSendId}
+          >
+            {#if activeAiAction === 'casual'}
+              <span class="flex items-center gap-2">
+                <Loader2 size={14} class="animate-spin" style="color: var(--iris-color-primary);" />
+                Rewriting...
+              </span>
+            {:else}
+              More Casual
+            {/if}
+          </button>
+          <button
+            class="ai-panel-card w-full text-left px-3 py-2 rounded-lg text-sm transition-colors disabled:opacity-50"
+            style="background: var(--iris-color-bg-surface); color: var(--iris-color-text);"
+            onclick={() => handleAiAssist('shorter')}
+            disabled={aiAssisting || !body.trim() || !!undoSendId}
+          >
+            {#if activeAiAction === 'shorter'}
+              <span class="flex items-center gap-2">
+                <Loader2 size={14} class="animate-spin" style="color: var(--iris-color-primary);" />
+                Rewriting...
+              </span>
+            {:else}
+              Shorter
+            {/if}
+          </button>
+        </div>
+
+        <!-- CHECKS Section -->
+        <div class="space-y-2">
+          <span class="text-[10px] font-semibold uppercase tracking-wider" style="color: var(--iris-color-text-faint);">Checks</span>
+
+          {#if grammarChecking}
+            <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+              <Loader2 size={14} class="animate-spin" style="color: var(--iris-color-primary);" />
+              <span class="text-xs" style="color: var(--iris-color-text-muted);">Running checks...</span>
+            </div>
+          {:else if grammarResult}
+            <!-- Grammar status -->
+            {#if grammarResult.issues.filter(i => i.kind === 'grammar' || i.kind === 'punctuation').length > 0}
+              <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+                <AlertTriangle size={14} style="color: var(--iris-color-warning);" />
+                <span class="text-xs" style="color: var(--iris-color-warning);">
+                  {grammarResult.issues.filter(i => i.kind === 'grammar' || i.kind === 'punctuation').length} grammar issue{grammarResult.issues.filter(i => i.kind === 'grammar' || i.kind === 'punctuation').length !== 1 ? 's' : ''}
+                </span>
+              </div>
+            {:else}
+              <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+                <Check size={14} style="color: var(--iris-color-success);" />
+                <span class="text-xs" style="color: var(--iris-color-success);">Grammar</span>
+              </div>
+            {/if}
+
+            <!-- Spelling status -->
+            {#if grammarResult.issues.filter(i => i.kind === 'spelling').length > 0}
+              <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+                <AlertTriangle size={14} style="color: var(--iris-color-warning);" />
+                <span class="text-xs" style="color: var(--iris-color-warning);">
+                  {grammarResult.issues.filter(i => i.kind === 'spelling').length} spelling issue{grammarResult.issues.filter(i => i.kind === 'spelling').length !== 1 ? 's' : ''}
+                </span>
+              </div>
+            {:else}
+              <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+                <Check size={14} style="color: var(--iris-color-success);" />
+                <span class="text-xs" style="color: var(--iris-color-success);">Spelling</span>
+              </div>
+            {/if}
+
+            <!-- Tone -->
+            <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+              <span class="text-xs" style="color: var(--iris-color-text-muted);">Tone: <strong style="color: var(--iris-color-text);">{grammarResult.tone}</strong></span>
+              <span class="ml-auto text-xs font-bold" style="color: {scoreColor(grammarResult.score)};">{grammarResult.score}</span>
+            </div>
+
+            <!-- Apply fixes button -->
+            {#if grammarResult.improved_content}
+              <button
+                class="w-full px-3 py-1.5 text-xs rounded-lg font-medium transition-colors"
+                style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                onclick={applyGrammarFixes}
+              >
+                Apply fixes
+              </button>
+            {/if}
+          {:else}
+            <!-- No checks run yet -->
+            <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--iris-color-bg-surface);">
+              <span class="text-xs" style="color: var(--iris-color-text-faint);">No checks run yet</span>
+            </div>
+          {/if}
+
+          <button
+            class="w-full px-3 py-1.5 text-xs rounded-lg font-medium transition-colors compose-secondary-btn"
+            style="color: var(--iris-color-text-muted); border: 1px solid var(--iris-color-border);"
+            onclick={handleRunChecks}
+            disabled={grammarChecking || !body.trim()}
+          >
+            {grammarChecking ? 'Checking...' : 'Run Checks'}
+          </button>
+        </div>
+      </div>
+    {/if}
+    </div><!-- end flex row -->
+
     <!-- Footer -->
     <div class="px-4 py-3 border-t flex items-center gap-2" style="border-color: var(--iris-color-border);">
       {#if scheduleConfirmation}
@@ -1223,35 +1385,22 @@
           {multiReplyLoading ? 'Generating...' : 'AI Reply Options'}
         </button>
       {/if}
-      <!-- AI Assist dropdown -->
-      <div class="relative">
-        <button
-          class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn"
-          style="color: var(--iris-color-text-muted);"
-          onclick={() => (showAiMenu = !showAiMenu)}
-          disabled={aiAssisting || sending || !body.trim() || !!undoSendId}
-          title="AI Assist"
-        >
-          {aiAssisting ? 'Thinking...' : 'AI'}
-        </button>
-        {#if showAiMenu}
-          <div class="absolute bottom-full left-0 mb-1 rounded-lg shadow-lg py-1 min-w-[160px] z-10" style="background: var(--iris-color-bg-elevated); border: 1px solid var(--iris-color-border);">
-            {#each aiActions as { action, label }}
-              <button
-                class="w-full text-left px-3 py-1.5 text-sm compose-dropdown-item"
-                style="color: var(--iris-color-text-muted);"
-                onclick={() => handleAiAssist(action)}
-              >{label}</button>
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <!-- AI Assist panel toggle -->
+      <button
+        class="px-3 py-1.5 text-sm transition-colors compose-secondary-btn flex items-center gap-1"
+        style="color: {aiPanelOpen ? 'var(--iris-color-primary)' : 'var(--iris-color-text-muted)'};"
+        onclick={() => (aiPanelOpen = !aiPanelOpen)}
+        title={aiPanelOpen ? 'Hide AI Assist panel' : 'Show AI Assist panel'}
+      >
+        <Wand2 size={14} />
+        AI
+      </button>
       <!-- Schedule Send -->
       <div class="relative">
         <button
           class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn flex items-center gap-1"
           style="color: var(--iris-color-text-muted);"
-          onclick={() => { showSchedulePicker = !showSchedulePicker; showAiMenu = false; }}
+          onclick={() => { showSchedulePicker = !showSchedulePicker; }}
           disabled={sending}
           title="Schedule Send"
         >
@@ -1265,15 +1414,6 @@
           />
         {/if}
       </div>
-      <button
-        class="px-3 py-1.5 text-sm transition-colors disabled:opacity-50 compose-secondary-btn"
-        style="color: var(--iris-color-text-muted);"
-        onclick={handleGrammarCheck}
-        disabled={grammarChecking || sending || !body.trim()}
-        title="Grammar & tone check"
-      >
-        {grammarChecking ? 'Checking...' : 'Check'}
-      </button>
       <button
         class="px-4 py-1.5 text-sm rounded-lg font-medium disabled:opacity-50 transition-colors compose-send-btn"
         style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
@@ -1381,5 +1521,22 @@
     background: var(--iris-color-bg-surface);
     color: var(--iris-color-text-muted);
     border: 1px solid var(--iris-color-border-subtle);
+  }
+
+  /* AI side panel */
+  .ai-side-panel {
+    scrollbar-width: thin;
+    scrollbar-color: var(--iris-color-border) transparent;
+  }
+
+  .ai-panel-card {
+    border: 1px solid var(--iris-color-border-subtle);
+  }
+  .ai-panel-card:hover:not(:disabled) {
+    background: var(--iris-color-bg-hover) !important;
+    border-color: var(--iris-color-border);
+  }
+  .ai-panel-card:active:not(:disabled) {
+    transform: scale(0.98);
   }
 </style>
