@@ -9,6 +9,7 @@
   import { handleGlobalKeydown, registerShortcut, currentMode } from '$lib/keyboard';
   import { togglePalette, registerCommands } from '$lib/commands';
   import { push } from 'svelte-spa-router';
+  import { currentThreadContext } from '$lib/threadContext';
 
   interface Props {
     children: Snippet;
@@ -111,7 +112,7 @@
     </main>
 
     {#if chatOpen}
-      <ChatPanel open={chatOpen} onclose={() => chatOpen = false} />
+      <ChatPanel open={chatOpen} onclose={() => chatOpen = false} threadContext={$currentThreadContext} />
     {/if}
   </div>
 </div>

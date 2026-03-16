@@ -4,6 +4,7 @@
   import { push } from 'svelte-spa-router';
   import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote, Reply, ReplyAll, MessageSquare, Timer } from 'lucide-svelte';
   import { irisCollapse, irisSlide } from '$lib/transitions';
+  import { currentThreadContext } from '$lib/threadContext';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -181,6 +182,7 @@
     error = '';
     try {
       thread = await api.threads.get(params.id);
+      currentThreadContext.set({ id: params.id, subject: thread.subject || '(no subject)' });
       const unreadIds = thread.messages.filter((m: any) => !m.is_read).map((m: any) => m.id);
       if (unreadIds.length > 0) {
         await api.messages.batch(unreadIds, 'mark_read');
@@ -620,7 +622,10 @@
     const off = wsClient.on('NewEmail', () => {
       if (thread) loadThread();
     });
-    return () => off();
+    return () => {
+      off();
+      currentThreadContext.set(null);
+    };
   });
 </script>
 

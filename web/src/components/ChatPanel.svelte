@@ -2,8 +2,29 @@
   import { api } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import ComposeCard from './chat/ComposeCard.svelte';
+  import { irisSlide } from '$lib/transitions';
+  import type { ThreadContext } from '$lib/threadContext';
 
-  let { open, onclose }: { open: boolean; onclose: () => void } = $props();
+  let {
+    open,
+    onclose,
+    threadContext = null,
+  }: {
+    open: boolean;
+    onclose: () => void;
+    threadContext?: ThreadContext | null;
+  } = $props();
+
+  let activeThreadContext = $state<ThreadContext | null>(null);
+  let contextInjected = $state(false);
+
+  // When threadContext changes (new thread opened), adopt it as active context
+  $effect(() => {
+    if (threadContext && threadContext.id !== activeThreadContext?.id) {
+      activeThreadContext = threadContext;
+      contextInjected = false;
+    }
+  });
 
   let sessionId = $state(crypto.randomUUID());
   let messages = $state<any[]>([]);
@@ -108,7 +129,13 @@
 
     loading = true;
     try {
-      const res = await api.ai.chat({ session_id: sessionId, message: msg });
+      // Inject thread context into the first message of the session when a thread is active
+      let outgoingMsg = msg;
+      if (activeThreadContext && !contextInjected) {
+        outgoingMsg = `Regarding the email thread "${activeThreadContext.subject}" (thread ID: ${activeThreadContext.id}): ${msg}`;
+        contextInjected = true;
+      }
+      const res = await api.ai.chat({ session_id: sessionId, message: outgoingMsg });
       messages = [...messages, res.message];
       scrollToBottom();
     } catch (e: any) {
@@ -183,6 +210,7 @@
     messages = [];
     error = '';
     input = '';
+    contextInjected = false;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -194,7 +222,11 @@
 </script>
 
 {#if open}
-  <div class="border-l flex flex-col h-full relative" style="width: {chatWidth}px; background: var(--iris-color-bg-elevated); border-color: var(--iris-color-border);">
+  <div
+    class="border-l flex flex-col h-full relative"
+    style="width: {chatWidth}px; background: var(--iris-color-bg-elevated); border-color: var(--iris-color-border);"
+    transition:irisSlide={{ axis: 'x' }}
+  >
     <!-- Resize handle -->
     <div
       class="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[var(--iris-color-primary)] transition-colors z-10"
@@ -225,6 +257,29 @@
         >&times;</button>
       </div>
     </div>
+
+    <!-- Thread context indicator -->
+    {#if activeThreadContext}
+      <div
+        class="flex items-center gap-2 px-3 py-1.5 text-xs"
+        style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--iris-color-primary) 20%, transparent);"
+        transition:irisSlide={{ axis: 'y' }}
+      >
+        <svg class="w-3 h-3 shrink-0" style="color: var(--iris-color-primary);" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+        </svg>
+        <span class="flex-1 truncate" style="color: var(--iris-color-primary);">
+          Chatting about: <span class="font-medium">{activeThreadContext.subject}</span>
+        </span>
+        <button
+          class="shrink-0 hover:opacity-70 transition-opacity"
+          style="color: var(--iris-color-primary);"
+          onclick={() => { activeThreadContext = null; contextInjected = false; }}
+          title="Clear thread context"
+          aria-label="Clear thread context"
+        >&times;</button>
+      </div>
+    {/if}
 
     <!-- Messages -->
     <div class="flex-1 overflow-y-auto p-3 space-y-3" bind:this={messagesContainer}>
@@ -515,13 +570,13 @@
     font-size: 0.85em;
     padding: 0.15em 0.35em;
     border-radius: var(--iris-radius-sm);
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--iris-color-ghost-hover);
   }
   :global(.chat-markdown pre) {
     margin: 0.5em 0;
     padding: 0.6em 0.8em;
     border-radius: var(--iris-radius-md);
-    background: rgba(0, 0, 0, 0.25);
+    background: var(--iris-color-bg);
     overflow-x: auto;
     font-size: 0.85em;
   }
@@ -559,7 +614,7 @@
   }
   :global(.chat-markdown th) {
     font-weight: 600;
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--iris-color-border-subtle);
   }
   :global(.chat-markdown a) {
     color: var(--iris-color-primary);
