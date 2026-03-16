@@ -12,6 +12,18 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 3 — Layer 2: Agent Infrastructure (2026-03-15)
+
+### Added
+- **Iris CLI** — `iris` command-line tool for terminal access: inbox, search, send, chat, status, key management. Supports `--json` and `--quiet` output modes.
+- **8 new MCP tools** — get_thread_summary, get_contact_profile, extract_tasks, extract_deadlines, chat, get_inbox_stats, manage_draft, bulk_action
+- **Enhanced list_threads** — now supports filtering by unread, starred, category, date range, and sender
+
+### Developer notes
+- CLI reads config from `~/.iris/config.toml` (set up with `iris init`)
+- MCP tools support both sync and async execution (AI tools run async)
+- Total MCP tools: 18 (9 existing + 9 new/enhanced)
+
 ## Wave 3 — Layer 1: AI Integration (2026-03-15)
 
 ### Added
