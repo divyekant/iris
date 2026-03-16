@@ -1,9 +1,53 @@
 <script lang="ts">
-  let { html, text }: { html?: string | null; text?: string | null } = $props();
+  let { html, text, senderAddress = '' }: { html?: string | null; text?: string | null; senderAddress?: string } = $props();
 
   let iframeEl: HTMLIFrameElement;
   let showRemoteImages = $state(false);
   let blockedImageCount = $state(0);
+
+  const TRUSTED_SENDERS_KEY = 'iris-trusted-image-senders';
+
+  function getSenderDomain(address: string): string {
+    const match = address.match(/@([\w.-]+)/);
+    return match ? match[1].toLowerCase() : '';
+  }
+
+  function getTrustedDomains(): string[] {
+    try {
+      return JSON.parse(localStorage.getItem(TRUSTED_SENDERS_KEY) || '[]');
+    } catch {
+      return [];
+    }
+  }
+
+  function trustDomain(domain: string) {
+    if (!domain) return;
+    const current = getTrustedDomains();
+    if (!current.includes(domain)) {
+      current.push(domain);
+      localStorage.setItem(TRUSTED_SENDERS_KEY, JSON.stringify(current));
+    }
+  }
+
+  // On mount: check if sender's domain is already trusted
+  $effect(() => {
+    if (senderAddress && !showRemoteImages) {
+      const domain = getSenderDomain(senderAddress);
+      if (domain && getTrustedDomains().includes(domain)) {
+        showRemoteImages = true;
+      }
+    }
+  });
+
+  function handleLoadImages() {
+    showRemoteImages = true;
+  }
+
+  function handleAlwaysLoad() {
+    const domain = getSenderDomain(senderAddress);
+    trustDomain(domain);
+    showRemoteImages = true;
+  }
 
   function sanitizeHtml(raw: string): string {
     // Security model: the iframe sandbox (no allow-scripts, no allow-forms,
@@ -103,7 +147,7 @@
       "object-src 'none'",
       "script-src 'none'",
       "style-src 'unsafe-inline'",
-      "font-src 'none'",
+      "font-src https: data:",
       imgSrc,
     ].join('; ');
   }
@@ -178,9 +222,16 @@
       </svg>
       <span>{blockedImageCount} remote image{blockedImageCount > 1 ? 's' : ''} blocked</span>
     </div>
-    <button class="load-images-btn" onclick={() => showRemoteImages = true}>
-      Load images
-    </button>
+    <div class="image-block-actions">
+      <button class="load-images-btn" onclick={handleLoadImages}>
+        Load images
+      </button>
+      {#if senderAddress}
+        <button class="load-images-btn always-btn" onclick={handleAlwaysLoad}>
+          Always load from this sender
+        </button>
+      {/if}
+    </div>
   </div>
 {/if}
 
@@ -201,6 +252,7 @@
     border-radius: var(--iris-radius-md);
     background: color-mix(in srgb, var(--iris-color-warning) 10%, var(--iris-color-bg-surface));
     border: 1px solid color-mix(in srgb, var(--iris-color-warning) 25%, transparent);
+    gap: 8px;
   }
 
   .image-block-info {
@@ -210,12 +262,21 @@
     font-size: 12px;
     color: var(--iris-color-warning);
     font-weight: 500;
+    flex-shrink: 0;
   }
 
   .image-block-icon {
     width: 16px;
     height: 16px;
     flex-shrink: 0;
+  }
+
+  .image-block-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .load-images-btn {
@@ -239,5 +300,14 @@
 
   .load-images-btn:active {
     background: color-mix(in srgb, var(--iris-color-primary) 20%, var(--iris-color-bg-elevated));
+  }
+
+  .always-btn {
+    border-color: var(--iris-color-primary);
+    color: var(--iris-color-primary);
+  }
+
+  .always-btn:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 15%, var(--iris-color-bg-elevated));
   }
 </style>

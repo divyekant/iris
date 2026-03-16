@@ -995,23 +995,6 @@
         {/if}
       </div>
 
-      <!-- Quick reply footer (only when not already replying) -->
-      {#if thread && !loading && !replyMode}
-        <div class="px-4 py-3 flex gap-2" style="border-top: 1px solid var(--iris-color-border); background: var(--iris-color-bg-elevated);">
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn flex items-center gap-1.5" onclick={() => startReply('reply')}>
-            <Reply size={14} />
-            Reply
-          </button>
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={() => startReply('reply-all')}>
-            <ReplyAll size={14} />
-            Reply All
-          </button>
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={() => startReply('forward')}>
-            <Forward size={14} />
-            Forward
-          </button>
-        </div>
-      {/if}
     </div>
 
     <!-- Side panel divider + panel -->
@@ -1187,22 +1170,6 @@
   }
   .retry-btn:hover {
     background: var(--iris-color-primary-hover);
-  }
-  .reply-primary-btn {
-    background: var(--iris-color-primary);
-    color: var(--iris-color-bg);
-  }
-  .reply-primary-btn:hover {
-    background: var(--iris-color-primary-hover);
-  }
-  .reply-secondary-btn {
-    background: var(--iris-color-bg-surface);
-    color: var(--iris-color-text-muted);
-    border: 1px solid var(--iris-color-border);
-  }
-  .reply-secondary-btn:hover {
-    background: var(--iris-color-bg-elevated);
-    color: var(--iris-color-text);
   }
   .reply-send-btn {
     background: var(--iris-color-primary);

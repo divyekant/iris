@@ -182,7 +182,7 @@
         </div>
       {/if}
 
-      <EmailBody html={message.body_html} text={message.body_text} />
+      <EmailBody html={message.body_html} text={message.body_text} senderAddress={message.from_address} />
 
       {#if displayAttachments.length > 0}
         <div class="mt-4 pt-3 attachment-bar">
