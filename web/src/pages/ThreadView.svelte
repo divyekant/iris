@@ -2,7 +2,8 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote, Reply, ReplyAll } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote, Reply, ReplyAll, MessageSquare, Timer } from 'lucide-svelte';
+  import { irisCollapse } from '$lib/transitions';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -45,6 +46,12 @@
   let aiSummary = $state<string | null>(null);
   let summaryLoading = $state(false);
   let summaryError = $state('');
+
+  // Intelligence strip state
+  let stripExpanded = $state(false);
+  let stripTasksLoaded = $state(false);
+  let stripActionCount = $state(0);
+  let stripDeadline = $state<string | null>(null);
 
   // Redirect dialog state
   let redirectOpen = $state(false);
@@ -339,6 +346,32 @@
     }
   }
 
+  async function loadStripIntelligence() {
+    if (stripTasksLoaded) return;
+    stripTasksLoaded = true;
+    try {
+      const res = await api.ai.extractTasks(undefined, params.id);
+      stripActionCount = res.tasks?.length ?? 0;
+      const firstWithDeadline = res.tasks?.find((t: any) => t.deadline);
+      stripDeadline = firstWithDeadline?.deadline ?? null;
+      // Also populate the side-panel tasks so the Tasks tab works for free
+      if (extractedTasks.length === 0) {
+        extractedTasks = res.tasks ?? [];
+        checkedTasks = new Set();
+      }
+    } catch {
+      // Non-critical — strip still shows message count
+    }
+  }
+
+  function toggleStrip() {
+    stripExpanded = !stripExpanded;
+    if (stripExpanded) {
+      loadStripIntelligence();
+      loadSummary();
+    }
+  }
+
   // Keyboard navigation state
   let showShortcutHelp = $state(false);
   let pendingGChord = $state(false);
@@ -487,6 +520,13 @@
     checkedTasks = next;
   }
 
+  // Auto-load strip intelligence for multi-message threads
+  $effect(() => {
+    if (thread && thread.message_count > 1 && !stripTasksLoaded) {
+      loadStripIntelligence();
+    }
+  });
+
   // Auto-load content when side panel tab changes
   $effect(() => {
     if (!thread || !sidePanelOpen) return;
@@ -504,6 +544,10 @@
       extractedTasks = [];
       tasksError = '';
       checkedTasks = new Set();
+      stripExpanded = false;
+      stripTasksLoaded = false;
+      stripActionCount = 0;
+      stripDeadline = null;
       cancelReply();
       loadThread();
     }
@@ -668,6 +712,52 @@
       </div>
     {/if}
   </div>
+
+  <!-- Intelligence strip (multi-message threads only) -->
+  {#if thread && thread.message_count > 1}
+    <button
+      class="intel-strip w-full flex items-center gap-4 px-4 py-2 text-left"
+      onclick={toggleStrip}
+      aria-expanded={stripExpanded}
+    >
+      <span class="flex items-center gap-1.5 text-xs" style="color: var(--iris-color-text-muted);">
+        <MessageSquare size={12} />
+        {thread.message_count} messages
+      </span>
+      {#if stripActionCount > 0}
+        <span class="flex items-center gap-1.5 text-xs" style="color: var(--iris-color-warning);">
+          <ListChecks size={12} />
+          {stripActionCount} action item{stripActionCount === 1 ? '' : 's'}
+        </span>
+      {/if}
+      {#if stripDeadline}
+        <span class="flex items-center gap-1.5 text-xs" style="color: var(--iris-color-error);">
+          <Timer size={12} />
+          deadline {stripDeadline}
+        </span>
+      {/if}
+      <span class="ml-auto text-xs" style="color: var(--iris-color-text-faint);">
+        {stripExpanded ? 'Hide summary' : 'Click for full summary'}
+      </span>
+    </button>
+
+    {#if stripExpanded}
+      <div transition:irisCollapse class="intel-strip-body px-4 py-3" style="border-bottom: 1px solid var(--iris-color-border);">
+        {#if summaryLoading}
+          <div class="flex items-center gap-2" style="color: var(--iris-color-text-faint);">
+            <div class="w-3 h-3 rounded-full animate-spin" style="border: 2px solid var(--iris-color-border); border-top-color: var(--iris-color-primary);"></div>
+            <span class="text-xs">Summarizing thread...</span>
+          </div>
+        {:else if aiSummary}
+          <p class="text-sm leading-relaxed" style="color: var(--iris-color-text);">{aiSummary}</p>
+        {:else if summaryError}
+          <p class="text-xs" style="color: var(--iris-color-text-faint);">{summaryError}</p>
+        {:else}
+          <p class="text-xs" style="color: var(--iris-color-text-faint);">Loading summary...</p>
+        {/if}
+      </div>
+    {/if}
+  {/if}
 
   <!-- Main content: messages + side panel -->
   <div class="flex-1 flex min-h-0">
@@ -1056,5 +1146,17 @@
   .side-panel-tab.active {
     color: var(--iris-color-text);
     border-bottom-color: var(--iris-color-primary);
+  }
+  .intel-strip {
+    background: var(--iris-color-primary-dim);
+    border-bottom: 1px solid var(--iris-color-border);
+    cursor: pointer;
+    transition: background var(--iris-transition-fast);
+  }
+  .intel-strip:hover {
+    background: color-mix(in srgb, var(--iris-color-primary) 12%, transparent);
+  }
+  .intel-strip-body {
+    background: var(--iris-color-primary-dim);
   }
 </style>
