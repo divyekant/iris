@@ -3,7 +3,7 @@
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
   import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote, Reply, ReplyAll, MessageSquare, Timer } from 'lucide-svelte';
-  import { irisCollapse } from '$lib/transitions';
+  import { irisCollapse, irisSlide } from '$lib/transitions';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -52,6 +52,57 @@
   let stripTasksLoaded = $state(false);
   let stripActionCount = $state(0);
   let stripDeadline = $state<string | null>(null);
+
+  // AI suggestion strip state
+  let suggestionVisible = $state(false);
+  let suggestionText = $state<string | null>(null);
+  let suggestionLoading = $state(false);
+  let suggestionDismissed = $state(false);
+
+  // Session-level cache: threadId → suggestion text
+  const suggestionCache = new Map<string, string>();
+
+  async function loadSuggestion() {
+    if (suggestionLoading || suggestionDismissed) return;
+    const msg = lastMessage();
+    if (!msg) return;
+    const cached = suggestionCache.get(params.id);
+    if (cached) {
+      suggestionText = cached;
+      return;
+    }
+    suggestionLoading = true;
+    try {
+      const body = msg.body_text || msg.snippet || '';
+      const res = await api.ai.assist({ action: 'rewrite', content: body });
+      // Trim to a 1-2 sentence preview
+      const full = res.result || '';
+      const sentences = full.match(/[^.!?]+[.!?]+/g) || [];
+      const preview = sentences.slice(0, 2).join(' ').trim() || full.slice(0, 200);
+      suggestionText = preview;
+      suggestionCache.set(params.id, preview);
+    } catch {
+      // Non-critical — hide strip on error
+      suggestionVisible = false;
+    } finally {
+      suggestionLoading = false;
+    }
+  }
+
+  function dismissSuggestion() {
+    suggestionDismissed = true;
+    suggestionVisible = false;
+  }
+
+  function replyWithSuggestion() {
+    if (!suggestionText) return;
+    startReply('reply');
+    // Pre-fill body after startReply has set up the reply state
+    setTimeout(() => {
+      replyBody = suggestionText!;
+    }, 0);
+    suggestionVisible = false;
+  }
 
   // Redirect dialog state
   let redirectOpen = $state(false);
@@ -527,6 +578,17 @@
     }
   });
 
+  // Show AI suggestion strip when latest message needs a reply
+  $effect(() => {
+    if (!thread || suggestionDismissed) return;
+    const msg = lastMessage();
+    const needsReply = msg?.ai_needs_reply === true || msg?.ai_needs_reply === 1;
+    if (needsReply && !suggestionVisible) {
+      suggestionVisible = true;
+      loadSuggestion();
+    }
+  });
+
   // Auto-load content when side panel tab changes
   $effect(() => {
     if (!thread || !sidePanelOpen) return;
@@ -548,6 +610,10 @@
       stripTasksLoaded = false;
       stripActionCount = 0;
       stripDeadline = null;
+      suggestionVisible = false;
+      suggestionText = null;
+      suggestionLoading = false;
+      suggestionDismissed = false;
       cancelReply();
       loadThread();
     }
@@ -757,6 +823,46 @@
         {/if}
       </div>
     {/if}
+  {/if}
+
+  <!-- AI suggestion strip (needs-reply threads) -->
+  {#if suggestionVisible && !replyMode}
+    <div
+      transition:irisSlide
+      class="ai-suggestion-strip flex items-start gap-3 px-4 py-3"
+      style="background: var(--iris-color-bg-elevated); border-bottom: 1px solid var(--iris-color-border);"
+    >
+      <div class="flex items-center gap-1.5 flex-shrink-0 pt-0.5" style="color: var(--iris-color-primary);">
+        <Sparkles size={14} />
+        <span class="text-xs font-semibold whitespace-nowrap" style="color: var(--iris-color-primary);">AI suggests a reply</span>
+      </div>
+
+      <div class="flex-1 min-w-0">
+        {#if suggestionLoading}
+          <span class="text-xs italic" style="color: var(--iris-color-text-faint);">Generating suggestion...</span>
+        {:else if suggestionText}
+          <span class="text-xs leading-relaxed" style="color: var(--iris-color-text-muted);">{suggestionText}</span>
+        {/if}
+      </div>
+
+      <div class="flex items-center gap-3 flex-shrink-0">
+        {#if !suggestionLoading && suggestionText}
+          <button
+            class="suggestion-reply-btn px-3 py-1.5 text-xs rounded-lg font-medium transition-colors"
+            onclick={replyWithSuggestion}
+          >
+            Reply with this
+          </button>
+        {/if}
+        <button
+          class="text-xs transition-colors"
+          style="color: var(--iris-color-text-faint);"
+          onclick={dismissSuggestion}
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
   {/if}
 
   <!-- Main content: messages + side panel -->
@@ -1146,6 +1252,13 @@
   .side-panel-tab.active {
     color: var(--iris-color-text);
     border-bottom-color: var(--iris-color-primary);
+  }
+  .suggestion-reply-btn {
+    background: var(--iris-color-primary);
+    color: var(--iris-color-bg);
+  }
+  .suggestion-reply-btn:hover {
+    background: var(--iris-color-primary-hover);
   }
   .intel-strip {
     background: var(--iris-color-primary-dim);
