@@ -3,6 +3,14 @@ name = "iris-server"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "iris-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "iris"
+path = "src/bin/iris.rs"
+
 [dependencies]
 # Web framework
 axum = { version = "0.8", features = ["ws", "macros"] }
@@ -21,7 +29,7 @@ serde_json = "1"
 
 # Auth
 oauth2 = "5"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
 argon2 = "0.5"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 
@@ -57,6 +65,11 @@ regex-lite = "0.1"
 # Rate limiting
 tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
 governor = "0.10"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+toml = "0.8"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
