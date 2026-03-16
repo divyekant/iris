@@ -11,6 +11,7 @@
   import { feedback } from '../lib/feedback';
   import SpamDialog from '../components/SpamDialog.svelte';
   import ContactTopicsPanel from '../components/contacts/ContactTopicsPanel.svelte';
+  import { registerShortcuts, currentMode } from '$lib/keyboard';
 
 
   let messages = $state<any[]>([]);
@@ -37,149 +38,6 @@
   // Keyboard navigation state
   let focusedIndex = $state(-1);
   let showShortcutHelp = $state(false);
-  let pendingGChord = $state(false);
-  let gChordTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function isInputFocused(): boolean {
-    const el = document.activeElement;
-    if (!el) return false;
-    const tag = el.tagName.toLowerCase();
-    return tag === 'input' || tag === 'textarea' || tag === 'select' || (el as HTMLElement).isContentEditable;
-  }
-
-  function focusSearch() {
-    const input = document.getElementById('topnav-search-input') as HTMLInputElement | null;
-    if (input) {
-      input.focus();
-      input.select();
-    }
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    // Always allow shortcut help toggle
-    if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      if (isInputFocused()) return;
-      e.preventDefault();
-      showShortcutHelp = !showShortcutHelp;
-      return;
-    }
-
-    // Close help overlay on Escape
-    if (e.key === 'Escape' && showShortcutHelp) {
-      e.preventDefault();
-      showShortcutHelp = false;
-      return;
-    }
-
-    // Cmd+K / Ctrl+K — focus search (works even in inputs)
-    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-      e.preventDefault();
-      focusSearch();
-      return;
-    }
-
-    // Skip all other shortcuts if user is typing
-    if (isInputFocused()) return;
-
-    // Handle "g" chord
-    if (pendingGChord) {
-      pendingGChord = false;
-      if (gChordTimer) { clearTimeout(gChordTimer); gChordTimer = null; }
-      switch (e.key) {
-        case 'i': e.preventDefault(); push('/'); return;
-        case 's': e.preventDefault(); push('/sent'); return;
-        case 'd': e.preventDefault(); push('/drafts'); return;
-      }
-      // Unrecognized second key — fall through
-      return;
-    }
-
-    if (e.key === 'g' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-      e.preventDefault();
-      pendingGChord = true;
-      gChordTimer = setTimeout(() => { pendingGChord = false; }, 1000);
-      return;
-    }
-
-    // "/" — focus search
-    if (e.key === '/' && !e.metaKey && !e.ctrlKey) {
-      e.preventDefault();
-      focusSearch();
-      return;
-    }
-
-    // "c" — compose
-    if (e.key === 'c' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
-      e.preventDefault();
-      showCompose = true;
-      return;
-    }
-
-    // j/k — navigate list
-    if (e.key === 'j') {
-      e.preventDefault();
-      if (messages.length > 0) {
-        focusedIndex = Math.min(focusedIndex + 1, messages.length - 1);
-        scrollFocusedIntoView();
-      }
-      return;
-    }
-    if (e.key === 'k') {
-      e.preventDefault();
-      if (messages.length > 0) {
-        focusedIndex = Math.max(focusedIndex - 1, 0);
-        scrollFocusedIntoView();
-      }
-      return;
-    }
-
-    // Enter/o — open focused message
-    if ((e.key === 'Enter' || e.key === 'o') && focusedIndex >= 0 && focusedIndex < messages.length) {
-      e.preventDefault();
-      handleMessageClick(messages[focusedIndex].id);
-      return;
-    }
-
-    // Actions on focused message
-    if (focusedIndex >= 0 && focusedIndex < messages.length) {
-      const msg = messages[focusedIndex];
-
-      // e — archive
-      if (e.key === 'e' && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault();
-        handleRowAction(msg.id, 'archive');
-        // Adjust focus if we removed the last item
-        if (focusedIndex >= messages.length - 1) {
-          focusedIndex = Math.max(0, messages.length - 2);
-        }
-        return;
-      }
-
-      // # — delete
-      if (e.key === '#') {
-        e.preventDefault();
-        handleRowAction(msg.id, 'delete');
-        if (focusedIndex >= messages.length - 1) {
-          focusedIndex = Math.max(0, messages.length - 2);
-        }
-        return;
-      }
-
-      // s — star/unstar
-      if (e.key === 's' && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
-        e.preventDefault();
-        handleRowAction(msg.id, 'star');
-        return;
-      }
-
-      // Shift+u — mark unread
-      if (e.key === 'U' || (e.key === 'u' && e.shiftKey)) {
-        e.preventDefault();
-        handleRowAction(msg.id, 'mark_unread');
-        return;
-      }
-    }
-  }
 
   function scrollFocusedIntoView() {
     // Defer to next tick so the DOM has updated
@@ -344,6 +202,64 @@
     }
   }
 
+  async function handleSnoozeFocused() {
+    if (focusedIndex < 0 || focusedIndex >= messages.length) return;
+    const msg = messages[focusedIndex];
+    // Snooze for 1 day by default (keyboard shortcut)
+    const snoozeUntil = Math.floor(Date.now() / 1000) + 86400;
+    await handleSnooze(msg.id, snoozeUntil);
+  }
+
+  async function handleMuteFocused() {
+    if (focusedIndex < 0 || focusedIndex >= messages.length) return;
+    const msg = messages[focusedIndex];
+    const threadId = msg.thread_id || msg.id;
+    try {
+      await api.mutedThreads.mute(threadId);
+      feedback.success('Thread muted');
+      mutedThreadIds = new Set([...mutedThreadIds, threadId]);
+    } catch (e: any) {
+      error = e.message || 'Mute failed';
+    }
+  }
+
+  // Register inbox keyboard shortcuts via centralized keyboard manager
+  $effect(() => {
+    currentMode.set('inbox');
+    registerShortcuts([
+      // Help overlay
+      { key: '?', mode: 'inbox', action: () => { showShortcutHelp = !showShortcutHelp; }, description: 'Toggle shortcut help' },
+      { key: 'Escape', mode: 'inbox', action: () => { showShortcutHelp = false; }, description: 'Close help overlay' },
+
+      // Search
+      { key: '/', mode: 'inbox', action: () => { const el = document.getElementById('topnav-search-input'); if (el) { el.focus(); (el as HTMLInputElement).select(); } }, description: 'Focus search' },
+
+      // Compose
+      { key: 'c', mode: 'inbox', action: () => { showCompose = true; }, description: 'Compose new email' },
+
+      // Navigation
+      { key: 'j', mode: 'inbox', action: () => { if (messages.length > 0) { focusedIndex = Math.min(focusedIndex + 1, messages.length - 1); scrollFocusedIntoView(); } }, description: 'Move to next message' },
+      { key: 'k', mode: 'inbox', action: () => { if (messages.length > 0) { focusedIndex = Math.max(focusedIndex - 1, 0); scrollFocusedIntoView(); } }, description: 'Move to previous message' },
+      { key: 'o', mode: 'inbox', action: () => { if (focusedIndex >= 0 && focusedIndex < messages.length) handleMessageClick(messages[focusedIndex].id); }, description: 'Open focused message' },
+      { key: 'Enter', mode: 'inbox', action: () => { if (focusedIndex >= 0 && focusedIndex < messages.length) handleMessageClick(messages[focusedIndex].id); }, description: 'Open focused message' },
+
+      // Actions on focused message
+      { key: 'e', mode: 'inbox', action: () => { if (focusedIndex >= 0 && focusedIndex < messages.length) { const msg = messages[focusedIndex]; handleRowAction(msg.id, 'archive'); if (focusedIndex >= messages.length - 1) focusedIndex = Math.max(0, messages.length - 2); } }, description: 'Archive focused message' },
+      { key: '#', mode: 'inbox', action: () => { if (focusedIndex >= 0 && focusedIndex < messages.length) { const msg = messages[focusedIndex]; handleRowAction(msg.id, 'delete'); if (focusedIndex >= messages.length - 1) focusedIndex = Math.max(0, messages.length - 2); } }, description: 'Delete focused message' },
+      { key: 's', mode: 'inbox', action: () => { if (focusedIndex >= 0 && focusedIndex < messages.length) handleRowAction(messages[focusedIndex].id, 'star'); }, description: 'Star / unstar focused message' },
+      { key: 'U', mode: 'inbox', shift: true, action: () => { if (focusedIndex >= 0 && focusedIndex < messages.length) handleRowAction(messages[focusedIndex].id, 'mark_unread'); }, description: 'Mark focused message unread' },
+
+      // New shortcuts
+      { key: 'b', mode: 'inbox', action: () => { handleSnoozeFocused(); }, description: 'Snooze focused message' },
+      { key: 'm', mode: 'inbox', action: () => { handleMuteFocused(); }, description: 'Mute focused thread' },
+
+      // Go-to chords
+      { key: 'g+i', mode: 'inbox', action: () => push('/'), description: 'Go to Inbox' },
+      { key: 'g+s', mode: 'inbox', action: () => push('/sent'), description: 'Go to Sent' },
+      { key: 'g+d', mode: 'inbox', action: () => push('/drafts'), description: 'Go to Drafts' },
+    ]);
+  });
+
   $effect(() => {
     loadMessages();
     loadMutedThreads();
@@ -368,8 +284,6 @@
     };
   });
 </script>
-
-<svelte:window onkeydown={handleKeydown} />
 
 <div class="h-full flex flex-col">
   <!-- No sub-header — tabs are in TopNav. Just a sync status bar below. -->
@@ -477,8 +391,10 @@
         <div class="shortcut-label">Move down / up</div>
         <div class="shortcut-row"><kbd>Enter</kbd> or <kbd>o</kbd></div>
         <div class="shortcut-label">Open message</div>
-        <div class="shortcut-row"><kbd>/</kbd> or <kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd></div>
+        <div class="shortcut-row"><kbd>/</kbd></div>
         <div class="shortcut-label">Focus search</div>
+        <div class="shortcut-row"><kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd></div>
+        <div class="shortcut-label">Command palette</div>
         <div class="shortcut-row"><kbd>g</kbd> then <kbd>i</kbd></div>
         <div class="shortcut-label">Go to Inbox</div>
         <div class="shortcut-row"><kbd>g</kbd> then <kbd>s</kbd></div>
@@ -500,6 +416,10 @@
         <div class="shortcut-label">Star / unstar</div>
         <div class="shortcut-row"><kbd>Shift+U</kbd></div>
         <div class="shortcut-label">Mark unread</div>
+        <div class="shortcut-row"><kbd>b</kbd></div>
+        <div class="shortcut-label">Snooze (1 day)</div>
+        <div class="shortcut-row"><kbd>m</kbd></div>
+        <div class="shortcut-label">Mute thread</div>
 
         <!-- Thread -->
         <div class="col-span-2 mt-3 mb-1">

@@ -6,7 +6,7 @@
   import CommandPalette from './shared/CommandPalette.svelte';
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
-  import { handleGlobalKeydown, registerShortcut } from '$lib/keyboard';
+  import { handleGlobalKeydown, registerShortcut, currentMode } from '$lib/keyboard';
   import { togglePalette, registerCommands } from '$lib/commands';
   import { push } from 'svelte-spa-router';
 
@@ -117,3 +117,12 @@
 </div>
 
 <Toast />
+
+<!-- Mode indicator -->
+{#if $currentMode && $currentMode !== 'global'}
+  <div
+    style="position: fixed; bottom: 8px; left: 8px; z-index: 40; background: var(--iris-color-bg-elevated); color: var(--iris-color-text-faint); border: 1px solid var(--iris-color-border); border-radius: var(--iris-radius-sm); padding: 2px 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; pointer-events: none;"
+  >
+    {$currentMode}
+  </div>
+{/if}
