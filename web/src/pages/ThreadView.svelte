@@ -2,7 +2,7 @@
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
   import { push } from 'svelte-spa-router';
-  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote } from 'lucide-svelte';
+  import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote, Reply, ReplyAll } from 'lucide-svelte';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -10,6 +10,7 @@
   import RedirectDialog from '../components/thread/RedirectDialog.svelte';
   import NotesPanel from '../components/thread/NotesPanel.svelte';
   import MultiReplyPicker from '../components/compose/MultiReplyPicker.svelte';
+  import DropdownMenu from '../components/shared/DropdownMenu.svelte';
 
   let { params }: { params: { id: string } } = $props();
 
@@ -35,9 +36,6 @@
 
   // Spam dialog state
   let showSpamDialog = $state(false);
-
-  // More menu state (ThreadView action grouping)
-  let moreMenuOpen = $state(false);
 
   // Contact topics state
   let topicsEmail = $state<string | null>(null);
@@ -516,7 +514,7 @@
   });
 </script>
 
-<svelte:window onkeydown={handleKeydown} onclick={() => { moreMenuOpen = false; }} />
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="h-full flex flex-col">
   <!-- Thread header -->
@@ -545,18 +543,66 @@
           {/if}
         </p>
       </div>
-      <div class="flex items-center gap-0.5">
-        <!-- Primary actions group -->
-        <button class="p-1.5 transition-colors thread-action-btn star-btn" onclick={() => handleThreadAction('star')} title="Star"><Star size={15} /></button>
-        <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('archive')} title="Archive"><Archive size={15} /></button>
-        <button class="p-1.5 transition-colors thread-action-btn" onclick={() => handleThreadAction('mark_unread')} title="Mark unread"><MailOpen size={15} /></button>
+      <div class="flex items-center gap-1">
+        <!-- Primary actions: Reply, Reply All, Forward -->
+        <button
+          class="action-primary-btn flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+          onclick={() => startReply('reply')}
+          title="Reply (r)"
+        >
+          <Reply size={14} />
+          Reply
+        </button>
+        <button
+          class="action-secondary-btn flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+          onclick={() => startReply('reply-all')}
+          title="Reply All (a)"
+        >
+          <ReplyAll size={14} />
+          Reply All
+        </button>
+        <button
+          class="action-secondary-btn flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+          onclick={() => startReply('forward')}
+          title="Forward (f)"
+        >
+          <Forward size={14} />
+          Forward
+        </button>
 
-        <!-- Separator -->
+        <!-- Group divider -->
         <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
 
-        <!-- Organize group: Snooze -->
+        <!-- Organize dropdown -->
         <div class="relative">
-          <button class="p-1.5 transition-colors thread-action-btn snooze-btn" onclick={() => { snoozePickerOpen = !snoozePickerOpen; }} title="Snooze"><Clock size={15} /></button>
+          <DropdownMenu
+            triggerLabel="Organize"
+            items={[
+              {
+                label: thread?.is_starred ? 'Unstar' : 'Star',
+                shortcut: 's',
+                onClick: () => handleThreadAction('star'),
+                dividerAfter: false,
+              },
+              {
+                label: 'Snooze',
+                shortcut: 'b',
+                onClick: () => { snoozePickerOpen = !snoozePickerOpen; },
+                dividerAfter: false,
+              },
+              {
+                label: 'Archive',
+                shortcut: 'e',
+                onClick: () => handleThreadAction('archive'),
+                dividerAfter: false,
+              },
+              {
+                label: 'Delete',
+                shortcut: '#',
+                onClick: () => handleThreadAction('delete'),
+              },
+            ]}
+          />
           {#if snoozePickerOpen}
             <div class="absolute right-0 top-full mt-1 z-50">
               <SnoozePicker
@@ -567,54 +613,58 @@
           {/if}
         </div>
 
-        <!-- Separator -->
+        <!-- Group divider -->
         <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
 
-        <!-- Danger group -->
-        <button class="p-1.5 transition-colors thread-action-btn delete-btn" onclick={() => handleThreadAction('delete')} title="Delete"><Trash2 size={15} /></button>
-        <button class="p-1.5 transition-colors thread-action-btn spam-btn" onclick={openSpamDialog} title="Report Spam"><ShieldAlert size={15} /></button>
+        <!-- AI dropdown -->
+        <DropdownMenu
+          triggerLabel="AI"
+          items={[
+            {
+              label: 'Summarize',
+              onClick: () => { activeTab = 'summary'; if (!sidePanelOpen) toggleSidePanel(); loadSummary(); },
+            },
+            {
+              label: 'Extract Tasks',
+              onClick: () => { activeTab = 'tasks'; if (!sidePanelOpen) toggleSidePanel(); },
+            },
+            {
+              label: 'Generate Replies',
+              onClick: () => handleGenerateReplies(),
+            },
+          ]}
+        />
+
+        <!-- Group divider -->
+        <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
+
+        <!-- More dropdown -->
+        <DropdownMenu
+          triggerLabel="More"
+          items={[
+            {
+              label: 'Report Spam',
+              onClick: () => openSpamDialog(),
+            },
+            {
+              label: isMuted ? 'Unmute Thread' : 'Mute Thread',
+              onClick: () => toggleMute(),
+              disabled: muteLoading,
+            },
+            {
+              label: 'Redirect',
+              onClick: () => openRedirect(),
+            },
+          ]}
+        />
 
         <!-- Panel toggle -->
         <button
-          class="p-1.5 transition-colors thread-action-btn"
+          class="p-1.5 transition-colors thread-action-btn ml-1"
           class:panel-active={sidePanelOpen}
           onclick={toggleSidePanel}
           title={sidePanelOpen ? 'Hide side panel' : 'Show side panel'}
         ><PanelRight size={15} /></button>
-
-        <!-- Separator -->
-        <div class="flex-shrink-0" style="width: 1px; height: 20px; background: var(--iris-color-border); margin: 0 4px;"></div>
-
-        <!-- More menu -->
-        <div class="relative">
-          <button
-            class="p-1.5 transition-colors thread-action-btn"
-            onclick={(e) => { e.stopPropagation(); moreMenuOpen = !moreMenuOpen; }}
-            title="More actions"
-          ><Ellipsis size={15} /></button>
-          {#if moreMenuOpen}
-            <div
-              class="absolute right-0 top-full mt-1 z-50 py-1 rounded-lg"
-              style="background: var(--iris-color-bg-elevated); box-shadow: 0 4px 12px rgba(0,0,0,.15); border: 1px solid var(--iris-color-border); min-width: 160px;"
-            >
-              <button
-                class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors more-menu-item {isMuted ? 'mute-active' : ''}"
-                onclick={(e) => { e.stopPropagation(); moreMenuOpen = false; toggleMute(); }}
-                disabled={muteLoading}
-              >
-                {#if isMuted}<VolumeX size={14} />{:else}<Volume2 size={14} />{/if}
-                <span>{isMuted ? 'Unmute thread' : 'Mute thread'}</span>
-              </button>
-              <button
-                class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors more-menu-item"
-                onclick={(e) => { e.stopPropagation(); moreMenuOpen = false; activeTab = 'tasks'; if (!sidePanelOpen) toggleSidePanel(); }}
-              >
-                <ListChecks size={14} />
-                <span>Extract Tasks</span>
-              </button>
-            </div>
-          {/if}
-        </div>
       </div>
     {/if}
   </div>
@@ -733,15 +783,20 @@
         {/if}
       </div>
 
-      <!-- Reply buttons footer (only when not already replying) -->
+      <!-- Quick reply footer (only when not already replying) -->
       {#if thread && !loading && !replyMode}
         <div class="px-4 py-3 flex gap-2" style="border-top: 1px solid var(--iris-color-border); background: var(--iris-color-bg-elevated);">
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn" onclick={() => startReply('reply')}>Reply</button>
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('reply-all')}>Reply All</button>
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn" onclick={() => startReply('forward')}>Forward</button>
-          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={openRedirect}>
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-primary-btn flex items-center gap-1.5" onclick={() => startReply('reply')}>
+            <Reply size={14} />
+            Reply
+          </button>
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={() => startReply('reply-all')}>
+            <ReplyAll size={14} />
+            Reply All
+          </button>
+          <button class="px-4 py-2 text-sm rounded-lg font-medium transition-colors reply-secondary-btn flex items-center gap-1.5" onclick={() => startReply('forward')}>
             <Forward size={14} />
-            Redirect
+            Forward
           </button>
         </div>
       {/if}
@@ -892,23 +947,27 @@
 {/if}
 
 <style>
+  .action-primary-btn {
+    background: var(--iris-color-primary);
+    color: var(--iris-color-bg);
+  }
+  .action-primary-btn:hover {
+    background: var(--iris-color-primary-hover);
+  }
+  .action-secondary-btn {
+    background: transparent;
+    color: var(--iris-color-text-muted);
+    border: 1px solid var(--iris-color-border);
+  }
+  .action-secondary-btn:hover {
+    background: var(--iris-color-bg-elevated);
+    color: var(--iris-color-text);
+  }
   .thread-action-btn {
     color: var(--iris-color-text-faint);
   }
   .thread-action-btn:hover {
     color: var(--iris-color-text-muted);
-  }
-  .thread-action-btn.star-btn:hover {
-    color: var(--iris-color-primary);
-  }
-  .thread-action-btn.snooze-btn:hover {
-    color: var(--iris-color-warning);
-  }
-  .thread-action-btn.delete-btn:hover {
-    color: var(--iris-color-error);
-  }
-  .thread-action-btn.spam-btn:hover {
-    color: var(--iris-color-warning);
   }
   .retry-btn {
     background: var(--iris-color-primary);
@@ -980,16 +1039,6 @@
   }
   .reply-ai-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--iris-color-primary) 10%, transparent);
-  }
-  .more-menu-item {
-    color: var(--iris-color-text-muted);
-  }
-  .more-menu-item:hover {
-    color: var(--iris-color-text);
-    background: color-mix(in srgb, var(--iris-color-text-faint) 8%, transparent);
-  }
-  .more-menu-item.mute-active {
-    color: var(--iris-color-primary);
   }
   .thread-action-btn.panel-active {
     color: var(--iris-color-primary);
