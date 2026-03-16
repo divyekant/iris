@@ -12,6 +12,17 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 3 — Layer 1: Keyboard-First Navigation (2026-03-15)
+
+### Added
+- **Command palette** — press Cmd+K to search and execute any command (navigate, compose, archive, change settings)
+- **Mode indicator** — subtle badge in bottom-left shows current keyboard context
+- **New shortcuts** — `b` to snooze, `m` to mute focused message
+
+### Improved
+- **Dynamic help overlay** — press `?` to see all shortcuts grouped by context, automatically updated as new shortcuts are added
+- All existing keyboard shortcuts work exactly as before
+
 ## Wave 3 — Layer 1: Visual Hierarchy (2026-03-15)
 
 ### Improved
