@@ -12,6 +12,17 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 3 — Layer 1: AI Integration (2026-03-15)
+
+### Added
+- **Thread intelligence strip** — compact bar below thread subject showing message count, action items, and deadlines at a glance. Click to expand full AI summary
+- **AI reply suggestions** — for threads needing a reply, AI generates a draft preview with one-click "Reply with this"
+- **Contextual chat** — opening AI Chat while viewing a thread auto-loads that thread as context
+
+### Improved
+- **Settings tab transitions** — smooth fade crossfade when switching settings tabs
+- **Token compliance** — all remaining hardcoded colors replaced with design tokens
+
 ## Wave 3 — Layer 1: Keyboard-First Navigation (2026-03-15)
 
 ### Added
