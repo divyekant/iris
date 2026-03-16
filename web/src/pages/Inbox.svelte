@@ -11,7 +11,7 @@
   import { feedback } from '../lib/feedback';
   import SpamDialog from '../components/SpamDialog.svelte';
   import ContactTopicsPanel from '../components/contacts/ContactTopicsPanel.svelte';
-  import { registerShortcuts, currentMode } from '$lib/keyboard';
+  import { registerShortcuts, currentMode, getAllShortcuts } from '$lib/keyboard';
 
 
   let messages = $state<any[]>([]);
@@ -223,6 +223,28 @@
     }
   }
 
+  // Helper functions for shortcut help overlay
+  function groupShortcutsByMode(shortcuts: any[]): Record<string, any[]> {
+    const grouped: Record<string, any[]> = {};
+    shortcuts.forEach((sc) => {
+      if (!grouped[sc.mode]) grouped[sc.mode] = [];
+      grouped[sc.mode].push(sc);
+    });
+    return grouped;
+  }
+
+  function formatModeTitle(mode: string): string {
+    const titles: Record<string, string> = {
+      inbox: 'Inbox',
+      thread: 'Thread View',
+      compose: 'Compose',
+      chat: 'Chat',
+      settings: 'Settings',
+      global: 'General',
+    };
+    return titles[mode] || mode.charAt(0).toUpperCase() + mode.slice(1);
+  }
+
   // Register inbox keyboard shortcuts via centralized keyboard manager
   $effect(() => {
     currentMode.set('inbox');
@@ -382,70 +404,22 @@
         >&times;</button>
       </div>
 
-      <div class="grid grid-cols-2 gap-x-8 gap-y-1">
-        <!-- Navigation -->
-        <div class="col-span-2 mt-2 mb-1">
-          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">Navigation</h3>
-        </div>
-        <div class="shortcut-row"><kbd>j</kbd> / <kbd>k</kbd></div>
-        <div class="shortcut-label">Move down / up</div>
-        <div class="shortcut-row"><kbd>Enter</kbd> or <kbd>o</kbd></div>
-        <div class="shortcut-label">Open message</div>
-        <div class="shortcut-row"><kbd>/</kbd></div>
-        <div class="shortcut-label">Focus search</div>
-        <div class="shortcut-row"><kbd>{navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl'}+K</kbd></div>
-        <div class="shortcut-label">Command palette</div>
-        <div class="shortcut-row"><kbd>g</kbd> then <kbd>i</kbd></div>
-        <div class="shortcut-label">Go to Inbox</div>
-        <div class="shortcut-row"><kbd>g</kbd> then <kbd>s</kbd></div>
-        <div class="shortcut-label">Go to Sent</div>
-        <div class="shortcut-row"><kbd>g</kbd> then <kbd>d</kbd></div>
-        <div class="shortcut-label">Go to Drafts</div>
-
-        <!-- Actions -->
-        <div class="col-span-2 mt-3 mb-1">
-          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">Actions (Inbox)</h3>
-        </div>
-        <div class="shortcut-row"><kbd>c</kbd></div>
-        <div class="shortcut-label">Compose new email</div>
-        <div class="shortcut-row"><kbd>e</kbd></div>
-        <div class="shortcut-label">Archive</div>
-        <div class="shortcut-row"><kbd>#</kbd></div>
-        <div class="shortcut-label">Delete</div>
-        <div class="shortcut-row"><kbd>s</kbd></div>
-        <div class="shortcut-label">Star / unstar</div>
-        <div class="shortcut-row"><kbd>Shift+U</kbd></div>
-        <div class="shortcut-label">Mark unread</div>
-        <div class="shortcut-row"><kbd>b</kbd></div>
-        <div class="shortcut-label">Snooze (1 day)</div>
-        <div class="shortcut-row"><kbd>m</kbd></div>
-        <div class="shortcut-label">Mute thread</div>
-
-        <!-- Thread -->
-        <div class="col-span-2 mt-3 mb-1">
-          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">Thread View</h3>
-        </div>
-        <div class="shortcut-row"><kbd>r</kbd></div>
-        <div class="shortcut-label">Reply</div>
-        <div class="shortcut-row"><kbd>a</kbd></div>
-        <div class="shortcut-label">Reply all</div>
-        <div class="shortcut-row"><kbd>f</kbd></div>
-        <div class="shortcut-label">Forward</div>
-        <div class="shortcut-row"><kbd>e</kbd></div>
-        <div class="shortcut-label">Archive thread</div>
-        <div class="shortcut-row"><kbd>s</kbd></div>
-        <div class="shortcut-label">Star thread</div>
-        <div class="shortcut-row"><kbd>#</kbd></div>
-        <div class="shortcut-label">Delete thread</div>
-        <div class="shortcut-row"><kbd>u</kbd> or <kbd>Esc</kbd></div>
-        <div class="shortcut-label">Back to inbox</div>
-
-        <!-- General -->
-        <div class="col-span-2 mt-3 mb-1">
-          <h3 class="text-xs font-semibold uppercase tracking-wider" style="color: var(--iris-color-primary);">General</h3>
-        </div>
-        <div class="shortcut-row"><kbd>?</kbd></div>
-        <div class="shortcut-label">Show this help</div>
+      <div class="space-y-4">
+        {#each Object.entries(groupShortcutsByMode(getAllShortcuts())) as [mode, shortcuts]}
+          <div>
+            <h3 class="text-xs font-semibold uppercase tracking-wider mb-2" style="color: var(--iris-color-primary);">{formatModeTitle(mode)}</h3>
+            <div class="grid grid-cols-2 gap-x-8 gap-y-1">
+              {#each shortcuts as sc}
+                <div class="shortcut-row">
+                  {#each sc.key.split(' / ') as keyPart}
+                    <kbd>{keyPart}</kbd>
+                  {/each}
+                </div>
+                <div class="shortcut-label">{sc.description}</div>
+              {/each}
+            </div>
+          </div>
+        {/each}
       </div>
     </div>
   </div>

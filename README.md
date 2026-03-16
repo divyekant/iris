@@ -74,6 +74,8 @@ Open `http://localhost:3000`. Ollama runs as a sidecar container. If `IRIS_AUTH_
 
 For at-rest encryption of stored account credentials and provider API keys, set `IRIS_SECRETS_KEY` to a 32-byte base64 or 64-character hex key before first run. Existing plaintext secrets will be re-encrypted on startup once the key is configured.
 
+For deployment hardening guidance, see [DEPLOYMENT_SECURITY.md](DEPLOYMENT_SECURITY.md).
+
 ### OAuth Setup
 
 **Gmail:**
