@@ -12,6 +12,17 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 3 — Layer 1: Visual Hierarchy (2026-03-15)
+
+### Improved
+- **Smart badge priority** — inbox rows now show one primary badge based on importance (needs reply > deadline > intent), with overflow count for additional metadata
+- **Grouped thread actions** — Reply, Reply All, and Forward always visible; Star, Snooze, Archive, Delete grouped under "Organize"; AI actions under "AI" dropdown
+- **Smooth animations** — message rows collapse smoothly on archive/delete; hover actions appear with staggered fade-in
+
+### Keyboard shortcuts
+- All existing shortcuts continue to work without change
+- New shortcuts: `b` for snooze, `m` for mute (coming in Chunk 3)
+
 ## [Unreleased] - 2026-03-04
 
 ### Added
