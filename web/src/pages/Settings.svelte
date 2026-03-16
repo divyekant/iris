@@ -6,6 +6,7 @@
   import SettingsCompose from '../components/settings/SettingsCompose.svelte';
   import SettingsOrganization from '../components/settings/SettingsOrganization.svelte';
   import SettingsSecurity from '../components/settings/SettingsSecurity.svelte';
+  import { irisFade } from '$lib/transitions';
 
   type TabId = 'general' | 'appearance' | 'ai' | 'compose' | 'organization' | 'security';
 
@@ -77,19 +78,23 @@
 
   <!-- Tab content -->
   <div class="settings-content" role="tabpanel">
-    {#if activeTab === 'general'}
-      <SettingsGeneral bind:accounts />
-    {:else if activeTab === 'appearance'}
-      <SettingsAppearance />
-    {:else if activeTab === 'ai'}
-      <SettingsAI />
-    {:else if activeTab === 'compose'}
-      <SettingsCompose bind:accounts />
-    {:else if activeTab === 'organization'}
-      <SettingsOrganization />
-    {:else if activeTab === 'security'}
-      <SettingsSecurity bind:accounts />
-    {/if}
+    {#key activeTab}
+      <div transition:irisFade>
+        {#if activeTab === 'general'}
+          <SettingsGeneral bind:accounts />
+        {:else if activeTab === 'appearance'}
+          <SettingsAppearance />
+        {:else if activeTab === 'ai'}
+          <SettingsAI />
+        {:else if activeTab === 'compose'}
+          <SettingsCompose bind:accounts />
+        {:else if activeTab === 'organization'}
+          <SettingsOrganization />
+        {:else if activeTab === 'security'}
+          <SettingsSecurity bind:accounts />
+        {/if}
+      </div>
+    {/key}
   </div>
 </div>
 
