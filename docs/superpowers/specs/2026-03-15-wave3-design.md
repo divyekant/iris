@@ -183,18 +183,18 @@ AI surfaces throughout the app, not just in the chat panel.
 
 | Component | Status | Changes |
 |-----------|--------|---------|
-| `Modal.svelte` | **New** | Shared modal: backdrop, escape handler, size variants (sm/md/lg), `scale` transition. Refactor all existing dialogs (SpamDialog, RedirectDialog, SnoozePicker, etc.) to use it. |
-| `ModalActions.svelte` | **New** | Consistent button row (cancel left, primary right) for all modals |
-| `FormInput.svelte` | **New** | Styled text input with label, placeholder, error state, focus ring |
-| `FormSelect.svelte` | **New** | Styled select with consistent border/focus |
-| `FormToggle.svelte` | **New** | iOS-style toggle replacing manual toggle implementations |
-| `Badge.svelte` | **New** | Semantic color variants (success/warning/error/info/neutral), size variants (sm/md) |
+| `Modal.svelte` | Exists (`shared/`) | Wire to new transition system (1.1 `scale` in/out). Refactor remaining dialogs (SpamDialog, RedirectDialog, SnoozePicker) to use it if they don't already. |
+| `ModalActions.svelte` | Exists (`shared/`) | No changes needed |
+| `FormInput.svelte` | Exists (`shared/`) | Verify all settings sections use it; ensure consistent focus ring |
+| `FormSelect.svelte` | Exists (`shared/`) | Verify all settings sections use it |
+| `FormToggle.svelte` | Exists (`shared/`) | Verify all settings sections use it |
+| `Badge.svelte` | Exists (`shared/`) | Verify size variants (sm/md) exist; add if missing |
 | `Toast.svelte` | Exists | Wire to feedback store; add undo support; add animations |
 | `DropdownMenu.svelte` | **New** | Replace ad-hoc dropdowns in ThreadView, TopNav |
 | `CommandPalette.svelte` | **New** | `Cmd+K` palette |
 | `Tooltip.svelte` | **New** | Replace title attributes with styled, animated tooltips |
 
-Note: Modal, ModalActions, Form*, and Badge were identified as needed in the UI cohesion shaping doc but never implemented. They are prerequisites for 1.5 (AI woven), 1.7 (Settings refactor), and all Layer 3 features.
+Note: Modal, ModalActions, Form*, and Badge exist in `web/src/components/shared/`. The work is ensuring all dialogs and settings sections actually use them (some may still inline their own patterns) and wiring them into the new transition/feedback systems.
 
 ### 1.7 Settings Refactor
 
@@ -253,13 +253,13 @@ iris keys create --permission read_only --name "..."
 
 Expand existing MCP server with richer tools, resources, and prompts.
 
-**Current state:** The existing `src/api/mcp_server.rs` provides session management, tool schemas, and tool call execution. Existing tools include: `search_emails`, `read_message`, `compose_draft`, `send_email`, `label_message`, `archive_message`. The following are net-new additions:
+**Current state:** The existing `src/api/mcp_server.rs` provides session management, tool schemas, and tool call execution. 9 tools exist: `search_emails`, `read_email`, `list_inbox`, `send_email`, `create_draft`, `list_threads`, `get_thread`, `archive_email`, `star_email`. The following are net-new additions:
 
 **New tools (added to existing):**
 
 | Tool | Description |
 |------|-------------|
-| `list_threads` | Filter by unread, starred, category, date range, sender |
+| `list_threads` (enhance) | Add filter params: unread, starred, category, date range, sender (existing version has no filters) |
 | `get_thread_summary` | AI-generated thread summary |
 | `get_contact_profile` | Relationship intelligence for a contact |
 | `extract_tasks` | Action items from a thread |
