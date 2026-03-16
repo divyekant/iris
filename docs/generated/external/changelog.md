@@ -12,6 +12,16 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Wave 3 — Layer 3: Showcase Features (2026-03-15)
+
+### Added
+- **Knowledge Graph** — entities (people, orgs, projects) automatically extracted from emails. Search at /graph to find everything related to a topic or person
+- **Temporal Reasoning** — search by time references like "emails from around the product launch". AI resolves vague dates to real date ranges
+- **Writing Style Learning** — AI analyzes your sent emails to learn your voice. All AI-generated drafts now match your greeting, sign-off, and tone
+- **Auto-Draft** — routine emails get pre-drafted replies. "Draft ready" chip appears on matching messages
+- **Email Delegation** — configurable playbooks that handle specific email types automatically. Auto-reply, draft, forward, archive, or label based on sender, subject, or category
+- **Evolving Categories** — AI suggests new inbox categories based on your email patterns. Dynamic tabs appear in the inbox alongside Primary/Updates/Social/Promotions
+
 ## Wave 3 — Layer 2: Agent Infrastructure (2026-03-15)
 
 ### Added
