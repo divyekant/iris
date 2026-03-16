@@ -8,7 +8,7 @@
   import ComposeModal from '../components/compose/ComposeModal.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import SkeletonRow from '../components/SkeletonRow.svelte';
-  import Toast from '../components/Toast.svelte';
+  import { feedback } from '../lib/feedback';
   import SpamDialog from '../components/SpamDialog.svelte';
   import ContactTopicsPanel from '../components/contacts/ContactTopicsPanel.svelte';
 
@@ -25,8 +25,7 @@
   let filterAccountId = $state('');
   let page = $state(1);
   const PAGE_SIZE = 25;
-  let toastMessage = $state('');
-  let toastVisible = $state(false);
+
   let showSpamDialog = $state(false);
   let spamTargetId = $state('');
   let spamTargetEmail = $state('');
@@ -325,8 +324,7 @@
   async function handleSnooze(id: string, snoozeUntil: number) {
     try {
       await api.messages.snooze([id], snoozeUntil);
-      toastMessage = 'Email snoozed';
-      toastVisible = true;
+      feedback.success('Email snoozed');
       await loadMessages();
     } catch (e: any) {
       error = e.message || 'Snooze failed';
@@ -353,8 +351,7 @@
     wsClient.connect();
     initNotifications();
     const offNewEmail = wsClient.on('NewEmail', (evt: any) => {
-      toastMessage = `New email received`;
-      toastVisible = true;
+      feedback.info('New email received');
       showNotification('New email', { body: `From: ${evt.from || 'Unknown'}` });
       loadMessages(false);
     });
@@ -439,7 +436,6 @@
   {/if}
 </div>
 
-<Toast message={toastMessage} visible={toastVisible} ondismiss={() => toastVisible = false} />
 
 {#if showCompose}
   <ComposeModal

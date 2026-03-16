@@ -5,15 +5,13 @@
   import MessageList from '../components/inbox/MessageList.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import SkeletonRow from '../components/SkeletonRow.svelte';
-  import Toast from '../components/Toast.svelte';
+  import { feedback } from '../lib/feedback';
 
   let messages = $state<any[]>([]);
   let total = $state(0);
   let loading = $state(true);
   let error = $state('');
   let selectedIds = $state(new Set<string>());
-  let toastMessage = $state('');
-  let toastVisible = $state(false);
 
   async function loadMessages() {
     loading = true;
@@ -39,8 +37,7 @@
     try {
       if (action === 'unsnooze') {
         await api.messages.unsnooze([id]);
-        toastMessage = 'Email unsnoozed';
-        toastVisible = true;
+        feedback.success('Email unsnoozed');
       } else {
         await api.messages.batch([id], action);
       }
@@ -55,8 +52,7 @@
     try {
       if (action === 'unsnooze') {
         await api.messages.unsnooze([...selectedIds]);
-        toastMessage = `${selectedIds.size} email(s) unsnoozed`;
-        toastVisible = true;
+        feedback.success(`${selectedIds.size} email(s) unsnoozed`);
       } else {
         await api.messages.batch([...selectedIds], action);
       }
@@ -129,4 +125,3 @@
   </div>
 </div>
 
-<Toast message={toastMessage} visible={toastVisible} ondismiss={() => toastVisible = false} />

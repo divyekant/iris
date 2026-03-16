@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import TopNav from './TopNav.svelte';
   import ChatPanel from './ChatPanel.svelte';
+  import Toast from './Toast.svelte';
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
 
@@ -86,3 +87,5 @@
     {/if}
   </div>
 </div>
+
+<Toast />
