@@ -1,6 +1,7 @@
 <script lang="ts">
   import { X } from 'lucide-svelte';
   import type { Snippet } from 'svelte';
+  import { irisFade, irisScale } from '$lib/transitions';
 
   let {
     size = 'md',
@@ -44,8 +45,9 @@
   role="dialog"
   aria-modal="true"
   aria-label={title || undefined}
+  transition:irisFade
 >
-  <div class="w-full modal-card {sizeClass[size]}">
+  <div class="w-full modal-card {sizeClass[size]}" transition:irisScale>
     {#if title}
       <div class="modal-header">
         <h3 class="text-base font-semibold modal-title">{title}</h3>
