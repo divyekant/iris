@@ -26,7 +26,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
 
     Json(HealthResponse {
         status,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: "0.3.0".to_string(),
         db: db_ok,
         ai: ai_ok,
         memories: memories_ok,
