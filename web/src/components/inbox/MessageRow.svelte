@@ -3,7 +3,7 @@
   import SnoozePicker from '../SnoozePicker.svelte';
   import Badge from '$components/shared/Badge.svelte';
   import { getPrimaryBadges } from '$lib/badge-priority';
-  import { irisCollapse } from '$lib/transitions';
+  import { irisCollapse, staggeredFade } from '$lib/transitions';
 
   interface Message {
     id: string;
@@ -157,18 +157,21 @@
   <div class="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1 px-2 py-1 rounded-lg"
        style="background: var(--iris-color-bg-elevated); box-shadow: 0 1px 3px rgba(0,0,0,.15);">
     <button
+      transition:staggeredFade={{ index: 0 }}
       class="p-1 rounded transition-colors quick-action"
       style="color: var(--iris-color-text-faint);"
       onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'archive'); }}
       title="Archive"
     ><Archive size={14} /></button>
     <button
+      transition:staggeredFade={{ index: 1 }}
       class="p-1 rounded transition-colors quick-action-delete"
       style="color: var(--iris-color-text-faint);"
       onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'delete'); }}
       title="Delete"
     ><Trash2 size={14} /></button>
     <button
+      transition:staggeredFade={{ index: 2 }}
       class="p-1 rounded transition-colors quick-action"
       style="color: var(--iris-color-text-faint);"
       onclick={(e) => { e.stopPropagation(); onaction?.(message.id, 'star'); }}
@@ -176,6 +179,7 @@
     ><Star size={14} /></button>
     <div class="relative">
       <button
+        transition:staggeredFade={{ index: 3 }}
         class="p-1 rounded transition-colors quick-action-snooze"
         style="color: var(--iris-color-text-faint);"
         onclick={(e) => { e.stopPropagation(); snoozePickerOpen = !snoozePickerOpen; }}
