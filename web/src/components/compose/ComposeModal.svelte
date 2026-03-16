@@ -7,6 +7,7 @@
   import MultiReplyPicker from './MultiReplyPicker.svelte';
   import DlpWarning from './DlpWarning.svelte';
   import { Clock, Wand2, Sparkles, Check, AlertTriangle, Loader2 } from 'lucide-svelte';
+  import { feedback } from '../../lib/feedback';
 
   interface DlpScanResult {
     findings: { type: string; match: string; location: string; line: number }[];
@@ -611,11 +612,13 @@
           if (undoCountdown <= 0) {
             clearUndoTimer();
             undoSendId = null;
+            feedback.success('Email sent');
             onsent?.();
             onclose();
           }
         }, 1000);
       } else {
+        feedback.success('Email sent');
         onsent?.();
         onclose();
       }

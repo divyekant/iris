@@ -5,6 +5,7 @@
   import { Star, Archive, MailOpen, Trash2, Sparkles, ArrowLeft, Send, Clock, ShieldAlert, VolumeX, Volume2, Forward, ListChecks, Ellipsis, PanelRight, StickyNote, Reply, ReplyAll, MessageSquare, Timer } from 'lucide-svelte';
   import { irisCollapse, irisSlide } from '$lib/transitions';
   import { currentThreadContext } from '$lib/threadContext';
+  import { feedback } from '$lib/feedback';
   import SpamDialog from '../components/SpamDialog.svelte';
   import MessageCard from '../components/thread/MessageCard.svelte';
   import SnoozePicker from '../components/SnoozePicker.svelte';
@@ -211,9 +212,11 @@
       if (isMuted) {
         await api.mutedThreads.unmute(params.id);
         isMuted = false;
+        feedback.success('Thread unmuted');
       } else {
         await api.mutedThreads.mute(params.id);
         isMuted = true;
+        feedback.success('Thread muted');
       }
     } catch (e: any) {
       error = e.message || 'Failed to toggle mute';
@@ -341,11 +344,19 @@
   async function handleThreadAction(action: string) {
     if (!thread) return;
     const ids = thread.messages.map((m: any) => m.id);
+    const wasStarred = thread.is_starred;
     try {
       await api.messages.batch(ids, action);
-      if (action === 'archive' || action === 'delete') {
+      if (action === 'archive') {
+        feedback.success('Thread archived');
+        push('/');
+      } else if (action === 'delete') {
+        feedback.success('Thread deleted');
         push('/');
       } else {
+        if (action === 'star') {
+          feedback.success(wasStarred ? 'Unstarred' : 'Starred');
+        }
         await loadThread();
       }
     } catch (e: any) {

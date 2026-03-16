@@ -146,10 +146,22 @@
 
   async function handleBulkAction(action: string) {
     if (selectedIds.size === 0) return;
+    const ids = [...selectedIds];
     try {
-      await api.messages.batch([...selectedIds], action);
+      await api.messages.batch(ids, action);
       selectedIds = new Set();
       await loadMessages();
+      if (action === 'archive') {
+        feedback.success(`${ids.length} archived`, { undo: async () => { await api.messages.batch(ids, 'unarchive'); await loadMessages(); } });
+      } else if (action === 'delete') {
+        feedback.success(`${ids.length} deleted`);
+      } else if (action === 'star') {
+        feedback.success(`${ids.length} starred`);
+      } else if (action === 'mark_read') {
+        feedback.success(`${ids.length} marked as read`);
+      } else if (action === 'mark_unread') {
+        feedback.success(`${ids.length} marked as unread`);
+      }
     } catch (e: any) {
       error = e.message || 'Bulk action failed';
     }
@@ -174,6 +186,17 @@
     try {
       await api.messages.batch([id], action);
       await loadMessages();
+      if (action === 'archive') {
+        feedback.success('Archived', { undo: async () => { await api.messages.batch([id], 'unarchive'); await loadMessages(); } });
+      } else if (action === 'delete') {
+        feedback.success('Deleted');
+      } else if (action === 'star') {
+        feedback.success('Starred');
+      } else if (action === 'mark_read') {
+        feedback.success('Marked as read');
+      } else if (action === 'mark_unread') {
+        feedback.success('Marked as unread');
+      }
     } catch (e: any) {
       error = e.message || 'Action failed';
     }
