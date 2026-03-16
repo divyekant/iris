@@ -3,8 +3,12 @@
   import TopNav from './TopNav.svelte';
   import ChatPanel from './ChatPanel.svelte';
   import Toast from './Toast.svelte';
+  import CommandPalette from './shared/CommandPalette.svelte';
   import { api } from '../lib/api';
   import { wsClient } from '../lib/ws';
+  import { handleGlobalKeydown, registerShortcut } from '$lib/keyboard';
+  import { togglePalette, registerCommands } from '$lib/commands';
+  import { push } from 'svelte-spa-router';
 
   interface Props {
     children: Snippet;
@@ -18,6 +22,26 @@
   let syncStatus: string | null = $state(null);
   let syncError = $state(false);
   let unreadCount = $state(0);
+
+  $effect(() => {
+    // Register Cmd+K shortcut
+    registerShortcut({
+      key: 'k',
+      mode: 'global',
+      meta: true,
+      action: togglePalette,
+      description: 'Open command palette',
+    });
+
+    // Register core navigation commands
+    registerCommands([
+      { id: 'nav-inbox', label: 'Go to Inbox', category: 'Navigation', keywords: ['home'], action: () => push('/'), shortcut: 'g → i' },
+      { id: 'nav-sent', label: 'Go to Sent', category: 'Navigation', keywords: ['sent'], action: () => push('/sent'), shortcut: 'g → s' },
+      { id: 'nav-drafts', label: 'Go to Drafts', category: 'Navigation', keywords: ['draft'], action: () => push('/drafts'), shortcut: 'g → d' },
+      { id: 'nav-settings', label: 'Open Settings', category: 'Navigation', keywords: ['preferences', 'config'], action: () => push('/settings') },
+      { id: 'nav-search', label: 'Focus Search', category: 'Navigation', keywords: ['find'], action: () => { const el = document.getElementById('topnav-search-input'); if (el) { el.focus(); (el as HTMLInputElement).select(); } }, shortcut: '/' },
+    ]);
+  });
 
   $effect(() => {
     loadAccounts();
@@ -63,6 +87,10 @@
     window.dispatchEvent(new CustomEvent('open-compose', { detail: { mode: 'new', accountId: activeAccountId } }));
   }
 </script>
+
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+<CommandPalette />
 
 <div class="flex flex-col h-screen" style="background: var(--iris-color-bg);">
   <TopNav
