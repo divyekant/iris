@@ -490,4 +490,15 @@ export const api = {
     dismiss: (id: string) => request<void>(`/api/followups/${id}/dismiss`, { method: 'PUT' }),
     acted: (id: string) => request<void>(`/api/followups/${id}/acted`, { method: 'PUT' }),
   },
+  style: {
+    get: (accountId: string) => request<{ traits: { id: string; account_id: string; trait_type: string; trait_value: string; confidence: number; examples: string[] | null; created_at: number; updated_at: number }[]; account_id: string }>(`/api/style/${accountId}`),
+    analyze: (accountId: string) => request<{ traits: { id: string; account_id: string; trait_type: string; trait_value: string; confidence: number; examples: string[] | null; created_at: number; updated_at: number }[]; emails_analyzed: number }>(`/api/style/${accountId}/analyze`, { method: 'POST' }),
+  },
+  autoDraft: {
+    check: (messageId: string) => request<{ draft: { id: string; message_id: string; account_id: string; pattern_id: string | null; draft_body: string; status: string; created_at: number } | null }>(`/api/auto-draft/${messageId}`),
+    generate: (messageId: string) => request<{ draft: { id: string; message_id: string; account_id: string; pattern_id: string | null; draft_body: string; status: string; created_at: number } }>(`/api/auto-draft/generate/${messageId}`, { method: 'POST' }),
+    feedback: (draftId: string, action: string) => request<{ updated: boolean }>(`/api/auto-draft/${draftId}/feedback`, { method: 'POST', body: JSON.stringify({ action }) }),
+    getConfig: () => request<{ enabled: boolean; sensitivity: string }>('/api/config/auto-draft'),
+    setConfig: (config: { enabled: boolean; sensitivity: string }) => request<{ enabled: boolean; sensitivity: string }>('/api/config/auto-draft', { method: 'PUT', body: JSON.stringify(config) }),
+  },
 };

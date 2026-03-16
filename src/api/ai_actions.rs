@@ -174,9 +174,28 @@ pub async fn ai_assist(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    // Inject writing style into rewrite/compose actions
+    let enriched_system = if matches!(input.action.as_str(), "rewrite" | "formal" | "casual" | "shorter" | "longer") {
+        // Try to get account_id from the first account (single-user app)
+        let account_id: Option<String> = conn
+            .query_row("SELECT id FROM accounts LIMIT 1", [], |row| row.get(0))
+            .ok();
+        if let Some(ref aid) = account_id {
+            if let Some(style) = crate::api::writing_style::build_style_prompt(&conn, aid) {
+                format!("{}\n\n{}", system_prompt, style)
+            } else {
+                system_prompt.to_string()
+            }
+        } else {
+            system_prompt.to_string()
+        }
+    } else {
+        system_prompt.to_string()
+    };
+
     let result = state
         .providers
-        .generate(&input.content, Some(system_prompt))
+        .generate(&input.content, Some(&enriched_system))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
@@ -510,9 +529,25 @@ pub async fn draft_from_intent(
 
     let prompt = build_draft_intent_prompt(intent, input.context.as_deref());
 
+    // Inject writing style
+    let enriched_system = {
+        let account_id: Option<String> = conn
+            .query_row("SELECT id FROM accounts LIMIT 1", [], |row| row.get(0))
+            .ok();
+        if let Some(ref aid) = account_id {
+            if let Some(style) = crate::api::writing_style::build_style_prompt(&conn, aid) {
+                format!("{}\n\n{}", DRAFT_INTENT_SYSTEM_PROMPT, style)
+            } else {
+                DRAFT_INTENT_SYSTEM_PROMPT.to_string()
+            }
+        } else {
+            DRAFT_INTENT_SYSTEM_PROMPT.to_string()
+        }
+    };
+
     let raw = state
         .providers
-        .generate(&prompt, Some(DRAFT_INTENT_SYSTEM_PROMPT))
+        .generate(&prompt, Some(&enriched_system))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 
@@ -814,9 +849,25 @@ pub async fn multi_reply(
         input.context.as_deref(),
     );
 
+    // Inject writing style
+    let enriched_system = {
+        let account_id: Option<String> = conn
+            .query_row("SELECT id FROM accounts LIMIT 1", [], |row| row.get(0))
+            .ok();
+        if let Some(ref aid) = account_id {
+            if let Some(style) = crate::api::writing_style::build_style_prompt(&conn, aid) {
+                format!("{}\n\n{}", MULTI_REPLY_SYSTEM_PROMPT, style)
+            } else {
+                MULTI_REPLY_SYSTEM_PROMPT.to_string()
+            }
+        } else {
+            MULTI_REPLY_SYSTEM_PROMPT.to_string()
+        }
+    };
+
     let raw = state
         .providers
-        .generate(&prompt, Some(MULTI_REPLY_SYSTEM_PROMPT))
+        .generate(&prompt, Some(&enriched_system))
         .await
         .ok_or(StatusCode::BAD_GATEWAY)?;
 

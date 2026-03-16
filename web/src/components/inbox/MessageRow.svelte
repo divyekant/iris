@@ -20,6 +20,7 @@
     ai_needs_reply?: boolean;
     intent?: string;
     labels?: string;
+    has_auto_draft?: boolean;
   }
 
   let { message, onclick, selected = false, focused = false, onselect, onaction, onsnooze, muted = false }: {
@@ -142,6 +143,14 @@
     </div>
     <div class="text-sm truncate {message.is_read ? '' : 'font-medium'} flex items-center gap-1.5" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
       <span class="truncate">{subjectDisplay}</span>
+      {#if message.has_auto_draft}
+        <button
+          class="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium uppercase cursor-pointer draft-ready-chip border-0"
+          style="background: color-mix(in srgb, var(--iris-color-info) 15%, transparent); color: var(--iris-color-info);"
+          title="Auto-draft reply available"
+          onclick={(e) => { e.stopPropagation(); }}
+        >Draft ready</button>
+      {/if}
       {#if muted}
         <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium uppercase" style="background: color-mix(in srgb, var(--iris-color-text-faint) 15%, transparent); color: var(--iris-color-text-faint);">Muted</span>
       {/if}
@@ -201,4 +210,5 @@
   .quick-action:hover { color: var(--iris-color-primary); }
   .quick-action-delete:hover { color: var(--iris-color-error); }
   .quick-action-snooze:hover { color: var(--iris-color-warning); }
+  .draft-ready-chip:hover { filter: brightness(1.2); }
 </style>

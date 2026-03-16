@@ -129,6 +129,47 @@ pub fn enqueue_chat_summarize(conn: &Connection, session_id: &str) {
     }
 }
 
+/// Enqueue a writing style extraction job for an account (with dedup + 7-day cooldown).
+pub fn enqueue_style_extract(conn: &Connection, account_id: &str) {
+    // Check cooldown: skip if analyzed in last 7 days
+    let last_key = format!("style_last_analyzed_{}", account_id);
+    let last_run: Option<i64> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM config WHERE key = ?1",
+            rusqlite::params![last_key],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(ts) = last_run {
+        let now = chrono::Utc::now().timestamp();
+        if now - ts < 7 * 86400 {
+            return; // Too recent
+        }
+    }
+
+    // Dedup check
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM processing_jobs WHERE job_type = 'style_extract' AND payload LIKE ?1 AND status IN ('pending','processing'))",
+            rusqlite::params![format!("%{}%", account_id)],
+            |row| row.get(0),
+        )
+        .unwrap_or(true);
+
+    if exists {
+        return;
+    }
+
+    let payload = serde_json::json!({ "account_id": account_id }).to_string();
+    if let Err(e) = conn.execute(
+        "INSERT INTO processing_jobs (job_type, payload) VALUES ('style_extract', ?1)",
+        rusqlite::params![payload],
+    ) {
+        tracing::warn!("Failed to enqueue style_extract: {e}");
+    }
+}
+
 /// Enqueue a preference extraction job (with dedup check).
 pub fn enqueue_pref_extract(conn: &Connection) {
     let exists: bool = conn
@@ -339,7 +380,7 @@ mod tests {
              );
              CREATE TABLE IF NOT EXISTS processing_jobs (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 job_type TEXT NOT NULL CHECK(job_type IN ('ai_classify','memories_store','chat_summarize','pref_extract','entity_extract')),
+                 job_type TEXT NOT NULL CHECK(job_type IN ('ai_classify','memories_store','chat_summarize','pref_extract','entity_extract','style_extract','auto_draft')),
                  message_id TEXT,
                  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','done','failed')),
                  attempts INTEGER NOT NULL DEFAULT 0,

@@ -31,6 +31,18 @@
   let decayThresholdDays = $state('7');
   let decaySaving = $state(false);
 
+  // Writing style
+  let styleTraits = $state<{ trait_type: string; trait_value: string; confidence: number; examples: string[] | null }[]>([]);
+  let styleLoading = $state(false);
+  let styleAnalyzing = $state(false);
+  let styleMessage = $state('');
+
+  // Auto-draft
+  let autoDraftEnabled = $state(false);
+  let autoDraftSensitivity = $state('balanced');
+  let autoDraftSaving = $state(false);
+  let autoDraftInitialized = $state(false);
+
   // Provider API keys (masked display)
   let anthropicKey = $state('');
   let anthropicModel = $state('');
@@ -149,6 +161,78 @@
     }
   });
 
+  async function loadWritingStyle() {
+    styleLoading = true;
+    try {
+      const accounts = await api.accounts.list();
+      if (accounts.length > 0) {
+        const result = await api.style.get(accounts[0].id);
+        styleTraits = result.traits;
+      }
+    } catch {
+      // Style not available
+    } finally {
+      styleLoading = false;
+    }
+  }
+
+  async function analyzeWritingStyle() {
+    styleAnalyzing = true;
+    styleMessage = '';
+    try {
+      const accounts = await api.accounts.list();
+      if (accounts.length === 0) {
+        styleMessage = 'No accounts found';
+        return;
+      }
+      const result = await api.style.analyze(accounts[0].id);
+      styleTraits = result.traits;
+      styleMessage = result.emails_analyzed > 0
+        ? `Analyzed ${result.emails_analyzed} emails, found ${result.traits.length} traits`
+        : 'No sent emails found to analyze';
+    } catch {
+      styleMessage = 'Analysis failed';
+    } finally {
+      styleAnalyzing = false;
+      setTimeout(() => { styleMessage = ''; }, 5000);
+    }
+  }
+
+  async function loadAutoDraftConfig() {
+    try {
+      const config = await api.autoDraft.getConfig();
+      autoDraftEnabled = config.enabled;
+      autoDraftSensitivity = config.sensitivity;
+    } catch {
+      // Not available
+    }
+    autoDraftInitialized = true;
+  }
+
+  async function saveAutoDraftConfig() {
+    autoDraftSaving = true;
+    try {
+      const result = await api.autoDraft.setConfig({
+        enabled: autoDraftEnabled,
+        sensitivity: autoDraftSensitivity,
+      });
+      autoDraftEnabled = result.enabled;
+      autoDraftSensitivity = result.sensitivity;
+    } catch {
+      // Silently fail
+    } finally {
+      autoDraftSaving = false;
+    }
+  }
+
+  // Watch autoDraftEnabled toggle changes (after initialization)
+  $effect(() => {
+    const val = autoDraftEnabled;
+    if (autoDraftInitialized) {
+      saveAutoDraftConfig();
+    }
+  });
+
   async function reprocessUntagged() {
     reprocessing = true;
     reprocessMessage = '';
@@ -202,6 +286,8 @@
       decayInitialized = true;
     }
     loadSettings();
+    loadWritingStyle();
+    loadAutoDraftConfig();
   });
 </script>
 
@@ -411,6 +497,99 @@
           </div>
         {/if}
       </div>
+    </div>
+  </section>
+
+  <!-- Writing Style section -->
+  <section>
+    <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Writing Style</h3>
+    <div class="space-y-4">
+      <p class="text-xs" style="color: var(--iris-color-text-faint);">
+        Iris learns your writing style from sent emails to generate drafts that sound like you.
+      </p>
+
+      {#if styleLoading}
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-sm" style="color: var(--iris-color-text-muted);">Loading style traits...</p>
+        </div>
+      {:else if styleTraits.length > 0}
+        <div class="grid gap-2">
+          {#each styleTraits as trait}
+            <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-medium uppercase tracking-wider" style="color: var(--iris-color-text-muted);">
+                  {trait.trait_type === 'avg_length' ? 'Avg Length' : trait.trait_type === 'signoff' ? 'Sign-off' : trait.trait_type.charAt(0).toUpperCase() + trait.trait_type.slice(1)}
+                </span>
+                <span class="text-[10px] px-1.5 py-0.5 rounded-full" style="background: color-mix(in srgb, var(--iris-color-primary) {Math.round(trait.confidence * 100)}%, transparent); color: var(--iris-color-primary);">
+                  {Math.round(trait.confidence * 100)}%
+                </span>
+              </div>
+              <p class="text-sm" style="color: var(--iris-color-text);">{trait.trait_value}</p>
+              {#if trait.examples && trait.examples.length > 0}
+                <div class="mt-1 flex flex-wrap gap-1">
+                  {#each trait.examples.slice(0, 3) as example}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded" style="background: var(--iris-color-bg-surface); color: var(--iris-color-text-faint);">
+                      "{example}"
+                    </span>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-sm" style="color: var(--iris-color-text-muted);">No writing style detected yet. Click "Analyze" to learn from your sent emails.</p>
+        </div>
+      {/if}
+
+      <div class="flex items-center gap-2">
+        <button
+          class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+          style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+          onclick={analyzeWritingStyle}
+          disabled={styleAnalyzing}
+        >
+          {styleAnalyzing ? 'Analyzing...' : styleTraits.length > 0 ? 'Re-analyze' : 'Analyze Writing Style'}
+        </button>
+        {#if styleMessage}
+          <span class="text-xs" style="color: var(--iris-color-text-muted);">{styleMessage}</span>
+        {/if}
+      </div>
+    </div>
+  </section>
+
+  <!-- Auto-Draft section -->
+  <section>
+    <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Auto-Draft</h3>
+    <div class="space-y-4">
+      <FormToggle
+        label="Auto-generate reply drafts"
+        description="Automatically draft replies for incoming emails using AI and your writing style"
+        bind:checked={autoDraftEnabled}
+      />
+
+      {#if autoDraftEnabled}
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-xs font-medium mb-2" style="color: var(--iris-color-text-muted);">Sensitivity</p>
+          <div class="flex gap-2">
+            {#each ['conservative', 'balanced', 'aggressive'] as level}
+              <button
+                class="flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors"
+                style="border-color: {autoDraftSensitivity === level ? 'var(--iris-color-primary)' : 'var(--iris-color-border)'}; background: {autoDraftSensitivity === level ? 'color-mix(in srgb, var(--iris-color-primary) 12%, transparent)' : 'transparent'}; color: {autoDraftSensitivity === level ? 'var(--iris-color-primary)' : 'var(--iris-color-text-muted)'};"
+                onclick={() => { autoDraftSensitivity = level; saveAutoDraftConfig(); }}
+              >
+                {level.charAt(0).toUpperCase() + level.slice(1)}
+              </button>
+            {/each}
+          </div>
+          <p class="text-[10px] mt-2" style="color: var(--iris-color-text-faint);">
+            {autoDraftSensitivity === 'conservative' ? 'Only draft replies for well-matched patterns (high confidence required)' :
+             autoDraftSensitivity === 'aggressive' ? 'Draft replies for most incoming emails (lower confidence threshold)' :
+             'Draft replies when reasonably confident about the appropriate response'}
+          </p>
+        </div>
+      {/if}
     </div>
   </section>
 </div>

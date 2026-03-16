@@ -169,6 +169,8 @@ impl JobWorker {
             "chat_summarize" => self.handle_chat_summarize(&job).await,
             "pref_extract" => self.handle_pref_extract(&job).await,
             "entity_extract" => self.handle_entity_extract(&job).await,
+            "style_extract" => self.handle_style_extract(&job).await,
+            "auto_draft" => self.handle_auto_draft(&job).await,
             _ => Err(format!("Unknown job type: {}", job.job_type)),
         };
 
@@ -632,6 +634,233 @@ Body:
         }
 
         tracing::info!(message_id = message_id, entities = extraction.entities.len(), relations = extraction.relations.len(), events = extraction.events.len(), "Entity extraction completed");
+        Ok(())
+    }
+
+    async fn handle_style_extract(&self, job: &Job) -> Result<(), String> {
+        let payload_str = job.payload.as_deref().ok_or("Missing payload")?;
+        let payload: serde_json::Value = serde_json::from_str(payload_str)
+            .map_err(|e| format!("Invalid payload: {e}"))?;
+        let account_id = payload["account_id"]
+            .as_str()
+            .ok_or("Missing account_id in payload")?;
+
+        // Check if AI is enabled
+        let enabled = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string())
+                == "true"
+        };
+
+        if !enabled || !self.providers.has_providers() {
+            return Err("AI not enabled".to_string());
+        }
+
+        // Fetch sent emails
+        let sent_emails: Vec<(String, String)> = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT COALESCE(subject, ''), COALESCE(body_text, '')
+                     FROM messages
+                     WHERE account_id = ?1 AND folder = 'Sent'
+                     ORDER BY date DESC
+                     LIMIT 200",
+                )
+                .map_err(|e| e.to_string())?;
+
+            stmt.query_map(rusqlite::params![account_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .filter(|(_, body)| !body.trim().is_empty())
+            .collect()
+        };
+
+        if sent_emails.is_empty() {
+            tracing::info!(account_id = account_id, "No sent emails for style extraction");
+            return Ok(());
+        }
+
+        // Build sample
+        let mut sample = String::new();
+        let max_sample = 6000;
+        for (i, (subject, body)) in sent_emails.iter().enumerate().take(30) {
+            let body_truncated: String = body.chars().take(300).collect();
+            let entry = format!("--- Email {} ---\nSubject: {}\n{}\n\n", i + 1, subject, body_truncated);
+            if sample.len() + entry.len() > max_sample {
+                break;
+            }
+            sample.push_str(&entry);
+        }
+
+        let prompt = format!(
+            r#"Analyze the writing style of these sent emails and extract the following traits. Return ONLY a JSON array:
+
+[
+  {{"trait_type": "greeting", "trait_value": "most common greeting phrase", "confidence": 0.0-1.0, "examples": []}},
+  {{"trait_type": "signoff", "trait_value": "most common sign-off phrase", "confidence": 0.0-1.0, "examples": []}},
+  {{"trait_type": "tone", "trait_value": "one of: formal, semi-formal, casual, direct, warm, analytical", "confidence": 0.0-1.0, "examples": []}},
+  {{"trait_type": "avg_length", "trait_value": "short | medium | long", "confidence": 0.0-1.0, "examples": []}},
+  {{"trait_type": "formality", "trait_value": "1-10 score", "confidence": 0.0-1.0, "examples": []}},
+  {{"trait_type": "vocabulary", "trait_value": "description", "confidence": 0.0-1.0, "examples": []}}
+]
+
+Emails:
+
+{sample}"#
+        );
+
+        let raw = self
+            .providers
+            .generate(&prompt, Some("You are a writing style analyst. Return ONLY valid JSON."))
+            .await
+            .ok_or("AI style analysis failed")?;
+
+        // Parse and store
+        let traits = crate::api::writing_style::parse_style_traits_for_worker(&raw, account_id);
+        let conn = self.db.get().map_err(|e| e.to_string())?;
+        crate::api::writing_style::store_style_traits_for_worker(&conn, account_id, &traits);
+
+        // Record timestamp
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            rusqlite::params![
+                format!("style_last_analyzed_{}", account_id),
+                chrono::Utc::now().timestamp().to_string()
+            ],
+        )
+        .ok();
+
+        tracing::info!(account_id = account_id, traits = traits.len(), "Writing style extracted");
+        Ok(())
+    }
+
+    async fn handle_auto_draft(&self, job: &Job) -> Result<(), String> {
+        let message_id = job.message_id.as_deref().ok_or("Missing message_id")?;
+
+        // Check if AI is enabled
+        let enabled = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string())
+                == "true"
+        };
+
+        if !enabled || !self.providers.has_providers() {
+            return Err("AI not enabled".to_string());
+        }
+
+        // Check auto-draft is still enabled
+        let ad_enabled = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row("SELECT value FROM config WHERE key = 'auto_draft_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string())
+                == "true"
+        };
+
+        if !ad_enabled {
+            return Ok(());
+        }
+
+        // Fetch the message
+        let (account_id, from_address, subject, body_text) = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT account_id, COALESCE(from_address, ''), COALESCE(subject, ''), COALESCE(body_text, '')
+                 FROM messages WHERE id = ?1",
+                rusqlite::params![message_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+            )
+            .map_err(|e| format!("Message not found: {e}"))?
+        };
+
+        // Skip if already has a draft
+        let existing: bool = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM auto_drafts WHERE message_id = ?1)",
+                rusqlite::params![message_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false)
+        };
+
+        if existing {
+            return Ok(());
+        }
+
+        // Get sensitivity
+        let confidence_threshold = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            let sensitivity = conn
+                .query_row("SELECT value FROM config WHERE key = 'auto_draft_sensitivity'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "balanced".to_string());
+            match sensitivity.as_str() {
+                "conservative" => 0.8,
+                "aggressive" => 0.4,
+                _ => 0.6,
+            }
+        };
+
+        // Try pattern matching
+        let sender_domain = from_address.split('@').nth(1).unwrap_or("").to_lowercase();
+        let matched_pattern = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            crate::api::auto_draft::find_matching_pattern_for_worker(&conn, &account_id, &sender_domain, &subject, confidence_threshold)
+        };
+
+        let (draft_body, pattern_id) = if let Some((pid, template)) = matched_pattern {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE auto_draft_patterns SET match_count = match_count + 1, last_matched_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1",
+                rusqlite::params![pid],
+            ).ok();
+            (template, Some(pid))
+        } else {
+            // Generate via AI
+            let body_truncated: String = body_text.chars().take(2000).collect();
+
+            let style_snippet = {
+                let conn = self.db.get().map_err(|e| e.to_string())?;
+                crate::api::writing_style::build_style_prompt(&conn, &account_id)
+            };
+
+            let mut system = String::from(
+                "You are an email reply assistant. Generate a professional, contextual reply. \
+                 Return ONLY the reply body text."
+            );
+            if let Some(style) = style_snippet {
+                system.push_str("\n\n");
+                system.push_str(&style);
+            }
+
+            let prompt = format!(
+                "Write a reply to this email:\n\nFrom: {}\nSubject: {}\n\n{}",
+                from_address, subject, body_truncated
+            );
+
+            let generated = self.providers
+                .generate(&prompt, Some(&system))
+                .await
+                .ok_or("AI draft generation failed")?;
+
+            (generated, None)
+        };
+
+        // Store the draft
+        let draft_id = uuid::Uuid::new_v4().to_string();
+        let conn = self.db.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO auto_drafts (id, message_id, account_id, pattern_id, draft_body, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+            rusqlite::params![draft_id, message_id, account_id, pattern_id, draft_body],
+        )
+        .map_err(|e| format!("Failed to store auto-draft: {e}"))?;
+
+        tracing::info!(message_id = message_id, "Auto-draft generated");
         Ok(())
     }
 }

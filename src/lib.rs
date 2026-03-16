@@ -246,6 +246,14 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/mcp/sessions", get(api::mcp_server::list_sessions))
         .route("/mcp/sessions/{session_id}", delete(api::mcp_server::delete_session))
         .route("/mcp/sessions/{session_id}/history", get(api::mcp_server::session_history))
+        // Writing style learning
+        .route("/style/{account_id}", get(api::writing_style::get_style))
+        .route("/style/{account_id}/analyze", post(api::writing_style::analyze_style))
+        // Auto-draft
+        .route("/auto-draft/{message_id}", get(api::auto_draft::check_auto_draft))
+        .route("/auto-draft/generate/{message_id}", post(api::auto_draft::generate_auto_draft))
+        .route("/auto-draft/{draft_id}/feedback", post(api::auto_draft::auto_draft_feedback))
+        .route("/config/auto-draft", get(api::auto_draft::get_auto_draft_config).put(api::auto_draft::set_auto_draft_config))
         // Knowledge graph
         .route("/graph", get(api::knowledge_graph::query_graph))
         .route("/graph/entities", get(api::knowledge_graph::list_entities))
