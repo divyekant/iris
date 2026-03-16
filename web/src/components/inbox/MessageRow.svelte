@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { Paperclip, Archive, Trash2, Star, Clock, Reply } from 'lucide-svelte';
+  import { Paperclip, Archive, Trash2, Star, Clock } from 'lucide-svelte';
   import SnoozePicker from '../SnoozePicker.svelte';
-  import IntentBadge from './IntentBadge.svelte';
+  import Badge from '$components/shared/Badge.svelte';
+  import { getPrimaryBadges } from '$lib/badge-priority';
+  import { irisCollapse } from '$lib/transitions';
 
   interface Message {
     id: string;
@@ -62,52 +64,14 @@
     message.ai_priority_label ? priorityStyles[message.ai_priority_label] || '' : ''
   );
 
-  const sentimentConfig: Record<string, { color: string; label: string }> = {
-    positive: { color: 'var(--iris-color-success)', label: 'Positive' },
-    negative: { color: 'var(--iris-color-error)', label: 'Negative' },
-    neutral: { color: 'var(--iris-color-text-faint)', label: 'Neutral' },
-    mixed: { color: 'var(--iris-color-warning)', label: 'Mixed' },
-  };
-
-  let parsedLabels: string[] = $derived.by(() => {
-    if (!message.labels) return [];
-    try { return JSON.parse(message.labels); } catch { return []; }
-  });
-
-  // --- Smart Badge Priority (Shape F) ---
-  // Priority ranking: needs_reply > deadline > intent > sentiment > category > labels
-  const MAX_VISIBLE_BADGES = 2;
-
-  type BadgeEntry = {
-    priority: number;
-    type: 'needs_reply' | 'intent' | 'sentiment' | 'category' | 'label';
-    key: string;
-  };
-
-  let allBadges: BadgeEntry[] = $derived.by(() => {
-    const badges: BadgeEntry[] = [];
-    if (message.ai_needs_reply) {
-      badges.push({ priority: 0, type: 'needs_reply', key: 'needs_reply' });
-    }
-    // deadline slot (priority 1) reserved for future use
-    if (message.intent) {
-      badges.push({ priority: 2, type: 'intent', key: `intent_${message.intent}` });
-    }
-    if (message.ai_sentiment && sentimentConfig[message.ai_sentiment]) {
-      badges.push({ priority: 3, type: 'sentiment', key: `sentiment_${message.ai_sentiment}` });
-    }
-    if (message.ai_category) {
-      badges.push({ priority: 4, type: 'category', key: `category_${message.ai_category}` });
-    }
-    for (const label of parsedLabels) {
-      badges.push({ priority: 5, type: 'label', key: `label_${label}` });
-    }
-    badges.sort((a, b) => a.priority - b.priority);
-    return badges;
-  });
-
-  let visibleBadges = $derived(allBadges.slice(0, MAX_VISIBLE_BADGES));
-  let overflowCount = $derived(Math.max(0, allBadges.length - MAX_VISIBLE_BADGES));
+  // Map AI fields to badge-priority interface (ai_* prefix → clean names)
+  let badgeResult = $derived(getPrimaryBadges({
+    needs_reply: message.ai_needs_reply,
+    intent: message.intent,
+    sentiment: message.ai_sentiment,
+    category: message.ai_category,
+    labels: message.labels,
+  }));
 
   function handleCheckbox(e: Event) {
     e.stopPropagation();
@@ -118,6 +82,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  out:irisCollapse
   class="group relative w-full text-left px-4 py-3 border-b transition-colors flex items-center gap-2 cursor-pointer"
   style="border-color: var(--iris-color-border-subtle); {selected ? 'background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent);' : focused ? 'background: color-mix(in srgb, var(--iris-color-primary) 6%, transparent);' : ''}"
   role="button"
@@ -151,40 +116,21 @@
       <span class="text-sm truncate flex-shrink {message.is_read ? '' : 'font-semibold'}" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'}; min-width: 60px;">
         {senderDisplay}
       </span>
-      <!-- Smart Badge Priority: show top 2 badges + overflow count -->
-      <div class="flex items-center gap-1 flex-shrink-0 overflow-hidden">
-        {#each visibleBadges as badge (badge.key)}
-          {#if badge.type === 'needs_reply'}
-            <span class="flex-shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-warning) 12%, transparent); color: var(--iris-color-warning);" title="Needs reply">
-              <Reply size={10} />Reply
-            </span>
-          {:else if badge.type === 'intent'}
-            <IntentBadge intent={message.intent} />
-          {:else if badge.type === 'sentiment'}
-            <span
-              class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
-              style="background: color-mix(in srgb, {sentimentConfig[message.ai_sentiment!].color} 12%, transparent); color: {sentimentConfig[message.ai_sentiment!].color};"
-              title="Sentiment: {sentimentConfig[message.ai_sentiment!].label}"
-            >
-              {sentimentConfig[message.ai_sentiment!].label}
-            </span>
-          {:else if badge.type === 'category'}
-            <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium" style="background: color-mix(in srgb, var(--iris-color-primary) 8%, transparent); color: var(--iris-color-primary);">
-              {message.ai_category}
-            </span>
-          {:else if badge.type === 'label'}
-            <span class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
-              style="background: color-mix(in srgb, var(--iris-color-text-muted) 10%, transparent); color: var(--iris-color-text-muted);">
-              {badge.key.replace('label_', '')}
-            </span>
-          {/if}
-        {/each}
-        {#if overflowCount > 0}
+      <!-- Smart Badge Priority: show 1 primary badge + overflow count -->
+      <div class="flex items-center gap-1 flex-shrink-0">
+        {#if badgeResult.primary}
+          <Badge
+            variant={badgeResult.primary.type}
+            text={badgeResult.primary.label}
+            size="sm"
+          />
+        {/if}
+        {#if badgeResult.overflow > 0}
           <span
             class="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium"
             style="background: color-mix(in srgb, var(--iris-color-text-faint) 10%, transparent); color: var(--iris-color-text-faint);"
-            title="{overflowCount} more badge{overflowCount > 1 ? 's' : ''}"
-          >+{overflowCount}</span>
+            title="{badgeResult.overflow} more badge{badgeResult.overflow > 1 ? 's' : ''}"
+          >+{badgeResult.overflow}</span>
         {/if}
       </div>
       <span class="flex-shrink-0 text-xs ml-auto flex items-center gap-1.5" style="color: var(--iris-color-text-faint);">
