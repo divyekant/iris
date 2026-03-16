@@ -29,14 +29,15 @@ impl fmt::Display for SessionTokenKeyExtractor {
     }
 }
 
-/// Create a GovernorLayer for rate limiting: ~100 requests per 60 seconds per session token.
+/// Create a GovernorLayer for rate limiting: ~500 requests per 60 seconds per session token.
 ///
 /// Governor uses a token-bucket (GCRA) algorithm. We configure:
-/// - `burst_size(100)`: max 100 tokens in the bucket
-/// - `per_second(60)`: replenishment period of 60s per token (~1.67 tokens/sec)
+/// - `burst_size(500)`: max 500 tokens in the bucket
+/// - `per_second(12)`: replenishment period of 12s per token (~5 tokens/sec)
 ///
-/// A client can burst up to 100 requests instantly, then must wait for tokens to
-/// replenish at ~1.67/sec (100/min sustained rate).
+/// A client can burst up to 500 requests instantly, then must wait for tokens to
+/// replenish at ~5/sec (500/min sustained rate). This is generous enough for
+/// Settings pages that fire 10+ concurrent API calls on mount.
 ///
 /// When the limit is exceeded, tower_governor returns HTTP 429 with `retry-after` and
 /// `x-ratelimit-after` headers. The `use_headers()` call also adds `x-ratelimit-limit`
@@ -48,8 +49,8 @@ pub fn rate_limit_layer() -> GovernorLayer<
 > {
     let config = GovernorConfigBuilder::default()
         .key_extractor(SessionTokenKeyExtractor)
-        .per_second(60)
-        .burst_size(100)
+        .per_second(12)
+        .burst_size(500)
         .use_headers()
         .finish()
         .expect("Failed to build rate limiter config");
