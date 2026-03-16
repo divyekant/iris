@@ -8,6 +8,7 @@
   import AccountSetup from './pages/AccountSetup.svelte';
   import Settings from './pages/Settings.svelte';
   import Search from './pages/Search.svelte';
+  import GraphExplorer from './pages/GraphExplorer.svelte';
   import FolderView from './pages/FolderView.svelte';
   import Snoozed from './pages/Snoozed.svelte';
   import { api } from './lib/api';
@@ -37,6 +38,7 @@
   const routes = {
     '/': Inbox,
     '/search': Search,
+    '/graph': GraphExplorer,
     '/thread/:id': ThreadView,
     '/setup': AccountSetup,
     '/setup/*': AccountSetup,

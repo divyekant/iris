@@ -168,6 +168,7 @@ impl JobWorker {
             "memories_store" => self.handle_memories_store(&job).await,
             "chat_summarize" => self.handle_chat_summarize(&job).await,
             "pref_extract" => self.handle_pref_extract(&job).await,
+            "entity_extract" => self.handle_entity_extract(&job).await,
             _ => Err(format!("Unknown job type: {}", job.job_type)),
         };
 
@@ -463,6 +464,174 @@ impl JobWorker {
         }
 
         tracing::info!("User preferences extracted and stored");
+        Ok(())
+    }
+
+    async fn handle_entity_extract(&self, job: &Job) -> Result<(), String> {
+        let message_id = job.message_id.as_deref().ok_or("Missing message_id")?;
+
+        // Check if AI is enabled
+        let enabled = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string())
+                == "true"
+        };
+
+        if !enabled {
+            return Err("AI not enabled".to_string());
+        }
+
+        if !self.providers.has_providers() {
+            return Err("No AI providers configured".to_string());
+        }
+
+        // Fetch message
+        let (subject, from_address, body_text) = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT COALESCE(subject, ''), COALESCE(from_address, ''), COALESCE(body_text, '') FROM messages WHERE id = ?1",
+                rusqlite::params![message_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .map_err(|e| format!("Message not found: {e}"))?
+        };
+
+        let body_truncated: String = body_text.chars().take(4000).collect();
+
+        // Build extraction prompt
+        let prompt = format!(
+            r#"Extract entities, relationships, and date events from this email. Return a JSON object with these fields:
+
+1. "entities": array of {{ "name": string, "type": "person"|"org"|"project"|"date"|"amount", "aliases": [string] }}
+2. "relations": array of {{ "from": string, "to": string, "relation": string }}
+3. "events": array of {{ "name": string, "date": "YYYY-MM-DD", "precision": "day"|"week"|"month"|"quarter"|"year" }}
+
+Return empty arrays if nothing is found. Respond ONLY with the JSON object.
+
+From: {from_address}
+Subject: {subject}
+
+Body:
+{body_truncated}"#
+        );
+
+        let response = self
+            .providers
+            .generate(&prompt, Some("You are an entity and relationship extraction engine for emails. Return ONLY valid JSON."))
+            .await
+            .ok_or("AI entity extraction failed")?;
+
+        let trimmed = response.trim();
+        let json_str = if trimmed.starts_with("```") {
+            trimmed
+                .trim_start_matches("```json")
+                .trim_start_matches("```")
+                .trim_end_matches("```")
+                .trim()
+        } else {
+            trimmed
+        };
+
+        // Parse and store (best-effort)
+        #[derive(serde::Deserialize)]
+        struct AiEntity { name: String, #[serde(rename = "type")] entity_type: String, #[serde(default)] aliases: Vec<String> }
+        #[derive(serde::Deserialize)]
+        struct AiRelation { from: String, to: String, relation: String }
+        #[derive(serde::Deserialize)]
+        struct AiEvent { name: String, date: String, #[serde(default = "default_prec")] precision: String }
+        fn default_prec() -> String { "day".to_string() }
+        #[derive(serde::Deserialize)]
+        struct AiResult { #[serde(default)] entities: Vec<AiEntity>, #[serde(default)] relations: Vec<AiRelation>, #[serde(default)] events: Vec<AiEvent> }
+
+        let extraction: AiResult = serde_json::from_str(json_str)
+            .map_err(|e| format!("Failed to parse AI response: {e}"))?;
+
+        let conn = self.db.get().map_err(|e| e.to_string())?;
+        let valid_types = ["person", "org", "project", "date", "amount"];
+        let valid_precisions = ["day", "week", "month", "quarter", "year"];
+
+        let mut name_to_id = std::collections::HashMap::new();
+
+        for e in &extraction.entities {
+            let et = e.entity_type.to_lowercase();
+            if !valid_types.contains(&et.as_str()) { continue; }
+
+            let entity_id = crate::api::knowledge_graph::find_or_create_entity(&conn, &e.name, &et, message_id);
+            if let Some(ref id) = entity_id {
+                name_to_id.insert(e.name.to_lowercase(), id.clone());
+                for alias in &e.aliases {
+                    if alias.is_empty() { continue; }
+                    let exists: bool = conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM entity_aliases WHERE entity_id = ?1 AND alias_name = ?2 COLLATE NOCASE)",
+                            rusqlite::params![id, alias],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(true);
+                    if !exists {
+                        let alias_id = uuid::Uuid::new_v4().to_string();
+                        conn.execute(
+                            "INSERT INTO entity_aliases (id, entity_id, alias_name, source_message_id) VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![alias_id, id, alias, message_id],
+                        ).ok();
+                    }
+                }
+            }
+        }
+
+        for r in &extraction.relations {
+            let a_id = name_to_id.get(&r.from.to_lowercase());
+            let b_id = name_to_id.get(&r.to.to_lowercase());
+            if let (Some(a), Some(b)) = (a_id, b_id) {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM entity_relations WHERE entity_a = ?1 AND entity_b = ?2 AND relation_type = ?3)",
+                        rusqlite::params![a, b, r.relation],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(true);
+                if exists {
+                    conn.execute(
+                        "UPDATE entity_relations SET weight = weight + 0.5 WHERE entity_a = ?1 AND entity_b = ?2 AND relation_type = ?3",
+                        rusqlite::params![a, b, r.relation],
+                    ).ok();
+                } else {
+                    let rel_id = uuid::Uuid::new_v4().to_string();
+                    conn.execute(
+                        "INSERT INTO entity_relations (id, entity_a, entity_b, relation_type, source_message_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![rel_id, a, b, r.relation, message_id],
+                    ).ok();
+                }
+            }
+        }
+
+        for ev in &extraction.events {
+            if ev.name.is_empty() || ev.date.is_empty() { continue; }
+            let precision = {
+                let p = ev.precision.to_lowercase();
+                if valid_precisions.contains(&p.as_str()) { p } else { "day".to_string() }
+            };
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM timeline_events WHERE event_name = ?1 COLLATE NOCASE AND approximate_date = ?2)",
+                    rusqlite::params![ev.name, ev.date],
+                    |row| row.get(0),
+                )
+                .unwrap_or(true);
+            if !exists {
+                let event_id = uuid::Uuid::new_v4().to_string();
+                let account_id: Option<String> = conn
+                    .query_row("SELECT account_id FROM messages WHERE id = ?1", rusqlite::params![message_id], |row| row.get(0))
+                    .ok();
+                conn.execute(
+                    "INSERT INTO timeline_events (id, event_name, approximate_date, date_precision, source_message_id, account_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![event_id, ev.name, ev.date, precision, message_id, account_id],
+                ).ok();
+            }
+        }
+
+        tracing::info!(message_id = message_id, entities = extraction.entities.len(), relations = extraction.relations.len(), events = extraction.events.len(), "Entity extraction completed");
         Ok(())
     }
 }

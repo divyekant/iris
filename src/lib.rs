@@ -246,6 +246,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/mcp/sessions", get(api::mcp_server::list_sessions))
         .route("/mcp/sessions/{session_id}", delete(api::mcp_server::delete_session))
         .route("/mcp/sessions/{session_id}/history", get(api::mcp_server::session_history))
+        // Knowledge graph
+        .route("/graph", get(api::knowledge_graph::query_graph))
+        .route("/graph/entities", get(api::knowledge_graph::list_entities))
+        .route("/graph/extract/{message_id}", post(api::knowledge_graph::extract_entities))
+        // Temporal reasoning
+        .route("/search/temporal", post(api::temporal::temporal_search))
+        .route("/timeline", get(api::temporal::list_events))
         .route("/send", post(api::compose::send_message))
         .route("/send/cancel/{id}", post(api::compose::cancel_send))
         .route("/config/undo-send-delay", get(api::compose::get_undo_send_delay).put(api::compose::set_undo_send_delay))

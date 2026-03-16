@@ -468,6 +468,15 @@ export const api = {
     getScore: (email: string) =>
       request<VipContact>(`/api/contacts/${encodeURIComponent(email)}/vip-score`),
   },
+  graph: {
+    query: (q: string) => request<{ results: any[]; total: number }>(`/api/graph?query=${encodeURIComponent(q)}`),
+    entities: (type?: string, limit?: number) => request<{ entities: any[]; total: number }>(`/api/graph/entities?${new URLSearchParams({ ...(type && { type }), ...(limit && { limit: String(limit) }) })}`),
+    extract: (messageId: string) => request<{ message_id: string; entities_created: number; relations_created: number; events_created: number }>(`/api/graph/extract/${messageId}`, { method: 'POST' }),
+  },
+  temporal: {
+    search: (query: string) => request<{ resolved_range: { description: string; start_date: string; end_date: string; matched_event: string | null; confidence: number } | null; messages: any[]; total: number }>('/api/search/temporal', { method: 'POST', body: JSON.stringify({ query }) }),
+    events: (limit?: number) => request<{ events: any[]; total: number }>(`/api/timeline?${new URLSearchParams({ ...(limit && { limit: String(limit) }) })}`),
+  },
   followups: {
     list: (status?: string, limit?: number) => {
       const query = new URLSearchParams();

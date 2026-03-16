@@ -339,7 +339,7 @@ mod tests {
              );
              CREATE TABLE IF NOT EXISTS processing_jobs (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 job_type TEXT NOT NULL CHECK(job_type IN ('ai_classify','memories_store','chat_summarize','pref_extract')),
+                 job_type TEXT NOT NULL CHECK(job_type IN ('ai_classify','memories_store','chat_summarize','pref_extract','entity_extract')),
                  message_id TEXT,
                  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','done','failed')),
                  attempts INTEGER NOT NULL DEFAULT 0,

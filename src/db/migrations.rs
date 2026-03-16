@@ -51,6 +51,8 @@ const MIGRATION_048: &str = include_str!("../../migrations/048_phishing_detectio
 const MIGRATION_049: &str = include_str!("../../migrations/049_contact_profiles.sql");
 const MIGRATION_050: &str = include_str!("../../migrations/050_mcp_server.sql");
 const MIGRATION_051: &str = include_str!("../../migrations/051_performance_indexes.sql");
+const MIGRATION_052: &str = include_str!("../../migrations/052_knowledge_graph.sql");
+const MIGRATION_053: &str = include_str!("../../migrations/053_temporal_events.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -322,6 +324,16 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     if current_version < 51 {
         conn.execute_batch(MIGRATION_051)?;
         tracing::info!("Applied migration 051_performance_indexes");
+    }
+
+    if current_version < 52 {
+        conn.execute_batch(MIGRATION_052)?;
+        tracing::info!("Applied migration 052_knowledge_graph");
+    }
+
+    if current_version < 53 {
+        conn.execute_batch(MIGRATION_053)?;
+        tracing::info!("Applied migration 053_temporal_events");
     }
 
     Ok(())
