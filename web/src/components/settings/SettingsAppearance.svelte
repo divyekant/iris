@@ -645,7 +645,7 @@
     height: 20px;
     border-radius: var(--iris-radius-full);
     background: var(--iris-color-primary);
-    color: #000;
+    color: var(--iris-color-bg);
     display: flex;
     align-items: center;
     justify-content: center;

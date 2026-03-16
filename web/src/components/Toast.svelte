@@ -50,11 +50,11 @@
   }
 
   .toast-success {
-    border-left: 3px solid #16A34A;
+    border-left: 3px solid var(--iris-color-success);
   }
 
   .toast-error {
-    border-left: 3px solid #DC2626;
+    border-left: 3px solid var(--iris-color-error);
   }
 
   .toast-info {
