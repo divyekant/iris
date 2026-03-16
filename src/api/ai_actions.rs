@@ -17,7 +17,7 @@ pub struct SummarizeResponse {
     pub cached: bool,
 }
 
-const SUMMARY_SYSTEM_PROMPT: &str = "You are an email thread summarizer. Given a thread of emails, produce a concise 2-4 sentence summary covering: the key topic or decision being discussed, the current status or outcome, and any action items or next steps. Be factual and concise. Do not use bullet points. Respond with plain text only.";
+pub const SUMMARY_SYSTEM_PROMPT: &str = "You are an email thread summarizer. Given a thread of emails, produce a concise 2-4 sentence summary covering: the key topic or decision being discussed, the current status or outcome, and any action items or next steps. Be factual and concise. Do not use bullet points. Respond with plain text only.";
 
 /// Build a summarization prompt from a list of thread messages.
 pub fn build_summary_prompt(subject: &str, messages: &[MessageDetail]) -> String {
@@ -544,7 +544,7 @@ pub struct ExtractTasksResponse {
     pub tasks: Vec<ExtractedTask>,
 }
 
-const EXTRACT_TASKS_SYSTEM_PROMPT: &str = "Extract action items from the email(s). Return ONLY valid JSON array. Each element: {\"task\": \"description\", \"priority\": \"high|medium|low\", \"deadline\": \"date or null\", \"source_subject\": \"email subject\"}. If there are no action items, return an empty array []. Do not include any text outside the JSON array.";
+pub const EXTRACT_TASKS_SYSTEM_PROMPT: &str = "Extract action items from the email(s). Return ONLY valid JSON array. Each element: {\"task\": \"description\", \"priority\": \"high|medium|low\", \"deadline\": \"date or null\", \"source_subject\": \"email subject\"}. If there are no action items, return an empty array []. Do not include any text outside the JSON array.";
 
 /// Build a prompt for task extraction from one or more messages.
 pub fn build_extract_tasks_prompt(messages: &[MessageDetail]) -> String {

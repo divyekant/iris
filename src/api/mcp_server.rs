@@ -154,12 +154,18 @@ fn all_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "list_threads".to_string(),
-            description: "List email threads".to_string(),
+            description: "List email threads with optional filters".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "limit": { "type": "integer", "description": "Max results (default 20)", "default": 20 },
-                    "offset": { "type": "integer", "description": "Result offset (default 0)", "default": 0 }
+                    "offset": { "type": "integer", "description": "Result offset (default 0)", "default": 0 },
+                    "unread": { "type": "boolean", "description": "Filter to threads with at least one unread message" },
+                    "starred": { "type": "boolean", "description": "Filter to threads with at least one starred message" },
+                    "category": { "type": "string", "description": "Filter by AI category (e.g. primary, updates, promotions)" },
+                    "date_from": { "type": "string", "description": "ISO 8601 date — only threads with messages on/after this date" },
+                    "date_to": { "type": "string", "description": "ISO 8601 date — only threads with messages on/before this date" },
+                    "sender": { "type": "string", "description": "Filter threads by sender email address (partial match)" }
                 }
             }),
         },
@@ -195,6 +201,98 @@ fn all_tool_schemas() -> Vec<ToolSchema> {
                     "starred": { "type": "boolean", "description": "true to star, false to unstar", "default": true }
                 },
                 "required": ["message_id"]
+            }),
+        },
+        ToolSchema {
+            name: "get_thread_summary".to_string(),
+            description: "Get an AI-generated summary for an email thread. Returns cached summary if available.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "thread_id": { "type": "string", "description": "The thread ID to summarize" }
+                },
+                "required": ["thread_id"]
+            }),
+        },
+        ToolSchema {
+            name: "get_contact_profile".to_string(),
+            description: "Get a contact profile including response times, topics, and VIP status for a given email address.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "email": { "type": "string", "description": "The contact email address to look up" }
+                },
+                "required": ["email"]
+            }),
+        },
+        ToolSchema {
+            name: "extract_tasks".to_string(),
+            description: "Extract action items and to-dos from an email thread using AI.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "thread_id": { "type": "string", "description": "The thread ID to extract tasks from" }
+                },
+                "required": ["thread_id"]
+            }),
+        },
+        ToolSchema {
+            name: "extract_deadlines".to_string(),
+            description: "Extract deadlines and due dates from an email thread using AI.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "thread_id": { "type": "string", "description": "The thread ID to extract deadlines from" }
+                },
+                "required": ["thread_id"]
+            }),
+        },
+        ToolSchema {
+            name: "chat".to_string(),
+            description: "Send a message to the Iris AI assistant. The assistant can search emails, summarize threads, and answer questions about your inbox.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string", "description": "The message to send to the AI assistant" },
+                    "session_id": { "type": "string", "description": "Chat session ID for conversation continuity (generated if omitted)" },
+                    "account_id": { "type": "string", "description": "Override account ID for this chat (defaults to session account)" }
+                },
+                "required": ["message"]
+            }),
+        },
+        ToolSchema {
+            name: "get_inbox_stats".to_string(),
+            description: "Get inbox statistics: total, unread, starred counts plus category breakdown and top senders.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolSchema {
+            name: "manage_draft".to_string(),
+            description: "Create, update, or delete an email draft.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["create", "update", "delete"], "description": "The action to perform on the draft" },
+                    "draft_id": { "type": "string", "description": "Draft ID — required for update and delete actions" },
+                    "to": { "type": "array", "items": { "type": "string" }, "description": "Recipient addresses (for create/update)" },
+                    "subject": { "type": "string", "description": "Email subject (for create/update)" },
+                    "body": { "type": "string", "description": "Email body text (for create/update)" }
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolSchema {
+            name: "bulk_action".to_string(),
+            description: "Perform a bulk action on multiple emails at once.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message_ids": { "type": "array", "items": { "type": "string" }, "description": "List of message IDs to act on" },
+                    "action": { "type": "string", "enum": ["archive", "delete", "star", "mark_read", "mark_unread"], "description": "Action to perform on all specified messages" }
+                },
+                "required": ["message_ids", "action"]
             }),
         },
     ]
@@ -560,19 +658,99 @@ fn execute_tool(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .max(0);
+            let filter_unread = arguments.get("unread").and_then(|v| v.as_bool());
+            let filter_starred = arguments.get("starred").and_then(|v| v.as_bool());
+            let filter_category = arguments.get("category").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let filter_date_from = arguments.get("date_from").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let filter_date_to = arguments.get("date_to").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let filter_sender = arguments.get("sender").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-            let sql = "SELECT DISTINCT thread_id, MIN(date) as first_date,
-                              MAX(date) as last_date, COUNT(*) as msg_count,
-                              MAX(subject) as subject
-                       FROM messages
-                       WHERE account_id = ?1 AND thread_id IS NOT NULL AND is_deleted = 0
-                       GROUP BY thread_id
-                       ORDER BY last_date DESC
-                       LIMIT ?2 OFFSET ?3";
+            // Convert date strings to unix timestamps when provided
+            let date_from_ts: Option<i64> = filter_date_from.as_deref().and_then(|d| {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .ok()
+                    .and_then(|nd| nd.and_hms_opt(0, 0, 0))
+                    .map(|ndt| ndt.and_utc().timestamp())
+            });
+            let date_to_ts: Option<i64> = filter_date_to.as_deref().and_then(|d| {
+                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .ok()
+                    .and_then(|nd| nd.and_hms_opt(23, 59, 59))
+                    .map(|ndt| ndt.and_utc().timestamp())
+            });
 
-            let mut stmt = conn.prepare(sql).map_err(|e| format!("threads query error: {e}"))?;
+            // Build dynamic WHERE clauses
+            let mut where_clauses = vec![
+                "account_id = ?1".to_string(),
+                "thread_id IS NOT NULL".to_string(),
+                "is_deleted = 0".to_string(),
+            ];
+            if let Some(true) = filter_unread {
+                where_clauses.push("is_read = 0".to_string());
+            }
+            if let Some(true) = filter_starred {
+                where_clauses.push("is_starred = 1".to_string());
+            }
+            if filter_category.is_some() {
+                where_clauses.push("ai_category = ?2".to_string());
+            }
+            if date_from_ts.is_some() {
+                let idx = if filter_category.is_some() { 3 } else { 2 };
+                where_clauses.push(format!("date >= ?{idx}"));
+            }
+            if date_to_ts.is_some() {
+                let mut idx = 2;
+                if filter_category.is_some() { idx += 1; }
+                if date_from_ts.is_some() { idx += 1; }
+                where_clauses.push(format!("date <= ?{idx}"));
+            }
+            if filter_sender.is_some() {
+                let mut idx = 2;
+                if filter_category.is_some() { idx += 1; }
+                if date_from_ts.is_some() { idx += 1; }
+                if date_to_ts.is_some() { idx += 1; }
+                where_clauses.push(format!("from_address LIKE ?{idx}"));
+            }
+
+            let where_str = where_clauses.join(" AND ");
+            // Count params needed (excluding account_id which is ?1)
+            let mut extra_count = 0;
+            if filter_category.is_some() { extra_count += 1; }
+            if date_from_ts.is_some() { extra_count += 1; }
+            if date_to_ts.is_some() { extra_count += 1; }
+            if filter_sender.is_some() { extra_count += 1; }
+
+            let limit_idx = 2 + extra_count;
+            let offset_idx = 3 + extra_count;
+
+            let sql = format!(
+                "SELECT DISTINCT thread_id, MIN(date) as first_date,
+                        MAX(date) as last_date, COUNT(*) as msg_count,
+                        MAX(subject) as subject
+                 FROM messages
+                 WHERE {where_str}
+                 GROUP BY thread_id
+                 ORDER BY last_date DESC
+                 LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+            );
+
+            // Build params vec dynamically
+            let sender_like = filter_sender.as_ref().map(|s| format!("%{s}%"));
+            let mut dyn_params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(account_id_str.clone()),
+            ];
+            if let Some(ref cat) = filter_category { dyn_params.push(Box::new(cat.clone())); }
+            if let Some(ts) = date_from_ts { dyn_params.push(Box::new(ts)); }
+            if let Some(ts) = date_to_ts { dyn_params.push(Box::new(ts)); }
+            if let Some(ref like_str) = sender_like { dyn_params.push(Box::new(like_str.clone())); }
+            dyn_params.push(Box::new(limit));
+            dyn_params.push(Box::new(offset));
+
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = dyn_params.iter().map(|b| b.as_ref()).collect();
+
+            let mut stmt = conn.prepare(&sql).map_err(|e| format!("threads query error: {e}"))?;
             let threads: Vec<serde_json::Value> = stmt
-                .query_map(params![account_id_str, limit, offset], |row| {
+                .query_map(params_refs.as_slice(), |row| {
                     Ok(serde_json::json!({
                         "thread_id": row.get::<_, String>(0)?,
                         "first_date": row.get::<_, Option<i64>>(1)?,
@@ -656,7 +834,500 @@ fn execute_tool(
             let updated = message::batch_update(conn, &[msg_id], action);
             Ok(serde_json::json!({"starred": starred, "updated": updated > 0, "message_id": msg_id}))
         }
+        "get_contact_profile" => {
+            let email = arguments
+                .get("email")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'email' argument")?;
+            let email_lower = email.to_lowercase();
+
+            // Try to find an existing profile first
+            let profile_result = conn.query_row(
+                "SELECT id, account_id, email_address, display_name, organization,
+                        first_seen_at, last_seen_at, total_emails_from, total_emails_to,
+                        avg_response_time_hours, top_categories, communication_style,
+                        ai_summary, profile_data, generated_at, updated_at
+                 FROM contact_profiles
+                 WHERE account_id = ?1 AND email_address = ?2",
+                params![account_id_str, email_lower],
+                |row| {
+                    Ok(serde_json::json!({
+                        "email": row.get::<_, String>(2)?,
+                        "display_name": row.get::<_, Option<String>>(3)?,
+                        "organization": row.get::<_, Option<String>>(4)?,
+                        "first_seen_at": row.get::<_, Option<String>>(5)?,
+                        "last_seen_at": row.get::<_, Option<String>>(6)?,
+                        "total_emails_from": row.get::<_, i64>(7)?,
+                        "total_emails_to": row.get::<_, i64>(8)?,
+                        "avg_response_time_hours": row.get::<_, Option<f64>>(9)?,
+                        "top_categories": row.get::<_, Option<String>>(10)?,
+                        "communication_style": row.get::<_, Option<String>>(11)?,
+                        "ai_summary": row.get::<_, Option<String>>(12)?,
+                        "updated_at": row.get::<_, String>(15)?,
+                    }))
+                },
+            );
+
+            if let Ok(profile) = profile_result {
+                return Ok(profile);
+            }
+
+            // Profile not cached — compute on the fly from messages
+            let like_email = format!("%{email_lower}%");
+            let total_from: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND from_address = ?2 AND is_deleted = 0",
+                    params![account_id_str, email_lower],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let total_to: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND to_addresses LIKE ?2 AND is_deleted = 0",
+                    params![account_id_str, like_email],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            if total_from == 0 && total_to == 0 {
+                return Err(format!("no emails found for {email}"));
+            }
+
+            let display_name: Option<String> = conn
+                .query_row(
+                    "SELECT from_name FROM messages
+                     WHERE account_id = ?1 AND from_address = ?2 AND from_name IS NOT NULL AND is_deleted = 0
+                     ORDER BY date DESC LIMIT 1",
+                    params![account_id_str, email_lower],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let vip_status: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM vip_contacts WHERE email = ?1",
+                    params![email_lower],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) > 0;
+
+            let mut cat_stmt = conn
+                .prepare(
+                    "SELECT COALESCE(ai_category, 'uncategorized'), COUNT(*) as cnt
+                     FROM messages WHERE account_id = ?1 AND from_address = ?2 AND is_deleted = 0
+                     GROUP BY ai_category ORDER BY cnt DESC LIMIT 5",
+                )
+                .map_err(|e| format!("profile query error: {e}"))?;
+            let categories: Vec<String> = cat_stmt
+                .query_map(params![account_id_str, email_lower], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("profile query error: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            Ok(serde_json::json!({
+                "email": email_lower,
+                "display_name": display_name,
+                "vip": vip_status,
+                "total_emails_from": total_from,
+                "total_emails_to": total_to,
+                "top_categories": categories,
+            }))
+        }
+        "get_inbox_stats" => {
+            // Compute fresh stats and return them
+            crate::api::inbox_stats::compute_and_store(conn, &account_id_str)
+                .map_err(|e| format!("failed to compute stats: {e}"))?;
+
+            let stats = crate::api::inbox_stats::get_all_stats(conn)
+                .map_err(|e| format!("failed to read stats: {e}"))?;
+
+            let account_stats = stats
+                .into_iter()
+                .find(|s| s.account_id == account_id_str)
+                .ok_or_else(|| "no stats found for account".to_string())?;
+
+            Ok(serde_json::json!({
+                "total": account_stats.total,
+                "unread": account_stats.unread,
+                "starred": account_stats.starred,
+                "today_count": account_stats.today_count,
+                "week_count": account_stats.week_count,
+                "month_count": account_stats.month_count,
+                "by_category": account_stats.by_category,
+                "top_senders": account_stats.top_senders,
+            }))
+        }
+        "manage_draft" => {
+            let action = arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'action' argument")?;
+
+            match action {
+                "create" => {
+                    let body = arguments
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing 'body' argument for create")?;
+                    let subject = arguments.get("subject").and_then(|v| v.as_str());
+                    let to = arguments.get("to").map(|v| serde_json::to_string(v).unwrap_or_default());
+
+                    let draft_id = message::save_draft(
+                        conn,
+                        None,
+                        &account_id_str,
+                        to.as_deref(),
+                        None,
+                        None,
+                        subject,
+                        body,
+                        None,
+                    );
+                    Ok(serde_json::json!({"draft_id": draft_id, "action": "created"}))
+                }
+                "update" => {
+                    let draft_id = arguments
+                        .get("draft_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing 'draft_id' argument for update")?;
+                    let body = arguments
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing 'body' argument for update")?;
+                    let subject = arguments.get("subject").and_then(|v| v.as_str());
+                    let to = arguments.get("to").map(|v| serde_json::to_string(v).unwrap_or_default());
+
+                    message::save_draft(
+                        conn,
+                        Some(draft_id),
+                        &account_id_str,
+                        to.as_deref(),
+                        None,
+                        None,
+                        subject,
+                        body,
+                        None,
+                    );
+                    Ok(serde_json::json!({"draft_id": draft_id, "action": "updated"}))
+                }
+                "delete" => {
+                    let draft_id = arguments
+                        .get("draft_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing 'draft_id' argument for delete")?;
+                    let deleted = message::delete_draft(conn, draft_id);
+                    Ok(serde_json::json!({"draft_id": draft_id, "deleted": deleted}))
+                }
+                other => Err(format!("unknown manage_draft action: {other}")),
+            }
+        }
+        "bulk_action" => {
+            let ids_val = arguments
+                .get("message_ids")
+                .ok_or("missing 'message_ids' argument")?;
+            let action = arguments
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'action' argument")?;
+
+            let ids: Vec<String> = ids_val
+                .as_array()
+                .ok_or("'message_ids' must be an array")?
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+
+            if ids.is_empty() {
+                return Ok(serde_json::json!({"updated": 0, "action": action}));
+            }
+            if ids.len() > 500 {
+                return Err("message_ids exceeds maximum of 500".to_string());
+            }
+
+            // Validate ownership: all ids must belong to this account
+            let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i + 1)).collect();
+            let in_clause = placeholders.join(", ");
+            let check_sql = format!(
+                "SELECT COUNT(*) FROM messages WHERE id IN ({in_clause}) AND account_id != ?1"
+            );
+            let mut check_params: Vec<&dyn rusqlite::types::ToSql> = vec![&account_id_str];
+            let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+            for id in &id_refs {
+                check_params.push(id as &dyn rusqlite::types::ToSql);
+            }
+            let foreign_count: i64 = conn
+                .query_row(&check_sql, check_params.as_slice(), |row| row.get(0))
+                .unwrap_or(0);
+            if foreign_count > 0 {
+                return Err("one or more message_ids not in scope".to_string());
+            }
+
+            let updated = message::batch_update(conn, &id_refs, action);
+            Ok(serde_json::json!({"updated": updated, "action": action, "count": ids.len()}))
+        }
         _ => Err(format!("unknown tool: {tool_name}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async tool execution (AI-dependent tools)
+// ---------------------------------------------------------------------------
+
+/// Returns true if the tool requires async execution (AI providers).
+fn is_async_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "get_thread_summary" | "extract_tasks" | "extract_deadlines" | "chat")
+}
+
+async fn execute_tool_async(
+    state: &Arc<AppState>,
+    account_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let account_id_str = account_id.to_string();
+
+    match tool_name {
+        "get_thread_summary" => {
+            let thread_id = arguments
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'thread_id' argument")?;
+
+            let conn = state.db.get().map_err(|_| "database error".to_string())?;
+            let messages = crate::models::message::MessageDetail::list_by_thread(&conn, thread_id);
+            if messages.is_empty() {
+                return Err("thread not found".to_string());
+            }
+
+            // Check account ownership
+            if let Some(first) = messages.first() {
+                if first.account_id != account_id_str {
+                    return Err("thread not in scope".to_string());
+                }
+            }
+
+            // Check cache
+            if let Some(ref cached) = messages[0].ai_summary {
+                if !cached.is_empty() {
+                    return Ok(serde_json::json!({
+                        "thread_id": thread_id,
+                        "summary": cached,
+                        "cached": true,
+                    }));
+                }
+            }
+
+            // AI check
+            let ai_enabled = conn
+                .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string());
+            if ai_enabled != "true" || !state.providers.has_providers() {
+                return Err("AI not available".to_string());
+            }
+
+            let subject = messages[0].subject.as_deref().unwrap_or("(no subject)");
+            let prompt = crate::api::ai_actions::build_summary_prompt(subject, &messages);
+            let summary = state
+                .providers
+                .generate(&prompt, Some(crate::api::ai_actions::SUMMARY_SYSTEM_PROMPT))
+                .await
+                .ok_or("AI provider unavailable".to_string())?;
+
+            // Cache the summary
+            let first_id = &messages[0].id;
+            let _ = conn.execute(
+                "UPDATE messages SET ai_summary = ?2, updated_at = unixepoch() WHERE id = ?1",
+                rusqlite::params![first_id, summary],
+            );
+
+            Ok(serde_json::json!({
+                "thread_id": thread_id,
+                "summary": summary,
+                "cached": false,
+            }))
+        }
+        "extract_tasks" => {
+            let thread_id = arguments
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'thread_id' argument")?;
+
+            let conn = state.db.get().map_err(|_| "database error".to_string())?;
+            let messages = crate::models::message::MessageDetail::list_by_thread(&conn, thread_id);
+            if messages.is_empty() {
+                return Err("thread not found".to_string());
+            }
+            if let Some(first) = messages.first() {
+                if first.account_id != account_id_str {
+                    return Err("thread not in scope".to_string());
+                }
+            }
+
+            let ai_enabled = conn
+                .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string());
+            if ai_enabled != "true" || !state.providers.has_providers() {
+                return Err("AI not available".to_string());
+            }
+
+            let prompt = crate::api::ai_actions::build_extract_tasks_prompt(&messages);
+            let ai_response = state
+                .providers
+                .generate(&prompt, Some(crate::api::ai_actions::EXTRACT_TASKS_SYSTEM_PROMPT))
+                .await
+                .ok_or("AI provider unavailable".to_string())?;
+
+            let tasks = crate::api::ai_actions::parse_extracted_tasks(&ai_response);
+            let tasks_json: Vec<serde_json::Value> = tasks
+                .iter()
+                .map(|t| serde_json::json!({
+                    "task": t.task,
+                    "priority": t.priority,
+                    "deadline": t.deadline,
+                    "source_subject": t.source_subject,
+                }))
+                .collect();
+
+            Ok(serde_json::json!({"thread_id": thread_id, "tasks": tasks_json, "count": tasks_json.len()}))
+        }
+        "extract_deadlines" => {
+            let thread_id = arguments
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'thread_id' argument")?;
+
+            let conn = state.db.get().map_err(|_| "database error".to_string())?;
+            let messages = crate::models::message::MessageDetail::list_by_thread(&conn, thread_id);
+            if messages.is_empty() {
+                return Err("thread not found".to_string());
+            }
+            if let Some(first) = messages.first() {
+                if first.account_id != account_id_str {
+                    return Err("thread not in scope".to_string());
+                }
+            }
+
+            let ai_enabled = conn
+                .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                .unwrap_or_else(|_| "false".to_string());
+            if ai_enabled != "true" || !state.providers.has_providers() {
+                return Err("AI not available".to_string());
+            }
+
+            // Use the first message in the thread for deadline extraction
+            let first_msg = &messages[0];
+            let subject = first_msg.subject.as_deref().unwrap_or("(no subject)");
+            // Combine all message bodies
+            let combined_body: String = messages
+                .iter()
+                .filter_map(|m| m.body_text.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n");
+
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let system_prompt = crate::api::deadlines::build_deadline_system_prompt(&today);
+            let user_prompt = crate::api::deadlines::build_deadline_user_prompt(subject, &combined_body);
+
+            let raw_response = state
+                .providers
+                .generate(&user_prompt, Some(&system_prompt))
+                .await
+                .ok_or("AI provider unavailable".to_string())?;
+
+            let extracted = crate::api::deadlines::parse_deadline_response(&raw_response);
+            let deadlines_json: Vec<serde_json::Value> = extracted
+                .iter()
+                .map(|d| serde_json::json!({
+                    "description": d.description,
+                    "deadline_date": d.deadline_date,
+                    "deadline_source": d.deadline_source,
+                    "is_explicit": d.is_explicit,
+                }))
+                .collect();
+
+            Ok(serde_json::json!({"thread_id": thread_id, "deadlines": deadlines_json, "count": deadlines_json.len()}))
+        }
+        "chat" => {
+            let message = arguments
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or("missing 'message' argument")?;
+
+            // session_id: use provided or generate a new one
+            let session_id = arguments
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("mcp-chat-{}", uuid::Uuid::new_v4()));
+
+            if message.len() > 50_000 {
+                return Err("message too long (max 50000 chars)".to_string());
+            }
+
+            let (history, ai_enabled) = {
+                let conn = state.db.get().map_err(|_| "database error".to_string())?;
+                let ai_enabled = conn
+                    .query_row("SELECT value FROM config WHERE key = 'ai_enabled'", [], |row| row.get::<_, String>(0))
+                    .unwrap_or_else(|_| "false".to_string());
+                if ai_enabled != "true" || !state.providers.has_providers() {
+                    return Err("AI not available".to_string());
+                }
+                // Store user message
+                let user_msg_id = uuid::Uuid::new_v4().to_string();
+                let _ = conn.execute(
+                    "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?1, ?2, 'user', ?3)",
+                    rusqlite::params![user_msg_id, session_id, message],
+                );
+                let history = crate::api::chat::load_history_for_mcp(&conn, &session_id, 10);
+                (history, ai_enabled)
+            };
+
+            let _ = ai_enabled; // already checked above
+
+            let system_prompt = {
+                let conn = state.db.get().map_err(|_| "database error".to_string())?;
+                crate::api::chat::chat_system_prompt_for_mcp(&conn)
+            };
+
+            let (ai_response, citations, _tool_records) = crate::api::chat::agentic_chat_for_mcp(
+                &state.providers,
+                &state.db,
+                &state.memories,
+                &system_prompt,
+                message,
+                &history,
+                5,
+            )
+            .await
+            .map_err(|_| "AI chat failed".to_string())?;
+
+            // Store assistant response
+            let assistant_id = uuid::Uuid::new_v4().to_string();
+            {
+                let conn = state.db.get().map_err(|_| "database error".to_string())?;
+                let _ = conn.execute(
+                    "INSERT INTO chat_messages (id, session_id, role, content) VALUES (?1, ?2, 'assistant', ?3)",
+                    rusqlite::params![assistant_id, session_id, ai_response],
+                );
+            }
+
+            let citations_out: Vec<serde_json::Value> = citations
+                .iter()
+                .map(|c| serde_json::json!({
+                    "message_id": c.message_id,
+                    "subject": c.subject,
+                    "from": c.from,
+                    "snippet": c.snippet,
+                }))
+                .collect();
+
+            Ok(serde_json::json!({
+                "session_id": session_id,
+                "response": ai_response,
+                "citations": citations_out,
+            }))
+        }
+        _ => Err(format!("unknown async tool: {tool_name}")),
     }
 }
 
@@ -767,9 +1438,16 @@ pub async fn tool_call(
         ));
     }
 
-    // Execute with timing
+    // Execute with timing — async tools release the conn before awaiting
     let start = Instant::now();
-    let result = execute_tool(&conn, &session.account_id, &req.tool_name, &req.arguments);
+    let result = if is_async_tool(&req.tool_name) {
+        drop(conn);
+        execute_tool_async(&state, &session.account_id, &req.tool_name, &req.arguments).await
+    } else {
+        let r = execute_tool(&conn, &session.account_id, &req.tool_name, &req.arguments);
+        drop(conn);
+        r
+    };
     let duration_ms = start.elapsed().as_millis() as i64;
 
     let (status, output) = match result {
@@ -780,9 +1458,17 @@ pub async fn tool_call(
         ),
     };
 
+    // Re-acquire connection for bookkeeping
+    let post_conn = state.db.get().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "database error"})),
+        )
+    })?;
+
     // Record the call
     record_tool_call(
-        &conn,
+        &post_conn,
         &req.session_id,
         &req.tool_name,
         &req.arguments,
@@ -792,7 +1478,7 @@ pub async fn tool_call(
     );
 
     // Touch session last_active_at
-    touch_session(&conn, &req.session_id);
+    touch_session(&post_conn, &req.session_id);
 
     Ok(Json(ToolCallResponse {
         tool_name: req.tool_name,
@@ -956,7 +1642,7 @@ mod tests {
     #[test]
     fn test_list_all_tools() {
         let tools = all_tool_schemas();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 17);
 
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"search_emails"));
@@ -968,6 +1654,15 @@ mod tests {
         assert!(names.contains(&"get_thread"));
         assert!(names.contains(&"archive_email"));
         assert!(names.contains(&"star_email"));
+        // New tools
+        assert!(names.contains(&"get_thread_summary"));
+        assert!(names.contains(&"get_contact_profile"));
+        assert!(names.contains(&"extract_tasks"));
+        assert!(names.contains(&"extract_deadlines"));
+        assert!(names.contains(&"chat"));
+        assert!(names.contains(&"get_inbox_stats"));
+        assert!(names.contains(&"manage_draft"));
+        assert!(names.contains(&"bulk_action"));
     }
 
     // Test 4: Filter tools by capabilities
@@ -984,7 +1679,7 @@ mod tests {
     #[test]
     fn test_get_available_tools_no_filter() {
         let tools = get_available_tools(&[]);
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 17);
     }
 
     // Test 6: Close session
@@ -1252,5 +1947,251 @@ mod tests {
         // Both should exist; we just verify it didn't break
         assert_eq!(before.session_id, after.session_id);
         assert!(after.is_active);
+    }
+
+    // Test 20: list_threads with unread filter
+    #[test]
+    fn test_list_threads_unread_filter() {
+        let (conn, account) = setup();
+        let acct_id = &account.id;
+
+        // Insert messages: one read, one unread, both with thread_ids
+        let msg1 = InsertMessage {
+            account_id: acct_id.clone(),
+            message_id: Some("<thread-a@test.com>".to_string()),
+            thread_id: Some("thread-a".to_string()),
+            folder: "INBOX".to_string(),
+            from_address: Some("alice@example.com".to_string()),
+            from_name: Some("Alice".to_string()),
+            to_addresses: None,
+            cc_addresses: None,
+            bcc_addresses: None,
+            subject: Some("Read thread".to_string()),
+            date: Some(1700000000),
+            snippet: None,
+            body_text: None,
+            body_html: None,
+            is_read: true,
+            is_starred: false,
+            is_draft: false,
+            labels: None,
+            uid: None,
+            modseq: None,
+            raw_headers: None,
+            has_attachments: false,
+            attachment_names: None,
+            size_bytes: None,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
+        };
+        InsertMessage::insert(&conn, &msg1).unwrap();
+
+        let msg2 = InsertMessage {
+            account_id: acct_id.clone(),
+            message_id: Some("<thread-b@test.com>".to_string()),
+            thread_id: Some("thread-b".to_string()),
+            folder: "INBOX".to_string(),
+            from_address: Some("bob@example.com".to_string()),
+            from_name: Some("Bob".to_string()),
+            to_addresses: None,
+            cc_addresses: None,
+            bcc_addresses: None,
+            subject: Some("Unread thread".to_string()),
+            date: Some(1700000001),
+            snippet: None,
+            body_text: None,
+            body_html: None,
+            is_read: false,
+            is_starred: false,
+            is_draft: false,
+            labels: None,
+            uid: None,
+            modseq: None,
+            raw_headers: None,
+            has_attachments: false,
+            attachment_names: None,
+            size_bytes: None,
+            list_unsubscribe: None,
+            list_unsubscribe_post: false,
+        };
+        InsertMessage::insert(&conn, &msg2).unwrap();
+
+        // Without filter: both threads
+        let result = execute_tool(&conn, acct_id, "list_threads", &serde_json::json!({}));
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"].as_i64().unwrap(), 2);
+
+        // With unread filter: only thread-b
+        let result = execute_tool(&conn, acct_id, "list_threads", &serde_json::json!({"unread": true}));
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["count"].as_i64().unwrap(), 1);
+        assert_eq!(val["threads"][0]["thread_id"].as_str().unwrap(), "thread-b");
+    }
+
+    // Test 21: get_inbox_stats tool
+    #[test]
+    fn test_tool_call_get_inbox_stats() {
+        let (conn, account) = setup();
+        let acct_id = &account.id;
+
+        insert_test_message(&conn, acct_id, "Unread 1", "INBOX");
+        insert_test_message(&conn, acct_id, "Unread 2", "INBOX");
+
+        let result = execute_tool(&conn, acct_id, "get_inbox_stats", &serde_json::json!({}));
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val["total"].as_i64().unwrap() >= 2);
+        assert!(val["unread"].as_i64().is_some());
+        assert!(val["by_category"].is_object());
+    }
+
+    // Test 22: manage_draft — create, update, delete
+    #[test]
+    fn test_tool_call_manage_draft_lifecycle() {
+        let (conn, account) = setup();
+        let acct_id = &account.id;
+
+        // Create
+        let result = execute_tool(
+            &conn,
+            acct_id,
+            "manage_draft",
+            &serde_json::json!({
+                "action": "create",
+                "to": ["alice@example.com"],
+                "subject": "Hello",
+                "body": "Draft body text"
+            }),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        let draft_id = val["draft_id"].as_str().unwrap().to_string();
+        assert_eq!(val["action"].as_str().unwrap(), "created");
+
+        // Update
+        let result = execute_tool(
+            &conn,
+            acct_id,
+            "manage_draft",
+            &serde_json::json!({
+                "action": "update",
+                "draft_id": draft_id,
+                "body": "Updated body"
+            }),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["action"].as_str().unwrap(), "updated");
+
+        // Delete
+        let result = execute_tool(
+            &conn,
+            acct_id,
+            "manage_draft",
+            &serde_json::json!({
+                "action": "delete",
+                "draft_id": draft_id
+            }),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val["deleted"].as_bool().unwrap());
+    }
+
+    // Test 23: bulk_action — mark_read on multiple messages
+    #[test]
+    fn test_tool_call_bulk_action() {
+        let (conn, account) = setup();
+        let acct_id = &account.id;
+
+        let id1 = insert_test_message(&conn, acct_id, "Bulk 1", "INBOX");
+        let id2 = insert_test_message(&conn, acct_id, "Bulk 2", "INBOX");
+
+        let result = execute_tool(
+            &conn,
+            acct_id,
+            "bulk_action",
+            &serde_json::json!({
+                "message_ids": [id1, id2],
+                "action": "mark_read"
+            }),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["updated"].as_i64().unwrap(), 2);
+        assert_eq!(val["action"].as_str().unwrap(), "mark_read");
+
+        // Verify both are now read
+        let d1 = MessageDetail::get_by_id(&conn, &id1).unwrap();
+        let d2 = MessageDetail::get_by_id(&conn, &id2).unwrap();
+        assert!(d1.is_read);
+        assert!(d2.is_read);
+    }
+
+    // Test 24: bulk_action — reject foreign account messages
+    #[test]
+    fn test_tool_call_bulk_action_wrong_account() {
+        let (conn, account) = setup();
+        let id = insert_test_message(&conn, &account.id, "Foreign msg", "INBOX");
+
+        let result = execute_tool(
+            &conn,
+            "different-account",
+            "bulk_action",
+            &serde_json::json!({
+                "message_ids": [id],
+                "action": "archive"
+            }),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in scope"));
+    }
+
+    // Test 25: get_contact_profile — no emails returns error
+    #[test]
+    fn test_tool_call_get_contact_profile_not_found() {
+        let (conn, account) = setup();
+        let acct_id = &account.id;
+
+        let result = execute_tool(
+            &conn,
+            acct_id,
+            "get_contact_profile",
+            &serde_json::json!({"email": "nobody@nowhere.example"}),
+        );
+        assert!(result.is_err());
+    }
+
+    // Test 26: get_contact_profile — found via messages
+    #[test]
+    fn test_tool_call_get_contact_profile_found() {
+        let (conn, account) = setup();
+        let acct_id = &account.id;
+        insert_test_message(&conn, acct_id, "From Alice", "INBOX");
+
+        let result = execute_tool(
+            &conn,
+            acct_id,
+            "get_contact_profile",
+            &serde_json::json!({"email": "sender@example.com"}),
+        );
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val["email"].as_str().unwrap(), "sender@example.com");
+        assert!(val["total_emails_from"].as_i64().unwrap() >= 1);
+    }
+
+    // Test 27: is_async_tool helper
+    #[test]
+    fn test_is_async_tool() {
+        assert!(is_async_tool("get_thread_summary"));
+        assert!(is_async_tool("extract_tasks"));
+        assert!(is_async_tool("extract_deadlines"));
+        assert!(is_async_tool("chat"));
+        assert!(!is_async_tool("list_inbox"));
+        assert!(!is_async_tool("get_inbox_stats"));
+        assert!(!is_async_tool("bulk_action"));
     }
 }

@@ -957,6 +957,37 @@ pub fn parse_action_proposal(response: &str) -> (String, Option<ProposedAction>)
 }
 
 // ---------------------------------------------------------------------------
+// MCP-facing public wrappers
+// ---------------------------------------------------------------------------
+
+/// Public wrapper around `load_history` for use by the MCP server tool.
+pub fn load_history_for_mcp(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    limit: usize,
+) -> Vec<ChatMessage> {
+    load_history(conn, session_id, limit)
+}
+
+/// Public wrapper around `chat_system_prompt_with_stats` for the MCP server tool.
+pub fn chat_system_prompt_for_mcp(conn: &rusqlite::Connection) -> String {
+    chat_system_prompt_with_stats(conn)
+}
+
+/// Public wrapper around `agentic_chat` for use by the MCP server tool.
+pub async fn agentic_chat_for_mcp(
+    providers: &crate::ai::provider::ProviderPool,
+    db: &crate::db::DbPool,
+    memories: &crate::ai::memories::MemoriesClient,
+    system_prompt: &str,
+    initial_user_message: &str,
+    history: &[ChatMessage],
+    max_iterations: usize,
+) -> Result<(String, Vec<Citation>, Vec<crate::ai::tools::ToolCallRecord>), axum::http::StatusCode> {
+    agentic_chat(providers, db, memories, system_prompt, initial_user_message, history, max_iterations).await
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
