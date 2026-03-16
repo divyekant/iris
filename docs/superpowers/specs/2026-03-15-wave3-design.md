@@ -64,7 +64,7 @@ A shared Svelte transition library. Every component uses named transitions from 
 | Compose modal | `slide` up from bottom | `slide` down |
 | Hover action buttons | `fade` in (staggered 30ms) | `fade` out |
 
-**Implementation:** `web/src/lib/transitions.ts` — exports named Svelte transitions using CSS custom property values (`--iris-transition-fast: 120ms`, `--iris-transition-normal: 200ms`). All components import from this single source.
+**Implementation:** `web/src/lib/transitions.ts` — exports named Svelte transitions using CSS custom property values (`--iris-transition-fast: 120ms ease`, `--iris-transition-normal: 200ms ease`). These tokens include both duration and easing. The library uses them directly as CSS `transition` shorthand values. All components import from this single source.
 
 ### 1.2 Feedback Loops
 
@@ -162,9 +162,11 @@ AI surfaces throughout the app, not just in the chat panel.
 - Uses existing API endpoints, new UI surface
 
 **Smart compose hints:**
-- Ghost text in compose showing AI-completed sentences (Copilot-style)
-- Tab to accept, keep typing to ignore
-- Uses existing autocomplete endpoint
+- Dropdown-style autocomplete suggestions (extending existing `AutocompleteTextarea.svelte`)
+- Suggestions appear below cursor as a floating menu, triggered by pause in typing (500ms debounce)
+- Arrow keys to select, Tab/Enter to accept, Escape to dismiss
+- Uses existing autocomplete endpoint with thread context injection
+- Note: Copilot-style inline ghost text was considered but scoped out — requires custom editor overlay that conflicts with both textarea and TipTap. The dropdown pattern works with both editors and is already proven in the codebase.
 
 **Thread intelligence strip:**
 - Replaces separate summary panel
@@ -181,16 +183,18 @@ AI surfaces throughout the app, not just in the chat panel.
 
 | Component | Status | Changes |
 |-----------|--------|---------|
-| `Modal.svelte` | Exists | Ensure all dialogs use it; add `scale` transition |
-| `ModalActions.svelte` | Exists | No changes |
-| `FormInput.svelte` | Exists | Ensure all settings sections use it |
-| `FormSelect.svelte` | Exists | Ensure all settings sections use it |
-| `FormToggle.svelte` | Exists | Ensure all settings sections use it |
-| `Badge.svelte` | Exists | Add size variants (sm/md) |
+| `Modal.svelte` | **New** | Shared modal: backdrop, escape handler, size variants (sm/md/lg), `scale` transition. Refactor all existing dialogs (SpamDialog, RedirectDialog, SnoozePicker, etc.) to use it. |
+| `ModalActions.svelte` | **New** | Consistent button row (cancel left, primary right) for all modals |
+| `FormInput.svelte` | **New** | Styled text input with label, placeholder, error state, focus ring |
+| `FormSelect.svelte` | **New** | Styled select with consistent border/focus |
+| `FormToggle.svelte` | **New** | iOS-style toggle replacing manual toggle implementations |
+| `Badge.svelte` | **New** | Semantic color variants (success/warning/error/info/neutral), size variants (sm/md) |
 | `Toast.svelte` | Exists | Wire to feedback store; add undo support; add animations |
 | `DropdownMenu.svelte` | **New** | Replace ad-hoc dropdowns in ThreadView, TopNav |
 | `CommandPalette.svelte` | **New** | `Cmd+K` palette |
 | `Tooltip.svelte` | **New** | Replace title attributes with styled, animated tooltips |
+
+Note: Modal, ModalActions, Form*, and Badge were identified as needed in the UI cohesion shaping doc but never implemented. They are prerequisites for 1.5 (AI woven), 1.7 (Settings refactor), and all Layer 3 features.
 
 ### 1.7 Settings Refactor
 
@@ -203,9 +207,7 @@ Settings is already split into 6 tab components (from Wave 2). Remaining work:
 
 ### 1.8 Token Compliance
 
-Two files still have hardcoded hex values:
-- `Search.svelte` — `operatorColors` → replace with `var(--iris-color-info)`, `var(--iris-color-success)`, etc.
-- `ContactTopicsPanel.svelte` — `pillColors` → replace with token references
+Re-audit needed before implementation — prior references to `operatorColors` in Search.svelte and `pillColors` in ContactTopicsPanel.svelte may be stale (possibly already fixed or renamed). Run `grep -r '#[0-9a-fA-F]\{3,8\}' web/src/ --include='*.svelte'` to find actual remaining hardcoded hex values and fix all instances.
 
 ---
 
@@ -251,6 +253,8 @@ iris keys create --permission read_only --name "..."
 
 Expand existing MCP server with richer tools, resources, and prompts.
 
+**Current state:** The existing `src/api/mcp_server.rs` provides session management, tool schemas, and tool call execution. Existing tools include: `search_emails`, `read_message`, `compose_draft`, `send_email`, `label_message`, `archive_message`. The following are net-new additions:
+
 **New tools (added to existing):**
 
 | Tool | Description |
@@ -284,14 +288,16 @@ Expand existing MCP server with richer tools, resources, and prompts.
 
 ### 2.3 Shared Types (`iris-common` crate)
 
-Extract from server into a library crate:
+Extract stable types from server into a library crate:
 
-- Request/response types for all API endpoints
-- Message, Thread, Account, Contact models (serializable)
-- Error types
+- Core models: Message, Thread, Account, Contact (serializable)
+- Error types and common result types
 - Config types
+- API key / permission types
 
-Both `iris-server` and `iris` (CLI) depend on `iris-common`. Prevents type drift.
+Note: Keep request/response types local to the server to avoid tight coupling on every API change. Only extract types the CLI actually needs.
+
+Both `iris-server` and `iris` (CLI) depend on `iris-common`. Prevents type drift on shared models.
 
 **Cargo workspace structure:**
 
@@ -305,6 +311,13 @@ iris/
 ├── web/                # frontend (unchanged)
 └── migrations/         # shared (unchanged)
 ```
+
+**Workspace restructure is high-risk** — it touches every import path, the Dockerfile, docker-compose.yml, and migration path resolution. This requires its own detailed implementation plan as a prerequisite sub-step before any Layer 2 work begins. The plan must cover:
+- Migration path resolution strategy (currently relative to binary working dir)
+- Dockerfile multi-stage build adaptation
+- Dev-dependencies and test harness migration
+- Verification checklist (all 975 tests must pass post-restructure)
+- Rollback strategy
 
 ---
 
@@ -322,12 +335,14 @@ Six features demonstrating Iris intelligence, built on the polished foundation.
 - Chat integration: "everything involving Sarah and budget" queries the graph
 
 **Backend:**
-- `entities` table: name, type (person/org/project/date/amount), source_message_id, confidence
+- `entities` table: id, canonical_name, type (person/org/project/date/amount), confidence
+- `entity_aliases` table: entity_id, alias_name, source_message_id — maps name variants to canonical entity
 - `entity_relations` table: entity_a, entity_b, relation_type, weight
+- Entity disambiguation: email addresses anchor person entities. "Sarah", "Sarah Smith", "sarah@co.com" resolve to one canonical entity via alias table. AI extraction pipeline includes a merge step that checks existing entities before creating new ones.
 - AI extraction job: runs on ingest via existing job queue
 - API: `GET /api/graph?query=...` returns entity subgraph with connected threads
 
-**Migration:** `051_knowledge_graph.sql`
+**Migration:** `052_knowledge_graph.sql`
 
 ### 3.2 Temporal Reasoning
 
@@ -336,14 +351,15 @@ Six features demonstrating Iris intelligence, built on the polished foundation.
 **UX:**
 - Search bar accepts natural time expressions, shown as resolved date chip
 - Chat handles temporal queries via agentic tool loop
-- Works with knowledge graph timeline data
+- Can leverage knowledge graph timeline data when available, but operates independently with its own NER pipeline
 
 **Backend:**
-- Temporal NER in AI pipeline: extract date references and event markers
+- Standalone temporal NER in AI pipeline: extract date references and event markers from emails
 - `timeline_events` table: event_name, approximate_date, source_message_ids
 - Search API extended: `temporal_query` param resolved via LLM before search
+- Note: 3.2 has a soft dependency on 3.1 (can use knowledge graph data for richer event context) but functions independently. The temporal NER pipeline extracts events from email text directly.
 
-**Migration:** `052_temporal_events.sql`
+**Migration:** `053_temporal_events.sql`
 
 ### 3.3 Writing Style Learning
 
@@ -360,7 +376,9 @@ Six features demonstrating Iris intelligence, built on the polished foundation.
 - Style prompt injection into all draft generation
 - Weekly re-analysis to adapt
 
-**Migration:** `053_writing_style.sql`
+- Scheduling: weekly re-analysis uses a `last_run_at` check in the job worker — if `now - last_run_at > 7 days`, enqueue a style extraction job. Same pattern as existing job queue polling.
+
+**Migration:** `054_writing_style.sql`
 
 ### 3.4 Email Delegation Agent
 
@@ -378,7 +396,7 @@ Six features demonstrating Iris intelligence, built on the polished foundation.
 - Confidence threshold: 0.85 for auto-action, otherwise queues for review
 - All actions in existing audit_log
 
-**Migration:** `054_delegation.sql`
+**Migration:** `055_delegation.sql`
 
 ### 3.5 Auto-Draft for Routine Emails
 
@@ -395,7 +413,9 @@ Six features demonstrating Iris intelligence, built on the polished foundation.
 - On new email: match patterns, generate draft if confidence > threshold
 - Feedback loop: edit → confidence decreases; send as-is → confidence increases
 
-**Migration:** `055_auto_draft.sql`
+**Precedence with Delegation (3.4):** Delegation playbooks run first (rule-based triggers with explicit user-configured conditions). Auto-draft runs only for emails NOT matched by any playbook. If a playbook fires, auto-draft is skipped for that email. This prevents conflicting actions on the same message.
+
+**Migration:** `056_auto_draft.sql`
 
 ### 3.6 Evolving Auto-Categorization
 
@@ -412,7 +432,7 @@ Six features demonstrating Iris intelligence, built on the polished foundation.
 - Category suggestion pipeline: propose → accept/reject → confidence adjustment
 - Existing AI classification extended to include custom categories
 
-**Migration:** `056_custom_categories.sql`
+**Migration:** `057_custom_categories.sql`
 
 ---
 
@@ -429,17 +449,28 @@ Layer 1.5 (AI woven) ─── depends on 1.1, 1.2, 1.6
 Layer 1.7 (settings)  ─── depends on 1.6
 Layer 1.8 (tokens)    ─── independent, trivial
          │
-Layer 2.3 (iris-common) ─── first (workspace restructure)
+Layer 2.3 (iris-common) ─── first (workspace restructure — needs own plan)
 Layer 2.1 (CLI)         ─── depends on 2.3
-Layer 2.2 (MCP)         ─── depends on 2.3
+Layer 2.2 (MCP)         ─── independent (extends existing server, no workspace dep)
          │
 Layer 3.1 (knowledge graph)    ──┐
-Layer 3.2 (temporal reasoning)  ──┼── All independent after L1+L2
+Layer 3.2 (temporal reasoning)  ──┤── soft dep on 3.1 (uses graph data if available)
 Layer 3.3 (writing style)       ──┤
-Layer 3.4 (delegation agent)    ──┤
-Layer 3.5 (auto-draft)          ──┤
+Layer 3.4 (delegation agent)    ──┤── independent
+Layer 3.5 (auto-draft)          ──┤── runs after 3.4 (delegation takes precedence)
 Layer 3.6 (evolving categories) ──┘
 ```
+
+Note: 3.2 functions independently but produces richer results when 3.1 is available. 3.5 skips emails already handled by 3.4 playbooks.
+
+## Testing Strategy
+
+- **Test count parity:** Each layer must maintain or increase the current 975 tests. No regressions.
+- **Layer 1 (UX):** Component-level tests for new shared components (Modal, FormInput, etc.). Interaction tests for keyboard navigation and command palette.
+- **Layer 2 (CLI):** Integration tests for CLI commands against a running test server. Workspace restructure requires full test suite pass before proceeding.
+- **Layer 2 (MCP):** Tool schema validation tests. Round-trip tests for each new MCP tool.
+- **Layer 3 (Features):** Each showcase feature requires 3+ Delphi guided cases covering positive path, edge case, and error handling.
+- **Pencil prototypes:** Created during implementation for all visual changes, reviewed before code.
 
 ## Out of Scope
 
@@ -448,4 +479,5 @@ Layer 3.6 (evolving categories) ──┘
 - Mobile-specific features (web-only)
 - Predictive inbox (deferred to Wave 4)
 - Agent-to-Agent protocols (deferred)
+- Copilot-style inline ghost text (scoped down to dropdown autocomplete — see 1.5)
 - Pencil prototypes will be created during implementation, not in this spec
