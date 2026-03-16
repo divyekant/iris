@@ -309,10 +309,12 @@ fn print_header(label: &str) {
 
 fn truncate(s: &str, max: usize) -> String {
     let s = s.trim();
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let mut result: String = s.chars().take(max.saturating_sub(1)).collect();
+        result.push('…');
+        result
     }
 }
 

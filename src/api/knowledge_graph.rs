@@ -447,7 +447,8 @@ pub async fn query_graph(
         .get()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let search_pattern = format!("%{}%", query);
+    let escaped = query.replace('%', "\\%").replace('_', "\\_");
+    let search_pattern = format!("%{}%", escaped);
 
     // Find entities matching by canonical name or alias
     let mut stmt = conn
@@ -455,8 +456,8 @@ pub async fn query_graph(
             "SELECT DISTINCT e.id, e.canonical_name, e.entity_type, e.confidence, e.created_at, e.updated_at
              FROM entities e
              LEFT JOIN entity_aliases ea ON e.id = ea.entity_id
-             WHERE e.canonical_name LIKE ?1 COLLATE NOCASE
-                OR ea.alias_name LIKE ?1 COLLATE NOCASE
+             WHERE e.canonical_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+                OR ea.alias_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
              ORDER BY e.updated_at DESC
              LIMIT 20",
         )

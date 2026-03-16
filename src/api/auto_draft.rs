@@ -405,12 +405,13 @@ fn find_matching_pattern(
     }
 
     // Try domain-only match with high confidence
+    let escaped_domain = sender_domain.replace('%', "\\%").replace('_', "\\_");
     conn.query_row(
         "SELECT id, template_body FROM auto_draft_patterns
-         WHERE account_id = ?1 AND pattern_hash LIKE ?2 AND success_rate >= ?3
+         WHERE account_id = ?1 AND pattern_hash LIKE ?2 ESCAPE '\\' AND success_rate >= ?3
          ORDER BY match_count DESC
          LIMIT 1",
-        rusqlite::params![account_id, format!("{}:%", sender_domain), confidence_threshold + 0.1],
+        rusqlite::params![account_id, format!("{}:%", escaped_domain), confidence_threshold + 0.1],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )
     .ok()

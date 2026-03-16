@@ -11,6 +11,7 @@ export interface FeedbackItem {
 
 function createFeedbackStore() {
   const { subscribe, update } = writable<FeedbackItem[]>([]);
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function add(item: Omit<FeedbackItem, 'id' | 'createdAt'>) {
     const id = `fb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -18,16 +19,21 @@ function createFeedbackStore() {
     update(items => [...items, entry]);
 
     if (item.autoDismissMs > 0) {
-      setTimeout(() => dismiss(id), item.autoDismissMs);
+      const timer = setTimeout(() => dismiss(id), item.autoDismissMs);
+      timers.set(id, timer);
     }
     return id;
   }
 
   function dismiss(id: string) {
+    const timer = timers.get(id);
+    if (timer) { clearTimeout(timer); timers.delete(id); }
     update(items => items.filter(i => i.id !== id));
   }
 
   function undo(id: string) {
+    const timer = timers.get(id);
+    if (timer) { clearTimeout(timer); timers.delete(id); }
     let fn: (() => void) | undefined;
     update(items => {
       const item = items.find(i => i.id === id);

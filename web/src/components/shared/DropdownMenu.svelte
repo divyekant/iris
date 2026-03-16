@@ -33,9 +33,17 @@
     else if (e.key === 'ArrowUp') { focusedIndex = Math.max(focusedIndex - 1, 0); e.preventDefault(); }
     else if (e.key === 'Enter' && focusedIndex >= 0) { enabledItems[focusedIndex]?.onClick(); close(); e.preventDefault(); }
   }
+
+  $effect(() => {
+    if (!open) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (menuEl && !menuEl.contains(e.target as Node)) close();
+    }
+    window.addEventListener('click', handleOutsideClick);
+    return () => window.removeEventListener('click', handleOutsideClick);
+  });
 </script>
 
-<svelte:window onclick={(e) => { if (open && menuEl && !menuEl.contains(e.target as Node)) close(); }} />
 
 <div class="relative inline-block" bind:this={menuEl} onkeydown={handleKeydown}>
   <button
