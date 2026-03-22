@@ -171,6 +171,7 @@ impl JobWorker {
             "entity_extract" => self.handle_entity_extract(&job).await,
             "style_extract" => self.handle_style_extract(&job).await,
             "auto_draft" => self.handle_auto_draft(&job).await,
+            "delegation_process" => self.handle_delegation_process(&job).await,
             _ => Err(format!("Unknown job type: {}", job.job_type)),
         };
 
@@ -741,6 +742,15 @@ Emails:
     async fn handle_auto_draft(&self, job: &Job) -> Result<(), String> {
         let message_id = job.message_id.as_deref().ok_or("Missing message_id")?;
 
+        // Delegation precedence: if any delegation playbook matched, skip auto_draft
+        {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            if crate::api::delegation::has_delegation_match(&conn, message_id) {
+                tracing::debug!(message_id = message_id, "Skipping auto_draft: delegation playbook matched");
+                return Ok(());
+            }
+        }
+
         // Check if AI is enabled
         let enabled = {
             let conn = self.db.get().map_err(|e| e.to_string())?;
@@ -861,6 +871,110 @@ Emails:
         .map_err(|e| format!("Failed to store auto-draft: {e}"))?;
 
         tracing::info!(message_id = message_id, "Auto-draft generated");
+        Ok(())
+    }
+
+    async fn handle_delegation_process(&self, job: &Job) -> Result<(), String> {
+        let message_id = job.message_id.as_deref().ok_or("Missing message_id")?;
+
+        // Fetch message details
+        let (account_id, from_address, subject, category, intent) = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT account_id, COALESCE(from_address, ''), COALESCE(subject, ''), ai_category, intent FROM messages WHERE id = ?1",
+                rusqlite::params![message_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)),
+            )
+            .map_err(|e| format!("Message not found: {e}"))?
+        };
+
+        let sender_domain = from_address.split('@').nth(1).unwrap_or("").to_lowercase();
+        let subject_lower = subject.to_lowercase();
+
+        // Get all enabled playbooks for this account
+        let playbooks: Vec<(String, String, String, Option<String>, f64)> = {
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, trigger_conditions, action_type, action_template, confidence_threshold
+                     FROM delegation_playbooks
+                     WHERE account_id = ?1 AND enabled = 1",
+                )
+                .map_err(|e| e.to_string())?;
+
+            stmt.query_map(rusqlite::params![account_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect()
+        };
+
+        let mut any_match = false;
+
+        for (pb_id, trigger_json, action_type, action_template, threshold) in playbooks {
+            let conditions: crate::api::delegation::TriggerConditions =
+                match serde_json::from_str(&trigger_json) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+            let mut matched = 0u32;
+            let mut total = 0u32;
+
+            if let Some(ref domain) = conditions.sender_domain {
+                total += 1;
+                if sender_domain == domain.to_lowercase() { matched += 1; }
+            }
+            if let Some(ref substr) = conditions.subject_contains {
+                total += 1;
+                if subject_lower.contains(&substr.to_lowercase()) { matched += 1; }
+            }
+            if let Some(ref cat) = conditions.category {
+                total += 1;
+                if category.as_deref().unwrap_or("").eq_ignore_ascii_case(cat) { matched += 1; }
+            }
+            if let Some(ref int) = conditions.intent {
+                total += 1;
+                if intent.as_deref().unwrap_or("").eq_ignore_ascii_case(int) { matched += 1; }
+            }
+
+            if total == 0 { continue; }
+            let confidence = matched as f64 / total as f64;
+
+            let conn = self.db.get().map_err(|e| e.to_string())?;
+
+            if confidence >= threshold {
+                any_match = true;
+                let action_id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO delegation_actions (id, playbook_id, message_id, action_taken, confidence, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'completed')",
+                    rusqlite::params![action_id, pb_id, message_id, action_type, confidence],
+                ).ok();
+                conn.execute(
+                    "UPDATE delegation_playbooks SET match_count = match_count + 1, last_matched_at = unixepoch(), updated_at = unixepoch() WHERE id = ?1",
+                    rusqlite::params![pb_id],
+                ).ok();
+                // Execute the action
+                crate::api::delegation::execute_delegation_action_pub(&conn, message_id, &action_type, action_template.as_deref());
+                tracing::info!(message_id = message_id, playbook = %pb_id, action = %action_type, "Delegation action executed");
+            } else if confidence > 0.5 {
+                any_match = true;
+                let action_id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO delegation_actions (id, playbook_id, message_id, action_taken, confidence, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'pending_review')",
+                    rusqlite::params![action_id, pb_id, message_id, action_type, confidence],
+                ).ok();
+                tracing::info!(message_id = message_id, playbook = %pb_id, "Delegation action pending review");
+            }
+        }
+
+        if !any_match {
+            tracing::debug!(message_id = message_id, "No delegation playbooks matched");
+        }
+
         Ok(())
     }
 }

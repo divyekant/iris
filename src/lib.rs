@@ -246,6 +246,20 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/mcp/sessions", get(api::mcp_server::list_sessions))
         .route("/mcp/sessions/{session_id}", delete(api::mcp_server::delete_session))
         .route("/mcp/sessions/{session_id}/history", get(api::mcp_server::session_history))
+        // Delegation agent
+        .route("/delegation/playbooks", get(api::delegation::list_playbooks).post(api::delegation::create_playbook))
+        .route("/delegation/playbooks/{id}", put(api::delegation::update_playbook).delete(api::delegation::delete_playbook))
+        .route("/delegation/process/{message_id}", post(api::delegation::process_message))
+        .route("/delegation/actions", get(api::delegation::list_actions))
+        .route("/delegation/actions/{id}/undo", post(api::delegation::undo_action))
+        .route("/delegation/summary", get(api::delegation::get_summary))
+        // Custom categories
+        .route("/categories/custom", get(api::custom_categories::list_custom_categories).post(api::custom_categories::create_custom_category))
+        .route("/categories/custom/{id}", put(api::custom_categories::update_custom_category).delete(api::custom_categories::delete_custom_category))
+        .route("/categories/analyze/{account_id}", post(api::custom_categories::analyze_categories))
+        .route("/categories/custom/{id}/accept", post(api::custom_categories::accept_category))
+        .route("/categories/custom/{id}/dismiss", post(api::custom_categories::dismiss_category))
+        .route("/categories/explain/{message_id}", get(api::custom_categories::explain_category))
         // Writing style learning
         .route("/style/{account_id}", get(api::writing_style::get_style))
         .route("/style/{account_id}/analyze", post(api::writing_style::analyze_style))

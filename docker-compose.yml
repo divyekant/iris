@@ -8,15 +8,15 @@ services:
     environment:
       - DATABASE_URL=/app/data/iris.db
       - OLLAMA_URL=http://ollama:11434
-      - MEMORIES_URL=http://localhost:8900
+      - MEMORIES_URL=http://host.docker.internal:8900
       - PORT=3000
       - BIND_ALL=1
     env_file:
       - path: .env
         required: false
-    depends_on:
-      ollama:
-        condition: service_healthy
+    # depends_on:
+    #   ollama:
+    #     condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/health"]
       interval: 30s

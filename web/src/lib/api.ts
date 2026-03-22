@@ -494,6 +494,30 @@ export const api = {
     get: (accountId: string) => request<{ traits: { id: string; account_id: string; trait_type: string; trait_value: string; confidence: number; examples: string[] | null; created_at: number; updated_at: number }[]; account_id: string }>(`/api/style/${accountId}`),
     analyze: (accountId: string) => request<{ traits: { id: string; account_id: string; trait_type: string; trait_value: string; confidence: number; examples: string[] | null; created_at: number; updated_at: number }[]; emails_analyzed: number }>(`/api/style/${accountId}/analyze`, { method: 'POST' }),
   },
+  delegation: {
+    playbooks: {
+      list: (accountId?: string) => request<any[]>(`/api/delegation/playbooks${accountId ? `?account_id=${accountId}` : ''}`),
+      create: (data: any) => request<any>('/api/delegation/playbooks', { method: 'POST', body: JSON.stringify(data) }),
+      update: (id: string, data: any) => request<any>(`/api/delegation/playbooks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+      delete: (id: string) => request<void>(`/api/delegation/playbooks/${id}`, { method: 'DELETE' }),
+    },
+    actions: {
+      list: (limit?: number) => request<any[]>(`/api/delegation/actions?limit=${limit ?? 20}`),
+      undo: (id: string) => request<{ undone: boolean }>(`/api/delegation/actions/${id}/undo`, { method: 'POST' }),
+    },
+    summary: () => request<{ actions_today: number; pending_review: number; active_playbooks: number }>('/api/delegation/summary'),
+    process: (messageId: string) => request<{ matched: boolean; actions: any[] }>(`/api/delegation/process/${messageId}`, { method: 'POST' }),
+  },
+  customCategories: {
+    list: (accountId?: string) => request<any[]>(`/api/categories/custom${accountId ? `?account_id=${accountId}` : ''}`),
+    create: (data: any) => request<any>('/api/categories/custom', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: any) => request<any>(`/api/categories/custom/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    delete: (id: string) => request<void>(`/api/categories/custom/${id}`, { method: 'DELETE' }),
+    analyze: (accountId: string) => request<{ suggested: any[]; analyzed_messages: number }>(`/api/categories/analyze/${accountId}`, { method: 'POST' }),
+    accept: (id: string) => request<any>(`/api/categories/custom/${id}/accept`, { method: 'POST' }),
+    dismiss: (id: string) => request<{ dismissed: boolean }>(`/api/categories/custom/${id}/dismiss`, { method: 'POST' }),
+    explain: (messageId: string) => request<{ message_id: string; category: string; reasoning: string }>(`/api/categories/explain/${messageId}`),
+  },
   autoDraft: {
     check: (messageId: string) => request<{ draft: { id: string; message_id: string; account_id: string; pattern_id: string | null; draft_body: string; status: string; created_at: number } | null }>(`/api/auto-draft/${messageId}`),
     generate: (messageId: string) => request<{ draft: { id: string; message_id: string; account_id: string; pattern_id: string | null; draft_body: string; status: string; created_at: number } }>(`/api/auto-draft/generate/${messageId}`, { method: 'POST' }),

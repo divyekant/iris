@@ -32,6 +32,7 @@
   let isDark = $state(!document.documentElement.hasAttribute('data-brand'));
   let activeCategory = $state('');
   let needsReplyCount = $state(0);
+  let customCategories = $state<{ id: string; name: string; status: string }[]>([]);
 
   async function loadNeedsReplyCount() {
     try {
@@ -40,9 +41,17 @@
     } catch { /* ignore */ }
   }
 
+  async function loadCustomCategories() {
+    try {
+      const cats = await api.customCategories.list();
+      customCategories = cats.filter((c: any) => c.status === 'active');
+    } catch { customCategories = []; }
+  }
+
   $effect(() => {
     loadNeedsReplyCount();
-    const interval = setInterval(loadNeedsReplyCount, 60000);
+    loadCustomCategories();
+    const interval = setInterval(() => { loadNeedsReplyCount(); loadCustomCategories(); }, 60000);
     return () => clearInterval(interval);
   });
 
@@ -229,6 +238,17 @@
           onclick={() => selectCategory(cat.id)}
         >
           {cat.label}
+        </button>
+      {/each}
+      {#each customCategories as cc}
+        <button
+          class="flex items-center h-12 px-2.5 text-[13px] font-medium border-b-2 transition-colors"
+          style={activeCategory === cc.name.toLowerCase()
+            ? 'border-color: var(--iris-color-primary); color: var(--iris-color-primary);'
+            : 'border-color: transparent; color: var(--iris-color-text-muted);'}
+          onclick={() => selectCategory(cc.name.toLowerCase())}
+        >
+          {cc.name}
         </button>
       {/each}
       <button

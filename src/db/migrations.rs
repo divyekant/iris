@@ -54,7 +54,9 @@ const MIGRATION_051: &str = include_str!("../../migrations/051_performance_index
 const MIGRATION_052: &str = include_str!("../../migrations/052_knowledge_graph.sql");
 const MIGRATION_053: &str = include_str!("../../migrations/053_temporal_events.sql");
 const MIGRATION_054: &str = include_str!("../../migrations/054_writing_style.sql");
+const MIGRATION_055: &str = include_str!("../../migrations/055_delegation.sql");
 const MIGRATION_056: &str = include_str!("../../migrations/056_auto_draft.sql");
+const MIGRATION_057: &str = include_str!("../../migrations/057_custom_categories.sql");
 
 pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Ensure schema_version table exists before querying (handles fresh databases)
@@ -343,11 +345,19 @@ pub fn run(conn: &Connection) -> Result<(), rusqlite::Error> {
         tracing::info!("Applied migration 054_writing_style");
     }
 
-    // 055 reserved for delegation (Batch C)
+    if current_version < 55 {
+        conn.execute_batch(MIGRATION_055)?;
+        tracing::info!("Applied migration 055_delegation");
+    }
 
     if current_version < 56 {
         conn.execute_batch(MIGRATION_056)?;
         tracing::info!("Applied migration 056_auto_draft");
+    }
+
+    if current_version < 57 {
+        conn.execute_batch(MIGRATION_057)?;
+        tracing::info!("Applied migration 057_custom_categories");
     }
 
     Ok(())

@@ -43,6 +43,18 @@
   let autoDraftSaving = $state(false);
   let autoDraftInitialized = $state(false);
 
+  // Delegation playbooks
+  let playbooks = $state<any[]>([]);
+  let playbookShowNew = $state(false);
+  let pbNewName = $state('');
+  let pbNewActionType = $state('archive');
+  let pbNewTemplate = $state('');
+  let pbNewSenderDomain = $state('');
+  let pbNewSubjectContains = $state('');
+  let pbNewCategory = $state('');
+  let pbSaving = $state(false);
+  let delegationSummary = $state<{ actions_today: number; pending_review: number; active_playbooks: number } | null>(null);
+
   // Provider API keys (masked display)
   let anthropicKey = $state('');
   let anthropicModel = $state('');
@@ -233,6 +245,60 @@
     }
   });
 
+  async function loadPlaybooks() {
+    try {
+      playbooks = await api.delegation.playbooks.list();
+    } catch { playbooks = []; }
+  }
+
+  async function loadDelegationSummary() {
+    try {
+      delegationSummary = await api.delegation.summary();
+    } catch { delegationSummary = null; }
+  }
+
+  async function createPlaybook() {
+    if (!pbNewName.trim() || pbSaving) return;
+    const accounts = await api.accounts.list();
+    if (accounts.length === 0) return;
+    pbSaving = true;
+    try {
+      const triggerConditions: any = {};
+      if (pbNewSenderDomain.trim()) triggerConditions.sender_domain = pbNewSenderDomain.trim();
+      if (pbNewSubjectContains.trim()) triggerConditions.subject_contains = pbNewSubjectContains.trim();
+      if (pbNewCategory.trim()) triggerConditions.category = pbNewCategory.trim();
+      await api.delegation.playbooks.create({
+        account_id: accounts[0].id,
+        name: pbNewName.trim(),
+        trigger_conditions: triggerConditions,
+        action_type: pbNewActionType,
+        action_template: pbNewTemplate.trim() || undefined,
+      });
+      pbNewName = ''; pbNewActionType = 'archive'; pbNewTemplate = '';
+      pbNewSenderDomain = ''; pbNewSubjectContains = ''; pbNewCategory = '';
+      playbookShowNew = false;
+      await loadPlaybooks();
+      await loadDelegationSummary();
+    } catch { /* silently fail */ }
+    finally { pbSaving = false; }
+  }
+
+  async function togglePlaybook(pb: any) {
+    try {
+      await api.delegation.playbooks.update(pb.id, { enabled: !pb.enabled });
+      await loadPlaybooks();
+      await loadDelegationSummary();
+    } catch { /* silently fail */ }
+  }
+
+  async function deletePlaybook(id: string) {
+    try {
+      await api.delegation.playbooks.delete(id);
+      await loadPlaybooks();
+      await loadDelegationSummary();
+    } catch { /* silently fail */ }
+  }
+
   async function reprocessUntagged() {
     reprocessing = true;
     reprocessMessage = '';
@@ -288,6 +354,8 @@
     loadSettings();
     loadWritingStyle();
     loadAutoDraftConfig();
+    loadPlaybooks();
+    loadDelegationSummary();
   });
 </script>
 
@@ -589,6 +657,128 @@
              'Draft replies when reasonably confident about the appropriate response'}
           </p>
         </div>
+      {/if}
+    </div>
+  </section>
+
+  <!-- Delegation Playbooks section -->
+  <section>
+    <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">Delegation Playbooks</h3>
+    <div class="space-y-4">
+      <p class="text-xs" style="color: var(--iris-color-text-faint);">
+        Define rules to automatically handle incoming emails. Delegation takes precedence over auto-draft.
+      </p>
+
+      {#if delegationSummary}
+        <div class="flex gap-3">
+          <div class="px-3 py-2 rounded-lg text-center" style="background: var(--iris-color-bg-surface);">
+            <p class="text-lg font-semibold" style="color: var(--iris-color-text);">{delegationSummary.active_playbooks}</p>
+            <p class="text-[10px]" style="color: var(--iris-color-text-faint);">Active</p>
+          </div>
+          <div class="px-3 py-2 rounded-lg text-center" style="background: var(--iris-color-bg-surface);">
+            <p class="text-lg font-semibold" style="color: var(--iris-color-success);">{delegationSummary.actions_today}</p>
+            <p class="text-[10px]" style="color: var(--iris-color-text-faint);">Today</p>
+          </div>
+          {#if delegationSummary.pending_review > 0}
+            <div class="px-3 py-2 rounded-lg text-center" style="background: color-mix(in srgb, var(--iris-color-warning) 10%, transparent);">
+              <p class="text-lg font-semibold" style="color: var(--iris-color-warning);">{delegationSummary.pending_review}</p>
+              <p class="text-[10px]" style="color: var(--iris-color-text-faint);">Review</p>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Existing playbooks -->
+      {#if playbooks.length > 0}
+        <div class="space-y-2">
+          {#each playbooks as pb}
+            <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+              <div class="flex items-center gap-3">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 mb-1">
+                    <span class="text-sm font-medium" style="color: var(--iris-color-text);">{pb.name}</span>
+                    <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium"
+                      style="background: {pb.enabled ? 'color-mix(in srgb, var(--iris-color-success) 20%, transparent)' : 'color-mix(in srgb, var(--iris-color-text-faint) 20%, transparent)'}; color: {pb.enabled ? 'var(--iris-color-success)' : 'var(--iris-color-text-faint)'};">
+                      {pb.enabled ? 'Active' : 'Paused'}
+                    </span>
+                  </div>
+                  <div class="flex flex-wrap gap-1 mb-1">
+                    {#if pb.trigger_conditions?.sender_domain}
+                      <span class="px-1.5 py-0.5 text-[10px] rounded" style="background: color-mix(in srgb, var(--iris-color-info) 15%, transparent); color: var(--iris-color-info);">
+                        domain: {pb.trigger_conditions.sender_domain}
+                      </span>
+                    {/if}
+                    {#if pb.trigger_conditions?.subject_contains}
+                      <span class="px-1.5 py-0.5 text-[10px] rounded" style="background: color-mix(in srgb, var(--iris-color-info) 15%, transparent); color: var(--iris-color-info);">
+                        subject: {pb.trigger_conditions.subject_contains}
+                      </span>
+                    {/if}
+                    {#if pb.trigger_conditions?.category}
+                      <span class="px-1.5 py-0.5 text-[10px] rounded" style="background: color-mix(in srgb, var(--iris-color-info) 15%, transparent); color: var(--iris-color-info);">
+                        category: {pb.trigger_conditions.category}
+                      </span>
+                    {/if}
+                  </div>
+                  <span class="px-1.5 py-0.5 text-[10px] rounded" style="background: color-mix(in srgb, var(--iris-color-warning) 15%, transparent); color: var(--iris-color-warning);">
+                    {pb.action_type}
+                  </span>
+                  {#if pb.match_count > 0}
+                    <span class="text-[10px] ml-2" style="color: var(--iris-color-text-faint);">
+                      {pb.match_count} match{pb.match_count !== 1 ? 'es' : ''}
+                    </span>
+                  {/if}
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                  <button class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                    style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                    onclick={() => togglePlaybook(pb)}>{pb.enabled ? 'Pause' : 'Resume'}</button>
+                  <button class="settings-btn-secondary px-2 py-1 text-xs rounded transition-colors"
+                    style="color: var(--iris-color-error);" onclick={() => deletePlaybook(pb.id)}>Delete</button>
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {:else if !playbookShowNew}
+        <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+          <p class="text-sm" style="color: var(--iris-color-text-muted);">No delegation playbooks created yet.</p>
+        </div>
+      {/if}
+
+      <!-- New playbook form -->
+      {#if playbookShowNew}
+        <div class="p-3 rounded-lg border space-y-2" style="border-color: var(--iris-color-border);">
+          <FormInput bind:value={pbNewName} placeholder="Playbook name (e.g., Archive newsletters)" />
+          <p class="text-xs font-medium" style="color: var(--iris-color-text-muted);">Trigger conditions:</p>
+          <FormInput bind:value={pbNewSenderDomain} placeholder="Sender domain (e.g., marketing.com)" />
+          <FormInput bind:value={pbNewSubjectContains} placeholder="Subject contains (e.g., newsletter)" />
+          <FormInput bind:value={pbNewCategory} placeholder="Category (e.g., promotions)" />
+          <p class="text-xs font-medium" style="color: var(--iris-color-text-muted);">Action:</p>
+          <div class="flex gap-2">
+            {#each ['archive', 'label', 'draft_reply', 'auto_reply', 'forward'] as act}
+              <button
+                class="flex-1 px-2 py-1.5 text-xs font-medium rounded-lg border transition-colors"
+                style="border-color: {pbNewActionType === act ? 'var(--iris-color-primary)' : 'var(--iris-color-border)'}; background: {pbNewActionType === act ? 'color-mix(in srgb, var(--iris-color-primary) 12%, transparent)' : 'transparent'}; color: {pbNewActionType === act ? 'var(--iris-color-primary)' : 'var(--iris-color-text-muted)'};"
+                onclick={() => (pbNewActionType = act)}
+              >{act.replace('_', ' ')}</button>
+            {/each}
+          </div>
+          {#if ['draft_reply', 'auto_reply', 'label'].includes(pbNewActionType)}
+            <FormInput bind:value={pbNewTemplate} placeholder={pbNewActionType === 'label' ? 'Label name' : 'Reply template body'} />
+          {/if}
+          <div class="flex gap-2">
+            <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+              style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+              onclick={() => { playbookShowNew = false; pbNewName = ''; }}>Cancel</button>
+            <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+              onclick={createPlaybook} disabled={pbSaving || !pbNewName.trim()}>{pbSaving ? 'Creating...' : 'Create Playbook'}</button>
+          </div>
+        </div>
+      {:else}
+        <button class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors"
+          style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+          onclick={() => (playbookShowNew = true)}>+ Add Playbook</button>
       {/if}
     </div>
   </section>

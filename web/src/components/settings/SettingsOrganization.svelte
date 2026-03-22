@@ -16,6 +16,16 @@
 
   const LABEL_COLORS = ['#3B82F6', '#16A34A', '#EF4444', '#d4af37', '#8B5CF6', '#EC4899', '#06B6D4', '#F97316'];
 
+  // AI Categories
+  type CustomCategoryItem = { id: string; account_id: string; name: string; description: string | null; is_ai_generated: boolean; email_count: number; status: string; created_at: number; updated_at: number };
+  let customCategories = $state<CustomCategoryItem[]>([]);
+  let catShowNew = $state(false);
+  let catNewName = $state('');
+  let catNewDescription = $state('');
+  let catSaving = $state(false);
+  let catAnalyzing = $state(false);
+  let catAnalyzeMessage = $state('');
+
   // Filter rules
   type FilterCondition = { field: string; operator: string; value: string };
   type FilterAction = { type: string; value?: string };
@@ -156,11 +166,76 @@
     } catch { /* silently fail */ }
   }
 
+  // AI Categories functions
+  async function loadCustomCategories() {
+    try { customCategories = await api.customCategories.list(); } catch { customCategories = []; }
+  }
+
+  async function createCustomCategory() {
+    if (!catNewName.trim() || catSaving) return;
+    catSaving = true;
+    try {
+      const accounts = await api.accounts.list();
+      if (accounts.length === 0) return;
+      await api.customCategories.create({
+        account_id: accounts[0].id,
+        name: catNewName.trim(),
+        description: catNewDescription.trim() || undefined,
+      });
+      catNewName = '';
+      catNewDescription = '';
+      catShowNew = false;
+      await loadCustomCategories();
+    } catch { /* silently fail */ }
+    finally { catSaving = false; }
+  }
+
+  async function deleteCustomCategory(id: string) {
+    try {
+      await api.customCategories.delete(id);
+      await loadCustomCategories();
+    } catch { /* silently fail */ }
+  }
+
+  async function acceptCategory(id: string) {
+    try {
+      await api.customCategories.accept(id);
+      await loadCustomCategories();
+    } catch { /* silently fail */ }
+  }
+
+  async function dismissCategory(id: string) {
+    try {
+      await api.customCategories.dismiss(id);
+      await loadCustomCategories();
+    } catch { /* silently fail */ }
+  }
+
+  async function analyzeCategories() {
+    catAnalyzing = true;
+    catAnalyzeMessage = '';
+    try {
+      const accounts = await api.accounts.list();
+      if (accounts.length === 0) { catAnalyzeMessage = 'No accounts found'; return; }
+      const result = await api.customCategories.analyze(accounts[0].id);
+      catAnalyzeMessage = result.suggested.length > 0
+        ? `Found ${result.suggested.length} suggestion${result.suggested.length === 1 ? '' : 's'} from ${result.analyzed_messages} emails`
+        : `No new categories suggested (analyzed ${result.analyzed_messages} emails)`;
+      await loadCustomCategories();
+    } catch {
+      catAnalyzeMessage = 'Analysis failed';
+    } finally {
+      catAnalyzing = false;
+      setTimeout(() => { catAnalyzeMessage = ''; }, 5000);
+    }
+  }
+
   // Load data on mount
   $effect(() => {
     async function loadData() {
       await loadLabels();
       await loadFilterRules();
+      await loadCustomCategories();
     }
     loadData();
   });
@@ -427,6 +502,95 @@
         style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
         onclick={() => (frShowNew = true)}>+ Add Filter Rule</button>
     {/if}
+  </section>
+
+  <!-- AI Categories section -->
+  <section>
+    <h3 class="text-sm font-semibold uppercase tracking-wider mb-4" style="color: var(--iris-color-text-muted);">AI Categories</h3>
+    <p class="text-xs mb-4" style="color: var(--iris-color-text-faint);">Custom categories extend the standard Primary/Updates/Social/Promotions tabs. AI can suggest new categories based on your email patterns.</p>
+
+    <!-- Existing categories -->
+    {#if customCategories.length > 0}
+      <div class="space-y-2 mb-4">
+        {#each customCategories as cat}
+          <div class="p-3 rounded-lg border" style="border-color: var(--iris-color-border);">
+            <div class="flex items-center gap-3">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-0.5">
+                  <span class="text-sm font-medium" style="color: var(--iris-color-text);">{cat.name}</span>
+                  {#if cat.is_ai_generated}
+                    <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium"
+                      style="background: color-mix(in srgb, var(--iris-color-primary) 15%, transparent); color: var(--iris-color-primary);">
+                      AI
+                    </span>
+                  {:else}
+                    <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium"
+                      style="background: color-mix(in srgb, var(--iris-color-text-faint) 15%, transparent); color: var(--iris-color-text-faint);">
+                      Manual
+                    </span>
+                  {/if}
+                  {#if cat.status === 'suggested'}
+                    <span class="px-1.5 py-0.5 text-[10px] rounded-full font-medium"
+                      style="background: color-mix(in srgb, var(--iris-color-warning) 15%, transparent); color: var(--iris-color-warning);">
+                      New
+                    </span>
+                  {/if}
+                </div>
+                {#if cat.description}
+                  <p class="text-xs" style="color: var(--iris-color-text-faint);">{cat.description}</p>
+                {/if}
+                <span class="text-[10px]" style="color: var(--iris-color-text-faint);">{cat.email_count} email{cat.email_count !== 1 ? 's' : ''}</span>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                {#if cat.status === 'suggested'}
+                  <button class="settings-btn-primary px-2 py-1 text-xs font-medium rounded transition-colors"
+                    style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+                    onclick={() => acceptCategory(cat.id)}>Accept</button>
+                  <button class="settings-btn-secondary px-2 py-1 text-xs rounded border transition-colors"
+                    style="border-color: var(--iris-color-border); color: var(--iris-color-text-muted);"
+                    onclick={() => dismissCategory(cat.id)}>Dismiss</button>
+                {:else}
+                  <button class="settings-revoke-btn px-2 py-1 text-xs rounded transition-colors"
+                    style="color: var(--iris-color-error);" onclick={() => deleteCustomCategory(cat.id)}>Delete</button>
+                {/if}
+              </div>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {:else if !catShowNew}
+      <p class="text-sm mb-4" style="color: var(--iris-color-text-faint);">No custom categories yet. Create one manually or let AI suggest categories.</p>
+    {/if}
+
+    <!-- New category form -->
+    {#if catShowNew}
+      <div class="p-3 rounded-lg border space-y-2 mb-4" style="border-color: var(--iris-color-border);">
+        <FormInput bind:value={catNewName} placeholder="Category name (e.g., Receipts, Travel)" />
+        <FormInput bind:value={catNewDescription} placeholder="Description (optional)" />
+        <div class="flex gap-2">
+          <button class="settings-btn-secondary px-3 py-1.5 text-xs rounded-lg border transition-colors"
+            style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+            onclick={() => { catShowNew = false; catNewName = ''; catNewDescription = ''; }}>Cancel</button>
+          <button class="settings-btn-primary px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+            style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+            onclick={createCustomCategory} disabled={catSaving || !catNewName.trim()}>{catSaving ? 'Creating...' : 'Create Category'}</button>
+        </div>
+      </div>
+    {/if}
+
+    <div class="flex items-center gap-2">
+      {#if !catShowNew}
+        <button class="settings-btn-secondary px-4 py-2 text-sm rounded-lg border transition-colors"
+          style="border-color: var(--iris-color-border); color: var(--iris-color-text);"
+          onclick={() => (catShowNew = true)}>+ Add Category</button>
+      {/if}
+      <button class="settings-btn-primary px-4 py-2 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+        style="background: var(--iris-color-primary); color: var(--iris-color-bg);"
+        onclick={analyzeCategories} disabled={catAnalyzing}>{catAnalyzing ? 'Analyzing...' : 'AI Suggest'}</button>
+      {#if catAnalyzeMessage}
+        <span class="text-xs" style="color: var(--iris-color-text-muted);">{catAnalyzeMessage}</span>
+      {/if}
+    </div>
   </section>
 </div>
 

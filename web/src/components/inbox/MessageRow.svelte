@@ -21,6 +21,7 @@
     intent?: string;
     labels?: string;
     has_auto_draft?: boolean;
+    has_delegation_action?: boolean;
   }
 
   let { message, onclick, selected = false, focused = false, onselect, onaction, onsnooze, muted = false }: {
@@ -143,6 +144,13 @@
     </div>
     <div class="text-sm truncate {message.is_read ? '' : 'font-medium'} flex items-center gap-1.5" style="color: {message.is_read ? 'var(--iris-color-text-muted)' : 'var(--iris-color-text)'};">
       <span class="truncate">{subjectDisplay}</span>
+      {#if message.has_delegation_action}
+        <span
+          class="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium uppercase"
+          style="background: color-mix(in srgb, var(--iris-color-success) 15%, transparent); color: var(--iris-color-success);"
+          title="Handled by delegation playbook"
+        >AI handled</span>
+      {/if}
       {#if message.has_auto_draft}
         <button
           class="flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium uppercase cursor-pointer draft-ready-chip border-0"
