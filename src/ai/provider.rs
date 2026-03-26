@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 
 use super::anthropic::AnthropicClient;
 use super::ollama::OllamaClient;
@@ -71,24 +72,37 @@ pub struct ProviderStatus {
 }
 
 /// Pool of LLM providers with round-robin load balancing.
+/// Providers can be hot-reloaded via `reload()` without restarting the server.
 #[derive(Clone)]
 pub struct ProviderPool {
-    providers: Vec<LlmProvider>,
+    providers: std::sync::Arc<RwLock<Vec<LlmProvider>>>,
     counter: std::sync::Arc<AtomicUsize>,
 }
 
 impl ProviderPool {
     pub fn new(providers: Vec<LlmProvider>) -> Self {
         Self {
-            providers,
+            providers: std::sync::Arc::new(RwLock::new(providers)),
             counter: std::sync::Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Replace the provider list at runtime (e.g. after saving new API keys).
+    pub fn reload(&self, providers: Vec<LlmProvider>) {
+        let mut lock = self.providers.write().expect("provider pool lock poisoned");
+        *lock = providers;
+    }
+
+    /// Snapshot current providers for iteration (releases the lock immediately).
+    fn snapshot(&self) -> Vec<LlmProvider> {
+        self.providers.read().expect("provider pool lock poisoned").clone()
     }
 
     /// Generate a completion using round-robin with fallback.
     /// Tries each provider starting from the next in rotation.
     pub async fn generate(&self, prompt: &str, system: Option<&str>) -> Option<String> {
-        let n = self.providers.len();
+        let providers = self.snapshot();
+        let n = providers.len();
         if n == 0 {
             return None;
         }
@@ -96,7 +110,7 @@ impl ProviderPool {
         let start = self.counter.fetch_add(1, Ordering::Relaxed) % n;
         for i in 0..n {
             let idx = (start + i) % n;
-            let provider = &self.providers[idx];
+            let provider = &providers[idx];
             if let Some(result) = provider.generate(prompt, system).await {
                 return Some(result);
             }
@@ -112,7 +126,8 @@ impl ProviderPool {
         system: Option<&str>,
         tools: &[crate::ai::tools::Tool],
     ) -> Option<crate::ai::tools::LlmResponse> {
-        let n = self.providers.len();
+        let providers = self.snapshot();
+        let n = providers.len();
         if n == 0 {
             return None;
         }
@@ -120,7 +135,7 @@ impl ProviderPool {
         let start = self.counter.fetch_add(1, Ordering::Relaxed) % n;
         for i in 0..n {
             let idx = (start + i) % n;
-            let provider = &self.providers[idx];
+            let provider = &providers[idx];
             if let Some(result) = provider.generate_with_tools(messages, system, tools).await {
                 return Some(result);
             }
@@ -131,8 +146,9 @@ impl ProviderPool {
 
     /// Check health of all providers.
     pub async fn health_status(&self) -> Vec<ProviderStatus> {
-        let mut statuses = Vec::with_capacity(self.providers.len());
-        for p in &self.providers {
+        let providers = self.snapshot();
+        let mut statuses = Vec::with_capacity(providers.len());
+        for p in &providers {
             statuses.push(ProviderStatus {
                 name: p.name().to_string(),
                 model: p.model().to_string(),
@@ -144,12 +160,12 @@ impl ProviderPool {
 
     /// Whether any provider is configured.
     pub fn has_providers(&self) -> bool {
-        !self.providers.is_empty()
+        !self.snapshot().is_empty()
     }
 
     /// Whether any provider reports healthy.
     pub async fn any_healthy(&self) -> bool {
-        for p in &self.providers {
+        for p in &self.snapshot() {
             if p.health().await {
                 return true;
             }

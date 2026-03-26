@@ -4,7 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::ai::provider::ProviderStatus;
+use crate::ai::provider::{LlmProvider, ProviderStatus};
 use crate::secrets;
 use crate::AppState;
 
@@ -161,6 +161,21 @@ pub async fn set_ai_config(
         state.memories.update_config(&url, key);
     }
 
+    // Hot-reload providers when API keys or URLs change (no restart needed)
+    if input.anthropic_api_key.is_some()
+        || input.openai_api_key.is_some()
+        || input.ollama_url.is_some()
+        || input.model.is_some()
+        || input.anthropic_model.is_some()
+        || input.openai_model.is_some()
+    {
+        let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let new_providers = rebuild_providers(&conn, &state.config);
+        let count = new_providers.len();
+        state.providers.reload(new_providers);
+        tracing::info!("Provider pool reloaded: {} providers", count);
+    }
+
     // Re-read to return current state
     let (ollama_url, model, enabled, decay_enabled, decay_threshold_days, decay_factor) = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -196,4 +211,48 @@ pub async fn test_ai_connection(
 ) -> Result<Json<AiTestResponse>, StatusCode> {
     let providers = state.providers.health_status().await;
     Ok(Json(AiTestResponse { providers }))
+}
+
+/// Rebuild the provider list from DB config + env fallbacks.
+/// Mirrors the startup logic in main.rs so the same providers are created.
+fn rebuild_providers(conn: &rusqlite::Connection, config: &crate::config::Config) -> Vec<LlmProvider> {
+    let mut providers = Vec::new();
+
+    // Ollama
+    let ollama_url = get_config_value(conn, "ai_ollama_url", &config.ollama_url);
+    let ollama_model = get_config_value(conn, "ai_model", "");
+    let ollama = crate::ai::ollama::OllamaClient::with_model(&ollama_url, &ollama_model);
+    providers.push(LlmProvider::Ollama(ollama));
+
+    // Anthropic
+    let anthropic_key = secrets::get_secret_config_value(conn, "anthropic_api_key")
+        .ok()
+        .flatten()
+        .or_else(|| config.anthropic_api_key.clone());
+    if let Some(ref key) = anthropic_key {
+        if !key.is_empty() {
+            let model = conn
+                .query_row("SELECT value FROM config WHERE key = 'ai_model_anthropic'", [], |row| row.get::<_, String>(0))
+                .ok();
+            let client = crate::ai::anthropic::AnthropicClient::new(key, model.as_deref());
+            providers.push(LlmProvider::Anthropic(client));
+        }
+    }
+
+    // OpenAI
+    let openai_key = secrets::get_secret_config_value(conn, "openai_api_key")
+        .ok()
+        .flatten()
+        .or_else(|| config.openai_api_key.clone());
+    if let Some(ref key) = openai_key {
+        if !key.is_empty() {
+            let model = conn
+                .query_row("SELECT value FROM config WHERE key = 'ai_model_openai'", [], |row| row.get::<_, String>(0))
+                .ok();
+            let client = crate::ai::openai::OpenAIClient::new(key, model.as_deref());
+            providers.push(LlmProvider::OpenAI(client));
+        }
+    }
+
+    providers
 }
