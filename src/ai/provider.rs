@@ -160,7 +160,7 @@ impl ProviderPool {
 
     /// Whether any provider is configured.
     pub fn has_providers(&self) -> bool {
-        !self.snapshot().is_empty()
+        !self.providers.read().expect("provider pool lock poisoned").is_empty()
     }
 
     /// Whether any provider reports healthy.

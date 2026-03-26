@@ -104,7 +104,7 @@ fn expected_origin(headers: &HeaderMap) -> Option<String> {
     Some(format!("{scheme}://{host}"))
 }
 
-fn is_safe_method(method: &Method) -> bool {
+pub fn is_safe_method(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 

@@ -8,7 +8,7 @@ use axum::{
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::api::session_auth::{extract_session_token, is_same_origin_browser_context, SessionTransport};
+use crate::api::session_auth::{extract_session_token, is_safe_method, is_same_origin_browser_context, SessionTransport};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -101,15 +101,15 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Look up an API key by its SHA-256 hash.
-/// Returns (id, permission, account_id, is_revoked).
+/// Returns (id, permission, account_id, is_revoked, last_used_at).
 fn lookup_api_key(
     conn: &rusqlite::Connection,
     key_hash: &str,
-) -> Option<(String, String, Option<String>, bool)> {
+) -> Option<(String, String, Option<String>, bool, Option<i64>)> {
     conn.query_row(
-        "SELECT id, permission, account_id, is_revoked FROM api_keys WHERE key_hash = ?1",
+        "SELECT id, permission, account_id, is_revoked, last_used_at FROM api_keys WHERE key_hash = ?1",
         rusqlite::params![key_hash],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     )
     .ok()
 }
@@ -142,7 +142,7 @@ pub async fn unified_auth_middleware(
             };
 
             match lookup_api_key(&conn, &key_hash) {
-                Some((id, permission_str, account_id, is_revoked)) => {
+                Some((id, permission_str, account_id, is_revoked, last_used)) => {
                     if is_revoked {
                         return StatusCode::UNAUTHORIZED.into_response();
                     }
@@ -152,11 +152,19 @@ pub async fn unified_auth_middleware(
                         None => return StatusCode::UNAUTHORIZED.into_response(),
                     };
 
-                    // Update last_used_at (best-effort, don't fail if it errors)
-                    let _ = conn.execute(
-                        "UPDATE api_keys SET last_used_at = unixepoch() WHERE id = ?1",
-                        rusqlite::params![id],
-                    );
+                    // Debounce last_used_at — only write if older than 60s to avoid
+                    // a SQLite write lock on every agent request.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    let stale = last_used.map_or(true, |t| now - t > 60);
+                    if stale {
+                        let _ = conn.execute(
+                            "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
+                            rusqlite::params![now, id],
+                        );
+                    }
 
                     Some(AuthContext::Agent {
                         key_id: id,
@@ -198,10 +206,6 @@ pub async fn unified_auth_middleware(
 
     // --- Path 3: No valid credentials ---
     StatusCode::UNAUTHORIZED.into_response()
-}
-
-fn is_safe_method(method: &Method) -> bool {
-    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
 // ---------------------------------------------------------------------------

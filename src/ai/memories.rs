@@ -24,15 +24,6 @@ pub struct UpsertEntry {
 }
 
 #[derive(Debug, Serialize)]
-struct UpsertRequest {
-    text: String,
-    source: String,
-    key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    document_at: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 struct UpsertBatchRequest {
     entries: Vec<UpsertEntry>,
 }
@@ -162,7 +153,7 @@ impl MemoriesClient {
 
     /// Store or update a single memory entry
     pub async fn upsert(&self, text: &str, source: &str, key: &str, document_at: Option<&str>) -> bool {
-        let body = UpsertRequest {
+        let body = UpsertEntry {
             text: text.to_string(),
             source: source.to_string(),
             key: key.to_string(),
@@ -336,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_upsert_request_with_document_at() {
-        let req = UpsertRequest {
+        let req = UpsertEntry {
             text: "email body".into(),
             source: "iris/1/messages/abc".into(),
             key: "<abc@example.com>".into(),
@@ -348,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_upsert_request_without_document_at() {
-        let req = UpsertRequest {
+        let req = UpsertEntry {
             text: "email body".into(),
             source: "iris/1/messages/abc".into(),
             key: "<abc@example.com>".into(),
