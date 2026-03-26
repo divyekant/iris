@@ -44,37 +44,56 @@ The unified middleware replaces `session_auth_middleware` on protected routes:
    - Extract permission level and optional account scope
    - Attach `AgentAuth { key_id, permission, account_id }` to request extensions
    - Log to audit trail
+   - No CSRF checks needed (Bearer tokens are not auto-attached by browsers)
 
-2. Check `X-Session-Token` header or `iris_session` cookie -> session auth
+2. If no Bearer token, check `X-Session-Token` header or `iris_session` cookie -> session auth
    - Validate against startup session token
    - CSRF checks (same-origin for cookie-based mutations)
    - Attach `SessionAuth` to request extensions (full access)
+   - If both `iris_session` cookie AND `Authorization: Bearer` are present, Bearer takes precedence and CSRF is skipped (the caller is explicitly providing credentials, not relying on ambient cookies)
 
 3. Neither present -> 401 Unauthorized
 
 ### Permission Model
 
-API keys carry one of four permission levels. Each level includes all permissions below it:
+API keys carry one of four permission levels (matching existing `api_keys.permission` column values). Each level includes all permissions below it:
 
 | Level | Allows | Example Operations |
 |-------|--------|-------------------|
-| `read` | GET endpoints | List messages, get thread, search, analytics, contacts |
-| `draft` | read + non-send mutations | Save draft, batch label/archive, create label, snooze, notes |
-| `send` | draft + sending | Send, reply, forward, cancel send |
-| `autonomous` | send + config/admin | Change settings, manage webhooks, delegation playbooks |
+| `read_only` | Most GET endpoints | List messages, get thread, search, analytics, contacts |
+| `draft_only` | read_only + non-send mutations | Save draft, batch label/archive, create label, snooze, notes |
+| `send_with_approval` | draft_only + sending | Send, reply, forward, cancel send |
+| `autonomous` | send_with_approval + config/admin | Change settings, manage webhooks, delegation playbooks |
+
+**Sensitive GET endpoints** require elevated permissions:
+- `GET /api/config`, `GET /api/config/ai` -> `autonomous` (exposes server configuration)
+- `GET /api/api-keys` -> `autonomous` (enumerates API keys)
+- `GET /api/audit-log` -> `autonomous` (audit trail)
+- `GET /api/webhooks` -> `draft_only` (webhook URLs are operational data)
+
+### Account Scope Enforcement
+
+API keys have an optional `account_id` field. When set, the middleware attaches the account constraint to request extensions. Enforcement:
+
+- Handlers that accept an `account_id` query parameter: the middleware overrides it with the scoped account. The agent cannot query other accounts.
+- Handlers that return cross-account data (e.g., `GET /api/messages` without account filter): the middleware injects the account filter automatically.
+- Handlers that operate on a specific message/thread by ID: the handler verifies the resource belongs to the scoped account, returning 403 if not.
+- Unscoped API keys (account_id = None) have access to all accounts.
 
 ### Permission Enforcement
 
 Handlers that perform restricted operations check the permission level from request extensions:
 
 ```rust
-fn require_permission(extensions: &Extensions, needed: &str) -> Result<(), StatusCode> {
+fn require_permission(extensions: &Extensions, needed: Permission) -> Result<(), StatusCode> {
     // SessionAuth always passes (full access)
     // AgentAuth checks permission hierarchy
 }
 ```
 
-GET handlers don't need explicit checks — `read` is the minimum for any authenticated request.
+### Rate Limiting for API Keys
+
+The rate limit key extractor is updated to use the API key ID when Bearer auth is present, instead of falling back to `"__anonymous__"`. Each API key gets its own rate limit bucket (same 500 burst / 5 req/sec as session auth). This prevents one misbehaving agent from exhausting another agent's rate limit.
 
 ### Backwards Compatibility
 
@@ -133,6 +152,7 @@ The existing semantic search path (`?semantic=true`) gets upgraded:
 - **Not switching to the extraction pipeline.** Iris uses direct upsert, not Memories extraction (AUDN). The upsert path is simpler and we control the text format. Auto-linking (which requires extraction) is deferred.
 - **Not creating explicit memory links.** Thread relationships and contact links could be built via the Memories links API, but this is a follow-up scope.
 - **Not wiring feedback signals.** Iris has AI feedback (thumbs up/down). Piping these to Memories `POST /search/feedback` for ranking improvements is a natural follow-up.
+- **Not backfilling existing emails.** Emails indexed before this upgrade will lack `document_at`. Temporal searches with `since`/`until` may miss these older entries. A backfill job (re-upsert with the email's date) is a follow-up if needed — most users will have recent email as the primary agent use case.
 
 ---
 
@@ -152,6 +172,16 @@ The 26 existing MCP tools remain. They already cover the core agent use case (se
 - REST API is the comprehensive surface (200+ endpoints)
 - MCP is the curated tool set for LLM-based agents
 - Both authenticate the same way
+
+### MCP Tool Permission Mapping
+
+MCP tool calls are permission-checked against the session's auth level. The mapping rule:
+- **read_only:** search_emails, read_email, list_inbox, list_threads, get_thread, get_thread_summary, get_contact_profile, get_inbox_stats, extract_tasks, extract_deadlines
+- **draft_only:** create_draft, manage_draft, archive_email, star_email, bulk_action
+- **send_with_approval:** send_email, chat (when chat proposes sending)
+- **autonomous:** any tool (no restrictions)
+
+Tool calls that exceed the session's permission level return an error in the MCP response, not an HTTP 403.
 
 ### What We're Not Doing
 
@@ -210,9 +240,22 @@ Same parameters as reply, creates a draft for human review instead of sending.
 
 Same parameters as forward, creates a draft instead of sending.
 
+### Account Resolution
+
+The `account_id` is derived from the original message's record in the database — not provided by the caller. The server looks up `message_id`, reads its `account_id`, and uses that account's SMTP credentials. If the account is inactive or missing OAuth tokens, the endpoint returns 400 with an error describing the issue.
+
+For API keys with account scope: the server verifies the original message belongs to the scoped account, returning 403 if not.
+
+### Error Responses
+
+- `404` — message_id not found
+- `400` — account inactive or SMTP credentials unavailable
+- `403` — message belongs to an account outside the API key's scope
+- `422` — missing required fields (body)
+
 ### Implementation
 
-These endpoints call existing compose/send logic internally. The `send_message` handler in `compose.rs` already handles email construction — the reply/forward endpoints resolve the threading context from `message_id`, build the proper headers and quoted content, then delegate to the existing send or draft-save path.
+These endpoints call existing compose/send logic internally. The `send_message` handler in `compose.rs` already handles email construction. The `redirect_message` handler already resolves threading context from a message ID — this pattern is extracted into a shared utility for reply/forward. The reply/forward endpoints resolve headers and quoted content, then delegate to the existing send or draft-save path.
 
 ---
 
