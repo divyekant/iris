@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::ai::memories::SearchOptions;
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -716,11 +717,11 @@ pub async fn get_chat_memory(
 ) -> Result<Json<ChatMemoryResponse>, StatusCode> {
     let summaries = state
         .memories
-        .search("chat conversation summary", 10, Some("iris/chat/sessions/"))
+        .search("chat conversation summary", 10, Some("iris/chat/sessions/"), SearchOptions::default())
         .await;
     let prefs = state
         .memories
-        .search("user email preferences", 1, Some("iris/user/preferences"))
+        .search("user email preferences", 1, Some("iris/user/preferences"), SearchOptions::default())
         .await;
 
     Ok(Json(ChatMemoryResponse {

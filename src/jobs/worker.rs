@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-use crate::ai::memories::MemoriesClient;
+use crate::ai::memories::{MemoriesClient, SearchOptions};
 use crate::ai::provider::ProviderPool;
 use crate::ai::pipeline;
 use crate::api::compose::{self, PendingSend};
@@ -279,7 +279,7 @@ impl JobWorker {
         });
 
         // Load user preferences from Memories
-        let prefs = self.memories.search("user email preferences", 1, Some("iris/user/preferences")).await;
+        let prefs = self.memories.search("user email preferences", 1, Some("iris/user/preferences"), SearchOptions::default()).await;
         let pref_context = prefs.first().map(|p| {
             format!("\n\nUser preferences:\n{}", p.text)
         });

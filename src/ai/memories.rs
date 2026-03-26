@@ -44,6 +44,25 @@ struct SearchRequest {
     hybrid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recency_weight: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence_weight: Option<f64>,
+}
+
+#[derive(Default)]
+pub struct SearchOptions {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub graph_weight: Option<f64>,
+    pub recency_weight: Option<f64>,
+    pub confidence_weight: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -199,12 +218,18 @@ impl MemoriesClient {
         query: &str,
         k: usize,
         source_prefix: Option<&str>,
+        options: SearchOptions,
     ) -> Vec<MemoryResult> {
         let body = SearchRequest {
             query: query.to_string(),
             k,
             hybrid: true,
             source: source_prefix.map(|s| s.to_string()),
+            since: options.since,
+            until: options.until,
+            graph_weight: options.graph_weight,
+            recency_weight: options.recency_weight,
+            confidence_weight: options.confidence_weight,
         };
 
         match self.request(reqwest::Method::POST, "/search")
@@ -340,6 +365,11 @@ mod tests {
             k: 10,
             hybrid: true,
             source: Some("iris/".into()),
+            since: None,
+            until: None,
+            graph_weight: None,
+            recency_weight: None,
+            confidence_weight: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["query"], "budget concerns");
@@ -355,8 +385,44 @@ mod tests {
             k: 5,
             hybrid: true,
             source: None,
+            since: None,
+            until: None,
+            graph_weight: None,
+            recency_weight: None,
+            confidence_weight: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("source").is_none());
+    }
+
+    #[test]
+    fn test_search_request_with_v5_params() {
+        let req = SearchRequest {
+            query: "project deadline".into(),
+            k: 5,
+            hybrid: true,
+            source: Some("iris/1/".into()),
+            since: Some("2026-01-01".into()),
+            until: Some("2026-03-31".into()),
+            graph_weight: Some(0.1),
+            recency_weight: Some(0.0),
+            confidence_weight: Some(0.0),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["since"], "2026-01-01");
+        assert_eq!(json["until"], "2026-03-31");
+        assert_eq!(json["graph_weight"], 0.1);
+        assert_eq!(json["recency_weight"], 0.0);
+        assert_eq!(json["confidence_weight"], 0.0);
+    }
+
+    #[test]
+    fn test_search_options_default() {
+        let opts = SearchOptions::default();
+        assert!(opts.since.is_none());
+        assert!(opts.until.is_none());
+        assert!(opts.graph_weight.is_none());
+        assert!(opts.recency_weight.is_none());
+        assert!(opts.confidence_weight.is_none());
     }
 }

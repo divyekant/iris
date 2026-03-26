@@ -4,6 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::ai::memories::SearchOptions;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -16,6 +17,8 @@ pub struct SearchParams {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub semantic: Option<bool>,
+    pub since: Option<String>,
+    pub until: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -157,7 +160,14 @@ pub async fn search(
             .unwrap_or_else(|| "iris/".to_string());
 
         let limit = params.limit.unwrap_or(50) as usize;
-        let mem_results = state.memories.search(&text_query, limit, Some(&source_prefix)).await;
+        let options = SearchOptions {
+            since: params.since.clone(),
+            until: params.until.clone(),
+            graph_weight: Some(0.1),
+            recency_weight: Some(0.0),
+            confidence_weight: Some(0.0),
+        };
+        let mem_results = state.memories.search(&text_query, limit, Some(&source_prefix), options).await;
 
         if !mem_results.is_empty() {
             let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
