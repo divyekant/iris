@@ -376,3 +376,121 @@ async fn suggest_cc_route_is_registered() {
         "Route POST /api/ai/suggest-cc must be registered in the router"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Reply endpoint — 404 for nonexistent message
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reply_returns_404_for_nonexistent_message() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = serde_json::json!({
+        "message_id": "nonexistent-id",
+        "body": "Thanks for the update!"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/reply")
+                .header("x-session-token", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let json = body_to_json(res.into_body()).await;
+    assert_eq!(json["error"], "message not found");
+}
+
+// ---------------------------------------------------------------------------
+// Forward endpoint — 404 for nonexistent message
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn forward_returns_404_for_nonexistent_message() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = serde_json::json!({
+        "message_id": "nonexistent-id",
+        "to": ["someone@example.com"],
+        "body": "FYI"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/forward")
+                .header("x-session-token", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let json = body_to_json(res.into_body()).await;
+    assert_eq!(json["error"], "message not found");
+}
+
+// ---------------------------------------------------------------------------
+// Draft reply endpoint — 404 for nonexistent message
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn draft_reply_returns_404_for_nonexistent_message() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = serde_json::json!({
+        "message_id": "nonexistent-id",
+        "body": "Draft reply"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/drafts/reply")
+                .header("x-session-token", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Draft forward endpoint — 404 for nonexistent message
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn draft_forward_returns_404_for_nonexistent_message() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    let body = serde_json::json!({
+        "message_id": "nonexistent-id",
+        "to": ["someone@example.com"],
+        "body": "Draft forward"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/drafts/forward")
+                .header("x-session-token", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

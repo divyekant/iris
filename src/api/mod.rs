@@ -46,6 +46,7 @@ pub mod phishing_detection;
 pub mod privacy_report;
 pub mod queue_status;
 pub mod rate_limit;
+pub mod reply_forward;
 pub mod relationship_intel;
 pub mod relationship_priority;
 pub mod relationship_scoring;
