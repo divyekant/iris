@@ -108,13 +108,14 @@ impl AuthContext {
 // Unified auth middleware
 // ---------------------------------------------------------------------------
 
-/// Extract a Bearer token from the Authorization header.
+/// Extract a Bearer token from the Authorization header (case-insensitive scheme per RFC 7235).
 pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    if value.len() > 7 && value[..7].eq_ignore_ascii_case("bearer ") {
+        Some(value[7..].trim().to_string())
+    } else {
+        None
+    }
 }
 
 /// Look up an API key by its SHA-256 hash.
