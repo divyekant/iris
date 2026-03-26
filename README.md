@@ -14,7 +14,8 @@
 - Batch actions: archive, read/unread, category assignment
 - Full-text search with FTS5 snippets and filter chips
 
-**AI (powered by Ollama)**
+**AI**
+- Multi-provider: Anthropic, OpenAI, Ollama (local) — hot-swap via Settings UI
 - Automatic email classification: intent, priority, category
 - Entity extraction: people, dates, amounts, topics, deadlines
 - Thread summarization (lazy, cached)
@@ -22,17 +23,24 @@
 - Natural language chat with email context (RAG via Memories)
 - Self-improving: user corrections feed back into future classifications
 
-**Agent API**
-- REST API with scoped API keys (4 permission levels)
-- Search, read messages/threads, create drafts, send
+**Agent Platform**
+- Unified REST API: 200+ endpoints accessible with scoped API keys
+- If the UI can do it, agents can do it — same routes, same data
+- 4 permission levels: read_only, draft_only, send_with_approval, autonomous
+- Reply/forward endpoints with server-side threading header resolution
+- MCP server with 26 tools and per-tool permission checks
+- Semantic search with temporal filters (since/until) and graph-aware ranking
 - Audit logging for all agent actions
-- Trust indicators: SPF/DKIM/DMARC validation, tracking pixel detection
+- Per-key rate limiting (500 burst / 5 req/sec per key)
 
-**Privacy**
+**Privacy & Security**
 - Self-hosted: your data never leaves your machine
 - No telemetry, no cloud dependencies
 - Optional password gate for remote/self-hosted access
-- Semantic memory via local Memories MCP server
+- XChaCha20-Poly1305 encryption at rest for stored credentials
+- Security headers: X-Content-Type-Options, X-Frame-Options, Referrer-Policy
+- Non-root Docker container (UID 1001)
+- CSRF protection with same-origin validation
 
 ## Quick Start
 
@@ -111,7 +119,7 @@ Axum Server (Rust)
 | Backend | Rust, Axum 0.8, rusqlite (bundled), async-imap, lettre |
 | Frontend | Svelte 5, TypeScript, Vite 7, Tailwind CSS 4, svelte-spa-router |
 | Database | SQLite with FTS5 full-text search |
-| AI | Ollama (local LLM), Memories MCP (vector store) |
+| AI | Anthropic, OpenAI, Ollama (multi-provider), Memories v5 (semantic search) |
 | Auth | OAuth2 (Gmail/Outlook), session tokens, API keys |
 | Deploy | Docker Compose with Ollama sidecar |
 
@@ -164,6 +172,10 @@ cargo test --test api_integration
 | `IRIS_AUTH_PASSWORD_HASH` | | Optional Argon2 password hash for the web UI login gate |
 | `IRIS_SECRETS_KEY` | | Optional 32-byte base64 or 64-character hex key for encrypting persisted secrets at rest |
 | `SESSION_TOKEN_FILE` | | Write session token to file (for Docker/scripts) |
+| `ANTHROPIC_API_KEY` | | Anthropic API key (also configurable via Settings UI) |
+| `OPENAI_API_KEY` | | OpenAI API key (also configurable via Settings UI) |
+| `IRIS_CORS_ORIGINS` | `localhost:1420,5173` | Comma-separated CORS origins (set in production) |
+| `BIND_ALL` | | Bind to 0.0.0.0 (required inside Docker containers) |
 
 ## License
 

@@ -27,6 +27,17 @@ This guide is the minimum hardening baseline for self-hosting Iris safely.
 - Existing plaintext secrets are re-encrypted automatically on startup after the key is configured.
 - If encrypted secrets already exist and the key is missing or wrong, Iris should fail fast on startup.
 
+## API Keys (Agent Access)
+
+API keys grant agents access to all 200+ API routes with scoped permissions. Treat them as credentials.
+
+- **Principle of least privilege.** Issue `read_only` keys unless the agent needs to write or send. `autonomous` keys can change server configuration.
+- **Account scoping.** Keys can be restricted to a single email account. Use this when an agent only needs access to one mailbox.
+- **Revoke unused keys.** Revoked keys are rejected immediately. Check `last_used_at` in Settings to identify stale keys.
+- **Rate limits.** Each key gets its own rate limit bucket (500 burst / 5 req/sec). A misbehaving agent cannot starve others.
+- **Audit trail.** All agent actions are logged with key ID, action, resource, and timestamp. Review via GET /api/audit-log.
+- **Key rotation.** If a key is compromised, revoke it and create a new one. There is no key expiration — revocation is immediate.
+
 ## Safe Deployment Patterns
 
 ### Local-only
@@ -77,8 +88,11 @@ After deployment or restart, verify these behaviors:
 
 - `IRIS_AUTH_PASSWORD_HASH` is set
 - `IRIS_SECRETS_KEY` is set and backed up
+- `IRIS_CORS_ORIGINS` is set (not using dev defaults)
 - HTTPS is enabled for non-localhost access
 - Iris is not exposed directly on a public port
+- API keys use minimum required permission level
+- Unused API keys are revoked
 - Old secrets have been rotated
 - Backups and `.env` files are access-controlled
 

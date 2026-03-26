@@ -1,7 +1,7 @@
 # Agent Platform & Memories v5 Integration
 
 **Date:** 2026-03-26
-**Status:** Draft
+**Status:** Implemented
 **Scope:** Unified agent auth, Memories v5 search/store upgrade, MCP alignment, reply/forward endpoints
 
 ---
