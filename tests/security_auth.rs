@@ -964,7 +964,94 @@ async fn health_accessible_without_auth() {
 }
 
 // =========================================================================
-// H) Permission hierarchy tests (unit level)
+// H) Unified auth: API key on protected routes
+// =========================================================================
+
+#[tokio::test]
+async fn test_unified_auth_api_key_on_protected_route() {
+    let (state, raw_key) = create_test_state_with_agent_key();
+    let app = build_app(state);
+
+    // Use an API key Bearer token on a normal protected route (not /agent/*)
+    let res = app
+        .oneshot(
+            Request::get("/api/messages")
+                .header("authorization", format!("Bearer {}", raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should NOT be 401 — the key is valid; might be 200 with empty list
+    assert_ne!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Valid API key should authenticate on protected routes"
+    );
+}
+
+#[tokio::test]
+async fn test_unified_auth_revoked_key_rejected() {
+    let state = create_test_state();
+    let raw_key;
+    {
+        let conn = state.db.get().unwrap();
+        let (key, stored) = iris_server::api::agent::create_api_key(
+            &conn,
+            "Revoked Unified",
+            "read_only",
+            None,
+        )
+        .unwrap();
+        raw_key = key;
+        iris_server::api::agent::revoke_api_key(&conn, &stored.id);
+    }
+
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(
+            Request::get("/api/messages")
+                .header("authorization", format!("Bearer {}", raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Revoked API key must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_unified_auth_session_still_works() {
+    let state = create_test_state();
+    let app = build_app(state);
+
+    // Session token via header should still work (existing behaviour preserved)
+    let res = app
+        .oneshot(
+            Request::get("/api/accounts")
+                .header("x-session-token", TEST_TOKEN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "Session token should still authenticate on protected routes"
+    );
+}
+
+// =========================================================================
+// I) Permission hierarchy tests (unit level)
 // =========================================================================
 
 #[test]

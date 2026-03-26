@@ -1,4 +1,15 @@
-use axum::http::StatusCode;
+use axum::{
+    body::Body,
+    extract::State,
+    http::{header::AUTHORIZATION, HeaderMap, Method, Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+use crate::api::session_auth::{extract_session_token, is_same_origin_browser_context, SessionTransport};
+use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // Permission enum
@@ -74,6 +85,123 @@ impl AuthContext {
             AuthContext::Agent { account_id, .. } => account_id.as_deref(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Unified auth middleware
+// ---------------------------------------------------------------------------
+
+/// Extract a Bearer token from the Authorization header.
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+/// Look up an API key by its SHA-256 hash.
+/// Returns (id, permission, account_id, is_revoked).
+fn lookup_api_key(
+    conn: &rusqlite::Connection,
+    key_hash: &str,
+) -> Option<(String, String, Option<String>, bool)> {
+    conn.query_row(
+        "SELECT id, permission, account_id, is_revoked FROM api_keys WHERE key_hash = ?1",
+        rusqlite::params![key_hash],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .ok()
+}
+
+/// Middleware that accepts both API-key Bearer tokens and session tokens.
+///
+/// Check order:
+/// 1. Bearer token (`Authorization: Bearer iris_...`) — hash, look up in
+///    `api_keys`, reject if missing/revoked, insert `AuthContext::Agent`.
+/// 2. Session token (`X-Session-Token` header or `iris_session` cookie) —
+///    validate against `state.session_token`, CSRF check for cookie transport
+///    on mutating methods, insert `AuthContext::Session`.
+/// 3. Neither present — 401.
+pub async fn unified_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    // --- Path 1: Bearer token ---
+    if let Some(raw_key) = extract_bearer_token(request.headers()) {
+        let key_hash = format!("{:x}", Sha256::digest(raw_key.as_bytes()));
+
+        // Scope the DB connection so it's returned to the pool before
+        // next.run() — downstream handlers and nested middleware need
+        // their own connections.
+        let auth_result = {
+            let conn = match state.db.get() {
+                Ok(c) => c,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+
+            match lookup_api_key(&conn, &key_hash) {
+                Some((id, permission_str, account_id, is_revoked)) => {
+                    if is_revoked {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+
+                    let permission = match Permission::from_str(&permission_str) {
+                        Some(p) => p,
+                        None => return StatusCode::UNAUTHORIZED.into_response(),
+                    };
+
+                    // Update last_used_at (best-effort, don't fail if it errors)
+                    let _ = conn.execute(
+                        "UPDATE api_keys SET last_used_at = unixepoch() WHERE id = ?1",
+                        rusqlite::params![id],
+                    );
+
+                    Some(AuthContext::Agent {
+                        key_id: id,
+                        permission,
+                        account_id,
+                    })
+                }
+                None => None,
+            }
+        }; // conn is dropped here
+
+        match auth_result {
+            Some(ctx) => {
+                request.extensions_mut().insert(ctx);
+                return next.run(request).await;
+            }
+            None => {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+        }
+    }
+
+    // --- Path 2: Session token ---
+    if let Some((token, transport)) = extract_session_token(request.headers()) {
+        if token == state.session_token {
+            // CSRF check: cookie-transported token on a mutating method must
+            // come from a same-origin browser context.
+            if transport == SessionTransport::Cookie
+                && !is_safe_method(request.method())
+                && !is_same_origin_browser_context(request.headers())
+            {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+
+            request.extensions_mut().insert(AuthContext::Session);
+            return next.run(request).await;
+        }
+    }
+
+    // --- Path 3: No valid credentials ---
+    StatusCode::UNAUTHORIZED.into_response()
+}
+
+fn is_safe_method(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
 // ---------------------------------------------------------------------------

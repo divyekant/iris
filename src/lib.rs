@@ -305,7 +305,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .nest("/agent", agent_routes)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            api::session_auth::session_auth_middleware,
+            api::unified_auth::unified_auth_middleware,
         ));
 
     // Rate-limited protected API: 100 requests/min per session token
