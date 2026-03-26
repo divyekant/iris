@@ -30,8 +30,7 @@ pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ComposeRequest>,
 ) -> Result<Json<SendResponse>, (StatusCode, Json<serde_json::Value>)> {
-    auth.require(Permission::SendWithApproval)
-        .map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permission"}))))?;
+    auth.require_json(Permission::SendWithApproval)?;
     let conn = state.db.get().map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
     })?;
@@ -128,8 +127,7 @@ pub async fn cancel_send(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<CancelResponse>, (StatusCode, Json<serde_json::Value>)> {
-    auth.require(Permission::SendWithApproval)
-        .map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permission"}))))?;
+    auth.require_json(Permission::SendWithApproval)?;
     let conn = state.db.get().map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
     })?;

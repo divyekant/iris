@@ -144,18 +144,17 @@ impl ProviderPool {
         None
     }
 
-    /// Check health of all providers.
+    /// Check health of all providers concurrently.
     pub async fn health_status(&self) -> Vec<ProviderStatus> {
         let providers = self.snapshot();
-        let mut statuses = Vec::with_capacity(providers.len());
-        for p in &providers {
-            statuses.push(ProviderStatus {
+        let futures: Vec<_> = providers.iter().map(|p| async {
+            ProviderStatus {
                 name: p.name().to_string(),
                 model: p.model().to_string(),
                 healthy: p.health().await,
-            });
-        }
-        statuses
+            }
+        }).collect();
+        futures::future::join_all(futures).await
     }
 
     /// Whether any provider is configured.

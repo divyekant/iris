@@ -7,6 +7,8 @@ use tower_governor::{
     GovernorLayer,
 };
 
+use crate::api::unified_auth::extract_bearer_token;
+
 /// Extracts the session token from either the legacy header or the new session cookie
 /// for per-session rate limiting.
 #[derive(Clone, Debug)]
@@ -17,11 +19,7 @@ impl KeyExtractor for SessionTokenKeyExtractor {
 
     fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
         // Check for Bearer API key first — use key prefix as rate limit bucket
-        if let Some(bearer) = req.headers()
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-        {
+        if let Some(bearer) = extract_bearer_token(req.headers()) {
             // Use first 16 chars as bucket key (the iris_ prefix portion)
             let prefix = &bearer[..bearer.len().min(16)];
             return Ok(format!("agent:{}", prefix));

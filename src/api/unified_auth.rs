@@ -4,6 +4,7 @@ use axum::{
     http::{header::AUTHORIZATION, HeaderMap, Method, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
+    Json,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -43,6 +44,17 @@ impl Permission {
     }
 }
 
+impl std::fmt::Display for Permission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Permission::ReadOnly => write!(f, "read_only"),
+            Permission::DraftOnly => write!(f, "draft_only"),
+            Permission::SendWithApproval => write!(f, "send_with_approval"),
+            Permission::Autonomous => write!(f, "autonomous"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AuthContext enum
 // ---------------------------------------------------------------------------
@@ -77,6 +89,11 @@ impl AuthContext {
         }
     }
 
+    /// Check permission, returning a JSON error tuple on failure.
+    pub fn require_json(&self, needed: Permission) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        self.require(needed).map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permissions"}))))
+    }
+
     /// Returns the `account_id` scope for agent keys, or `None` for sessions
     /// and agent keys without an account restriction.
     pub fn account_scope(&self) -> Option<&str> {
@@ -92,7 +109,7 @@ impl AuthContext {
 // ---------------------------------------------------------------------------
 
 /// Extract a Bearer token from the Authorization header.
-fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+pub fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

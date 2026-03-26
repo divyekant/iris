@@ -200,8 +200,7 @@ pub async fn reply(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReplyRequest>,
 ) -> Result<Json<SendResponse>, ApiError> {
-    auth.require(Permission::SendWithApproval)
-        .map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permission"}))))?;
+    auth.require_json(Permission::SendWithApproval)?;
 
     let conn = state.db.get().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
     let original = resolve_original(&conn, &req.message_id, &auth)?;
@@ -248,8 +247,7 @@ pub async fn forward(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ForwardRequest>,
 ) -> Result<Json<SendResponse>, ApiError> {
-    auth.require(Permission::SendWithApproval)
-        .map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permission"}))))?;
+    auth.require_json(Permission::SendWithApproval)?;
 
     let conn = state.db.get().map_err(|_| api_err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
     let original = resolve_original(&conn, &req.message_id, &auth)?;

@@ -141,6 +141,8 @@ pub fn create_api_key(
     Ok((raw_key, api_key))
 }
 
+/// Legacy: used by `agent_auth_middleware` for backwards compat with /api/agent/* routes.
+/// New routes should use `unified_auth_middleware` which calls `lookup_api_key` directly.
 pub fn validate_api_key(conn: &Conn, raw_key: &str) -> Option<ApiKey> {
     let mut hasher = Sha256::new();
     hasher.update(raw_key.as_bytes());
@@ -308,9 +310,7 @@ pub async fn create_key_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateKeyResponse>), (StatusCode, Json<serde_json::Value>)> {
-    auth.require(Permission::Autonomous).map_err(|s| {
-        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
-    })?;
+    auth.require_json(Permission::Autonomous)?;
     if !VALID_PERMISSIONS.contains(&req.permission.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -384,19 +384,6 @@ pub async fn get_audit_log_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Bearer token extraction
-// ---------------------------------------------------------------------------
-
-pub fn extract_bearer_token(auth_header: &str) -> Option<String> {
-    let lower = auth_header.to_lowercase();
-    if lower.starts_with("bearer ") {
-        Some(auth_header[7..].trim().to_string())
-    } else {
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Agent auth middleware
 // ---------------------------------------------------------------------------
 
@@ -405,13 +392,8 @@ pub async fn agent_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth_header = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let token = extract_bearer_token(auth_header).ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = crate::api::unified_auth::extract_bearer_token(request.headers())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let conn = state
         .db
@@ -1213,16 +1195,19 @@ mod tests {
 
     #[test]
     fn test_extract_bearer_token() {
-        assert_eq!(
-            extract_bearer_token("Bearer iris_abc123"),
-            Some("iris_abc123".to_string())
-        );
-        assert_eq!(
-            extract_bearer_token("bearer iris_abc123"),
-            Some("iris_abc123".to_string())
-        );
-        assert_eq!(extract_bearer_token("Basic abc123"), None);
-        assert_eq!(extract_bearer_token(""), None);
+        use axum::http::HeaderMap;
+        use crate::api::unified_auth::extract_bearer_token;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer iris_abc123".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), Some("iris_abc123".to_string()));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Basic abc123".parse().unwrap());
+        assert_eq!(extract_bearer_token(&headers), None);
+
+        let headers = HeaderMap::new();
+        assert_eq!(extract_bearer_token(&headers), None);
     }
 
     #[test]

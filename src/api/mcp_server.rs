@@ -1481,16 +1481,10 @@ pub async fn tool_call(
     // agent receives a useful message it can reason about.
     let needed = tool_permission(&req.tool_name);
     if auth.require(needed).is_err() {
-        let permission_label = match needed {
-            Permission::ReadOnly => "read_only",
-            Permission::DraftOnly => "draft_only",
-            Permission::SendWithApproval => "send_with_approval",
-            Permission::Autonomous => "autonomous",
-        };
         let error_result = serde_json::json!({
             "error": format!(
                 "permission denied: tool '{}' requires '{}' permission",
-                req.tool_name, permission_label
+                req.tool_name, needed
             )
         });
         // Record the denied call for audit purposes
