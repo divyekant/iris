@@ -354,7 +354,13 @@ impl JobWorker {
             .clone()
             .unwrap_or_else(|| db_message_id.to_string());
 
-        if !self.memories.upsert(&text, &source, &key).await {
+        // Convert email timestamp to ISO 8601 for temporal search
+        let document_at = payload
+            .date
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+
+        if !self.memories.upsert(&text, &source, &key, document_at.as_deref()).await {
             return Err("Memories upsert failed".to_string());
         }
 
@@ -406,7 +412,7 @@ impl JobWorker {
 
         // Store summary in Memories
         let source = format!("iris/chat/sessions/{}", payload.session_id);
-        if !self.memories.upsert(&summary, &source, &payload.session_id).await {
+        if !self.memories.upsert(&summary, &source, &payload.session_id, None).await {
             return Err("Failed to store chat summary".to_string());
         }
 
@@ -460,7 +466,7 @@ impl JobWorker {
         // Store preferences in Memories
         if !self
             .memories
-            .upsert(&preferences, "iris/user/preferences", "preferences")
+            .upsert(&preferences, "iris/user/preferences", "preferences", None)
             .await
         {
             return Err("Failed to store preferences".to_string());

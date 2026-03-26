@@ -19,6 +19,8 @@ pub struct UpsertEntry {
     pub text: String,
     pub source: String,
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,6 +28,8 @@ struct UpsertRequest {
     text: String,
     source: String,
     key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,11 +142,12 @@ impl MemoriesClient {
     }
 
     /// Store or update a single memory entry
-    pub async fn upsert(&self, text: &str, source: &str, key: &str) -> bool {
+    pub async fn upsert(&self, text: &str, source: &str, key: &str, document_at: Option<&str>) -> bool {
         let body = UpsertRequest {
             text: text.to_string(),
             source: source.to_string(),
             key: key.to_string(),
+            document_at: document_at.map(|s| s.to_string()),
         };
 
         match self.request(reqwest::Method::POST, "/memory/upsert")
@@ -295,11 +300,37 @@ mod tests {
             text: "test content".into(),
             source: "iris/1/messages/abc".into(),
             key: "<abc@example.com>".into(),
+            document_at: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["text"], "test content");
         assert_eq!(json["source"], "iris/1/messages/abc");
         assert_eq!(json["key"], "<abc@example.com>");
+        assert!(json.get("document_at").is_none());
+    }
+
+    #[test]
+    fn test_upsert_request_with_document_at() {
+        let req = UpsertRequest {
+            text: "email body".into(),
+            source: "iris/1/messages/abc".into(),
+            key: "<abc@example.com>".into(),
+            document_at: Some("2024-03-15T10:00:00Z".into()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["document_at"], "2024-03-15T10:00:00Z");
+    }
+
+    #[test]
+    fn test_upsert_request_without_document_at() {
+        let req = UpsertRequest {
+            text: "email body".into(),
+            source: "iris/1/messages/abc".into(),
+            key: "<abc@example.com>".into(),
+            document_at: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("document_at").is_none());
     }
 
     #[test]
