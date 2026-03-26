@@ -125,7 +125,8 @@ pub fn build_email(
                 .map_err(|e| SmtpError::Build(format!("invalid base64 attachment: {e}")))?;
 
             let content_type: ContentType = att.content_type.parse()
-                .unwrap_or(ContentType::parse("application/octet-stream").unwrap());
+                .unwrap_or_else(|_| ContentType::parse("application/octet-stream")
+                    .unwrap_or(ContentType::TEXT_PLAIN));
 
             let attachment = Attachment::new(att.filename.clone())
                 .body(decoded, content_type);

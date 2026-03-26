@@ -186,13 +186,17 @@ pub fn revoke_api_key(conn: &Conn, key_id: &str) -> bool {
 }
 
 pub fn list_api_keys(conn: &Conn) -> Vec<ApiKey> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, key_prefix, permission, account_id, is_revoked, last_used_at, created_at
-             FROM api_keys WHERE is_revoked = 0
-             ORDER BY created_at DESC",
-        )
-        .unwrap();
+    let mut stmt = match conn.prepare(
+        "SELECT id, name, key_prefix, permission, account_id, is_revoked, last_used_at, created_at
+         FROM api_keys WHERE is_revoked = 0
+         ORDER BY created_at DESC",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to prepare list_api_keys query: {e}");
+            return Vec::new();
+        }
+    };
 
     stmt.query_map([], |row| {
         Ok(ApiKey {
@@ -206,9 +210,8 @@ pub fn list_api_keys(conn: &Conn) -> Vec<ApiKey> {
             created_at: row.get(7)?,
         })
     })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +272,13 @@ pub fn get_audit_log(
         )
     };
 
-    let mut stmt = conn.prepare(&sql).unwrap();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to prepare get_audit_log query: {e}");
+            return Vec::new();
+        }
+    };
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = filter_params.iter().map(|p| p.as_ref()).collect();
 
     stmt.query_map(params_refs.as_slice(), |row| {
@@ -285,9 +294,8 @@ pub fn get_audit_log(
             created_at: row.get(8)?,
         })
     })
-    .unwrap()
-    .filter_map(|r| r.ok())
-    .collect()
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

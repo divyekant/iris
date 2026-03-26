@@ -318,7 +318,7 @@ pub fn get_queue_status(conn: &Connection) -> QueueStatus {
     let today_start = chrono::Utc::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
-        .unwrap()
+        .expect("midnight (0,0,0) is always valid")
         .and_utc()
         .timestamp();
 

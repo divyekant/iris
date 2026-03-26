@@ -2,6 +2,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::AppState;
 
@@ -15,9 +16,15 @@ pub struct HealthResponse {
 }
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let db_ok = state.db.get().map(|conn| {
-        conn.query_row("SELECT 1", [], |_| Ok(())).is_ok()
-    }).unwrap_or(false);
+    let pool = state.db.clone();
+    let db_ok = tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(move || {
+        pool.get().map(|conn| {
+            conn.query_row("SELECT 1", [], |_| Ok(())).is_ok()
+        }).unwrap_or(false)
+    }))
+    .await
+    .map(|r| r.unwrap_or(false))
+    .unwrap_or(false);
 
     let ai_ok = state.providers.any_healthy().await;
     let memories_ok = state.memories.health().await;

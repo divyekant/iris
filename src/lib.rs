@@ -12,6 +12,7 @@ pub mod utils;
 pub mod ws;
 
 use axum::{
+    extract::DefaultBodyLimit,
     http::{
         header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, ORIGIN},
         HeaderName, HeaderValue, Method,
@@ -46,13 +47,18 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             api::agent::agent_auth_middleware,
         ));
 
-    // Public API routes (no session auth)
-    let public_api = Router::new()
-        .route("/health", get(api::health::health))
+    // Auth routes with stricter rate limiting (10 burst, 1/sec)
+    let auth_routes = Router::new()
         .route("/auth/bootstrap", get(api::session_auth::bootstrap_token))
         .route("/auth/login", post(api::session_auth::login))
         .route("/auth/logout", post(api::session_auth::logout))
-        .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth));
+        .route("/auth/oauth/{provider}", get(auth::oauth::start_oauth))
+        .layer(api::rate_limit::auth_rate_limit_layer());
+
+    // Public API routes (no session auth)
+    let public_api = Router::new()
+        .route("/health", get(api::health::health))
+        .merge(auth_routes);
 
     // Protected API routes (session auth required)
     let protected_api = Router::new()
@@ -320,6 +326,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/auth/callback", get(auth::oauth::oauth_callback))
         .nest("/api", api_routes)
         .fallback_service(spa)
+        .layer(DefaultBodyLimit::max(25 * 1024 * 1024)) // 25 MB
+        .layer(middleware::from_fn(
+            api::security_headers::security_headers_middleware,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_origin(cors_origins)
@@ -350,10 +360,13 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 fn build_cors_origins() -> AllowOrigin {
     let default_origins = "http://localhost:1420,http://localhost:5173";
 
-    let raw = std::env::var("IRIS_CORS_ORIGINS")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| default_origins.to_string());
+    let raw = match std::env::var("IRIS_CORS_ORIGINS").ok().filter(|s| !s.trim().is_empty()) {
+        Some(v) => v,
+        None => {
+            tracing::warn!("IRIS_CORS_ORIGINS not set — using dev defaults (localhost:1420, localhost:5173). Set this in production.");
+            default_origins.to_string()
+        }
+    };
 
     let origins: Vec<HeaderValue> = raw
         .split(',')

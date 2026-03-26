@@ -10,7 +10,7 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - MEMORIES_URL=http://host.docker.internal:8900
       - PORT=3000
-      - BIND_ALL=1
+      - BIND_ALL=1  # Required inside container; host binding is restricted by ports: above
     env_file:
       - path: .env
         required: false
@@ -26,7 +26,7 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.9
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:

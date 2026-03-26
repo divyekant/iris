@@ -15,10 +15,13 @@ RUN npm run build
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -u 1001 iris
 WORKDIR /app
 COPY --from=builder /app/target/release/iris-server .
 COPY --from=frontend /app/dist ./web/dist
 COPY migrations/ migrations/
+RUN mkdir -p /app/data && chown -R iris:iris /app
+USER iris
 ENV PORT=3000
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -42,6 +42,25 @@ impl fmt::Display for SessionTokenKeyExtractor {
 /// When the limit is exceeded, tower_governor returns HTTP 429 with `retry-after` and
 /// `x-ratelimit-after` headers. The `use_headers()` call also adds `x-ratelimit-limit`
 /// and `x-ratelimit-remaining` headers on successful responses.
+/// Stricter rate limiter for authentication endpoints: 10 burst, 1/sec sustained.
+/// Uses the same session token extractor (falls back to "__anonymous__" for unauthed requests).
+/// This is appropriate for a single-user email client — limits brute-force on login/bootstrap.
+pub fn auth_rate_limit_layer() -> GovernorLayer<
+    SessionTokenKeyExtractor,
+    governor::middleware::StateInformationMiddleware,
+    axum::body::Body,
+> {
+    let config = GovernorConfigBuilder::default()
+        .key_extractor(SessionTokenKeyExtractor)
+        .per_second(1)
+        .burst_size(10)
+        .use_headers()
+        .finish()
+        .expect("Failed to build auth rate limiter config");
+
+    GovernorLayer::new(config)
+}
+
 pub fn rate_limit_layer() -> GovernorLayer<
     SessionTokenKeyExtractor,
     governor::middleware::StateInformationMiddleware,

@@ -51,6 +51,7 @@ pub mod relationship_priority;
 pub mod relationship_scoring;
 pub mod saved_searches;
 pub mod search;
+pub mod security_headers;
 pub mod session_auth;
 pub mod signatures;
 pub mod social_engineering;
