@@ -26,7 +26,7 @@ services:
     restart: unless-stopped
 
   ollama:
-    image: ollama/ollama:0.9
+    image: ollama/ollama:0.18.3
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
