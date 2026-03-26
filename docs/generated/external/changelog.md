@@ -1,8 +1,8 @@
 ---
-status: draft
-generated: 2026-03-04
+status: current
+generated: 2026-03-26
 source-tier: direct
-hermes-version: 1.0.0
+hermes-version: 1.0.1
 ---
 
 # Changelog
@@ -12,60 +12,90 @@ All notable changes to Iris are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Wave 3 — Layer 3: Showcase Features (2026-03-15)
+## [0.4.0] - 2026-03-26
+
+### Agent Platform
+
+- **Unified authentication** -- API keys now access all 200+ routes, not just the original 5. If the UI can do it, agents can do it.
+- **Permission model** -- four levels (read_only, draft_only, send_with_approval, autonomous) with hierarchical access. Sensitive endpoints like config and audit log require elevated permissions.
+- **Per-API-key rate limiting** -- each key gets its own bucket (500 burst, 5 req/sec). One agent hitting its limit does not affect others.
+- **Reply and forward endpoints** -- `POST /api/reply`, `/api/forward`, `/api/drafts/reply`, `/api/drafts/forward`. Server handles threading headers (In-Reply-To, References), quoted body, recipient resolution, and Re:/Fwd: subject prefixes automatically.
+- **MCP tool permission checks** -- MCP sessions created with API key auth inherit the key's permission level. Individual tool calls are gated by that level.
+
+### Memories v5 Integration
+
+- **Temporal search** -- `since` and `until` date parameters on semantic search. Emails are stored with their sent date (`document_at`), not their index time, so date filtering is accurate.
+- **Graph-aware search** -- knowledge graph connections boost related results (default `graph_weight: 0.1`).
+- **Email-tuned defaults** -- zero recency and confidence decay, since email relevance does not degrade with time.
+
+### Production Hardening
+
+- **Non-root Docker container** -- runs as user `iris` (UID 1001)
+- **Security headers** -- X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy on all responses
+- **Request body size limit** -- 25 MB global limit
+- **Health check timeout** -- 5-second timeout on database health probe
+- **Auth rate limiting** -- 10 burst, 1/sec on login, bootstrap, and OAuth endpoints
+- **CORS configuration** -- set `IRIS_CORS_ORIGINS` to control allowed origins; warning logged on startup if not set
+- **Stability fixes** -- removed dangerous `unwrap()` calls in agent, SMTP, queue, and delegation code paths
+- **Ollama pinned** -- Docker image pinned to `0.18.3` for reproducible builds
+
+### Infrastructure
+
+- **CI/CD pipeline** -- cargo fmt, clippy, test, npm check, npm build, Docker build, cargo audit, npm audit
+- **Provider hot-reload** -- AI provider configuration applies immediately on save without server restart
+
+## [0.3.0] - 2026-03-16
+
+### Wave 3 -- Showcase Features
+
+- **Email Delegation** -- configurable playbooks that handle specific email types automatically. Auto-reply, draft, forward, archive, or label based on sender, subject, or category
+- **Evolving Categories** -- AI suggests new inbox categories based on your email patterns. Dynamic tabs appear in the inbox alongside Primary/Updates/Social/Promotions
+- **Writing Style Learning** -- AI analyzes your sent emails to learn your voice. All AI-generated drafts now match your greeting, sign-off, and tone
+- **Auto-Draft** -- routine emails get pre-drafted replies. "Draft ready" chip appears on matching messages
+- **Knowledge Graph** -- entities (people, orgs, projects) automatically extracted from emails. Search at /graph to find everything related to a topic or person
+- **Temporal Reasoning** -- search by time references like "emails from around the product launch". AI resolves vague dates to real date ranges
+
+### Wave 3 -- Agent Infrastructure
+
+- **Iris CLI** -- `iris` command-line tool for terminal access: inbox, search, send, chat, status, key management. Supports `--json` and `--quiet` output modes.
+- **MCP server** -- 18 tools for LLM-based agents, including thread summary, contact profile, task extraction, and bulk actions
+- **27 MCP tests** covering all tool paths
+
+### Post-Deploy Fixes
+
+- Rate limit bumped from 100/min to 500/min
+- Duplicate reply buttons removed
+- Email font-src CSP relaxed for web fonts
+- Trusted sender images feature
+- Memories URL fix (localhost vs host.docker.internal)
+
+## Wave 3 -- Layer 1: AI Integration (2026-03-15)
 
 ### Added
-- **Knowledge Graph** — entities (people, orgs, projects) automatically extracted from emails. Search at /graph to find everything related to a topic or person
-- **Temporal Reasoning** — search by time references like "emails from around the product launch". AI resolves vague dates to real date ranges
-- **Writing Style Learning** — AI analyzes your sent emails to learn your voice. All AI-generated drafts now match your greeting, sign-off, and tone
-- **Auto-Draft** — routine emails get pre-drafted replies. "Draft ready" chip appears on matching messages
-- **Email Delegation** — configurable playbooks that handle specific email types automatically. Auto-reply, draft, forward, archive, or label based on sender, subject, or category
-- **Evolving Categories** — AI suggests new inbox categories based on your email patterns. Dynamic tabs appear in the inbox alongside Primary/Updates/Social/Promotions
-
-## Wave 3 — Layer 2: Agent Infrastructure (2026-03-15)
-
-### Added
-- **Iris CLI** — `iris` command-line tool for terminal access: inbox, search, send, chat, status, key management. Supports `--json` and `--quiet` output modes.
-- **8 new MCP tools** — get_thread_summary, get_contact_profile, extract_tasks, extract_deadlines, chat, get_inbox_stats, manage_draft, bulk_action
-- **Enhanced list_threads** — now supports filtering by unread, starred, category, date range, and sender
-
-### Developer notes
-- CLI reads config from `~/.iris/config.toml` (set up with `iris init`)
-- MCP tools support both sync and async execution (AI tools run async)
-- Total MCP tools: 18 (9 existing + 9 new/enhanced)
-
-## Wave 3 — Layer 1: AI Integration (2026-03-15)
-
-### Added
-- **Thread intelligence strip** — compact bar below thread subject showing message count, action items, and deadlines at a glance. Click to expand full AI summary
-- **AI reply suggestions** — for threads needing a reply, AI generates a draft preview with one-click "Reply with this"
-- **Contextual chat** — opening AI Chat while viewing a thread auto-loads that thread as context
+- **Thread intelligence strip** -- compact bar below thread subject showing message count, action items, and deadlines at a glance. Click to expand full AI summary
+- **AI reply suggestions** -- for threads needing a reply, AI generates a draft preview with one-click "Reply with this"
+- **Contextual chat** -- opening AI Chat while viewing a thread auto-loads that thread as context
 
 ### Improved
-- **Settings tab transitions** — smooth fade crossfade when switching settings tabs
-- **Token compliance** — all remaining hardcoded colors replaced with design tokens
+- **Settings tab transitions** -- smooth fade crossfade when switching settings tabs
+- **Token compliance** -- all remaining hardcoded colors replaced with design tokens
 
-## Wave 3 — Layer 1: Keyboard-First Navigation (2026-03-15)
+## Wave 3 -- Layer 1: Keyboard-First Navigation (2026-03-15)
 
 ### Added
-- **Command palette** — press Cmd+K to search and execute any command (navigate, compose, archive, change settings)
-- **Mode indicator** — subtle badge in bottom-left shows current keyboard context
-- **New shortcuts** — `b` to snooze, `m` to mute focused message
+- **Command palette** -- press Cmd+K to search and execute any command (navigate, compose, archive, change settings)
+- **New shortcuts** -- `b` to snooze, `m` to mute focused message
 
 ### Improved
-- **Dynamic help overlay** — press `?` to see all shortcuts grouped by context, automatically updated as new shortcuts are added
+- **Dynamic help overlay** -- press `?` to see all shortcuts grouped by context, automatically updated as new shortcuts are added
 - All existing keyboard shortcuts work exactly as before
 
-## Wave 3 — Layer 1: Visual Hierarchy (2026-03-15)
+## Wave 3 -- Layer 1: Visual Hierarchy (2026-03-15)
 
 ### Improved
-- **Smart badge priority** — inbox rows now show one primary badge based on importance (needs reply > deadline > intent), with overflow count for additional metadata
-- **Grouped thread actions** — Reply, Reply All, and Forward always visible; Star, Snooze, Archive, Delete grouped under "Organize"; AI actions under "AI" dropdown
-- **Smooth animations** — message rows collapse smoothly on archive/delete; hover actions appear with staggered fade-in
-
-### Keyboard shortcuts
-- All existing shortcuts continue to work without change
-- New shortcuts: `b` for snooze, `m` for mute (coming in Chunk 3)
+- **Smart badge priority** -- inbox rows now show one primary badge based on importance (needs reply > deadline > intent), with overflow count for additional metadata
+- **Grouped thread actions** -- Reply, Reply All, and Forward always visible; Star, Snooze, Archive, Delete grouped under "Organize"; AI actions under "AI" dropdown
+- **Smooth animations** -- message rows collapse smoothly on archive/delete; hover actions appear with staggered fade-in
 
 ## [Unreleased] - 2026-03-04
 

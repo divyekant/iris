@@ -1,8 +1,8 @@
 ---
-status: draft
-generated: 2026-03-04
+status: current
+generated: 2026-03-26
 source-tier: direct
-hermes-version: 1.0.0
+hermes-version: 1.0.1
 ---
 
 # Configuration Reference
@@ -24,12 +24,16 @@ cp .env.example .env
 | `PORT` | number | `3000` | The port the Iris server listens on |
 | `DATABASE_URL` | string | `./data/iris.db` | Path to the SQLite database file. Iris creates the file and parent directories if they do not exist. |
 | `PUBLIC_URL` | string | `http://localhost:3000` | The publicly accessible URL of your Iris instance. Used to construct OAuth callback URLs. If you run Iris behind a reverse proxy or on a non-default port, set this accordingly. |
+| `BIND_ALL` | boolean | -- | When set (any value), Iris binds to `0.0.0.0` instead of `127.0.0.1`. Also enables Docker host networking substitution for service URLs (replacing `localhost` with `host.docker.internal`). Set this when running inside Docker. |
+| `IRIS_CORS_ORIGINS` | string | -- | Comma-separated list of allowed CORS origins (e.g., `http://localhost:3000,https://iris.example.com`). If not set, Iris falls back to localhost development origins and logs a warning on startup. Set this in production to restrict cross-origin access. |
 
 ### AI Services
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
 | `OLLAMA_URL` | string | `http://localhost:11434` | URL of the Ollama API. Iris connects to this for AI classification, summarization, chat, and writing assist. |
+| `ANTHROPIC_API_KEY` | string | -- | API key for Anthropic's Claude API. Used as an alternative AI provider when configured. Set this if you want to use Claude instead of or alongside Ollama. |
+| `OPENAI_API_KEY` | string | -- | API key for OpenAI's API. Used as an alternative AI provider when configured. Set this if you want to use GPT models instead of or alongside Ollama. |
 | `MEMORIES_URL` | string | `http://localhost:8900` | URL of the Memories MCP service. Used for semantic search and email storage. Optional -- Iris works without it, falling back to keyword search. |
 | `MEMORIES_API_KEY` | string | -- | API key for authenticating with the Memories service. Optional -- only needed if your Memories instance requires authentication. |
 
@@ -94,6 +98,16 @@ OUTLOOK_CLIENT_SECRET=your-outlook-secret
 # Memories API key (if Memories requires auth)
 MEMORIES_API_KEY=
 
+# AI provider API keys (optional, for cloud AI providers)
+# ANTHROPIC_API_KEY=sk-ant-...
+# OPENAI_API_KEY=sk-...
+
+# CORS origins (production)
+# IRIS_CORS_ORIGINS=https://iris.example.com
+
+# Bind to all interfaces (Docker)
+# BIND_ALL=1
+
 # Write session token to file (for Docker/scripts)
 # SESSION_TOKEN_FILE=/app/data/session-token
 ```
@@ -142,8 +156,11 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - MEMORIES_URL=http://memories:8900
       - PORT=3000
+      - BIND_ALL=1
 ```
 
 The `iris-data` volume persists the SQLite database across container restarts. The `ollama-data` volume persists downloaded AI models.
 
 Variables from your `.env` file are also loaded by the Docker Compose service (if the file exists), so you can put your OAuth credentials there and they will be available inside the container.
+
+**Security note:** In v0.4.0, the Docker container runs as a non-root user (`iris`, UID 1001) for improved security.

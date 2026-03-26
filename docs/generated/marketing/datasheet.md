@@ -1,8 +1,8 @@
 ---
-status: draft
-generated: 2026-03-04
+status: current
+generated: 2026-03-26
 source-tier: direct
-hermes-version: 1.0.0
+hermes-version: 1.0.1
 ---
 
 # Iris Product Datasheet
@@ -30,6 +30,7 @@ Iris is a self-hosted email client with built-in AI intelligence. It connects to
 - **Batch actions**: Select and process multiple messages at once (archive, categorize, mark read)
 - **Category views**: Primary, social, promotions, updates, forums — with tab navigation
 - **Full-text search**: SQLite FTS5 with snippet highlighting, date filters, attachment filters
+- **Semantic search v5**: Find emails by meaning with date range filtering and graph-aware ranking
 
 ### AI Intelligence
 
@@ -44,23 +45,32 @@ Iris is a self-hosted email client with built-in AI intelligence. It connects to
 - **Adaptive classification**: AI learns from your corrections and personalizes categories and priorities over time
 - **Cross-session AI memory**: The chat assistant remembers past conversations across sessions — context persists, not just within one sitting
 - **Reliable background processing**: A job queue with automatic retry ensures every email is processed — no messages skipped, even during interruptions
-- **Semantic search**: Find emails by meaning using local vector search
+- **Multi-provider AI**: Support for multiple AI providers beyond Ollama
+- **Semantic search**: Find emails by meaning using local vector search via Memories v5
 
 ### Agent Platform
 
-- **Open REST API**: Search, read, draft, and send emails programmatically
+- **200+ API endpoints**: Search, read, compose, send, organize, and analyze emails programmatically
 - **Scoped API keys**: Four permission levels (read, draft, send, admin)
 - **SHA-256 key security**: API keys are hashed — never stored in plaintext
+- **Per-key rate limiting**: Each API key gets its own rate limit to isolate agent workloads
+- **One-call actions**: Reply, forward, or send with a single API call — no multi-step orchestration
 - **Full audit logging**: Every API action recorded with timestamp, IP, action, and key identifier
 - **AI-enriched responses**: API returns include classification, priority, and entity metadata
+- **MCP support**: Claude-native agents connect via Model Context Protocol with zero additional integration
 
 ### Privacy and Security
 
 - **Local-first architecture**: All data stored on your machine in SQLite
 - **No cloud dependency**: No Iris servers, no telemetry, no third-party data sharing
+- **Non-root Docker**: Container runs as an unprivileged user by default
+- **Encrypted credentials**: Email credentials and API keys encrypted at rest
+- **Security headers**: CSRF protection, content security policies enabled by default
+- **Rate limiting**: Configurable per-endpoint and per-key rate limits
 - **Session authentication**: Secure local session tokens for the web interface
 - **Trust indicators**: SPF, DKIM, and DMARC validation displayed per message
 - **Tracking pixel detection**: Identifies and flags email tracking pixels
+- **CI/CD pipeline**: Automated build, test, and release with 1,184 tests
 - **Bring your own AI**: Connect any Ollama-compatible model
 
 ---
@@ -71,7 +81,7 @@ Iris is a self-hosted email client with built-in AI intelligence. It connects to
 |---|---|
 | Backend | Rust, Axum 0.8 |
 | Database | SQLite (rusqlite, bundled) |
-| Search | SQLite FTS5 + Memories vector store |
+| Search | SQLite FTS5 + Memories v5 vector store |
 | Frontend | Svelte 5, TypeScript, Vite 7, Tailwind CSS 4 |
 | AI Runtime | Ollama (local inference) |
 | IMAP | async-imap with IDLE support |
@@ -126,9 +136,14 @@ Build from source with Rust 1.85+ and Node.js 20+.
 | Web UI authentication | Session tokens |
 | API authentication | Bearer tokens (SHA-256 hashed keys) |
 | Email authentication | OAuth2 (Gmail, Outlook), IMAP credentials |
+| Credential storage | Encrypted at rest |
+| Container security | Non-root Docker by default |
+| HTTP security | CSRF protection, security headers |
+| Rate limiting | Per-endpoint and per-key limits |
 | Email trust validation | SPF, DKIM, DMARC header parsing |
 | Privacy protection | Tracking pixel detection |
 | Audit | Full API action logging (timestamp, IP, action, key) |
+| CI/CD | Automated pipeline with 1,184 tests |
 
 ---
 
@@ -147,4 +162,4 @@ Build from source with Rust 1.85+ and Node.js 20+.
 
 ## Version
 
-**Iris v0.1.0** | Released 2026-03-04 | 12 feature areas | 78 tests passing
+**Iris v0.4.0** | Released 2026-03-26 | 200+ API endpoints | 1,184 tests passing | 4 permission levels | Memories v5 integration | Multi-provider AI | CI/CD pipeline

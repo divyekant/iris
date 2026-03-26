@@ -1,8 +1,8 @@
 ---
-status: draft
-generated: 2026-03-04
+status: current
+generated: 2026-03-26
 source-tier: direct
-hermes-version: 1.0.0
+hermes-version: 1.0.1
 ---
 
 # Iris FAQ
@@ -102,3 +102,71 @@ A: Iris scans HTML emails for 1x1 pixel images and images from known email track
 
 **Q: How are API keys stored?**
 A: API keys are hashed with SHA-256 before storage. Only the hash is in the database. The raw key is shown once at creation and cannot be recovered.
+
+## Agent Platform (Unified Auth)
+
+**Q: What changed from the old agent API to the unified auth?**
+A: The old agent API used separate `/api/agent/*` routes with their own auth middleware. The unified auth middleware now runs on all 200+ protected routes and accepts both session tokens (browser) and Bearer API keys (agents). The old routes still work for backward compatibility, but new integrations should use Bearer auth on the standard API routes.
+
+**Q: Can an agent use all the same endpoints as the web UI?**
+A: Yes, subject to permission checks. An agent with `autonomous` permission can access every endpoint the web UI uses. Lower permission levels restrict access -- for example, `read_only` cannot create drafts or send emails.
+
+**Q: How does the permission hierarchy work?**
+A: Four levels ordered from least to most privileged: `read_only` < `draft_only` < `send_with_approval` < `autonomous`. A higher permission always satisfies a lower one. For example, a `send_with_approval` key can read, draft, and send, but cannot use `execute` or `configure` actions reserved for `autonomous`.
+
+**Q: Can I scope an API key to a single email account?**
+A: Yes. When creating an API key, set the optional `account_id` field. The key can then only access messages from and send via that account. Attempts to access other accounts return 403.
+
+**Q: How do reply and forward endpoints handle threading?**
+A: `POST /api/reply` and `POST /api/forward` resolve the original message, build proper `In-Reply-To` and `References` headers from stored raw headers, construct the reply/forward body with quoting, and handle recipient deduplication for reply-all. Draft variants (`POST /api/drafts/reply`, `POST /api/drafts/forward`) create drafts without sending.
+
+**Q: What rate limits apply to agent requests?**
+A: Each API key gets its own rate limit bucket (keyed by `agent:{key_prefix}`). The general limit is 500 burst with ~5/sec sustained rate. Auth endpoints have a stricter limit of 10 burst at 1/sec. When exceeded, HTTP 429 is returned with `retry-after` headers.
+
+**Q: How do MCP tool permissions work with API keys?**
+A: Each MCP tool maps to a minimum permission level. Read-only tools (search, read, list) require `read_only`. Draft and action tools (create_draft, archive, star) require `draft_only`. Send and chat tools require `send_with_approval`. Permission denials return MCP-formatted errors (HTTP 200 with `status: "permission_denied"`), not HTTP 403.
+
+**Q: Can an agent create other API keys?**
+A: Only if the agent's key has `autonomous` permission. Creating and revoking keys requires the highest permission level. Lower-permission agents cannot manage keys.
+
+## Memories & Semantic Search (v5)
+
+**Q: What is `document_at` and why does it matter?**
+A: `document_at` is an ISO 8601 timestamp set on each email memory entry, representing the email's original send date. It enables temporal filtering via `since` and `until` query parameters. Without it, entries cannot participate in date-range searches.
+
+**Q: Why is recency weight set to zero for email search?**
+A: Standard Memories search penalizes older entries, but email relevance is topic-based, not time-based. A three-year-old email about a contract is as relevant to a "contract" search as one from yesterday. Zero recency weight treats all entries equally, while `since/until` parameters provide explicit temporal filtering when needed.
+
+**Q: What is graph_weight and when does it help?**
+A: Graph weight (set to 0.1 for email search) gives a small ranking boost to results connected by entity relationships in the knowledge graph. For example, if emails about "Project Alpha" mention "Acme Corp," searching for "Acme Corp" may boost "Project Alpha" results slightly. The low weight ensures text relevance still dominates.
+
+## Showcase Features
+
+**Q: How do delegation playbooks decide when to act?**
+A: Each playbook defines trigger conditions (sender domain, subject contains, AI category, intent) and a confidence threshold (default 0.85). All specified conditions must match (AND logic). Conditions set to null are ignored. The delegation engine only acts when match confidence meets or exceeds the threshold.
+
+**Q: Can I undo a delegation action?**
+A: Yes. Call `POST /api/delegation/actions/{id}/undo`. The action record is updated and the original state is restored where possible (e.g., un-archiving an auto-archived message).
+
+**Q: How does auto-draft use my writing style?**
+A: When generating a draft, the system loads stored style traits (greeting, signoff, tone, formality, vocabulary) and includes them in the AI prompt. The AI uses these to match your natural writing voice. Run `POST /api/style/{account_id}/analyze` to populate traits before using auto-draft.
+
+**Q: What entity types does the knowledge graph extract?**
+A: Five types: `person`, `org` (company/organization), `project` (product/initiative), `date`, `amount`. Entity resolution is case-insensitive but type-sensitive -- "Acme" as `org` and "Acme" as `project` are treated as separate entities.
+
+**Q: How does temporal search resolve natural-language queries?**
+A: The temporal reasoning engine sends the query along with known timeline events and today's date to the AI. The AI resolves it to a concrete date range (e.g., "around the board meeting" becomes 2026-02-15 to 2026-03-01). If no temporal reference is detected, it defaults to the last 30 days.
+
+## Production & Deployment
+
+**Q: Why is the version hardcoded in the health endpoint?**
+A: The `env!("CARGO_PKG_VERSION")` macro captures the version at compile time. With Docker layer caching, if `Cargo.toml` is unchanged between builds, the cached layer retains the old version string. Hardcoding in `src/api/health.rs` ensures correctness at the cost of manual updates.
+
+**Q: Does the Docker container run as root?**
+A: No. The runtime stage creates a non-root user `iris` (UID 1001) and all processes run under that user. Volume mounts for `/app/data` must be writable by UID 1001.
+
+**Q: What security headers does Iris set?**
+A: Four headers on every response: `x-content-type-options: nosniff`, `x-frame-options: DENY`, `referrer-policy: strict-origin-when-cross-origin`, and `permissions-policy: camera=(), microphone=(), geolocation=()`. Content-Security-Policy is not set because the SPA requires inline styles/scripts.
+
+**Q: How do I configure CORS for production?**
+A: Set the `IRIS_CORS_ORIGINS` environment variable to a comma-separated list of allowed origins (e.g., `https://mail.example.com`). If unset, the system falls back to localhost development origins and logs a warning.
