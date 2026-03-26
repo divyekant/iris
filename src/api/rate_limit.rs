@@ -16,6 +16,18 @@ impl KeyExtractor for SessionTokenKeyExtractor {
     type Key = String;
 
     fn extract<T>(&self, req: &http::Request<T>) -> Result<Self::Key, GovernorError> {
+        // Check for Bearer API key first — use key prefix as rate limit bucket
+        if let Some(bearer) = req.headers()
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+        {
+            // Use first 16 chars as bucket key (the iris_ prefix portion)
+            let prefix = &bearer[..bearer.len().min(16)];
+            return Ok(format!("agent:{}", prefix));
+        }
+
+        // Fall back to session token
         let key = crate::api::session_auth::extract_session_token(req.headers())
             .map(|(token, _)| token)
             .unwrap_or_else(|| "__anonymous__".to_owned());
@@ -75,4 +87,40 @@ pub fn rate_limit_layer() -> GovernorLayer<
         .expect("Failed to build rate limiter config");
 
     GovernorLayer::new(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower_governor::key_extractor::KeyExtractor;
+
+    #[test]
+    fn test_bearer_token_gets_agent_bucket() {
+        let req = http::Request::builder()
+            .header("Authorization", "Bearer iris_abc123def456")
+            .body(())
+            .unwrap();
+        let key = SessionTokenKeyExtractor.extract(&req).unwrap();
+        assert!(key.starts_with("agent:"), "Expected agent: prefix, got: {}", key);
+        assert_ne!(key, "__anonymous__");
+    }
+
+    #[test]
+    fn test_no_auth_gets_anonymous() {
+        let req = http::Request::builder()
+            .body(())
+            .unwrap();
+        let key = SessionTokenKeyExtractor.extract(&req).unwrap();
+        assert_eq!(key, "__anonymous__");
+    }
+
+    #[test]
+    fn test_session_token_gets_token_bucket() {
+        let req = http::Request::builder()
+            .header("x-session-token", "abc123")
+            .body(())
+            .unwrap();
+        let key = SessionTokenKeyExtractor.extract(&req).unwrap();
+        assert_eq!(key, "abc123");
+    }
 }
