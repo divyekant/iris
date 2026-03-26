@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use rusqlite::params;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::models::message::{self, InsertMessage, MessageDetail, MessageSummary};
 use crate::AppState;
 
@@ -1332,6 +1333,36 @@ async fn execute_tool_async(
 }
 
 // ---------------------------------------------------------------------------
+// Tool permission mapping
+// ---------------------------------------------------------------------------
+
+/// Returns the minimum `Permission` required to execute a given MCP tool.
+/// Unknown tools fall through to `Autonomous` — the subsequent tool-existence
+/// check in `tool_call` will reject them anyway.
+fn tool_permission(tool_name: &str) -> Permission {
+    match tool_name {
+        "search_emails"
+        | "read_email"
+        | "list_inbox"
+        | "list_threads"
+        | "get_thread"
+        | "get_thread_summary"
+        | "get_contact_profile"
+        | "get_inbox_stats"
+        | "extract_tasks"
+        | "extract_deadlines" => Permission::ReadOnly,
+
+        "create_draft" | "manage_draft" | "archive_email" | "star_email" | "bulk_action" => {
+            Permission::DraftOnly
+        }
+
+        "send_email" | "chat" => Permission::SendWithApproval,
+
+        _ => Permission::Autonomous,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP handlers
 // ---------------------------------------------------------------------------
 
@@ -1396,6 +1427,7 @@ pub async fn initialize(
 
 /// POST /api/mcp/tools/call — execute a tool call
 pub async fn tool_call(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ToolCallRequest>,
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -1436,6 +1468,43 @@ pub async fn tool_call(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("unknown tool: {}", req.tool_name)})),
         ));
+    }
+
+    // Check permission — return an MCP-formatted error (not HTTP 403) so the
+    // agent receives a useful message it can reason about.
+    let needed = tool_permission(&req.tool_name);
+    if auth.require(needed).is_err() {
+        let permission_label = match needed {
+            Permission::ReadOnly => "read_only",
+            Permission::DraftOnly => "draft_only",
+            Permission::SendWithApproval => "send_with_approval",
+            Permission::Autonomous => "autonomous",
+        };
+        let error_result = serde_json::json!({
+            "error": format!(
+                "permission denied: tool '{}' requires '{}' permission",
+                req.tool_name, permission_label
+            )
+        });
+        // Record the denied call for audit purposes
+        let duration_ms = 0i64;
+        if let Ok(audit_conn) = state.db.get() {
+            record_tool_call(
+                &audit_conn,
+                &req.session_id,
+                &req.tool_name,
+                &req.arguments,
+                &error_result,
+                "permission_denied",
+                duration_ms,
+            );
+        }
+        return Ok(Json(ToolCallResponse {
+            tool_name: req.tool_name,
+            result: error_result,
+            status: "permission_denied".to_string(),
+            duration_ms,
+        }));
     }
 
     // Execute with timing — async tools release the conn before awaiting
@@ -1544,9 +1613,100 @@ pub async fn session_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::unified_auth::Permission;
     use crate::db::create_test_pool;
     use crate::models::account::{Account, CreateAccount};
     use crate::models::message::InsertMessage;
+
+    // Test: tool_permission mapping
+    #[test]
+    fn test_tool_permission_read_only() {
+        assert_eq!(tool_permission("search_emails"), Permission::ReadOnly);
+        assert_eq!(tool_permission("read_email"), Permission::ReadOnly);
+        assert_eq!(tool_permission("list_inbox"), Permission::ReadOnly);
+        assert_eq!(tool_permission("list_threads"), Permission::ReadOnly);
+        assert_eq!(tool_permission("get_thread"), Permission::ReadOnly);
+        assert_eq!(tool_permission("get_thread_summary"), Permission::ReadOnly);
+        assert_eq!(tool_permission("get_contact_profile"), Permission::ReadOnly);
+        assert_eq!(tool_permission("get_inbox_stats"), Permission::ReadOnly);
+        assert_eq!(tool_permission("extract_tasks"), Permission::ReadOnly);
+        assert_eq!(tool_permission("extract_deadlines"), Permission::ReadOnly);
+    }
+
+    #[test]
+    fn test_tool_permission_draft_only() {
+        assert_eq!(tool_permission("create_draft"), Permission::DraftOnly);
+        assert_eq!(tool_permission("manage_draft"), Permission::DraftOnly);
+        assert_eq!(tool_permission("archive_email"), Permission::DraftOnly);
+        assert_eq!(tool_permission("star_email"), Permission::DraftOnly);
+        assert_eq!(tool_permission("bulk_action"), Permission::DraftOnly);
+    }
+
+    #[test]
+    fn test_tool_permission_send_with_approval() {
+        assert_eq!(tool_permission("send_email"), Permission::SendWithApproval);
+        assert_eq!(tool_permission("chat"), Permission::SendWithApproval);
+    }
+
+    #[test]
+    fn test_tool_permission_unknown_defaults_autonomous() {
+        assert_eq!(tool_permission("nonexistent_tool"), Permission::Autonomous);
+        assert_eq!(tool_permission(""), Permission::Autonomous);
+    }
+
+    #[test]
+    fn test_tool_permission_hierarchy_allows_higher() {
+        // Autonomous key can run all tools
+        let auth = AuthContext::Agent {
+            key_id: "k".to_string(),
+            permission: Permission::Autonomous,
+            account_id: None,
+        };
+        assert!(auth.require(tool_permission("search_emails")).is_ok());
+        assert!(auth.require(tool_permission("create_draft")).is_ok());
+        assert!(auth.require(tool_permission("send_email")).is_ok());
+    }
+
+    #[test]
+    fn test_tool_permission_read_only_key_blocked_on_draft_tools() {
+        let auth = AuthContext::Agent {
+            key_id: "k".to_string(),
+            permission: Permission::ReadOnly,
+            account_id: None,
+        };
+        // Read tools allowed
+        assert!(auth.require(tool_permission("search_emails")).is_ok());
+        assert!(auth.require(tool_permission("list_inbox")).is_ok());
+        // Write tools denied
+        assert!(auth.require(tool_permission("create_draft")).is_err());
+        assert!(auth.require(tool_permission("send_email")).is_err());
+        assert!(auth.require(tool_permission("archive_email")).is_err());
+    }
+
+    #[test]
+    fn test_tool_permission_draft_key_blocked_on_send() {
+        let auth = AuthContext::Agent {
+            key_id: "k".to_string(),
+            permission: Permission::DraftOnly,
+            account_id: None,
+        };
+        // Read and draft tools allowed
+        assert!(auth.require(tool_permission("search_emails")).is_ok());
+        assert!(auth.require(tool_permission("create_draft")).is_ok());
+        assert!(auth.require(tool_permission("archive_email")).is_ok());
+        // Send denied
+        assert!(auth.require(tool_permission("send_email")).is_err());
+        assert!(auth.require(tool_permission("chat")).is_err());
+    }
+
+    #[test]
+    fn test_tool_permission_session_always_allowed() {
+        let auth = AuthContext::Session;
+        // Session bypasses all permission checks
+        assert!(auth.require(tool_permission("send_email")).is_ok());
+        assert!(auth.require(tool_permission("create_draft")).is_ok());
+        assert!(auth.require(tool_permission("search_emails")).is_ok());
+    }
 
     fn setup() -> (Conn, Account) {
         let pool = create_test_pool();
