@@ -1,11 +1,13 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::Extension;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use crate::api::trust;
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::models::message::{self, MessageDetail, MessageSummary};
 use crate::AppState;
 extern crate mailparse;
@@ -411,9 +413,11 @@ pub struct BatchUpdateResponse {
 }
 
 pub async fn batch_update_messages(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<BatchUpdateRequest>,
 ) -> Result<Json<BatchUpdateResponse>, StatusCode> {
+    auth.require(Permission::DraftOnly)?;
     // Cap batch size to prevent DoS via unbounded IN clause
     if req.ids.is_empty() || req.ids.len() > 1000 {
         return Err(StatusCode::BAD_REQUEST);

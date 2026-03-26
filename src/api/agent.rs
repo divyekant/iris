@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::auth::refresh::ensure_fresh_token;
 use crate::models::account::Account;
 use crate::models::message::{self, MessageDetail};
@@ -343,8 +344,10 @@ pub async fn create_key_handler(
 }
 
 pub async fn list_keys_handler(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ApiKey>>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(list_api_keys(&conn)))
 }
@@ -362,9 +365,11 @@ pub async fn revoke_key_handler(
 }
 
 pub async fn get_audit_log_handler(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditLogQuery>,
 ) -> Result<Json<Vec<AuditEntry>>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let limit = params.limit.unwrap_or(50);
     let offset = params.offset.unwrap_or(0);

@@ -1097,3 +1097,111 @@ fn permission_hierarchy_invalid_permission_denied() {
     assert!(!has_permission("", "read"));
     assert!(!has_permission("root", "execute"));
 }
+
+// =========================================================================
+// J) Permission-level checks on protected REST endpoints
+// =========================================================================
+
+fn create_api_key_with_permission(state: &Arc<AppState>, permission: &str) -> String {
+    let conn = state.db.get().unwrap();
+    let (raw_key, _) = iris_server::api::agent::create_api_key(
+        &conn,
+        "Test Key",
+        permission,
+        None,
+    )
+    .unwrap();
+    raw_key
+}
+
+#[tokio::test]
+async fn test_read_only_key_cannot_send() {
+    let state = create_test_state();
+    let raw_key = create_api_key_with_permission(&state, "read_only");
+    let app = build_app(state);
+
+    let body = serde_json::json!({
+        "account_id": "acc1",
+        "to": ["victim@example.com"],
+        "subject": "test",
+        "body_text": "Hello"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/send")
+                .header("authorization", format!("Bearer {}", raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "read_only key must not be able to POST /api/send"
+    );
+}
+
+#[tokio::test]
+async fn test_read_only_key_cannot_access_config() {
+    let state = create_test_state();
+    let raw_key = create_api_key_with_permission(&state, "read_only");
+    let app = build_app(state);
+
+    let res = app
+        .oneshot(
+            Request::get("/api/config")
+                .header("authorization", format!("Bearer {}", raw_key))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "read_only key must not be able to GET /api/config"
+    );
+}
+
+#[tokio::test]
+async fn test_draft_key_can_save_draft() {
+    let state = create_test_state();
+    // Insert an account so save_draft can reference it
+    {
+        let conn = state.db.get().unwrap();
+        conn.execute(
+            "INSERT INTO accounts (id, provider, email) VALUES ('acc1', 'imap', 'alice@example.com')",
+            [],
+        )
+        .unwrap();
+    }
+    let raw_key = create_api_key_with_permission(&state, "draft_only");
+    let app = build_app(state);
+
+    let body = serde_json::json!({
+        "account_id": "acc1",
+        "body_text": "Hello draft"
+    });
+
+    let res = app
+        .oneshot(
+            Request::post("/api/drafts")
+                .header("authorization", format!("Bearer {}", raw_key))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "draft_only key must be able to POST /api/drafts"
+    );
+}

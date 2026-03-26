@@ -1,10 +1,12 @@
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::Extension;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::ai::provider::{LlmProvider, ProviderStatus};
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::secrets;
 use crate::AppState;
 
@@ -65,8 +67,10 @@ fn set_config_value(conn: &rusqlite::Connection, key: &str, value: &str) -> Resu
 }
 
 pub async fn get_ai_config(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AiConfigResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let (ollama_url, model, enabled, decay_enabled, decay_threshold_days, decay_factor) = {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let ollama_url = get_config_value(&conn, "ai_ollama_url", &state.config.ollama_url);
@@ -97,9 +101,11 @@ pub async fn get_ai_config(
 }
 
 pub async fn set_ai_config(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetAiConfigRequest>,
 ) -> Result<Json<AiConfigResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     {
         let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -207,8 +213,10 @@ pub async fn set_ai_config(
 }
 
 pub async fn test_ai_connection(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AiTestResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let providers = state.providers.health_status().await;
     Ok(Json(AiTestResponse { providers }))
 }

@@ -1,10 +1,12 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::Extension;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::api::draft_versions;
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::models::account::Account;
 use crate::auth::refresh::ensure_fresh_token;
 use crate::models::message::{self, MessageDetail, MessageSummary};
@@ -24,9 +26,12 @@ pub struct SendResponse {
 }
 
 pub async fn send_message(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<ComposeRequest>,
 ) -> Result<Json<SendResponse>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::SendWithApproval)
+        .map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permission"}))))?;
     let conn = state.db.get().map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
     })?;
@@ -119,9 +124,12 @@ pub struct CancelResponse {
 }
 
 pub async fn cancel_send(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<CancelResponse>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::SendWithApproval)
+        .map_err(|s| (s, Json(serde_json::json!({"error": "insufficient permission"}))))?;
     let conn = state.db.get().map_err(|_| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "database error"})))
     })?;
@@ -385,9 +393,11 @@ pub struct DraftResponse {
 }
 
 pub async fn save_draft(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<SaveDraftRequest>,
 ) -> Result<Json<DraftResponse>, StatusCode> {
+    auth.require(Permission::DraftOnly)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let to_json = req.to.as_ref().and_then(|v| serde_json::to_string(v).ok());
@@ -433,9 +443,11 @@ pub async fn list_drafts(
 }
 
 pub async fn delete_draft(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
+    auth.require(Permission::DraftOnly)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if message::delete_draft(&conn, &id) {
         Ok(StatusCode::NO_CONTENT)

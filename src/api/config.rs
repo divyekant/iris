@@ -1,10 +1,12 @@
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::Extension;
 use axum::Json;
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, LazyLock};
 
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::AppState;
 
 #[derive(Debug, Serialize)]
@@ -52,8 +54,10 @@ pub struct SetAppearanceRequest {
 }
 
 pub async fn get_config(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ConfigResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let theme: String = conn
@@ -76,9 +80,11 @@ pub async fn get_config(
 }
 
 pub async fn set_theme(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetThemeRequest>,
 ) -> Result<Json<ConfigResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     // Validate theme value
     match input.theme.as_str() {
         "light" | "dark" | "system" => {}
@@ -109,9 +115,11 @@ pub async fn set_theme(
 }
 
 pub async fn set_view_mode(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetViewModeRequest>,
 ) -> Result<Json<ConfigResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     match input.view_mode.as_str() {
         "traditional" | "messaging" => {}
         _ => return Err(StatusCode::BAD_REQUEST),
@@ -162,8 +170,10 @@ fn set_config_value(conn: &rusqlite::Connection, key: &str, value: &str) -> Resu
 }
 
 pub async fn get_appearance(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AppearanceResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(AppearanceResponse {
@@ -174,9 +184,11 @@ pub async fn get_appearance(
 }
 
 pub async fn set_appearance(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetAppearanceRequest>,
 ) -> Result<Json<AppearanceResponse>, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Some(ref color) = input.accent_color {
