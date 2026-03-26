@@ -65,6 +65,7 @@ pub mod translate;
 pub mod subscription_management;
 pub mod subscriptions;
 pub mod trust;
+pub mod unified_auth;
 pub mod webhooks;
 pub mod vip;
 pub mod writing_style;
