@@ -304,9 +304,13 @@ pub fn get_audit_log(
 // ---------------------------------------------------------------------------
 
 pub async fn create_key_handler(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateKeyResponse>), (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::Autonomous).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     if !VALID_PERMISSIONS.contains(&req.permission.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -353,9 +357,11 @@ pub async fn list_keys_handler(
 }
 
 pub async fn revoke_key_handler(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
+    auth.require(Permission::Autonomous)?;
     let conn = state.db.get().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if revoke_api_key(&conn, &id) {
         Ok(StatusCode::NO_CONTENT)

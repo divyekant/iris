@@ -1368,9 +1368,16 @@ fn tool_permission(tool_name: &str) -> Permission {
 
 /// POST /api/mcp/initialize — create an MCP session
 pub async fn initialize(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<InitializeRequest>,
 ) -> Result<(StatusCode, Json<InitializeResponse>), (StatusCode, Json<serde_json::Value>)> {
+    // Derive api_key_id from authenticated context, not from client request body
+    let api_key_id = match &auth {
+        AuthContext::Agent { key_id, .. } => Some(key_id.as_str()),
+        AuthContext::Session => None,
+    };
+
     let conn = state.db.get().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1404,7 +1411,7 @@ pub async fn initialize(
         &conn,
         &session_id,
         &req.account_id,
-        req.api_key_id.as_deref(),
+        api_key_id,
         &capabilities,
     )
     .map_err(|e| {

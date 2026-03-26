@@ -1,11 +1,13 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::Extension;
 use axum::Json;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::api::unified_auth::{AuthContext, Permission};
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
@@ -349,9 +351,13 @@ pub fn trigger_webhooks(
 
 /// POST /api/webhooks — register a new webhook
 pub async fn create_webhook(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateWebhookRequest>,
 ) -> Result<(StatusCode, Json<Webhook>), (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::Autonomous).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     // Validate URL
     if !validate_url(&req.url) {
         return Err((
@@ -387,9 +393,13 @@ pub async fn create_webhook(
 
 /// GET /api/webhooks?account_id=N — list all webhooks for an account
 pub async fn list_webhooks(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<Webhook>>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::DraftOnly).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     let account_id: i64 = params
         .get("account_id")
         .and_then(|v| v.parse().ok())
@@ -407,9 +417,13 @@ pub async fn list_webhooks(
 
 /// GET /api/webhooks/:id — get a specific webhook
 pub async fn get_webhook_handler(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<Webhook>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::DraftOnly).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     let conn = state.db.get().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -429,10 +443,14 @@ pub async fn get_webhook_handler(
 
 /// PUT /api/webhooks/:id — update a webhook
 pub async fn update_webhook(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(req): Json<UpdateWebhookRequest>,
 ) -> Result<Json<Webhook>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::Autonomous).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     // Validate URL if provided
     if let Some(ref url) = req.url {
         if !validate_url(url) {
@@ -477,9 +495,13 @@ pub async fn update_webhook(
 
 /// DELETE /api/webhooks/:id — delete a webhook
 pub async fn delete_webhook(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::Autonomous).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     let conn = state.db.get().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -499,10 +521,14 @@ pub async fn delete_webhook(
 
 /// GET /api/webhooks/:id/deliveries — list recent deliveries
 pub async fn list_webhook_deliveries(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Query(params): Query<DeliveriesQuery>,
 ) -> Result<Json<Vec<WebhookDelivery>>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::DraftOnly).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     let conn = state.db.get().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -526,9 +552,13 @@ pub async fn list_webhook_deliveries(
 
 /// POST /api/webhooks/:id/test — send a test event
 pub async fn test_webhook(
+    Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    auth.require(Permission::Autonomous).map_err(|s| {
+        (s, Json(serde_json::json!({"error": "insufficient permissions"})))
+    })?;
     let conn = state.db.get().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
