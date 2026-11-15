@@ -1,0 +1,87 @@
+version: 0.2.0
+extends: minimal
+
+tokens:
+  colors:
+    primary: "#b8960f"
+    secondary: "#d4af37"
+    neutral: "stone"
+    semantic:
+      success: "#16A34A"
+      warning: "#CA8A04"
+      error: "#DC2626"
+      info: "#2563EB"
+  typography:
+    font_family: "Inter, system-ui, sans-serif"
+    mono_font_family: "'SF Mono', 'Cascadia Mono', 'Menlo', monospace"
+    scale: "1.25"
+    base_size: 16
+  spacing:
+    base: 4
+    scale: [0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32]
+  radii:
+    none: 0
+    sm: 4
+    md: 8
+    lg: 12
+    full: 9999
+
+rules:
+  colors:
+    max_unique: 12
+    require_semantic: true
+  typography:
+    max_font_families: 3
+    require_scale: true
+  spacing:
+    require_base_unit: true
+  accessibility:
+    min_contrast: 4.5
+    require_alt_text: true
+
+brands:
+  active: "dark"
+  palettes:
+    dark:
+      colors:
+        primary: "#d4af37"
+        secondary: "#f5d060"
+        neutral: "neutral"
+        background: "#0a0a0a"
+        background_elevated: "#111111"
+        background_surface: "#1a1a1a"
+        text: "#e5e5e5"
+        text_muted: "#a3a3a3"
+        text_faint: "#666666"
+        border: "rgba(212,175,55,0.15)"
+        border_subtle: "rgba(255,255,255,0.06)"
+        accent_border: "rgba(212,175,55,0.15)"
+        overlay: "rgba(0,0,0,0.6)"
+        unread: "#d4af37"
+      typography:
+        font_family: "Inter, system-ui, sans-serif"
+    light:
+      colors:
+        primary: "#b8960f"
+        secondary: "#d4af37"
+        neutral: "stone"
+        background: "#FAF9F6"
+        background_elevated: "#FFFEF9"
+        background_surface: "#F0EDE6"
+        text: "#2C2418"
+        text_muted: "#7A7060"
+        text_faint: "#A69E90"
+        border: "#E8E2D6"
+        border_subtle: "rgba(0,0,0,0.06)"
+        accent_border: "rgba(184,150,15,0.18)"
+        overlay: "rgba(0,0,0,0.3)"
+        unread: "#b8960f"
+      typography:
+        font_family: "Inter, system-ui, sans-serif"
+
+transitions:
+  fast: "120ms ease"
+  normal: "200ms ease"
+
+adapters:
+  - tailwind

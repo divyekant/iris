@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/divyekant/iris"
+publish = false
+
+# Iris must run with a small memory footprint on a Mac and on a small server.
+# The release build is small and has no unwind tables.
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

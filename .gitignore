@@ -1,0 +1,18 @@
+# Local CI state (it also ignores itself with .local-ci/.gitignore)
+.local-ci/
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+# Rust
+target/
+# Node
+node_modules/
+dist/
+# Local environment files
+.env
+.env.*
+!.env.example
+.DS_Store

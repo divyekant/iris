@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "product": "iris",
+  "base": "develop",
+  "release": {
+    "branch": "main"
+  },
+  "review": {
+    "model": "gpt-6-sol",
+    "effort": "medium",
+    "merge_method": "squash",
+    "trusted_authors": [
+      "divyekant"
+    ]
+  },
+  "always": [
+    "starter.json",
+    "scripts/local-ci/**"
+  ],
+  "areas": {
+    "engine": {
+      "paths": [
+        "crates/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".cargo/**"
+      ],
+      "setup": "cargo fetch --locked",
+      "setup_inputs": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml"
+      ],
+      "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "test": "cargo test --workspace --locked",
+      "tools": [
+        "rustc --version",
+        "cargo --version"
+      ],
+      "env": {
+        "RUSTUP_HOME": "~/.rustup",
+        "CARGO_HOME": "./.local-ci/cargo"
+      }
+    },
+    "client": {
+      "paths": [
+        "client/**"
+      ],
+      "setup": "cd client && npm ci --no-audit --no-fund",
+      "setup_inputs": [
+        "client/package.json",
+        "client/package-lock.json"
+      ],
+      "check": "cd client && npm run --if-present lint",
+      "test": "cd client && npm test",
+      "tools": [
+        "node --version",
+        "npm --version"
+      ]
+    }
+  },
+  "cloud": {
+    "profile": false,
+    "keys": [],
+    "apt": [],
+    "hosts": [
+      "crates.io",
+      "index.crates.io",
+      "static.crates.io",
+      "static.rust-lang.org",
+      "registry.npmjs.org",
+      "github.com"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fast checks before each push: the `check` command of each area that the push changes.
+# Local CI (scripts/local-ci/run.sh) stays the merge gate. Skip one time: git push --no-verify.
+cd "$(git rev-parse --show-toplevel)" || exit 0
+exec python3 scripts/local-ci/local_ci.py --pre-push

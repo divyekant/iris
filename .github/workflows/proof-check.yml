@@ -1,0 +1,26 @@
+# Feature PRs into develop run no tests on GitHub. The tests ran in local CI, which
+# pushed a proof commit. This job checks only that the PR head is that proof commit
+# (scripts/local-ci/local_ci.py --verify). It takes some seconds.
+# Note: the job runs the verify code of the PR branch. A writer can change it, so it
+# guards against a forgotten local CI run, not against a writer who wants to skip it.
+name: proof-check
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+concurrency:
+  group: proof-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  proof-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 2
+      - name: The head is a local CI proof commit
+        run: python3 scripts/local-ci/local_ci.py --verify HEAD

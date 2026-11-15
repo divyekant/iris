@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pr_number", "head_sha", "verdict", "summary", "findings", "commands", "residual_risks"],
+  "properties": {
+    "pr_number": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "minLength": 7},
+    "verdict": {"enum": ["clean", "blocked"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "path", "line", "title", "rationale", "requested_fix"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 120},
+          "severity": {
+            "description": "P0 critical production hazard; P1 material production failure; P2 bounded merge defect; P3 advisory improvement.",
+            "enum": ["P0", "P1", "P2", "P3"]
+          },
+          "path": {"type": "string", "minLength": 1, "maxLength": 500},
+          "line": {"type": "integer", "minimum": 0},
+          "title": {"type": "string", "minLength": 1, "maxLength": 200},
+          "rationale": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "requested_fix": {"type": "string", "minLength": 1, "maxLength": 1500}
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "outcome"],
+        "properties": {
+          "command": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "outcome": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    },
+    "residual_risks": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1000}
+    }
+  }
+}

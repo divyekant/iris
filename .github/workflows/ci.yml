@@ -1,0 +1,23 @@
+# Full CI: every area of starter.json, on each release PR into main and by hand.
+# Feature PRs do not run this job: local CI ran their tests (see proof-check.yml).
+# release.yml merges a release PR only when the check `ci` is green.
+name: ci
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # The runner image has rustup (stable), node and python3.
+      # rust-toolchain.toml selects the toolchain and its components.
+      - name: Every area of starter.json
+        run: python3 scripts/local-ci/local_ci.py --ci

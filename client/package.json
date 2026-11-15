@@ -1,0 +1,10 @@
+{
+  "name": "iris-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "node --check src/index.mjs",
+    "test": "node --test \"test/**/*.test.mjs\""
+  }
+}

@@ -1,0 +1,43 @@
+# Release cycle (docs/RELEASES.md):
+# - open: make release/v<YYYY.MM.DD.N> from develop and open or move the release PR into main.
+# - check: merge a release PR when its `ci` check is green, then make the tag and the
+#   GitHub Release from the PR release notes. The push to main starts deploy.yml.
+# The secret RELEASE_TOKEN is a fine-grained token with Contents, Pull requests and
+# Actions write access. A merge made with GITHUB_TOKEN starts no other workflow.
+name: release
+on:
+  schedule:
+    - cron: "0 14 * * *" # the release cadence; change it for this product
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: open, check, or both
+        default: both
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      MODE: ${{ github.event_name == 'workflow_run' && 'check' || inputs.mode || 'both' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+      - name: Check the token
+        run: test -n "$GH_TOKEN" || { echo "Add the repository secret RELEASE_TOKEN (docs/RELEASES.md)"; exit 1; }
+      - name: Open or move the release PR
+        if: env.MODE == 'open' || env.MODE == 'both'
+        run: python3 scripts/release/release.py open
+      - name: Merge a green release PR, then tag and release
+        if: env.MODE == 'check' || env.MODE == 'both'
+        run: python3 scripts/release/release.py check
