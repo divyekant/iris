@@ -436,3 +436,20 @@ fn an_answer_with_no_scope_is_scope_missing() {
         Err(Error::ScopeMissing)
     ));
 }
+
+#[test]
+fn a_refresh_answer_with_no_scope_is_accepted() {
+    let (_fake, uri) = token_server(vec![(
+        200,
+        r#"{"access_token":"new-access","expires_in":3599}"#.into(),
+    )]);
+    let client = test_client(Some(&uri));
+    assert_eq!(
+        client
+            .refresh(&Secret::new(REFRESH))
+            .unwrap()
+            .token
+            .expose(),
+        "new-access"
+    );
+}
