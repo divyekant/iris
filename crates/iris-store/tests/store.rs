@@ -394,3 +394,51 @@ fn open_makes_an_existing_data_folder_private() {
     assert_eq!(mode(&dir.0), 0o700);
     assert_eq!(mode(&dir.0.join("content")), 0o700);
 }
+
+#[test]
+fn a_message_found_again_is_not_gone() {
+    let dir = TempDir::new("found");
+    let (store, acc) = setup(&dir);
+    let a = store
+        .put_messages(acc, &[msg("a", "t1", 1, &[], "s", "apple")])
+        .unwrap()[0];
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET gone_at = 5, understood_at = 4 WHERE id = ?1",
+                [a],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(store.search("apple", 10).unwrap(), Vec::<i64>::new());
+    let again = store
+        .put_messages(acc, &[msg("a", "t1", 1, &[], "s", "apple")])
+        .unwrap()[0];
+    assert_eq!(again, a);
+    assert_eq!(store.search("apple", 10).unwrap(), [a]);
+    // Specification 1, section 4.4: its items run understanding again.
+    let understood: Option<i64> = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT understood_at FROM message WHERE id = ?1",
+                [a],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(understood, None);
+}
+
+#[test]
+fn an_interrupted_first_key_creation_does_not_block_the_start() {
+    let dir = TempDir::new("keytmp");
+    fs::create_dir_all(&dir.0).unwrap();
+    // A crash during the first start left a part of a temporary key file.
+    fs::write(dir.0.join("key.tmp"), b"part").unwrap();
+    let store = Store::open(&dir.0).unwrap();
+    assert_eq!(fs::read(dir.0.join("key")).unwrap().len(), 32);
+    assert!(!dir.0.join("key.tmp").exists());
+    let sealed = store.seal(b"x").unwrap();
+    drop(store);
+    assert_eq!(Store::open(&dir.0).unwrap().unseal(&sealed).unwrap(), b"x");
+}
