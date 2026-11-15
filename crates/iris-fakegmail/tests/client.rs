@@ -210,3 +210,33 @@ fn history_sync_starts_from_the_profile_id_of_an_empty_mailbox() {
     let changes = get(&gmail, &format!("history?startHistoryId={start}"));
     assert!(changes.get("history").is_none());
 }
+
+#[test]
+fn send_to_an_old_thread_keeps_the_thread_count_and_big_tokens_are_safe() {
+    let gmail = FakeGmail::start(Mailbox::new(4, 10)).unwrap();
+    let threads = get(&gmail, "profile")["threadsTotal"].clone();
+    let thread = get(&gmail, "messages?maxResults=1")["messages"][0]["threadId"].clone();
+    let raw = base64::encode_url(b"Subject: Re\r\n\r\nOK\r\n");
+    let (status, _) = call(
+        &gmail,
+        "POST",
+        "messages/send",
+        Some(&json!({ "raw": raw, "threadId": thread })),
+        true,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(get(&gmail, "profile")["threadsTotal"], threads);
+
+    let max = usize::MAX;
+    let page = get(&gmail, &format!("messages?pageToken={max}"));
+    assert!(page.get("messages").is_none() && page.get("nextPageToken").is_none());
+    let start = get(&gmail, "profile")["historyId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let history = get(
+        &gmail,
+        &format!("history?startHistoryId={start}&pageToken={max}"),
+    );
+    assert!(history.get("nextPageToken").is_none());
+}
