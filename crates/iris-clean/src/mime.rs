@@ -290,15 +290,17 @@ pub fn transfer_decode<'a>(body: &'a [u8], encoding: &str) -> Cow<'a, [u8]> {
 
 /// The decoded size of a body, without decoding it.
 pub fn decoded_len(body: &[u8], encoding: &str) -> u64 {
-    if encoding == "base64" {
-        let n = body
-            .iter()
-            .take_while(|&&b| b != b'=')
-            .filter(|&&b| b64(b).is_some())
-            .count() as u64;
-        n * 3 / 4
-    } else {
-        body.len() as u64
+    match encoding {
+        "base64" => {
+            let n = body
+                .iter()
+                .take_while(|&&b| b != b'=')
+                .filter(|&&b| b64(b).is_some())
+                .count() as u64;
+            n * 3 / 4
+        }
+        "quoted-printable" => qp_walk(body, |_| {}),
+        _ => body.len() as u64,
     }
 }
 
@@ -340,6 +342,17 @@ fn base64(b: &[u8]) -> Vec<u8> {
 /// Lenient quoted-printable: an `=` that does not start a valid escape stays.
 fn qp(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
+    qp_walk(b, |c| out.push(c));
+    out
+}
+
+/// Give each decoded quoted-printable byte to `f`. Return the count.
+fn qp_walk(b: &[u8], mut f: impl FnMut(u8)) -> u64 {
+    let mut count = 0;
+    let mut out = |c: u8| {
+        count += 1;
+        f(c)
+    };
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'=' {
@@ -353,20 +366,21 @@ fn qp(b: &[u8]) -> Vec<u8> {
                 continue;
             }
             if let (Some(h), Some(l)) = (rest.first().and_then(hex), rest.get(1).and_then(hex)) {
-                out.push(h * 16 + l);
+                out(h * 16 + l);
                 i += 3;
                 continue;
             }
         }
-        out.push(b[i]);
+        out(b[i]);
         i += 1;
     }
-    out
+    count
 }
 
 /// Split a multipart body into its parts. The preamble and the epilogue go out.
-/// If there is no close delimiter, the last part runs to the end.
-pub fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<&'a [u8]> {
+/// If there is no close delimiter, the last part runs to the end. The split
+/// stops after `max` parts.
+pub fn split_multipart<'a>(body: &'a [u8], boundary: &str, max: usize) -> Vec<&'a [u8]> {
     let delim = format!("--{boundary}");
     let delim = delim.as_bytes();
     let mut parts = Vec::new();
@@ -388,7 +402,7 @@ pub fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<&'a [u8]> {
                 if let Some(s) = start.take() {
                     parts.push(trim_line_end(&body[s..line]));
                 }
-                if close {
+                if close || parts.len() >= max {
                     return parts;
                 }
                 start = next;
@@ -458,21 +472,30 @@ mod tests {
             b"a=bc =zz"
         );
         assert_eq!(decoded_len(b"SGVs\r\nbG8=", "base64"), 5);
+        assert_eq!(decoded_len(b"a=3Db=\r\n", "quoted-printable"), 3);
     }
 
     #[test]
     fn multipart_split() {
         let body = b"preamble\r\n--b\r\nA\r\n--b \r\nB\r\n\r\n--b--\r\nepilogue";
-        assert_eq!(split_multipart(body, "b"), vec![&b"A"[..], &b"B\r\n"[..]]);
+        assert_eq!(
+            split_multipart(body, "b", 10),
+            vec![&b"A"[..], &b"B\r\n"[..]]
+        );
         // No close delimiter.
         assert_eq!(
-            split_multipart(b"--b\nA\n--b\nB", "b"),
+            split_multipart(b"--b\nA\n--b\nB", "b", 10),
             vec![&b"A"[..], &b"B"[..]]
         );
         // `--bc` is not the boundary `b`.
         assert_eq!(
-            split_multipart(b"--b\nA\n--bc\n--b--", "b"),
+            split_multipart(b"--b\nA\n--bc\n--b--", "b", 10),
             vec![&b"A\n--bc"[..]]
+        );
+        // The split stops at the limit.
+        assert_eq!(
+            split_multipart(b"--b\nA\n--b\nB\n--b\nC", "b", 2),
+            vec![&b"A"[..], &b"B"[..]]
         );
     }
 

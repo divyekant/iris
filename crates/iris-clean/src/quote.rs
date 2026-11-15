@@ -29,9 +29,12 @@ const MOBILE: [&str; 4] = [
 pub fn strip_quotes(text: &str, is_reply: bool) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut end = lines.len();
+    // The `>` lines of a forwarded message belong to that message, so they stay.
+    let mut forward = lines.len();
     for i in 0..lines.len() {
         let t = lines[i].trim();
         if is_forward_marker(t) {
+            forward = i;
             break;
         }
         if is_original_marker(t) || (is_reply && is_header_block(&lines[i..])) {
@@ -48,8 +51,9 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
     }
     let mut kept: Vec<&str> = lines[..end]
         .iter()
-        .copied()
-        .filter(|l| !(is_reply && l.trim_start().starts_with('>')))
+        .enumerate()
+        .filter(|(i, l)| !(is_reply && *i < forward && l.trim_start().starts_with('>')))
+        .map(|(_, l)| *l)
         .collect();
     // A rule line or an empty line before the history goes out too.
     while kept
@@ -177,7 +181,7 @@ mod tests {
         let t = "Ana wrote:\nthe plan is good.\n> a real quote";
         assert_eq!(strip_quotes(t, false), t);
         let t = "FYI\n\n---------- Forwarded message ---------\nFrom: Ana\nDate: Mon\nSubject: Plan\nTo: Avel\n\nOn Sun Bo wrote:\n> x";
-        assert_eq!(strip_quotes(t, true), "FYI\n\n---------- Forwarded message ---------\nFrom: Ana\nDate: Mon\nSubject: Plan\nTo: Avel\n\nOn Sun Bo wrote:");
+        assert_eq!(strip_quotes(t, true), t);
     }
 
     #[test]

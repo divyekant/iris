@@ -10,14 +10,18 @@
 //! Bounds for one message, whatever its size:
 //! - The body text parts give at most [`BODY_LIMIT`] decoded bytes.
 //! - The text of attachments has at most [`ATTACHMENT_TEXT_LIMIT`] bytes.
+//! - An attached message gives at most [`INNER_LIMIT`] decoded bytes to the parser.
+//! - Only a PDF of at most [`PDF_LIMIT`] bytes is decoded for its text.
 //! - The parser reads at most [`MAX_PARTS`] MIME parts, [`MAX_DEPTH`] levels deep.
 //! - The body of an attachment is not decoded to measure its size.
 //!
 //! So the memory use does not grow with the size of attachments, and the
-//! time is linear in the size of the message.
+//! time is linear in the size of the message. The largest use is a PDF of
+//! 10 MiB with one decompressed stream of at most 4 MiB.
 
 mod html;
 mod mime;
+mod pdf;
 mod quote;
 mod url;
 
@@ -35,6 +39,10 @@ const STEP_LIMIT: usize = 512 * 1024;
 pub const MAX_PARTS: usize = 500;
 /// The most levels of nested MIME parts.
 pub const MAX_DEPTH: usize = 8;
+/// The most decoded bytes of an attached message that the parser reads.
+pub const INNER_LIMIT: usize = 2 * 1024 * 1024;
+/// The largest PDF attachment (decoded bytes) that gives text (spec 1 section 9).
+pub const PDF_LIMIT: u64 = 10 * 1024 * 1024;
 /// The most characters of an attachment name.
 const NAME_LIMIT: usize = 255;
 
@@ -62,7 +70,7 @@ pub struct Attachment {
     pub mime_type: String,
     /// The decoded size in bytes.
     pub size: u64,
-    /// The text of a plain-text attachment or an attached message.
+    /// The text of a plain-text attachment, an attached message or a simple PDF.
     pub text: Option<String>,
 }
 
@@ -166,21 +174,26 @@ impl Walker {
             let Some(boundary) = mime::param(&ct.params, "boundary") else {
                 return Vec::new();
             };
-            let mut children = Vec::new();
-            for part in mime::split_multipart(body, &boundary) {
-                children.push(self.entity(part, depth + 1));
-            }
-            return if sub == "alternative" {
+            // One part more than the limit, so that the walker sees the overflow.
+            let max = MAX_PARTS.saturating_sub(self.parts) + 1;
+            let parts = mime::split_multipart(body, &boundary, max);
+            if sub == "alternative" {
                 // RFC 2046: the last version is the richest. A mail client
-                // shows it, so the clean text uses it too.
-                children
-                    .into_iter()
-                    .rev()
-                    .find(|c| !c.is_empty())
-                    .unwrap_or_default()
-            } else {
-                children.into_iter().flatten().collect()
-            };
+                // shows it, so the clean text uses it too. Walk from the end,
+                // so that a version that is not used takes none of the budget.
+                for part in parts.into_iter().rev() {
+                    let bodies = self.entity(part, depth + 1);
+                    if !bodies.is_empty() {
+                        return bodies;
+                    }
+                }
+                return Vec::new();
+            }
+            let mut bodies = Vec::new();
+            for part in parts {
+                bodies.extend(self.entity(part, depth + 1));
+            }
+            return bodies;
         }
         let name =
             mime::param(&disp.params, "filename").or_else(|| mime::param(&ct.params, "name"));
@@ -209,10 +222,12 @@ impl Walker {
         depth: usize,
     ) {
         let size = mime::decoded_len(body, cte);
+        // An attached message adds its own attachments. This one goes before them.
+        let at = self.attachments.len();
         let mut name = name.unwrap_or_default();
         let mut text = None;
         if mime_type == "message/rfc822" && self.attach_left > 0 {
-            let inner = mime::transfer_decode(body, cte);
+            let (inner, _) = decode_capped(body, cte, INNER_LIMIT);
             let (subject, t) = self.message(&inner, depth + 1);
             if name.is_empty() {
                 name = subject;
@@ -221,9 +236,13 @@ impl Walker {
         } else if mime_type == "text/plain" && self.attach_left > 0 {
             let bytes = self.take(body, cte, BudgetKind::Attachment);
             text = Some(mime::decode(&bytes, charset.as_deref()));
+        } else if mime_type == "application/pdf" && self.attach_left > 0 && size <= PDF_LIMIT {
+            // Check the marker first, so that a file that is not a PDF costs no memory.
+            if pdf::is_pdf(&decode_capped(body, cte, 1024).0) {
+                let (bytes, _) = decode_capped(body, cte, PDF_LIMIT as usize);
+                text = pdf::text(&bytes, self.attach_left);
+            }
         }
-        // shortcut: no PDF text yet (spec 1 section 7.2 asks for it). A PDF stays a
-        // name, a type and a size. Add a bounded PDF text step in its own change.
         if let Some(t) = text.as_mut() {
             if t.len() > self.attach_left {
                 t.truncate(floor_char(t, self.attach_left));
@@ -236,12 +255,15 @@ impl Walker {
             .filter(|c| !c.is_control())
             .take(NAME_LIMIT)
             .collect();
-        self.attachments.push(Attachment {
-            name: name.trim().to_string(),
-            mime_type,
-            size,
-            text,
-        });
+        self.attachments.insert(
+            at,
+            Attachment {
+                name: name.trim().to_string(),
+                mime_type,
+                size,
+                text,
+            },
+        );
     }
 
     /// Decode at most the bytes that are left in a budget, and use them.
@@ -250,26 +272,33 @@ impl Walker {
             BudgetKind::Body => self.body_left,
             BudgetKind::Attachment => self.attach_left,
         };
-        // Base64 gives 3 bytes for 4 characters. The other encodings give at
-        // most 1 byte for each input byte.
-        let max_in = if cte == "base64" {
-            left / 3 * 4 + 4
-        } else {
-            left
-        };
-        let input = &body[..body.len().min(max_in)];
-        let mut bytes = mime::transfer_decode(input, cte).into_owned();
-        if input.len() < body.len() || bytes.len() > left {
-            bytes.truncate(left);
-            if kind == BudgetKind::Body {
-                self.cut = true;
-            }
-        }
+        let (bytes, truncated) = decode_capped(body, cte, left);
         if kind == BudgetKind::Body {
+            self.cut |= truncated;
             self.body_left -= bytes.len();
         }
-        bytes
+        bytes.into_owned()
     }
+}
+
+/// Decode at most `cap` bytes of a body. Return the bytes and true if bytes
+/// went out. The input is cut before the decode, so the decode never
+/// allocates more than about `cap` bytes.
+fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow<'a, [u8]>, bool) {
+    // Base64 gives 3 bytes for 4 characters. The other encodings give at
+    // most 1 byte for each input byte.
+    let max_in = if cte == "base64" {
+        cap / 3 * 4 + 4
+    } else {
+        cap
+    };
+    let input = &body[..body.len().min(max_in)];
+    let mut bytes = mime::transfer_decode(input, cte);
+    let truncated = input.len() < body.len() || bytes.len() > cap;
+    if bytes.len() > cap {
+        bytes.to_mut().truncate(cap);
+    }
+    (bytes, truncated)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

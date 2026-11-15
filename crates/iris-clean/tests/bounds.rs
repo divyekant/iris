@@ -68,4 +68,64 @@ fn memory_and_time_stay_bounded() {
     assert!(big_peak < small_peak + 12 * 1024 * 1024);
     // Debug builds are slow. The limit holds in a debug build on a small machine.
     assert!(time < Duration::from_secs(10), "time {time:?}");
+
+    // A big attached message in base64: the parser decodes only its start.
+    let inner = message(100_000, 20_000_000);
+    let mut b64 = String::new();
+    for chunk in inner.chunks(57) {
+        b64.push_str(&b64_line(chunk));
+        b64.push_str("\r\n");
+    }
+    let raw = format!(
+        "Subject: Fwd\r\nContent-Type: multipart/mixed; boundary=o\r\n\r\n--o\r\n\
+         Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n\r\n{b64}--o--\r\n"
+    );
+    drop(inner);
+    let (peak, _, c) = peak_of(raw.as_bytes());
+    eprintln!("peak: {peak} bytes (attached message)");
+    assert_eq!(c.attachments[0].mime_type, "message/rfc822");
+    assert!(peak < 8 * 1024 * 1024, "peak {peak}");
+
+    // A PDF of 9 MiB is decoded for its text. One of 30 MB is not.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let pdf = format!("%PDF-1.4\n{}", "x".repeat(9 * 1024 * 1024));
+    for chunk in pdf.as_bytes().chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, c) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF of 9 MiB)");
+    assert_eq!(c.attachments[0].text, None);
+    assert!(peak < 16 * 1024 * 1024, "peak {peak}");
+
+    // Many small parts: the split stops at the part limit.
+    let mut raw =
+        String::from("Subject: Parts\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n");
+    for _ in 0..200_000 {
+        raw.push_str("--p\r\n\r\nx\r\n");
+    }
+    let (peak, _, c) = peak_of(raw.as_bytes());
+    eprintln!("peak: {peak} bytes (200,000 parts)");
+    assert!(c.cut);
+    assert!(peak < 1024 * 1024, "peak {peak}");
+}
+
+fn b64_line(chunk: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for g in chunk.chunks(3) {
+        let n = (g[0] as u32) << 16
+            | (*g.get(1).unwrap_or(&0) as u32) << 8
+            | *g.get(2).unwrap_or(&0) as u32;
+        for k in 0..4 {
+            if k <= g.len() {
+                out.push(A[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }

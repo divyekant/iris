@@ -156,3 +156,77 @@ fn bytes_that_are_not_mail_do_not_panic() {
         clean(raw);
     }
 }
+
+#[test]
+fn a_big_plain_version_does_not_use_the_budget_of_the_html_version() {
+    let plain = "p ".repeat(1_200_000);
+    let raw = format!(
+        "Subject: Alt\nContent-Type: multipart/alternative; boundary=a\n\n--a\n\
+         Content-Type: text/plain\n\n{plain}\n--a\nContent-Type: text/html\n\n<p>Shown</p>\n--a--\n"
+    );
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.text, "Shown");
+    assert!(!c.cut);
+}
+
+#[test]
+fn a_reply_keeps_the_quotes_of_a_forwarded_message() {
+    let raw = crlf(
+        "Subject: Re: Fwd: Plan
+In-Reply-To: <a@example.org>
+
+See below.
+
+---------- Forwarded message ---------
+From: Ana
+> the old plan
+The new plan.
+",
+    );
+    assert_eq!(
+        clean(&raw).text,
+        "See below.\n\n---------- Forwarded message ---------\nFrom: Ana\n> the old plan\nThe new plan."
+    );
+}
+
+#[test]
+fn quoted_printable_attachment_size_is_decoded() {
+    let raw = crlf(
+        "Subject: QP
+Content-Type: multipart/mixed; boundary=m
+
+--m
+Content-Type: application/octet-stream; name=a.bin
+Content-Transfer-Encoding: quoted-printable
+
+a=3Db
+--m--
+",
+    );
+    assert_eq!(clean(&raw).attachments[0].size, 3);
+}
+
+#[test]
+fn a_simple_pdf_attachment_gives_text() {
+    let page = b"BT /F1 12 Tf 72 720 Td (Invoice 2025-07 for Avel Torun) Tj 0 -14 Td (Total: 120.00 EUR) Tj ET";
+    let data = miniz_oxide::deflate::compress_to_vec_zlib(page, 6);
+    let mut pdf = format!(
+        "%PDF-1.4\n4 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n",
+        data.len()
+    )
+    .into_bytes();
+    pdf.extend(data);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
+    let mut raw = b"Subject: Invoice\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+        Content-Type: text/plain\r\n\r\nSee the PDF.\r\n--m\r\n\
+        Content-Type: application/pdf; name=\"i.pdf\"\r\nContent-Transfer-Encoding: binary\r\n\r\n"
+        .to_vec();
+    raw.extend(&pdf);
+    raw.extend_from_slice(b"\r\n--m--\r\n");
+    let c = clean(&raw);
+    assert_eq!(c.text, "See the PDF.");
+    assert_eq!(
+        c.attachments[0].text.as_deref(),
+        Some("Invoice 2025-07 for Avel Torun\nTotal: 120.00 EUR")
+    );
+}
