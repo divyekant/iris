@@ -263,3 +263,26 @@ fn query_values_are_url_decoded_and_bad_padding_is_refused() {
     );
     assert_eq!(status, 400);
 }
+
+#[test]
+fn a_small_mailbox_has_an_unread_message() {
+    let gmail = FakeGmail::start(Mailbox::new(4, 40)).unwrap();
+    let ids = get(&gmail, "messages?maxResults=40");
+    let unread = ids["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| {
+            let full = get(
+                &gmail,
+                &format!("messages/{}?format=minimal", m["id"].as_str().unwrap()),
+            );
+            full["labelIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l == "UNREAD")
+        })
+        .count();
+    assert_eq!(unread, 1);
+}

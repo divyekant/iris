@@ -24,6 +24,8 @@ const OWNER_NAME: &str = "Avel Torun";
 
 /// 2026-01-01T00:00:00Z. The mailbox ends at this time.
 const END: i64 = 1_767_225_600;
+/// 2024-01-01T00:00:00Z. The mailbox starts at this time.
+const START: i64 = 1_704_067_200;
 const SPAN: i64 = 2 * 365 * 86_400;
 
 /// The five forms of a message.
@@ -327,6 +329,10 @@ mod tests {
         let first = mb.truth(0).date;
         let last = mb.truth(mb.len() - 1).date;
         assert!(last - first > SPAN - 30 * 86_400 && last < END);
+        assert!(
+            first >= START && first < START + 86_400,
+            "first date {first}"
+        );
     }
 
     #[test]
