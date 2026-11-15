@@ -375,9 +375,15 @@ changes a row only to move its state forward.
    each message. After each call succeeds, add its messages to `done`.
 4. If each call succeeds, set the state `applied` and save the history ID.
    Update the mirror with the new labels.
-5. If a call fails, set the state `failed` and save the error. The messages in
-   `done` keep the change, and the undo applies to them. Do not try a send
-   again.
+5. If Gmail refuses a call with a clear error (HTTP 400, 403 or 404), set the
+   state `failed` and save the error. The messages in `done` keep the change,
+   and the undo applies to them.
+6. If the result of a call is not known (a timeout, a lost connection or HTTP
+   5xx), Gmail can have applied the call. Keep the row in the state `writing`,
+   and run the recovery of section 7.3 for the row at once. The recovery
+   compares the state at Gmail with `pre` and `post`, and decides which
+   messages are in `done`. For a `send`, the recovery looks for the sent
+   message as in section 7.3. Do not try a send again.
 
 `batchModify` adds and removes labels, and `messages.trash` on a message in the
 trash changes nothing. For these verbs, a repeat is safe.
@@ -530,6 +536,9 @@ agent that does not work in a folder. The rules for the MCP interface:
 - A policy test for each step of section 6.4, and for each hard limit.
 - A test with a policy file that is not valid: in mode `apply`, each action is
   `in_review`; in mode `observe`, each action stays `proposed`.
+- A test where the fake Gmail server applies a `batchModify` call and then
+  drops the connection. The row stays `writing`, and the recovery puts each
+  message in `done`, so the undo applies to them.
 - A crash test where the person changes a message in `done` before the start:
   recovery does not change it. A crash test where a message has neither the
   `pre` nor the `post` state: recovery lists it and does not call the
