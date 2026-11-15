@@ -40,7 +40,9 @@ Reasons:
 
 Path A does not meet the 10-minute target with certainty. A first-time user
 needs about 10 to 20 minutes (estimate, no source). The guided setup must
-bring the time down. R1-02 must measure the time with a real run on dk's Mac.
+bring the time down. The release target (spec 1, M4) is the first brief in
+10 minutes or less, so the measure ends at the first brief, not at sign-in.
+R1-02 must measure this time with a real run on dk's Mac.
 
 ## Paths
 
@@ -65,6 +67,21 @@ Iris uses the loopback redirect (`http://127.0.0.1:<port>`) with PKCE (Proof
 Key for Code Exchange). Google recommends this flow for desktop programs and
 calls the desktop client secret not confidential [7].
 
+Sign-in on a remote Linux server: the loopback redirect goes to the machine
+that runs the browser. If the browser runs on a laptop and the engine runs on
+a server, the server does not receive the authorization code. Iris gives two
+ways for this case:
+
+1. Copy the redirect address. After consent, the laptop browser shows an
+   error page for `http://127.0.0.1:<port>/...`. The user copies the full
+   address from the address bar and gives it to the engine in the web client.
+   The engine checks the `state` value and exchanges the code with the PKCE
+   verifier. This step adds about 1 minute (estimate). Evidence: pending.
+   R1-02 must test that Google accepts the exchange from the server.
+2. Use an SSH tunnel: `ssh -L <port>:127.0.0.1:<port> <server>`. Then the
+   laptop browser reaches the engine directly. This needs SSH access and
+   about 1 minute more (estimate).
+
 | Item | Value |
 |---|---|
 | Setup time | About 10 to 20 minutes for the first time (estimate) |
@@ -72,6 +89,7 @@ calls the desktop client secret not confidential [7].
 | Google review | None, under the personal-use exemption [3] |
 | Scope | `gmail.readonly`, later `gmail.modify` |
 | Works on | Personal Gmail accounts. Workspace accounts if the admin permits the app. |
+| Remote server | Needs one extra step: copy the redirect address, or an SSH tunnel |
 
 Limits:
 
@@ -150,7 +168,7 @@ Limits:
   available code repositories" [10]. Anyone can then use the Iris app
   identity.
 - The loopback redirect works only when the browser and the engine are on the
-  same machine. A Linux server needs a copy-and-paste step or a tunnel.
+  same machine. A remote server needs the extra step of path A.
 - The project is responsible to Google for each install, and the project pays
   each year. MailMate stopped the yearly assessment in 2025 [21].
 
@@ -227,8 +245,8 @@ these paths.
 
 | Path | User setup | Cost | Read-only scope | Linux server | Spec 1 change | Main risk |
 |---|---|---|---|---|---|---|
-| A. Own client | 10 to 20 min (estimate) | None | Yes | Yes | None | Google rule changes, "unsafe" screen |
-| B. Verified app | About 2 min | USD 540+ each year | Yes | Needs a redirect step | None | Weeks of review, yearly cost, public secret |
+| A. Own client | 10 to 20 min (estimate) | None | Yes | Extra redirect step | None | Google rule changes, "unsafe" screen |
+| B. Verified app | About 2 min | USD 540+ each year | Yes | Extra redirect step | None | Weeks of review, yearly cost, public secret |
 | C. IMAP app password | 2 to 5 min | None | No | Yes | New sync design | Full-access credential, removal by Google |
 | D. IMAP OAuth | As A or B | As A or B | No | Yes | New sync design | Limits of A or B, plus C |
 | E. macOS Mail | About 5 min | None | Yes | No | New source | Mac only, format changes |
@@ -239,8 +257,12 @@ these paths.
   file of the user. Iris does not ship a client ID.
 - R1-02 (sign-in) builds the guided setup and measures the setup time.
 - The Iris documentation needs a page for the home page URL and a privacy
-  policy page for path A. Iris collects no data, so the privacy policy is
-  short.
+  policy page for path A. The privacy policy must keep two cases apart:
+  - The Iris install of the user stores a local copy of each message,
+    including the raw mail (spec 1). This data stays on the machine of the
+    user, under the control of the user.
+  - The Iris project receives no mail data and no usage data from an
+    install.
 - Path B stays open for a later release, when the project has users and a
   budget. Path C stays open as a second provider.
 
@@ -250,8 +272,11 @@ these paths.
    `gmail.readonly` still work after 8 days?
 2. Which home page URL, privacy policy URL and authorized domain does
    "Publish app" accept?
-3. How long does the guided setup take on dk's Mac, from start to the first
-   message list?
+3. How long does it take on dk's Mac from the start of setup to the first
+   brief (spec 1, M4)? Also record the time to the end of sign-in as a
+   separate measure.
+4. Does the copy of the redirect address work for an engine on a remote
+   Linux server?
 
 ## Sources
 
