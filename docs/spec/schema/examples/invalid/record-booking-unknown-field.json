@@ -1,0 +1,33 @@
+{
+  "model": "iris/0",
+  "id": "r-1202",
+  "form": "record",
+  "status": "corrected",
+  "title": "Flight to Tokyo",
+  "type": "booking",
+  "issuer": {
+    "kind": "sender",
+    "sender": "p-33",
+    "address": "trips@air.example"
+  },
+  "fields": {
+    "kind": "flight",
+    "reference": "QX7K2P",
+    "start": "2026-12-10T11:05:00+01:00",
+    "end": "2026-12-11T07:40:00+09:00",
+    "location": "Tokyo",
+    "seat": "12A"
+  },
+  "sources": [
+    {
+      "message": "m-53500",
+      "thread": "t-8600",
+      "role": "origin"
+    }
+  ],
+  "created": "2026-11-05T12:00:00Z",
+  "updated": "2026-11-06T08:00:00Z",
+  "derived": {
+    "by": "person"
+  }
+}

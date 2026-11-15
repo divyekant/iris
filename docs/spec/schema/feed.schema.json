@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:feed",
+  "title": "Iris open model 0 (draft): feed item",
+  "description": "Draft. An item to read when you choose. See docs/spec/01-mirror-store-forms.md, section 6.5.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["publisher", "published"],
+  "allOf": [{ "$ref": "urn:iris:model:0:common#/$defs/item" }],
+  "properties": {
+    "id": { "pattern": "^f-[1-9][0-9]*$" },
+    "form": { "const": "feed" },
+    "status": { "enum": ["new", "read", "skipped", "gone"] },
+    "publisher": { "$ref": "urn:iris:model:0:common#/$defs/party" },
+    "list": { "type": "string", "maxLength": 500 },
+    "published": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+    "summary": { "type": "string", "maxLength": 500 }
+  }
+}

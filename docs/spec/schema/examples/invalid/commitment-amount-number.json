@@ -1,0 +1,40 @@
+{
+  "model": "iris/0",
+  "id": "c-312",
+  "form": "commitment",
+  "status": "open",
+  "title": "Pay invoice",
+  "direction": "you_owe",
+  "kind": "payment",
+  "owner": {
+    "kind": "self"
+  },
+  "counterparty": {
+    "kind": "sender",
+    "sender": "p-7",
+    "name": "Example Cloud Billing",
+    "address": "billing@cloud.example"
+  },
+  "amount": {
+    "value": 312.77,
+    "currency": "USD"
+  },
+  "due": {
+    "date": "2026-12-03",
+    "strict": true
+  },
+  "sources": [
+    {
+      "message": "m-55300",
+      "thread": "t-8900",
+      "role": "origin"
+    }
+  ],
+  "created": "2026-11-16T07:00:00Z",
+  "updated": "2026-11-16T07:00:00Z",
+  "derived": {
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "understand/0.1"
+  }
+}

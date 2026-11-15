@@ -1,0 +1,45 @@
+{
+  "model": "iris/0",
+  "id": "r-1201",
+  "form": "record",
+  "status": "kept",
+  "title": "Receipt: Example Books, 24.50 EUR",
+  "type": "receipt",
+  "issuer": {
+    "kind": "sender",
+    "sender": "p-31",
+    "address": "orders@books.example"
+  },
+  "fields": {
+    "amount": {
+      "value": "24.50",
+      "currency": "EUR"
+    },
+    "date": "2026-11-02",
+    "order": "EB-20931",
+    "items": [
+      {
+        "name": "A book about mail",
+        "quantity": 1,
+        "amount": {
+          "value": "24.50",
+          "currency": "EUR"
+        }
+      }
+    ]
+  },
+  "sources": [
+    {
+      "message": "m-53010",
+      "thread": "t-8500",
+      "role": "origin"
+    }
+  ],
+  "created": "2026-11-02T10:00:00Z",
+  "updated": "2026-11-02T10:00:00Z",
+  "derived": {
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "understand/0.1"
+  }
+}

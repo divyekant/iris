@@ -1,0 +1,15 @@
+{
+  "model": "iris/0",
+  "id": "f-5001",
+  "form": "feed",
+  "status": "new",
+  "title": "This week in mail standards",
+  "publisher": { "kind": "sender", "sender": "p-50", "name": "Mail Weekly", "address": "news@weekly.example" },
+  "list": "<weekly.news.example>",
+  "published": "2026-11-15T06:00:00Z",
+  "sources": [{ "message": "m-55100", "thread": "t-8800", "role": "origin" }],
+  "created": "2026-11-15T06:01:00Z",
+  "updated": "2026-11-15T06:01:00Z",
+  "derived": { "by": "rule", "rule": "list-id" },
+  "attention": { "state": "bundled", "rule": 3, "reason": "Feed items are bundled by rule 3." }
+}

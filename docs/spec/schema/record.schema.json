@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:record",
+  "title": "Iris open model 0 (draft): record",
+  "description": "Draft. A fact that you keep and can query. See docs/spec/01-mirror-store-forms.md, section 6.4.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["type", "issuer", "fields"],
+  "properties": {
+    "id": { "pattern": "^r-[1-9][0-9]*$" },
+    "form": { "const": "record" },
+    "status": { "enum": ["kept", "corrected", "gone"] },
+    "type": { "enum": ["receipt", "booking", "statement", "ticket", "contract", "event", "other"] },
+    "issuer": { "$ref": "urn:iris:model:0:common#/$defs/party" },
+    "fields": { "type": "object" }
+  },
+  "allOf": [
+    { "$ref": "urn:iris:model:0:common#/$defs/item" },
+    { "if": { "properties": { "type": { "const": "receipt" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/receipt" } } } },
+    { "if": { "properties": { "type": { "const": "booking" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/booking" } } } },
+    { "if": { "properties": { "type": { "const": "statement" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/statement" } } } },
+    { "if": { "properties": { "type": { "const": "ticket" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/ticket" } } } },
+    { "if": { "properties": { "type": { "const": "contract" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/contract" } } } },
+    { "if": { "properties": { "type": { "const": "event" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/event" } } } },
+    { "if": { "properties": { "type": { "const": "other" } } }, "then": { "properties": { "fields": { "$ref": "#/$defs/other" } } } }
+  ],
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "receipt": {
+      "type": "object",
+      "required": ["vendor", "amount", "date"],
+      "additionalProperties": false,
+      "properties": {
+        "vendor": { "$ref": "#/$defs/text" },
+        "amount": { "$ref": "urn:iris:model:0:common#/$defs/money" },
+        "date": { "$ref": "urn:iris:model:0:common#/$defs/date" },
+        "order": { "$ref": "#/$defs/text" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "$ref": "#/$defs/text" },
+              "quantity": { "type": "integer", "minimum": 1 },
+              "amount": { "$ref": "urn:iris:model:0:common#/$defs/money" }
+            }
+          }
+        }
+      }
+    },
+    "booking": {
+      "type": "object",
+      "required": ["kind", "reference", "start"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["flight", "hotel", "train", "car", "restaurant", "other"] },
+        "reference": { "$ref": "#/$defs/text" },
+        "start": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+        "end": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+        "location": { "$ref": "#/$defs/text" }
+      }
+    },
+    "statement": {
+      "type": "object",
+      "required": ["issuer_name", "period_start", "period_end"],
+      "additionalProperties": false,
+      "properties": {
+        "issuer_name": { "$ref": "#/$defs/text" },
+        "period_start": { "$ref": "urn:iris:model:0:common#/$defs/date" },
+        "period_end": { "$ref": "urn:iris:model:0:common#/$defs/date" },
+        "balance": { "$ref": "urn:iris:model:0:common#/$defs/money" },
+        "due_date": { "$ref": "urn:iris:model:0:common#/$defs/date" }
+      }
+    },
+    "ticket": {
+      "type": "object",
+      "required": ["event", "start"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "$ref": "#/$defs/text" },
+        "start": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+        "venue": { "$ref": "#/$defs/text" },
+        "seat": { "$ref": "#/$defs/text" }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/text" },
+        "parties": { "type": "array", "items": { "$ref": "urn:iris:model:0:common#/$defs/party" } },
+        "effective": { "$ref": "urn:iris:model:0:common#/$defs/date" },
+        "expires": { "$ref": "urn:iris:model:0:common#/$defs/date" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["name", "start"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/text" },
+        "start": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+        "end": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+        "location": { "$ref": "#/$defs/text" }
+      }
+    },
+    "other": {
+      "type": "object",
+      "required": ["summary"],
+      "additionalProperties": false,
+      "properties": { "summary": { "$ref": "#/$defs/text" } }
+    }
+  }
+}
