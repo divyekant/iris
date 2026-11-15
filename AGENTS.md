@@ -2,7 +2,7 @@
 
 These rules apply to every agent that works in this repository (Claude, Codex, and
 others). `CLAUDE.md` imports this file. The process comes from the projectstarter
-kit (projectstarter 0.4.0). Product rules are at the end, in [Product rules](#product-rules).
+kit (projectstarter 0.5.0). Product rules are at the end, in [Product rules](#product-rules).
 
 Write all documentation, PR text and code comments as `docs/writing-style.md` says
 (Simplified Technical English).
@@ -52,8 +52,18 @@ To add a tool, a test command or a new folder, change `starter.json`.
 2. Start the branch from `develop`. If the branch has no commits of its own:
    `git fetch origin develop` and `git checkout -B <branch> origin/develop`.
 3. Write a test that fails without the change. Then write the change. If no test
-   can apply (copy, docs), say why in the PR.
+   can apply (copy, docs), say why in the PR. If the change has a spec, do the
+   spec checks of `docs/PLANNING.md` first. If the code goes another way than
+   the spec (drift), fix the spec in the same PR.
 4. Commit in logical parts. Put a dependency change in its own commit.
+   Self-review before the PR:
+   - For each new test: what would make it go red? If nothing in the change can,
+     it proves nothing.
+   - For each new guard or limit: what bypasses it? Find each caller that can
+     reach the same place, and say if a test covers it.
+   - For each claim in the PR, the spec or the docs: does the same diff refute
+     it?
+   - When you clear a risk, write the case that you checked, not "checked".
 5. Run local CI: `scripts/local-ci/run.sh`. It tests each area that the branch
    changes and pushes an empty proof commit. If it fails, fix the cause, commit
    and run it again. Do not open the PR before the proof commit is pushed.
