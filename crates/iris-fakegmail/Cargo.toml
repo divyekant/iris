@@ -1,0 +1,16 @@
+[package]
+name = "iris-fakegmail"
+description = "A fake Gmail API v1 server for Iris tests, on top of the synthetic mailbox. In process, no network."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+tokio = { version = "1", default-features = false, features = ["rt", "net"] }
