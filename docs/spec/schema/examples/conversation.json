@@ -6,20 +6,46 @@
   "title": "Dinner on Thursday?",
   "thread": "t-9001",
   "participants": [
-    { "kind": "self" },
-    { "kind": "sender", "sender": "p-23", "name": "Sam Ortiz", "address": "sam@fabrikam.example" }
+    {
+      "kind": "self"
+    },
+    {
+      "kind": "sender",
+      "sender": "p-23",
+      "name": "Sam Ortiz",
+      "address": "sam@fabrikam.example"
+    }
   ],
   "role": "direct",
   "latest": {
     "at": "2026-11-16T08:41:00Z",
-    "from": { "kind": "sender", "sender": "p-23", "name": "Sam Ortiz" },
+    "from": {
+      "kind": "sender",
+      "sender": "p-23",
+      "name": "Sam Ortiz"
+    },
     "snippet": "Are you free for dinner on Thursday?"
   },
   "messages": 3,
   "new": 1,
   "your_turn": true,
-  "sources": [{ "message": "m-55400", "thread": "t-9001", "role": "update" }],
+  "sources": [
+    {
+      "message": "m-55380",
+      "thread": "t-9001",
+      "role": "origin",
+      "quote": "Dinner on Thursday?"
+    },
+    {
+      "message": "m-55400",
+      "thread": "t-9001",
+      "role": "update"
+    }
+  ],
   "created": "2026-11-12T19:00:00Z",
   "updated": "2026-11-16T08:41:00Z",
-  "derived": { "by": "rule", "rule": "thread" }
+  "derived": {
+    "by": "rule",
+    "rule": "thread"
+  }
 }

@@ -28,6 +28,12 @@
   "your_turn": true,
   "sources": [
     {
+      "message": "m-55380",
+      "thread": "t-9001",
+      "role": "origin",
+      "quote": "Dinner on Thursday?"
+    },
+    {
       "message": "m-55400",
       "thread": "t-9001",
       "role": "update"
