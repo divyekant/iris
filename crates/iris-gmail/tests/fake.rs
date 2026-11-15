@@ -195,6 +195,28 @@ fn a_write_does_not_try_again_on_5xx() {
 }
 
 #[test]
+fn a_send_with_a_bad_answer_has_an_unknown_result() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = s.read(&mut buf);
+        s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nxyz")
+            .unwrap();
+    });
+    let gmail = Gmail::new(Config {
+        base_url: format!("http://{addr}/gmail/v1"),
+        ..Config::default()
+    });
+    let e = gmail
+        .send(TOKEN, b"Subject: a\r\n\r\nb\r\n", None)
+        .unwrap_err();
+    assert!(e.write_result_unknown(), "{e}");
+}
+
+#[test]
 fn errors_that_do_not_try_again() {
     let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
     let gmail = client(&fake);
