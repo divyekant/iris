@@ -17,8 +17,16 @@
 
 ## Design
 
-<!-- How it works: the flow, the data, the screens, the API. Give the options that
-you did not choose, and why, in one line each. -->
+<!-- How it works: the flow, the data, the screens, the API. -->
+
+## Options not chosen
+
+<!-- Each option that you did not choose, and the reason, in one line each. -->
+
+## Impact
+
+<!-- The files and the parts of the product that the change touches, and each
+change to a data format, an API or a screen. -->
 
 ## Assumptions
 
@@ -37,6 +45,20 @@ lost response or a crash), and on retry. Write "None" if there are none. -->
 <!-- Questions that the build can answer without a change to the design. The
 review does not block on them. -->
 
+## Acceptance criteria
+
+<!-- Each result that the owner can check. For each one, say what would make it
+go red. A criterion that nothing can make go red is not a criterion. -->
+
+## Verify
+
+<!-- The exact commands that prove the acceptance criteria. -->
+
+## Rollout
+
+<!-- The order of the steps: flags, migrations, config, docs. Write "None" if the
+change needs no rollout step. -->
+
 ## Risks
 
 <!-- What can go wrong, and how to undo the change (rollback). -->
@@ -49,3 +71,15 @@ review does not block on them. -->
 
 ## Test plan
 
+## Spec checks
+
+<!-- Answer each check before the spec goes to review (docs/PLANNING.md, "Spec checks").
+- [ ] Each assumption holds with a second caller, worker or tab.
+- [ ] Each assumption holds when an outcome is unknown (a time-out, a lost response, a crash).
+- [ ] Each dropped mechanism was dropped for a reason that makes it unnecessary.
+- [ ] Each "idempotent" step is not check-then-act.
+- [ ] Each property that the design depends on has a test or a command that shows it.
+- [ ] The spec addresses the hardest problem of the change.
+- [ ] Each acceptance criterion can go red.
+- [ ] The assumptions do not contradict each other.
+-->

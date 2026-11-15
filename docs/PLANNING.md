@@ -82,6 +82,50 @@ Copy `docs/templates/spec.md`. A copy edit, a one-line fix or a format change
 needs no spec. Give each fact that you did not check in the `## Assumptions`
 section.
 
+## Spec checks
+
+Do these checks before the spec goes to review. Each check finds a defect class
+that costs many review rounds when the review finds it.
+
+1. For each assumption, ask three questions:
+   - Does it still hold when a second caller, worker or tab exists?
+   - Does it still hold when an outcome is unknown: a time-out, a response that
+     cannot be read, or a crash in the middle of a step?
+   - If the design drops a mechanism, does the reason make the mechanism
+     unnecessary? A reason that is only near the need leaves the need.
+2. Find each step that the spec calls idempotent. If the step reads, then
+   decides, then writes, it is check-then-act. Two callers can both pass the check.
+3. For each property that the design depends on, name the test or the command
+   that shows it. A property with only an argument is not settled.
+4. Name the hardest problem of the change. Make sure that the design solves it
+   and does not go around it.
+5. For each acceptance criterion, ask what would make it go red. If nothing in
+   the change can make it go red, it is documentation. Change it or remove it.
+6. Read `## Assumptions` as one set. Two entries about the same property must
+   agree.
+7. Give each fact one home. If a fact is in two places, one place links to the
+   other.
+
+A second check by another model or person is optional. Use it for a risky
+design. The checker reads the spec and the code or data that each assumption is
+about. The checker gives one of two verdicts: approved, or needs changes. A
+caveat on an assumption is "needs changes". The author does not check their own
+spec.
+
+## Spec and code
+
+When a spec exists, the code review reads the spec with the diff, and reports
+each mismatch as one of these:
+
+| Kind | Meaning | Fix |
+|---|---|---|
+| Violation | The code breaks a rule of the spec. The spec is right. | Fix the code. |
+| Drift | The code went another way on purpose, and the spec does not say so. The code is right. | Fix the spec in the same PR. |
+| Defect | The code is wrong, whatever the spec says. | Fix the code. |
+
+A spec that describes an old design is worse than no spec. The next builder
+reads it as instructions.
+
 ## UI changes: before and after
 
 For each change to a screen, the owner picks the result from screenshots before
