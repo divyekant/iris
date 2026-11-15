@@ -34,21 +34,29 @@ serve an empty page. Release 1 (See) is the first release that reads a mailbox.
 
 ## Build
 
-You need the Rust toolchain in `rust-toolchain.toml` and a C compiler (SQLite is
-built from source). Iris builds on macOS and Linux.
+You need these tools. Iris builds on macOS and Linux.
 
-1. Build the program:
+- The Rust toolchain in `rust-toolchain.toml`.
+- A C compiler. The build compiles SQLite from source.
+- Node.js, to build the web client. Node is a build tool only.
+
+1. Build the client, then the program. Run this command from the root of the
+   repository:
 
    ```bash
-   cargo build --release
+   (cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile && npm run build) && IRIS_REQUIRE_CLIENT=1 cargo build --release
    ```
 
-2. Run it:
+2. Run the program:
 
    ```bash
    target/release/iris --version
    target/release/iris serve
    ```
+
+A plain `cargo build --release` also works, but the program then has no web
+client. It serves a fallback page that tells you to build the client.
+[client/README.md](client/README.md) gives the details of the client build.
 
 `iris serve` listens on `127.0.0.1:4800`. Only this machine can connect to it.
 
