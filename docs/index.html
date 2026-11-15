@@ -13,8 +13,10 @@
 (Apache-2.0). Each person runs an own copy of Iris on an own computer or
 server.</p>
 <p>Iris reads Gmail with the Gmail API. Release 1 asks Google only for read
-access (<code>gmail.readonly</code>). Iris keeps a copy of the mail on the
-machine of the person, and nowhere else.</p>
+access (<code>gmail.readonly</code>). Iris keeps its copy of the mail on the
+machine of the person. If the person selects a hosted model, Iris sends mail
+data to that model provider, and the provider can keep it. See the
+<a href="privacy.html">privacy policy</a>.</p>
 <h2>Google sign-in</h2>
 <p>Iris has no shared Google app. Each person makes an own Google OAuth client
 and gives its file to the own Iris install. Google then shows the name of the
