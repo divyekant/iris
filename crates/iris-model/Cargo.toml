@@ -1,0 +1,17 @@
+[package]
+name = "iris-model"
+description = "The model provider layer of Iris: one call that sends mail text as data to a hosted or a local model and gets JSON back."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
+# Sync client with rustls (ring). No OpenSSL, no async runtime.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net"] }

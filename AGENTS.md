@@ -199,6 +199,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-web/` | Serves the web client. It embeds the build of `client/`. | `engine` |
 | `crates/iris-synth/` | Test data: a deterministic synthetic mailbox of all five forms, with hostile samples. | `engine` |
 | `crates/iris-fakegmail/` | Test server: a fake Gmail API on top of the synthetic mailbox. No network. | `engine` |
+| `crates/iris-model/` | The model provider layer: one call sends mail text as data to a hosted model (Anthropic) or a local OpenAI-compatible server, and gives JSON, tokens and cost. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
