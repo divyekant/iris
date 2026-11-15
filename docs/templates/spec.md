@@ -1,7 +1,7 @@
 # Spec: <name>
 
 - Date: <YYYY-MM-DD>
-- Card: C-<number>
+- Card: <ID of the Iris tracker card, for example R0-09>
 - Status: Draft | Agreed | Built | Replaced by <link>
 
 ## Problem
@@ -44,7 +44,7 @@ review does not block on them. -->
 ## Plan
 
 <!-- One line for each card, in the order of the work. Each card gets one PR.
-1. C-<number>: <what it does>
+1. <card ID, for example R0-09>: <what it does>
 -->
 
 ## Test plan

@@ -1,7 +1,7 @@
 # Design brief: <name>
 
 - Date: <YYYY-MM-DD>
-- Card: C-<number>
+- Card: <ID of the Iris tracker card, for example R0-09>
 - For: Claude Design (or a person)
 - Screens: <for example, mobile 375 px and desktop 1280 px>
 - Deliverable: <for example, every screen and state of section 4, at both sizes>

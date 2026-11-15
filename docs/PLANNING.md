@@ -3,12 +3,6 @@
 All products of the projectstarter kit use this process. `AGENTS.md` holds the
 short rules. This file gives the detail.
 
-Iris uses its own board, the "Iris tracker" artifact (`board` in `starter.json`).
-Its cards have `title`, `release`, `part`, `status` (`todo`, `doing`, `blocked`,
-`done`), `doneWhen` and `dependsOn`. Card IDs are like `R0-09`. Where this file
-names a field or a column of the kit board that the Iris tracker does not have,
-follow `AGENTS.md`, "Plan and track".
-
 ## The parts
 
 | Part | Where | Use |
@@ -28,36 +22,37 @@ Issues or another tool as a tracker. Use the board.
 
 ## The board
 
-The board is `docs/board/board.html`, published as a claude.ai artifact with
-the capabilities `{"db": {}, "user": {}}`. The owner drags cards and adds cards.
-Agents add and move cards with the `ArtifactData` tool.
+Iris uses its own board: the "Iris tracker" artifact. Its URL is `board` in
+`starter.json`. It is not the kit board (`docs/board/board.html`), and Iris does
+not publish the kit board. The owner moves cards on the page. Agents add and
+move cards with the `ArtifactData` tool.
 
-Each card is one document in the collection `cards`. The document ID is
-`C-<number>`. The fields:
+Each card is one document in the collection `items`. The document ID is the
+release and a number, for example `R0-09`. The fields:
 
 | Field | Value |
 |---|---|
 | `title` | The work, in a few words |
-| `type` | `feature`, `bug`, `design` or `chore` |
-| `priority` | `P1` (now), `P2` (next) or `P3` (later) |
-| `status` | The column: `backlog`, `design`, `ready`, `building`, `review` or `done` |
-| `needsYou` | What the owner must do, in one sentence. An empty string when nothing. |
-| `doneWhen` | The result that the owner can see. One line for each check. |
-| `links` | An object with `spec`, `compare`, `thread` and `pr`. Each value is an `https://` URL or is missing. |
-| `order` | The card number. It sorts cards of the same priority. |
+| `release` | The release number, 0 to 6 (see the manifesto, "The path") |
+| `part` | `Project`, `Engine`, `Model`, `Safety`, `Client`, `Agents` or `Open model` |
+| `status` | The column: `todo`, `doing`, `blocked` or `done` |
+| `doneWhen` | The condition that completes the card |
+| `dependsOn` | A list of card IDs that must be `done` first |
+| `order` | A number that sorts the cards |
 | `updatedAt` | The time of the change, in milliseconds since 1970 |
+
+The collection `releases` holds one document for each release, with `n`,
+`name`, `goal` and `exit`.
 
 Rules for agents:
 
-1. Before you add a card, list the collection `cards`. Use the next free number.
-2. To change a card, use `update` with only the fields that change. Always set
-   `updatedAt`.
+1. Before you add a card, list the collection `items`. Use the next free
+   number of the release.
+2. To change a card, use `update` with only the fields that change, with the
+   version that you read (`if_version`). Always set `updatedAt`.
 3. Change only the card of your own work.
-4. When you need the owner, set `needsYou`. When the owner answers, set it to an
-   empty string.
-5. If `board` in `starter.json` is empty, publish `docs/board/board.html` as a
-   new artifact with the capabilities above. Put the URL in `starter.json` in
-   the PR of your change.
+4. When you need the owner, move the card to `blocked` and tell the owner in the
+   thread. When the owner answers, move it back to `doing`.
 
 Only an agent with the `ArtifactData` tool (a Claude session) can change the
 board. Codex reviews the code and does not change the board.
@@ -66,15 +61,13 @@ board. Codex reviews the code and does not change the board.
 
 | Column | The card is here when | The next step |
 |---|---|---|
-| Backlog | Someone asked for it | Give it a priority and a `doneWhen` |
-| Design | It needs a spec, a design brief or a choice from the owner | The owner agrees the spec or picks an option |
-| Ready | It has `doneWhen` and a test plan, and each choice is made | A thread starts it |
-| Building | A thread works on it | The thread opens a PR |
-| Review | The PR is open and in the review loop | The review is clean and the PR merges |
-| Done | The PR merged into `develop` | The release PR takes it to `main` |
+| `todo` | It is planned, or someone asked for it | Its `dependsOn` cards are `done`, and a thread starts it |
+| `doing` | A thread works on it, and its PR can be open | The PR merges |
+| `blocked` | It waits for the owner or for another card | The owner answers, or the other card is `done` |
+| `done` | The PR merged into `develop` | The release PR takes it to `main` |
 
-Put the card ID in the PR summary (`Card: C-<number>`), and put the PR URL in
-`links.pr`. When the PR merges, move the card to `done`.
+Put the card ID in the PR summary (`Card: R0-09`). When the PR merges, move the
+card to `done`.
 
 ## When to write a spec
 
@@ -106,15 +99,14 @@ the merge. Do these steps:
 5. Publish the page as a new artifact with the capabilities
    `{"db": {}, "user": {}}`. Publish the screenshots in `files`, at the paths of
    the data block.
-6. Put the URL in `links.compare` of the card. Move the card to `design` and set
-   `needsYou` to "Pick an option".
+6. Move the card to `blocked`, until the owner picks.
 7. Tell the owner. In a project thread, post the link and a decision card with
    the same options, so that the answer wakes the thread.
 8. Read the answer: `ArtifactData`, collection `choice`, document `answer`. It
    has `option`, `label` and `note`. If the decision card and the page do not
    agree, use the newer answer and say so.
 9. Build the chosen option. Do the changes of the note. Delete the code of the
-   other options. Clear `needsYou`.
+   other options. Move the card back to `doing`.
 10. In the PR, link the artifact and name the chosen option in `## Summary`.
 
 A change that the owner cannot see on a screen (a refactor, a test, a style
