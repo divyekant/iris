@@ -211,6 +211,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-fakegmail/` | Test server: a fake Gmail API on top of the synthetic mailbox. No network. | `engine` |
 | `crates/iris-gmail/` | A thin Gmail API v1 client for the mirror: paging, backoff, quota and a streamed raw fetch. | `engine` |
 | `crates/iris-model/` | The model provider layer: one call sends mail text as data to a hosted model (Anthropic) or a local OpenAI-compatible server, and gives JSON, tokens and cost. | `engine` |
+| `crates/iris-auth/` | Google sign-in: the client file of the user, the loopback redirect with PKCE, the token exchange and the token refresh. The access token stays in memory. | `engine` |
 | `crates/iris-eval/` | Test set: scores an understanding function against the truth of the synthetic mailbox (precision and recall). | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
