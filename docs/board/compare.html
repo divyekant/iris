@@ -109,7 +109,7 @@
   try { data = JSON.parse(document.getElementById('compare-data').textContent); } catch (e) { data = { options: [] }; }
   var options = Array.isArray(data.options) ? data.options : [];
   var sizes = Array.isArray(data.sizes) && data.sizes.length ? data.sizes : ['phone'];
-  var state = { size: sizes[0], answer: null, saving: false, canWrite: true };
+  var state = { size: sizes[0], answer: null, saving: false, canWrite: true, error: '' };
   var db = null;
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, attrs, kids) {
@@ -163,17 +163,18 @@
       ]));
     });
     var st = $('status');
-    if (state.answer) { st.className = 'status chosen'; st.textContent = 'You chose ' + label(state.answer.option) + '. The agent builds it next. You can change the choice.'; }
+    if (state.error) { st.className = 'status'; st.textContent = state.error; }
+    else if (state.answer) { st.className = 'status chosen'; st.textContent = 'You chose ' + label(state.answer.option) + '. The agent builds it next. You can change the choice.'; }
     else if (!db) { st.className = 'status'; st.textContent = 'Open this page in claude.ai to choose.'; }
     else { st.className = 'status'; st.textContent = 'Pick one option.'; }
   }
 
   function choose(key) {
     if (!db || state.saving) return;
-    state.saving = true; render();
+    state.saving = true; state.error = ''; render();
     var answer = { option: key, label: label(key), note: $('noteText').value.trim(), card: data.card || '', at: Date.now() };
     db.doc('choice/answer').set(answer).then(function () { state.saving = false; state.answer = answer; render(); },
-      function () { state.saving = false; state.canWrite = false; $('status').textContent = 'The choice did not save. Tell the agent in the thread.'; render(); });
+      function () { state.saving = false; state.error = 'The choice did not save. Choose again, or tell the agent in the thread which option you want.'; render(); });
   }
 
   render();
