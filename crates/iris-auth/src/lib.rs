@@ -107,6 +107,8 @@ pub enum Error {
     },
     /// The token endpoint gave an answer that is not a token answer.
     BadAnswer,
+    /// The random source of the system failed.
+    Random,
     Transport(String),
     Io(std::io::Error),
 }
@@ -130,6 +132,7 @@ impl fmt::Display for Error {
             Error::BadAnswer => {
                 f.write_str("the token endpoint gave an answer that Iris cannot read")
             }
+            Error::Random => f.write_str("the random source of the system failed"),
             Error::Transport(e) => write!(f, "the token endpoint is not reachable: {e}"),
             Error::Io(e) => write!(f, "loopback listener: {e}"),
         }
@@ -236,8 +239,8 @@ impl Client {
             client: self.clone(),
             listener,
             redirect_uri: format!("http://127.0.0.1:{port}{CALLBACK}"),
-            state: random_text(),
-            verifier: Secret(random_text()),
+            state: random_text()?,
+            verifier: Secret(random_text()?),
         })
     }
 
@@ -252,7 +255,7 @@ impl Client {
                 ("client_secret", self.secret.expose()),
             ],
         )?;
-        check_scope(&answer)?;
+        check_scope(&answer, true)?;
         answer.access()
     }
 
@@ -312,19 +315,21 @@ impl TokenAnswer {
 }
 
 /// With granular consent the user can clear the Gmail box, so check the grant.
-fn check_scope(answer: &TokenAnswer) -> Result<()> {
+/// A code exchange must name the scope. A refresh can leave it out when the
+/// grant did not change.
+fn check_scope(answer: &TokenAnswer, refresh: bool) -> Result<()> {
     match &answer.scope {
         Some(s) if s.split(' ').any(|x| x == SCOPE) => Ok(()),
-        // Google always names the granted scopes, so no scope is no grant.
+        None if refresh => Ok(()),
         _ => Err(Error::ScopeMissing),
     }
 }
 
 /// 32 random bytes in base64url: 43 characters, valid as a PKCE verifier.
-fn random_text() -> String {
+fn random_text() -> Result<String> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).expect("the system random source failed");
-    URL_SAFE_NO_PAD.encode(bytes)
+    getrandom::fill(&mut bytes).map_err(|_| Error::Random)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// One sign-in that waits for the redirect from Google.
@@ -500,7 +505,7 @@ impl SignIn {
                 ("code_verifier", self.verifier.expose()),
             ],
         )?;
-        check_scope(&answer)?;
+        check_scope(&answer, false)?;
         Ok(Tokens {
             access: answer.access()?,
             refresh: answer.refresh_token.clone().ok_or(Error::NoRefreshToken)?,
