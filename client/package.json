@@ -1,10 +1,21 @@
 {
   "name": "iris-client",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.28.0",
   "scripts": {
-    "lint": "node --check src/index.mjs",
-    "test": "node --test \"test/**/*.test.mjs\""
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "vite build && node --test \"test/**/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tsconfig/svelte": "5.0.9",
+    "svelte": "5.57.3",
+    "svelte-check": "4.7.8",
+    "typescript": "6.0.3",
+    "vite": "8.3.8"
   }
 }
