@@ -212,6 +212,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-gmail/` | A thin Gmail API v1 client for the mirror: paging, backoff, quota and a streamed raw fetch. | `engine` |
 | `crates/iris-model/` | The model provider layer: one call sends mail text as data to a hosted model (Anthropic) or a local OpenAI-compatible server, and gives JSON, tokens and cost. | `engine` |
 | `crates/iris-eval/` | Test set: scores an understanding function against the truth of the synthetic mailbox (precision and recall). | `engine` |
+| `crates/iris-store/` | The store: the data folder, SQLite with full-text search, raw message files and encrypted secrets. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
