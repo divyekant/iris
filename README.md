@@ -69,8 +69,7 @@ built from source). Iris builds on macOS and Linux.
 - Report a security problem: [SECURITY.md](SECURITY.md)
 - Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
-The old Iris code is on the branch `legacy` and in the tag `legacy-final`. The
-new Iris does not use it.
+The old Iris code is in a private archive. The new Iris does not use it.
 
 ## License
 

@@ -10,8 +10,7 @@ Iris is at release 0. No release can read a mailbox yet. Until release 1, the
 `develop` branch is the only supported version. After release 1, the newest
 release gets security fixes.
 
-The old Iris code (the branch `legacy` and the tag `legacy-final`) gets no
-fixes. Do not run it.
+The old Iris code (before release 0) gets no fixes. Do not run it.
 
 ## Report a problem
 
