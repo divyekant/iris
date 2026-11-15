@@ -57,7 +57,10 @@ fn client_lists_and_gets_every_message() {
     let mut ids = Vec::new();
     let mut token = String::new();
     loop {
-        let page = get(&gmail, &format!("messages?maxResults=50{token}"));
+        let page = get(
+            &gmail,
+            &format!("messages?maxResults=50&includeSpamTrash=true{token}"),
+        );
         for m in page["messages"].as_array().unwrap() {
             ids.push(m["id"].as_str().unwrap().to_string());
         }
@@ -191,13 +194,9 @@ fn formats_labels_history_send_and_errors() {
 }
 
 #[test]
-fn search_and_label_filters_are_refused() {
+fn search_is_refused() {
     let gmail = FakeGmail::start(Mailbox::new(4, 10)).unwrap();
     assert_eq!(call(&gmail, "GET", "messages?q=from:a", None, true).0, 400);
-    assert_eq!(
-        call(&gmail, "GET", "messages?labelIds=INBOX", None, true).0,
-        400
-    );
 }
 
 #[test]
