@@ -279,7 +279,7 @@ Iris is open source because the aim is a new model of email, not one more produc
 
 ### The repository
 
-The repository keeps its name. The old code moves to a `legacy` branch with a tag, and `main` starts clean. Before promotion, we scan the full history for secrets.
+The repository keeps its name, and `main` starts clean. The old code moved to a private archive repository. Before promotion, we scanned the full history for secrets (2026-11-15).
 
 The tree below is the planned layout. `README.md` shows the layout of today.
 
