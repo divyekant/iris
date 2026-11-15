@@ -290,6 +290,8 @@ name = "iris-web"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
