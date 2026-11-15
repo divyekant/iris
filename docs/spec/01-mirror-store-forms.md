@@ -316,8 +316,8 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. |
-| `body` | `message_id` PK, `text` TEXT | The clean text of the message (section 7.2). |
-| `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body_view'` | Full-text search. |
+| `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
+| `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT | One row for each item of each form. `doc` is the form document of section 6. |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
@@ -393,7 +393,7 @@ A source has these fields:
 | `message` | string, `m-` ID | yes | The message. |
 | `thread` | string, `t-` ID | yes | Its thread. |
 | `role` | `origin`, `update` or `evidence` | yes | `origin` made the item. `update` changed it. `evidence` supports it. |
-| `quote` | string, up to 500 characters | no | The words in the message that support the item. |
+| `quote` | string, 1 to 500 characters | when `role` is `origin` | The words in the message that support the item. A rebuild uses the quote of the origin source (section 7.5). |
 
 A party (a person or a service in an item) has these fields:
 
@@ -599,8 +599,9 @@ Fixed rules run before the model. They are fast, free and the same each time.
   the same match key. If no item or more than one item has the key, the engine
   does not guess. It makes an item with `derived.by` `person` from the
   corrected values, and the brief shows it for a check.
-- The understanding step must set `quote` on each origin source. An item
-  without a quote cannot get a correction that survives a rebuild.
+- The schemas require `quote` on each origin source. For an item from a fixed
+  rule, the quote is the line that the rule matched (for example the subject
+  or the code line).
 
 ## 8. The first brief
 
