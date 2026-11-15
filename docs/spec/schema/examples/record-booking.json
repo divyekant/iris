@@ -28,6 +28,8 @@
   "created": "2026-11-05T12:00:00Z",
   "updated": "2026-11-06T08:00:00Z",
   "derived": {
-    "by": "person"
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "understand/0.1"
   }
 }

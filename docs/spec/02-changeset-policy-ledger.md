@@ -81,7 +81,8 @@ Gmail deletes a message in the trash for good after 30 days. After that time,
 the undo of `trash` is not possible, and the ledger shows the entry as final.
 
 `label` and `unlabel` accept only a label of kind `user` (specification 1,
-section 5.5). A system label (`INBOX`, `UNREAD`, `SPAM`, `TRASH` and the
+section 5.5). At submit, the engine refuses a label name that is the same as
+the name or the ID of a system label, with no regard to case. A system label (`INBOX`, `UNREAD`, `SPAM`, `TRASH` and the
 others) changes only through its own verb, so that no `label` action can go
 past a rule or a hard limit that names that verb.
 
@@ -105,7 +106,15 @@ transaction:
   values as `post` (section 7.1).
 
 The undo of the action sets the old values and deletes the correction row, in
-one transaction, with its own ledger row.
+one transaction, with its own ledger row. If the current value is not the
+`post` value of the entry (a later action changed it), the undo changes
+nothing and lists the item. After the undo of a `correct` on a record with no
+correction left, the status of the record goes back to `kept`.
+
+`correct` cannot change `status` or a common field of section 6.1 of
+specification 1. The engine validates the corrected document against the
+schemas at submit, and denies an action that gives a document that is not
+valid.
 
 ## 5. The changeset
 
@@ -240,8 +249,8 @@ A change of the mode does not evaluate open actions again:
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
   which continues to its end. Applied actions stay.
-- 14 days after submit, each open action that is not `held` becomes
-  `expired`. The changeset is `closed` when no action is open.
+- 14 days after submit, each open action that is not `held`, and has no
+  ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
 
 ## 6. The policy file
 
@@ -325,9 +334,15 @@ needs a change to this specification.
 
 Each condition matches one message. For an action on an item, the message is
 the origin message of the item. `form`, `record_type` and `commitment_kind`
-match a message only when the message has one or more items, and each item of
-the message has that value. So a message with a feed item and a receipt does
-not match `form = "feed"`.
+match in two ways, so that each reading is the strict one:
+
+- For an `allow` rule, a message matches only when it has one or more items,
+  and each item of the message has that value. So a message with a feed item
+  and a receipt does not match `form = "feed"`.
+- For a `deny` or a `review` rule, a message matches when one or more of its
+  items has that value.
+
+A rule without `author` matches each author, `local` included.
 
 ### 6.3 Who changes the file
 
@@ -341,8 +356,10 @@ not match `form = "feed"`.
   person confirms it. Only then does the file become the active policy.
 - When the person changes the policy in the web client (a change of `mode`,
   an accepted proposal or the removal of a rule), the engine writes the file
-  and makes it the active policy in one step. The engine changes only the
-  lines of that rule and keeps all other text and comments.
+  and makes it the active policy in one step. The engine starts from the text
+  of the active policy, changes only the lines of that change, and keeps all
+  other text and comments. If the file on disk is not the same as the active
+  policy, the person first confirms or discards that difference.
 - If the file is not valid, the active policy stays. The brief shows the
   error and the line number. The person cannot confirm a file that is not
   valid.
@@ -393,7 +410,7 @@ in the file.
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
-| Mode is `observe`. | Nothing applies. |
+| Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4). |
 | A permanent delete. | No verb exists. |
 
 The hard limits treat `local` and `triage` as agents.
@@ -447,7 +464,8 @@ The `ledger_message` table has one row for each message of the entry:
 
 1. If the action adds a user label that the mirror does not have, call
    `labels.create`. If Gmail answers that the label exists, or the result is
-   not known, call `labels.list` and use the label with that name. The label
+   not known, call `labels.list` and use the user label with that name. If
+   no label of kind `user` has that name, the action is `failed`. The label
    stays after an undo, so this step has no ledger entry.
 2. Read the labels of each message of the action at Gmail (`format=minimal`).
    The mirror can be one sync interval behind Gmail, so the engine does not
@@ -497,6 +515,8 @@ For each message of the row:
   `pre`, and keep the message for step 4 of section 7.2.
 - Each other message: its call started, and its result is not known. Read
   the labels at Gmail (`format=minimal`).
+  - Gmail returns HTTP 404: the message is gone. It is not in `done`, and the
+    engine lists it as gone.
   - The message has the `post` state: set `done`.
   - Each other state, `pre` included: the engine cannot tell if the call did
     not reach the message, or if the person reversed the change in Gmail
@@ -582,8 +602,8 @@ another session.
 The command has no verb to approve, to deny or to change the policy. Only the
 web client does these steps, for the person. The person has no terminal client
 (decision of the maintainer). In host mode, a changeset has the author `local`
-and goes through the policy as an agent changeset does. A rule must name
-`author = "local"` to match it (section 6.2).
+and goes through the policy as an agent changeset does. A rule with
+`author = "agent"` does not match `local` (section 6.2).
 
 ### 8.2 Verbs of the command
 
@@ -721,7 +741,8 @@ another OS user, if it must not approve. The documentation must say this.
   request with another `Origin`. A test that `iris serve --addr 0.0.0.0:4800`
   does not start.
 - A test that an approval of revision 1 is refused after revision 2 is
-  submitted, and that the open actions of revision 1 are `replaced`.
+  submitted, and that the `proposed` and `in_review` actions of revision 1
+  are `replaced`.
 - A test that an undo skips a message that changed after the entry, and that
   an undo applies in the mode `observe`.
 - A test that the undo of `trash` gives back each label of `pre`.

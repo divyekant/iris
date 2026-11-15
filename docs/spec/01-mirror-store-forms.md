@@ -87,8 +87,9 @@ copy, and the sender axis uses the spam label.
    `format=raw`. Decode the base64url data, write the raw message to the
    content folder (section 5.3). Save the labels and the `internalDate` of
    the response, and the length of the decoded data as the size.
-   Fetch the newest messages first, so that understanding can start on the
-   last 90 days before the full copy is complete. If Gmail returns HTTP 404
+   Fetch by thread: first the thread with the newest message, and each
+   message of a thread before the next thread. So understanding can start on
+   the last 90 days before the full copy is complete (section 7.1). If Gmail returns HTTP 404
    for a message, Gmail deleted it after step 3. Mark the message as gone
    (section 4.5) and continue.
 5. When each known message is fetched or gone, run one incremental sync from `H0`
@@ -103,8 +104,9 @@ The first sync can stop at any point (crash, network loss, restart). It starts
 again from the saved state, with the saved `H0`. It fetches only the messages
 that are not fetched.
 
-The sync state of the account has the kind of the sync that runs (`first`,
-`resync` or none) and its start history ID (`H0` or `H1`). The engine writes
+The sync state of the account is in the columns `sync_kind` (`first`,
+`resync` or empty), `sync_start` (`H0` or `H1`) and `sync_step` of the
+`account` table. The engine writes
 `account.history_id` only in the transaction of the last step of a sync. At
 start, the engine continues an unfinished first sync or full resync from its
 saved step and start history ID. While a first sync or a full resync runs, no
@@ -132,8 +134,8 @@ other sync of the account runs.
 If a `labelAdded` or `labelRemoved` record names a message that the mirror
 does not have, fetch the message as for `messageAdded`.
 
-Each incremental sync also calls `labels.list`, because Gmail makes no history
-record for a new name or a delete of a label. The engine saves each label of
+Each incremental sync also calls `labels.list` after `history.list`, because
+Gmail makes no history record for a new name or a delete of a label. The engine saves each label of
 the answer with its name, and deletes each label row, and its `message_label`
 rows, that the answer does not have. A history record that names a label that
 `labels.list` does not have changes nothing for that label.
@@ -385,7 +387,8 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 
 | Table | Columns | Purpose |
 |---|---|---|
-| `account` | `id` INTEGER PK, `provider` TEXT, `address` TEXT UNIQUE, `history_id` TEXT, `state` TEXT, `token` BLOB (encrypted), `mirror_ready_at` INTEGER | One row for each mailbox. |
+| `account` | `id` INTEGER PK, `provider` TEXT, `address` TEXT UNIQUE, `history_id` TEXT, `state` TEXT, `token` BLOB (encrypted), `mirror_ready_at` INTEGER, `sync_kind` TEXT, `sync_start` TEXT, `sync_step` INTEGER | One row for each mailbox. The `sync_` columns hold the state of an unfinished first sync or full resync (section 4.2). |
+| `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
 | `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). |
@@ -461,7 +464,7 @@ Each item of each form has these fields:
 | `sources` | array of source, at least 1, with exactly one `origin` | yes | The messages that the item comes from. The `origin` source is the message that made the item. |
 | `created` | date-time (RFC 3339) | yes | When the engine made the item. |
 | `updated` | date-time | yes | The last change. |
-| `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model and the prompt version. |
+| `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model, and `prompt` names the prompt version. |
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
 | `matter` | string or null | no | Reserved for release 6. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
@@ -512,7 +515,7 @@ The talk with one person or one group.
 | `participants` | array of party, at least 1 | yes | Each party in the thread. |
 | `role` | `direct`, `group` or `cc` | yes | `cc` when you are only in CC. |
 | `latest` | object | yes | `at` (date-time), `from` (party) and `snippet` (up to 200 characters). |
-| `messages` | integer | yes | The number of messages in the thread. |
+| `messages` | integer | yes | The number of messages that the conversation counts (section 7.3). |
 | `new` | integer | yes | Messages after your last view in Iris. This is not an unread count of the mailbox. |
 | `your_turn` | boolean | yes | True when the last message is from another party and has your address in `To`. |
 | `summary` | string, up to 1,000 characters | no | A short summary of the thread. |
@@ -666,8 +669,9 @@ The engine reads each message one time, after the mirror has it. The steps:
 5. Apply the other fixed rules (section 7.3). If a rule gives the result, go
    to step 8.
 6. Send the clean text to the model (section 7.4).
-7. If the model answer has `phishing` true, drop the items of steps 4 to 6,
-   and give the message the treatment of hostile mail.
+7. If the model answer has `phishing` true, drop the items of steps 5 and 6,
+   and give the message the treatment of hostile mail. Compute the
+   conversation of the thread again without the message.
 8. Validate each item against the schemas. Save the items and set
    `understood_at` on the message in one SQLite transaction. A crash before
    the commit leaves the message not understood, and the next start runs the
@@ -677,9 +681,13 @@ To run understanding again on one message, the engine first deletes the items
 whose origin is that message and that are not pinned (section 7.5). Then it
 runs the steps from step 3. The conversation of the thread is computed again.
 
-The engine understands the last 90 days first, newest first. Older mail gets
-understood in the background, at a low rate, so that the first brief comes
-early (requirement M4).
+The engine understands mail by thread. It understands a thread when the
+mirror has each known message of the thread, and it understands the messages
+of a thread oldest first. So a later message that closes a commitment comes
+after the commitment. The threads of the last 90 days come first, the thread
+with the newest message first. Older mail gets understood in the background,
+at a low rate, so that the first brief comes early (requirement M4). A
+rebuild uses the same order.
 
 ### 7.2 Clean text
 
@@ -707,15 +715,19 @@ Fixed rules run before the model. They are fast, free and the same each time.
 
 The conversation rule runs for each message that is not hostile mail:
 
-- The engine computes the conversation from the understood messages of the
-  thread that are not hostile mail and not gone, in the order of
-  `internalDate`. It computes it again each time a message of the thread is
-  understood or gone.
+- The engine computes the conversation from the messages of the thread that
+  are understood, or are in step 4 now, and that are not hostile mail and not
+  gone, in the order of `internalDate`. It computes it again each time a
+  message of the thread is understood, gone, or gets a hostile mark.
 - If one or more of these messages is from you, from a `person` or from a
-  `stranger`, the thread has one conversation. The earliest such message is
-  its origin. Each other message of the thread is an `update` source.
+  `stranger`, the thread has one conversation. The first such message makes
+  it and is its origin. The origin does not change after that, also when the
+  origin message is gone (section 4.5). Each other message of the thread is
+  an `update` source.
 - `latest`, `messages`, `new` (messages after `thread.viewed_at`) and
   `your_turn` come from these messages.
+- When each message of the conversation is gone, the conversation gets the
+  status `gone`. It is not deleted.
 - A thread with only `service` messages has no conversation.
 
 `derived.by` is `rule`, and `derived.rule` names the rule.
@@ -771,8 +783,9 @@ The conversation rule runs for each message that is not hostile mail:
   that are not gone. The engine gives the model the pinned items of the
   message as existing items. For each item that it finds, the model returns a
   new item, or the existing item with `same_as`. An item with `same_as` adds
-  nothing. A fixed rule matches an existing item by its form, its origin
-  message and its rule.
+  nothing. The engine removes `same_as` before it validates an item. A fixed
+  rule matches an existing item by its form, its origin message and its
+  rule.
 - If a new item may be the same as a pinned item (same form and same origin
   message), the engine keeps both, and sets `duplicate_of` of the new item.
   The brief shows the pair once as a possible duplicate. From release 2, a
@@ -822,7 +835,7 @@ The design keeps memory flat when the mailbox grows:
   name, a type and a size.
 - The engine never keeps a list of all messages in memory. The verify step
   and the full resync compare IDs page by page against SQLite. They mark the
-  IDs that a list names in a temporary table on disk.
+  IDs that a list names in the table `sync_seen` on disk.
 - SQLite uses at most 2 MiB of page cache for each connection, and 3
   connections.
 
