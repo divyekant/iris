@@ -1,0 +1,14 @@
+[package]
+name = "iris-spec"
+description = "Tests of the Iris open model schemas in docs/spec/schema."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The schemas are only test data, so the validator is a dev-dependency. It adds
+# nothing to the iris program.
+[dev-dependencies]
+jsonschema = { version = "=0.61.2", default-features = false }
+serde_json = "1"
