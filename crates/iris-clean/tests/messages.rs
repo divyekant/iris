@@ -337,3 +337,56 @@ fn quoted_printable_soft_breaks_do_not_use_the_budget() {
     assert_eq!(c.text, "Visible end.");
     assert!(!c.cut);
 }
+
+#[test]
+fn alternatives_past_the_part_limit_mark_the_cut() {
+    let mut raw =
+        String::from("Subject: Many\nContent-Type: multipart/alternative; boundary=a\n\n");
+    for k in 0..iris_clean::MAX_PARTS + 1 {
+        raw.push_str(&format!("--a\nContent-Type: text/plain\n\nVersion {k}\n"));
+    }
+    raw.push_str("--a--\n");
+    assert!(clean(raw.as_bytes()).cut);
+}
+
+#[test]
+fn quotes_in_one_part_do_not_remove_a_later_part() {
+    let raw = crlf(
+        "Subject: Re: Plan
+In-Reply-To: <a@example.org>
+Content-Type: multipart/mixed; boundary=m
+
+--m
+Content-Type: text/plain
+
+Yes.
+
+On Mon, Ana wrote:
+> Can you?
+--m
+Content-Type: text/plain
+
+New details: room 4.
+--m--
+",
+    );
+    assert_eq!(clean(&raw).text, "Yes.\n\nNew details: room 4.");
+}
+
+#[test]
+fn a_clipped_attached_message_lists_no_partial_attachments() {
+    let file = "f".repeat(3 * 1024 * 1024);
+    let raw = format!(
+        "Subject: Fwd\nContent-Type: multipart/mixed; boundary=o\n\n--o\n\
+         Content-Type: message/rfc822\n\nSubject: Inner\nContent-Type: multipart/mixed; boundary=i\n\n\
+         --i\nContent-Type: text/plain\n\nShort text.\n--i\n\
+         Content-Type: application/octet-stream; name=big.bin\n\n{file}\n--i--\n--o--\n"
+    );
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.attachments.len(), 1);
+    assert_eq!(c.attachments[0].mime_type, "message/rfc822");
+    assert_eq!(
+        c.attachments[0].text.as_deref(),
+        Some(format!("Short text.{CUT_MARK}").as_str())
+    );
+}

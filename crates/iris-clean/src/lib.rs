@@ -128,19 +128,25 @@ impl Walker {
 
     fn render(&mut self, bodies: Vec<String>, is_reply: bool) -> String {
         let mut text = String::new();
-        for t in bodies {
+        let mut left = STEP_LIMIT;
+        for mut t in bodies {
+            if t.len() > left {
+                t.truncate(floor_char(&t, left));
+                self.cut = true;
+            }
+            left -= t.len();
+            // Each part has its own quotes and signature: a cut in one part
+            // must not remove the text of a later part.
+            let t = t.replace("\r\n", "\n").replace('\r', "\n");
+            let t = quote::strip_signature(&quote::strip_quotes(&t, is_reply));
+            if t.trim().is_empty() {
+                continue;
+            }
             if !text.is_empty() {
                 text.push_str("\n\n");
             }
             text.push_str(&t);
         }
-        if text.len() > STEP_LIMIT {
-            text.truncate(floor_char(&text, STEP_LIMIT));
-            self.cut = true;
-        }
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let text = quote::strip_quotes(&text, is_reply);
-        let text = quote::strip_signature(&text);
         tidy(&url::clean_urls(&text))
     }
 
@@ -178,7 +184,9 @@ impl Walker {
             };
             // One part more than the limit, so that the walker sees the overflow.
             let max = MAX_PARTS.saturating_sub(self.parts) + 1;
-            let parts = mime::split_multipart(body, &boundary, max);
+            let (parts, more) = mime::split_multipart(body, &boundary, max);
+            // Parts past the limit are not read. A last alternative can be one of them.
+            self.cut |= more;
             if sub == "alternative" {
                 // RFC 2046: the last version is the richest. A mail client
                 // shows it, so the clean text uses it too. Walk from the end,
@@ -228,7 +236,7 @@ impl Walker {
         let mut name = name.unwrap_or_default();
         let mut text = None;
         if mime_type == "message/rfc822" && self.attach_left > 0 {
-            let (inner, _) = decode_capped(body, cte, INNER_LIMIT);
+            let (inner, clipped) = decode_capped(body, cte, INNER_LIMIT);
             // The attached message has its own body budget and cut state, so
             // that it does not take text from the outer message. Its text
             // cannot be longer than the attachment text that is left.
@@ -236,7 +244,12 @@ impl Walker {
             self.body_left = self.attach_left;
             self.cut = false;
             let (subject, mut t) = self.message(&inner, depth + 1);
-            if self.cut {
+            if clipped {
+                // The end of the attached message is not read, so the sizes
+                // of its own attachments are not known. Do not list them.
+                self.attachments.truncate(at);
+            }
+            if self.cut || clipped {
                 t.push_str(CUT_MARK);
             }
             (self.body_left, self.cut) = outer;

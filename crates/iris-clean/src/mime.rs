@@ -437,8 +437,9 @@ fn qp_walk_until(b: &[u8], mut f: impl FnMut(u8, usize) -> bool) {
 
 /// Split a multipart body into its parts. The preamble and the epilogue go out.
 /// If there is no close delimiter, the last part runs to the end. The split
-/// stops after `max` parts.
-pub fn split_multipart<'a>(body: &'a [u8], boundary: &str, max: usize) -> Vec<&'a [u8]> {
+/// stops after `max` parts. The flag is true if parts follow that the split
+/// did not return.
+pub fn split_multipart<'a>(body: &'a [u8], boundary: &str, max: usize) -> (Vec<&'a [u8]>, bool) {
     let delim = format!("--{boundary}");
     let delim = delim.as_bytes();
     let mut parts = Vec::new();
@@ -462,7 +463,7 @@ pub fn split_multipart<'a>(body: &'a [u8], boundary: &str, max: usize) -> Vec<&'
                     parts.push(trim_line_end(&body[s..line]));
                 }
                 if close || parts.len() >= max {
-                    return parts;
+                    return (parts, !close);
                 }
                 start = next;
             }
@@ -475,7 +476,7 @@ pub fn split_multipart<'a>(body: &'a [u8], boundary: &str, max: usize) -> Vec<&'
     if let Some(s) = start {
         parts.push(&body[s.min(body.len())..]);
     }
-    parts
+    (parts, false)
 }
 
 /// Remove the line end before a delimiter. It belongs to the delimiter.
@@ -540,28 +541,28 @@ mod tests {
     fn multipart_split() {
         let body = b"preamble\r\n--b\r\nA\r\n--b \r\nB\r\n\r\n--b--\r\nepilogue";
         assert_eq!(
-            split_multipart(body, "b", 10),
+            split_multipart(body, "b", 10).0,
             vec![&b"A"[..], &b"B\r\n"[..]]
         );
         // No close delimiter.
         assert_eq!(
-            split_multipart(b"--b\nA\n--b\nB", "b", 10),
+            split_multipart(b"--b\nA\n--b\nB", "b", 10).0,
             vec![&b"A"[..], &b"B"[..]]
         );
         // `--bc` is not the boundary `b`.
         assert_eq!(
-            split_multipart(b"--b\nA\n--bc\n--b--", "b", 10),
+            split_multipart(b"--b\nA\n--bc\n--b--", "b", 10).0,
             vec![&b"A\n--bc"[..]]
         );
         // `--b--x` is not a close delimiter.
         assert_eq!(
-            split_multipart(b"--b\nA\n--b--x\n--b\nB\n--b--", "b", 10),
+            split_multipart(b"--b\nA\n--b--x\n--b\nB\n--b--", "b", 10).0,
             vec![&b"A\n--b--x"[..], &b"B"[..]]
         );
         // The split stops at the limit.
         assert_eq!(
             split_multipart(b"--b\nA\n--b\nB\n--b\nC", "b", 2),
-            vec![&b"A"[..], &b"B"[..]]
+            (vec![&b"A"[..], &b"B"[..]], true)
         );
     }
 
