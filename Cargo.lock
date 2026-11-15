@@ -496,6 +496,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-eval"
+version = "0.0.0"
+dependencies = [
+ "iris-synth",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-fakegmail"
 version = "0.0.0"
 dependencies = [
