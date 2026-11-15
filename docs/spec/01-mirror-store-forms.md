@@ -37,7 +37,7 @@ document has a `matter` field that stays empty until release 6.
 | Item | One document of one form. An item has an ID such as `c-311`. |
 | Source | The link from an item to the message that it comes from. |
 | Understanding | The step that reads a message once and makes or updates items. |
-| Correction | A change that a person makes to an item. A rebuild keeps each correction. |
+| Correction | A change that a person makes to an item (release 2, specification 2). A rebuild keeps each correction. A correction does not change `derived`. |
 | Observe mode | The engine makes items and proposes changes, but applies nothing. Release 1 has only observe mode. |
 
 ## 3. Requirements
@@ -53,7 +53,7 @@ Each one has a test or a measure.
 | M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. |
 | M5 | Mail text is data. | No text from a message can start an action. The understanding step has no tools and returns only schema-valid JSON. |
 | M6 | Each item points to its source mail. | Each item has one or more sources. The schemas require the `sources` field. |
-| M7 | The forms can be built again from the mirror. | `iris rebuild` makes the same items from the same mirror, and each corrected item keeps its ID and its corrections. |
+| M7 | The forms can be built again from the mirror. | With a fixed fake model, `iris rebuild` makes the same items from the same mirror, apart from IDs and times. Each pinned item keeps its ID and its corrections. |
 
 ## 4. The mirror
 
@@ -65,7 +65,7 @@ For each message in the account, the mirror holds:
 - The Gmail message ID and thread ID.
 - The set of label IDs. The set includes the system labels (`INBOX`, `SENT`, `SPAM`,
   `TRASH`, `UNREAD`, `STARRED`, `IMPORTANT` and the `CATEGORY_*` labels).
-- The Gmail `internalDate` and the size in bytes.
+- The Gmail `internalDate`, and the size of the raw message in bytes.
 
 For the account, the mirror holds the list of labels and the history ID of the
 last complete sync.
@@ -76,15 +76,17 @@ copy, and the sender axis uses the spam label.
 
 ### 4.2 First sync
 
-1. Call `users.getProfile`. Save its `historyId` as `H0`. Do this before the
-   list, so that no change between the list and the end of the sync is lost.
+1. Call `users.getProfile`. Save its `historyId` as `H0` in the sync state
+   of the account (below). Do this before the list, so that no change between
+   the list and the end of the sync is lost.
 2. Call `labels.list`. Save each label.
 3. Call `messages.list` with `includeSpamTrash=true` and `maxResults=500`.
    Follow `nextPageToken` to the last page. Save each message ID and thread ID
    as "known, not fetched".
 4. For each message that is not fetched, call `messages.get` with
    `format=raw`. Decode the base64url data, write the raw message to the
-   content folder (section 5.3), and save the labels, the date and the size.
+   content folder (section 5.3). Save the labels and the `internalDate` of
+   the response, and the length of the decoded data as the size.
    Fetch the newest messages first, so that understanding can start on the
    last 90 days before the full copy is complete. If Gmail returns HTTP 404
    for a message, Gmail deleted it after step 3. Mark the message as gone
@@ -92,8 +94,21 @@ copy, and the sender axis uses the spam label.
 5. When each known message is fetched or gone, run one incremental sync from `H0`
    (section 4.3). Then mark the account as "mirror ready".
 
+At the quota of the assumptions, the engine fetches about 100 raw messages
+each minute. So the first brief covers the messages that the engine fetched
+before it, and the brief shows the date of the oldest of them. The brief
+grows while the first sync continues.
+
 The first sync can stop at any point (crash, network loss, restart). It starts
-again from the saved state. It fetches only the messages that are not fetched.
+again from the saved state, with the saved `H0`. It fetches only the messages
+that are not fetched.
+
+The sync state of the account has the kind of the sync that runs (`first`,
+`resync` or none) and its start history ID (`H0` or `H1`). The engine writes
+`account.history_id` only in the transaction of the last step of a sync. At
+start, the engine continues an unfinished first sync or full resync from its
+saved step and start history ID. While a first sync or a full resync runs, no
+other sync of the account runs.
 
 ### 4.3 Incremental sync
 
@@ -101,37 +116,56 @@ again from the saved state. It fetches only the messages that are not fetched.
    with the history types `messageAdded`, `messageDeleted`, `labelAdded` and
    `labelRemoved`. Follow `nextPageToken` to the last page.
 2. Apply each history record in the order that Gmail returns:
-   - `messageAdded`: fetch the message (`format=raw`) and save it. If Gmail
-     returns HTTP 404, Gmail deleted the message after the record. Mark the
-     message as gone (section 4.5) and continue with the next record.
-   - `messageDeleted`: mark the message as gone (section 4.5).
+   - `messageAdded` for a message that the mirror does not have: fetch the
+     message (`format=raw`) and save it. If Gmail returns HTTP 404, Gmail
+     deleted the message after the record. Do not save the message, and
+     continue with the next record.
+   - `messageAdded` for a message that the mirror has: save the label set of
+     the record. Do not fetch the message again.
+   - `messageDeleted`: mark the message as gone (section 4.5). If the mirror
+     does not have the message, ignore the record.
    - `labelAdded` and `labelRemoved`: change the label set of the message.
 3. Save the `historyId` of the response as the new history ID. Save it in the
    same SQLite transaction as the last change, so that a crash cannot save a
    history ID without its changes.
 
-If one history record names a message that the mirror does not have, fetch the
-message. If one history record names a label that the mirror does not have,
-call `labels.list` again.
+If a `labelAdded` or `labelRemoved` record names a message that the mirror
+does not have, fetch the message as for `messageAdded`.
+
+Each incremental sync also calls `labels.list`, because Gmail makes no history
+record for a new name or a delete of a label. The engine saves each label of
+the answer with its name, and deletes each label row, and its `message_label`
+rows, that the answer does not have. A history record that names a label that
+`labels.list` does not have changes nothing for that label.
 
 ### 4.4 Full resync
 
 Gmail keeps the change history for a limited time. If `history.list` returns
 HTTP 404 for the saved history ID, do a full resync:
 
-1. Call `users.getProfile` and save its `historyId` as `H1`.
-2. List all message IDs again (as in step 3 of section 4.2).
-3. Fetch each message that the mirror does not have.
-4. Mark as gone each message that the mirror has and the list does not have.
-5. For each message that the mirror has and the new list has, get its labels
-   with `messages.get` and `format=minimal`. Correct the label set. If Gmail
-   returns HTTP 404 for a message (it was deleted after step 2), mark the
-   message as gone and continue.
-6. Run one incremental sync from `H1`.
+1. Call `users.getProfile`. Save its `historyId` as `H1` in the sync state
+   of the account.
+2. Call `labels.list`, and save the labels (section 4.3).
+3. List all message IDs and thread IDs again (as in step 3 of section 4.2).
+4. Fetch each message that the mirror does not have. If Gmail returns HTTP
+   404, Gmail deleted the message after step 3. Do not save the message, and
+   continue.
+5. For each message that the mirror has and the list does not have, call
+   `messages.get` with `format=minimal`. Mark the message as gone only if
+   Gmail returns HTTP 404. Else, keep it, and correct its labels from the
+   answer.
+6. If a message that the mirror marked as gone is in the list, clear its
+   `gone_at`. If its content file is deleted, fetch the message again. Then
+   run understanding again on the message (section 7.1).
+7. Get the label sets (section 4.10). Correct the label set of each message
+   that the mirror has and the list has.
+8. Run one incremental sync from `H1`. This sync corrects each change that
+   Gmail made during steps 2 to 7.
 
-A full resync of 100,000 messages costs about 500,000 quota units for step 5
-alone (see section 4.7). It is slow but correct. The engine records each full
-resync in the sync log, so that a person can see why a sync took long.
+Step 7 does not call `messages.get` for each message, so a full resync costs
+about the same quota as a list of all message IDs, plus the fetch of new
+messages. The engine records each full resync in the sync log, so that a
+person can see why a sync took long.
 
 ### 4.5 Messages that are gone
 
@@ -140,15 +174,22 @@ When Gmail deletes a message for good, the mirror must follow. The engine:
 1. Sets `gone_at` on the message. The message leaves each query at once.
 2. Keeps the raw message for 30 days, so that a sync defect cannot destroy
    mail that is still at Gmail. A full resync in these 30 days can bring the
-   message back.
-3. After 30 days, deletes the raw message from the content folder, and deletes
-   its `header`, `body` and search text. The message row stays as a tombstone
-   (`gone_at` set, `content_sha256` empty) while an item cites it in
-   `item_source`. The engine deletes the tombstone when no item cites it.
+   message back (section 4.4, step 6).
+3. After 30 days, removes the reference of the message to its content file
+   (section 5.3), and deletes its `header`, `body` and search text. The
+   message row stays as a tombstone (`gone_at` set, `content_sha256` empty)
+   while an item cites it in `item_source`. The engine deletes the tombstone
+   when no item cites it.
 
-The items that come only from a gone message get the status `gone`, and they
-keep the source, so each item keeps at least one valid source. The items that
-have other sources stay, without that source.
+An item keeps each of its sources when a source message is gone. A source
+that cites a tombstone is still a valid source, so the origin source of an
+item never goes away. The quote of the origin stays in the item document.
+
+When each source of an item is gone, the item gets the status `gone`, and the
+engine saves the status before it in the item row. When only some sources are
+gone, the item keeps its status. The brief does not show an item with the
+status `gone`. If a source message comes back (section 4.4, step 6), the item
+gets its saved status again.
 
 ### 4.6 When to sync
 
@@ -165,9 +206,12 @@ have other sources stay, without that source.
   limit.
 - The engine runs at most 8 `messages.get` calls at the same time. This number
   is a constant in the provider client.
-- On HTTP 429 or HTTP 5xx, the engine waits and tries again. The wait starts at
-  1 second, doubles each time to a maximum of 5 minutes, and has a random part
-  of up to 50 percent.
+- These rules are for read calls. Specification 2, section 7.2 gives the
+  rules for a write call.
+- On HTTP 429, on HTTP 403 with the reason `rateLimitExceeded` or
+  `userRateLimitExceeded`, and on HTTP 5xx, the engine waits and tries again.
+  The wait starts at 1 second, doubles each time to a maximum of 5 minutes,
+  and has a random part of up to 50 percent.
 - On HTTP 401, the engine gets a new access token with the refresh token, one
   time. If that fails, the account goes to the state "needs sign-in", and the
   brief shows it.
@@ -180,23 +224,36 @@ have other sources stay, without that source.
 `iris mirror verify` compares the mirror with Gmail, and checks the local
 content:
 
-1. List all message IDs and thread IDs at Gmail.
-2. Get the label set, the `internalDate` and the size of each message
-   (`format=minimal`).
-3. Call `labels.list`.
-4. Compare the message IDs, the thread IDs, the label sets, the dates, the
-   sizes and the label list with the mirror.
-5. For each message that is not gone, read its content file and compute the
+1. Run one incremental sync. Then stop the sync of the account until verify
+   ends, so that the mirror does not change. Save the history ID of the
+   mirror as `V`.
+2. Call `labels.list`.
+3. List all message IDs and thread IDs at Gmail (as in step 3 of
+   section 4.2).
+4. Get the label sets (section 4.10).
+5. Call `labels.list` again.
+6. Call `history.list` from `V`. Each message that a history record names
+   changed during verify. Leave these messages out of the compare. A label
+   that is not the same in steps 2 and 5 changed during verify. Leave it out
+   of the compare. If `history.list` returns HTTP 404, stop verify and report
+   that the history is too old.
+7. Compare the message IDs, the thread IDs, the label sets and the label list
+   with the mirror. Compare only the messages of the mirror that are not gone.
+8. For each message that is not gone, read its content file and compute the
    SHA-256 hash. A missing file, or a hash that is not `content_sha256`, is a
    difference.
-6. Print each difference, and the total. Save the result in the sync log.
+9. Print each difference, and the total. Save the result in the sync log.
 
-A difference of step 5 is a local defect, not a sync defect. The engine
-fetches the message again (`format=raw`) to repair it.
+However verify ends (a result, an error or a crash), the engine starts the
+sync of the account again. After a crash, the next start does this. A
+difference of step 7 starts a full resync (section 4.4).
 
-The exit criterion of release 1 is 0 differences each day for 7 days. To avoid
-a false difference, verify runs an incremental sync first and compares only
-the messages that did not change after its `users.getProfile` call.
+Verify does not compare `internalDate` or the size. Gmail does not change the
+bytes of a message, and step 8 checks the bytes. A difference of step 8 is a
+local defect, not a sync defect. The engine fetches the message again
+(`format=raw`) to repair it.
+
+The exit criterion of release 1 is 0 differences each day for 7 days.
 
 ### 4.9 Account and credentials
 
@@ -210,6 +267,20 @@ the messages that did not change after its `users.getProfile` call.
   uses is an open risk (tracker item R1-01, section 11).
 - An agent never gets a token. Only the provider client in the engine reads
   the token.
+
+### 4.10 Label sets
+
+The full resync and verify get the label set of each message from lists, not
+from one `messages.get` call for each message:
+
+1. For each label of `labels.list`, call `messages.list` with `labelIds` set
+   to that label and `includeSpamTrash=true`. Follow `nextPageToken` to the
+   last page.
+2. The label set of a message is the set of labels whose list names the
+   message. A message that no list names has no labels.
+
+A list page costs 5 quota units and names up to 500 messages. One
+`messages.get` call costs 20 units for one message.
 
 ## 5. The store
 
@@ -240,8 +311,10 @@ iris/
 To back up Iris, stop the engine and copy the folder. `iris backup <path>`
 makes a copy while the engine runs:
 
-1. Take the backup lock. The content cleanup (section 4.5) does not delete a
-   file while another process holds this lock.
+1. Take the backup lock. While a backup holds this lock, the content cleanup
+   (section 4.5) does not start, and the engine does not write
+   `policy.toml`. The cleanup takes the same lock for its full step: the
+   database change and the file delete.
 2. Copy `iris.db` with the SQLite online backup.
 3. Copy each content file that the copy of `iris.db` refers to.
 4. Copy `key` with mode `0600`, and copy `policy.toml`. Without `key`, the
@@ -249,9 +322,9 @@ makes a copy while the engine runs:
 5. Release the lock.
 
 The engine makes the backup folder with mode `0700`, because it holds the key
-and the mail. The engine writes `policy.toml` only while it holds the backup
-lock, and it writes the file to a temporary file and then renames it. So the
-copy has one complete version of the policy.
+and the mail. The engine writes `policy.toml` to a temporary file and then
+renames it, and it does not write the file during a backup. So the copy has
+one complete version of the policy.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
@@ -314,17 +387,21 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 |---|---|---|
 | `account` | `id` INTEGER PK, `provider` TEXT, `address` TEXT UNIQUE, `history_id` TEXT, `state` TEXT, `token` BLOB (encrypted), `mirror_ready_at` INTEGER | One row for each mailbox. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
-| `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. |
+| `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
-| `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT | One row for each item of each form. `doc` is the form document of section 6. |
+| `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
-| `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `at` INTEGER | Changes by a person. The item stays through a rebuild (section 7.5). |
+| `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `by` TEXT, `at` INTEGER | Each change of an item by a person, or by an applied action of specification 2. `by` is `person` or the changeset ID. The item stays through a rebuild (section 7.5). |
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
+
+The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
+AUTOINCREMENT`, so SQLite never gives the row ID of a deleted row to a new
+row (section 5.7).
 
 The engine adds indexes for the queries of the brief: `item(form, status)`,
 `message(thread_id, internal_date)` and `header(from_addr)`.
@@ -357,7 +434,8 @@ Iris gives short IDs that a person and an agent can type:
 | `s-` | Signal |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
-Iris install and the engine never uses it again. Provider IDs stay in the
+Iris install and the engine never uses it again, also after a rebuild deletes
+the row (section 5.5). Provider IDs stay in the
 store and do not go into the form documents, so the format does not depend on
 Gmail.
 
@@ -436,7 +514,7 @@ The talk with one person or one group.
 | `latest` | object | yes | `at` (date-time), `from` (party) and `snippet` (up to 200 characters). |
 | `messages` | integer | yes | The number of messages in the thread. |
 | `new` | integer | yes | Messages after your last view in Iris. This is not an unread count of the mailbox. |
-| `your_turn` | boolean | yes | True when the last message is from another party and asks you. |
+| `your_turn` | boolean | yes | True when the last message is from another party and has your address in `To`. |
 | `summary` | string, up to 1,000 characters | no | A short summary of the thread. |
 | `status` | `active`, `quiet`, `muted` or `gone` | yes | `quiet`: no message for 14 days. |
 
@@ -503,17 +581,49 @@ message.
 | Kind | Rule in version 0 |
 |---|---|
 | `person` (known person) | You sent at least one message to the address, or you replied in a thread with it. |
-| `service` (known service) | The mail is automated (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, or `Auto-Submitted` other than `no`), DKIM passes for the domain of the address, and at least 2 messages came from it before. |
-| `hostile` | One of: DMARC fails for a domain with a DMARC policy; the display name is the name of a known person, and the address is different; the domain is a near copy of the domain of a known sender; Gmail put the message in spam; the understanding step marks phishing. |
+| `service` (known service) | The mail is automated (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, or `Auto-Submitted` other than `no`), DKIM passes for the domain of the address, and at least 2 messages with an earlier `internalDate` came from it. |
+| `hostile` | The domain of the address is a near copy of the domain of a known sender, or a person set the kind `hostile`. |
 | `stranger` | Each other sender. |
 
 Order: the engine checks `hostile` first, then `person`, then `service`. A
 sender that matches no rule is a `stranger`.
 
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
-A decision by a person always wins over the engine. In release 1, the person
-changes a kind through a correction. In release 5, the stranger gate makes
-this a rule in the policy file.
+A decision by a person always wins over the engine, and the engine never
+changes it. From release 2, the person sets the kind in the web client. In
+release 5, the stranger gate makes this a rule in the policy file.
+
+The engine decides the kind of a sender again each time it understands a
+message with that address. The first sync fetches newest first, so a known
+person can be a `stranger` for some time. The brief reads the kind of each
+party when it runs its query (section 8), so a later change of a kind moves
+the items. If a sender becomes `hostile` or stops being `hostile`, the engine
+runs understanding again on each message from that address.
+
+A message with the label `SENT` is from you (`self`), also when its `From` is
+an alias. The engine does not understand a message with the label `DRAFT`,
+and a draft does not count for the `person` rule.
+
+The engine reads the authentication results only from the
+`Authentication-Results` header that Gmail added: the top header with the
+authserv-id of Gmail. A sender can add its own header with any result, so the
+engine ignores each other `Authentication-Results` header.
+
+An attacker can put the address of a known person in `From`. So the engine
+also gives each message hostile marks, separate from the kind of its sender.
+The `hostile` column of the message holds each mark that applies:
+
+| Mark | Rule |
+|---|---|
+| `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
+| `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `spam` | The message has the label `SPAM`. |
+| `phishing` | The understanding step marks the message as phishing. |
+
+The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
+of the label set of the message. The mark `phishing` stays until a rebuild.
+When a mark is set, or the last mark is cleared, the engine runs understanding
+again on the message (section 7.1).
 
 The kind changes the treatment of items (from the manifesto):
 
@@ -522,7 +632,26 @@ The kind changes the treatment of items (from the manifesto):
 | `person` | An ask becomes a commitment in "You owe" at once. |
 | `service` | Records, feed items and signals. Payment commitments go to "You owe". |
 | `stranger` | Items go to "Strangers" in the brief, not to "You owe". |
-| `hostile` | The understanding step does not send the body to a model. The engine makes no commitment. The brief shows a count only. |
+| `hostile` | The understanding step does not send the body to a model. The engine makes no item. The brief shows a count only. |
+
+A message with a hostile mark gets the treatment of `hostile`, whatever the
+kind of its sender. In this specification and in specification 2, "hostile
+mail" is a message with a hostile mark, or a message from a `hostile` sender.
+
+### 6.8 Status changes
+
+| Form | Change | Who, and when |
+|---|---|---|
+| Each form | To `gone`, and back | The engine (section 4.5). |
+| Commitment | `open` to `done`, `declined`, `deferred` or `cancelled` | A person, through a changeset (release 2). Understanding sets `done` or `cancelled` when a later message of the thread says so. |
+| Commitment | `deferred` to `open` | The engine, when `deferred_until` passes. |
+| Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
+| Conversation | `muted` | Reserved. A later release adds the verb. |
+| Record | `kept` to `corrected` | A correction (release 2). |
+| Feed | `new` to `read` | The engine, when the message loses the label `UNREAD`. |
+| Feed | `skipped` | Reserved. A later release adds the verb. |
+| Signal | `active` to `expired` | The engine, at `expires`. |
+| Signal | `used`, `dismissed` | Reserved. A later release adds the verb. |
 
 ## 7. Understanding: from mail to forms
 
@@ -532,11 +661,21 @@ The engine reads each message one time, after the mirror has it. The steps:
 
 1. Parse the MIME structure and the headers. Save the `header` row.
 2. Make the clean text (section 7.2). Save the `body` row and the search text.
-3. Decide the sender kind (section 6.7).
-4. Apply the fixed rules (section 7.3). If a rule gives the result, stop.
-5. Send the clean text to the model (section 7.4). Validate the answer against
-   the schemas. Save the items.
-6. Set `understood_at` on the message.
+3. Decide the sender kind and the hostile mark (section 6.7).
+4. Apply the conversation rule (section 7.3).
+5. Apply the other fixed rules (section 7.3). If a rule gives the result, go
+   to step 8.
+6. Send the clean text to the model (section 7.4).
+7. If the model answer has `phishing` true, drop the items of steps 4 to 6,
+   and give the message the treatment of hostile mail.
+8. Validate each item against the schemas. Save the items and set
+   `understood_at` on the message in one SQLite transaction. A crash before
+   the commit leaves the message not understood, and the next start runs the
+   steps again from step 3.
+
+To run understanding again on one message, the engine first deletes the items
+whose origin is that message and that are not pinned (section 7.5). Then it
+runs the steps from step 3. The conversation of the thread is computed again.
 
 The engine understands the last 90 days first, newest first. Older mail gets
 understood in the background, at a low rate, so that the first brief comes
@@ -564,7 +703,20 @@ Fixed rules run before the model. They are fast, free and the same each time.
 | `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item, unless the subject or the body matches a receipt or a statement pattern. |
 | A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. |
 | A calendar invitation (`text/calendar` with `METHOD:REQUEST`) | Commitment of kind `invitation`. |
-| The sender is `hostile` | No model call. One signal of kind `security` if the message asks for a password, a payment or a code. |
+| Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+
+The conversation rule runs for each message that is not hostile mail:
+
+- The engine computes the conversation from the understood messages of the
+  thread that are not hostile mail and not gone, in the order of
+  `internalDate`. It computes it again each time a message of the thread is
+  understood or gone.
+- If one or more of these messages is from you, from a `person` or from a
+  `stranger`, the thread has one conversation. The earliest such message is
+  its origin. Each other message of the thread is an `update` source.
+- `latest`, `messages`, `new` (messages after `thread.viewed_at`) and
+  `your_turn` come from these messages.
+- A thread with only `service` messages has no conversation.
 
 `derived.by` is `rule`, and `derived.rule` names the rule.
 
@@ -578,10 +730,20 @@ Fixed rules run before the model. They are fast, free and the same each time.
   parties. The text goes inside a data block with a fixed delimiter.
   The instruction says that the block is data and that it contains no
   instructions.
-- The model has no tools. It returns one JSON document that the engine
-  validates against the schemas. If the answer is not valid, the engine tries
-  one time again. If the second answer is not valid, the engine saves no item
-  and marks the message for a later try.
+- The model has no tools. It returns one JSON document: a list of items
+  without the fields `model`, `id`, `created`, `updated` and `derived`, and a
+  boolean `phishing`. Parties in the answer have an address, not a `p-` ID.
+  An item can have `same_as`: the ID of an existing item that the engine gave
+  to the model (section 7.5).
+- The engine adds the missing fields, and puts the `p-` ID of the sender row
+  of each address. Then it validates each item against the schemas. If an
+  item is not valid, the engine tries one time again. If the second answer is
+  not valid, the engine saves no item, adds 1 to `tries` of the message, and
+  sets `retry_at` to 1 day later. After 3 tries, the engine stops, and the
+  message stays not understood. The brief shows the count of such messages.
+- If `phishing` is true, the engine sets the hostile mark `phishing` on the
+  message, saves no item from it, and gives it the treatment of hostile mail
+  (section 7.1, step 7).
 - The worst result of a prompt injection is a wrong item. No item can start an
   action in release 1. In release 2, an item from mail can only become a
   proposal in a changeset (specification 2).
@@ -593,53 +755,76 @@ Fixed rules run before the model. They are fast, free and the same each time.
 
 - `iris rebuild` deletes the items that `derived.by` `rule` or `model` made,
   except pinned items (below), and runs understanding again on the mirror.
-- A correction refers to its item by the item ID (`item_id`). An item with
-  one or more corrections is pinned. A rebuild never deletes a pinned item and
-  never changes its ID, so each correction stays on the same item.
-- A rebuild runs understanding again on the source messages of a pinned item.
-  The engine gives the step the pinned items of the message as existing items.
-  For each item that it finds, the step returns a new item or the ID of an
-  existing item that is the same.
-- If the step returns a new item that may be the same as a pinned item (same
-  form and same origin message), the engine keeps both and the brief shows the
-  pair once as a possible duplicate. A person merges them or keeps both. The
-  worst result is a duplicate in front of the person, never a lost or a moved
-  correction.
+  `iris rebuild --since-prompt <version>` does the same only for the items
+  whose `derived.prompt` is older than that version, and for their origin
+  messages.
+- A rebuild skips each gone message, because its text can be deleted. An item
+  whose origin message is gone is pinned.
+- A correction refers to its item by the item ID (`item_id`). A change of
+  the status of an item by a person, or by an applied action of
+  specification 2, is also a correction.
+- An item is pinned when it has one or more corrections, or when an open
+  changeset or a ledger entry of specification 2 refers to it. A rebuild
+  never deletes a pinned item and never changes its ID, so each correction
+  and each reference stays on the same item.
+- A rebuild runs understanding again on the source messages of a pinned item
+  that are not gone. The engine gives the model the pinned items of the
+  message as existing items. For each item that it finds, the model returns a
+  new item, or the existing item with `same_as`. An item with `same_as` adds
+  nothing. A fixed rule matches an existing item by its form, its origin
+  message and its rule.
+- If a new item may be the same as a pinned item (same form and same origin
+  message), the engine keeps both, and sets `duplicate_of` of the new item.
+  The brief shows the pair once as a possible duplicate. From release 2, a
+  person merges them, or keeps both with a correction of the new item, which
+  pins it. The worst result is a duplicate in front of the person, never a
+  lost or a moved correction.
 - The schemas require `quote` on each origin source, so a person can see why
   an item exists. For an item from a fixed rule, the quote is the line that
-  the rule matched (for example the subject or the code line).
+  the rule matched (for example the subject or the code line). If that line
+  is empty, the quote is `(no subject)`.
 
 ## 8. The first brief
 
-The brief is a query on the items. It is not a separate store.
+The brief is a query on the items. It is not a separate store. Each query reads
+the kind of a party from the sender row of its `p-` ID (the counterparty, the
+issuer or the publisher), when the query runs. No query shows an item whose
+status is `gone`.
 
 | Section | Query |
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
-| Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`. Order by age. |
+| Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
 | Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active`. |
-| Strangers | Items whose origin sender is a `stranger`. |
+| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. |
+| Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
+| Not understood | The count of messages that the model failed 3 times (section 7.4). |
 
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
-applied.") uses the changeset format of specification 2, with each action in
-the state `proposed`.
+applied.") is a list that the engine computes when the brief opens, in the
+changeset format of specification 2, with each action in the state
+`proposed`. Release 1 does not store it. From release 2, triage stores it as
+a changeset in the mode `observe`.
 
 ## 9. Memory
 
 The design keeps memory flat when the mailbox grows:
 
-- The sync streams each raw message to disk. It holds at most 8 messages in
-  memory, one for each fetch.
+- The sync streams each raw message to disk through a fixed buffer of 64 KiB
+  for each fetch, at most 8 fetches at the same time. It decodes the base64url
+  data of the answer while it reads, and never holds a full message.
+- The understanding step parses at most one message at a time. It extracts
+  the text of a PDF attachment only up to 10 MiB. A larger PDF stays as a
+  name, a type and a size.
 - The engine never keeps a list of all messages in memory. The verify step
-  and the full resync compare IDs page by page against SQLite.
+  and the full resync compare IDs page by page against SQLite. They mark the
+  IDs that a list names in a temporary table on disk.
 - SQLite uses at most 2 MiB of page cache for each connection, and 3
   connections.
-- The understanding step parses one message at a time, and it streams large
-  attachments.
 
 A change that adds a cache must say its size in the pull request.
 
@@ -654,7 +839,7 @@ A change that adds a cache must say its size in the pull request.
 - A test drops the connection in the middle of the first sync and checks that
   the next start fetches only the rest.
 - A test runs the content cleanup during a live backup, and checks that each
-  message row in the backup has its content file.
+  message row with a `content_sha256` in the backup has its content file.
 - A test changes one byte of a content file, and checks that verify reports 1
   difference and fetches the message again.
 - A test adds and then deletes a message at the fake server before an
@@ -664,21 +849,61 @@ A change that adds a cache must say its size in the pull request.
   of the first sync, and checks that the mirror becomes ready.
 - A test restores a live backup to a new folder, and checks that the engine
   reads the secrets and the policy.
-- A test deletes a message at the fake server during step 5 of a full resync,
-  and checks that the resync completes and marks the message as gone.
+- A test deletes a message at the fake server during step 7 of a full resync,
+  and checks that the resync completes and that the message is gone after
+  step 8.
+- A test stops the engine during step 5 of a full resync. After the start,
+  the resync continues from `H1`, and no incremental sync runs before it ends.
+- A test renames and deletes a label at the fake server, and checks that the
+  next incremental sync corrects the label rows, and that verify reports 0
+  differences.
+- A test with a message that has a forged `Authentication-Results` header
+  below the header of Gmail: the engine uses only the header of Gmail.
+- A test with a message with the label `DRAFT`: understanding makes no item
+  from it.
+- A test runs understanding again on one message, and checks that the items
+  of the message are not duplicated.
 - A test changes labels at the fake server between two syncs and checks that
   verify reports 0 differences.
+- A test changes a label at the fake server while verify lists the labels,
+  and checks that verify reports 0 differences.
+- A test makes an item with an origin message and an update message, and
+  deletes the origin at the fake server. After the 30 days, the item keeps
+  its status, its origin source cites the tombstone, and the item is valid
+  against the schema.
+- A test sends a `messageAdded` record for a message that the mirror has, and
+  checks that the sync changes the label set and does not fetch the message.
+- A test marks a message as gone, and then a full resync finds it in the
+  list. The message comes back, and its items run understanding again.
+- A test sends a message with the display name of a known person, another
+  address and a DMARC fail. No text goes to the model, and the sender row of
+  the known person does not change.
+- A rebuild test with an item that an open changeset refers to. After the
+  rebuild, the item has the same ID.
+- These tests need features that the fake server (tracker item R0-08) does
+  not have yet. Add them to the fake server before the sync code is written:
+  - A delete of a message, a change of labels, and a rename and a delete of a
+    label, with the history records `messageDeleted`, `labelAdded` and
+    `labelRemoved`, and the filter `historyTypes`.
+  - The `labelIds` filter and the `includeSpamTrash` parameter of
+    `messages.list`, with messages in `SPAM`, `TRASH` and `DRAFT`, and user
+    labels.
+  - For each format of `messages.get`, only the fields that the Gmail
+    documentation promises, so that a test cannot pass on a field that Gmail
+    does not send.
 - The schema test (`crates/iris-spec`) validates the sample documents in
   `schema/examples/` against the schemas, and checks that each sample in
   `schema/examples/invalid/` fails.
-- A rebuild test with one message that gives two commitments. A person
-  corrects the due date of one. After the rebuild, that commitment has the
+- A rebuild test of release 2 with one message that gives two commitments. A
+  person corrects the due date of one. After the rebuild, that commitment has the
   same ID and the corrected date, and the other commitment has no correction.
+- The rebuild tests use a fixed fake model, which gives the same answer for
+  the same input.
 - The understanding tests use the ground-truth file of the synthetic mailbox.
   They measure the share of messages with the correct form. Release 1 sets the
   target after the first measure.
 - The hostile samples of the synthetic mailbox check that no hostile body goes
-  to the model, and that no commitment comes from a hostile sender.
+  to the model, and that no item comes from hostile mail.
 
 ## 11. Open questions
 
@@ -699,12 +924,29 @@ A change that adds a cache must say its size in the pull request.
   returns HTTP 404 for a history ID that is too old, and `messages.list`
   accepts `includeSpamTrash`. Verify against the Google documentation before
   the provider client is written.
-- The Gmail per-user quota is 250 quota units each second. `messages.get` and
-  `messages.list` cost 5 units, and `history.list` costs 2 units. Verify the
-  current numbers before the provider client is written.
-- Gmail keeps the change history for at least some hours. If it keeps it less
+- The Gmail quota page (checked on 2026-11-15) gives 6,000 quota units each
+  minute for each user of a project. `messages.get` costs 20 units, or 60
+  units with `format=raw`. `messages.list` costs 5 units, `history.list` 2
+  units and `users.getProfile` 1 unit. A project that used the API before
+  May 2026 can keep its earlier quota. The provider client reads the limit
+  from a setting, so that a change needs no new release.
+- With these numbers, the first sync of 100,000 messages costs 6,000,000
+  units and takes about 17 hours at the quota limit. The newest-first order
+  of section 4.2 lets understanding start on recent mail in the first
+  minutes. The list calls of a full resync or a verify cost about 1,000
+  units for each 100,000 label memberships.
+- `messages.get` with `format=raw` returns `labelIds` and `internalDate` with
+  the raw data. Verify this against the real API before the sync code is
+  written. The Gmail documentation promises only the ID and the labels for
+  `format=minimal`, so this specification uses `format=minimal` only for
+  labels and for a 404.
+- Gmail keeps the change history "typically" for at least one week, and in
+  rare cases for only a few hours (Gmail sync guide). If it keeps it less
   than the 60-second sync interval in practice, each sync becomes a full
   resync, and the design must change.
+- Gmail deletes a message in the trash for good after 30 days (Gmail Help
+  Center, not the API documentation). The mirror follows each delete through
+  the history, so the design does not depend on this number.
 - The `bundled` SQLite of `rusqlite` has FTS5. The engine checks this at start
   and stops with a clear error if FTS5 is not present.
 - A mailbox of 100,000 messages has a content folder of a few GB. The data
