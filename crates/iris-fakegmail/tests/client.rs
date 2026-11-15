@@ -240,3 +240,26 @@ fn send_to_an_old_thread_keeps_the_thread_count_and_big_tokens_are_safe() {
     );
     assert!(history.get("nextPageToken").is_none());
 }
+
+#[test]
+fn query_values_are_url_decoded_and_bad_padding_is_refused() {
+    let gmail = FakeGmail::start(Mailbox::new(4, 5)).unwrap();
+    let id = get(&gmail, "messages?maxResults=1")["messages"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(get(&gmail, &format!("messages/{id}?format=%72aw"))["raw"].is_string());
+    let meta = get(
+        &gmail,
+        &format!("messages/{id}?format=metadata&metadataHeaders=Message%2DID"),
+    );
+    assert_eq!(meta["payload"]["headers"][0]["name"], "Message-ID");
+    let (status, _) = call(
+        &gmail,
+        "POST",
+        "messages/send",
+        Some(&json!({ "raw": "AA=A" })),
+        true,
+    );
+    assert_eq!(status, 400);
+}

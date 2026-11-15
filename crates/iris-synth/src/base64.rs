@@ -67,5 +67,9 @@ mod tests {
             assert_eq!(decode(&encode_url(&data)).unwrap(), data);
         }
         assert_eq!(decode("Zm9v*"), None);
+        for bad in ["AA=A", "A", "Zm9vY===", "Zm9vY=", "Zh==", "Zm9=v"] {
+            assert_eq!(decode(bad), None, "{bad}");
+        }
+        assert_eq!(decode("Zm9vYg").unwrap(), b"foob");
     }
 }

@@ -390,6 +390,23 @@ mod tests {
     }
 
     #[test]
+    fn encoded_words_are_at_most_75_characters() {
+        let mb = Mailbox::new(1, 20_000);
+        let mut seen = 0;
+        for i in 0..mb.len() {
+            let raw = String::from_utf8_lossy(&mb.raw(i)).into_owned();
+            for word in raw
+                .split_whitespace()
+                .filter(|w| w.starts_with("=?UTF-8?B?"))
+            {
+                assert!(word.len() <= 75 && word.ends_with("?="), "{word}");
+                seen += 1;
+            }
+        }
+        assert!(seen > 20, "encoded words: {seen}");
+    }
+
+    #[test]
     fn replies_point_to_the_thread() {
         let mb = Mailbox::new(5, 2000);
         let reply =
