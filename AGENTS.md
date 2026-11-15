@@ -2,7 +2,7 @@
 
 These rules apply to every agent that works in this repository (Claude, Codex, and
 others). `CLAUDE.md` imports this file. The process comes from the projectstarter
-kit (projectstarter 0.2.0). Product rules are at the end, in [Product rules](#product-rules).
+kit (projectstarter 0.2.0, with the review loop of 0.4.0). Product rules are at the end, in [Product rules](#product-rules).
 
 Write all documentation, PR text and code comments as `docs/writing-style.md` says
 (Simplified Technical English).
@@ -36,6 +36,18 @@ To add a tool, a test command or a new folder, change `starter.json`.
    personal data, migrations, deletes). Put it in `docs/specs/<YYYY-MM-DD>-<name>.md`
    with a `## Assumptions` section. A copy edit, a one-line fix or a format change
    needs no spec.
+
+   Rules for a spec:
+   - For each external write (a call that changes data outside the product),
+     state what happens on success, on a definite rejection, on an unknown
+     result (a time-out, a lost response or a crash), and on retry.
+   - For each assumption, name the evidence (a command, a file, a document). If
+     there is no evidence, write `pending` and say how the design tolerates a
+     wrong assumption.
+   - Put a question that the build can answer in `## Open questions`, not in
+     the design.
+   - Give each item its own spec PR. If a spec PR is larger than about 1,500
+     changed lines (lockfiles excluded), split it.
 2. Start the branch from `develop`. If the branch has no commits of its own:
    `git fetch origin develop` and `git checkout -B <branch> origin/develop`.
 3. Write a test that fails without the change. Then write the change. If no test
@@ -61,7 +73,13 @@ To add a tool, a test command or a new folder, change `starter.json`.
    - Two rounds in a row find a defect in a fix that you made for the round
      before (a repair stop). Name the subsystem and what the fixes get wrong.
      Do not push one more fix.
-   - Five review rounds end with no clean review.
+   - Five review rounds end with no clean review. `review.py` stops by itself
+     after `review.max_rounds` blocked rounds (default 5). Use `--force` only
+     after the user says to continue.
+
+   A PR that changes a file in `review.spec_paths` (default `docs/spec/**` and
+   `docs/specs/**`) gets the spec rules of `scripts/review/spec.md`. Under these
+   rules, an edge case that the build can settle is P3.
 9. While the review runs, do not comment on the PR and do not edit its body. A
    change makes the review stale, and the command posts nothing.
 
