@@ -59,6 +59,17 @@ fn token_server(answers: Vec<(u16, String)>) -> (Arc<Fake>, String) {
     (fake, uri)
 }
 
+/// The file names an attacker endpoint. Iris must never use it.
+const ATTACKER: &str = "http://127.0.0.1:80@attacker.example/token";
+
+fn test_client(token_uri: Option<&str>) -> Client {
+    let client = Client::from_json(client_json(ATTACKER).as_bytes()).unwrap();
+    match token_uri {
+        Some(uri) => client.with_test_token_uri(uri).unwrap(),
+        None => client,
+    }
+}
+
 fn client_json(token_uri: &str) -> String {
     format!(
         r#"{{"installed":{{"client_id":"fake-id.apps.googleusercontent.com","project_id":"p",
@@ -102,7 +113,7 @@ fn browser_get(redirect_uri: &str, query: &str) -> String {
 #[test]
 fn loopback_sign_in_with_pkce() {
     let (fake, uri) = token_server(vec![good_answer()]);
-    let client = Client::from_json(client_json(&uri).as_bytes()).unwrap();
+    let client = test_client(Some(&uri));
     let sign_in = client.sign_in().unwrap();
     let p = params(&sign_in.url());
     assert_eq!(p["scope"], SCOPE, "only gmail.readonly");
@@ -149,7 +160,7 @@ fn loopback_sign_in_with_pkce() {
 
 #[test]
 fn each_sign_in_has_a_new_state_and_verifier() {
-    let client = Client::from_json(client_json("https://example.invalid/t").as_bytes()).unwrap();
+    let client = test_client(None);
     let a = params(&client.sign_in().unwrap().url());
     let b = params(&client.sign_in().unwrap().url());
     assert_ne!(a["state"], b["state"]);
@@ -159,7 +170,7 @@ fn each_sign_in_has_a_new_state_and_verifier() {
 #[test]
 fn copied_address_completes_a_remote_sign_in() {
     let (fake, uri) = token_server(vec![good_answer()]);
-    let client = Client::from_json(client_json(&uri).as_bytes()).unwrap();
+    let client = test_client(Some(&uri));
     let sign_in = client.sign_in().unwrap();
     let state = params(&sign_in.url())["state"].clone();
     let base = sign_in.redirect_uri().to_string();
@@ -182,7 +193,7 @@ fn copied_address_completes_a_remote_sign_in() {
 
 #[test]
 fn refused_consent_is_denied() {
-    let client = Client::from_json(client_json("https://example.invalid/t").as_bytes()).unwrap();
+    let client = test_client(None);
     let sign_in = client.sign_in().unwrap();
     let state = params(&sign_in.url())["state"].clone();
     let address = format!(
@@ -197,7 +208,7 @@ fn refused_consent_is_denied() {
 
 #[test]
 fn wait_ends_at_the_time_limit() {
-    let client = Client::from_json(client_json("https://example.invalid/t").as_bytes()).unwrap();
+    let client = test_client(None);
     let sign_in = client.sign_in().unwrap();
     assert!(matches!(
         sign_in.wait(Duration::from_millis(200)),
@@ -207,7 +218,7 @@ fn wait_ends_at_the_time_limit() {
 
 fn finish_with(answer: (u16, String)) -> Result<iris_auth::Tokens, Error> {
     let (_fake, uri) = token_server(vec![answer]);
-    let client = Client::from_json(client_json(&uri).as_bytes()).unwrap();
+    let client = test_client(Some(&uri));
     let sign_in = client.sign_in().unwrap();
     let state = params(&sign_in.url())["state"].clone();
     sign_in.finish(&format!("{}?state={state}&code=c", sign_in.redirect_uri()))
@@ -255,7 +266,7 @@ fn refresh_gets_a_new_access_token() {
                 .into(),
         ),
     ]);
-    let client = Client::from_json(client_json(&uri).as_bytes()).unwrap();
+    let client = test_client(Some(&uri));
     let refresh = Secret::new(REFRESH);
     assert_eq!(
         client.refresh(&refresh).unwrap().token.expose(),
@@ -272,8 +283,6 @@ fn client_file_errors() {
     let web = r#"{"web":{"client_id":"a","client_secret":"b"}}"#;
     let e = Client::from_json(web.as_bytes()).err().unwrap();
     assert!(e.to_string().contains("Desktop app"), "{e}");
-    let http = client_json("http://example.com/token");
-    assert!(Client::from_json(http.as_bytes()).is_err());
     let empty = r#"{"installed":{"client_id":"a","client_secret":"","auth_uri":"https://a","token_uri":"https://b"}}"#;
     assert!(Client::from_json(empty.as_bytes()).is_err());
 }
@@ -289,7 +298,7 @@ fn secrets_stay_out_of_logs_and_errors() {
     let e = Client::from_json(bad.as_bytes()).err().unwrap();
     texts.push(format!("{e} {e:?}"));
     let bad = format!(
-        r#"{{"installed":{{"client_id":"a","client_secret":"{CLIENT_SECRET}","auth_uri":7}}}}"#
+        r#"{{"installed":{{"client_id":"a","client_secret":"{CLIENT_SECRET}","client_id":7}}}}"#
     );
     let e = Client::from_json(bad.as_bytes()).err().unwrap();
     texts.push(format!("{e} {e:?}"));
@@ -305,7 +314,7 @@ fn secrets_stay_out_of_logs_and_errors() {
     texts.push(format!("{e} {e:?}"));
 
     // A redirect error that carries a token value.
-    let client = Client::from_json(client_json("https://example.invalid/t").as_bytes()).unwrap();
+    let client = test_client(None);
     let sign_in = client.sign_in().unwrap();
     let state = params(&sign_in.url())["state"].clone();
     let e = sign_in
@@ -349,7 +358,7 @@ fn a_huge_expiry_is_a_bad_answer() {
 
 #[test]
 fn busy_connections_do_not_hold_wait_past_its_time_limit() {
-    let client = Client::from_json(client_json("https://example.invalid/t").as_bytes()).unwrap();
+    let client = test_client(None);
     let sign_in = client.sign_in().unwrap();
     let host = sign_in.redirect_uri()[7..]
         .split('/')
@@ -379,4 +388,23 @@ fn busy_connections_do_not_hold_wait_past_its_time_limit() {
         "{:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn the_file_cannot_choose_the_endpoints() {
+    let file = client_json("https://attacker.example/token")
+        .replace("https://accounts.google.com/o/oauth2/auth", "https://attacker.example/auth");
+    let client = Client::from_json(file.as_bytes()).unwrap();
+    assert_eq!(client.token_uri(), iris_auth::GOOGLE_TOKEN_URI);
+    assert!(client.sign_in().unwrap().url().starts_with("https://accounts.google.com/o/oauth2/auth?"));
+    assert_eq!(test_client(None).token_uri(), iris_auth::GOOGLE_TOKEN_URI);
+    for bad in [
+        ATTACKER,
+        "https://attacker.example/token",
+        "http://127.0.0.1.attacker.example/token",
+        "http://127.0.0.1:x@attacker.example/token",
+        "http://127.0.0.1:/token",
+    ] {
+        assert!(test_client(None).with_test_token_uri(bad).is_err(), "{bad}");
+    }
 }
