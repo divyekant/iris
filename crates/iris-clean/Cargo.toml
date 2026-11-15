@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 encoding_rs = "0.8"
+miniz_oxide = "0.9"
 
 [dev-dependencies]
+miniz_oxide = "0.9"
 iris-synth = { path = "../iris-synth" }
