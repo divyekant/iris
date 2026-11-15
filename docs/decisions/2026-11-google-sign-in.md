@@ -38,6 +38,10 @@ Reasons:
    changes spec 1 (no Gmail history API). Keep path C as a later second
    provider.
 
+The recommendation has a condition: the domain test of path A must pass.
+If the test fails, Iris does not ship path A as the default. The lead brings
+the decision back to dk.
+
 Path A does not meet the 10-minute target with certainty. A first-time user
 needs about 10 to 20 minutes (estimate, no source). The guided setup must
 bring the time down. The release target (spec 1, M4) is the first brief in
@@ -104,9 +108,12 @@ Limits:
 - After "Publish app", the user must sign in again. A token from the
   "Testing" status keeps its 7-day limit [17] (single source, low weight).
 - "Publish app" needs a home page URL, a privacy policy URL and an authorized
-  domain. In 2026, rclone users reported a refusal for `github.com` [14].
-  Evidence: pending. R1-02 must test which URLs Google accepts. A page on an
-  Iris project domain is the first option to test.
+  domain [36]. Google writes: "The homepage must be hosted on a verified
+  domain you own" [36]. The same page links the Search Console check to app
+  verification, not to "Publish app". So the page does not say if an
+  unverified app needs a domain that the user owns. In 2026, rclone users
+  reported a refusal for `github.com`, and other users published with no
+  verification [14]. Evidence: pending. See "Domain test" below.
 - Google gives no API and no `gcloud` command to make a standard OAuth client
   or the Branding and Audience settings [14]. `gcloud` can create the project
   and enable the Gmail API. The other steps stay manual in the browser.
@@ -124,6 +131,23 @@ Limits:
   for Gmail. The admin must then mark the client ID as trusted [11]. If the
   user owns the project in the same Workspace organization, the user type
   "Internal" has no warning screen and no 7-day limit [3][8].
+
+Domain test (R1-02 does it first, before other sign-in work):
+
+1. Put a home page and a privacy policy page on an Iris project domain. The
+   user does not own this domain and cannot verify it.
+2. In a new Google Cloud project, use these URLs and this authorized domain,
+   then click "Publish app".
+3. If Google accepts, the guided setup uses the Iris pages. No user action
+   for the domain is necessary.
+4. If Google refuses, test a domain that each user can own and verify: a
+   GitHub Pages site at `<user>.github.io`. The `github.io` domain is a public
+   suffix, so each `<user>.github.io` is a separate domain. Iris gives a
+   template for the two pages. The user verifies the site in Google Search
+   Console. Measure the added time.
+5. If step 4 also fails, or the total time goes far over 10 minutes, path A
+   fails the test. Then the lead asks dk to choose again, with path C as the
+   next option.
 
 Risks:
 
@@ -268,10 +292,9 @@ these paths.
 
 ## Open questions for R1-02
 
-1. Does a token from an unverified "In production" client with
+1. Does the domain test of path A pass, and at which step?
+2. Does a token from an unverified "In production" client with
    `gmail.readonly` still work after 8 days?
-2. Which home page URL, privacy policy URL and authorized domain does
-   "Publish app" accept?
 3. How long does it take on dk's Mac from the start of setup to the first
    brief (spec 1, M4)? Also record the time to the end of sign-in as a
    separate measure.
@@ -355,3 +378,5 @@ All sources were read on 2026-11-15. "Official" means a Google or Apple page.
     https://support.google.com/accounts/answer/3024190
 35. Forward Gmail messages to another account (official).
     https://support.google.com/mail/answer/10957
+36. Manage OAuth App Branding (official).
+    https://support.google.com/cloud/answer/15549049
