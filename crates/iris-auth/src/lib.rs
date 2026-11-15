@@ -314,8 +314,9 @@ impl TokenAnswer {
 /// With granular consent the user can clear the Gmail box, so check the grant.
 fn check_scope(answer: &TokenAnswer) -> Result<()> {
     match &answer.scope {
-        Some(s) if !s.split(' ').any(|x| x == SCOPE) => Err(Error::ScopeMissing),
-        _ => Ok(()),
+        Some(s) if s.split(' ').any(|x| x == SCOPE) => Ok(()),
+        // Google always names the granted scopes, so no scope is no grant.
+        _ => Err(Error::ScopeMissing),
     }
 }
 
@@ -365,6 +366,8 @@ impl SignIn {
     }
 
     /// Waits for the redirect on the loopback listener, then exchanges the code.
+    /// `timeout` limits the wait for the redirect only. The code exchange after
+    /// it has the 30-second limit of the HTTP client.
     pub fn wait(&self, timeout: Duration) -> Result<Tokens> {
         // A longer wait is of no use, and the cap keeps the Instant sum in range.
         let deadline = Instant::now() + timeout.min(Duration::from_secs(24 * 3600));
