@@ -548,3 +548,12 @@ fn new_content_without_a_body_removes_the_old_text() {
         .unwrap();
     assert_eq!((bodies, understood), (0, None));
 }
+
+#[test]
+fn a_missing_key_with_a_database_is_an_error() {
+    let dir = TempDir::new("nokey");
+    drop(Store::open(&dir.0).unwrap());
+    fs::remove_file(dir.0.join("key")).unwrap();
+    assert!(matches!(Store::open(&dir.0), Err(Error::Key(_))));
+    assert!(!dir.0.join("key").exists(), "no new key");
+}
