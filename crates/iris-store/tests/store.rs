@@ -481,3 +481,35 @@ fn open_makes_an_existing_key_private() {
     Store::open(&dir.0).unwrap();
     assert_eq!(mode(&key), 0o600);
 }
+
+#[test]
+fn new_content_without_a_body_removes_the_old_text() {
+    let dir = TempDir::new("newcontent");
+    let (store, acc) = setup(&dir);
+    let mut m = msg("a", "t1", 1, &[], "s", "apple");
+    m.content_sha256 = Some("a".repeat(64));
+    let a = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 4 WHERE id = ?1", [a])?))
+        .unwrap();
+
+    // The same content again keeps the text and the understanding.
+    m.body = None;
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(store.search("apple", 10).unwrap(), [a]);
+
+    // New content with no new text: the old text must not stay searchable.
+    m.content_sha256 = Some("b".repeat(64));
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(store.search("apple", 10).unwrap(), Vec::<i64>::new());
+    let (bodies, understood): (i64, Option<i64>) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT (SELECT count(*) FROM body WHERE message_id = ?1), understood_at FROM message WHERE id = ?1",
+                [a],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!((bodies, understood), (0, None));
+}
