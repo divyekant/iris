@@ -144,6 +144,8 @@ pub(crate) fn fields(seed: u64, m: &Meta) -> Vec<(&'static str, String)> {
             ]
         }
         Form::Commitment if m.pos == 0 => {
+            // The first message asks its recipient for a document. If the
+            // owner sends it, the other party owes the owner (`owed_to_you`).
             let direction = if m.sender == Sender::Owner {
                 "owed_to_you"
             } else {

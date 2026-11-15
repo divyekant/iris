@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn fields_match_the_rendered_text() {
         let mb = Mailbox::new(9, 3000);
-        let (mut records, mut asks) = (0, 0);
+        let (mut records, mut asks, mut owner_asks) = (0, 0, 0);
         for i in 0..mb.len() {
             let f: std::collections::BTreeMap<_, _> = mb.fields(i).into_iter().collect();
             let raw = String::from_utf8_lossy(&mb.raw(i)).into_owned();
@@ -439,12 +439,26 @@ mod tests {
             } else if t.form == Form::Commitment && t.message_id.contains(".0@") {
                 asks += 1;
                 assert_eq!(f["kind"], "task");
+                // The first message asks its recipient to send a document. If
+                // the owner asks, the other party owes the owner.
+                let want = if t.sender == Sender::Owner {
+                    owner_asks += 1;
+                    assert!(raw.contains(&format!("From: \"{OWNER_NAME}\" <{OWNER}>")));
+                    "owed_to_you"
+                } else {
+                    assert!(raw.contains(&format!("To: \"{OWNER_NAME}\" <{OWNER}>")));
+                    "you_owe"
+                };
+                assert_eq!(f["direction"], want, "message {i}");
                 assert!(f["due.date"].as_str() > date::ymd(t.date).as_str());
             } else {
                 assert!(f.is_empty(), "message {i}: {f:?}");
             }
         }
-        assert!(records > 100 && asks > 50, "{records} {asks}");
+        assert!(
+            records > 100 && asks > 50 && owner_asks > 0 && owner_asks < asks,
+            "{records} {asks} {owner_asks}"
+        );
     }
 
     #[test]
