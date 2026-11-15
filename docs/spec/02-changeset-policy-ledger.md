@@ -365,6 +365,8 @@ changes a row only to move its state forward.
 2. In one SQLite transaction, add the ledger row with the state `writing`, the
    `ops`, the `pre` state from step 1, and the expected `post` state.
    Recovery (section 7.3) needs `post`, so the engine saves it before the call.
+   The commit must be on disk (`synchronous=FULL`, specification 1, section
+   5.2) before step 3.
 3. Call the provider. An action can need more than one call: one
    `batchModify` call for each 1,000 messages, or one `messages.trash` call for
    each message. After each call succeeds, add its messages to `done`.

@@ -86,8 +86,10 @@ copy, and the sender axis uses the spam label.
    `format=raw`. Decode the base64url data, write the raw message to the
    content folder (section 5.3), and save the labels, the date and the size.
    Fetch the newest messages first, so that understanding can start on the
-   last 90 days before the full copy is complete.
-5. When each known message is fetched, run one incremental sync from `H0`
+   last 90 days before the full copy is complete. If Gmail returns HTTP 404
+   for a message, Gmail deleted it after step 3. Mark the message as gone
+   (section 4.5) and continue.
+5. When each known message is fetched or gone, run one incremental sync from `H0`
    (section 4.3). Then mark the account as "mirror ready".
 
 The first sync can stop at any point (crash, network loss, restart). It starts
@@ -240,7 +242,14 @@ makes a copy while the engine runs:
    file while another process holds this lock.
 2. Copy `iris.db` with the SQLite online backup.
 3. Copy each content file that the copy of `iris.db` refers to.
-4. Release the lock.
+4. Copy `key` with mode `0600`, and copy `policy.toml`. Without `key`, the
+   backup cannot decrypt the secrets.
+5. Release the lock.
+
+The engine makes the backup folder with mode `0700`, because it holds the key
+and the mail. The engine writes `policy.toml` only while it holds the backup
+lock, and it writes the file to a temporary file and then renames it. So the
+copy has one complete version of the policy.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
@@ -253,7 +262,7 @@ is always present and each system has the same SQLite version.
 | Setting | Value | Reason |
 |---|---|---|
 | `journal_mode` | `WAL` | Readers do not block the writer. |
-| `synchronous` | `NORMAL` | Safe with WAL. A power loss can lose the last transaction, and the next sync gets it again. |
+| `synchronous` | `FULL` | Each commit is on disk before the next step. The ledger row of specification 2 must be on disk before the provider write, or a power loss can lose the record of a write. |
 | `foreign_keys` | `ON` | The schema uses foreign keys. |
 | `cache_size` | `-2048` (2 MiB) for each connection | Keeps the memory budget. |
 | `mmap_size` | `0` | Memory-mapped pages count in resident memory on some systems. |
@@ -635,6 +644,10 @@ A change that adds a cache must say its size in the pull request.
   message row in the backup has its content file.
 - A test changes one byte of a content file, and checks that verify reports 1
   difference and fetches the message again.
+- A test deletes a message at the fake server between the list and the fetch
+  of the first sync, and checks that the mirror becomes ready.
+- A test restores a live backup to a new folder, and checks that the engine
+  reads the secrets and the policy.
 - A test deletes a message at the fake server during step 5 of a full resync,
   and checks that the resync completes and marks the message as gone.
 - A test changes labels at the fake server between two syncs and checks that
