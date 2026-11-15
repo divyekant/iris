@@ -11,6 +11,8 @@ publish.workspace = true
 serde_json = "1"
 # Sync client with rustls (ring). No OpenSSL, no async runtime.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Already in the build through hyper. Parses the date form of `retry-after`.
+httpdate = "1"
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

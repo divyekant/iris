@@ -512,6 +512,7 @@ name = "iris-model"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "httpdate",
  "serde_json",
  "tokio",
  "ureq",
