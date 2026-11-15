@@ -265,8 +265,10 @@ The exit criterion of release 1 is 0 differences each day for 7 days.
   Release 2 asks for `gmail.modify` when the person turns on writes.
 - The engine stores the refresh token encrypted in the store (section 5.4). It
   keeps the access token only in memory.
-- The OAuth client ID is a setting. Which OAuth client a self-hosted engine
-  uses is an open risk (tracker item R1-01, section 11).
+- The OAuth client ID is a setting. Each user gives the JSON file of an own
+  OAuth client of the type "Desktop app", published to "In production".
+  Do not use the "Testing" status: its refresh tokens expire after 7 days.
+  See `docs/decisions/2026-11-google-sign-in.md` (tracker item R1-01).
 - An agent never gets a token. Only the provider client in the engine reads
   the token.
 
@@ -920,11 +922,10 @@ A change that adds a cache must say its size in the pull request.
 
 ## 11. Open questions
 
-1. OAuth client for self-hosted users (tracker item R1-01). The scope
-   `gmail.readonly` is a restricted scope at Google. Each self-hosted user can
-   make an own OAuth client in testing mode, or the project gets a verified
-   app with a security assessment. This decision changes the first ten
-   minutes. It needs a check of the current Google rules.
+1. OAuth client for self-hosted users (tracker item R1-01). Decided on
+   2026-11-15: each user makes an own OAuth client, published to "In
+   production" without verification. See
+   `docs/decisions/2026-11-google-sign-in.md`.
 2. Contacts. The rule for `person` uses only sent mail. The Google People API
    can add contacts, but it needs one more scope. Version 0 does not use it.
 3. One conversation for each thread. Gmail threads by subject, and a person
