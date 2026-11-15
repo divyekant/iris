@@ -44,6 +44,11 @@ const LINE: [&str; 20] = [
     "aside", "address", "center", "form", "fieldset", "caption", "details", "summary", "figure",
 ];
 
+/// The attributes that the converter reads.
+const USED_ATTRS: [&str; 9] = [
+    "href", "style", "class", "id", "hidden", "type", "alt", "width", "height",
+];
+
 struct Tag {
     name: String,
     attrs: Vec<(String, String)>,
@@ -487,7 +492,11 @@ fn parse_tag(s: &str, start: usize) -> (Tag, usize) {
                 }
             }
         }
-        attrs.push((key, decode_entities(value).into_owned()));
+        // Keep only the attributes that the converter reads, so that a tag
+        // with very many attributes costs no memory.
+        if USED_ATTRS.contains(&key.as_str()) && attrs.len() < USED_ATTRS.len() * 2 {
+            attrs.push((key, decode_entities(value).into_owned()));
+        }
     }
     (Tag { name, attrs }, i)
 }

@@ -378,13 +378,36 @@ fn qp(b: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Decode quoted-printable until `cap` decoded bytes. Return the bytes and
+/// true if more decoded bytes follow.
+pub fn qp_capped(b: &[u8], cap: usize) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut at = b.len();
+    qp_walk_until(b, |c, i| {
+        if out.len() == cap {
+            at = i;
+            return false;
+        }
+        out.push(c);
+        true
+    });
+    (out, qp_walk(&b[at..], |_| {}) > 0)
+}
+
 /// Give each decoded quoted-printable byte to `f`. Return the count.
 fn qp_walk(b: &[u8], mut f: impl FnMut(u8)) -> u64 {
     let mut count = 0;
-    let mut out = |c: u8| {
+    qp_walk_until(b, |c, _| {
         count += 1;
-        f(c)
-    };
+        f(c);
+        true
+    });
+    count
+}
+
+/// Give each decoded byte and the input index of its escape to `f`. Stop
+/// when `f` returns false.
+fn qp_walk_until(b: &[u8], mut f: impl FnMut(u8, usize) -> bool) {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'=' {
@@ -398,15 +421,18 @@ fn qp_walk(b: &[u8], mut f: impl FnMut(u8)) -> u64 {
                 continue;
             }
             if let (Some(h), Some(l)) = (rest.first().and_then(hex), rest.get(1).and_then(hex)) {
-                out(h * 16 + l);
+                if !f(h * 16 + l, i) {
+                    return;
+                }
                 i += 3;
                 continue;
             }
         }
-        out(b[i]);
+        if !f(b[i], i) {
+            return;
+        }
         i += 1;
     }
-    count
 }
 
 /// Split a multipart body into its parts. The preamble and the epilogue go out.
@@ -505,6 +531,8 @@ mod tests {
         );
         assert_eq!(decoded_len(b"SGVs\r\nbG8=", "base64"), 5);
         assert_eq!(decoded_len(b"a=3Db=\r\n", "quoted-printable"), 3);
+        assert_eq!(qp_capped(b"a=\r\n=\r\nb=3Dc", 2), (b"ab".to_vec(), true));
+        assert_eq!(qp_capped(b"ab=\r\n=\r\n", 2), (b"ab".to_vec(), false));
     }
 
     #[test]

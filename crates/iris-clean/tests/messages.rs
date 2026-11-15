@@ -314,3 +314,26 @@ fn deep_quotes_with_many_lines_are_cut() {
     let c = clean(raw.as_bytes());
     assert!(c.cut);
 }
+
+#[test]
+fn an_attached_message_does_not_use_the_budget_of_the_outer_message() {
+    let inner_text = "i ".repeat(1_100_000);
+    let raw = format!(
+        "Subject: Fwd\nContent-Type: multipart/mixed; boundary=m\n\n--m\n\
+         Content-Type: message/rfc822\n\nSubject: Inner\n\n{inner_text}\n--m\n\
+         Content-Type: text/plain\n\nOuter words.\n--m--\n"
+    );
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.text, "Outer words.");
+    assert!(!c.cut);
+    assert!(c.attachments[0].text.as_ref().unwrap().ends_with(CUT_MARK));
+}
+
+#[test]
+fn quoted_printable_soft_breaks_do_not_use_the_budget() {
+    let body = format!("{}Visible end.", "=\n".repeat(iris_clean::BODY_LIMIT));
+    let raw = format!("Subject: QP\nContent-Transfer-Encoding: quoted-printable\n\n{body}");
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.text, "Visible end.");
+    assert!(!c.cut);
+}

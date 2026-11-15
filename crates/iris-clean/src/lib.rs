@@ -229,7 +229,17 @@ impl Walker {
         let mut text = None;
         if mime_type == "message/rfc822" && self.attach_left > 0 {
             let (inner, _) = decode_capped(body, cte, INNER_LIMIT);
-            let (subject, t) = self.message(&inner, depth + 1);
+            // The attached message has its own body budget and cut state, so
+            // that it does not take text from the outer message. Its text
+            // cannot be longer than the attachment text that is left.
+            let outer = (self.body_left, self.cut);
+            self.body_left = self.attach_left;
+            self.cut = false;
+            let (subject, mut t) = self.message(&inner, depth + 1);
+            if self.cut {
+                t.push_str(CUT_MARK);
+            }
+            (self.body_left, self.cut) = outer;
             if name.is_empty() {
                 name = subject;
             }
@@ -288,6 +298,10 @@ impl Walker {
 fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow<'a, [u8]>, bool) {
     // Base64 gives 3 bytes for 4 characters. The other encodings give at
     // most 1 byte for each input byte.
+    if cte == "quoted-printable" {
+        let (bytes, more) = mime::qp_capped(body, cap);
+        return (std::borrow::Cow::Owned(bytes), more);
+    }
     // Line ends between base64 characters do not count.
     let max_in = if cte == "base64" {
         mime::base64_prefix(body, cap / 3 * 4 + 4)
