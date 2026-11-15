@@ -5,7 +5,11 @@
   "status": "corrected",
   "title": "Flight to Tokyo",
   "type": "booking",
-  "issuer": { "kind": "sender", "sender": "p-33", "address": "trips@air.example" },
+  "issuer": {
+    "kind": "sender",
+    "sender": "p-33",
+    "address": "trips@air.example"
+  },
   "fields": {
     "kind": "flight",
     "reference": "QX7K2P",
@@ -13,8 +17,17 @@
     "end": "2026-12-11T07:40:00+09:00",
     "location": "Tokyo"
   },
-  "sources": [{ "message": "m-53500", "thread": "t-8600", "role": "origin" }],
+  "sources": [
+    {
+      "message": "m-53500",
+      "thread": "t-8600",
+      "role": "origin",
+      "quote": "Booking reference QX7K2P"
+    }
+  ],
   "created": "2026-11-05T12:00:00Z",
   "updated": "2026-11-06T08:00:00Z",
-  "derived": { "by": "person" }
+  "derived": {
+    "by": "person"
+  }
 }

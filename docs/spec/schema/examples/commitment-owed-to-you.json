@@ -6,10 +6,27 @@
   "title": "SDK examples",
   "direction": "owed_to_you",
   "kind": "task",
-  "owner": { "kind": "sender", "sender": "p-19", "name": "Alex Chen" },
-  "counterparty": { "kind": "self" },
-  "sources": [{ "message": "m-54001", "thread": "t-8700", "role": "origin" }],
+  "owner": {
+    "kind": "sender",
+    "sender": "p-19",
+    "name": "Alex Chen"
+  },
+  "counterparty": {
+    "kind": "self"
+  },
+  "sources": [
+    {
+      "message": "m-54001",
+      "thread": "t-8700",
+      "role": "origin",
+      "quote": "I will send the SDK examples next week."
+    }
+  ],
   "created": "2026-11-10T15:20:00Z",
   "updated": "2026-11-10T15:20:00Z",
-  "derived": { "by": "model", "model": "example-model-1", "prompt": "understand/0.1" }
+  "derived": {
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "understand/0.1"
+  }
 }

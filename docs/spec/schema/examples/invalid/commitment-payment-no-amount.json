@@ -23,7 +23,8 @@
     {
       "message": "m-55300",
       "thread": "t-8900",
-      "role": "origin"
+      "role": "origin",
+      "quote": "Amount due: $312.77 by Dec 3."
     }
   ],
   "created": "2026-11-16T07:00:00Z",
