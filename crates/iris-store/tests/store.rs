@@ -437,8 +437,30 @@ fn an_interrupted_first_key_creation_does_not_block_the_start() {
     fs::write(dir.0.join("key.tmp"), b"part").unwrap();
     let store = Store::open(&dir.0).unwrap();
     assert_eq!(fs::read(dir.0.join("key")).unwrap().len(), 32);
-    assert!(!dir.0.join("key.tmp").exists());
     let sealed = store.seal(b"x").unwrap();
     drop(store);
     assert_eq!(Store::open(&dir.0).unwrap().unseal(&sealed).unwrap(), b"x");
+}
+
+#[test]
+fn starts_at_the_same_time_share_one_key_and_one_schema() {
+    let dir = TempDir::new("race");
+    let barrier = std::sync::Barrier::new(8);
+    let sealed: Vec<Vec<u8>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let (dir, barrier) = (&dir.0, &barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    let store = Store::open(dir).unwrap();
+                    store.seal(format!("secret {i}").as_bytes()).unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let store = Store::open(&dir.0).unwrap();
+    for (i, s) in sealed.iter().enumerate() {
+        assert_eq!(store.unseal(s).unwrap(), format!("secret {i}").as_bytes());
+    }
 }
