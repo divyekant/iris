@@ -18,7 +18,7 @@ pub struct Cli {
 pub enum Command {
     /// Start the engine and serve the web client.
     Serve {
-        /// The address to listen on.
+        /// The IP address and port to listen on, for example 127.0.0.1:4800.
         #[arg(long, default_value = DEFAULT_ADDR)]
         addr: SocketAddr,
     },
