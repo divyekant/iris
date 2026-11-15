@@ -1,0 +1,11 @@
+[package]
+name = "iris-web"
+description = "The web client of Iris, served by the iris program."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
