@@ -34,7 +34,7 @@ pub fn encode_url(data: &[u8]) -> String {
 pub fn decode(text: &str) -> Option<Vec<u8>> {
     let body = text.trim_end_matches('=');
     let pad = text.len() - body.len();
-    if body.len() % 4 == 1 || (pad > 0 && (text.len() % 4 != 0 || pad > 2)) {
+    if body.len() % 4 == 1 || (pad > 0 && (!text.len().is_multiple_of(4) || pad > 2)) {
         return None;
     }
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
