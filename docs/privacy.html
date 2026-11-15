@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iris privacy policy</title>
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<main>
+<h1>Iris privacy policy</h1>
+<p class="muted">Date: 2026-11-15</p>
+<p>Iris is a program that each person runs on an own computer or server. This
+policy has two parts: the Iris install of the person, and the Iris project.</p>
+<p>This policy applies to Iris release 1. A later release that can change,
+send or delete mail updates this policy in the same release.</p>
+
+<h2>1. The Iris install of the person</h2>
+<ul>
+<li>Iris reads the Gmail mailbox of the person with the Gmail API, with the
+scope <code>gmail.readonly</code>. Iris release 1 does not change, send or
+delete mail.</li>
+<li>Iris stores a local copy of each message, including the raw mail, in the
+data folder on the machine of the person. Iris does not send this copy
+anywhere. Only the model step below sends mail data off the machine, and only
+when the person selects a model that runs on another machine.</li>
+<li>Iris encrypts the Google refresh token before it writes the token to disk.
+Iris keeps the access token in memory only.</li>
+<li>If the person turns on a hosted model, Iris sends mail data to the model
+provider that the person selects, with the key of the person. A model request
+can contain the text of a message, the headers that the model needs, the
+sender and the other parties of the message, and the context of its thread.
+The terms of that provider apply to this data, and the provider can keep it.
+If the person uses a model server, Iris sends the same data to the address of
+that server. The data stays on the machine only when the server runs on the
+same machine.</li>
+<li>To delete the data of the Iris install, the person deletes the Iris data
+folder. Each copy that Iris made outside the data folder is separate: a backup
+of <code>iris backup</code> (with the mail and the key) and an output of
+<code>iris export</code> (with the mail). Delete each of these copies too. For
+data that Iris sent to a hosted model, see the terms of that provider.</li>
+<li>To remove the
+access of Iris, the person removes the app at
+<a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>.</li>
+</ul>
+
+<h2>2. The Iris project</h2>
+<ul>
+<li>The Iris project receives no mail data, no tokens and no usage data from an
+install. Iris has no usage data collection.</li>
+<li>The Iris project has no server that an install connects to.</li>
+<li>These pages set no cookies and contain no analytics. The pages are hosted
+on GitHub Pages. GitHub can record the requests to these pages, as its own
+privacy statement says.</li>
+</ul>
+
+<h2>Google API Services User Data Policy</h2>
+<p>The use of information received from Google APIs by Iris follows the
+<a href="https://developers.google.com/terms/api-services-user-data-policy">Google
+API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+<h2>Changes and contact</h2>
+<p>Changes to this policy are in the history of the
+<a href="https://github.com/divyekant/iris">Iris repository</a>. For a question,
+open an issue there.</p>
+</main>
+</body>
+</html>

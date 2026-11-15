@@ -1,0 +1,8 @@
+/* Iris project pages (GitHub Pages). Colors are the dark brand tokens of .kalos.yaml. */
+:root { --bg: #0a0a0a; --text: #e5e5e5; --muted: #a3a3a3; --link: #d4af37; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.5 Inter, system-ui, sans-serif; }
+main { max-width: 40rem; margin: 0 auto; padding: 32px 16px; }
+h1 { font-size: 1.953rem; } h2 { font-size: 1.25rem; margin-top: 32px; }
+a { color: var(--link); }
+.muted { color: var(--muted); }
