@@ -1,0 +1,330 @@
+use std::fs;
+use std::path::PathBuf;
+
+use iris_store::{Body, Error, Header, NewMessage, Store};
+
+/// A new empty folder for one test, removed at the end.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("iris-store-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn msg(
+    id: &str,
+    thread: &str,
+    date: i64,
+    labels: &[&str],
+    subject: &str,
+    text: &str,
+) -> NewMessage {
+    NewMessage {
+        provider_id: id.into(),
+        thread_provider_id: thread.into(),
+        internal_date: Some(date),
+        labels: labels.iter().map(|l| l.to_string()).collect(),
+        header: Header {
+            from_addr: Some(format!("{id}@example.com")),
+            from_name: Some("Ana Lee".into()),
+            to_addrs: Some("owner@example.com".into()),
+            subject: Some(subject.into()),
+            ..Header::default()
+        },
+        body: Some(Body {
+            subject: subject.into(),
+            sender: format!("Ana Lee {id}@example.com"),
+            text: text.into(),
+        }),
+        ..NewMessage::default()
+    }
+}
+
+fn setup(dir: &TempDir) -> (Store, i64) {
+    let store = Store::open(&dir.0).unwrap();
+    let acc = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .put_labels(
+            acc,
+            &[("INBOX", "INBOX", "system"), ("Label_1", "Taxes", "user")],
+        )
+        .unwrap();
+    (store, acc)
+}
+
+#[cfg(unix)]
+fn mode(p: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+#[test]
+fn open_makes_the_data_folder() {
+    let dir = TempDir::new("open");
+    let store = Store::open(&dir.0).unwrap();
+    assert!(dir.0.join("iris.db").is_file());
+    assert!(dir.0.join("content").is_dir());
+    assert_eq!(fs::read(dir.0.join("key")).unwrap().len(), 32);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&dir.0), 0o700);
+        assert_eq!(mode(&dir.0.join("key")), 0o600);
+        assert_eq!(mode(&dir.0.join("content")), 0o700);
+    }
+    store
+        .read(|c| {
+            assert_eq!(iris_store::schema_version(c)?, 1);
+            let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+            assert_eq!(journal, "wal");
+            let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
+            assert_eq!(cache, -2048);
+            let mmap: i64 = c.query_row("PRAGMA mmap_size", [], |r| r.get(0))?;
+            assert_eq!(mmap, 0);
+            Ok(())
+        })
+        .unwrap();
+    store
+        .write(|tx| {
+            let sync: i64 = tx.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
+            assert_eq!(sync, 2, "FULL");
+            let fk: i64 = tx.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+            assert_eq!(fk, 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn secrets_survive_a_new_start_and_need_the_key() {
+    let dir = TempDir::new("secret");
+    let sealed = Store::open(&dir.0).unwrap().seal(b"refresh-token").unwrap();
+    assert!(!sealed.windows(13).any(|w| w == b"refresh-token"));
+    let store = Store::open(&dir.0).unwrap();
+    assert_eq!(store.unseal(&sealed).unwrap(), b"refresh-token");
+
+    let mut bad = sealed.clone();
+    *bad.last_mut().unwrap() ^= 1;
+    assert!(matches!(store.unseal(&bad), Err(Error::Key(_))));
+    assert!(matches!(store.unseal(&sealed[..10]), Err(Error::Key(_))));
+
+    let other = TempDir::new("secret-other");
+    assert!(Store::open(&other.0).unwrap().unseal(&sealed).is_err());
+
+    drop(store);
+    fs::write(dir.0.join("key"), b"short").unwrap();
+    assert!(matches!(Store::open(&dir.0), Err(Error::Key(_))));
+}
+
+#[test]
+fn refuses_a_newer_schema() {
+    let dir = TempDir::new("newer");
+    let store = Store::open(&dir.0).unwrap();
+    store
+        .write(|tx| Ok(tx.pragma_update(None, "user_version", 99)?))
+        .unwrap();
+    drop(store);
+    assert!(matches!(Store::open(&dir.0), Err(Error::NewerSchema(99))));
+}
+
+#[test]
+fn search_words_phrases_and_filters() {
+    let dir = TempDir::new("search");
+    let (store, acc) = setup(&dir);
+    let day = 86_400_000;
+    let t0 = 1_735_689_600_000; // 2025-01-01
+    let ids = store
+        .put_messages(
+            acc,
+            &[
+                msg(
+                    "a",
+                    "t1",
+                    t0,
+                    &["INBOX"],
+                    "Invoice 42",
+                    "Please pay the invoice by Friday.",
+                ),
+                msg(
+                    "b",
+                    "t1",
+                    t0 + day,
+                    &["INBOX", "Label_1"],
+                    "Re: Invoice 42",
+                    "Paid. Café receipt attached.",
+                ),
+                msg(
+                    "c",
+                    "t2",
+                    t0 + 2 * day,
+                    &[],
+                    "Lunch",
+                    "Friday lunch at noon?",
+                ),
+            ],
+        )
+        .unwrap();
+    let [a, b, c] = ids[..] else { panic!() };
+    let s = |q: &str| store.search(q, 10).unwrap();
+
+    assert_eq!(s("invoice"), [b, a], "newest first");
+    assert_eq!(s("friday"), [c, a]);
+    assert_eq!(s("\"pay the invoice\""), [a]);
+    assert_eq!(s("\"invoice pay\""), Vec::<i64>::new());
+    assert_eq!(s("cafe"), [b], "diacritics removed");
+    assert_eq!(s("inv"), Vec::<i64>::new(), "a word is not a prefix search");
+    assert_eq!(s("label:taxes"), [b]);
+    assert_eq!(s("label:INBOX invoice"), [b, a]);
+    assert_eq!(s("from:c@example"), [c]);
+    assert_eq!(s("from:\"ana lee\" friday"), [c, a]);
+    assert_eq!(s("to:owner"), [c, b, a]);
+    assert_eq!(s("FROM:x"), Vec::<i64>::new(), "filter names are lowercase");
+    // `%` and `_` are plain characters in a filter value, not LIKE patterns.
+    assert_eq!(s("from:%"), Vec::<i64>::new());
+    assert_eq!(s("from:_@"), Vec::<i64>::new());
+    assert_eq!(s("after:2025-01-02"), [c, b]);
+    assert_eq!(s("before:2025-01-02"), [a]);
+    assert_eq!(s(""), [c, b, a]);
+    assert_eq!(store.search("invoice", 1).unwrap(), [b]);
+    // FTS5 operators are plain words.
+    assert_eq!(s("invoice OR lunch"), Vec::<i64>::new());
+    assert_eq!(s("NEAR(invoice friday) * ^pay \""), Vec::<i64>::new());
+
+    // form: uses the items of the message.
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at) VALUES ('record', ?1, 'open', '{}', 0, 0)",
+                [acc],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role) VALUES (last_insert_rowid(), ?1, 'origin')",
+                [b],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(s("form:record"), [b]);
+    assert_eq!(s("form:feed"), Vec::<i64>::new());
+
+    // A message that is gone is not in the results.
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [a])?))
+        .unwrap();
+    assert_eq!(s("invoice"), [b]);
+}
+
+#[test]
+fn put_again_keeps_the_id_and_updates_the_index() {
+    let dir = TempDir::new("update");
+    let (store, acc) = setup(&dir);
+    let first = store
+        .put_messages(
+            acc,
+            &[msg("a", "t1", 1, &["INBOX", "Label_1"], "Old", "apple")],
+        )
+        .unwrap();
+    let again = store
+        .put_messages(acc, &[msg("a", "t1", 1, &["INBOX"], "New", "banana")])
+        .unwrap();
+    assert_eq!(first, again);
+    assert_eq!(store.search("apple", 10).unwrap(), Vec::<i64>::new());
+    assert_eq!(store.search("banana", 10).unwrap(), first);
+    assert_eq!(store.search("label:taxes", 10).unwrap(), Vec::<i64>::new());
+
+    store
+        .put_body(
+            first[0],
+            &Body {
+                subject: "x".into(),
+                sender: "y".into(),
+                text: "cherry".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(store.search("banana", 10).unwrap(), Vec::<i64>::new());
+    assert_eq!(store.search("cherry", 10).unwrap(), first);
+}
+
+#[test]
+fn an_unknown_label_writes_nothing_of_the_batch() {
+    let dir = TempDir::new("label");
+    let (store, acc) = setup(&dir);
+    let err = store
+        .put_messages(
+            acc,
+            &[
+                msg("a", "t1", 1, &["INBOX"], "s", "apple"),
+                msg("b", "t1", 2, &["Label_9"], "s", "apple"),
+            ],
+        )
+        .unwrap_err();
+    assert!(matches!(err, Error::UnknownLabel(ref l) if l == "Label_9"));
+    let n: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(store.search("apple", 10).unwrap(), Vec::<i64>::new());
+}
+
+#[test]
+fn row_ids_are_not_used_again() {
+    let dir = TempDir::new("rowid");
+    let (store, acc) = setup(&dir);
+    let a = store
+        .put_messages(acc, &[msg("a", "t1", 1, &[], "s", "x")])
+        .unwrap()[0];
+    store
+        .write(|tx| Ok(tx.execute("DELETE FROM message WHERE id = ?1", [a])?))
+        .unwrap();
+    let b = store
+        .put_messages(acc, &[msg("b", "t1", 1, &[], "s", "x")])
+        .unwrap()[0];
+    assert!(b > a);
+    assert_eq!(
+        iris_store::format_id(iris_store::Kind::Message, b),
+        format!("m-{b}")
+    );
+}
+
+#[test]
+fn content_files_are_named_by_hash() {
+    let dir = TempDir::new("content");
+    let store = Store::open(&dir.0).unwrap();
+    let sha = store.put_content(b"Subject: hi\r\n\r\nhello\r\n").unwrap();
+    assert_eq!(sha.len(), 64);
+    let path = store.content_path(&sha).unwrap();
+    assert!(path.starts_with(dir.0.join("content").join(&sha[..2])));
+    assert_eq!(fs::read(&path).unwrap(), b"Subject: hi\r\n\r\nhello\r\n");
+    assert_eq!(
+        store.put_content(b"Subject: hi\r\n\r\nhello\r\n").unwrap(),
+        sha
+    );
+
+    // A fetch again repairs a damaged file.
+    fs::write(&path, b"damaged").unwrap();
+    store.put_content(b"Subject: hi\r\n\r\nhello\r\n").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"Subject: hi\r\n\r\nhello\r\n");
+
+    // A writer that drops before finish leaves no file.
+    let mut w = store.content_writer().unwrap();
+    std::io::Write::write_all(&mut w, b"half").unwrap();
+    drop(w);
+    let left: Vec<_> = fs::read_dir(dir.0.join("content"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().starts_with(".tmp"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+
+    assert_eq!(store.content_path("../../etc/passwd"), None);
+    assert_eq!(store.content_path(&sha.to_uppercase()), None);
+}
