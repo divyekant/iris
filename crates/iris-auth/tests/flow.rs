@@ -329,7 +329,10 @@ fn secrets_stay_out_of_logs_and_errors() {
 
 #[test]
 fn an_expired_code_is_not_a_revoked_sign_in() {
-    let answer = (400, r#"{"error":"invalid_grant","error_description":"Bad Request"}"#.to_string());
+    let answer = (
+        400,
+        r#"{"error":"invalid_grant","error_description":"Bad Request"}"#.to_string(),
+    );
     match finish_with(answer) {
         Err(Error::Token { status: 400, code }) => assert_eq!(code, "invalid_grant"),
         other => panic!("{other:?}"),
@@ -348,7 +351,11 @@ fn a_huge_expiry_is_a_bad_answer() {
 fn busy_connections_do_not_hold_wait_past_its_time_limit() {
     let client = Client::from_json(client_json("https://example.invalid/t").as_bytes()).unwrap();
     let sign_in = client.sign_in().unwrap();
-    let host = sign_in.redirect_uri()[7..].split('/').next().unwrap().to_string();
+    let host = sign_in.redirect_uri()[7..]
+        .split('/')
+        .next()
+        .unwrap()
+        .to_string();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let s = stop.clone();
     // Connects again and again and never ends a request line.
@@ -367,5 +374,9 @@ fn busy_connections_do_not_hold_wait_past_its_time_limit() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     noise.join().unwrap();
     assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
-    assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
 }

@@ -228,17 +228,22 @@ impl Client {
 
     /// Gets a new access token with the refresh token.
     pub fn refresh(&self, refresh: &Secret) -> Result<AccessToken> {
-        let answer = self.token_call(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh.expose()),
-            ("client_id", &self.id),
-            ("client_secret", self.secret.expose()),
-        ])?;
+        let answer = self.token_call(
+            true,
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh.expose()),
+                ("client_id", &self.id),
+                ("client_secret", self.secret.expose()),
+            ],
+        )?;
         check_scope(&answer)?;
-        Ok(answer.access())
+        answer.access()
     }
 
-    fn token_call(&self, form: &[(&str, &str)]) -> Result<TokenAnswer> {
+    /// `refresh` says if the request uses a stored refresh token. Only then
+    /// does `invalid_grant` mean that the stored sign-in is gone.
+    fn token_call(&self, refresh: bool, form: &[(&str, &str)]) -> Result<TokenAnswer> {
         let mut response = self
             .agent
             .post(&self.token_uri)
@@ -255,7 +260,7 @@ impl Client {
             let code = serde_json::from_slice::<ErrorAnswer>(&body)
                 .map(|e| error_code(&e.error))
                 .unwrap_or_default();
-            return Err(if code == "invalid_grant" {
+            return Err(if refresh && code == "invalid_grant" {
                 Error::Revoked
             } else {
                 Error::Token { status, code }
@@ -280,11 +285,14 @@ struct TokenAnswer {
 }
 
 impl TokenAnswer {
-    fn access(&self) -> AccessToken {
-        AccessToken {
+    fn access(&self) -> Result<AccessToken> {
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_secs(self.expires_in))
+            .ok_or(Error::BadAnswer)?;
+        Ok(AccessToken {
             token: self.access_token.clone(),
-            expires_at: Instant::now() + Duration::from_secs(self.expires_in),
-        }
+            expires_at,
+        })
     }
 }
 
@@ -346,9 +354,13 @@ impl SignIn {
         let deadline = Instant::now() + timeout;
         self.listener.set_nonblocking(true).map_err(Error::Io)?;
         loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Error::Timeout);
+            }
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    if let Some(answer) = self.serve(stream) {
+                    if let Some(answer) = self.serve(stream, left) {
                         return self.complete(answer);
                     }
                 }
@@ -378,12 +390,17 @@ impl SignIn {
 
     /// Reads one browser request. Gives an answer only for the callback with
     /// the right `state`. Other requests get an error page, and the wait goes on.
-    fn serve(&self, mut stream: TcpStream) -> Option<Answer> {
+    /// Reads for at most `left` (the rest of the wait), and at most 5 s.
+    fn serve(&self, mut stream: TcpStream, left: Duration) -> Option<Answer> {
+        let end = Instant::now() + left.min(Duration::from_secs(5));
         let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let mut buf = Vec::with_capacity(1024);
         let mut chunk = [0u8; 1024];
         while !buf.windows(2).any(|w| w == b"\r\n") && buf.len() < REQUEST_LIMIT {
+            let rest = end.saturating_duration_since(Instant::now());
+            if rest.is_zero() || stream.set_read_timeout(Some(rest)).is_err() {
+                break;
+            }
             match stream.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -453,17 +470,20 @@ impl SignIn {
             Answer::Denied(e) => return Err(Error::Denied(e)),
         };
         let c = &self.client;
-        let answer = c.token_call(&[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("client_id", &c.id),
-            ("client_secret", c.secret.expose()),
-            ("redirect_uri", &self.redirect_uri),
-            ("code_verifier", self.verifier.expose()),
-        ])?;
+        let answer = c.token_call(
+            false,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("client_id", &c.id),
+                ("client_secret", c.secret.expose()),
+                ("redirect_uri", &self.redirect_uri),
+                ("code_verifier", self.verifier.expose()),
+            ],
+        )?;
         check_scope(&answer)?;
         Ok(Tokens {
-            access: answer.access(),
+            access: answer.access()?,
             refresh: answer.refresh_token.clone().ok_or(Error::NoRefreshToken)?,
             refresh_expires_in: answer.refresh_token_expires_in,
         })
