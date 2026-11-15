@@ -74,5 +74,6 @@
       "registry.npmjs.org",
       "github.com"
     ]
-  }
+  },
+  "board": "https://claude.ai/artifact/VWqsmpqHNgiop14TpoecjV"
 }

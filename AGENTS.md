@@ -2,7 +2,7 @@
 
 These rules apply to every agent that works in this repository (Claude, Codex, and
 others). `CLAUDE.md` imports this file. The process comes from the projectstarter
-kit (projectstarter 0.2.0, with the review loop of 0.4.0). Product rules are at the end, in [Product rules](#product-rules).
+kit (projectstarter 0.4.0). Product rules are at the end, in [Product rules](#product-rules).
 
 Write all documentation, PR text and code comments as `docs/writing-style.md` says
 (Simplified Technical English).
@@ -31,11 +31,12 @@ To add a tool, a test command or a new folder, change `starter.json`.
 
 ## Workflow for one change
 
-1. Decide if the change needs a spec. Write a spec only for a decision that is
+1. Find or add the board card of the change (see [Plan and track](#plan-and-track)).
+   Decide if the change needs a spec. Write a spec only for a decision that is
    architectural, ambiguous, irreversible or risky (external writes, auth,
-   personal data, migrations, deletes). Put it in `docs/specs/<YYYY-MM-DD>-<name>.md`
-   with a `## Assumptions` section. A copy edit, a one-line fix or a format change
-   needs no spec.
+   personal data, migrations, deletes). Copy `docs/templates/spec.md` to
+   `docs/specs/<YYYY-MM-DD>-<name>.md`. A copy edit, a one-line fix or a format
+   change needs no spec.
 
    Rules for a spec:
    - For each external write (a call that changes data outside the product),
@@ -46,7 +47,7 @@ To add a tool, a test command or a new folder, change `starter.json`.
      wrong assumption.
    - Put a question that the build can answer in `## Open questions`, not in
      the design.
-   - Give each item its own spec PR. If a spec PR is larger than about 1,500
+   - Give each card its own spec PR. If a spec PR is larger than about 1,500
      changed lines (lockfiles excluded), split it.
 2. Start the branch from `develop`. If the branch has no commits of its own:
    `git fetch origin develop` and `git checkout -B <branch> origin/develop`.
@@ -57,8 +58,9 @@ To add a tool, a test command or a new folder, change `starter.json`.
    changes and pushes an empty proof commit. If it fails, fix the cause, commit
    and run it again. Do not open the PR before the proof commit is pushed.
 6. Open the PR into `develop` as a draft, with the template
-   (`.github/pull_request_template.md`). Fill in `## Summary`, `## Verification`
-   and `## Release Notes`.
+   (`.github/pull_request_template.md`). Fill in `## Summary` (with
+   `Card: <ID>` (for example `Card: R0-09`)), `## Verification` and `## Release Notes`. Move the card
+   to `doing` if it is not there yet.
 7. Run the review loop:
    `python3 scripts/review/review.py --pr <number> --merge`.
    - Exit 0: the review is clean and the PR is merged. The work is done.
@@ -83,7 +85,7 @@ To add a tool, a test command or a new folder, change `starter.json`.
 9. While the review runs, do not comment on the PR and do not edit its body. A
    change makes the review stale, and the command posts nothing.
 
-P3 findings are advice. They do not block the merge. Open an issue for a P3
+P3 findings are advice. They do not block the merge. Add a board card for a P3
 finding only when the follow-up is worth tracking.
 
 ## Release notes
@@ -141,19 +143,43 @@ Do not add a workflow that runs the tests on feature PRs. Local CI does that wor
 `docs/DEPLOYMENT.md` holds the deploy steps of the product. Agents do not
 deploy by hand. Do not change production without the owner's approval.
 
+## Plan and track
+
+`docs/PLANNING.md` gives the full process. The short rules:
+
+- The board is the only tracker. It is a claude.ai artifact. Its URL is `board`
+  in `starter.json`. Do not keep a to-do list or a status table in a file, and
+  do not use GitHub Issues or another tool as a tracker.
+- Each change has a card, except a small fix that the user asks for in the
+  session. Each card gets one PR. Iris uses its own tracker (the "Iris tracker"
+  artifact), not the kit board. Its columns are `todo`, `doing`, `blocked` and
+  `done`. Move the card as the work moves: `doing`, then `done` when the PR
+  merged.
+- When you need the owner, move the card to `blocked`.
+- Build only a card that has `doneWhen` and whose `dependsOn` cards are `done`.
+- For each change that the owner can see on a screen, publish a before/after
+  page (`docs/board/compare.html`) and let the owner pick. Do not merge before
+  the owner picks.
+- Before a design or a spec, read `PRODUCT.md`. Before a change to a screen, read
+  `docs/DESIGN.md`. If the change adds a token or a UI part, add it to
+  `docs/DESIGN.md` in the same PR.
+- Log each large decision in `docs/decisions.md`.
+- `docs/ROADMAP.md` gives the order of the large pieces of work. Change it only
+  when the order changes.
+
 ## Project threads
 
-A single change needs no plan and no tracker: one thread, one PR.
+A single change needs no plan: one thread, one card, one PR.
 
 For work with two or more items:
 
-1. A planning thread writes the plan and one tracker. Give the tracker one row for
-   each item: Item, Done means, Files it changes, Waits on, Thread, PR, Status.
-2. Status values: `Not started`, `In progress`, `PR open`, `Merged`, `Needs you`.
-3. Do not run two items that change the same files at the same time.
-4. Each thread updates only its own row. An item is done only when its PR merged.
-5. When every row is `Merged`, the planning thread checks the result against the
-   plan and reports once.
+1. A planning thread writes the spec and adds one card for each item. Each card
+   has `doneWhen` and `dependsOn`.
+2. Do not run two items that change the same files at the same time.
+3. Each thread works on one card, and names the card in its PR. An item is
+   done only when its PR merged.
+4. When each card is in `done`, the planning thread checks the result against
+   the spec and reports once.
 
 ## Secrets
 
