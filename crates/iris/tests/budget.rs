@@ -169,3 +169,19 @@ fn wait_for_http_fails_when_the_server_never_answers() {
     assert!(wait_for_http(&addr, begin, Duration::from_millis(200)).is_err());
     assert!(begin.elapsed() < Duration::from_secs(5));
 }
+
+#[test]
+fn wait_for_http_fails_when_the_server_sends_bytes_and_never_closes() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            while stream.write_all(b"x").is_ok() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    });
+    let begin = Instant::now();
+    assert!(wait_for_http(&addr, begin, Duration::from_millis(200)).is_err());
+    assert!(begin.elapsed() < Duration::from_secs(5));
+}
