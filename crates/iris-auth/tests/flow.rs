@@ -420,8 +420,9 @@ fn a_huge_wait_time_does_not_panic() {
     let sign_in = test_client(None).sign_in().unwrap();
     let state = params(&sign_in.url())["state"].clone();
     let redirect = sign_in.redirect_uri().to_string();
-    let browser =
-        std::thread::spawn(move || browser_get(&redirect, &format!("error=access_denied&state={state}")));
+    let browser = std::thread::spawn(move || {
+        browser_get(&redirect, &format!("error=access_denied&state={state}"))
+    });
     assert!(matches!(sign_in.wait(Duration::MAX), Err(Error::Denied(_))));
     assert!(browser.join().unwrap().contains("200"));
 }

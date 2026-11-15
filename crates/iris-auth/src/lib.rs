@@ -366,7 +366,8 @@ impl SignIn {
 
     /// Waits for the redirect on the loopback listener, then exchanges the code.
     pub fn wait(&self, timeout: Duration) -> Result<Tokens> {
-        let deadline = Instant::now() + timeout;
+        // A longer wait is of no use, and the cap keeps the Instant sum in range.
+        let deadline = Instant::now() + timeout.min(Duration::from_secs(24 * 3600));
         self.listener.set_nonblocking(true).map_err(Error::Io)?;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
