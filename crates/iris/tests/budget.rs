@@ -53,19 +53,30 @@ fn rss_kib(pid: u32) -> u64 {
 
 /// Read the address from the first line of the program. Fail after `limit`.
 fn read_addr(stderr: ChildStderr, limit: Duration) -> Result<String, String> {
-    let _ = limit;
-    let mut line = String::new();
-    BufReader::new(stderr)
-        .read_line(&mut line)
+    // A thread reads, because a pipe read has no timeout.
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = send.send(BufReader::new(stderr).read_line(&mut line).map(|_| line));
+    });
+    let line = receive
+        .recv_timeout(limit)
+        .map_err(|_| format!("no address line in {limit:?}"))?
         .map_err(|e| e.to_string())?;
     Ok(line.trim().rsplit("http://").next().unwrap().to_string())
 }
 
 /// Send one GET request. Return true for a 200 answer.
-fn answers_http(addr: &str) -> bool {
+/// A read or write that waits more than `timeout` gives false.
+fn answers_http(addr: &str, timeout: Duration) -> bool {
     let Ok(mut stream) = TcpStream::connect(addr) else {
         return false;
     };
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err()
+    {
+        return false;
+    }
     let request = format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     let mut response = String::new();
     stream.write_all(request.as_bytes()).is_ok()
@@ -75,7 +86,7 @@ fn answers_http(addr: &str) -> bool {
 
 /// Send GET requests until one gets a 200 answer. Fail after `limit` from `begin`.
 fn wait_for_http(addr: &str, begin: Instant, limit: Duration) -> Result<(), String> {
-    while !answers_http(addr) {
+    while !answers_http(addr, Duration::from_millis(100)) {
         if begin.elapsed() > limit {
             return Err(format!("no HTTP answer from {addr} in {limit:?}"));
         }
