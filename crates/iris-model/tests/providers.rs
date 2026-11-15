@@ -22,7 +22,7 @@ struct Seen {
 }
 
 /// A queued answer: status, extra headers, body.
-type Answer = (u16, Vec<(&'static str, String)>, String);
+type Answer = (u16, Vec<(&'static str, String)>, Vec<u8>);
 
 #[derive(Default)]
 struct Fake {
@@ -132,7 +132,7 @@ fn answer_gives_json_tokens_and_cost() {
             300,
             stop_word(p, Stop::End),
         );
-        let (client, fake) = setup(p, vec![(200, vec![], body)]);
+        let (client, fake) = setup(p, vec![(200, vec![], body.into())]);
         let reply = client
             .ask("Find the items.", "Hello Ana, lunch on Friday?")
             .unwrap();
@@ -190,7 +190,7 @@ fn answer_gives_json_tokens_and_cost() {
 fn json_in_a_code_fence_is_read() {
     for p in PROVIDERS {
         let body = ok_body(p, "```json\n{\"a\": 1}\n```", 1, 1, stop_word(p, Stop::End));
-        let (client, _) = setup(p, vec![(200, vec![], body)]);
+        let (client, _) = setup(p, vec![(200, vec![], body.into())]);
         assert_eq!(
             client.ask("x", "y").unwrap().json().unwrap(),
             json!({"a": 1})
@@ -208,7 +208,7 @@ fn text_that_is_not_json_keeps_the_usage() {
             7,
             stop_word(p, Stop::End),
         );
-        let (client, _) = setup(p, vec![(200, vec![], body)]);
+        let (client, _) = setup(p, vec![(200, vec![], body.into())]);
         let reply = client.ask("x", "y").unwrap();
         assert!(matches!(reply.json(), Err(Error::NotJson)), "{p:?}");
         assert_eq!(reply.usage.output_tokens, 7);
@@ -220,7 +220,7 @@ fn truncated_and_refused_answers_are_marked() {
     for p in PROVIDERS {
         for stop in [Stop::Truncated, Stop::Refused] {
             let body = ok_body(p, "{\"a\":", 5, 5, stop_word(p, stop));
-            let (client, _) = setup(p, vec![(200, vec![], body)]);
+            let (client, _) = setup(p, vec![(200, vec![], body.into())]);
             assert_eq!(client.ask("x", "y").unwrap().stop, stop, "{p:?}");
         }
     }
@@ -231,7 +231,7 @@ fn rate_limit_gives_the_wait_time() {
     for p in PROVIDERS {
         let (client, _) = setup(
             p,
-            vec![(429, vec![("retry-after", "17".into())], "{}".into())],
+            vec![(429, vec![("retry-after", "17".into())], b"{}".to_vec())],
         );
         match client.ask("x", "y") {
             Err(Error::RateLimited { retry_after }) => {
@@ -246,7 +246,7 @@ fn rate_limit_gives_the_wait_time() {
 fn server_errors_are_retryable() {
     for p in PROVIDERS {
         for status in [500, 503, 529] {
-            let (client, _) = setup(p, vec![(status, vec![], "busy".into())]);
+            let (client, _) = setup(p, vec![(status, vec![], b"busy".to_vec())]);
             match client.ask("x", "y") {
                 Err(e @ Error::Server(s)) => {
                     assert_eq!(s, status);
@@ -265,7 +265,7 @@ fn rejection_never_shows_the_key() {
         let body =
             json!({"error": {"type": "authentication_error", "message": format!("bad key {KEY}")}})
                 .to_string();
-        let (client, _) = setup(p, vec![(401, vec![], body)]);
+        let (client, _) = setup(p, vec![(401, vec![], body.into())]);
         let err = client.ask("x", "y").unwrap_err();
         assert!(
             matches!(err, Error::Rejected { status: 401, .. }),
@@ -286,7 +286,7 @@ fn local_model_needs_no_key_and_no_price() {
     fake.answers
         .lock()
         .unwrap()
-        .push_back((200, vec![], ok_body(p, "{}", 10, 2, "stop")));
+        .push_back((200, vec![], ok_body(p, "{}", 10, 2, "stop").into()));
     let addr = start(fake.clone());
     let client = Client::new(Config {
         api_key: None,
@@ -331,4 +331,56 @@ fn transport_error_when_no_server() {
 fn config_debug_hides_the_key() {
     let config = Config::anthropic("m", ApiKey::new(KEY));
     assert!(!format!("{config:?}").contains(KEY));
+}
+
+#[test]
+fn key_across_the_cut_is_hidden() {
+    for p in PROVIDERS {
+        // The key starts just before the cut at 300 characters.
+        let message = format!("{}{KEY} end", "x".repeat(290));
+        let body = json!({"error": {"message": message}}).to_string();
+        let (client, _) = setup(p, vec![(401, vec![], body.into())]);
+        let err = client.ask("x", "y").unwrap_err();
+        let text = format!("{err} {err:?}");
+        assert!(!text.contains(&KEY[..8]), "{p:?}: {text}");
+    }
+}
+
+#[test]
+fn status_decides_the_error_for_any_body() {
+    let big = vec![b'a'; 2 << 20];
+    let bad_utf8 = vec![0xff, 0xfe, b'k', b'e', b'y'];
+    for p in PROVIDERS {
+        let (client, _) = setup(
+            p,
+            vec![(429, vec![("retry-after", "3".into())], big.clone())],
+        );
+        match client.ask("x", "y") {
+            Err(Error::RateLimited { retry_after }) => {
+                assert_eq!(retry_after, Some(Duration::from_secs(3)))
+            }
+            other => panic!("{p:?}: {other:?}"),
+        }
+        let (client, _) = setup(p, vec![(503, vec![], big.clone())]);
+        assert!(
+            matches!(client.ask("x", "y"), Err(Error::Server(503))),
+            "{p:?}"
+        );
+        let (client, _) = setup(p, vec![(401, vec![], bad_utf8.clone())]);
+        assert!(
+            matches!(
+                client.ask("x", "y"),
+                Err(Error::Rejected { status: 401, .. })
+            ),
+            "{p:?}"
+        );
+        let (client, _) = setup(p, vec![(400, vec![], big.clone())]);
+        assert!(
+            matches!(
+                client.ask("x", "y"),
+                Err(Error::Rejected { status: 400, .. })
+            ),
+            "{p:?}"
+        );
+    }
 }
