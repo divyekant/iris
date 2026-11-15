@@ -60,3 +60,25 @@ async fn the_client_build_is_embedded_when_it_exists() {
         assert_eq!(get(path).await.2, String::from_utf8_lossy(&bytes), "{path}");
     }
 }
+
+#[tokio::test]
+async fn only_get_and_head_are_allowed() {
+    for method in ["POST", "PUT", "DELETE"] {
+        let res = iris_web::router()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+    }
+    let res = iris_web::router()
+        .oneshot(Request::head("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
