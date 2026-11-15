@@ -318,28 +318,38 @@ impl Client {
             }
         }
 
-        let text = resp
+        let text = match resp
             .body_mut()
             .with_config()
             .limit(MAX_ANSWER_BYTES)
             .read_to_string()
-            .map_err(|e| Error::Transport(self.scrub(e.to_string())))?;
+        {
+            Ok(t) => t,
+            // The same call gives the same large answer again, so a retry does not help.
+            Err(ureq::Error::BodyExceedsLimit(_)) => {
+                return Err(Error::BadAnswer(format!(
+                    "the answer is larger than {MAX_ANSWER_BYTES} bytes"
+                )))
+            }
+            Err(e) => return Err(Error::Transport(self.scrub(e.to_string()))),
+        };
         let v: Value = serde_json::from_str(&text).map_err(|e| Error::BadAnswer(e.to_string()))?;
+        let bad = |what: &str| Error::BadAnswer(what.to_string());
         let (text, stop, input, output) = match c.provider {
             Provider::Anthropic => {
-                let blocks = v["content"]
-                    .as_array()
-                    .ok_or_else(|| Error::BadAnswer("no content".into()))?;
+                let blocks = v["content"].as_array().ok_or_else(|| bad("no content"))?;
                 // Only text blocks: thinking blocks are not part of the answer.
                 let text: String = blocks
                     .iter()
                     .filter(|b| b["type"] == "text")
                     .filter_map(|b| b["text"].as_str())
                     .collect();
+                // The model has no tools, so `tool_use` or `pause_turn` is not a valid end.
                 let stop = match v["stop_reason"].as_str() {
+                    Some("end_turn" | "stop_sequence") => Stop::End,
                     Some("max_tokens") => Stop::Truncated,
                     Some("refusal") => Stop::Refused,
-                    _ => Stop::End,
+                    _ => return Err(bad("unknown stop_reason")),
                 };
                 let u = &v["usage"];
                 (
@@ -350,25 +360,26 @@ impl Client {
                 )
             }
             Provider::OpenAiCompatible => {
-                let choice = &v["choices"][0];
-                if choice.is_null() {
-                    return Err(Error::BadAnswer("no choices".into()));
-                }
-                let text = choice["message"]["content"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let stop = match choice["finish_reason"].as_str() {
+                let message = v["choices"][0]["message"]
+                    .as_object()
+                    .ok_or_else(|| bad("no choices[0].message"))?;
+                let refused = message
+                    .get("refusal")
+                    .and_then(Value::as_str)
+                    .is_some_and(|r| !r.is_empty());
+                let stop = match v["choices"][0]["finish_reason"].as_str() {
+                    // OpenAI puts a refusal in `message.refusal`, with `finish_reason` "stop".
+                    Some("stop") if refused => Stop::Refused,
+                    Some("stop") => Stop::End,
                     Some("length") => Stop::Truncated,
                     Some("content_filter") => Stop::Refused,
-                    // OpenAI puts a refusal in `message.refusal`, with `finish_reason` "stop".
-                    _ if choice["message"]["refusal"]
-                        .as_str()
-                        .is_some_and(|r| !r.is_empty()) =>
-                    {
-                        Stop::Refused
-                    }
-                    _ => Stop::End,
+                    _ => return Err(bad("unknown finish_reason")),
+                };
+                let text = match message.get("content").and_then(Value::as_str) {
+                    Some(t) => t.to_string(),
+                    // A cut or refused answer can have no text.
+                    None if stop != Stop::End => String::new(),
+                    None => return Err(bad("no message content")),
                 };
                 let u = &v["usage"];
                 (
