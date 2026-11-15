@@ -333,7 +333,8 @@ pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
             b64.extend_from_slice(b"\r\n");
         }
         let mut inner_head = body.0;
-        inner_head.push(String::new());
+        // Two empty items give the blank line between the part headers and the body.
+        inner_head.extend([String::new(), String::new()]);
         let mut first = inner_head.join("\r\n").into_bytes();
         first.extend_from_slice(&body.1);
         let attachment = Part {

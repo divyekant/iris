@@ -110,7 +110,8 @@ impl FakeGmail {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
-        let floor = HISTORY_BASE + 1;
+        // The profile id of an empty mailbox is HISTORY_BASE, so it must be valid.
+        let floor = HISTORY_BASE;
         let threads = (0..mailbox.len())
             .map(|i| mailbox.truth(i).thread)
             .collect::<std::collections::BTreeSet<_>>()
@@ -215,6 +216,10 @@ struct Page {
     max_results: Option<usize>,
     page_token: Option<String>,
     start_history_id: Option<String>,
+    /// Not supported. The fake refuses these, so a test does not get an
+    /// unfiltered list by mistake.
+    q: Option<String>,
+    label_ids: Option<String>,
 }
 
 impl Page {
@@ -278,6 +283,12 @@ async fn list(
 ) -> Response {
     if let Err(e) = check(&h, &user) {
         return e;
+    }
+    if page.q.is_some() || page.label_ids.is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The fake does not support q or labelIds.",
+        );
     }
     let (start, size) = match page.bounds() {
         Ok(b) => b,
