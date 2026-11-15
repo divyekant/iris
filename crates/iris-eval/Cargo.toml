@@ -1,0 +1,12 @@
+[package]
+name = "iris-eval"
+description = "The quality test set of Iris: scores an understanding function against the truth of the synthetic mailbox."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-synth = { version = "0.0.0", path = "../iris-synth" }
+serde_json = "1"

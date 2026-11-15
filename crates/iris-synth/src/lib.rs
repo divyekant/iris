@@ -184,6 +184,15 @@ impl Mailbox {
         }
     }
 
+    /// The true fields of the item that message `i` makes, for evaluation
+    /// only. Keys are dotted paths of the open model, for example
+    /// `fields.amount.value` of a record or `due.date` of a commitment. A
+    /// receipt and the first message of a commitment thread have fields. Each
+    /// other message gives an empty list.
+    pub fn fields(&self, i: usize) -> Vec<(&'static str, String)> {
+        text::fields(self.seed, &self.metas[i])
+    }
+
     /// Render message `i` as RFC 5322 bytes with CRLF line ends.
     pub fn raw(&self, i: usize) -> Vec<u8> {
         text::render(self.seed, &self.metas[i])
@@ -410,6 +419,46 @@ mod tests {
             }
         }
         assert!(seen > 20, "encoded words: {seen}");
+    }
+
+    #[test]
+    fn fields_match_the_rendered_text() {
+        let mb = Mailbox::new(9, 3000);
+        let (mut records, mut asks, mut owner_asks) = (0, 0, 0);
+        for i in 0..mb.len() {
+            let f: std::collections::BTreeMap<_, _> = mb.fields(i).into_iter().collect();
+            let raw = String::from_utf8_lossy(&mb.raw(i)).into_owned();
+            let t = mb.truth(i);
+            if t.sender == Sender::Hostile {
+                assert!(f.is_empty());
+            } else if t.form == Form::Record {
+                records += 1;
+                assert!(raw.contains(&format!("Total: {} EUR", f["fields.amount.value"])));
+                assert!(raw.contains(&format!("order {}", f["fields.order"])));
+                assert!(raw.contains(&format!("From: \"{}\"", f["fields.vendor"])));
+            } else if t.form == Form::Commitment && t.message_id.contains(".0@") {
+                asks += 1;
+                assert_eq!(f["kind"], "task");
+                // The first message asks its recipient to send a document. If
+                // the owner asks, the other party owes the owner.
+                let want = if t.sender == Sender::Owner {
+                    owner_asks += 1;
+                    assert!(raw.contains(&format!("From: \"{OWNER_NAME}\" <{OWNER}>")));
+                    "owed_to_you"
+                } else {
+                    assert!(raw.contains(&format!("To: \"{OWNER_NAME}\" <{OWNER}>")));
+                    "you_owe"
+                };
+                assert_eq!(f["direction"], want, "message {i}");
+                assert!(f["due.date"].as_str() > date::ymd(t.date).as_str());
+            } else {
+                assert!(f.is_empty(), "message {i}: {f:?}");
+            }
+        }
+        assert!(
+            records > 100 && asks > 50 && owner_asks > 0 && owner_asks < asks,
+            "{records} {asks} {owner_asks}"
+        );
     }
 
     #[test]
