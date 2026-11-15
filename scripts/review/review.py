@@ -305,7 +305,10 @@ def review(number: int, merge: bool, dry_run: bool, force: bool, api: Api = gh_a
         raise Stop(f"no local CI proof on the head: {proof.stdout.strip() or proof.stderr.strip()}")
     merge_base = git(root, "merge-base", f"origin/{config['base']}", head)
     body = body_hash(pr.get("body"))
-    comments = get_all(api, f"repos/{slug}/issues/{number}/comments")
+    # Only review comments that this command posted count: a trusted or signed-in author, marker first.
+    posters = set(trusted) | {api("GET", "user")["login"]}
+    comments = [c for c in get_all(api, f"repos/{slug}/issues/{number}/comments")
+                if (c.get("user") or {}).get("login") in posters and (c.get("body") or "").startswith(MARKER)]
     previous = None if force else find_previous(comments, head, merge_base, body)
     if previous:
         print(f"review: an earlier review of the same head, base and body says {previous}; "
