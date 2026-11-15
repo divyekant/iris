@@ -22,17 +22,30 @@ fn random(buf: &mut [u8]) -> Result<()> {
 /// The first start writes a new key to its own temporary file, syncs it, and
 /// then links it to `key`. So `key` is complete or not there, also after a
 /// crash. The link fails if `key` exists, so a start never replaces a key.
-/// Each start then reads `key` from disk, so all starts use the same key.
+/// Each start then syncs the folder and reads `key` from disk, so all
+/// starts use the same key, and only after it is durable.
 pub(crate) fn load_or_make_key(path: &Path) -> Result<[u8; 32]> {
     let read = || -> Result<[u8; 32]> {
         fs::read(path)?
             .try_into()
             .map_err(|_| Error::Key("the key file is not 32 bytes"))
     };
-    if path.exists() {
-        return read();
-    }
     let dir = path.parent().expect("the key is in the data folder");
+    if !path.exists() {
+        make_key(path, dir)?;
+    }
+    // Each start, also a start that finds the key of another start: make
+    // the key private and its folder entry durable before the key is used.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    crate::sync_dir(dir)?;
+    read()
+}
+
+fn make_key(path: &Path, dir: &Path) -> Result<()> {
     let mut key = [0u8; 32];
     random(&mut key)?;
     let mut name = [0u8; 8];
@@ -49,12 +62,10 @@ pub(crate) fn load_or_make_key(path: &Path) -> Result<[u8; 32]> {
     // This start made the file, so only this start removes it.
     let _ = fs::remove_file(&tmp);
     match linked {
-        Ok(()) => crate::sync_dir(dir)?,
-        // Another start made the key first.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e.into()),
+        // AlreadyExists: another start made the key first.
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e.into()),
+        _ => Ok(()),
     }
-    read()
 }
 
 pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>> {
