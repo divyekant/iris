@@ -200,6 +200,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-synth/` | Test data: a deterministic synthetic mailbox of all five forms, with hostile samples. | `engine` |
 | `crates/iris-fakegmail/` | Test server: a fake Gmail API on top of the synthetic mailbox. No network. | `engine` |
 | `crates/iris-eval/` | Test set: scores an understanding function against the truth of the synthetic mailbox (precision and recall). | `engine` |
+| `crates/iris-store/` | The store: the data folder, SQLite with full-text search, raw message files and encrypted secrets. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
