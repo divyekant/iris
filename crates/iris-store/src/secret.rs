@@ -18,31 +18,45 @@ fn random(buf: &mut [u8]) -> Result<()> {
 }
 
 /// Read the key, or make it at the first start.
+///
+/// The first start writes the key to `key.tmp`, syncs it, and then links it
+/// to `key`. So `key` is complete or not there, also after a crash. The link
+/// fails if `key` exists, so two starts at the same time cannot replace a key.
 pub(crate) fn load_or_make_key(path: &Path) -> Result<[u8; 32]> {
+    let read = || -> Result<[u8; 32]> {
+        fs::read(path)?
+            .try_into()
+            .map_err(|_| Error::Key("the key file is not 32 bytes"))
+    };
+    if path.exists() {
+        return read();
+    }
+    let dir = path.parent().expect("the key is in the data folder");
+    let tmp = path.with_extension("tmp");
     let mut key = [0u8; 32];
+    random(&mut key)?;
+    // A key.tmp file from an interrupted start has no use: replace it.
+    let _ = fs::remove_file(&tmp);
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    match opts.open(path) {
-        Ok(mut f) => {
-            random(&mut key)?;
-            f.write_all(&key)?;
-            f.sync_all()?;
-            // Without this, a power loss can lose the new file entry after
-            // secrets are committed, and the next start makes a new key.
-            crate::sync_dir(path.parent().expect("the key is in the data folder"))?;
-            Ok(key)
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let bytes = fs::read(path)?;
-            key = bytes
-                .try_into()
-                .map_err(|_| Error::Key("the key file is not 32 bytes"))?;
-            Ok(key)
-        }
-        Err(e) => Err(e.into()),
+    let mut f = opts.open(&tmp)?;
+    f.write_all(&key)?;
+    f.sync_all()?;
+    drop(f);
+    let linked = fs::hard_link(&tmp, path);
+    fs::remove_file(&tmp)?;
+    match linked {
+        Ok(()) => {}
+        // Another start made the key first: use that key.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return read(),
+        Err(e) => return Err(e.into()),
     }
+    // Without this, a power loss can lose the new file entry after secrets
+    // are committed, and the next start makes a new key.
+    crate::sync_dir(dir)?;
+    Ok(key)
 }
 
 pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>> {

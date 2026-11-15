@@ -246,7 +246,9 @@ impl Store {
 
     /// Write a batch of messages in one transaction, with their threads,
     /// labels, headers and clean text. A message that the store has gets the
-    /// new values and keeps its ID. Gives the row ID of each message.
+    /// new values and keeps its ID. A message that was gone comes back, and
+    /// its `understood_at` is cleared, so understanding runs on it again
+    /// (specification 1, section 4.4). Gives the row ID of each message.
     pub fn put_messages(&self, account: i64, batch: &[NewMessage]) -> Result<Vec<i64>> {
         self.write(|tx| {
             let mut thread = tx.prepare_cached(
@@ -260,7 +262,9 @@ impl Store {
                  ON CONFLICT(account_id, provider_id) DO UPDATE SET
                    thread_id = excluded.thread_id, content_sha256 = excluded.content_sha256,
                    size = excluded.size, internal_date = excluded.internal_date,
-                   fetched_at = excluded.fetched_at
+                   fetched_at = excluded.fetched_at,
+                   understood_at = CASE WHEN gone_at IS NULL THEN understood_at END,
+                   gone_at = NULL
                  RETURNING id",
             )?;
             let mut clear_labels = tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1")?;
