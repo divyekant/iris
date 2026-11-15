@@ -136,10 +136,13 @@ When Gmail deletes a message for good, the mirror must follow. The engine:
    mail that is still at Gmail. A full resync in these 30 days can bring the
    message back.
 3. After 30 days, deletes the raw message from the content folder, and deletes
-   the message row and its search text.
+   its `header`, `body` and search text. The message row stays as a tombstone
+   (`gone_at` set, `content_sha256` empty) while an item cites it in
+   `item_source`. The engine deletes the tombstone when no item cites it.
 
-The items that come only from a gone message get the status `gone`. The items
-that have other sources stay, without that source.
+The items that come only from a gone message get the status `gone`, and they
+keep the source, so each item keeps at least one valid source. The items that
+have other sources stay, without that source.
 
 ### 4.6 When to sync
 
@@ -603,6 +606,9 @@ A change that adds a cache must say its size in the pull request.
 - The fake Gmail server (tracker item R0-08) and the synthetic mailbox
   (R0-07) test the first sync, the incremental sync, the 404 resync and
   verify, with no network.
+- A test deletes a message at the fake server that is the only source of an
+  item. After the 30 days, the item has the status `gone` and its source still
+  points to the tombstone.
 - A test drops the connection in the middle of the first sync and checks that
   the next start fetches only the rest.
 - A test changes labels at the fake server between two syncs and checks that
