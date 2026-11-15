@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The highest resident memory (RSS) that `iris serve` can use, in KiB.
@@ -51,6 +51,16 @@ fn rss_kib(pid: u32) -> u64 {
         .expect("ps printed a number")
 }
 
+/// Read the address from the first line of the program. Fail after `limit`.
+fn read_addr(stderr: ChildStderr, limit: Duration) -> Result<String, String> {
+    let _ = limit;
+    let mut line = String::new();
+    BufReader::new(stderr)
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    Ok(line.trim().rsplit("http://").next().unwrap().to_string())
+}
+
 /// Send one GET request. Return true for a 200 answer.
 fn answers_http(addr: &str) -> bool {
     let Ok(mut stream) = TcpStream::connect(addr) else {
@@ -61,6 +71,17 @@ fn answers_http(addr: &str) -> bool {
     stream.write_all(request.as_bytes()).is_ok()
         && stream.read_to_string(&mut response).is_ok()
         && response.starts_with("HTTP/1.1 200")
+}
+
+/// Send GET requests until one gets a 200 answer. Fail after `limit` from `begin`.
+fn wait_for_http(addr: &str, begin: Instant, limit: Duration) -> Result<(), String> {
+    while !answers_http(addr) {
+        if begin.elapsed() > limit {
+            return Err(format!("no HTTP answer from {addr} in {limit:?}"));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 /// Kill the child process when the test ends, also when an assert fails.
@@ -84,20 +105,9 @@ fn serve_stays_inside_the_memory_and_start_budget() {
             .spawn()
             .unwrap(),
     );
-    let mut line = String::new();
-    BufReader::new(child.0.stderr.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    let addr = line.trim().rsplit("http://").next().unwrap().to_string();
-
-    // Wait for the first HTTP answer, but stop well after the limit, so a slow start fails and does not hang.
-    while !answers_http(&addr) {
-        assert!(
-            begin.elapsed() < MAX_START * 10,
-            "no HTTP answer from {addr}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Stop well after the limit, so a stalled start fails and does not hang.
+    let addr = read_addr(child.0.stderr.take().unwrap(), MAX_START * 10).unwrap();
+    wait_for_http(&addr, begin, MAX_START * 10).unwrap();
     let start = begin.elapsed();
     let rss = rss_kib(child.0.id());
 
@@ -122,4 +132,29 @@ fn check_fails_when_a_limit_is_too_low() {
     )
     .unwrap_err();
     assert!(err.contains("start time"), "{err}");
+}
+
+#[test]
+fn read_addr_fails_when_the_program_prints_nothing() {
+    let mut silent = KillOnDrop(
+        Command::new("sleep")
+            .arg("30")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let begin = Instant::now();
+    let stderr = silent.0.stderr.take().unwrap();
+    assert!(read_addr(stderr, Duration::from_millis(200)).is_err());
+    assert!(begin.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn wait_for_http_fails_when_the_server_never_answers() {
+    // The kernel accepts the connection, but nothing reads or answers it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let begin = Instant::now();
+    assert!(wait_for_http(&addr, begin, Duration::from_millis(200)).is_err());
+    assert!(begin.elapsed() < Duration::from_secs(5));
 }
