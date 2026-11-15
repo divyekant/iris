@@ -165,7 +165,7 @@ pub enum Error {
     NoKey,
     /// No answer: no connection, a time-out, or a lost connection.
     Transport(String),
-    /// HTTP 429. `retry_after` comes from the `retry-after` header.
+    /// HTTP 429. `retry_after` comes from the `retry-after` header (seconds or an HTTP date).
     RateLimited { retry_after: Option<Duration> },
     /// HTTP 5xx (Anthropic also uses 529 for "overloaded").
     Server(u16),
@@ -289,8 +289,7 @@ impl Client {
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse().ok())
-            .map(Duration::from_secs);
+            .and_then(parse_retry_after);
         // The status decides the error. A rate limit or a server error needs no body.
         match status {
             200..=299 => {}
@@ -362,6 +361,13 @@ impl Client {
                 let stop = match choice["finish_reason"].as_str() {
                     Some("length") => Stop::Truncated,
                     Some("content_filter") => Stop::Refused,
+                    // OpenAI puts a refusal in `message.refusal`, with `finish_reason` "stop".
+                    _ if choice["message"]["refusal"]
+                        .as_str()
+                        .is_some_and(|r| !r.is_empty()) =>
+                    {
+                        Stop::Refused
+                    }
                     _ => Stop::End,
                 };
                 let u = &v["usage"];
@@ -392,6 +398,19 @@ impl Client {
             _ => text,
         }
     }
+}
+
+/// Reads `retry-after` in its two forms: seconds, or an HTTP date. A date in the past gives 0.
+fn parse_retry_after(v: &str) -> Option<Duration> {
+    let v = v.trim();
+    if let Ok(secs) = v.parse() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = httpdate::parse_http_date(v).ok()?;
+    Some(
+        at.duration_since(std::time::SystemTime::now())
+            .unwrap_or_default(),
+    )
 }
 
 /// The cost in micro-USD, rounded up so that many small calls do not count as 0.
