@@ -49,8 +49,6 @@ pub enum Error {
     Key(&'static str),
     /// The search text is not valid.
     Query(String),
-    /// A message names a label that the store does not have.
-    UnknownLabel(String),
 }
 
 impl fmt::Display for Error {
@@ -65,7 +63,6 @@ impl fmt::Display for Error {
             ),
             Error::Key(why) => write!(f, "secret: {why}"),
             Error::Query(why) => write!(f, "search: {why}"),
-            Error::UnknownLabel(id) => write!(f, "unknown label {id}"),
         }
     }
 }
@@ -124,7 +121,8 @@ pub struct NewMessage {
     pub size: Option<i64>,
     pub internal_date: Option<i64>,
     pub fetched_at: Option<i64>,
-    /// Provider IDs of the labels. Each label must be in the store.
+    /// Provider IDs of the labels. A label that the store does not have is
+    /// skipped (specification 1, section 4.3).
     pub labels: Vec<String>,
     pub header: Header,
     /// The clean text (specification 1, section 7.2), if it is known. The
@@ -281,8 +279,6 @@ impl Store {
                 "INSERT OR IGNORE INTO message_label(message_id, label_id)
                  SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
             )?;
-            let mut label_known =
-                tx.prepare_cached("SELECT 1 FROM label WHERE account_id = ?1 AND provider_id = ?2")?;
             let mut header = tx.prepare_cached(
                 "INSERT INTO header(message_id, date, from_addr, from_name, to_addrs, cc_addrs, subject,
                    message_id_hdr, in_reply_to, list_id, auth)
@@ -311,12 +307,10 @@ impl Store {
                     |r| r.get(0),
                 )?;
                 clear_labels.execute([id])?;
+                // A label that the store does not have adds no row
+                // (specification 1, section 4.3).
                 for l in &m.labels {
-                    if label.execute(params![id, account, l])? == 0
-                        && !label_known.exists(params![account, l])?
-                    {
-                        return Err(Error::UnknownLabel(l.clone()));
-                    }
+                    label.execute(params![id, account, l])?;
                 }
                 let h = &m.header;
                 header.execute(params![
@@ -450,7 +444,12 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
     if have == know {
         return Ok(());
     }
-    if have > 0 {
+    // A version 0 database with tables is not new: it gets a backup too.
+    let has_data = have > 0
+        || conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })? > 0;
+    if has_data {
         // Specification 1, section 5.5: a backup copy before a migration.
         // The name is new for each start, so two starts do not write one file.
         let mut rand = [0u8; 4];
