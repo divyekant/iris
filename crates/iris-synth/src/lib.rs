@@ -26,7 +26,7 @@ const OWNER_NAME: &str = "Avel Torun";
 const END: i64 = 1_767_225_600;
 /// 2024-01-01T00:00:00Z. The mailbox starts at this time.
 const START: i64 = 1_704_067_200;
-const SPAN: i64 = 2 * 365 * 86_400;
+const SPAN: i64 = END - START;
 
 /// The five forms of a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0xb166_2010_03f7_f862;
+    const GOLDEN_42_2000: u64 = 0xd2e4_ab6d_b05f_ace5;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {
@@ -330,7 +330,7 @@ mod tests {
         let last = mb.truth(mb.len() - 1).date;
         assert!(last - first > SPAN - 30 * 86_400 && last < END);
         assert!(
-            first >= START && first < START + 86_400,
+            (START..START + 86_400).contains(&first),
             "first date {first}"
         );
     }

@@ -34,6 +34,8 @@ struct Store {
     sent: Vec<(Vec<u8>, String)>,
     /// A `startHistoryId` below this value gets 404, as an expired id does.
     history_floor: u64,
+    /// Messages of the mailbox from this index on are unread.
+    unread_from: usize,
     /// Each thread id, of the mailbox and of the sent messages.
     threads: std::collections::BTreeSet<String>,
 }
@@ -76,8 +78,7 @@ impl Store {
             _ => "CATEGORY_PERSONAL",
         };
         let mut labels = vec!["INBOX", category];
-        // The newest 1 % of the mailbox is unread.
-        if i * 100 >= self.mailbox.len() * 99 {
+        if i >= self.unread_from {
             labels.push("UNREAD");
         }
         labels
@@ -116,7 +117,17 @@ impl FakeGmail {
         let threads = (0..mailbox.len())
             .map(|i| gmail_id(mailbox.truth(i).thread as u64))
             .collect();
+        // The newest 1 % (at least one) of the received messages is unread.
+        let mut unread = mailbox.len().div_ceil(100);
+        let mut unread_from = mailbox.len();
+        while unread > 0 && unread_from > 0 {
+            unread_from -= 1;
+            if mailbox.truth(unread_from).sender != Sender::Owner {
+                unread -= 1;
+            }
+        }
         let store = Arc::new(Mutex::new(Store {
+            unread_from,
             mailbox,
             sent: Vec::new(),
             history_floor: floor,
