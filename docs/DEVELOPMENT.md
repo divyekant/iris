@@ -120,3 +120,10 @@ The command runs Codex on the exact head of the PR, in a read-only sandbox, and
 posts the result on the PR. If the result is clean, it merges the PR. Read
 `AGENTS.md`, "Workflow for one change", for what to do with each result.
 Add review rules of the product to `scripts/review/rules.md`.
+
+Two settings in `review` of `starter.json` control the loop:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `max_rounds` | `5` | The command stops after this number of blocked rounds. `--force` continues. |
+| `spec_paths` | `["docs/spec/**", "docs/specs/**"]` | A PR that changes a matching file gets the spec rules of `scripts/review/spec.md`. |

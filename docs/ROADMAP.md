@@ -6,14 +6,15 @@ this file when the order changes, not when a card changes.
 
 ## Now
 
-<!-- The work in progress. Three items at most.
-- <name>: C-<number>, C-<number>
--->
+- Release 0, Foundation: the open model draft and specifications 1 and 2 (PR #7).
 
 ## Next
 
-<!-- The work after "Now", in order. -->
+1. Release 1, See: connect one Gmail account and see mail as state in the first brief.
+2. Release 2, Apply: approve, apply and undo changes to the mailbox.
+3. Release 3, Write: write and send all mail from Iris.
 
 ## Later
 
-<!-- Ideas that are not in order yet. -->
+Releases 4 to 6 (Delegate, Trust and wait, Widen). The manifesto, "The path",
+gives each release and its exit criterion.

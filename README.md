@@ -80,6 +80,9 @@ the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 
 - How to make a change: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Rules for agents: [AGENTS.md](AGENTS.md)
+- The product and its users: [PRODUCT.md](PRODUCT.md)
+- Plan, design and track work: [docs/PLANNING.md](docs/PLANNING.md)
+- Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
 - Set up and checks: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 - Report a security problem: [SECURITY.md](SECURITY.md)
 - Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)

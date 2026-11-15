@@ -3,6 +3,12 @@
 All products of the projectstarter kit use this process. `AGENTS.md` holds the
 short rules. This file gives the detail.
 
+Iris uses its own board, the "Iris tracker" artifact (`board` in `starter.json`).
+Its cards have `title`, `release`, `part`, `status` (`todo`, `doing`, `blocked`,
+`done`), `doneWhen` and `dependsOn`. Card IDs are like `R0-09`. Where this file
+names a field or a column of the kit board that the Iris tracker does not have,
+follow `AGENTS.md`, "Plan and track".
+
 ## The parts
 
 | Part | Where | Use |

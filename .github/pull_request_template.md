@@ -1,6 +1,9 @@
 ## Summary
 
-<!-- What the change does and why. Link the issue if there is one. -->
+<!-- What the change does and why. For a UI change, link the before/after page
+and name the option that the owner chose. -->
+
+Card: <ID of the Iris tracker card, for example R0-09>
 
 ## Verification
 
