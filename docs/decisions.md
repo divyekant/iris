@@ -15,6 +15,20 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D2 (2026-11-15): Each user signs in to Gmail with an own Google OAuth client
+
+- Decided by: dk
+- Why: Google needs no app verification for personal use with fewer than
+  100 users. The path costs nothing, keeps the read-only scope
+  `gmail.readonly`, and keeps spec 1. The client must be "In production",
+  because "Testing" tokens expire after 7 days. The domain test of the record
+  is a condition.
+- Options not chosen: A verified Iris app (weeks of review, a yearly security
+  assessment, a public client secret). IMAP with an app password (full mail
+  access, no read-only option, new sync design). IMAP with OAuth, the macOS
+  Mail app, Google Takeout and forwarding.
+- Links: card R1-01, `docs/decisions/2026-11-google-sign-in.md`, PR #13
+
 ## D1 (2026-11-15): Iris keeps its own tracker as the board
 
 - Decided by: dk
