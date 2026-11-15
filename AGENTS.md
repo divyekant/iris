@@ -153,6 +153,8 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 |---|---|---|
 | `crates/` | The Cargo workspace of small crates. `crates/iris` is the one program: engine and command. | `engine` |
 | `crates/iris-web/` | Serves the web client. It embeds the build of `client/`. | `engine` |
+| `crates/iris-synth/` | Test data: a deterministic synthetic mailbox of all five forms, with hostile samples. | `engine` |
+| `crates/iris-fakegmail/` | Test server: a fake Gmail API on top of the synthetic mailbox. No network. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
