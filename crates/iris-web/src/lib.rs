@@ -4,6 +4,7 @@
 use axum::{
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
+    routing::get,
     Router,
 };
 
@@ -12,9 +13,9 @@ include!(concat!(env!("OUT_DIR"), "/files.rs"));
 /// The page when the program was built with no client build.
 const FALLBACK: &[u8] = b"<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Iris</title><body><h1>Iris</h1><p>This program has no web client. Build the client first (see client/README.md).</p></body></html>";
 
-/// Return the routes that serve the web client.
+/// Return the routes that serve the web client. Only GET and HEAD are allowed.
 pub fn router() -> Router {
-    Router::new().fallback(serve)
+    Router::new().fallback(get(serve))
 }
 
 /// Return the paths of the embedded files.
