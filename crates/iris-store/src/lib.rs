@@ -249,13 +249,20 @@ impl Store {
     /// labels, headers and clean text. A message that the store has gets the
     /// new values and keeps its ID. A message that was gone comes back, and
     /// its `understood_at` is cleared, so understanding runs on it again
-    /// (specification 1, section 4.4). Gives the row ID of each message.
+    /// (specification 1, section 4.4). A message with a new `content_sha256`
+    /// loses its old clean text and its `understood_at`. Gives the row ID of each message.
     pub fn put_messages(&self, account: i64, batch: &[NewMessage]) -> Result<Vec<i64>> {
         self.write(|tx| {
             let mut thread = tx.prepare_cached(
                 "INSERT INTO thread(account_id, provider_id) VALUES (?1, ?2)
                  ON CONFLICT(account_id, provider_id) DO UPDATE SET provider_id = provider_id
                  RETURNING id",
+            )?;
+            // New content makes the old clean text wrong. The delete trigger
+            // on body removes it from the full-text index too.
+            let mut stale_body = tx.prepare_cached(
+                "DELETE FROM body WHERE message_id = (SELECT id FROM message
+                   WHERE account_id = ?1 AND provider_id = ?2 AND content_sha256 IS NOT ?3)",
             )?;
             let mut message = tx.prepare_cached(
                 "INSERT INTO message(account_id, thread_id, provider_id, content_sha256, size, internal_date, fetched_at)
@@ -264,7 +271,8 @@ impl Store {
                    thread_id = excluded.thread_id, content_sha256 = excluded.content_sha256,
                    size = excluded.size, internal_date = excluded.internal_date,
                    fetched_at = excluded.fetched_at,
-                   understood_at = CASE WHEN gone_at IS NULL THEN understood_at END,
+                   understood_at = CASE WHEN gone_at IS NULL
+                     AND content_sha256 IS excluded.content_sha256 THEN understood_at END,
                    gone_at = NULL
                  RETURNING id",
             )?;
@@ -289,6 +297,7 @@ impl Store {
             for m in batch {
                 let thread_id: i64 =
                     thread.query_row(params![account, m.thread_provider_id], |r| r.get(0))?;
+                stale_body.execute(params![account, m.provider_id, m.content_sha256])?;
                 let id: i64 = message.query_row(
                     params![
                         account,
