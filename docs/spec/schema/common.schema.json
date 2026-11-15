@@ -4,87 +4,275 @@
   "title": "Iris open model 0 (draft): common definitions",
   "description": "Draft. Definitions that each form schema uses. See docs/spec/01-mirror-store-forms.md, section 6.1.",
   "$defs": {
-    "messageId": { "type": "string", "pattern": "^m-[1-9][0-9]*$" },
-    "threadId": { "type": "string", "pattern": "^t-[1-9][0-9]*$" },
-    "senderId": { "type": "string", "pattern": "^p-[1-9][0-9]*$" },
-    "dateTime": { "type": "string", "format": "date-time" },
-    "date": { "type": "string", "format": "date" },
+    "messageId": {
+      "type": "string",
+      "pattern": "^m-[1-9][0-9]*$"
+    },
+    "threadId": {
+      "type": "string",
+      "pattern": "^t-[1-9][0-9]*$"
+    },
+    "senderId": {
+      "type": "string",
+      "pattern": "^p-[1-9][0-9]*$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
     "money": {
       "type": "object",
-      "required": ["value", "currency"],
+      "required": [
+        "value",
+        "currency"
+      ],
       "additionalProperties": false,
       "properties": {
-        "value": { "type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$" },
-        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" }
+        "value": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        }
       }
     },
     "party": {
       "type": "object",
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "additionalProperties": false,
       "properties": {
-        "kind": { "enum": ["self", "sender"] },
-        "sender": { "$ref": "#/$defs/senderId" },
-        "name": { "type": "string", "maxLength": 200 },
-        "address": { "type": "string", "format": "email" }
+        "kind": {
+          "enum": [
+            "self",
+            "sender"
+          ]
+        },
+        "sender": {
+          "$ref": "#/$defs/senderId"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "address": {
+          "type": "string",
+          "format": "email"
+        }
       },
-      "if": { "properties": { "kind": { "const": "sender" } } },
-      "then": { "required": ["sender"] }
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "sender"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "sender"
+        ]
+      }
     },
     "source": {
       "type": "object",
-      "required": ["message", "thread", "role"],
+      "required": [
+        "message",
+        "thread",
+        "role"
+      ],
       "additionalProperties": false,
       "properties": {
-        "message": { "$ref": "#/$defs/messageId" },
-        "thread": { "$ref": "#/$defs/threadId" },
-        "role": { "enum": ["origin", "update", "evidence"] },
-        "quote": { "type": "string", "maxLength": 500 }
+        "message": {
+          "$ref": "#/$defs/messageId"
+        },
+        "thread": {
+          "$ref": "#/$defs/threadId"
+        },
+        "role": {
+          "enum": [
+            "origin",
+            "update",
+            "evidence"
+          ]
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "if": {
+        "properties": {
+          "role": {
+            "const": "origin"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "quote"
+        ]
       }
     },
     "derived": {
       "type": "object",
-      "required": ["by"],
+      "required": [
+        "by"
+      ],
       "additionalProperties": false,
       "properties": {
-        "by": { "enum": ["rule", "model", "person"] },
-        "rule": { "type": "string", "minLength": 1 },
-        "model": { "type": "string", "minLength": 1 },
-        "prompt": { "type": "string", "minLength": 1 }
+        "by": {
+          "enum": [
+            "rule",
+            "model",
+            "person"
+          ]
+        },
+        "rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "allOf": [
-        { "if": { "properties": { "by": { "const": "rule" } } }, "then": { "required": ["rule"] } },
-        { "if": { "properties": { "by": { "const": "model" } } }, "then": { "required": ["model", "prompt"] } }
+        {
+          "if": {
+            "properties": {
+              "by": {
+                "const": "rule"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "by": {
+                "const": "model"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model",
+              "prompt"
+            ]
+          }
+        }
       ]
     },
     "attention": {
       "description": "Reserved for specification 2.",
       "type": "object",
-      "required": ["state"],
+      "required": [
+        "state"
+      ],
       "additionalProperties": false,
       "properties": {
-        "state": { "enum": ["shown", "bundled", "hidden"] },
-        "rule": { "type": "integer", "minimum": 1 },
-        "reason": { "type": "string", "maxLength": 200 }
+        "state": {
+          "enum": [
+            "shown",
+            "bundled",
+            "hidden"
+          ]
+        },
+        "rule": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 200
+        }
       }
     },
     "item": {
       "description": "The fields of each item of each form.",
       "type": "object",
-      "required": ["model", "id", "form", "status", "title", "sources", "created", "updated", "derived"],
+      "required": [
+        "model",
+        "id",
+        "form",
+        "status",
+        "title",
+        "sources",
+        "created",
+        "updated",
+        "derived"
+      ],
       "properties": {
-        "model": { "const": "iris/0" },
-        "id": { "type": "string" },
-        "form": { "enum": ["commitment", "conversation", "record", "feed", "signal"] },
-        "status": { "type": "string" },
-        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
-        "sources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } },
-        "created": { "$ref": "#/$defs/dateTime" },
-        "updated": { "$ref": "#/$defs/dateTime" },
-        "derived": { "$ref": "#/$defs/derived" },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-        "matter": { "type": ["string", "null"] },
-        "attention": { "$ref": "#/$defs/attention" }
+        "model": {
+          "const": "iris/0"
+        },
+        "id": {
+          "type": "string"
+        },
+        "form": {
+          "enum": [
+            "commitment",
+            "conversation",
+            "record",
+            "feed",
+            "signal"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        },
+        "created": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "updated": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "derived": {
+          "$ref": "#/$defs/derived"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "matter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attention": {
+          "$ref": "#/$defs/attention"
+        }
       }
     }
   }
