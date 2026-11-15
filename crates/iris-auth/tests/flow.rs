@@ -414,3 +414,14 @@ fn the_file_cannot_choose_the_endpoints() {
         assert!(test_client(None).with_test_token_uri(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn a_huge_wait_time_does_not_panic() {
+    let sign_in = test_client(None).sign_in().unwrap();
+    let state = params(&sign_in.url())["state"].clone();
+    let redirect = sign_in.redirect_uri().to_string();
+    let browser =
+        std::thread::spawn(move || browser_get(&redirect, &format!("error=access_denied&state={state}")));
+    assert!(matches!(sign_in.wait(Duration::MAX), Err(Error::Denied(_))));
+    assert!(browser.join().unwrap().contains("200"));
+}
