@@ -101,7 +101,9 @@ again from the saved state. It fetches only the messages that are not fetched.
    with the history types `messageAdded`, `messageDeleted`, `labelAdded` and
    `labelRemoved`. Follow `nextPageToken` to the last page.
 2. Apply each history record in the order that Gmail returns:
-   - `messageAdded`: fetch the message (`format=raw`) and save it.
+   - `messageAdded`: fetch the message (`format=raw`) and save it. If Gmail
+     returns HTTP 404, Gmail deleted the message after the record. Mark the
+     message as gone (section 4.5) and continue with the next record.
    - `messageDeleted`: mark the message as gone (section 4.5).
    - `labelAdded` and `labelRemoved`: change the label set of the message.
 3. Save the `historyId` of the response as the new history ID. Save it in the
@@ -655,6 +657,9 @@ A change that adds a cache must say its size in the pull request.
   message row in the backup has its content file.
 - A test changes one byte of a content file, and checks that verify reports 1
   difference and fetches the message again.
+- A test adds and then deletes a message at the fake server before an
+  incremental sync, and checks that the sync completes and saves the new
+  history ID.
 - A test deletes a message at the fake server between the list and the fetch
   of the first sync, and checks that the mirror becomes ready.
 - A test restores a live backup to a new folder, and checks that the engine
