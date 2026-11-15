@@ -54,6 +54,9 @@ of the project (Apache-2.0). `git commit -s` adds the line. If you forgot the
 line, run `git commit --amend -s` for the last commit, or
 `git rebase --signoff origin/develop` for all commits of the branch.
 
+The empty proof commit that `scripts/local-ci/run.sh` makes needs no sign-off.
+It holds no change, so it gives no content to the project.
+
 ## Scope
 
 The manifesto ([docs/manifesto.md](docs/manifesto.md)) controls the scope. A
