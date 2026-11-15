@@ -119,8 +119,10 @@ HTTP 404 for the saved history ID, do a full resync:
 2. List all message IDs again (as in step 3 of section 4.2).
 3. Fetch each message that the mirror does not have.
 4. Mark as gone each message that the mirror has and the list does not have.
-5. For each message that the mirror has, get its labels with
-   `messages.get` and `format=minimal`. Correct the label set.
+5. For each message that the mirror has and the new list has, get its labels
+   with `messages.get` and `format=minimal`. Correct the label set. If Gmail
+   returns HTTP 404 for a message (it was deleted after step 2), mark the
+   message as gone and continue.
 6. Run one incremental sync from `H1`.
 
 A full resync of 100,000 messages costs about 500,000 quota units for step 5
@@ -171,12 +173,22 @@ have other sources stay, without that source.
 
 ### 4.8 Verify
 
-`iris mirror verify` compares the mirror with Gmail:
+`iris mirror verify` compares the mirror with Gmail, and checks the local
+content:
 
-1. List all message IDs at Gmail.
-2. Get the label set of each message (`format=minimal`).
-3. Compare the IDs and the label sets with the mirror.
-4. Print each difference, and the total. Save the result in the sync log.
+1. List all message IDs and thread IDs at Gmail.
+2. Get the label set, the `internalDate` and the size of each message
+   (`format=minimal`).
+3. Call `labels.list`.
+4. Compare the message IDs, the thread IDs, the label sets, the dates, the
+   sizes and the label list with the mirror.
+5. For each message that is not gone, read its content file and compute the
+   SHA-256 hash. A missing file, or a hash that is not `content_sha256`, is a
+   difference.
+6. Print each difference, and the total. Save the result in the sync log.
+
+A difference of step 5 is a local defect, not a sync defect. The engine
+fetches the message again (`format=raw`) to repair it.
 
 The exit criterion of release 1 is 0 differences each day for 7 days. To avoid
 a false difference, verify runs an incremental sync first and compares only
@@ -621,6 +633,10 @@ A change that adds a cache must say its size in the pull request.
   the next start fetches only the rest.
 - A test runs the content cleanup during a live backup, and checks that each
   message row in the backup has its content file.
+- A test changes one byte of a content file, and checks that verify reports 1
+  difference and fetches the message again.
+- A test deletes a message at the fake server during step 5 of a full resync,
+  and checks that the resync completes and marks the message as gone.
 - A test changes labels at the fake server between two syncs and checks that
   verify reports 0 differences.
 - The schema test (`crates/iris-spec`) validates the sample documents in

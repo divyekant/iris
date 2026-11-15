@@ -348,7 +348,7 @@ changes a row only to move its state forward.
 | `ops` | The provider operations, as JSON (for example the message IDs and the labels to add and remove). |
 | `pre` | For each message, the labels that the action changes, before the action. |
 | `post` | The same labels after the action, as the engine expects them. The engine saves it before the provider call. |
-| `done` | The messages that the provider confirmed, for a verb with one call for each message. |
+| `done` | The messages that the provider confirmed. The engine adds the messages of each call after the call succeeds. |
 | `state` | `writing`, `applied`, `failed` or `undone`. |
 | `history_id` | The Gmail history ID after the apply. |
 | `undo` | `inverse` (an undo exists) or `none` (final, for example a sent message). |
@@ -365,8 +365,9 @@ changes a row only to move its state forward.
 2. In one SQLite transaction, add the ledger row with the state `writing`, the
    `ops`, the `pre` state from step 1, and the expected `post` state.
    Recovery (section 7.3) needs `post`, so the engine saves it before the call.
-3. Call the provider. For a verb with one call for each message (`trash`),
-   add each message to `done` after its call succeeds.
+3. Call the provider. An action can need more than one call: one
+   `batchModify` call for each 1,000 messages, or one `messages.trash` call for
+   each message. After each call succeeds, add its messages to `done`.
 4. If each call succeeds, set the state `applied` and save the history ID.
    Update the mirror with the new labels.
 5. If a call fails, set the state `failed` and save the error. The messages in
@@ -380,15 +381,12 @@ trash changes nothing. For these verbs, a repeat is safe.
 
 At start, the engine looks for each ledger row in the state `writing`:
 
-- For a label verb, the engine reads the labels of each message at Gmail
-  (`format=minimal`). If each message has the `post` state, the row becomes
-  `applied`. Else, the row becomes `failed`, and the action is shown to the
-  person.
-- For `trash`, the engine reads the labels of each message in `ops`. A message
-  with the label `TRASH` goes to `done`. For each other message, the engine
-  calls `messages.trash` again, because a repeat is safe. When each message is
-  in `done`, the row becomes `applied`. If a call fails, the row becomes
-  `failed`, as in step 5 of section 7.2.
+- For a label verb and for `trash`, the engine reads the labels of each
+  message in `ops` at Gmail (`format=minimal`). A message with the `post`
+  state goes to `done`. For each other message, the engine calls the provider
+  again, because a repeat is safe. When each message is in `done`, the row
+  becomes `applied`. If a call fails, the row becomes `failed`, as in step 5
+  of section 7.2. In both cases, the undo applies to each message in `done`.
 - For a `send`, the engine looks for the message in `SENT` by the
   `Message-ID` header that Iris set in the draft. If it is there, the row
   becomes `applied`. Else, the row becomes `failed`. The engine never sends
@@ -513,8 +511,9 @@ agent that does not work in a folder. The rules for the MCP interface:
   sets, undo, and verify again (requirement C3).
 - A crash test for each case of section 7.3 (requirement C5). The tests
   include a provider call that succeeds before the ledger update, for a label
-  verb and for `send`, and a crash in the middle of a `trash` of more than one
-  message.
+  verb and for `send`, a crash between two `batchModify` calls of an action
+  with more than 1,000 messages, and a crash in the middle of a `trash` of
+  more than one message.
 - A policy test for each step of section 6.4, and for each hard limit.
 - A test with a policy file that is not valid: each action goes to review.
 - A test that the `iris` command has no verb that approves, denies or changes
