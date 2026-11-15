@@ -237,6 +237,7 @@ added = 2026-11-20
 id = 4
 name = "Never touch mail from the bank without review"
 effect = "review"
+verbs = ["archive", "inbox", "label", "unlabel", "read", "unread", "trash"]
 when = { sender = "@bank.example" }
 by = "person"
 added = 2026-11-20
@@ -356,14 +357,19 @@ changes a row only to move its state forward.
 
 ### 7.2 Apply
 
-1. In one SQLite transaction, add the ledger row with the state `writing`, the
-   `ops`, the `pre` state from the mirror, and the expected `post` state.
+1. Read the labels of each message of the action at Gmail (`format=minimal`).
+   The mirror can be one sync interval behind Gmail, so the engine does not
+   use the mirror for `pre`. Remove from the action each message that already
+   has the target state. The provider call does not change such a message, and
+   the undo does not touch it.
+2. In one SQLite transaction, add the ledger row with the state `writing`, the
+   `ops`, the `pre` state from step 1, and the expected `post` state.
    Recovery (section 7.3) needs `post`, so the engine saves it before the call.
-2. Call the provider. For a verb with one call for each message (`trash`),
+3. Call the provider. For a verb with one call for each message (`trash`),
    add each message to `done` after its call succeeds.
-3. If each call succeeds, set the state `applied` and save the history ID.
+4. If each call succeeds, set the state `applied` and save the history ID.
    Update the mirror with the new labels.
-4. If a call fails, set the state `failed` and save the error. The messages in
+5. If a call fails, set the state `failed` and save the error. The messages in
    `done` keep the change, and the undo applies to them. Do not try a send
    again.
 
@@ -382,7 +388,7 @@ At start, the engine looks for each ledger row in the state `writing`:
   with the label `TRASH` goes to `done`. For each other message, the engine
   calls `messages.trash` again, because a repeat is safe. When each message is
   in `done`, the row becomes `applied`. If a call fails, the row becomes
-  `failed`, as in step 4 of section 7.2.
+  `failed`, as in step 5 of section 7.2.
 - For a `send`, the engine looks for the message in `SENT` by the
   `Message-ID` header that Iris set in the draft. If it is there, the row
   becomes `applied`. Else, the row becomes `failed`. The engine never sends
@@ -514,6 +520,8 @@ agent that does not work in a folder. The rules for the MCP interface:
 - A test that the `iris` command has no verb that approves, denies or changes
   the policy.
 - A test that an undo skips a message that changed after the entry.
+- A test that marks a message read at the fake server after the last sync,
+  then applies `read` and the undo. The message must stay read.
 
 ## 11. Open questions
 
@@ -528,6 +536,10 @@ agent that does not work in a folder. The rules for the MCP interface:
 
 ## Assumptions
 
+- A person can change a message in Gmail between the read of step 1 and the
+  provider call of step 3 in section 7.2. The window is the time of one
+  provider call. If the person changes a label of the action in that window,
+  the undo can reverse that change. Version 0 accepts this risk.
 - Gmail `messages.batchModify` accepts up to 1,000 message IDs, and a repeat
   with the same labels has the same result. Verify before the apply code is
   written.

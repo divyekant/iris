@@ -222,8 +222,16 @@ iris/
 ```
 
 To back up Iris, stop the engine and copy the folder. `iris backup <path>`
-makes a copy while the engine runs (SQLite online backup, then the content
-folder).
+makes a copy while the engine runs:
+
+1. Take the backup lock. The content cleanup (section 4.5) does not delete a
+   file while another process holds this lock.
+2. Copy `iris.db` with the SQLite online backup.
+3. Copy each content file that the copy of `iris.db` refers to.
+4. Release the lock.
+
+New content files after step 2 are not in the backup, and the copy of
+`iris.db` does not refer to them.
 
 ### 5.2 SQLite settings
 
@@ -611,6 +619,8 @@ A change that adds a cache must say its size in the pull request.
   points to the tombstone.
 - A test drops the connection in the middle of the first sync and checks that
   the next start fetches only the rest.
+- A test runs the content cleanup during a live backup, and checks that each
+  message row in the backup has its content file.
 - A test changes labels at the fake server between two syncs and checks that
   verify reports 0 differences.
 - The schema test (`crates/iris-spec`) validates the sample documents in
