@@ -260,24 +260,59 @@ fn put_again_keeps_the_id_and_updates_the_index() {
 }
 
 #[test]
-fn an_unknown_label_writes_nothing_of_the_batch() {
+fn an_unknown_label_changes_nothing_for_that_label() {
+    // Specification 1, section 4.3: a label that labels.list does not have
+    // changes nothing for that label. The rest of the batch is written.
     let dir = TempDir::new("label");
     let (store, acc) = setup(&dir);
-    let err = store
+    let ids = store
         .put_messages(
             acc,
             &[
                 msg("a", "t1", 1, &["INBOX"], "s", "apple"),
-                msg("b", "t1", 2, &["Label_9"], "s", "apple"),
+                msg("b", "t1", 2, &["Label_9", "INBOX"], "s", "apple"),
             ],
         )
-        .unwrap_err();
-    assert!(matches!(err, Error::UnknownLabel(ref l) if l == "Label_9"));
-    let n: i64 = store
-        .read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))
         .unwrap();
-    assert_eq!(n, 0);
-    assert_eq!(store.search("apple", 10).unwrap(), Vec::<i64>::new());
+    assert_eq!(
+        store.search("label:INBOX apple", 10).unwrap(),
+        [ids[1], ids[0]]
+    );
+    let n: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM message_label", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
+#[test]
+fn migration_of_a_version_0_database_with_data_makes_a_backup() {
+    let dir = TempDir::new("v0");
+    fs::create_dir_all(&dir.0).unwrap();
+    let conn = rusqlite::Connection::open(dir.0.join("iris.db")).unwrap();
+    conn.execute_batch("CREATE TABLE old(x); INSERT INTO old VALUES (7);")
+        .unwrap();
+    drop(conn);
+    Store::open(&dir.0).unwrap();
+    let backups: Vec<_> = fs::read_dir(&dir.0)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".bak"))
+        .collect();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let copy = rusqlite::Connection::open(&backups[0]).unwrap();
+    let x: i64 = copy
+        .query_row("SELECT x FROM old", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(x, 7);
+
+    // A new empty database needs no backup.
+    let empty = TempDir::new("v0-empty");
+    Store::open(&empty.0).unwrap();
+    assert!(!fs::read_dir(&empty.0).unwrap().any(|e| e
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .ends_with(".bak")));
 }
 
 #[test]
