@@ -9,3 +9,7 @@ publish.workspace = true
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["rt", "macros"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
