@@ -1,0 +1,9 @@
+subject: Your Beled News receipt 55290
+cut: false
+---
+Thank you for your order 55290.
+Total: 349.96 EUR
+Order date: Sun, 21 Jan 2024 10:09:45 +0000
+Keep this message for your records.
+
+Pate

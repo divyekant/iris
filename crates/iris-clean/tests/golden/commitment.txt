@@ -1,0 +1,8 @@
+subject: Can you send the schedule by Thursday?
+cut: false
+---
+Hi Beltas,
+Can you send me the schedule by Thursday? I need it for the meeting.
+We can talk about it on the phone.
+
+Avel

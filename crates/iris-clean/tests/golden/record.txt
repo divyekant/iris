@@ -1,0 +1,9 @@
+subject: Your Marpa Cloud receipt 82662
+cut: false
+---
+Thank you for your order 82662.
+Total: 184.57 EUR
+Order date: Mon, 01 Jan 2024 06:07:23 +0000
+Keep this message for your records.
+
+Marpa
