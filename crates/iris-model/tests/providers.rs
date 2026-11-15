@@ -431,3 +431,50 @@ fn retry_after_as_a_date_gives_the_wait_time() {
         ));
     }
 }
+
+#[test]
+fn oversized_answer_is_a_bad_answer() {
+    for p in PROVIDERS {
+        let body = ok_body(p, &"a".repeat(2 << 20), 1, 1, stop_word(p, Stop::End));
+        let (client, _) = setup(p, vec![(200, vec![], body.into())]);
+        let err = client.ask("x", "y").unwrap_err();
+        assert!(matches!(err, Error::BadAnswer(_)), "{p:?}: {err:?}");
+        assert!(!err.is_retryable());
+    }
+}
+
+#[test]
+fn malformed_answers_are_bad_answers() {
+    let anthropic = [
+        json!({"content": [{"type": "text", "text": "{}"}], "usage": {}}),
+        json!({"content": [{"type": "text", "text": "{}"}], "stop_reason": "tool_use"}),
+        json!({"stop_reason": "end_turn"}),
+    ];
+    let openai = [
+        json!({"choices": [{"message": {"content": "{}"}}]}),
+        json!({"choices": [{"message": {"content": "{}"}, "finish_reason": "tool_calls"}]}),
+        json!({"choices": [{"message": {}, "finish_reason": "stop"}]}),
+        json!({"choices": [{"finish_reason": "stop"}]}),
+        json!({"choices": []}),
+    ];
+    for (p, bodies) in [
+        (Provider::Anthropic, &anthropic[..]),
+        (Provider::OpenAiCompatible, &openai[..]),
+    ] {
+        for body in bodies {
+            let (client, _) = setup(p, vec![(200, vec![], body.to_string().into())]);
+            let err = client.ask("x", "y").unwrap_err();
+            assert!(matches!(err, Error::BadAnswer(_)), "{p:?} {body}: {err:?}");
+        }
+    }
+}
+
+#[test]
+fn truncated_answer_with_no_text_is_allowed() {
+    let p = Provider::OpenAiCompatible;
+    let body =
+        json!({"choices": [{"message": {"content": null}, "finish_reason": "length"}]}).to_string();
+    let (client, _) = setup(p, vec![(200, vec![], body.into())]);
+    let reply = client.ask("x", "y").unwrap();
+    assert_eq!((reply.stop, reply.text.as_str()), (Stop::Truncated, ""));
+}
