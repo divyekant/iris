@@ -42,8 +42,9 @@ PRAGMA busy_timeout = 5000;
 pub enum Error {
     Db(rusqlite::Error),
     Io(io::Error),
-    /// The database has a schema version that this program does not know.
-    NewerSchema(i64),
+    /// The database has a schema version that this program does not know:
+    /// a newer version, or a negative one.
+    UnknownSchema(i64),
     /// The `key` file is not 32 bytes, or a secret does not decrypt.
     Key(&'static str),
     /// The search text is not valid.
@@ -57,9 +58,9 @@ impl fmt::Display for Error {
         match self {
             Error::Db(e) => write!(f, "database: {e}"),
             Error::Io(e) => write!(f, "file: {e}"),
-            Error::NewerSchema(v) => write!(
+            Error::UnknownSchema(v) => write!(
                 f,
-                "the database has schema version {v}, and this program knows only {}",
+                "the database has schema version {v}, and this program knows only 0 to {}",
                 MIGRATIONS.len()
             ),
             Error::Key(why) => write!(f, "secret: {why}"),
@@ -432,8 +433,10 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
     let have = schema_version(conn)?;
     let know = MIGRATIONS.len() as i64;
-    if have > know {
-        return Err(Error::NewerSchema(have));
+    // SQLite accepts a negative user_version. A negative value is not a
+    // version of this program, and as usize it skips every migration.
+    if !(0..=know).contains(&have) {
+        return Err(Error::UnknownSchema(have));
     }
     if have == know {
         return Ok(());
