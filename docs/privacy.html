@@ -22,15 +22,17 @@ data folder on the machine of the person. This data stays on that machine,
 under the control of the person.</li>
 <li>Iris encrypts the Google refresh token before it writes the token to disk.
 Iris keeps the access token in memory only.</li>
-<li>If the person turns on a hosted model, Iris sends the text of a message to
-the model provider that the person selects, with the key of the person. The
-terms of that provider apply to that text, and the provider can keep it. If
-the person uses a model server, Iris sends the text to the address of that
-server. The text stays on the machine only when the server runs on the same
-machine.</li>
+<li>If the person turns on a hosted model, Iris sends mail data to the model
+provider that the person selects, with the key of the person. A model request
+can contain the text of a message, the headers that the model needs, the
+sender and the other parties of the message, and the context of its thread.
+The terms of that provider apply to this data, and the provider can keep it.
+If the person uses a model server, Iris sends the same data to the address of
+that server. The data stays on the machine only when the server runs on the
+same machine.</li>
 <li>To delete the data of the Iris install, the person deletes the Iris data
 folder. A backup that <code>iris backup</code> made is a separate copy, with the
-mail and the key: delete each backup too. For text that Iris sent to a hosted
+mail and the key: delete each backup too. For data that Iris sent to a hosted
 model, see the terms of that provider.</li>
 <li>To remove the
 access of Iris, the person removes the app at
