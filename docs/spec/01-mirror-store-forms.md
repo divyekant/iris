@@ -321,7 +321,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT | One row for each item of each form. `doc` is the form document of section 6. |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
-| `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `at` INTEGER | Changes by a person. A rebuild applies them again. |
+| `correction` | `id` INTEGER PK, `item_id`, `match_key` TEXT, `field` TEXT, `value` TEXT (JSON), `at` INTEGER | Changes by a person. A rebuild applies them again (section 7.5). |
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
 
 The engine adds indexes for the queries of the brief: `item(form, status)`,
@@ -591,10 +591,16 @@ Fixed rules run before the model. They are fast, free and the same each time.
 
 - `iris rebuild` deletes the items that `derived.by` `rule` or `model` made,
   and runs understanding again on the mirror.
-- A correction holds the field and the new value. After a rebuild, the engine
-  applies each correction to the new item with the same source and the same
-  form. If no such item exists, the correction makes an item with
-  `derived.by` `person`.
+- Each item has a match key: the SHA-256 hash of the form, the origin message
+  and the `quote` of the origin source, with spaces and case normalized. Two
+  asks in one message have different quotes, so they have different keys.
+- A correction holds the match key of its item, the field and the new value.
+  After a rebuild, the engine applies each correction to the new item with
+  the same match key. If no item or more than one item has the key, the engine
+  does not guess. It makes an item with `derived.by` `person` from the
+  corrected values, and the brief shows it for a check.
+- The understanding step must set `quote` on each origin source. An item
+  without a quote cannot get a correction that survives a rebuild.
 
 ## 8. The first brief
 
@@ -655,6 +661,8 @@ A change that adds a cache must say its size in the pull request.
 - The schema test (`crates/iris-spec`) validates the sample documents in
   `schema/examples/` against the schemas, and checks that each sample in
   `schema/examples/invalid/` fails.
+- A rebuild test with one message that gives two commitments. A correction
+  of the due date of one commitment must apply to that commitment only.
 - The understanding tests use the ground-truth file of the synthetic mailbox.
   They measure the share of messages with the correct form. Release 1 sets the
   target after the first measure.

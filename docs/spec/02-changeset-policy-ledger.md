@@ -282,10 +282,13 @@ needs a change to this specification.
   comments.
 - No verb of the `iris` command changes the policy.
 - The engine reads the file again when it changes on disk.
-- If the file is not valid, the engine uses an empty policy in mode `observe`.
-  Each action goes to review, and nothing is hidden. The brief shows the error
-  and the line number. This is fail closed: a defect in the file can never
-  allow more.
+- The engine saves the `mode` of each valid file in `iris.db`.
+- If the file is not valid, the engine uses an empty rule set with the last
+  saved mode, or `observe` if no mode is saved. In mode `apply`, each action
+  is `in_review`, and it applies only after a person approves it. In mode
+  `observe`, each action stays `proposed`. Nothing is hidden. The brief shows
+  the error and the line number. This is fail closed: a defect in the file can
+  never allow more.
 
 ### 6.4 Evaluation
 
@@ -383,12 +386,20 @@ trash changes nothing. For these verbs, a repeat is safe.
 
 At start, the engine looks for each ledger row in the state `writing`:
 
-- For a label verb and for `trash`, the engine reads the labels of each
-  message in `ops` at Gmail (`format=minimal`). A message with the `post`
-  state goes to `done`. For each other message, the engine calls the provider
-  again, because a repeat is safe. When each message is in `done`, the row
-  becomes `applied`. If a call fails, the row becomes `failed`, as in step 5
-  of section 7.2. In both cases, the undo applies to each message in `done`.
+- For a label verb and for `trash`, the engine skips each message that is
+  already in `done`: the provider confirmed it, and a later change by the
+  person must stay. For each other message in `ops`, the engine reads the
+  labels at Gmail (`format=minimal`):
+  - The message has the `post` state: it goes to `done`.
+  - The message has the `pre` state: the call did not reach it. The engine
+    calls the provider again, and the message goes to `done` after the call.
+  - The message has neither state: the engine cannot tell what changed it.
+    The engine does not call the provider for it, and lists it in the result
+    for the person.
+
+  When each message is in `done`, the row becomes `applied`. Else, the row
+  becomes `failed`, as in step 5 of section 7.2. In both cases, the undo
+  applies only to each message in `done`.
 - For a `send`, the engine looks for the message in `SENT` by the
   `Message-ID` header that Iris set in the draft. If it is there, the row
   becomes `applied`. Else, the row becomes `failed`. The engine never sends
@@ -517,7 +528,12 @@ agent that does not work in a folder. The rules for the MCP interface:
   with more than 1,000 messages, and a crash in the middle of a `trash` of
   more than one message.
 - A policy test for each step of section 6.4, and for each hard limit.
-- A test with a policy file that is not valid: each action goes to review.
+- A test with a policy file that is not valid: in mode `apply`, each action is
+  `in_review`; in mode `observe`, each action stays `proposed`.
+- A crash test where the person changes a message in `done` before the start:
+  recovery does not change it. A crash test where a message has neither the
+  `pre` nor the `post` state: recovery lists it and does not call the
+  provider.
 - A test that the `iris` command has no verb that approves, denies or changes
   the policy.
 - A test that an undo skips a message that changed after the entry.
