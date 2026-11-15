@@ -40,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 MARKER = "<!-- starter-review v1"
 BLOCKING = ("P0", "P1", "P2")
 SEVERITIES = ("P0", "P1", "P2", "P3")
+WRITERS = ("OWNER", "MEMBER", "COLLABORATOR")
 DEFAULTS = {"model": "gpt-6-sol", "effort": "medium", "merge_method": "squash",
             "trusted_authors": [], "codex_timeout_minutes": 30, "check_wait_seconds": 300,
             "max_rounds": 5, "spec_paths": ["docs/spec/**", "docs/specs/**"]}
@@ -124,6 +125,14 @@ def find_previous(comments: Sequence[Dict[str, Any]], head: str, merge_base: str
         if found:
             return found.group(1)
     return None
+
+
+def review_comments(comments: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The comments that this command posted: the marker comes first, and GitHub marks the
+    author as an owner, member or collaborator of the repository (no extra API call, which
+    the cloud proxy blocks)."""
+    return [c for c in comments if (c.get("body") or "").startswith(MARKER)
+            and c.get("author_association") in WRITERS]
 
 
 def blocked_rounds(comments: Sequence[Dict[str, Any]]) -> int:
@@ -305,10 +314,7 @@ def review(number: int, merge: bool, dry_run: bool, force: bool, api: Api = gh_a
         raise Stop(f"no local CI proof on the head: {proof.stdout.strip() or proof.stderr.strip()}")
     merge_base = git(root, "merge-base", f"origin/{config['base']}", head)
     body = body_hash(pr.get("body"))
-    # Only review comments that this command posted count: a trusted or signed-in author, marker first.
-    posters = set(trusted) | {api("GET", "user")["login"]}
-    comments = [c for c in get_all(api, f"repos/{slug}/issues/{number}/comments")
-                if (c.get("user") or {}).get("login") in posters and (c.get("body") or "").startswith(MARKER)]
+    comments = review_comments(get_all(api, f"repos/{slug}/issues/{number}/comments"))
     previous = None if force else find_previous(comments, head, merge_base, body)
     if previous:
         print(f"review: an earlier review of the same head, base and body says {previous}; "
