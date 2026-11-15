@@ -358,13 +358,17 @@ async fn message(
     if let Err(e) = check(&h, &user) {
         return e;
     }
-    // `metadataHeaders` repeats, so read the raw query.
+    // `metadataHeaders` repeats, so decode the query as a list of pairs.
+    let query = query.unwrap_or_default();
+    let Ok(pairs) = serde_urlencoded::from_str::<Vec<(String, String)>>(&query) else {
+        return error(StatusCode::BAD_REQUEST, "Invalid query string.");
+    };
     let mut format = None;
     let mut wanted: Vec<String> = Vec::new();
-    for pair in query.as_deref().unwrap_or("").split('&') {
-        match pair.split_once('=') {
-            Some(("format", v)) => format = Some(v.to_string()),
-            Some(("metadataHeaders", v)) => wanted.push(v.to_ascii_lowercase()),
+    for (name, value) in pairs {
+        match name.as_str() {
+            "format" => format = Some(value),
+            "metadataHeaders" => wanted.push(value.to_ascii_lowercase()),
             _ => {}
         }
     }

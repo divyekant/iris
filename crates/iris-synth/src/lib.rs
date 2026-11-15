@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0xd475_b71a_5ebc_cc8c;
+    const GOLDEN_42_2000: u64 = 0xb166_2010_03f7_f862;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {

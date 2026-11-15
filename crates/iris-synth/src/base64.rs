@@ -29,11 +29,17 @@ pub fn encode_url(data: &[u8]) -> String {
     encode_with(data, URL, true)
 }
 
-/// Decode either alphabet, with or without padding. `None` on a bad character.
+/// Decode either alphabet, with or without padding. `None` on a bad
+/// character, bad padding or a last group with bits that are not zero.
 pub fn decode(text: &str) -> Option<Vec<u8>> {
+    let body = text.trim_end_matches('=');
+    let pad = text.len() - body.len();
+    if body.len() % 4 == 1 || (pad > 0 && (text.len() % 4 != 0 || pad > 2)) {
+        return None;
+    }
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0);
-    for c in text.bytes().filter(|c| !matches!(c, b'=' | b'\r' | b'\n')) {
+    for c in body.bytes() {
         let v = match c {
             b'A'..=b'Z' => c - b'A',
             b'a'..=b'z' => c - b'a' + 26,
@@ -49,7 +55,7 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
             out.push((acc >> bits) as u8);
         }
     }
-    Some(out)
+    (acc & ((1 << bits) - 1) == 0).then_some(out)
 }
 
 #[cfg(test)]

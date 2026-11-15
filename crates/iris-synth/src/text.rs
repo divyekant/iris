@@ -251,10 +251,22 @@ pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
     if odd && odd_kind == 0 {
         // RFC 2047 encoded word with non-Latin text.
         let s = format!("{subject} \u{2014} \u{4f1a}\u{8b70}\u{306e}\u{78ba}\u{8a8d} \u{00dc}ber");
-        headers.push(format!(
-            "Subject: =?UTF-8?B?{}?=",
-            base64::encode(s.as_bytes())
-        ));
+        // RFC 2047: each encoded word is at most 75 characters, so at most
+        // 45 bytes of text (60 base64 characters) go in one word.
+        let mut words = Vec::new();
+        let mut rest = s.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(45);
+            while !rest.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            words.push(format!(
+                "=?UTF-8?B?{}?=",
+                base64::encode(&rest.as_bytes()[..cut])
+            ));
+            rest = &rest[cut..];
+        }
+        headers.push(format!("Subject: {}", words.join("\r\n ")));
     } else {
         headers.push(format!("Subject: {subject}"));
     }
