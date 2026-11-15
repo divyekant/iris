@@ -58,10 +58,18 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             }
         }
     }
+    let is_quote = |l: &str| l.trim_start().starts_with('>');
+    let stop = end.min(forward);
+    // Without reply headers, only a quote block at the end is history. Quote
+    // lines between own lines can be a real quote, so they stay.
+    let tail = lines[..stop]
+        .iter()
+        .rposition(|l| !l.trim().is_empty() && !is_quote(l))
+        .map_or(stop, |p| p + 1);
     let mut kept: Vec<&str> = lines[..end]
         .iter()
         .enumerate()
-        .filter(|(i, l)| !(is_reply && *i < forward && l.trim_start().starts_with('>')))
+        .filter(|(i, l)| !(*i < stop && is_quote(l) && (is_reply || *i >= tail)))
         .map(|(_, l)| *l)
         .collect();
     // A rule line or an empty line before the history goes out too.
@@ -193,8 +201,14 @@ mod tests {
 
     #[test]
     fn not_a_reply_keeps_its_text() {
-        let t = "Ana wrote:\nthe plan is good.\n> a real quote";
+        let t = "As Ana said:\n\n> a real quote\n\nthe plan is good.";
         assert_eq!(strip_quotes(t, false), t);
+        // A quote block at the end is history, also without reply headers.
+        assert_eq!(
+            strip_quotes("New answer\n\n> old question\n> more", false),
+            "New answer"
+        );
+        assert_eq!(strip_quotes("> only a quote", false), "> only a quote");
         let t = "FYI\n\n---------- Forwarded message ---------\nFrom: Ana\nDate: Mon\nSubject: Plan\nTo: Avel\n\nOn Sun Bo wrote:\n> x";
         assert_eq!(strip_quotes(t, true), t);
     }

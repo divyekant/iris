@@ -172,6 +172,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         ..Writer::default()
     };
     let mut stack: Vec<Open> = Vec::new();
+    let mut css = Css::default();
     let mut hidden = 0usize;
     // Elements past the stack limit. Their content goes out, so that a hidden
     // element deep in the tree cannot show its text.
@@ -229,7 +230,11 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             continue;
         }
         if RAW.contains(&name) {
-            i = find_close(b, i, name);
+            let end = find_close(b, i, name);
+            if name == "style" {
+                css.read(&html[i..floor(html, end)]);
+            }
+            i = end;
             continue;
         }
         if drop_quotes && matches!(tag.attr("id"), Some("appendonsend" | "divRplyFwdMsg")) {
@@ -243,7 +248,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             }
         }
         close_implied(name, &mut stack, &mut hidden, &mut w);
-        let own_hidden = hides(&tag, drop_quotes);
+        let own_hidden = hides(&tag, drop_quotes, &css);
         if hidden == 0 && !own_hidden {
             open_effect(&tag, &mut w);
         }
@@ -396,7 +401,68 @@ fn close_effect(name: &str, w: &mut Writer) {
 /// content is a signature or (with `drop_quotes`) quoted history.
 ///
 /// Known limit: text in the same color as its background stays.
-fn hides(tag: &Tag, drop_quotes: bool) -> bool {
+/// Class and ID names that a style block hides, for example
+/// `.preheader { display: none }`. Only simple selectors count.
+#[derive(Default)]
+struct Css {
+    classes: Vec<String>,
+    ids: Vec<String>,
+}
+
+/// The most names that a message can hide with style rules.
+const MAX_CSS_NAMES: usize = 256;
+
+impl Css {
+    fn read(&mut self, style: &str) {
+        for rule in style.split('}') {
+            let Some((selectors, body)) = rule.split_once('{') else {
+                continue;
+            };
+            // A rule inside `@media` applies only on some screens.
+            if selectors.contains('@') || body.contains('{') || !css_hidden(body) {
+                continue;
+            }
+            for sel in selectors.split(',') {
+                let sel = sel.trim();
+                if sel.is_empty()
+                    || sel.contains(|c: char| c.is_whitespace() || ">+~:[*".contains(c))
+                {
+                    continue;
+                }
+                if self.classes.len() + self.ids.len() >= MAX_CSS_NAMES {
+                    return;
+                }
+                if let Some(id) = sel.strip_prefix('#') {
+                    self.ids.push(id.to_string());
+                } else if let Some((_, class)) = sel.rsplit_once('.') {
+                    self.classes.push(class.to_string());
+                }
+            }
+        }
+    }
+
+    fn hides(&self, tag: &Tag) -> bool {
+        tag.attr("id")
+            .is_some_and(|id| self.ids.iter().any(|i| i == id))
+            || tag.attr("class").is_some_and(|c| {
+                c.split_whitespace()
+                    .any(|c| self.classes.iter().any(|k| k == c))
+            })
+    }
+}
+
+/// The largest char boundary at or below `i`.
+fn floor(s: &str, i: usize) -> usize {
+    (0..=i.min(s.len()))
+        .rev()
+        .find(|&k| s.is_char_boundary(k))
+        .unwrap_or(0)
+}
+
+fn hides(tag: &Tag, drop_quotes: bool, css: &Css) -> bool {
+    if css.hides(tag) {
+        return true;
+    }
     if matches!(tag.name.as_str(), "svg" | "math" | "head") || tag.attr("hidden").is_some() {
         return true;
     }
@@ -785,6 +851,14 @@ mod tests {
             md("<script>x</scripture>also</SCRIPT ><p>shown</p>"),
             "shown"
         );
+    }
+
+    #[test]
+    fn style_rules_hide_classes_and_ids() {
+        let h = "<style>.hidden{display:none} #pre, p.x { font-size: 0 } @media (max-width:1px) { .m{display:none} }\
+                 .shown{color:red}</style><div class=\"a hidden\">secret</div><span id=pre>pre</span>\
+                 <p class=x>tiny</p><div class=m>m</div><div class=shown>ok</div>";
+        assert_eq!(md(h), "m\nok");
     }
 
     #[test]

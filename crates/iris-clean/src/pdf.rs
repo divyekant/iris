@@ -50,15 +50,16 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         if !is_content(dict) {
             continue;
         }
-        let decoded = if has(dict, b"/FlateDecode") {
+        let decoded: std::borrow::Cow<[u8]> = if has(dict, b"/FlateDecode") {
             match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, STREAM_LIMIT) {
-                Ok(v) => v,
-                Err(e) => e.output,
+                Ok(v) => v.into(),
+                Err(e) => e.output.into(),
             }
         } else if has(dict, b"/Filter") {
             continue;
         } else {
-            data.to_vec()
+            // A raw stream is read in place, and only up to the stream limit.
+            data[..data.len().min(STREAM_LIMIT)].into()
         };
         total += decoded.len();
         if find(&decoded, b"BT").is_some() {

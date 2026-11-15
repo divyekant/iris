@@ -100,6 +100,26 @@ fn memory_and_time_stay_bounded() {
     assert_eq!(c.attachments[0].text, None);
     assert!(peak < 16 * 1024 * 1024, "peak {peak}");
 
+    // A PDF with one raw stream of 9 MiB: the stream is read in place.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let stream = format!("BT (Hello raw words) Tj ET{}", " ".repeat(9 * 1024 * 1024));
+    let pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+        stream.len()
+    );
+    drop(stream);
+    for chunk in pdf.as_bytes().chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, c) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with a raw stream of 9 MiB)");
+    assert_eq!(c.attachments[0].text.as_deref(), Some("Hello raw words"));
+    assert!(peak < 12 * 1024 * 1024, "peak {peak}");
+
     // A very large header block.
     let raw = format!(
         "Subject: {}\r\n{}Content-Type: text/plain\r\n\r\nbody",
