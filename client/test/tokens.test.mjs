@@ -94,7 +94,9 @@ test("type scale is 1.25 from a 16px base", () => {
   }
 });
 
+// npm test builds into .test-build, so a parallel cargo build never reads a
+// half-written client/dist.
 test("the build shows the Iris name", () => {
-  const html = readFileSync(new URL("../dist/index.html", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../.test-build/index.html", import.meta.url), "utf8");
   assert.match(html, /<title>Iris<\/title>/);
 });

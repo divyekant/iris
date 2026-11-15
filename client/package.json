@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
-    "test": "vite build && node --test \"test/**/*.test.mjs\""
+    "test": "vite build --outDir .test-build && node --test \"test/**/*.test.mjs\""
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.1",

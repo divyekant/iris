@@ -2,6 +2,8 @@
 //!
 //! If `client/dist/index.html` does not exist (for example, on a machine with
 //! no Node), embed no files. The router then serves a fallback page.
+//! If `IRIS_REQUIRE_CLIENT` is set, a missing client build stops the build.
+//! The release build command sets it.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -12,9 +14,14 @@ fn main() {
     // Cargo scans the folder for changes. If the folder is missing, Cargo runs
     // this script again on each build, so a new client build is never missed.
     println!("cargo:rerun-if-changed={}", dist.display());
+    println!("cargo:rerun-if-env-changed=IRIS_REQUIRE_CLIENT");
+    let built = dist.join("index.html").is_file();
+    if !built && env::var_os("IRIS_REQUIRE_CLIENT").is_some() {
+        panic!("IRIS_REQUIRE_CLIENT is set, but {} does not exist. Build the client first (client/README.md).", dist.join("index.html").display());
+    }
 
     let mut files = Vec::new();
-    if dist.join("index.html").is_file() {
+    if built {
         collect(&dist, &mut files);
         files.sort();
     }

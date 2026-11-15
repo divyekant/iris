@@ -10,17 +10,18 @@ Use this command from the root of the repository. It builds the client first,
 then the program:
 
 ```bash
-(cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile && npm run build) && cargo build --release
+(cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile && npm run build) && IRIS_REQUIRE_CLIENT=1 cargo build --release
 ```
 
-If `client/dist` does not exist, `cargo build` still works. The program then
+`IRIS_REQUIRE_CLIENT=1` stops the build if `client/dist` does not exist.
+Without it, `cargo build` still works with no client build, and the program
 serves a fallback page that tells you to build the client.
 
 ## Work on the client
 
 1. Install the packages: `pnpm install --frozen-lockfile`.
 2. Start the dev server: `pnpm dev`.
-3. Before a commit, run `npm run lint` (type check) and `npm test` (build and tests).
+3. Before a commit, run `npm run lint` (type check) and `npm test` (a test build in `.test-build` and the tests).
 
 ## Design tokens
 
