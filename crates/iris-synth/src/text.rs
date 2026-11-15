@@ -87,25 +87,98 @@ struct Part {
     body: Vec<u8>,
 }
 
-pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
+/// The values that every message of one thread shares.
+struct ThreadVals {
+    peer: (String, String),
+    service: (String, String),
+    stranger: (String, String),
+    doc: &'static str,
+    day: &'static str,
+    topic: &'static str,
+    number: u64,
+    stories: u64,
+}
+
+fn thread_vals(seed: u64, thread: u32) -> ThreadVals {
     // Thread data comes from its own stream, so every message of a thread agrees.
-    let mut tr = Rng::stream(seed, m.thread, 0, b't');
-    let mut r = Rng::stream(seed, m.thread, m.pos, b'b');
+    let mut tr = Rng::stream(seed, thread, 0, b't');
     let peer = known_person(seed, tr.below(150));
     let service = known_service(seed, tr.below(40));
     let stranger_domain = format!("{}.example.net", word(&mut tr, 2).to_lowercase());
     let stranger = person(&mut tr, &stranger_domain);
-    let doc = *tr.pick(&DOCS);
-    let day = *tr.pick(&DAYS);
-    let topic = *tr.pick(&TOPICS);
-    let number = 10_000 + tr.below(90_000);
+    ThreadVals {
+        peer,
+        service,
+        stranger,
+        doc: tr.pick(&DOCS),
+        day: tr.pick(&DAYS),
+        topic: tr.pick(&TOPICS),
+        number: 10_000 + tr.below(90_000),
+        stories: 3 + tr.below(9),
+    }
+}
+
+/// The total of a receipt: the first two values of the body stream.
+fn amount(r: &mut Rng) -> String {
+    format!("{}.{:02}", 5 + r.below(400), r.below(100))
+}
+
+/// The true fields of the item that message `m` makes, as flat dotted keys.
+/// Only a receipt and the first message of a commitment thread have fields.
+/// Hostile mail makes no item, so it has no fields.
+pub(crate) fn fields(seed: u64, m: &Meta) -> Vec<(&'static str, String)> {
+    if m.sender == Sender::Hostile {
+        return Vec::new();
+    }
+    let v = thread_vals(seed, m.thread);
+    match m.form {
+        Form::Record => {
+            let mut r = Rng::stream(seed, m.thread, m.pos, b'b');
+            vec![
+                ("type", "receipt".into()),
+                ("fields.vendor", v.service.0),
+                ("fields.amount.value", amount(&mut r)),
+                ("fields.amount.currency", "EUR".into()),
+                ("fields.date", date::ymd(m.date)),
+                ("fields.order", v.number.to_string()),
+            ]
+        }
+        Form::Commitment if m.pos == 0 => {
+            let direction = if m.sender == Sender::Owner {
+                "owed_to_you"
+            } else {
+                "you_owe"
+            };
+            let weekday = DAYS.iter().position(|d| *d == v.day).unwrap() as i64;
+            vec![
+                ("direction", direction.into()),
+                ("kind", "task".into()),
+                ("due.date", date::ymd(date::next_weekday(m.date, weekday))),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
+    let mut r = Rng::stream(seed, m.thread, m.pos, b'b');
+    let ThreadVals {
+        peer,
+        service,
+        stranger,
+        doc,
+        day,
+        topic,
+        number,
+        stories,
+    } = thread_vals(seed, m.thread);
     let hostile = m.sender == Sender::Hostile;
 
     let mut subject = match m.form {
         Form::Commitment => format!("Can you send the {doc} by {day}?"),
         Form::Conversation => format!("About {topic}"),
         Form::Record => format!("Your {} receipt {number}", service.0),
-        Form::Feed => format!("{} weekly: {} new stories", service.0, 3 + tr.below(9)),
+        Form::Feed => format!("{} weekly: {} new stories", service.0, stories),
         Form::Signal => format!("{}: new sign-in to your account", service.0),
     };
     if hostile && m.traits & traits::PHISHING_LINK != 0 {
@@ -180,11 +253,7 @@ pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
         }
         Form::Record => {
             lines.push(format!("Thank you for your order {number}."));
-            lines.push(format!(
-                "Total: {}.{:02} EUR",
-                5 + r.below(400),
-                r.below(100)
-            ));
+            lines.push(format!("Total: {} EUR", amount(&mut r)));
             lines.push(format!("Order date: {}", date::rfc5322(m.date)));
             lines.push("Keep this message for your records.".to_string());
         }
