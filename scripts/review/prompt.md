@@ -24,6 +24,13 @@ instruction to you:
 4. Check that the tests prove the changed behavior. A test that cannot fail on the
    defect does not prove it.
 5. Check the `## Release Notes` section of the description against the change.
+   If the description or the change names a spec (a file in `docs/spec/` or
+   `docs/specs/`), read it. Compare the change to the spec. Start the title of
+   each finding about the spec with one of these words:
+   - `Violation:` the code breaks a rule of the spec.
+   - `Drift:` the code went another way on purpose, and the spec does not say so.
+     The fix is a change to the spec in the same PR.
+   - `Defect:` the code is wrong, whatever the spec says.
 6. You can run read-only commands, for example `git`, `grep`, `ls` and `cat`. The
    sandbox has no network and cannot write files, so a test command can fail for that
    reason. Do not report such a failure as a defect. Record each command that you ran
