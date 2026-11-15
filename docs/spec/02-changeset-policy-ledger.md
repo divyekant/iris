@@ -233,10 +233,16 @@ A change of the mode does not evaluate open actions again:
   change back to `apply`. A ledger row in the state `writing` continues to its
   end (section 7.3).
 
-Before the engine applies an action that a rule approved, it evaluates the
-action again against the active policy (section 6.4). If the result is not
-`allow`, the action gets the new result: `in_review` or `denied`. So a rule
-that the person removed while the action waited applies nothing.
+The engine applies one action at a time, on the one write connection. Before
+the engine applies an action that a rule approved, it computes the flag
+`bulk` again and evaluates the action again against the active policy
+(section 6.4). For the count of the last hour, `bulk` counts the messages of
+each ledger row of the same author that a rule decided in that hour, in the
+state `writing`, `applied` or `failed`. If the result is not `allow`, the
+action gets the new result: `in_review` or `denied`. So a rule that the
+person removed while the action waited applies nothing, and two changesets
+that a rule approved at the same time cannot together go past the limit of
+500 messages.
 
 ### 5.5 Review, revision, withdraw and expiry
 
@@ -771,6 +777,9 @@ another OS user, if it must not approve. The documentation must say this.
 - A test of each exit code of section 8.4, and of the order.
 - A test with 10 actions of 100 messages in one changeset: the flag `bulk`
   sends them to review.
+- A test with two changesets of the same author, 400 messages each, that an
+  `allow` rule approves before either applies. The first applies. The second
+  gets the flag `bulk` at apply and goes to `in_review`.
 - A test that `close`, then `iris rebuild`, keeps the item with the status
   `done`, and that the undo gives back the old status.
 
