@@ -464,3 +464,15 @@ fn starts_at_the_same_time_share_one_key_and_one_schema() {
         assert_eq!(store.unseal(s).unwrap(), format!("secret {i}").as_bytes());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn open_makes_an_existing_key_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("keymode");
+    drop(Store::open(&dir.0).unwrap());
+    let key = dir.0.join("key");
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    Store::open(&dir.0).unwrap();
+    assert_eq!(mode(&key), 0o600);
+}
