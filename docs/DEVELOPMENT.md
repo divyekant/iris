@@ -55,6 +55,32 @@ All commands run in the repository root with a clean environment: a private
 `HOME` in `.local-ci/home`, no tokens, `TZ=UTC` and `LANG=C.UTF-8`. The
 `env` of the area is added to this environment.
 
+## Budgets
+
+The test `crates/iris/tests/budget.rs` starts the real `iris serve` program. It
+measures two values:
+
+| Value | Limit | How the test measures it |
+|---|---|---|
+| Start time | 1 second | From the program start to the first HTTP 200 answer |
+| Resident memory (RSS) | 50 MB | `ps -o rss= -p <pid>`, on macOS and Linux |
+
+If a value is over its limit, the test fails. The limits are the constants
+`MAX_START` and `MAX_RSS_KIB` at the top of the file. `cargo test` runs the
+test, so local CI runs it too.
+
+To see the measured values, run:
+
+```bash
+cargo test -p iris --test budget -- --nocapture
+```
+
+Release 0 measures an empty program. When the store exists, the test will also
+load 100,000 messages.
+
+Do not increase a limit to make a change pass. If a change needs more memory,
+say how much in the PR.
+
 ## Local CI
 
 1. Commit your change.
