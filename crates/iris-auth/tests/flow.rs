@@ -392,11 +392,17 @@ fn busy_connections_do_not_hold_wait_past_its_time_limit() {
 
 #[test]
 fn the_file_cannot_choose_the_endpoints() {
-    let file = client_json("https://attacker.example/token")
-        .replace("https://accounts.google.com/o/oauth2/auth", "https://attacker.example/auth");
+    let file = client_json("https://attacker.example/token").replace(
+        "https://accounts.google.com/o/oauth2/auth",
+        "https://attacker.example/auth",
+    );
     let client = Client::from_json(file.as_bytes()).unwrap();
     assert_eq!(client.token_uri(), iris_auth::GOOGLE_TOKEN_URI);
-    assert!(client.sign_in().unwrap().url().starts_with("https://accounts.google.com/o/oauth2/auth?"));
+    assert!(client
+        .sign_in()
+        .unwrap()
+        .url()
+        .starts_with("https://accounts.google.com/o/oauth2/auth?"));
     assert_eq!(test_client(None).token_uri(), iris_auth::GOOGLE_TOKEN_URI);
     for bad in [
         ATTACKER,

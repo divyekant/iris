@@ -21,6 +21,11 @@ use sha2::{Digest, Sha256};
 /// The only scope of release 1.
 pub const SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 
+/// The Google endpoints. Iris uses only these, never the endpoints of the
+/// client file, so a changed file cannot send the tokens to another host.
+pub const GOOGLE_AUTH_URI: &str = "https://accounts.google.com/o/oauth2/auth";
+pub const GOOGLE_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
+
 /// The path of the loopback redirect.
 pub const CALLBACK: &str = "/oauth/callback";
 
@@ -168,13 +173,6 @@ struct File {
 struct Installed {
     client_id: String,
     client_secret: Secret,
-    auth_uri: String,
-    token_uri: String,
-}
-
-/// Accept `https://`, or plain HTTP on the loopback address (tests).
-fn endpoint_ok(uri: &str) -> bool {
-    uri.starts_with("https://") || uri.starts_with("http://127.0.0.1:")
 }
 
 impl Client {
@@ -195,9 +193,6 @@ impl Client {
                 "the client ID or the client secret is empty",
             ));
         }
-        if !endpoint_ok(&c.auth_uri) || !endpoint_ok(&c.token_uri) {
-            return Err(Error::ClientFile("an endpoint address is not HTTPS"));
-        }
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
@@ -206,10 +201,30 @@ impl Client {
         Ok(Client {
             id: c.client_id,
             secret: c.client_secret,
-            auth_uri: c.auth_uri,
-            token_uri: c.token_uri,
+            auth_uri: GOOGLE_AUTH_URI.to_string(),
+            token_uri: GOOGLE_TOKEN_URI.to_string(),
             agent,
         })
+    }
+
+    /// The token endpoint that this client posts to.
+    pub fn token_uri(&self) -> &str {
+        &self.token_uri
+    }
+
+    /// Tests only: post to a fake token endpoint at
+    /// `http://127.0.0.1:<port>/<path>`. Any other address is refused.
+    #[doc(hidden)]
+    pub fn with_test_token_uri(mut self, uri: &str) -> Result<Client> {
+        let rest = uri.strip_prefix("http://127.0.0.1:").unwrap_or_default();
+        let (port, _) = rest.split_once('/').unwrap_or_default();
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::ClientFile(
+                "a test endpoint must be http://127.0.0.1:<port>/",
+            ));
+        }
+        self.token_uri = uri.to_string();
+        Ok(self)
     }
 
     /// Starts a sign-in: a listener on a free port of `127.0.0.1`, a new
