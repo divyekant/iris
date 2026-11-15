@@ -34,7 +34,8 @@ struct Store {
     sent: Vec<(Vec<u8>, String)>,
     /// A `startHistoryId` below this value gets 404, as an expired id does.
     history_floor: u64,
-    threads: usize,
+    /// Each thread id, of the mailbox and of the sent messages.
+    threads: std::collections::BTreeSet<String>,
 }
 
 impl Store {
@@ -113,9 +114,8 @@ impl FakeGmail {
         // The profile id of an empty mailbox is HISTORY_BASE, so it must be valid.
         let floor = HISTORY_BASE;
         let threads = (0..mailbox.len())
-            .map(|i| mailbox.truth(i).thread)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
+            .map(|i| gmail_id(mailbox.truth(i).thread as u64))
+            .collect();
         let store = Arc::new(Mutex::new(Store {
             mailbox,
             sent: Vec::new(),
@@ -243,7 +243,7 @@ async fn profile(State(s): State<Shared>, Path(user): Path<String>, h: HeaderMap
     Json(json!({
         "emailAddress": OWNER,
         "messagesTotal": s.total(),
-        "threadsTotal": s.threads + s.sent.len(),
+        "threadsTotal": s.threads.len(),
         "historyId": s.latest_history().to_string(),
     }))
     .into_response()
@@ -307,7 +307,7 @@ async fn list(
     if !messages.is_empty() {
         body["messages"] = Value::Array(messages);
     }
-    if start + size < total {
+    if start.saturating_add(size) < total {
         body["nextPageToken"] = Value::String((start + size).to_string());
     }
     Json(body).into_response()
@@ -441,6 +441,7 @@ async fn send(
     let thread = body
         .thread_id
         .unwrap_or_else(|| format!("{:016x}", 0x8000_0000u64 + i as u64));
+    s.threads.insert(thread.clone());
     s.sent.push((raw, thread));
     Json(json!({ "id": gmail_id(i as u64), "threadId": s.thread_id(i), "labelIds": ["SENT"] }))
         .into_response()
@@ -483,7 +484,7 @@ async fn history(
         })
         .collect();
     let mut body = json!({ "historyId": latest.to_string() });
-    if first + offset + size < s.total() {
+    if first.saturating_add(offset).saturating_add(size) < s.total() {
         body["nextPageToken"] = Value::String((offset + size).to_string());
     }
     if !records.is_empty() {
