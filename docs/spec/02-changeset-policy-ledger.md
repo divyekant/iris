@@ -65,7 +65,7 @@ not have the label `SPAM` or `TRASH`.
 | `unlabel` | threads or messages | user label name | `batchModify`, remove the label | add the label | 2 |
 | `read` | threads or messages | none | `batchModify`, remove `UNREAD` | add `UNREAD` | 2 |
 | `unread` | threads or messages | none | `batchModify`, add `UNREAD` | remove `UNREAD` | 2 |
-| `trash` | threads or messages | none | `messages.trash` for each message | `messages.untrash`, then add back the labels of `pre` that are missing | 2 |
+| `trash` | threads or messages | none | `messages.trash` for each message | `messages.untrash`, then `archive` if `messages.untrash` added `INBOX` (section 7.4) | 2 |
 | `close` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
@@ -467,8 +467,8 @@ The `ledger_message` table has one row for each message of the entry:
 |---|---|
 | `ledger_id`, `message_id` | The entry and the message. |
 | `call` | The number of the provider call that changes the message. |
-| `pre` | The labels of the message before the action. For `trash`, the full label set. For the other verbs, the labels that the action changes. |
-| `post` | The labels that the action changes, after the action, as the engine expects them. For `trash`: before the call, the label `TRASH`. After the call, the full label set of the answer of `messages.trash`, or of the read of recovery (section 7.3). |
+| `pre` | The labels that the action changes, before the action. For `trash`, also if the message had `INBOX`. |
+| `post` | The labels that the action changes, after the action, as the engine expects them. For `trash`: the label `TRASH`. |
 | `done` | True when the provider confirmed the change of the message. |
 
 ### 7.2 Apply
@@ -494,8 +494,7 @@ The `ledger_message` table has one row for each message of the entry:
 4. For each call, in order:
    1. Set `call` of the row to the number of the call, and commit.
    2. Call the provider.
-   3. If the call succeeds, set `done` for its messages, and commit. For
-      `trash`, also save the full label set of the answer as `post`.
+   3. If the call succeeds, set `done` for its messages, and commit.
 5. After the last call, set the state `applied` if each message has `done`,
    else `failed` (section 7.3). Save the history ID. Update the mirror with
    the new labels.
@@ -529,9 +528,7 @@ For each message of the row:
   the labels at Gmail (`format=minimal`).
   - Gmail returns HTTP 404: the message is gone. It is not in `done`, and the
     engine lists it as gone.
-  - The message has the `post` state: set `done`. For `trash`, the message
-    has the `post` state when it has `TRASH`, and the engine saves its full
-    label set as `post`.
+  - The message has the `post` state: set `done`.
   - Each other state, `pre` included: the engine cannot tell if the call did
     not reach the message, or if the person reversed the change in Gmail
     after the call. The engine never calls the provider again for the
@@ -559,13 +556,19 @@ applies it.
    state of the entry. A message that changed after the entry (for example,
    the person moved it in Gmail) stays as it is. The result lists these
    messages.
-4. For `trash`, a message has the `post` state only when its full label set
-   is the same as `post`. For such a message, the inverse calls
-   `messages.untrash`, reads the labels, and then calls `batchModify`. The
-   call adds each label of `pre` that the message does not have, and removes
-   each label that the message has and `pre` does not have (for example an
-   `INBOX` that `messages.untrash` added). The person made no change to the
-   message after the trash, so the result is the label set of `pre`.
+4. For `trash`, the undo changeset has two actions, and each one is an
+   ordinary action with its own ledger entry and recovery:
+   1. `messages.untrash` for each message that still has `TRASH`. Only an
+      undo makes this action, with the verb `untrash`. Its `post` is "no
+      `TRASH`".
+   2. After action 1, `archive` for each message that has `INBOX` now and
+      had no `INBOX` in `pre` (for example an archived message that
+      `messages.untrash` put in the inbox).
+
+   The undo never sets a full label set, so a label that the person added
+   while the message was in the trash stays. If the engine stops between the
+   two actions, action 2 is still `approved`, and it applies after the start
+   (section 7.2, step 2 reads the labels again).
 5. The undo gets its own ledger entry. The first entry gets `undone_by`, and
    its action gets the state `undone`.
 
@@ -764,9 +767,11 @@ another OS user, if it must not approve. The documentation must say this.
   are `replaced`.
 - A test that an undo skips a message that changed after the entry, and that
   an undo applies in the mode `observe`.
-- A test that the undo of `trash` gives back each label of `pre`. The test
-  trashes an archived message and undoes the trash: the message has no
-  `INBOX` after the undo.
+- A test that trashes an archived message and undoes the trash: the message
+  has no `INBOX` after the undo. A crash test stops the engine between the
+  two actions of the undo: after the start, the message has no `INBOX`.
+- A test where a `trash` call applies, the answer is lost, and the person
+  adds a label before the recovery. After the undo, the label stays.
 - A test with an action that an `allow` rule approved. The person changes the
   mode to `observe`, removes the rule, and changes the mode back to `apply`.
   The action goes to `in_review` and does not apply.
@@ -809,8 +814,9 @@ another OS user, if it must not approve. The documentation must say this.
 - `labels.create` for a name that exists returns an error (HTTP 409). Verify
   before the apply code is written. Step 1 of section 7.2 calls `labels.list`
   for each error, so the design does not depend on the code.
-- `messages.trash` can change labels other than `TRASH`. The undo gives back
-  each label of `pre`, so the design does not depend on this behavior.
+- `messages.trash` and `messages.untrash` change only `TRASH` and `INBOX`.
+  Verify on the owner's Mac before the apply code is written. If they change
+  another label, the undo of section 7.4 changes.
 - Gmail deletes a message in the trash for good after 30 days (Gmail Help
   Center).
 - The scope `gmail.modify` allows label changes, `messages.trash`,
