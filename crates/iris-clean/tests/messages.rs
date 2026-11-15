@@ -230,3 +230,39 @@ fn a_simple_pdf_attachment_gives_text() {
         Some("Invoice 2025-07 for Avel Torun\nTotal: 120.00 EUR")
     );
 }
+
+#[test]
+fn a_wrapped_base64_attachment_below_the_limit_is_complete() {
+    let size = iris_clean::ATTACHMENT_TEXT_LIMIT - 1000;
+    let text: String = "abcdefghij\n".repeat(size / 11 + 1)[..size].to_string();
+    let mut b64 = String::new();
+    for chunk in text.as_bytes().chunks(57) {
+        b64.push_str(&encode(chunk));
+        b64.push_str("\r\n");
+    }
+    let raw = format!(
+        "Subject: Log\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+         Content-Type: text/plain; name=log.txt\r\nContent-Transfer-Encoding: base64\r\n\r\n{b64}--m--\r\n"
+    );
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.attachments[0].size, size as u64);
+    assert_eq!(c.attachments[0].text.as_deref(), Some(text.as_str()));
+}
+
+fn encode(chunk: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for g in chunk.chunks(3) {
+        let n = (g[0] as u32) << 16
+            | (*g.get(1).unwrap_or(&0) as u32) << 8
+            | *g.get(2).unwrap_or(&0) as u32;
+        for k in 0..4 {
+            out.push(if k <= g.len() {
+                A[(n >> (18 - 6 * k) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}

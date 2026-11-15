@@ -287,8 +287,9 @@ impl Walker {
 fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow<'a, [u8]>, bool) {
     // Base64 gives 3 bytes for 4 characters. The other encodings give at
     // most 1 byte for each input byte.
+    // Line ends between base64 characters do not count.
     let max_in = if cte == "base64" {
-        cap / 3 * 4 + 4
+        mime::base64_prefix(body, cap / 3 * 4 + 4)
     } else {
         cap
     };
@@ -307,13 +308,7 @@ enum BudgetKind {
     Attachment,
 }
 
-/// The largest char boundary at or below `i`.
-fn floor_char(s: &str, i: usize) -> usize {
-    (0..=i.min(s.len()))
-        .rev()
-        .find(|&k| s.is_char_boundary(k))
-        .unwrap_or(0)
-}
+use mime::floor_char;
 
 /// Characters that a person does not see. Mail uses them to pad a preview.
 const INVISIBLE: [char; 8] = [

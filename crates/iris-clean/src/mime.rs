@@ -9,6 +9,10 @@ use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
 
 /// The most header lines that the parser reads in one entity.
 const MAX_HEADERS: usize = 1000;
+/// The most bytes of a header block that the parser reads.
+const HEAD_LIMIT: usize = 256 * 1024;
+/// The most bytes of one header value.
+const VALUE_LIMIT: usize = 16 * 1024;
 
 /// Split an entity into its header block and its body at the first empty line.
 pub fn split_head(raw: &[u8]) -> (&[u8], &[u8]) {
@@ -37,14 +41,20 @@ pub struct Headers(Vec<(String, String)>);
 impl Headers {
     pub fn parse(head: &[u8]) -> Headers {
         let mut out: Vec<(String, String)> = Vec::new();
+        let head = &head[..head.len().min(HEAD_LIMIT)];
         for line in head.split(|&b| b == b'\n') {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let line = &line[..line.len().min(VALUE_LIMIT)];
             if line.is_empty() {
                 continue;
             }
             if line[0] == b' ' || line[0] == b'\t' {
                 if let Some(last) = out.last_mut() {
-                    last.1.push_str(&decode(line, None));
+                    if last.1.len() < VALUE_LIMIT {
+                        last.1.push_str(&decode(line, None));
+                        let end = floor_char(&last.1, VALUE_LIMIT);
+                        last.1.truncate(end);
+                    }
                 }
                 continue;
             }
@@ -69,6 +79,28 @@ impl Headers {
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
+}
+
+/// The largest char boundary at or below `i`.
+pub fn floor_char(s: &str, i: usize) -> usize {
+    (0..=i.min(s.len()))
+        .rev()
+        .find(|&k| s.is_char_boundary(k))
+        .unwrap_or(0)
+}
+
+/// The index in a base64 body after `chars` characters of the alphabet.
+pub fn base64_prefix(body: &[u8], chars: usize) -> usize {
+    let mut n = 0;
+    for (i, &b) in body.iter().enumerate() {
+        if n >= chars {
+            return i;
+        }
+        if b64(b).is_some() {
+            n += 1;
+        }
+    }
+    body.len()
 }
 
 /// A structured header value such as `text/plain; charset=utf-8`.
@@ -509,5 +541,14 @@ mod tests {
         let h = Headers::parse(b"Subject: a\r\n  b\r\nX: \xe9\r\n");
         assert_eq!(h.get("subject"), Some("a  b"));
         assert_eq!(h.get("x"), Some("é"));
+        let big = format!(
+            "Subject: {}\r\n{}\r\n",
+            "a".repeat(100_000),
+            " b\r\n".repeat(100_000)
+        );
+        let h = Headers::parse(big.as_bytes());
+        assert_eq!(h.get("subject").map(str::len), Some(VALUE_LIMIT));
+        assert_eq!(base64_prefix(b"AB\r\nCD\r\nEF", 4), 6);
+        assert_eq!(base64_prefix(b"AB", 4), 2);
     }
 }

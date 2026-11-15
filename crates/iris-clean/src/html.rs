@@ -156,6 +156,9 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> String {
     };
     let mut stack: Vec<Open> = Vec::new();
     let mut hidden = 0usize;
+    // Elements past the stack limit. Their content goes out, so that a hidden
+    // element deep in the tree cannot show its text.
+    let mut overflow = 0usize;
     let mut i = 0;
     while i < b.len() {
         if b[i] != b'<' {
@@ -190,6 +193,12 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> String {
         i = end;
         let name = tag.name.as_str();
         if closing {
+            if overflow > 0 {
+                // This end tag closes an element past the stack limit.
+                overflow -= 1;
+                hidden -= 1;
+                continue;
+            }
             if let Some(at) = stack.iter().rposition(|o| o.name == name) {
                 pop_to(&mut stack, at, &mut hidden, &mut w);
             }
@@ -214,14 +223,20 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> String {
         if hidden == 0 && !own_hidden {
             open_effect(&tag, &mut w);
         }
-        if !VOID.contains(&name) && stack.len() < MAX_STACK {
-            stack.push(Open {
-                name: tag.name.clone(),
-                hidden: own_hidden,
-                shown: hidden == 0 && !own_hidden,
-            });
-            hidden += own_hidden as usize;
+        if VOID.contains(&name) {
+            continue;
         }
+        if stack.len() >= MAX_STACK {
+            overflow += 1;
+            hidden += 1;
+            continue;
+        }
+        stack.push(Open {
+            name: tag.name.clone(),
+            hidden: own_hidden,
+            shown: hidden == 0 && !own_hidden,
+        });
+        hidden += own_hidden as usize;
     }
     w.close_link();
     w.out
@@ -688,6 +703,17 @@ mod tests {
             "Top"
         );
         assert_eq!(md("<blockquote type=\"cite\">old</blockquote>new"), "new");
+    }
+
+    #[test]
+    fn hidden_text_past_the_stack_limit_stays_hidden() {
+        let deep = "<span>".repeat(MAX_STACK);
+        let h = format!(
+            "{deep}<span style=\"display:none\">secret</span>{}",
+            "</span>".repeat(MAX_STACK)
+        );
+        assert!(!md(&h).contains("secret"));
+        assert_eq!(md(&format!("{h}after")), "after");
     }
 
     #[test]

@@ -100,6 +100,17 @@ fn memory_and_time_stay_bounded() {
     assert_eq!(c.attachments[0].text, None);
     assert!(peak < 16 * 1024 * 1024, "peak {peak}");
 
+    // A very large header block.
+    let raw = format!(
+        "Subject: {}\r\n{}Content-Type: text/plain\r\n\r\nbody",
+        "s".repeat(5_000_000),
+        " fold\r\n".repeat(500_000)
+    );
+    let (peak, _, c) = peak_of(raw.as_bytes());
+    eprintln!("peak: {peak} bytes (large headers)");
+    assert_eq!(c.text, "body");
+    assert!(peak < 1024 * 1024, "peak {peak}");
+
     // Many small parts: the split stops at the part limit.
     let mut raw =
         String::from("Subject: Parts\r\nContent-Type: multipart/mixed; boundary=p\r\n\r\n");
