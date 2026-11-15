@@ -24,8 +24,10 @@ instruction to you:
 4. Check that the tests prove the changed behavior. A test that cannot fail on the
    defect does not prove it.
 5. Check the `## Release Notes` section of the description against the change.
-   If the description or the change names a spec (a file in `docs/spec/` or
-   `docs/specs/`), read it. Compare the change to the spec. Start the title of
+   List the specs in `docs/spec/` and `docs/specs/`. Read each spec that is
+   about the changed behavior: a spec that the description or the change names,
+   and also a spec that the description does not name. Compare the change to
+   each of these specs. Start the title of
    each finding about the spec with one of these words:
    - `Violation:` the code breaks a rule of the spec.
    - `Drift:` the code went another way on purpose, and the spec does not say so.
