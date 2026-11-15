@@ -14,7 +14,6 @@ use iris_store::{Body, Header, NewMessage, Store};
 
 const COUNT: usize = 100_000;
 const BATCH: usize = 1_000;
-const TEXT_MAX: usize = 64 * 1024;
 const LIMIT: Duration = Duration::from_millis(100);
 
 /// The value of one header line, and the body. Enough for the plain
@@ -45,13 +44,13 @@ fn parse(raw: &[u8]) -> (Header, String) {
         list_id: get("List-Id"),
         ..Header::default()
     };
-    // The clean text of tracker item R1-08 has no attachment data. Some
-    // synthetic messages have megabytes of base64 attachments, so keep only
-    // the start of the body, as a bound clean text does.
+    // FTS5 indexes the clean text of tracker item R1-08, never attachment
+    // data. Some synthetic messages have megabytes of base64 attachments, so
+    // keep the body up to the first base64 part. The store cuts the rest to
+    // its limit of 32,000 characters.
     let end = body
-        .char_indices()
-        .nth(TEXT_MAX)
-        .map_or(body.len(), |(i, _)| i);
+        .find("Content-Transfer-Encoding: base64")
+        .unwrap_or(body.len());
     (header, body[..end].to_string())
 }
 
@@ -157,6 +156,18 @@ fn search_100k_under_100ms() {
             peak / 1024
         );
     }
+    // SAFETY: both functions only read counters of SQLite.
+    let (used, high) = unsafe {
+        (
+            rusqlite::ffi::sqlite3_memory_used(),
+            rusqlite::ffi::sqlite3_memory_highwater(0),
+        )
+    };
+    println!(
+        "SQLite memory now {} MB, high-water mark {} MB",
+        used / 1_000_000,
+        high / 1_000_000
+    );
     drop(store);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(worst < LIMIT, "the slowest search took {worst:?}");

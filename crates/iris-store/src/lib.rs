@@ -10,6 +10,7 @@ mod id;
 mod search;
 mod secret;
 
+use std::borrow::Cow;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -84,6 +85,17 @@ impl From<io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The most characters of clean text for each message (specification 1,
+/// section 7.2). The store cuts a longer text before FTS5 indexes it, because
+/// FTS5 holds the terms of a document in memory while it indexes the
+/// document. Same value as `iris_clean::TEXT_LIMIT`.
+pub const TEXT_LIMIT: usize = 32_000;
+/// The most characters of the subject and of the sender in `body`.
+pub const FIELD_LIMIT: usize = 1_000;
+/// The mark at the end of a text that was cut. Same value as
+/// `iris_clean::CUT_MARK`.
+pub const CUT_MARK: &str = "\n\n[Iris cut the text here.]";
+
 /// The default data folder (specification 1, section 5.1). `IRIS_DATA`
 /// changes it. The `--data` setting of the program has priority over both.
 pub fn default_data_dir() -> Option<PathBuf> {
@@ -114,7 +126,8 @@ pub struct NewMessage {
     /// Provider IDs of the labels. Each label must be in the store.
     pub labels: Vec<String>,
     pub header: Header,
-    /// The clean text (specification 1, section 7.2), if it is known.
+    /// The clean text (specification 1, section 7.2), if it is known. The
+    /// store applies the limits of [`Store::put_body`].
     pub body: Option<Body>,
 }
 
@@ -315,7 +328,9 @@ impl Store {
     }
 
     /// Write or replace the clean text of one message. The full-text index
-    /// follows through the triggers on `body`.
+    /// follows through the triggers on `body`. A text over [`TEXT_LIMIT`]
+    /// characters is cut and gets [`CUT_MARK`]. A subject or sender over
+    /// [`FIELD_LIMIT`] characters is cut.
     pub fn put_body(&self, message: i64, body: &Body) -> Result<()> {
         self.write(|tx| put_body(tx, message, body))
     }
@@ -356,13 +371,26 @@ impl Store {
     }
 }
 
+/// `text` with at most `limit` characters before the cut mark. A text that
+/// ends with the mark already and is in the limit stays as it is.
+fn bound<'a>(text: &'a str, limit: usize, mark: &str) -> Cow<'a, str> {
+    let core = text.strip_suffix(CUT_MARK).unwrap_or(text);
+    match core.char_indices().nth(limit) {
+        None => Cow::Borrowed(text),
+        Some((end, _)) => Cow::Owned(format!("{}{mark}", &core[..end])),
+    }
+}
+
 fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
+    let text = bound(&b.text, TEXT_LIMIT, CUT_MARK);
+    let subject = bound(&b.subject, FIELD_LIMIT, "");
+    let sender = bound(&b.sender, FIELD_LIMIT, "");
     tx.prepare_cached(
         "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(message_id) DO UPDATE SET
            subject = excluded.subject, sender = excluded.sender, text = excluded.text",
     )?
-    .execute(params![message, b.subject, b.sender, b.text])?;
+    .execute(params![message, subject, sender, text])?;
     Ok(())
 }
 

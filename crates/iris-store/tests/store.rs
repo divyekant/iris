@@ -328,3 +328,55 @@ fn content_files_are_named_by_hash() {
     assert_eq!(store.content_path("../../etc/passwd"), None);
     assert_eq!(store.content_path(&sha.to_uppercase()), None);
 }
+
+#[test]
+fn the_store_cuts_a_long_text_before_the_index() {
+    let dir = TempDir::new("cut");
+    let (store, acc) = setup(&dir);
+    let long = format!("{} tailword", "é".repeat(iris_store::TEXT_LIMIT));
+    let mut m = msg("a", "t1", 1, &[], &"s".repeat(5_000), &long);
+    m.body.as_mut().unwrap().sender = "x".repeat(5_000);
+    let id = store.put_messages(acc, &[m]).unwrap()[0];
+    let (text, subject, sender): (String, String, String) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT text, subject, sender FROM body WHERE message_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "{}{}",
+            "é".repeat(iris_store::TEXT_LIMIT),
+            iris_store::CUT_MARK
+        )
+    );
+    assert_eq!(subject.chars().count(), iris_store::FIELD_LIMIT);
+    assert_eq!(sender.chars().count(), iris_store::FIELD_LIMIT);
+    assert_eq!(store.search("tailword", 10).unwrap(), Vec::<i64>::new());
+
+    // A text that the clean step cut already (limit plus mark) stays the same.
+    store
+        .put_body(
+            id,
+            &Body {
+                subject: "s".into(),
+                sender: "x".into(),
+                text: text.clone(),
+            },
+        )
+        .unwrap();
+    let again: String = store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT text FROM body WHERE message_id = ?1", [id], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(again, text);
+}
