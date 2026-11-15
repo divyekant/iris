@@ -426,3 +426,13 @@ fn a_huge_wait_time_does_not_panic() {
     assert!(matches!(sign_in.wait(Duration::MAX), Err(Error::Denied(_))));
     assert!(browser.join().unwrap().contains("200"));
 }
+
+#[test]
+fn an_answer_with_no_scope_is_scope_missing() {
+    let answer =
+        format!(r#"{{"access_token":"{ACCESS}","expires_in":3599,"refresh_token":"{REFRESH}"}}"#);
+    assert!(matches!(
+        finish_with((200, answer)),
+        Err(Error::ScopeMissing)
+    ));
+}
