@@ -440,17 +440,25 @@ fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {
     }
     if have > 0 {
         // Specification 1, section 5.5: a backup copy before a migration.
-        let copy = db.with_file_name(format!("iris.db.v{have}.bak"));
-        if copy.exists() {
-            fs::remove_file(&copy)?;
-        }
+        // The name is new for each start, so two starts do not write one file.
+        let mut rand = [0u8; 4];
+        getrandom::fill(&mut rand).map_err(|e| io::Error::other(e.to_string()))?;
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let copy = db.with_file_name(format!("iris.db.v{have}.{ms}-{}.bak", content::hex(&rand)));
         let copy = copy
             .to_str()
             .ok_or_else(|| io::Error::other("the data folder path is not UTF-8"))?;
         conn.execute("VACUUM INTO ?1", [copy])?;
     }
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(have as usize) {
-        let tx = conn.transaction()?;
+        // IMMEDIATE takes the write lock first. Then the version check and
+        // the migration are one step, also when two starts run at the same time.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if schema_version(&tx)? != i as i64 {
+            continue;
+        }
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", i as i64 + 1)?;
         tx.commit()?;
