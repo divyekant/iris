@@ -42,6 +42,10 @@ Report a P0, P1 or P2 finding only when you can name the concrete failure path a
 bounded fix. Missing evidence alone is not a defect. Do not report style preferences
 as P0 to P2.
 
+Report every P0, P1 and P2 finding that you find in this one pass. The author fixes
+all of them before the next round. Do not keep a finding for a later round. If two
+findings have the same cause, report them as one finding.
+
 ## Verdict
 
 - `clean`: no P0, P1 or P2 finding.

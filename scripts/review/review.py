@@ -10,6 +10,7 @@ The steps:
  4. Make a fresh detached worktree of the exact head.
  5. Run Codex there: ephemeral, no user config, no rules, read-only sandbox, a clean
     shell environment, and a JSON schema for the result.
+ 5a. A change to a spec file (review.spec_paths) adds the spec rules of spec.md.
  6. Decide the verdict in Python: any P0, P1 or P2 finding blocks. P3 is advice.
  7. Read the PR again. If the head, the base branch or the body changed, post nothing.
  8. Post one comment with the verdict and the findings.
@@ -22,6 +23,7 @@ Standard library only. Needs `gh` (signed in) and `codex` (signed in) on PATH.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -39,7 +41,8 @@ MARKER = "<!-- starter-review v1"
 BLOCKING = ("P0", "P1", "P2")
 SEVERITIES = ("P0", "P1", "P2", "P3")
 DEFAULTS = {"model": "gpt-6-sol", "effort": "medium", "merge_method": "squash",
-            "trusted_authors": [], "codex_timeout_minutes": 30, "check_wait_seconds": 300}
+            "trusted_authors": [], "codex_timeout_minutes": 30, "check_wait_seconds": 300,
+            "max_rounds": 5, "spec_paths": ["docs/spec/**", "docs/specs/**"]}
 # The reviewer's shell gets this PATH and nothing else from the host. Without a PATH,
 # the Linux sandbox cannot find bwrap and every command of the reviewer fails.
 SANDBOX_PATH = 'shell_environment_policy.set={PATH="/usr/local/bin:/usr/bin:/bin"}'
@@ -123,7 +126,16 @@ def find_previous(comments: Sequence[Dict[str, Any]], head: str, merge_base: str
     return None
 
 
-def build_prompt(root: Path, pr: Dict[str, Any], head: str, merge_base: str, base_ref: str) -> str:
+def blocked_rounds(comments: Sequence[Dict[str, Any]]) -> int:
+    return sum(1 for c in comments if re.search(re.escape(MARKER) + r" .*verdict=blocked -->", c.get("body") or ""))
+
+
+def spec_files(files: Sequence[str], patterns: Sequence[str]) -> List[str]:
+    return [f for f in files if any(fnmatch.fnmatchcase(f, p) for p in patterns)]
+
+
+def build_prompt(root: Path, pr: Dict[str, Any], head: str, merge_base: str, base_ref: str,
+                 specs: Sequence[str] = ()) -> str:
     template = (HERE / "prompt.md").read_text(encoding="utf-8")
     rules_file = HERE / "rules.md"
     rules = rules_file.read_text(encoding="utf-8") if rules_file.exists() else "(none)"
@@ -135,8 +147,12 @@ def build_prompt(root: Path, pr: Dict[str, Any], head: str, merge_base: str, bas
         f"- Changed files: `git diff --stat {merge_base} {head}`",
     ])
     body = (pr.get("body") or "(empty)").strip()
-    return (template.replace("{{FACTS}}", facts).replace("{{RULES}}", rules.strip())
-            .replace("{{BODY}}", body))
+    prompt = (template.replace("{{FACTS}}", facts).replace("{{RULES}}", rules.strip())
+              .replace("{{BODY}}", body))
+    if specs:
+        spec_rules = (HERE / "spec.md").read_text(encoding="utf-8").strip()
+        prompt += "\n\n" + spec_rules.replace("{{SPECS}}", "\n".join(f"- `{f}`" for f in specs)) + "\n"
+    return prompt
 
 
 def codex_command(codex: str, worktree: Path, schema: Path, model: str, effort: str) -> List[str]:
@@ -186,7 +202,8 @@ def decide(result: Dict[str, Any]) -> str:
 
 
 def run_codex(root: Path, config: Dict[str, Any], pr: Dict[str, Any], head: str, merge_base: str,
-              runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> Dict[str, Any]:
+              runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+              specs: Sequence[str] = ()) -> Dict[str, Any]:
     codex = shutil.which("codex")
     if not codex:
         raise Stop("codex is not installed; install it and sign in (codex login), then run the review again")
@@ -194,7 +211,7 @@ def run_codex(root: Path, config: Dict[str, Any], pr: Dict[str, Any], head: str,
     worktree = work / "head"
     git(root, "worktree", "add", "-q", "--detach", str(worktree), head)
     try:
-        prompt = build_prompt(root, pr, head, merge_base, config["base"])
+        prompt = build_prompt(root, pr, head, merge_base, config["base"], specs)
         command = codex_command(codex, worktree, HERE / "schema.json", config["model"], config["effort"])
         print(f"review: Codex reviews {head[:12]} ({config['model']}, {config['effort']})", flush=True)
         done = runner(command, input=prompt, capture_output=True, text=True,
@@ -295,7 +312,14 @@ def review(number: int, merge: bool, dry_run: bool, force: bool, api: Api = gh_a
               "no new Codex run (use --force to review again)", flush=True)
         verdict = previous
     else:
-        result = run_codex(root, config, pr, head, merge_base, runner)
+        rounds = blocked_rounds(comments)
+        if rounds >= int(config["max_rounds"]) and not force:
+            raise Stop(f"PR #{number} has {rounds} blocked review rounds (review.max_rounds is "
+                       f"{config['max_rounds']}). Stop and tell the user which subsystem the findings hit. "
+                       "Run with --force only after the user says to continue.")
+        changed = git(root, "diff", "--name-only", merge_base, head).splitlines()
+        specs = spec_files(changed, config["spec_paths"])
+        result = run_codex(root, config, pr, head, merge_base, runner, specs)
         verdict = decide(result)
         text = render_comment(result, verdict, marker(head, merge_base, body, verdict))
         print(text, flush=True)
@@ -331,7 +355,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--pr", type=int, required=True, help="the PR number")
     parser.add_argument("--merge", action="store_true", help="merge the reviewed head if the review is clean")
     parser.add_argument("--dry-run", action="store_true", help="print the review; post and merge nothing")
-    parser.add_argument("--force", action="store_true", help="review again when a review of the same inputs exists")
+    parser.add_argument("--force", action="store_true",
+                        help="review again when a review of the same inputs exists, or past review.max_rounds")
     args = parser.parse_args(argv)
     try:
         return review(args.pr, args.merge, args.dry_run, args.force)
