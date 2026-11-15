@@ -61,7 +61,7 @@
     }
   },
   "cloud": {
-    "profile": false,
+    "profile": true,
     "keys": [],
     "apt": [],
     "hosts": [
