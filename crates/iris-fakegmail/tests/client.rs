@@ -189,3 +189,24 @@ fn formats_labels_history_send_and_errors() {
         400
     );
 }
+
+#[test]
+fn search_and_label_filters_are_refused() {
+    let gmail = FakeGmail::start(Mailbox::new(4, 10)).unwrap();
+    assert_eq!(call(&gmail, "GET", "messages?q=from:a", None, true).0, 400);
+    assert_eq!(
+        call(&gmail, "GET", "messages?labelIds=INBOX", None, true).0,
+        400
+    );
+}
+
+#[test]
+fn history_sync_starts_from_the_profile_id_of_an_empty_mailbox() {
+    let gmail = FakeGmail::start(Mailbox::new(4, 0)).unwrap();
+    let start = get(&gmail, "profile")["historyId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let changes = get(&gmail, &format!("history?startHistoryId={start}"));
+    assert!(changes.get("history").is_none());
+}

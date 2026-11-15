@@ -362,6 +362,34 @@ mod tests {
     }
 
     #[test]
+    fn every_mime_part_has_a_header_block() {
+        let mb = Mailbox::new(1, 20_000);
+        let big = (0..mb.len()).find(|i| mb.truth(*i).traits & traits::BIG_ATTACHMENT != 0);
+        let raw = String::from_utf8_lossy(&mb.raw(big.expect("a big attachment"))).into_owned();
+        let boundary = raw
+            .split("boundary=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let parts: Vec<&str> = raw.split(&format!("--{boundary}\r\n")).skip(1).collect();
+        assert_eq!(parts.len(), 2);
+        for part in parts {
+            let head = &part[..part
+                .find("\r\n\r\n")
+                .expect("blank line after the part headers")];
+            for line in head.split("\r\n") {
+                let name = line.split(':').next().unwrap();
+                assert!(
+                    line.starts_with([' ', '\t']) || (line.contains(": ") && !name.contains(' ')),
+                    "not a header line: {line:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn replies_point_to_the_thread() {
         let mb = Mailbox::new(5, 2000);
         let reply =
