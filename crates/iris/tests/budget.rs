@@ -67,9 +67,12 @@ fn read_addr(stderr: ChildStderr, limit: Duration) -> Result<String, String> {
 }
 
 /// Send one GET request. Return true for a 200 answer.
-/// A read or write that waits more than `timeout` gives false.
+/// A connect, read or write that waits more than `timeout` gives false.
 fn answers_http(addr: &str, timeout: Duration) -> bool {
-    let Ok(mut stream) = TcpStream::connect(addr) else {
+    let Ok(socket) = addr.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&socket, timeout) else {
         return false;
     };
     if stream.set_read_timeout(Some(timeout)).is_err()
@@ -78,10 +81,11 @@ fn answers_http(addr: &str, timeout: Duration) -> bool {
         return false;
     }
     let request = format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    let mut response = String::new();
+    // Read only the status: 12 reads at most, each limited by `timeout`, so the attempt always ends.
+    let mut status = [0u8; 12];
     stream.write_all(request.as_bytes()).is_ok()
-        && stream.read_to_string(&mut response).is_ok()
-        && response.starts_with("HTTP/1.1 200")
+        && stream.read_exact(&mut status).is_ok()
+        && &status == b"HTTP/1.1 200"
 }
 
 /// Send GET requests until one gets a 200 answer. Fail after `limit` from `begin`.
