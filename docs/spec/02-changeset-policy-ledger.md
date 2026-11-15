@@ -178,7 +178,7 @@ Schema of the changeset comes with the release 2 code, from this section.
 |---|---|---|
 | `proposed` | Submitted, and the policy did not decide it, or the mode is `observe`. | `approved`, `in_review`, `denied`, `expired`, `cancelled`, `replaced` |
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
-| `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `expired`, `cancelled` |
+| `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
 | `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` |
 | `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
@@ -232,6 +232,11 @@ A change of the mode does not evaluate open actions again:
 - From `apply` to `observe`: an `approved` action waits, and applies after a
   change back to `apply`. A ledger row in the state `writing` continues to its
   end (section 7.3).
+
+Before the engine applies an action that a rule approved, it evaluates the
+action again against the active policy (section 6.4). If the result is not
+`allow`, the action gets the new result: `in_review` or `denied`. So a rule
+that the person removed while the action waited applies nothing.
 
 ### 5.5 Review, revision, withdraw and expiry
 
@@ -457,7 +462,7 @@ The `ledger_message` table has one row for each message of the entry:
 | `ledger_id`, `message_id` | The entry and the message. |
 | `call` | The number of the provider call that changes the message. |
 | `pre` | The labels of the message before the action. For `trash`, the full label set. For the other verbs, the labels that the action changes. |
-| `post` | The labels that the action changes, after the action, as the engine expects them. For `trash`: the label `TRASH`. |
+| `post` | The labels that the action changes, after the action, as the engine expects them. For `trash`: before the call, the label `TRASH`. After the call, the full label set of the answer of `messages.trash`, or of the read of recovery (section 7.3). |
 | `done` | True when the provider confirmed the change of the message. |
 
 ### 7.2 Apply
@@ -483,7 +488,8 @@ The `ledger_message` table has one row for each message of the entry:
 4. For each call, in order:
    1. Set `call` of the row to the number of the call, and commit.
    2. Call the provider.
-   3. If the call succeeds, set `done` for its messages, and commit.
+   3. If the call succeeds, set `done` for its messages, and commit. For
+      `trash`, also save the full label set of the answer as `post`.
 5. After the last call, set the state `applied` if each message has `done`,
    else `failed` (section 7.3). Save the history ID. Update the mirror with
    the new labels.
@@ -517,7 +523,9 @@ For each message of the row:
   the labels at Gmail (`format=minimal`).
   - Gmail returns HTTP 404: the message is gone. It is not in `done`, and the
     engine lists it as gone.
-  - The message has the `post` state: set `done`.
+  - The message has the `post` state: set `done`. For `trash`, the message
+    has the `post` state when it has `TRASH`, and the engine saves its full
+    label set as `post`.
   - Each other state, `pre` included: the engine cannot tell if the call did
     not reach the message, or if the person reversed the change in Gmail
     after the call. The engine never calls the provider again for the
@@ -545,8 +553,13 @@ applies it.
    state of the entry. A message that changed after the entry (for example,
    the person moved it in Gmail) stays as it is. The result lists these
    messages.
-4. For `trash`, the inverse calls `messages.untrash`, and then adds back with
-   `batchModify` each label of `pre` that the message does not have.
+4. For `trash`, a message has the `post` state only when its full label set
+   is the same as `post`. For such a message, the inverse calls
+   `messages.untrash`, reads the labels, and then calls `batchModify`. The
+   call adds each label of `pre` that the message does not have, and removes
+   each label that the message has and `pre` does not have (for example an
+   `INBOX` that `messages.untrash` added). The person made no change to the
+   message after the trash, so the result is the label set of `pre`.
 5. The undo gets its own ledger entry. The first entry gets `undone_by`, and
    its action gets the state `undone`.
 
@@ -745,7 +758,12 @@ another OS user, if it must not approve. The documentation must say this.
   are `replaced`.
 - A test that an undo skips a message that changed after the entry, and that
   an undo applies in the mode `observe`.
-- A test that the undo of `trash` gives back each label of `pre`.
+- A test that the undo of `trash` gives back each label of `pre`. The test
+  trashes an archived message and undoes the trash: the message has no
+  `INBOX` after the undo.
+- A test with an action that an `allow` rule approved. The person changes the
+  mode to `observe`, removes the rule, and changes the mode back to `apply`.
+  The action goes to `in_review` and does not apply.
 - A test that marks a message read at the fake server after the last sync,
   then applies `read` and the undo. The message must stay read.
 - A test that deletes a message at the fake server between submit and apply:
