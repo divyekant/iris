@@ -1,0 +1,12 @@
+[package]
+name = "iris-synth"
+description = "A deterministic synthetic mailbox for Iris tests. No real people, no real addresses."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "iris-synth"
+path = "src/main.rs"
