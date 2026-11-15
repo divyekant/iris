@@ -248,7 +248,19 @@
           "minItems": 1,
           "items": {
             "$ref": "#/$defs/source"
-          }
+          },
+          "contains": {
+            "properties": {
+              "role": {
+                "const": "origin"
+              }
+            },
+            "required": [
+              "role"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
         },
         "created": {
           "$ref": "#/$defs/dateTime"
