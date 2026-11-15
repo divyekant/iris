@@ -41,3 +41,22 @@ async fn an_unknown_path_is_not_found() {
     let (status, _, _) = get("/no-such-file.js").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// If the client build exists, the program must serve it, not the fallback.
+/// Cargo runs `build.rs` again when `client/dist` appears, so the embedded
+/// files always match the folder at test time.
+#[tokio::test]
+async fn the_client_build_is_embedded_when_it_exists() {
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/dist");
+    let Ok(index) = std::fs::read_to_string(dist.join("index.html")) else {
+        return; // no client build: the fallback page is correct
+    };
+    let paths: Vec<_> = iris_web::paths().collect();
+    assert!(paths.contains(&"/index.html"), "{paths:?}");
+    assert!(paths.iter().any(|p| p.ends_with(".js")), "{paths:?}");
+    assert_eq!(get("/").await.2, index);
+    for path in paths {
+        let bytes = std::fs::read(dist.join(&path[1..])).unwrap();
+        assert_eq!(get(path).await.2, String::from_utf8_lossy(&bytes), "{path}");
+    }
+}
