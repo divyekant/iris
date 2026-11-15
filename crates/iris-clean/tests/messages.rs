@@ -390,3 +390,16 @@ fn a_clipped_attached_message_lists_no_partial_attachments() {
         Some(format!("Short text.{CUT_MARK}").as_str())
     );
 }
+
+#[test]
+fn a_big_hidden_html_version_gives_its_budget_back() {
+    let hidden = "<div style=\"display:none\">x</div>".repeat(100_000);
+    let raw = format!(
+        "Subject: Alt\nContent-Type: multipart/alternative; boundary=a\n\n--a\n\
+         Content-Type: text/plain\n\nPlain words.\n--a\nContent-Type: text/html\n\n{hidden}\n--a--\n"
+    );
+    assert!(hidden.len() > iris_clean::BODY_LIMIT);
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.text, "Plain words.");
+    assert!(!c.cut);
+}

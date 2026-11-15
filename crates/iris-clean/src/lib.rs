@@ -193,10 +193,13 @@ impl Walker {
                 // so that a version that is not used takes none of the budget.
                 // A version with no visible text (empty or all hidden) is skipped.
                 for part in parts.into_iter().rev() {
+                    let before = (self.body_left, self.cut);
                     let bodies = self.entity(part, depth + 1);
                     if bodies.iter().any(|t| !t.trim().is_empty()) {
                         return bodies;
                     }
+                    // A version with no visible text gives its budget back.
+                    (self.body_left, self.cut) = before;
                 }
                 return Vec::new();
             }

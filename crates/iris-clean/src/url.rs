@@ -58,9 +58,20 @@ pub fn clean_urls(text: &str) -> String {
     while let Some(i) = find_url(rest) {
         out.push_str(&rest[..i]);
         let tail = &rest[i..];
-        let mut end = tail
-            .find(|c: char| c.is_whitespace() || "<>\"'()[]{}|\\^`".contains(c))
-            .unwrap_or(tail.len());
+        // Parentheses inside a URL are kept when they are balanced.
+        let mut depth = 0usize;
+        let mut end = tail.len();
+        for (k, c) in tail.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' if depth > 0 => depth -= 1,
+                _ if c.is_whitespace() || ")<>\"'[]{}|\\^`".contains(c) => {
+                    end = k;
+                    break;
+                }
+                _ => {}
+            }
+        }
         while end > 0 && b".,;:!?".contains(&tail.as_bytes()[end - 1]) {
             end -= 1;
         }
@@ -115,5 +126,9 @@ mod tests {
             "See https://a.example.com/?k=2. And [x](http://b.example.com/)"
         );
         assert_eq!(clean_urls("httpx http:/ é https"), "httpx http:/ é https");
+        assert_eq!(
+            clean_urls("(see https://w.example.org/Foo_(bar)?utm_source=m)"),
+            "(see https://w.example.org/Foo_(bar))"
+        );
     }
 }

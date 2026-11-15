@@ -175,7 +175,9 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     let mut hidden = 0usize;
     // Elements past the stack limit. Their content goes out, so that a hidden
     // element deep in the tree cannot show its text.
-    let mut overflow = 0usize;
+    // The names are kept up to a limit. Past it, the content stays hidden to the end.
+    let mut overflow: Vec<String> = Vec::new();
+    let mut overflow_lost = false;
     let mut i = 0;
     while i < b.len() && !w.full {
         if b[i] != b'<' {
@@ -210,10 +212,15 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         i = end;
         let name = tag.name.as_str();
         if closing {
-            if overflow > 0 {
-                // This end tag closes an element past the stack limit.
-                overflow -= 1;
-                hidden -= 1;
+            if !overflow.is_empty() || overflow_lost {
+                // Only the matching end tag closes an element past the stack
+                // limit. Other end tags change nothing, so hidden text stays hidden.
+                if !overflow_lost {
+                    if let Some(at) = overflow.iter().rposition(|n| n == name) {
+                        hidden -= overflow.len() - at;
+                        overflow.truncate(at);
+                    }
+                }
                 continue;
             }
             if let Some(at) = stack.iter().rposition(|o| o.name == name) {
@@ -244,7 +251,11 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             continue;
         }
         if stack.len() >= MAX_STACK {
-            overflow += 1;
+            if overflow.len() < MAX_STACK * 8 {
+                overflow.push(tag.name.clone());
+            } else {
+                overflow_lost = true;
+            }
             hidden += 1;
             continue;
         }
@@ -742,6 +753,12 @@ mod tests {
         );
         assert!(!md(&h).contains("secret"));
         assert_eq!(md(&format!("{h}after")), "after");
+        // An end tag that matches nothing does not end the hidden element.
+        let h = format!(
+            "{deep}<div hidden>a</b>secret</div>{}after",
+            "</span>".repeat(MAX_STACK)
+        );
+        assert_eq!(md(&h), "after");
     }
 
     #[test]

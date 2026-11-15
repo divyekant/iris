@@ -13,6 +13,11 @@ const WROTE: [&str; 9] = [
     "napisał:",
 ];
 
+/// The first words of an "On ... wrote:" line in common clients and languages.
+const ATTRIBUTION_START: [&str; 9] = [
+    "On ", "Le ", "Am ", "El ", "Il ", "Op ", "Den ", "W dniu ", "Em ",
+];
+
 /// The first words of the last line that a phone mail client adds.
 const MOBILE: [&str; 4] = [
     "Sent from my ",
@@ -43,7 +48,11 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
         }
         if let Some(n) = attribution(&lines[i..]) {
             let next = lines[i + n..].iter().find(|l| !l.trim().is_empty());
-            if is_reply || next.is_some_and(|l| l.trim_start().starts_with('>')) {
+            // "Here is what I wrote:" is not history. A cut needs a quote
+            // after the line, or (in a reply) the start of a client line.
+            let quoted = next.is_some_and(|l| l.trim_start().starts_with('>'));
+            let client = ATTRIBUTION_START.iter().any(|p| t.starts_with(p));
+            if quoted || (is_reply && client) {
                 end = i;
                 break;
             }
@@ -174,6 +183,12 @@ mod tests {
         assert_eq!(strip_quotes(t, true), "Fine.");
         // Inline answers stay, the quoted lines go.
         assert_eq!(strip_quotes("> Q1?\nA1\n> Q2?\nA2", true), "A1\nA2");
+    }
+
+    #[test]
+    fn a_line_that_ends_with_wrote_is_not_always_history() {
+        let t = "Here is what I wrote:\nthe plan is good.";
+        assert_eq!(strip_quotes(t, true), t);
     }
 
     #[test]
