@@ -292,6 +292,8 @@ fn migration_of_a_version_0_database_with_data_makes_a_backup() {
     conn.execute_batch("CREATE TABLE old(x); INSERT INTO old VALUES (7);")
         .unwrap();
     drop(conn);
+    // The key of an earlier start. Without it, the store refuses the folder.
+    fs::write(dir.0.join("key"), [7u8; 32]).unwrap();
     Store::open(&dir.0).unwrap();
     let backups: Vec<_> = fs::read_dir(&dir.0)
         .unwrap()

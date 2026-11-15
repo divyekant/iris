@@ -167,9 +167,18 @@ impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         make_private_dir(dir)?;
         make_private_dir(&dir.join("content"))?;
-        let key = secret::load_or_make_key(&dir.join("key"))?;
-
         let db = dir.join("iris.db");
+        // The key comes before the database at the first start. So a
+        // database with no key lost its key: a new key cannot decrypt the
+        // secrets that the database has.
+        let key_path = dir.join("key");
+        if db.exists() && !key_path.exists() {
+            return Err(Error::Key(
+                "the key file is missing, and iris.db exists. Restore the key from a backup",
+            ));
+        }
+        let key = secret::load_or_make_key(&key_path)?;
+
         let mut writer = Connection::open(&db)?;
         writer.execute_batch(PRAGMAS)?;
         migrate(&mut writer, &db)?;
