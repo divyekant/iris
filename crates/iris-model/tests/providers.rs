@@ -384,3 +384,50 @@ fn status_decides_the_error_for_any_body() {
         );
     }
 }
+
+#[test]
+fn openai_refusal_field_is_a_refusal() {
+    let p = Provider::OpenAiCompatible;
+    let body = json!({
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": null, "refusal": "I cannot help."}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4}
+    })
+    .to_string();
+    let (client, _) = setup(p, vec![(200, vec![], body.into())]);
+    assert_eq!(client.ask("x", "y").unwrap().stop, Stop::Refused);
+}
+
+#[test]
+fn retry_after_as_a_date_gives_the_wait_time() {
+    let at = std::time::SystemTime::now() + Duration::from_secs(120);
+    let date = httpdate::fmt_http_date(at);
+    for p in PROVIDERS {
+        let (client, _) = setup(
+            p,
+            vec![(429, vec![("retry-after", date.clone())], b"{}".to_vec())],
+        );
+        match client.ask("x", "y") {
+            Err(Error::RateLimited {
+                retry_after: Some(d),
+            }) => {
+                assert!((100..=121).contains(&d.as_secs()), "{p:?}: {d:?}")
+            }
+            other => panic!("{p:?}: {other:?}"),
+        }
+        // A date in the past means: try now.
+        let (client, _) = setup(
+            p,
+            vec![(
+                429,
+                vec![("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT".into())],
+                b"{}".to_vec(),
+            )],
+        );
+        assert!(matches!(
+            client.ask("x", "y"),
+            Err(Error::RateLimited {
+                retry_after: Some(Duration::ZERO)
+            })
+        ));
+    }
+}
