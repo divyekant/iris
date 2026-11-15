@@ -380,3 +380,17 @@ fn the_store_cuts_a_long_text_before_the_index() {
         .unwrap();
     assert_eq!(again, text);
 }
+
+#[cfg(unix)]
+#[test]
+fn open_makes_an_existing_data_folder_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("existing");
+    fs::create_dir_all(dir.0.join("content")).unwrap();
+    for p in [dir.0.clone(), dir.0.join("content")] {
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    Store::open(&dir.0).unwrap();
+    assert_eq!(mode(&dir.0), 0o700);
+    assert_eq!(mode(&dir.0.join("content")), 0o700);
+}
