@@ -1,6 +1,6 @@
 # Google sign-in path for self-hosted users (R1-01)
 
-- Status: proposed. The decision waits for dk.
+- Status: decided. dk chose path A on 2026-11-15.
 - Date: 2026-11-15
 - Card: R1-01
 - Related: `docs/spec/01-mirror-store-forms.md` section 4.9 and section 11,
@@ -295,9 +295,11 @@ these paths.
 1. Does the domain test of path A pass, and at which step?
 2. Does a token from an unverified "In production" client with
    `gmail.readonly` still work after 8 days?
-3. How long does it take on dk's Mac from the start of setup to the first
-   brief (spec 1, M4)? Also record the time to the end of sign-in as a
-   separate measure.
+3. How long does a real setup take on dk's Mac, from the start of setup to
+   the first brief? Also record the time to the end of sign-in. These real
+   measures are added to the M4 measure of spec 1 (connect step to first
+   brief, with the synthetic mailbox and the fake Gmail server). R1-02 must
+   also run the M4 measure.
 4. Does the copy of the redirect address work for an engine on a remote
    Linux server?
 
