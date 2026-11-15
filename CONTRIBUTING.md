@@ -54,8 +54,16 @@ of the project (Apache-2.0). `git commit -s` adds the line. If you forgot the
 line, run `git commit --amend -s` for the last commit, or
 `git rebase --signoff origin/develop` for all commits of the branch.
 
-The empty proof commit that `scripts/local-ci/run.sh` makes needs no sign-off.
-It holds no change, so it gives no content to the project.
+The sign-off is a statement by a person. An agent cannot make it. These
+commits need no sign-off:
+
+- The commits of the maintainer, and the commits of the agents that the
+  maintainer runs. The maintainer owns these changes.
+- The empty proof commit that `scripts/local-ci/run.sh` makes. It holds no
+  change.
+
+If you run an agent for a change, you are the contributor. Add your own
+sign-off to the commits of the agent.
 
 ## Scope
 

@@ -10,9 +10,15 @@ Read [the Iris manifesto](docs/manifesto.md) for the full model and the plan.
 ## State
 
 Iris is at release 0 (Foundation). **You cannot use Iris for mail yet.** Release
-0 makes the base: the crates, CI with budgets, a synthetic mailbox, a fake Gmail
-server and a draft of the open model. The program can show its version and
-serve an empty page. Release 1 (See) is the first release that reads a mailbox.
+0 makes the base. Release 1 (See) is the first release that reads a mailbox.
+
+| Part of release 0 | State |
+|---|---|
+| The `iris` program: `iris --version` and `iris serve` | Done |
+| The web client, embedded in the program | Done (an empty shell) |
+| Local CI with the memory and start time budget test | Done |
+| The synthetic mailbox and the fake Gmail server (`crates/iris-synth`, `crates/iris-fakegmail`) | Done |
+| The draft of the open model (`docs/spec/`) | Not yet |
 
 ## What Iris is
 
@@ -54,8 +60,9 @@ You need these tools. Iris builds on macOS and Linux.
    target/release/iris serve
    ```
 
-A plain `cargo build --release` also works, but the program then has no web
-client. It serves a fallback page that tells you to build the client.
+A plain `cargo build --release` also works. If `client/dist` does not exist, the
+program has no web client and serves a fallback page that tells you to build
+the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 [client/README.md](client/README.md) gives the details of the client build.
 
 `iris serve` listens on `127.0.0.1:4800`. Only this machine can connect to it.
