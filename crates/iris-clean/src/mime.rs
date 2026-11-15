@@ -452,10 +452,11 @@ pub fn split_multipart<'a>(body: &'a [u8], boundary: &str, max: usize) -> Vec<&'
         if body[line..].starts_with(delim) {
             let after = &body[line + delim.len()..];
             let close = after.starts_with(b"--");
-            let only_space = after
+            let rest = if close { &after[2..] } else { after };
+            let only_space = rest
                 .iter()
                 .take_while(|&&b| b != b'\n')
-                .all(|b| b.is_ascii_whitespace() || close);
+                .all(u8::is_ascii_whitespace);
             if only_space {
                 if let Some(s) = start.take() {
                     parts.push(trim_line_end(&body[s..line]));
@@ -551,6 +552,11 @@ mod tests {
         assert_eq!(
             split_multipart(b"--b\nA\n--bc\n--b--", "b", 10),
             vec![&b"A\n--bc"[..]]
+        );
+        // `--b--x` is not a close delimiter.
+        assert_eq!(
+            split_multipart(b"--b\nA\n--b--x\n--b\nB\n--b--", "b", 10),
+            vec![&b"A\n--b--x"[..], &b"B"[..]]
         );
         // The split stops at the limit.
         assert_eq!(

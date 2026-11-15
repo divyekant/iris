@@ -513,7 +513,14 @@ fn find_close(b: &[u8], from: usize, name: &str) -> usize {
     let mut at = from;
     while let Some(n) = find(b, at, b"</") {
         let rest = &b[n + 2..];
-        if rest.len() >= name.len() && rest[..name.len()].eq_ignore_ascii_case(name.as_bytes()) {
+        // `</scripture>` does not end `script`: a delimiter must follow the name.
+        let ends = rest
+            .get(name.len())
+            .is_none_or(|c| c.is_ascii_whitespace() || matches!(c, b'>' | b'/'));
+        if rest.len() >= name.len()
+            && rest[..name.len()].eq_ignore_ascii_case(name.as_bytes())
+            && ends
+        {
             return find(b, n, b">").map_or(b.len(), |e| e + 1);
         }
         at = n + 2;
@@ -753,6 +760,14 @@ mod tests {
             .nth(1)
             .unwrap()
             .starts_with(&"> ".repeat(MAX_QUOTE + 1)));
+    }
+
+    #[test]
+    fn a_longer_end_tag_does_not_end_a_script() {
+        assert_eq!(
+            md("<script>x</scripture>also</SCRIPT ><p>shown</p>"),
+            "shown"
+        );
     }
 
     #[test]
