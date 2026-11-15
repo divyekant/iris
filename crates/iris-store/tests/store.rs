@@ -125,14 +125,19 @@ fn secrets_survive_a_new_start_and_need_the_key() {
 }
 
 #[test]
-fn refuses_a_newer_schema() {
+fn refuses_an_unknown_schema() {
     let dir = TempDir::new("newer");
     let store = Store::open(&dir.0).unwrap();
     store
         .write(|tx| Ok(tx.pragma_update(None, "user_version", 99)?))
         .unwrap();
     drop(store);
-    assert!(matches!(Store::open(&dir.0), Err(Error::NewerSchema(99))));
+    assert!(matches!(Store::open(&dir.0), Err(Error::UnknownSchema(99))));
+    // SQLite accepts a negative version. The store must refuse it too.
+    let conn = rusqlite::Connection::open(dir.0.join("iris.db")).unwrap();
+    conn.pragma_update(None, "user_version", -1).unwrap();
+    drop(conn);
+    assert!(matches!(Store::open(&dir.0), Err(Error::UnknownSchema(-1))));
 }
 
 #[test]
