@@ -53,7 +53,7 @@ Each one has a test or a measure.
 | M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. |
 | M5 | Mail text is data. | No text from a message can start an action. The understanding step has no tools and returns only schema-valid JSON. |
 | M6 | Each item points to its source mail. | Each item has one or more sources. The schemas require the `sources` field. |
-| M7 | The forms can be built again from the mirror. | `iris rebuild` makes the same items from the same mirror, plus the corrections. |
+| M7 | The forms can be built again from the mirror. | `iris rebuild` makes the same items from the same mirror, and each corrected item keeps its ID and its corrections. |
 
 ## 4. The mirror
 
@@ -321,7 +321,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT | One row for each item of each form. `doc` is the form document of section 6. |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
-| `correction` | `id` INTEGER PK, `item_id`, `match_key` TEXT, `field` TEXT, `value` TEXT (JSON), `at` INTEGER | Changes by a person. A rebuild applies them again (section 7.5). |
+| `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `at` INTEGER | Changes by a person. The item stays through a rebuild (section 7.5). |
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
 
 The engine adds indexes for the queries of the brief: `item(form, status)`,
@@ -378,7 +378,7 @@ Each item of each form has these fields:
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
 | `title` | string, 1 to 200 characters | yes | One line for the brief. |
-| `sources` | array of source, at least 1 | yes | The messages that the item comes from. |
+| `sources` | array of source, at least 1, with exactly one `origin` | yes | The messages that the item comes from. The `origin` source is the message that made the item. |
 | `created` | date-time (RFC 3339) | yes | When the engine made the item. |
 | `updated` | date-time | yes | The last change. |
 | `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model and the prompt version. |
@@ -393,7 +393,7 @@ A source has these fields:
 | `message` | string, `m-` ID | yes | The message. |
 | `thread` | string, `t-` ID | yes | Its thread. |
 | `role` | `origin`, `update` or `evidence` | yes | `origin` made the item. `update` changed it. `evidence` supports it. |
-| `quote` | string, 1 to 500 characters | when `role` is `origin` | The words in the message that support the item. A rebuild uses the quote of the origin source (section 7.5). |
+| `quote` | string, 1 to 500 characters | when `role` is `origin` | The words in the message that support the item. |
 
 A party (a person or a service in an item) has these fields:
 
@@ -590,18 +590,22 @@ Fixed rules run before the model. They are fast, free and the same each time.
 ### 7.5 Rebuild and corrections
 
 - `iris rebuild` deletes the items that `derived.by` `rule` or `model` made,
-  and runs understanding again on the mirror.
-- Each item has a match key: the SHA-256 hash of the form, the origin message
-  and the `quote` of the origin source, with spaces and case normalized. Two
-  asks in one message have different quotes, so they have different keys.
-- A correction holds the match key of its item, the field and the new value.
-  After a rebuild, the engine applies each correction to the new item with
-  the same match key. If no item or more than one item has the key, the engine
-  does not guess. It makes an item with `derived.by` `person` from the
-  corrected values, and the brief shows it for a check.
-- The schemas require `quote` on each origin source. For an item from a fixed
-  rule, the quote is the line that the rule matched (for example the subject
-  or the code line).
+  except pinned items (below), and runs understanding again on the mirror.
+- A correction refers to its item by the item ID (`item_id`). An item with
+  one or more corrections is pinned. A rebuild never deletes a pinned item and
+  never changes its ID, so each correction stays on the same item.
+- A rebuild runs understanding again on the source messages of a pinned item.
+  The engine gives the step the pinned items of the message as existing items.
+  For each item that it finds, the step returns a new item or the ID of an
+  existing item that is the same.
+- If the step returns a new item that may be the same as a pinned item (same
+  form and same origin message), the engine keeps both and the brief shows the
+  pair once as a possible duplicate. A person merges them or keeps both. The
+  worst result is a duplicate in front of the person, never a lost or a moved
+  correction.
+- The schemas require `quote` on each origin source, so a person can see why
+  an item exists. For an item from a fixed rule, the quote is the line that
+  the rule matched (for example the subject or the code line).
 
 ## 8. The first brief
 
@@ -662,8 +666,9 @@ A change that adds a cache must say its size in the pull request.
 - The schema test (`crates/iris-spec`) validates the sample documents in
   `schema/examples/` against the schemas, and checks that each sample in
   `schema/examples/invalid/` fails.
-- A rebuild test with one message that gives two commitments. A correction
-  of the due date of one commitment must apply to that commitment only.
+- A rebuild test with one message that gives two commitments. A person
+  corrects the due date of one. After the rebuild, that commitment has the
+  same ID and the corrected date, and the other commitment has no correction.
 - The understanding tests use the ground-truth file of the synthetic mailbox.
   They measure the share of messages with the correct form. Release 1 sets the
   target after the first measure.
