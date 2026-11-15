@@ -1,0 +1,194 @@
+<title>Before and after</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+<!-- The before/after chooser of the projectstarter kit (docs/board/compare.html).
+     An agent copies this file for each UI change, fills in the data block below,
+     and publishes it as a claude.ai artifact with the capabilities {"db": {}, "user": {}}.
+     The screenshots go in `files` next to the page. The owner's choice is saved in the
+     artifact database, collection "choice", document "answer". docs/PLANNING.md gives the steps. -->
+<script type="application/json" id="compare-data">
+{
+  "title": "<Screen name>: before and after",
+  "card": "C-0",
+  "question": "Which version do you want?",
+  "recommended": "A",
+  "why": "<One sentence: why the agent recommends this option.>",
+  "sizes": ["phone", "desktop"],
+  "options": [
+    {"key": "before", "label": "Now", "note": "The screen as it is on develop.",
+     "images": {"phone": "img/before-phone.png", "desktop": "img/before-desktop.png"}},
+    {"key": "A", "label": "Option A", "note": "<What changes, in one or two sentences.>",
+     "images": {"phone": "img/a-phone.png", "desktop": "img/a-desktop.png"}}
+  ]
+}
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f6f7f9; --bg-elevated: #ffffff; --bg-surface: #eceef2; --bg-hover: #e2e5eb;
+    --border: #d3d7df; --text: #1b1f27; --text-muted: #5c6472;
+    --primary: #2f6fde; --on-primary: #ffffff; --success: #1f8a4c; --error: #c93636;
+    --font: Inter, system-ui, sans-serif;
+    --fs-sm: 0.8rem; --fs-md: 0.95rem; --fs-lg: 1.2rem; --fs-xl: 1.5rem;
+    --r-md: 8px; --r-lg: 12px; --r-full: 9999px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #111317; --bg-elevated: #1a1d23; --bg-surface: #22262e; --bg-hover: #2a2f38;
+      --border: #383e4a; --text: #e6e8ec; --text-muted: #a0a7b4;
+      --primary: #6b9cf0; --on-primary: #0d1117; --success: #4cc27f; --error: #ef6b6b;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #111317; --bg-elevated: #1a1d23; --bg-surface: #22262e; --bg-hover: #2a2f38;
+    --border: #383e4a; --text: #e6e8ec; --text-muted: #a0a7b4;
+    --primary: #6b9cf0; --on-primary: #0d1117; --success: #4cc27f; --error: #ef6b6b;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: var(--fs-md); line-height: 1.5; }
+  .app {
+    max-width: 1600px; margin: 0 auto; padding-top: 28px; padding-bottom: 64px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  h1, h2, p { margin: 0; }
+  button, textarea { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .head h1 { font-size: var(--fs-xl); font-weight: 600; line-height: 1.2; }
+  .head p { color: var(--text-muted); margin-top: 4px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-top: 18px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-full); overflow: hidden; }
+  .seg button { padding: 6px 14px; border: 0; background: transparent; cursor: pointer; font-weight: 500; }
+  .seg button[aria-pressed="true"] { background: var(--primary); color: var(--on-primary); }
+  .status { font-size: var(--fs-sm); color: var(--text-muted); }
+  .status.chosen { color: var(--success); font-weight: 600; }
+  .grid { display: grid; gap: 16px; margin-top: 16px; grid-auto-flow: column; grid-auto-columns: minmax(280px, 1fr); overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; }
+  .grid.desktop { grid-auto-columns: minmax(min(560px, 85vw), 1fr); }
+  .opt { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 12px; display: grid; gap: 10px; align-content: start; scroll-snap-align: start; }
+  .opt.rec { border-color: var(--primary); }
+  .opt.picked { border-color: var(--success); box-shadow: 0 0 0 2px var(--success); }
+  .opt-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .opt-head h2 { font-size: var(--fs-lg); font-weight: 600; }
+  .pill { font-size: var(--fs-sm); border-radius: var(--r-full); padding: 0 8px; border: 1px solid var(--primary); color: var(--primary); }
+  .opt p { color: var(--text-muted); font-size: var(--fs-sm); }
+  .shot { background: var(--bg-surface); border-radius: var(--r-md); overflow: hidden; display: grid; place-items: center; min-height: 160px; }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot .miss { color: var(--text-muted); font-size: var(--fs-sm); padding: 24px; text-align: center; }
+  .pick { padding: 8px 14px; border-radius: var(--r-md); border: 1px solid var(--primary); background: var(--primary); color: var(--on-primary); font-weight: 600; cursor: pointer; }
+  .pick.keep { background: transparent; color: var(--text); border-color: var(--border); }
+  .pick:disabled { opacity: 0.6; cursor: default; }
+  .note { margin-top: 18px; display: grid; gap: 6px; max-width: 640px; }
+  .note label { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 500; }
+  .note textarea { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-elevated); }
+  .why { margin-top: 12px; padding: 10px 14px; border-left: 3px solid var(--primary); background: var(--bg-elevated); border-radius: var(--r-md); }
+  [hidden] { display: none !important; }
+</style>
+
+<div class="app">
+  <header class="head">
+    <h1 id="title"></h1>
+    <p id="sub"></p>
+  </header>
+  <p class="why" id="why" hidden></p>
+  <div class="bar">
+    <div class="seg" id="sizes" role="group" aria-label="Screen size"></div>
+    <span class="status" id="status" role="status">Pick one option.</span>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="note">
+    <label for="noteText">A note for the agent (optional): what to change in the option you pick</label>
+    <textarea id="noteText" rows="3" maxlength="2000"></textarea>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var data;
+  try { data = JSON.parse(document.getElementById('compare-data').textContent); } catch (e) { data = { options: [] }; }
+  var options = Array.isArray(data.options) ? data.options : [];
+  var sizes = Array.isArray(data.sizes) && data.sizes.length ? data.sizes : ['phone'];
+  var state = { size: sizes[0], answer: null, saving: false, canWrite: true };
+  var db = null;
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v === null || v === undefined || v === false) return;
+      if (k === 'class') n.className = v;
+      else if (k === 'text') n.textContent = v;
+      else if (k.slice(0, 2) === 'on') n.addEventListener(k.slice(2), v);
+      else n.setAttribute(k, v === true ? '' : v);
+    });
+    (kids || []).forEach(function (c) { if (c) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function label(key) {
+    var o = options.filter(function (x) { return x.key === key; })[0];
+    return o ? o.label : key;
+  }
+
+  $('title').textContent = data.title || 'Before and after';
+  document.title = data.title || 'Before and after';
+  $('sub').textContent = (data.card ? 'Card ' + data.card + '. ' : '') + (data.question || 'Which version do you want?');
+  if (data.why) { $('why').hidden = false; $('why').textContent = 'Recommended: ' + label(data.recommended) + '. ' + data.why; }
+
+  function render() {
+    var seg = $('sizes');
+    seg.textContent = '';
+    sizes.forEach(function (s) {
+      seg.appendChild(el('button', { type: 'button', 'aria-pressed': String(state.size === s), text: s[0].toUpperCase() + s.slice(1),
+        onclick: function () { state.size = s; render(); } }));
+    });
+    var grid = $('grid');
+    grid.className = 'grid ' + state.size;
+    grid.textContent = '';
+    options.forEach(function (o) {
+      var src = o.images && o.images[state.size];
+      var img = el('img', { src: src || null, alt: o.label + ', ' + state.size + ' size', loading: 'lazy' });
+      var shot = el('div', { class: 'shot' }, [src ? img : el('span', { class: 'miss', text: 'No ' + state.size + ' screenshot.' })]);
+      img.addEventListener('error', function () { shot.textContent = ''; shot.appendChild(el('span', { class: 'miss', text: 'The screenshot did not load.' })); });
+      var picked = state.answer && state.answer.option === o.key;
+      grid.appendChild(el('section', { class: 'opt' + (o.key === data.recommended ? ' rec' : '') + (picked ? ' picked' : ''), 'aria-label': o.label }, [
+        el('div', { class: 'opt-head' }, [el('h2', { text: o.label }), o.key === data.recommended ? el('span', { class: 'pill', text: 'Recommended' }) : null]),
+        o.note ? el('p', { text: o.note }) : null,
+        shot,
+        state.canWrite ? el('button', {
+          class: 'pick' + (o.key === 'before' ? ' keep' : ''), type: 'button', disabled: state.saving || !db,
+          text: picked ? 'Chosen' : (o.key === 'before' ? 'Keep it as it is' : 'Choose ' + o.label),
+          onclick: function () { choose(o.key); }
+        }) : null
+      ]));
+    });
+    var st = $('status');
+    if (state.answer) { st.className = 'status chosen'; st.textContent = 'You chose ' + label(state.answer.option) + '. The agent builds it next. You can change the choice.'; }
+    else if (!db) { st.className = 'status'; st.textContent = 'Open this page in claude.ai to choose.'; }
+    else { st.className = 'status'; st.textContent = 'Pick one option.'; }
+  }
+
+  function choose(key) {
+    if (!db || state.saving) return;
+    state.saving = true; render();
+    var answer = { option: key, label: label(key), note: $('noteText').value.trim(), card: data.card || '', at: Date.now() };
+    db.doc('choice/answer').set(answer).then(function () { state.saving = false; state.answer = answer; render(); },
+      function () { state.saving = false; state.canWrite = false; $('status').textContent = 'The choice did not save. Tell the agent in the thread.'; render(); });
+  }
+
+  render();
+  (async function start() {
+    var c = window.claude;
+    if (!c || typeof c.use !== 'function') return;
+    try { db = await c.use('db'); } catch (e) { db = null; }
+    if (!db) { render(); return; }
+    db.doc('choice/answer').onSnapshot(function (snap) {
+      var x = snap && snap.data ? snap.data() : null;
+      state.answer = x && x.option ? x : null;
+      if (state.answer && state.answer.note && !$('noteText').value) $('noteText').value = state.answer.note;
+      render();
+    }, function () { render(); });
+    render();
+  })();
+})();
+</script>
