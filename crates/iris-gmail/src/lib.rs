@@ -615,7 +615,10 @@ impl Gmail {
             &[],
             cost::MESSAGES_SEND,
         )?;
-        parse(&read_all(response)?)
+        // Gmail accepted the send, so a bad answer leaves the result unknown.
+        read_all(response)
+            .and_then(|b| parse(&b))
+            .map_err(|e| Error::Transport(format!("answer of an accepted send: {e}")))
     }
 
     fn json<T: DeserializeOwned>(
@@ -691,26 +694,34 @@ impl Gmail {
         }
     }
 
-    /// Wait until the bucket has `units`, then take them.
+    /// Wait for the quota, then take `units`.
     fn take_quota(&self, units: u32) {
         let limit = self.config.quota_per_minute.max(1) as f64;
-        let units = (units as f64).min(limit);
-        loop {
-            let wait = {
-                let mut q = self.quota.lock().unwrap();
-                let now = Instant::now();
-                q.units =
-                    (q.units + now.duration_since(q.at).as_secs_f64() * limit / 60.0).min(limit);
-                q.at = now;
-                if q.units >= units {
-                    q.units -= units;
-                    return;
-                }
-                Duration::from_secs_f64((units - q.units) * 60.0 / limit)
-            };
+        while let Some(wait) = reserve(
+            &mut self.quota.lock().unwrap(),
+            Instant::now(),
+            limit,
+            units as f64,
+        ) {
             std::thread::sleep(wait);
         }
     }
+}
+
+/// Fill the bucket up to `now`. If it has `units`, or is full when `units`
+/// is above the limit, take the full `units` and return `None`. The bucket
+/// can go below zero, so that a call above the limit pays its full cost.
+/// Else return the wait.
+fn reserve(q: &mut Quota, now: Instant, limit: f64, units: f64) -> Option<Duration> {
+    q.units =
+        (q.units + now.saturating_duration_since(q.at).as_secs_f64() * limit / 60.0).min(limit);
+    q.at = now;
+    let need = units.min(limit);
+    if q.units >= need {
+        q.units -= units;
+        return None;
+    }
+    Some(Duration::from_secs_f64((need - q.units) * 60.0 / limit))
 }
 
 /// Add a random part of up to 50 percent to a wait.
@@ -786,6 +797,20 @@ mod tests {
             }
         });
         assert_eq!(most.load(Ordering::SeqCst), MAX_GETS);
+    }
+
+    #[test]
+    fn a_call_above_the_limit_pays_its_full_cost() {
+        let t0 = Instant::now();
+        let mut q = Quota {
+            units: 20.0,
+            at: t0,
+        };
+        // Limit 20 for each minute; a raw get costs 60.
+        assert_eq!(reserve(&mut q, t0, 20.0, 60.0), None);
+        let wait = reserve(&mut q, t0, 20.0, 60.0).unwrap();
+        assert_eq!(wait, Duration::from_secs(180));
+        assert_eq!(reserve(&mut q, t0 + wait, 20.0, 60.0), None);
     }
 
     #[test]
