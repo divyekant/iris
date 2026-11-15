@@ -291,27 +291,40 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse().ok())
             .map(Duration::from_secs);
+        // The status decides the error. A rate limit or a server error needs no body.
+        match status {
+            200..=299 => {}
+            429 => return Err(Error::RateLimited { retry_after }),
+            500..=599 => return Err(Error::Server(status)),
+            _ => {
+                // The body is only a hint: a body that is too large or not UTF-8 gives a short text.
+                let bytes = resp
+                    .body_mut()
+                    .with_config()
+                    .limit(MAX_ANSWER_BYTES)
+                    .read_to_vec()
+                    .unwrap_or_default();
+                let text = String::from_utf8_lossy(&bytes);
+                let message = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| text.into_owned());
+                // Remove the key before the cut, so that the cut cannot leave a part of the key.
+                let message = self
+                    .scrub(message)
+                    .chars()
+                    .take(MAX_MESSAGE_CHARS)
+                    .collect();
+                return Err(Error::Rejected { status, message });
+            }
+        }
+
         let text = resp
             .body_mut()
             .with_config()
             .limit(MAX_ANSWER_BYTES)
             .read_to_string()
             .map_err(|e| Error::Transport(self.scrub(e.to_string())))?;
-
-        match status {
-            200..=299 => {}
-            429 => return Err(Error::RateLimited { retry_after }),
-            500..=599 => return Err(Error::Server(status)),
-            _ => {
-                let message = serde_json::from_str::<Value>(&text)
-                    .ok()
-                    .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                    .unwrap_or(text);
-                let message = self.scrub(message.chars().take(MAX_MESSAGE_CHARS).collect());
-                return Err(Error::Rejected { status, message });
-            }
-        }
-
         let v: Value = serde_json::from_str(&text).map_err(|e| Error::BadAnswer(e.to_string()))?;
         let (text, stop, input, output) = match c.provider {
             Provider::Anthropic => {
