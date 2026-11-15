@@ -29,6 +29,9 @@ pub(crate) fn load_or_make_key(path: &Path) -> Result<[u8; 32]> {
             random(&mut key)?;
             f.write_all(&key)?;
             f.sync_all()?;
+            // Without this, a power loss can lose the new file entry after
+            // secrets are committed, and the next start makes a new key.
+            crate::sync_dir(path.parent().expect("the key is in the data folder"))?;
             Ok(key)
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {

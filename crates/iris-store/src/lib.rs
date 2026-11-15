@@ -400,13 +400,29 @@ fn lock(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Make a folder with mode 0700. A folder that exists keeps its mode.
+/// Make a folder with mode 0700, or set mode 0700 on a folder that exists.
+/// An existing folder with a wider mode can let other users read the mail.
 fn make_private_dir(dir: &Path) -> io::Result<()> {
     let mut b = fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(dir)
+    b.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write the entries of a folder to disk, so that a new or renamed file in
+/// the folder is still there after a power loss. Windows has no such step.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    let _ = dir;
+    Ok(())
 }
 
 fn migrate(conn: &mut Connection, db: &Path) -> Result<()> {

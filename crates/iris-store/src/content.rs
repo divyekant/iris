@@ -59,11 +59,17 @@ impl ContentWriter {
         let sha = hex(&std::mem::take(&mut self.hash).finalize());
         let dest = path(&self.root, &sha).expect("a SHA-256 in hexadecimal");
         let dir = dest.parent().expect("the path has a folder");
-        crate::make_private_dir(dir)?;
+        let new_dir = !dir.exists();
+        if new_dir {
+            crate::make_private_dir(dir)?;
+        }
         fs::rename(&self.tmp, &dest)?;
-        // The rename is durable only after the folder is on disk too.
-        #[cfg(unix)]
-        File::open(dir)?.sync_all()?;
+        // The rename is durable only after its folder is on disk too, and a
+        // new folder only after the content folder is on disk.
+        crate::sync_dir(dir)?;
+        if new_dir {
+            crate::sync_dir(&self.root)?;
+        }
         Ok(sha)
     }
 }
