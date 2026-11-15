@@ -385,9 +385,6 @@ changes a row only to move its state forward.
    messages are in `done`. For a `send`, the recovery looks for the sent
    message as in section 7.3. Do not try a send again.
 
-`batchModify` adds and removes labels, and `messages.trash` on a message in the
-trash changes nothing. For these verbs, a repeat is safe.
-
 ### 7.3 Start after a crash
 
 At start, the engine looks for each ledger row in the state `writing`:
@@ -397,11 +394,11 @@ At start, the engine looks for each ledger row in the state `writing`:
   person must stay. For each other message in `ops`, the engine reads the
   labels at Gmail (`format=minimal`):
   - The message has the `post` state: it goes to `done`.
-  - The message has the `pre` state: the call did not reach it. The engine
-    calls the provider again, and the message goes to `done` after the call.
-  - The message has neither state: the engine cannot tell what changed it.
-    The engine does not call the provider for it, and lists it in the result
-    for the person.
+  - Each other state, `pre` included: the engine cannot tell if the call
+    did not reach the message, or if the person reversed the change in Gmail
+    after the call. The engine never calls the provider again for the
+    message. It lists the message in the result for the person, who can
+    approve a new changeset for it.
 
   When each message is in `done`, the row becomes `applied`. Else, the row
   becomes `failed`, as in step 5 of section 7.2. In both cases, the undo
@@ -540,9 +537,10 @@ agent that does not work in a folder. The rules for the MCP interface:
   drops the connection. The row stays `writing`, and the recovery puts each
   message in `done`, so the undo applies to them.
 - A crash test where the person changes a message in `done` before the start:
-  recovery does not change it. A crash test where a message has neither the
-  `pre` nor the `post` state: recovery lists it and does not call the
-  provider.
+  recovery does not change it.
+- A crash test where the call applied, and the person reversed the change in
+  Gmail before the start, so the message has the `pre` state: recovery lists
+  the message and does not call the provider.
 - A test that the `iris` command has no verb that approves, denies or changes
   the policy.
 - A test that an undo skips a message that changed after the entry.
