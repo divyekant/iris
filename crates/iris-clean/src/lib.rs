@@ -82,6 +82,7 @@ pub fn clean(raw: &[u8]) -> Clean {
         attach_left: ATTACHMENT_TEXT_LIMIT,
         cut: false,
         attachments: Vec::new(),
+        is_reply: false,
     };
     let (subject, mut text) = w.message(raw, 0);
     let mut cut = w.cut;
@@ -100,17 +101,14 @@ pub fn clean(raw: &[u8]) -> Clean {
     }
 }
 
-enum Body {
-    Plain(String),
-    Html(String),
-}
-
 struct Walker {
     parts: usize,
     body_left: usize,
     attach_left: usize,
     cut: bool,
     attachments: Vec<Attachment>,
+    /// True while the walker reads a reply. HTML quote blocks then go out.
+    is_reply: bool,
 }
 
 impl Walker {
@@ -122,17 +120,15 @@ impl Walker {
             .trim()
             .to_string();
         let is_reply = h.get("in-reply-to").is_some() || h.get("references").is_some();
+        let outer = std::mem::replace(&mut self.is_reply, is_reply);
         let bodies = self.entity(raw, depth);
+        self.is_reply = outer;
         (subject, self.render(bodies, is_reply))
     }
 
-    fn render(&mut self, bodies: Vec<Body>, is_reply: bool) -> String {
+    fn render(&mut self, bodies: Vec<String>, is_reply: bool) -> String {
         let mut text = String::new();
-        for b in bodies {
-            let t = match b {
-                Body::Plain(s) => s,
-                Body::Html(h) => html::to_markdown(&h, is_reply),
-            };
+        for t in bodies {
             if !text.is_empty() {
                 text.push_str("\n\n");
             }
@@ -150,7 +146,7 @@ impl Walker {
 
     /// Walk one entity. Return its body texts in order. Attachments go to
     /// `self.attachments`.
-    fn entity(&mut self, raw: &[u8], depth: usize) -> Vec<Body> {
+    fn entity(&mut self, raw: &[u8], depth: usize) -> Vec<String> {
         self.parts += 1;
         if self.parts > MAX_PARTS || depth > MAX_DEPTH {
             self.cut = true;
@@ -170,7 +166,13 @@ impl Walker {
         } else {
             "text/plain".to_string()
         };
-        if let Some(sub) = mime_type.strip_prefix("multipart/") {
+        let name =
+            mime::param(&disp.params, "filename").or_else(|| mime::param(&ct.params, "name"));
+        let charset = mime::param(&ct.params, "charset");
+        if let Some(sub) = mime_type
+            .strip_prefix("multipart/")
+            .filter(|_| disp.main != "attachment")
+        {
             let Some(boundary) = mime::param(&ct.params, "boundary") else {
                 return Vec::new();
             };
@@ -181,9 +183,10 @@ impl Walker {
                 // RFC 2046: the last version is the richest. A mail client
                 // shows it, so the clean text uses it too. Walk from the end,
                 // so that a version that is not used takes none of the budget.
+                // A version with no visible text (empty or all hidden) is skipped.
                 for part in parts.into_iter().rev() {
                     let bodies = self.entity(part, depth + 1);
-                    if !bodies.is_empty() {
+                    if bodies.iter().any(|t| !t.trim().is_empty()) {
                         return bodies;
                     }
                 }
@@ -195,18 +198,16 @@ impl Walker {
             }
             return bodies;
         }
-        let name =
-            mime::param(&disp.params, "filename").or_else(|| mime::param(&ct.params, "name"));
-        let charset = mime::param(&ct.params, "charset");
         let is_text = mime_type == "text/plain" || mime_type == "text/html";
         if is_text && disp.main != "attachment" && name.is_none() {
             let bytes = self.take(body, &cte, BudgetKind::Body);
             let text = mime::decode(&bytes, charset.as_deref());
-            return vec![if mime_type == "text/html" {
-                Body::Html(text)
-            } else {
-                Body::Plain(text)
-            }];
+            if mime_type != "text/html" {
+                return vec![text];
+            }
+            let (md, full) = html::to_markdown(&text, self.is_reply);
+            self.cut |= full;
+            return vec![md];
         }
         self.attachment(mime_type, name, charset, body, &cte, depth);
         Vec::new()

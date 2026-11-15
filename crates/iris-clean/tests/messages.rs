@@ -266,3 +266,51 @@ fn encode(chunk: &[u8]) -> String {
     }
     out
 }
+
+#[test]
+fn an_html_version_without_visible_text_falls_back_to_plain_text() {
+    for html in ["", "<div style=\"display:none\">hidden</div>"] {
+        let raw = format!(
+            "Subject: Alt\nContent-Type: multipart/alternative; boundary=a\n\n--a\n\
+             Content-Type: text/plain\n\nPlain words.\n--a\nContent-Type: text/html\n\n{html}\n--a--\n"
+        );
+        assert_eq!(clean(raw.as_bytes()).text, "Plain words.");
+    }
+}
+
+#[test]
+fn a_multipart_attachment_stays_an_attachment() {
+    let raw = crlf(
+        "Subject: Saved page
+Content-Type: multipart/mixed; boundary=m
+
+--m
+Content-Type: text/plain
+
+See the page.
+--m
+Content-Type: multipart/related; boundary=r
+Content-Disposition: attachment; filename=page.mht
+
+--r
+Content-Type: text/html
+
+<p>Page text</p>
+--r--
+--m--
+",
+    );
+    let c = clean(&raw);
+    assert_eq!(c.text, "See the page.");
+    assert_eq!(c.attachments.len(), 1);
+    assert_eq!(c.attachments[0].name, "page.mht");
+    assert_eq!(c.attachments[0].mime_type, "multipart/related");
+}
+
+#[test]
+fn deep_quotes_with_many_lines_are_cut() {
+    let html = format!("{}{}", "<blockquote>".repeat(500), "<br>x".repeat(300_000));
+    let raw = format!("Subject: Deep\nContent-Type: text/html\n\n{html}");
+    let c = clean(raw.as_bytes());
+    assert!(c.cut);
+}

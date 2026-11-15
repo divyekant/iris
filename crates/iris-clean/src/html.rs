@@ -8,6 +8,11 @@ use std::borrow::Cow;
 
 /// The deepest element stack that the converter keeps.
 const MAX_STACK: usize = 512;
+/// The most bytes of Markdown output. The quote and signature steps read at
+/// most this much, so more output has no use.
+pub const OUT_LIMIT: usize = 512 * 1024;
+/// The deepest quote level that the output shows with `> ` marks.
+const MAX_QUOTE: usize = 8;
 
 const VOID: [&str; 14] = [
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
@@ -73,6 +78,8 @@ struct Writer {
     lists: usize,
     /// The open link: its target and the output position of its text.
     link: Option<(String, usize)>,
+    /// True when the output reached `OUT_LIMIT`.
+    full: bool,
 }
 
 impl Writer {
@@ -82,6 +89,10 @@ impl Writer {
     }
 
     fn push(&mut self, c: char) {
+        if self.out.len() >= OUT_LIMIT {
+            self.full = true;
+            return;
+        }
         if self.breaks > 0 {
             if !self.out.is_empty() {
                 for _ in 0..self.breaks {
@@ -95,7 +106,7 @@ impl Writer {
             self.line_start = true;
         }
         if self.line_start {
-            for _ in 0..self.quote {
+            for _ in 0..self.quote.min(MAX_QUOTE) {
                 self.out.push_str("> ");
             }
             self.line_start = false;
@@ -148,7 +159,8 @@ impl Writer {
 
 /// Convert HTML to Markdown. If `drop_quotes` is true (the message is a
 /// reply), quoted history of common mail clients goes out too.
-pub fn to_markdown(html: &str, drop_quotes: bool) -> String {
+/// Return the Markdown and true if the output reached [`OUT_LIMIT`].
+pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     let b = html.as_bytes();
     let mut w = Writer {
         line_start: true,
@@ -160,7 +172,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> String {
     // element deep in the tree cannot show its text.
     let mut overflow = 0usize;
     let mut i = 0;
-    while i < b.len() {
+    while i < b.len() && !w.full {
         if b[i] != b'<' {
             let end = b[i..]
                 .iter()
@@ -239,7 +251,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> String {
         hidden += own_hidden as usize;
     }
     w.close_link();
-    w.out
+    (w.out, w.full)
 }
 
 fn pop_to(stack: &mut Vec<Open>, at: usize, hidden: &mut usize, w: &mut Writer) {
@@ -636,7 +648,7 @@ mod tests {
     use super::*;
 
     fn md(h: &str) -> String {
-        to_markdown(h, true)
+        to_markdown(h, true).0
     }
 
     #[test]
@@ -696,8 +708,8 @@ mod tests {
     fn quotes_and_signatures() {
         let h = "<div>Yes</div><div class=\"gmail_signature\">Ana<br>CEO</div>\
                  <div class=\"gmail_quote\"><div>On Mon wrote:</div><blockquote>old</blockquote></div>";
-        assert_eq!(to_markdown(h, true), "Yes");
-        assert_eq!(to_markdown(h, false), "Yes\nOn Mon wrote:\n\n> old");
+        assert_eq!(to_markdown(h, true).0, "Yes");
+        assert_eq!(to_markdown(h, false).0, "Yes\nOn Mon wrote:\n\n> old");
         assert_eq!(
             md("<p>Top</p><div id=\"appendonsend\"></div><p>old</p>"),
             "Top"
@@ -714,6 +726,24 @@ mod tests {
         );
         assert!(!md(&h).contains("secret"));
         assert_eq!(md(&format!("{h}after")), "after");
+    }
+
+    #[test]
+    fn output_stops_at_the_limit() {
+        let h = format!("{}{}", "<blockquote>".repeat(500), "<br>x".repeat(300_000));
+        let (out, full) = to_markdown(&h, false);
+        assert!(full);
+        assert!(out.len() <= OUT_LIMIT + 64, "{}", out.len());
+        assert!(out
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with(&"> ".repeat(MAX_QUOTE)));
+        assert!(!out
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with(&"> ".repeat(MAX_QUOTE + 1)));
     }
 
     #[test]

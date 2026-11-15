@@ -284,7 +284,7 @@ fn hex(h: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// True if the text looks like words: at least 20 letters, and at least 85 %
+/// True if the text looks like words: at least 3 letters, and at least 85 %
 /// of the characters are letters, digits, white space or common punctuation.
 fn readable(t: &str) -> bool {
     let (mut good, mut letters, mut all) = (0usize, 0usize, 0usize);
@@ -297,7 +297,7 @@ fn readable(t: &str) -> bool {
             good += 1;
         }
     }
-    letters >= 20 && good * 100 >= all * 85
+    letters >= 3 && good * 100 >= all * 85
 }
 
 #[cfg(test)]
@@ -347,6 +347,14 @@ mod tests {
         let mut bad = b"%PDF-1.4\nstream\n(((((\\".to_vec();
         bad.extend(std::iter::repeat_n(b'(', 10_000));
         text(&bad, 1000);
+    }
+
+    #[test]
+    fn short_text_stays() {
+        assert_eq!(
+            text(&sample(b"BT (PAID) Tj ET", true), 100).as_deref(),
+            Some("PAID")
+        );
     }
 
     #[test]
