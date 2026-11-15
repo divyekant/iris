@@ -63,7 +63,7 @@ For each message in the account, the mirror holds:
 
 - The raw message, byte for byte.
 - The Gmail message ID and thread ID.
-- The set of label IDs, including system labels (`INBOX`, `SENT`, `SPAM`,
+- The set of label IDs. The set includes the system labels (`INBOX`, `SENT`, `SPAM`,
   `TRASH`, `UNREAD`, `STARRED`, `IMPORTANT` and the `CATEGORY_*` labels).
 - The Gmail `internalDate` and the size in bytes.
 
