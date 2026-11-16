@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install Iris: download the iris program for this system from the latest
 # GitHub Release, check its SHA-256 sum, and install it to ~/.local/bin.
-# No sudo. The script connects only to the download address below.
+# No sudo. By default it connects only to GitHub (see docs/DEPLOYMENT.md).
 #
 #   curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && sh install.sh
 #

@@ -70,8 +70,11 @@ The script does these steps:
    `iris serve` yourself. An older program with no `service` command gets
    the same message.
 
-The script connects only to `github.com` (and the GitHub download host that
-`github.com` sends it to). It sends no data about you or your computer.
+By default, the script connects only to `github.com` and to the GitHub
+download host that `github.com` sends it to. These hosts get what each HTTP
+request shows: your IP address, the `curl` version, and the archive name,
+which names your system and CPU. The script sends no other data. If you set
+`IRIS_DOWNLOAD_URL`, the script connects to that address in place of GitHub.
 
 These environment variables change the script:
 
