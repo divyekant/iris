@@ -12,8 +12,14 @@ const NOW = new Date("2026-11-16T09:05:00Z");
 test("the brief opens with what needs you, in words", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
   assert.match(t, /You owe two things\. One thing is owed to you\. One conversation waits for you\./);
-  const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] } };
+  const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] } };
   assert.match(text(await render("/src/views/Brief.svelte", { brief: empty, now: NOW })), /Nothing needs you now\./);
+  // Only stranger items: the opening must not say that nothing needs you.
+  const strangers = { ...empty, strangers: { count: 2, items: [] } };
+  const t2 = text(await render("/src/views/Brief.svelte", { brief: strangers, now: NOW }));
+  assert.doesNotMatch(t2, /Nothing needs you now/);
+  assert.match(t2, /Two items are from senders you do not know\./);
+  assert.match(text(await render("/src/views/Brief.svelte", { brief: { ...empty, strangers: { count: 1, items: [] } }, now: NOW })), /One item is from a sender you do not know\./);
 });
 
 test("the brief lists what you owe, what is owed to you, and conversations, each line with its source mail", async () => {
@@ -108,6 +114,9 @@ test("the setup flow asks for the account when there is none", async () => {
   const t = text(await render("/src/views/Setup.svelte", { status: { ...fx.status, accounts: [] }, poll: 0 }));
   assert.match(t, /iris account add client\.json/);
   assert.match(t, /gmail\.readonly/);
+  // A client in "Testing" gets refresh tokens that end after 7 days (spec 1 section 4.9).
+  assert.match(t, /On the Audience page, click "Publish app"/);
+  assert.ok(t.indexOf("Publish app") < t.indexOf("iris account add"), "publish before sign-in");
 });
 
 test("the setup flow shows the copy progress and says that the mailbox does not change", async () => {
