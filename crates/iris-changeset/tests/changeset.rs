@@ -2,8 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_changeset::{
-    add_action, approve, create, decide, revise, submit, write_document, ActionId, Author,
-    AuthorKind, By, Error, State, Verb, BULK,
+    add_action, add_action_in, approve, create, create_in, decide, decide_in, revise, submit,
+    submit_in, transaction, write_document, ActionId, Author, AuthorKind, By, Error, State, Verb,
+    BULK,
 };
 use iris_store::{NewMessage, Store};
 use serde_json::{json, Map, Value};
@@ -990,4 +991,38 @@ fn no_decision_after_the_expiry() {
     for (n, state) in [(1, "approved"), (2, "proposed"), (3, "proposed")] {
         assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], state);
     }
+}
+
+/// A caller can run create, add, submit and decide in one transaction: a
+/// refusal at any step leaves no row.
+#[test]
+fn one_transaction_for_a_whole_run() {
+    let dir = TempDir::new("tx");
+    let s = store(&dir);
+    let count = |s: &Store| -> i64 {
+        s.read(|c| Ok(c.query_row("SELECT count(*) FROM changeset", [], |r| r.get(0))?))
+            .unwrap()
+    };
+    refused(transaction(&s, |c| {
+        let cs = create_in(c, &agent(), NOW)?;
+        add_action_in(c, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None)?;
+        submit_in(c, cs, &agent(), " ", NOW)
+    }));
+    refused(transaction(&s, |c| {
+        let cs = create_in(c, &agent(), NOW)?;
+        add_action_in(c, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None)?;
+        submit_in(c, cs, &agent(), "Archive.", NOW)?;
+        decide_in(c, at(cs, 1, 1), State::Approved, By::Person, None, NOW)
+    }));
+    assert_eq!(count(&s), 0);
+    let cs = transaction(&s, |c| {
+        let cs = create_in(c, &agent(), NOW)?;
+        add_action_in(c, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None)?;
+        submit_in(c, cs, &agent(), "Archive.", NOW)?;
+        decide_in(c, at(cs, 1, 1), State::InReview, By::Policy, None, NOW)?;
+        Ok(cs)
+    })
+    .unwrap();
+    assert_eq!(count(&s), 1);
+    assert_eq!(hash_doc(&s, cs, 1, 1)["decision"]["state"], "in_review");
 }
