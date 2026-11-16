@@ -117,6 +117,11 @@ object, and JSON Lines for a list.
 | `iris mirror sync` | One sync of each account now |
 | `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
 
+Release 1 limit: the sync stores the raw messages only. Words and the
+`from:` and `to:` filters find a message after the understanding step reads
+it (tracker items R1-10 and R1-28). Before that, use `label:`, `after:` and
+`before:`.
+
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
 
