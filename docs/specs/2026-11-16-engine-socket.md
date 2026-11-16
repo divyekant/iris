@@ -18,10 +18,9 @@ change, and the person cannot withdraw a changeset from the terminal (issue
 
 - `iris serve` listens on `iris.sock` in the data folder, mode `0600`.
 - These verbs of specification 2, section 8.2, work through the socket, in
-  host mode, with the author `local`:
-  - `iris close`, `defer`, `decline`, `correct` `<id>` and `iris archive`,
-    `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids>`, each with
-    an optional `--changeset <cs-id>`.
+  host mode, with the author `local` (the syntax is in "The command"):
+  - the verbs that add an action: `close`, `defer`, `decline`, `correct`,
+    `archive`, `inbox`, `label`, `unlabel`, `read`, `unread` and `trash`;
   - `iris changeset <cs-id>`, `iris submit <cs-id> --why <text>` and
     `iris withdraw <cs-id>`.
 - The exit codes follow specification 2, section 8.4. Code 4 means that the
@@ -31,27 +30,32 @@ change, and the person cannot withdraw a changeset from the terminal (issue
 
 - Session mode and `.iris/socket` (release 4).
 - `iris ledger` and the verbs of release 3.
-- The read verbs of release 1 (`status`, `search`, `show`) stay on the
-  store, as section 8.1 allows.
+- The read verbs (`status`, `search`, `show`, `brief`, `list`) stay on the
+  store in release 2. They change nothing, so they cannot skip the policy.
+  This PR changes section 8.1 of specification 2 to say so: the exception
+  of release 1 stays for the read verbs, and each verb that adds, submits or
+  withdraws an action goes through the socket.
 - A wait in `submit` for the apply. `submit` prints the state of each
   action at the end of the submit.
-- The rules of the policy on a `local` action (see "The work").
 
 ## Design
 
 ### The socket
 
-1. At the start, `iris serve` checks `<data>/iris.sock`:
-   - If a connect to it works, another engine runs. The start fails with
-     "another engine runs on this data folder".
-   - If the file exists and a connect fails, the file is left from a stopped
-     engine. The engine removes it.
-2. The engine binds the socket, then sets the mode of the file to `0600`.
+1. At the start, `iris serve` takes the engine lock: an exclusive lock on
+   `<data>/engine.lock` (`iris_store::FileLock`). If another process holds
+   it, the start fails with "another engine runs on this data folder". The
+   engine holds the lock until it stops. Only the holder of the lock does
+   the next steps, so two engines cannot both remove and bind the socket.
+2. With the lock, `iris serve` checks `<data>/iris.sock`:
+   - If the file exists, it is left from a stopped engine, because a running
+     engine holds the lock. The engine removes it.
+3. The engine binds the socket, then sets the mode of the file to `0600`.
    The data folder has the mode `0700` (specification 1, section 5.1), so no
    other OS user can reach the file between the bind and the mode change.
-3. At a clean stop (Ctrl-C), the engine removes the file. After a crash, the
-   next start removes it (step 1).
-4. The engine reads the user ID of the peer of each connection (`SO_PEERCRED`
+4. At a clean stop (Ctrl-C), the engine removes the file. After a crash, the
+   OS releases the lock, and the next start removes the file (step 2).
+5. The engine reads the user ID of the peer of each connection (`SO_PEERCRED`
    on Linux, `getpeereid` on macOS, through `tokio::net::UnixStream::peer_cred`).
    If it is not the user ID of the engine, the engine closes the connection
    with no answer.
@@ -83,11 +87,19 @@ Answer:
 
 `code` is the exit code of section 8.4 that the command uses. The engine
 gives 2 for a request that is not valid (an unknown verb, a target that is not
-an ID, a changeset of another author), 1 for an error in the store, and 3
-when the policy or a hard limit denied an action at the submit. For `submit`,
-the command computes the code from the states of the actions in the
-document: 1 if one is `failed`, 3 if one is `denied`, 5 if one is open, else
-0 (the order of section 8.4).
+an ID, a changeset of another author) and 1 for an error in the store.
+
+For `submit`, the command computes the code from the decision of each action
+in the document (`decision.state` and `decision.by`), in the order of
+section 8.4:
+
+| Decision | Code |
+|---|---|
+| `denied` by `engine` (the submit found a target or an argument that is not valid) | 2 |
+| `failed` | 1 |
+| `denied` by `limit`, `rule` or `policy` | 3 |
+| `proposed`, `in_review`, `approved` or `held` | 5 |
+| all `applied` | 0 |
 
 ### Limits
 
@@ -105,17 +117,37 @@ Each request is one call of the `iris-changeset` functions: `create` with
 is one SQLite transaction. The engine runs it on a blocking thread
 (`spawn_blocking`), so the runtime thread does not wait on SQLite.
 
-After `submit`, each valid action is `proposed`. Today only `iris-triage`
-runs the policy on its own actions after its submit (section 5.4, step 5).
-This card does not run the rules on a `local` action: the action stays
-`proposed`, so the review of the web client lists it, and only the person
-approves or denies it. This is the safe side of the policy: a rule can only
-approve or deny with no person, and here the person always decides. A hard
-limit that denies (section 6.5) is also a decision that the person makes in
-the review for now. The general policy step for each author is a known limit
-(issue #252), to build with the next author that needs rules.
+After `submit`, the policy decides each `proposed` action (section 5.4, step
+5). Today only `iris-triage` has this step, for its own author. The build
+moves it to one shared function, `decide_submitted(c, changeset, revision,
+author, now)`, which triage and the socket both call:
+
+- In the mode `apply`, the active policy decides each action with the facts
+  of its messages (`action_message`, also the origin messages of an item
+  target), as triage does today: `approved`, `in_review` or `denied`, by a
+  rule, the policy default or a hard limit.
+- In the mode `observe`, a hard limit that denies (section 6.5, for example a
+  verb other than `archive`, `trash` or `label` on hostile mail by an author
+  other than `person`) denies the action, by `limit`. Each other action stays
+  `proposed` for the person. This also applies to triage, which today keeps
+  such an action `proposed` in the mode `observe`.
 
 ### The command
+
+The verbs that add an action:
+
+| Command | Action |
+|---|---|
+| `iris close <id> [--reason <text>]` | `close`, args `{"reason"}`. The default reason is "Done.". |
+| `iris decline <id> [--reason <text>]` | `decline`, args `{"reason"}`. The default reason is "Declined.". |
+| `iris defer <id> --date <YYYY-MM-DD>` | `defer`, args `{"date"}`. |
+| `iris correct <id> --field <path> --value <json>` | `correct`, args `{"field", "value"}`. A `--value` that is not JSON is a string. |
+| `iris archive`, `inbox`, `read`, `unread`, `trash` `<ids>...` | The verb, args `{}`. |
+| `iris label`, `unlabel` `<ids>... --label <name>` | The verb, args `{"label"}`. |
+
+Each one also takes `--changeset <cs-id>` and `--why <text>` (the reason of
+the action). The engine checks the targets and the arguments at the submit,
+as for each author.
 
 The command finds the data folder as today (`--data`, `IRIS_DATA`, or the
 folder of the system), connects to `iris.sock`, sends the request and prints
@@ -156,16 +188,21 @@ the answer:
 | The engine stops before the transaction ends | SQLite rolls back. Nothing is written. Same message as above. | Covered by the store tests of transactions. |
 | Two commands add to the same draft at the same time | SQLite runs the two transactions one after the other. Each gets its own action number. | A test with two threads. |
 | A changeset of another author (`agent`, `person`, `triage`) | Code 2, "only the author can do this" (`check_author`). | A test. |
+| Two engines start at the same time on one data folder | One takes `engine.lock`. The other fails before it touches the socket. | A test that holds the lock and starts an engine. |
+| A `local` action on hostile mail with a verb other than `archive`, `trash` or `label` | Denied by `limit` at the submit, in both modes. Exit 3. | A test in each mode. |
 
 All other input: code 2 and no write.
 
 ## Impact
 
 - `crates/iris/src/socket.rs` (new): the listener, the protocol and the work.
+- `crates/iris-triage/src/lib.rs`: step 5 moves to the shared function. In
+  the mode `observe`, a hard limit that denies now denies a triage action.
+- `docs/spec/02-changeset-policy-ledger.md`: section 8.1 (the read verbs keep
+  the store; the engine lock) and section 5.4 (step 5 in the mode
+  `observe`).
 - `crates/iris/src/lib.rs`: the new subcommands, the client, and the start of
   the listener in `serve`.
-- `docs/spec/02-changeset-policy-ledger.md`, section 8: a pointer to this
-  spec.
 - `crates/iris/README.md` or the help text of each verb.
 - No change to the store, the API or the web client.
 - Memory: one task and one buffer of at most 64 KiB for each connection, so
@@ -194,11 +231,13 @@ after the submit, through the policy and the apply of specification 2.
 
 ## Acceptance criteria
 
-- With `iris serve` running, `iris close c-7` prints `cs-N 1`, and
+- With `iris serve` running, `iris close c-7 --reason "Sent it."` prints `cs-N 1`, and
   `iris changeset cs-N` shows a draft action `close` with the target `c-7`.
   Red if the command reads the store, or if no draft is made.
 - `iris submit cs-N --why "Done."` prints the state of each action and exits
   5 while the action waits for the person. Red if it exits 0.
+- `iris close m-1` (a message, not an item) then `iris submit` exits 2, with
+  the reason of the engine. Red if it exits 3.
 - `iris withdraw cs-N` makes each open action `cancelled`. Red if an applied
   action changes.
 - With no engine, each of these verbs exits 4. Red if one opens the store.
