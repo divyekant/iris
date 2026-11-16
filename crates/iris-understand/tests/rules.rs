@@ -433,6 +433,13 @@ fn a_cut_text_or_a_calendar_file_goes_to_the_model() {
     // A calendar file that is no request is a file.
     let publish = "From: Mail Weekly <news@weekly.example>\nList-Id: <weekly.news.example>\nSubject: Events\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=a\n\n--a\nContent-Type: text/plain\n\nThe events.\n--a\nContent-Type: text/calendar; method=PUBLISH; name=\"e.ics\"\nContent-Disposition: attachment; filename=\"e.ics\"\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--\n";
     assert!(drafts(publish, Kind::Service, &[]).is_none());
+    // A PUBLISH calendar in an alternative that gives no text.
+    let alt = LIST.replace(
+        "Subject: This week in mail standards\n\nRead the news.\n",
+        "Subject: News\nContent-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\nRead the news.\n--a\nContent-Type: text/calendar; method=PUBLISH\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--\n",
+    );
+    assert_ne!(alt, LIST);
+    assert!(drafts(&alt, Kind::Service, &[]).is_none());
     // A request with a second calendar file that is no request.
     let both = INVITE
         .replace("multipart/alternative", "multipart/mixed")

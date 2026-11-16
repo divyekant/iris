@@ -133,7 +133,10 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
             || mime.eq_ignore_ascii_case("application/ics");
         !(a.text.invitation && calendar)
     });
-    if a.text.cut || a.text.calendar_cut || file || looks_like_record(a) {
+    // A calendar part that is not a request, also in an alternative that
+    // gives no text and no attachment.
+    let other_calendar = a.text.has_calendar && !a.text.invitation;
+    if a.text.cut || a.text.calendar_cut || file || other_calendar || looks_like_record(a) {
         return None;
     }
     let subject = a.text.subject.as_str();

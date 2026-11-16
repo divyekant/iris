@@ -465,7 +465,7 @@ input: no panic, bounded memory and time, and a `Clean` with less text (and
 | A header block over 256 KiB, a value over 16 KiB | Header memory grows | The rest is not read | `a_header_after_the_header_limit_does_not_count`, `a_subject_past_the_value_limit_is_cut` |
 | Hostile HTML or CSS (hidden text, many elements) | Hidden text stays, or time grows | Hidden text of the closed list goes out; time stays linear | `many_elements_with_one_class_stay_fast` |
 | A hostile PDF | Panic or memory | No panic; a PDF over `PDF_LIMIT` gives no text | `a_simple_pdf_attachment_gives_text` |
-| A calendar part | False or missed invitation | Only a parsed `text/calendar` part with `method=REQUEST` or a `METHOD:REQUEST` line counts, at any size and in any order | `crates/iris-clean/tests/invitation.rs` |
+| A calendar part | False or missed invitation | A parsed `text/calendar` or `application/ics` part with `method=REQUEST` or a `METHOD:REQUEST` line is a request, at any size and in any order. `invitation` is true only if each calendar part is a request. `calendar` is true for any calendar part, also in an alternative that gives no text. | `crates/iris-clean/tests/invitation.rs` |
 | Text that reads as an instruction | The model follows it | The text stays data; the code never runs it | Specification 1, section 7.4 |
 
 ## Options not chosen

@@ -86,6 +86,10 @@ pub struct Clean {
     /// `METHOD:REQUEST` line. Another calendar file (for example
     /// `METHOD:PUBLISH`) next to a request makes this false.
     pub invitation: bool,
+    /// True if the top message has a calendar part (`text/calendar` or
+    /// `application/ics`) anywhere in its MIME tree, also in an alternative
+    /// that does not give the text.
+    pub calendar: bool,
     /// The decoded text of the calendar parts of the top message, at most
     /// [`CALENDAR_TEXT_LIMIT`] bytes, so that a rule can read it.
     pub calendar_text: String,
@@ -118,6 +122,7 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: true,
             attachments: Vec::new(),
             invitation: false,
+            calendar: false,
             calendar_text: String::new(),
             calendar_cut: false,
         };
@@ -129,6 +134,7 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: false,
             attachments: Vec::new(),
             invitation: false,
+            calendar: false,
             calendar_text: String::new(),
             calendar_cut: false,
         };
@@ -136,6 +142,10 @@ pub fn clean(raw: &[u8]) -> Clean {
     let mut cal = Calendars::default();
     calendar_parts(parsed.root().root_part(), 0, &mut cal);
     let invitation = cal.requests > 0 && cal.others == 0;
+    // Lossy UTF-8 can grow the text: cut it again at a character boundary.
+    let mut calendar_text = String::from_utf8_lossy(&cal.text).into_owned();
+    let calendar_cut = cal.cut || calendar_text.len() > CALENDAR_TEXT_LIMIT;
+    calendar_text.truncate(mime::floor_char(&calendar_text, CALENDAR_TEXT_LIMIT));
     let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
@@ -147,8 +157,9 @@ pub fn clean(raw: &[u8]) -> Clean {
         cut,
         attachments,
         invitation,
-        calendar_text: String::from_utf8_lossy(&cal.text).into_owned(),
-        calendar_cut: cal.cut,
+        calendar: cal.requests + cal.others > 0,
+        calendar_text,
+        calendar_cut,
     }
 }
 

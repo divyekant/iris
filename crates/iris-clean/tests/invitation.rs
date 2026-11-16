@@ -203,3 +203,23 @@ fn calendar_text_is_given_and_bounded() {
     assert!(c.calendar_cut);
     assert!(c.calendar_text.len() <= iris_clean::CALENDAR_TEXT_LIMIT);
 }
+
+#[test]
+fn calendar_text_stays_inside_its_limit_in_bytes() {
+    // A two-byte character across the byte limit.
+    let pad = "x".repeat(iris_clean::CALENDAR_TEXT_LIMIT - 3);
+    let raw = format!(
+        "Content-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n{pad}\u{e9}\u{e9}\r\n"
+    );
+    let c = iris_clean::clean(raw.as_bytes());
+    assert!(c.calendar_cut);
+    assert!(c.calendar_text.len() <= iris_clean::CALENDAR_TEXT_LIMIT);
+}
+
+#[test]
+fn a_calendar_in_an_unused_alternative_counts() {
+    let raw = b"Content-Type: multipart/alternative; boundary=a\r\n\r\n--a\r\nContent-Type: text/plain\r\n\r\nEvents.\r\n--a\r\nContent-Type: text/calendar; method=PUBLISH\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:PUBLISH\r\nEND:VCALENDAR\r\n--a--\r\n";
+    let c = iris_clean::clean(raw);
+    assert!(c.calendar && !c.invitation);
+    assert!(!iris_clean::clean(b"Subject: x\r\n\r\nHello\r\n").calendar);
+}
