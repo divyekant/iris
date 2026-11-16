@@ -96,7 +96,10 @@ impl Writer {
     }
 
     fn push(&mut self, c: char) {
-        if self.out.len() >= OUT_LIMIT {
+        // The most bytes that one call writes: the pending line ends, the
+        // quote marks, a space and one character.
+        let most = self.breaks + 2 * MAX_QUOTE + 1 + 4;
+        if self.out.len() + most > OUT_LIMIT {
             self.full = true;
             return;
         }
@@ -995,7 +998,11 @@ mod tests {
         let h = format!("{}{}", "<blockquote>".repeat(500), "<br>x".repeat(300_000));
         let (out, full) = to_markdown(&h, false);
         assert!(full);
-        assert!(out.len() <= OUT_LIMIT + 64, "{}", out.len());
+        assert!(out.len() <= OUT_LIMIT, "{}", out.len());
+        // A long run of line ends in `pre` does not pass the limit.
+        let pre = format!("<pre>a{}b</pre>", "\n".repeat(OUT_LIMIT + 10));
+        let (pre_out, pre_full) = to_markdown(&pre, false);
+        assert!(pre_full && pre_out.len() <= OUT_LIMIT, "{}", pre_out.len());
         // A long link target does not pass the limit.
         let long = format!(
             "<a href=\"https://example.org/{}\">x</a>",
