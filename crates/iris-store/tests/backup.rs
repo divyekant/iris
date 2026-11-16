@@ -454,8 +454,11 @@ fn a_policy_write_never_loses_a_file_text() {
         policy_files(&dir.0),
         [("policy.toml".into(), b"v1".to_vec())]
     );
-    // The expected text: replaced, with no copy.
-    assert!(write(PolicyExpect::Text(b"v1"), Some(b"v2")).done);
+    // The expected text: replaced, and the old file stays as a copy.
+    let w = write(PolicyExpect::Text(b"v1"), Some(b"v2"));
+    assert!(w.done);
+    assert_eq!(fs::read(w.saved.as_ref().unwrap()).unwrap(), b"v1");
+    fs::remove_file(w.saved.unwrap()).unwrap();
     assert_eq!(
         policy_files(&dir.0),
         [("policy.toml".into(), b"v2".to_vec())]
@@ -485,4 +488,37 @@ fn a_policy_write_never_loses_a_file_text() {
     assert_eq!(fs::read(b.saved.unwrap()).unwrap(), b"edit b");
     assert!(!path.exists());
     assert!(!dir.0.join("policy.toml.tmp").exists());
+}
+
+#[test]
+fn a_save_through_an_open_file_is_never_lost() {
+    // Invariant: the write never removes the last name of the file that was
+    // at policy.toml. An editor can hold that file open and save into it
+    // after the check, so its content must stay reachable by a name.
+    use std::io::{Seek, Write};
+    let cases: [(PolicyExpect, Option<&[u8]>); 6] = [
+        (PolicyExpect::Text(b"old"), Some(b"new")),
+        (PolicyExpect::Text(b"other"), Some(b"new")),
+        (PolicyExpect::Missing, Some(b"new")),
+        (PolicyExpect::Any, Some(b"new")),
+        (PolicyExpect::Any, None),
+        (PolicyExpect::Text(b"old"), None),
+    ];
+    for (i, (expect, text)) in cases.into_iter().enumerate() {
+        let dir = TempDir::new(&format!("policy-open-{i}"));
+        let store = Store::open(&dir.0).unwrap();
+        let lock = store.backup_lock().unwrap();
+        let path = dir.0.join("policy.toml");
+        fs::write(&path, b"old").unwrap();
+        let mut editor = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        store.write_policy(&lock, expect, text).unwrap();
+        editor.rewind().unwrap();
+        editor.write_all(b"late edit").unwrap();
+        editor.sync_all().unwrap();
+        let files = policy_files(&dir.0);
+        assert!(
+            files.iter().any(|(_, t)| t == b"late edit"),
+            "case {i}: {files:?}"
+        );
+    }
 }

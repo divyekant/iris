@@ -59,7 +59,8 @@ pub enum Discarded {
 /// Makes `change` to the active policy, if the active version is `seen`
 /// (`None` for the policy of the first start). The engine starts from the
 /// text of the active policy, writes the new text to `policy.toml` and makes
-/// it the active policy in one transaction.
+/// it the active policy in one transaction. The old file stays as a copy
+/// (`policy.toml.saved-<seconds>`), because an editor can still save into it.
 pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Result<Edited> {
     // The lock order of the store: the backup lock, then the write transaction.
     let lock = store.backup_lock()?;

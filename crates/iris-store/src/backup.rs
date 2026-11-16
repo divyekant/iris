@@ -27,7 +27,7 @@ pub enum PolicyExpect<'a> {
     Missing,
     /// This text.
     Text(&'a [u8]),
-    /// Any file, or no file. The file is kept as a saved copy.
+    /// Any file, or no file.
     Any,
 }
 
@@ -37,8 +37,8 @@ pub struct PolicyWrite {
     /// The new text is at `policy.toml`. False when the file there was not
     /// the expected one, or a new file came during the write.
     pub done: bool,
-    /// The copy of the file that was at `policy.toml`, when it is not the
-    /// expected text and could not go back.
+    /// The copy of the file that was at `policy.toml`, when it did not go
+    /// back. A done write that replaced a file always keeps one.
     pub saved: Option<std::path::PathBuf>,
 }
 
@@ -161,10 +161,10 @@ impl Store {
     /// backup runs; it takes the lock before a database write transaction, in
     /// the order of [`Store::clean_gone`].
     ///
-    /// A person can save the file at any time, so the file that was there is
-    /// never lost: it is the text that `expect` names, it goes back, or it
-    /// stays as `policy.toml.saved-<seconds>` in the data folder
-    /// ([`PolicyWrite::saved`]). `Any` always keeps it there.
+    /// A person can save the file at any time, also through an open file, so
+    /// the write never deletes the file that was there: it goes back to
+    /// `policy.toml`, or it stays as `policy.toml.saved-<seconds>` in the
+    /// data folder ([`PolicyWrite::saved`]).
     pub fn write_policy(
         &self,
         _lock: &BackupLock,
@@ -205,13 +205,10 @@ impl Store {
                     Err(e) => return Err(e.into()),
                 },
             };
+            // Keep the old file under its new name, never delete it: an
+            // editor can hold it open and save into it after the check.
             if moved {
-                if matches!(expect, PolicyExpect::Any) {
-                    out.saved = Some(aside);
-                } else {
-                    // The text that `expect` names: the caller has it.
-                    fs::remove_file(&aside)?;
-                }
+                out.saved = Some(aside);
             }
         } else if moved {
             // Put the file back, unless a new file came since the rename.
