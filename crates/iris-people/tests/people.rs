@@ -493,3 +493,36 @@ fn a_quoted_local_part_is_an_address() {
     assert_eq!(addrs(&all[0]), [r#""john.doe"@example.org"#]);
     assert_eq!(all[0].name.as_deref(), Some("John"));
 }
+
+#[test]
+fn a_repeated_recipient_keeps_its_name() {
+    let h = Hand::new("repeat");
+    let raw = b"From: me@example.com\r\nTo: ana@example.org\r\nBcc: Ana Lind <ana@example.org>\r\n\r\nhi\r\n";
+    let sha = h.store.put_content(raw).unwrap();
+    h.store
+        .put_messages(
+            h.account,
+            &[NewMessage {
+                provider_id: "r1".into(),
+                thread_provider_id: "t1".into(),
+                content_sha256: Some(sha),
+                internal_date: Some(1000),
+                labels: vec!["SENT".into()],
+                header: Header {
+                    from_addr: Some("me@example.com".into()),
+                    to_addrs: Some("ana@example.org".into()),
+                    cc_addrs: Some("Ana Lind <ana@example.org>".into()),
+                    ..Header::default()
+                },
+                ..NewMessage::default()
+            }],
+        )
+        .unwrap();
+    let all = h.people();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].name.as_deref(), Some("Ana Lind"));
+    assert_eq!(
+        all[0].from_you, 1,
+        "one message, also with the address three times"
+    );
+}
