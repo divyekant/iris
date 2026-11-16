@@ -78,8 +78,13 @@ own check of the retry state.
    message with no `internal_date` sorts as the oldest.
 
 The runner works thread by thread. It takes the next thread that has a
-pending message, and runs its pending messages until the thread has none.
-Then it takes the next thread. It reads the pending rule again just before
+pending message and that this run did not visit yet, and runs its pending
+messages. A run calls `store::understand` at most one time for each
+message. When a message of the thread stays not understood (a refused or
+failed call, a change), the later messages of the thread wait (thread
+rule), so the runner leaves the thread for this run. Then it takes the next
+thread. So a thread that waits for the budget does not stop the free steps
+of later threads. It reads the pending rule again just before
 each message, so an older message that failed in this run holds the later
 messages of its thread. Only the message IDs of the current thread stay in
 memory.
@@ -229,9 +234,10 @@ CREATE TABLE understand_run (
 - A call that the provider can charge for but whose usage Iris does not know
   (a time-out, a lost response, HTTP 5xx, an HTTP 200 answer with no usage
   or a usage that does not parse) counts in `unknown_calls`. Its worst case
-  goes to `unknown_cost_micro_usd`. The worst case comes from the request:
-  the byte count of the instruction and the data block as input tokens (a
-  token covers at least one byte), and `max_tokens` as output tokens.
+  goes to `unknown_cost_micro_usd`. The worst case is the same bound as the
+  reservation (see "Reservation"): the bytes of the whole request body as
+  input tokens, and `max_tokens` as output tokens. So the settle write of a
+  call with unknown usage gives nothing back.
 - The run cost for the limit and the budget is
   `cost_micro_usd + unknown_cost_micro_usd`.
 - `iris-model`: `Usage` gets `known: bool`. A reply with no usage gives
@@ -295,9 +301,11 @@ message. No path calls `store::understand` with a priced model outside
   older than 24 hours. Then it deletes the receipt, so a code works one
   time. It also needs a terminal: if standard input is not a TTY, it
   refuses. It shows the estimate of the receipt again and asks the person
-  to type the budget again. So a script or an agent with no terminal cannot
-  approve, and the person approves only after an estimate of the same model
-  and price.
+  to type the budget again. The TTY check stops scripts with no terminal.
+  It does not prove that a person types: a program that runs as the same OS
+  user can make a pseudo terminal. Spec 2 section 8.1 states this exception
+  of release 1: host mode is the person, and the person gives no agent host
+  access to the data folder.
 - `iris understand [--max-cost <usd>] [--max-messages <n>]`: runs the batch
   runner with the budget that is left, and prints the run row. With no
   budget, the free steps run and paid calls are refused (see
