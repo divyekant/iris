@@ -308,8 +308,13 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: only the submit of a revision replaces actions');
 END;
 
+-- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, so no insert
+-- replaces a revision row.
 CREATE TRIGGER changeset_revision_insert BEFORE INSERT ON changeset_revision
-WHEN new.replaced <> 0 OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
+WHEN new.replaced <> 0
+  OR EXISTS (SELECT 1 FROM changeset_revision WHERE changeset_id = new.changeset_id
+             AND revision = new.revision)
+  OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
                  AND revision = new.revision AND why IS new.why
                  AND submitted_at IS new.submitted_at)
 BEGIN

@@ -641,6 +641,13 @@ fn a_new_revision_replaces_and_is_a_draft() {
         "DELETE FROM changeset_revision",
         "INSERT INTO changeset_revision VALUES (2, 4, 'x', 40)",
         "INSERT INTO changeset_revision VALUES (1, 3, 'w', 0)",
+        // An insert does not replace a revision row, so the marker of the
+        // replace does not come back.
+        "INSERT OR REPLACE INTO changeset_revision(changeset_id, revision, why, submitted_at)
+         VALUES (2, 3, 'w', 15)",
+        "INSERT OR REPLACE INTO changeset_revision(changeset_id, revision, why, submitted_at)
+         VALUES (2, 3, 'w', 15);
+         UPDATE changeset SET replacing = 3 WHERE id = 2;",
     ] {
         fails(&s, sql);
     }
