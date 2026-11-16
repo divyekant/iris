@@ -365,10 +365,11 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
   `localhost`, so the mail text stays on the machine. Any other host is
   refused. A remote server is not a local model.
 - `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an
-  error, and the body goes nowhere else. For a local model, the client also
-  checks that the address of the connection is a loopback address, also
-  after the name lookup of `localhost` (R1-15, with the host check of
-  `iris model set local`). A local model call uses no HTTP proxy: the client
+  error, and the body goes nowhere else. For a local model, `iris` looks up
+  the host before each run. Each address must be a loopback address. Then
+  the client connects to the first address as an IP literal, so a later
+  name lookup cannot change the address of the connection (R1-15, with the
+  host check of `iris model set local`). A local model call uses no HTTP proxy: the client
   ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and any configured proxy
   for it, so no proxy on loopback can forward the mail.
 - `iris model show`: the settings and the budget left, never the key.
