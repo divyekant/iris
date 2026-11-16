@@ -18,12 +18,8 @@ fn engine(name: &str, count: usize) -> (Engine, FakeGmail, TokenServer, i64) {
     let tokens = token_server();
     let store = Arc::new(Store::open(&data_dir(name)).unwrap());
     let account = add_account(&store, &gmail(fake.base_url()));
-    let client = engine::load_client(&store)
-        .unwrap()
-        .with_test_token_uri(&tokens.uri)
-        .unwrap();
     (
-        Engine::new(store, gmail(fake.base_url()), Some(client)),
+        Engine::new(store, gmail(fake.base_url()), Some(tokens.uri.clone())),
         fake,
         tokens,
         account,
@@ -242,4 +238,20 @@ fn backup_copies_the_data_folder() {
     assert_eq!(count(&copy, "SELECT count(*) FROM message"), 10);
     // The copy has the key: the sealed client opens.
     assert!(engine::load_client(&copy).is_ok());
+}
+
+#[test]
+fn an_account_added_while_the_engine_runs_syncs_without_a_restart() {
+    let fake = FakeGmail::start(Mailbox::new(7, 3)).unwrap();
+    let tokens = token_server();
+    let store = Arc::new(Store::open(&data_dir("late-add")).unwrap());
+    let mut e = Engine::new(
+        store.clone(),
+        gmail(fake.base_url()),
+        Some(tokens.uri.clone()),
+    );
+    assert!(e.tick().is_empty(), "no account yet");
+    add_account(&store, &gmail(fake.base_url()));
+    let synced = e.tick().into_iter().next().unwrap().1.unwrap();
+    assert_eq!(synced.fetched, 3);
 }

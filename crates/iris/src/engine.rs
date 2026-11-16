@@ -175,19 +175,24 @@ pub fn sync_accounts(store: &Store) -> Result<Vec<i64>> {
 pub struct Engine {
     pub store: std::sync::Arc<Store>,
     pub gmail: Gmail,
-    client: Option<Client>,
+    test_token_uri: Option<String>,
     tokens: HashMap<i64, AccessToken>,
     last_clean: Option<Instant>,
 }
 
 impl Engine {
-    /// `client` is `None` when no account is added yet. The engine then
-    /// syncs nothing.
-    pub fn new(store: std::sync::Arc<Store>, gmail: Gmail, client: Option<Client>) -> Engine {
+    /// The engine reads the saved OAuth client at each token refresh, so an
+    /// `iris account add` while the engine runs takes effect without a
+    /// restart. `test_token_uri` is for tests: a token endpoint on 127.0.0.1.
+    pub fn new(
+        store: std::sync::Arc<Store>,
+        gmail: Gmail,
+        test_token_uri: Option<String>,
+    ) -> Engine {
         Engine {
             store,
             gmail,
-            client,
+            test_token_uri,
             tokens: HashMap::new(),
             last_clean: None,
         }
@@ -243,7 +248,10 @@ impl Engine {
                 return Ok(t.token.clone());
             }
         }
-        let client = self.client.as_ref().ok_or(Error::NoClient)?;
+        let mut client = load_client(&self.store)?;
+        if let Some(uri) = &self.test_token_uri {
+            client = client.with_test_token_uri(uri)?;
+        }
         let sealed: Option<Vec<u8>> = self.store.read(|c| {
             Ok(
                 c.query_row("SELECT token FROM account WHERE id = ?1", [account], |r| {

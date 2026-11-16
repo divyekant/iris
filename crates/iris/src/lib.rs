@@ -160,13 +160,8 @@ pub fn app() -> axum::Router {
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
-    let client = match engine::load_client(&store) {
-        Ok(c) => Some(test_token_uri(c).map_err(std::io::Error::other)?),
-        Err(engine::Error::NoClient) => None,
-        Err(e) => return Err(std::io::Error::other(e.to_string())),
-    };
     let gmail = gmail().map_err(std::io::Error::other)?;
-    let sync = engine::Engine::new(store, gmail, client);
+    let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
         .name("sync".into())
         .spawn(move || engine::run(sync))?;
