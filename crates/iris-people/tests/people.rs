@@ -726,3 +726,36 @@ fn a_sender_after_your_last_message_is_not_known() {
     found.sort();
     assert_eq!(found, ["ana@example.org", "bo@example.org"]);
 }
+
+#[test]
+fn the_person_rule_changes_an_engine_kind() {
+    let mut h = Hand::new("reclass");
+    h.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO sender(address, kind, basis, decided_by) VALUES
+                   ('ana@example.org', 'stranger', 'none', 'engine'),
+                   ('bo@example.org', 'service', 'list', 'engine');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.add(
+        "t1",
+        "SENT",
+        "me@example.com",
+        "Me",
+        "ana@example.org, bo@example.org",
+    );
+    assert_eq!(h.people().len(), 2);
+    let kinds: Vec<(String, String)> = h
+        .store
+        .read(|c| {
+            let mut st = c.prepare("SELECT kind, basis FROM sender ORDER BY address")?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let person = ("person".to_string(), "sent".to_string());
+    assert_eq!(kinds, [person.clone(), person]);
+}
