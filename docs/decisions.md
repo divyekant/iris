@@ -15,6 +15,24 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D3 (2026-11-16): A library reads MIME and mail addresses
+
+- Decided by: dk
+- Why: 150 of 427 review findings on PRs 11 to 35 were in the hand-written
+  parsers of hostile input. `mail-parser` 1.0.1 (Apache-2.0 or MIT, used by
+  Stalwart Mail Server, fuzzed) reads MIME, headers, encoded words and
+  address lists, and decodes bodies only on access. The trial removed about
+  680 lines and kept the memory bounds of `iris-clean` (largest peak 9.56 MB,
+  before 9.44 MB). Iris keeps its own HTML and PDF code.
+- Cost: two new crates (`encodify`, `hashify`), Rust 1.98 or newer, about
+  70 lines of Iris code for the limits that the library does not have, and
+  three address forms outside `<>` that give no address (spec
+  `docs/specs/2026-11-16-clean-text.md`, "Known limits").
+- Options not chosen: keep the hand-written parsers (each new edge case is one
+  more review round). Use the library for MIME only (the address parsers had
+  the same class of findings).
+- Links: card R1-29
+
 ## D2 (2026-11-15): Each user signs in to Gmail with an own Google OAuth client
 
 - Decided by: dk

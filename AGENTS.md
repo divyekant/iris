@@ -216,7 +216,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-store/` | The store: the data folder, SQLite with full-text search, raw message files and encrypted secrets. | `engine` |
 | `crates/iris-people/` | People: one profile for each known person (names, addresses, first and last contact, counts, threads), from the mail history in the store. | `engine` |
 | `crates/iris-sync/` | The first sync of the mirror: a full copy of a Gmail mailbox into the store, with resume after a stop. | `engine` |
-| `crates/iris-clean/` | The clean text of one message: MIME, charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
+| `crates/iris-clean/` | The clean text of one message: MIME (through `mail-parser`), charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
 | `crates/iris-api/` | The local API: read-only JSON from the store for the web client and the read verbs. It refuses requests that are not local. | `engine` |
 | `crates/iris-observe/` | Observe mode: the triage changeset from the forms, with a count of each rule. It applies nothing. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
