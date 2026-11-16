@@ -144,6 +144,12 @@ the provider bills, and the body holds all of that text, so the byte count
 is an upper bound. `iris-model` gives this count before it sends
 (`Client::request_bytes`). The second try of `decide` is reserved on its own.
 
+After a call with unknown usage, the wrapper refuses each later call of the
+run with `Error::Unknown` (no request goes out). So the second try of
+`decide` in the same message cannot go out: `store::understand` returns
+`Error::Model`, no try counts, and the message stays pending for the next
+run. The runner then stops with `stop = unknown`.
+
 If a known usage is still larger than the reservation, the settle write
 takes the real cost, the budget can go below zero, and the run stops with
 `stop = budget`. The run row keeps the overrun, and the command shows it.
@@ -368,6 +374,7 @@ more calls.
 | A provider bills more input tokens than the body bytes | Settle passes the reservation | The budget can go below zero once; the run stops with `stop = budget` and shows the overrun. | Fake model with a large usage. |
 | The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
 | A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
+| A first reply with no usage and an answer that is not valid | The second try pays again before the run stops | The wrapper refuses each call after a call with unknown usage. The message stays pending, no try counts. | Batch test. |
 | The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
 | A priced model and no budget | Paid calls with no approval | `stop = budget`, no call, also from R1-28. | Batch test. |
