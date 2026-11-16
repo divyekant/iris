@@ -479,7 +479,8 @@ test("a mail renders the engine shape: header text for To and Cc, and fields tha
 
 test("a mail that Iris has not read yet keeps the download of the original", async () => {
   const html = await render("/src/views/Mail.svelte", { message: { ...fx.message("m-55210"), text: null, gone: false } });
-  assert.match(text(html), /Iris has not read this mail yet\. Download the original to read it now\./);
+  // During the first copy, the original can be missing too, so the page does not promise it.
+  assert.match(text(html), /Iris has not read this mail yet\. If Iris copied the original, you can download it\./);
   assert.match(html, /<button[^>]*class="raw[^"]*"[^>]*>Download the original</);
   assert.doesNotMatch(html, /<pre/);
 });
@@ -620,6 +621,51 @@ test("a sign-in address opened in a tab that shows Iris already signs in, then l
     // Another hash is not a sign-in.
     assert.equal(await followSignIn({ hash: "#/brief", pathname: "/", search: "" }, hist, undefined, () => reloads++), false);
     assert.equal(reloads, 1);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("the brief and setup show the first sync while any account still copies", async () => {
+  const ready = { ...fx.status.accounts[0], id: 1, address: "a@example.com" };
+  const copying = { ...fx.status.accounts[0], id: 2, address: "b@example.com", mirror_ready_at: null, sync: { kind: "first", step: 2 } };
+  const status = { accounts: [ready, copying], messages: { total: 84212, fetched: 20000, understood: 500, gone: 0 } };
+  const brief = { ...fx.brief, oldest_fetched: "2026-09-01T00:00:00Z" };
+  assert.match(text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 })), /Iris still copies your mailbox: 20,000 of 84,212 messages\. This brief covers the mail since/);
+  assert.match(text(await render("/src/views/Setup.svelte", { status, poll: 0 })), /Iris copies b@example\.com/);
+  const done = { ...status, accounts: [ready, { ...copying, mirror_ready_at: "2026-11-16T08:00:00Z" }] };
+  assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief, status: done, now: NOW, poll: 0 })), /Iris still copies/);
+});
+
+test("an old 401 that ends after a new sign-in keeps the new token", async () => {
+  const { get, signIn } = await load("/src/api.ts");
+  const saved = globalThis.fetch;
+  const sent = [];
+  let answerOld;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ token: "old" }));
+    await signIn({ hash: "#code=a", pathname: "/", search: "" }, undefined, undefined);
+    globalThis.fetch = (url, init) => new Promise((resolve) => (answerOld = () => resolve(new Response("{}", { status: 401 }))));
+    const old = get("status").catch(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+    globalThis.fetch = async () => new Response(JSON.stringify({ token: "new" }));
+    await signIn({ hash: "#code=b", pathname: "/", search: "" }, undefined, undefined);
+    answerOld();
+    await old;
+    globalThis.fetch = async (url, init) => (sent.push(init.headers.authorization), new Response(JSON.stringify({ accounts: [] })));
+    await get("status");
+    assert.deepEqual(sent, ["Bearer new"]);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("a download of an original that Iris has not copied yet says so", async () => {
+  const { download, NOT_COPIED } = await load("/src/api.ts");
+  const saved = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    await assert.rejects(download("m-7", () => {}), { message: NOT_COPIED });
   } finally {
     globalThis.fetch = saved;
   }
