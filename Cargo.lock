@@ -737,13 +737,16 @@ dependencies = [
 name = "iris-apply"
 version = "0.0.0"
 dependencies = [
+ "iris-changeset",
  "iris-fakegmail",
  "iris-gmail",
  "iris-policy",
+ "iris-spec",
  "iris-store",
  "iris-sync",
  "iris-synth",
  "rusqlite",
+ "serde_json",
  "sha2",
 ]
 

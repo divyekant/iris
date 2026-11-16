@@ -181,7 +181,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
-| `actions[].ledger` | The ledger entry, after apply. |
+| `actions[].ledger` | The ledger entry, after apply. Required for `undone`. Before the ledger (R2-03), an `applied` or `failed` action has none (section 7.2). |
 
 ### 5.2 States of an action
 
@@ -191,7 +191,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
 | `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
 | `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` |
-| `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
+| `applied` | The provider accepted the change. The ledger has the entry. Before the ledger (R2-03), the action has no entry and the document has no `ledger` (section 7.2). | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
 | `denied` | The policy, a hard limit or a person refused it. `reason` says why. | none |
 | `expired` | No decision or no apply in 14 days after submit (section 5.5). | none |

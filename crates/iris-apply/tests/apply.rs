@@ -94,6 +94,8 @@ impl Box {
 
     /// As `approved`, with the submit time `submitted` (milliseconds).
     fn approved_at(&self, verb: &str, messages: &[i64], decision: &str, submitted: i64) -> i64 {
+        let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
+        let targets = format!("{{\"messages\":[{}]}}", ids.join(","));
         self.store
             .write(|tx| {
                 tx.execute(
@@ -103,8 +105,8 @@ impl Box {
                 let cs = tx.last_insert_rowid();
                 tx.execute(
                     "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                     VALUES (?1, 1, 1, ?2, '{\"messages\":[]}', '{}')",
-                    params![cs, verb],
+                     VALUES (?1, 1, 1, ?2, ?3, '{}')",
+                    params![cs, verb, targets],
                 )?;
                 let a = tx.last_insert_rowid();
                 for m in messages {
@@ -161,6 +163,29 @@ impl Box {
                 )?)
             })
             .unwrap()
+    }
+
+    /// The document of the changeset of `action` passes the published
+    /// schema.
+    fn check_document(&self, action: i64) {
+        let cs: i64 = self
+            .store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT changeset_id FROM changeset_action WHERE id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let mut out = Vec::new();
+        iris_changeset::write_document(&self.store, cs, &mut out).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let errors: Vec<String> = iris_spec::validator("changeset")
+            .iter_errors(&doc)
+            .map(|e| format!("{e} at {}", e.instance_path()))
+            .collect();
+        assert!(errors.is_empty(), "{errors:#?}\n{doc}");
     }
 
     fn state(&self, action: i64) -> (String, String) {
@@ -264,6 +289,7 @@ fn each_verb_changes_gmail_and_the_mirror() {
             "{verb}"
         );
         assert_eq!(b.state(a), ("applied".into(), "person".into()));
+        b.check_document(a);
         for &m in &ms {
             let at_gmail = b.gmail_labels(m);
             assert!(target(verb, &at_gmail), "{verb} {at_gmail:?}");
@@ -549,6 +575,7 @@ fn a_refusal_fails_the_action() {
         other => panic!("{other:?}"),
     }
     assert_eq!(b.state(a), ("failed".into(), "person".into()));
+    b.check_document(a);
     // The second trash call fails: the first message keeps the change.
     let t = b.approved("trash", &ms, PERSON);
     b.fake.fail_next_write(&[0, 400], false);
