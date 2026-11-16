@@ -92,10 +92,18 @@ fn args(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
+/// The JSON document of a changeset. Each document of each test agrees
+/// with the published changeset schema (R2-12).
 fn doc(s: &Store, cs: i64) -> Value {
     let mut out = Vec::new();
     write_document(s, cs, &mut out).unwrap();
-    serde_json::from_slice(&out).unwrap()
+    let d: Value = serde_json::from_slice(&out).unwrap();
+    let errors: Vec<String> = iris_spec::validator("changeset")
+        .iter_errors(&d)
+        .map(|e| format!("{e} at {}", e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    d
 }
 
 fn refused<T: std::fmt::Debug>(r: Result<T, Error>) {
@@ -180,8 +188,8 @@ fn submit_denies_an_action_that_is_not_valid() {
         (Verb::Archive, &["c-1"], json!({})),
         (Verb::Archive, &["t-3"], json!({})),
         (Verb::Archive, &["m-1"], json!({"label": "x"})),
-        // Part 2 of R2-01 adds these verbs.
-        (Verb::Label, &["m-1"], json!({"label": "Finance"})),
+        (Verb::Label, &["m-1"], json!({"label": "INBOX"})),
+        // The next R2-01 PR adds the state verbs (issue #164).
         (Verb::Close, &["c-1"], json!({"reason": "Done."})),
         (Verb::Untrash, &["m-3"], json!({})),
     ];
@@ -200,6 +208,8 @@ fn submit_denies_an_action_that_is_not_valid() {
             (33, r#"{"messages":[]}"#, "{}"),
             (35, r#"{"messages":["m-1"]}"#, " { } "),
             (36, r#"{"messages":["m-1"]}"#, r#""x""#),
+            (37, r#"{"messages":["m-1","m-1"]}"#, "{}"),
+            (38, r#"{"messages":["m-01"]}"#, "{}"),
         ] {
             tx.execute(
                 "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
@@ -568,7 +578,24 @@ fn random_target_rows() {
         })
         .unwrap();
         submit(&s, cs, &agent(), "Fuzz.", NOW).unwrap();
-        for a in doc(&s, cs)["actions"].as_array().unwrap() {
+        // The rows of another writer can break the schema (issue #158), so
+        // only the proposed actions go through the schema check.
+        let mut out = Vec::new();
+        write_document(&s, cs, &mut out).unwrap();
+        let mut d: Value = serde_json::from_slice(&out).unwrap();
+        let all = d["actions"].as_array().unwrap().clone();
+        d["actions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["decision"]["state"] == "proposed");
+        if !d["actions"].as_array().unwrap().is_empty() {
+            let errors: Vec<String> = iris_spec::validator("changeset")
+                .iter_errors(&d)
+                .map(|e| format!("{e} at {}", e.instance_path()))
+                .collect();
+            assert!(errors.is_empty(), "round {round}: {errors:#?}");
+        }
+        for a in &all {
             let resolved = a["resolved"]["messages"].as_array().unwrap();
             match a["decision"]["state"].as_str().unwrap() {
                 "proposed" => {
@@ -1056,4 +1083,89 @@ fn one_review_decision_is_all_or_nothing() {
     for (n, state) in [(1, "approved"), (2, "approved"), (3, "denied")] {
         assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], state);
     }
+}
+
+/// `label` and `unlabel` take one user label name. A system label, by name
+/// or ID and in any case, changes only through its own verb (section 4).
+#[test]
+fn label_takes_one_user_label() {
+    let dir = TempDir::new("label");
+    let s = store(&dir);
+    // A system label of the store that is not in the Gmail list.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO label(account_id, provider_id, name, kind)
+             VALUES (1, 'Label_9', 'Muted', 'system'), (1, 'Label_10', 'Épinglé', 'system'),
+               (1, 'Label_11', 'Σ', 'system')",
+            [],
+        )?)
+    })
+    .unwrap();
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let cases: [(Verb, Value, bool); 20] = [
+        (Verb::Label, json!({"label": "Finance"}), true),
+        (Verb::Unlabel, json!({"label": "Finance"}), true),
+        // A new label: the apply makes it (section 7.2).
+        (Verb::Label, json!({"label": "Trips/2026"}), true),
+        (Verb::Label, json!({"label": "inbox"}), false),
+        (Verb::Unlabel, json!({"label": "Unread"}), false),
+        (Verb::Label, json!({"label": "category_promotions"}), false),
+        (Verb::Label, json!({"label": "MUTED"}), false),
+        (Verb::Label, json!({"label": "label_9"}), false),
+        (Verb::Label, json!({}), false),
+        (Verb::Label, json!({"label": ""}), false),
+        (Verb::Label, json!({"label": " Finance"}), false),
+        (Verb::Label, json!({"label": 7}), false),
+        (Verb::Label, json!({"label": "Finance", "x": 1}), false),
+        (Verb::Label, json!({"name": "Finance"}), false),
+        (Verb::Unlabel, json!({"label": ["Finance"]}), false),
+        (Verb::Unlabel, json!({"label": "SENT"}), false),
+        // No regard to case, also outside ASCII.
+        (Verb::Label, json!({"label": "épinglé"}), false),
+        (Verb::Label, json!({"label": "ÉPINGLÉ"}), false),
+        // Case folding, not a lower case: σ, ς and Σ are one letter.
+        (Verb::Label, json!({"label": "ς"}), false),
+        (Verb::Unlabel, json!({"label": "σ"}), false),
+    ];
+    for (verb, a, _) in &cases {
+        add_action(&s, cs, &agent(), *verb, &["t-1"], &args(a.clone()), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Labels.", NOW).unwrap();
+    for (i, (verb, a, ok)) in cases.iter().enumerate() {
+        let d = hash_doc(&s, cs, 1, i as i64 + 1);
+        let expect = if *ok { "proposed" } else { "denied" };
+        assert_eq!(d["decision"]["state"], expect, "{} {a}", verb.as_str());
+        if *ok {
+            assert_eq!(d["resolved"]["messages"], json!(["m-1", "m-2"]), "{d}");
+        }
+    }
+}
+
+/// An action names each target once: two spellings of one ID are one
+/// target. The check is linear: 200,000 targets take well under a second.
+#[test]
+fn an_action_names_each_target_once() {
+    let dir = TempDir::new("once");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for targets in [
+        &["m-1", "m-1"][..],
+        &["m-1", "m-01"],
+        &["t-2", "t-1", "t-02"],
+    ] {
+        refused(add_action(
+            &s,
+            cs,
+            &agent(),
+            Verb::Archive,
+            targets,
+            &Map::new(),
+            None,
+        ));
+    }
+    let many: Vec<String> = (1..=200_000).map(|n| format!("m-{n}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let start = std::time::Instant::now();
+    add_action(&s, cs, &agent(), Verb::Archive, &many, &Map::new(), None).unwrap();
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
 }
