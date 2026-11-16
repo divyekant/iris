@@ -434,7 +434,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
-| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
+| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
@@ -665,11 +665,14 @@ The person gives one answer for each sender:
 | Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
 | Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
-The engine and the local API give the gate first (card R5-03, part 1). The
-view of the gate in the web client is a separate change (part 2), because
-each view gets its own change and the owner picks its layout first. Until
-part 2 merges, the web client shows the strangers section as a list of
-items, as in release 1, and the person cannot answer the gate from it.
+The web client shows the gate in the brief: one row for each sender, with
+the newest 3 items, "Ignore" and "Accept". After an answer, the row keeps
+its place and shows one line with "Undo" (reopen, or decline again after a
+reopen from the list of declined senders). The brief shows the first 20
+senders and links all of them. The list of declined senders has "Ask again"
+(reopen) and "Accept". An API without the gate gives no `gate` in the
+brief, and the web client then shows the strangers section as a list of
+items, as in release 1.
 
 A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
 "stranger"` (specification 2, section 6.2) takes the items of strangers out of
