@@ -308,9 +308,10 @@ fn a_draft_makes_no_item() {
     assert!(out.draft);
     assert_eq!(fake.calls.borrow().len(), 0);
     assert!(b.items().is_empty());
+    // The engine does not understand a draft: when it is sent, it runs.
     assert!(b
         .col::<Option<i64>>("SELECT understood_at FROM message WHERE id = ?1", m)
-        .is_some());
+        .is_none());
 }
 
 const ASK: &str = "From: Bo Ren <bo@example.org>
@@ -453,4 +454,142 @@ fn a_new_run_keeps_a_corrected_item_and_marks_the_new_one() {
         b.col::<Option<i64>>("SELECT duplicate_of FROM item WHERE id = ?1", third),
         Some(second)
     );
+}
+
+#[test]
+fn the_phishing_mark_stays_on_a_new_run() {
+    let b = store("phishing-stays");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let phish = COMMITMENT.replace(r#""phishing": false"#, r#""phishing": true"#);
+    understand(&b.store, m, &Fake::with(&[&phish]), NOW).unwrap();
+    let fake = Fake::with(&[COMMITMENT]);
+    let out = understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(out.hostile);
+    assert_eq!(fake.calls.borrow().len(), 0);
+    assert!(b.items().is_empty());
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["phishing"]"#);
+}
+
+#[test]
+fn no_model_call_after_3_tries_or_before_retry_at() {
+    let b = store("tries");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let set = |tries: i64, retry: Option<i64>| {
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE message SET tries = ?2, retry_at = ?3 WHERE id = ?1",
+                    rusqlite::params![m, tries, retry],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    let fake = Fake::default();
+    set(3, None);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    set(1, Some(NOW + DAY));
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 0);
+    assert_eq!(
+        b.col::<i64>("SELECT tries FROM message WHERE id = ?1", m),
+        1
+    );
+    understand(&b.store, m, &fake, NOW + DAY).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
+}
+
+#[test]
+fn calendar_words_in_plain_text_are_not_an_invitation() {
+    let b = store("not-invite");
+    let raw = "From: Ana Lee <ana@example.org>
+To: owner@example.com
+Subject: How invitations work
+
+Content-Type: text/calendar
+METHOD:REQUEST
+That is how a calendar invitation looks.
+";
+    let m = b.add("1", raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
+    assert!(b.items().is_empty());
+}
+
+#[test]
+fn an_old_code_from_the_model_is_expired() {
+    let b = store("model-signal");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let signal = r#"{"items": [{"form": "signal", "title": "Code", "quote": "code 1234",
+      "kind": "code", "code": "1234", "status": "active"}]}"#;
+    understand(&b.store, m, &Fake::with(&[signal]), NOW).unwrap();
+    assert_eq!(b.items()[0]["status"], "expired");
+    // An expiry from the model counts too.
+    let later = signal.replace(
+        r#""status": "active""#,
+        r#""expires": "2027-01-01T00:00:00+01:00""#,
+    );
+    understand(&b.store, m, &Fake::with(&[&later]), NOW).unwrap();
+    assert_eq!(b.items()[0]["status"], "active");
+}
+
+#[test]
+fn same_as_keeps_the_corrected_item_with_no_duplicate() {
+    let b = store("same-as");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let id = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO correction(item_id, field, value, by, at) VALUES (?1, 'due', '\"2026-01-09\"', 'person', 0)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let same = COMMITMENT.replace(
+        r#""form": "commitment","#,
+        &format!(r#""form": "commitment", "same_as": "c-{id}","#),
+    );
+    let fake = Fake::with(&[&same]);
+    let out = understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(out.items.is_empty());
+    let items = b.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], format!("c-{id}"));
+    // The model sees the pinned item, in the data block.
+    assert!(fake.calls.borrow()[0].1.contains(&format!("c-{id}")));
+}
+
+#[test]
+fn an_encoded_known_name_from_another_address_is_a_spoof() {
+    let b = store("spoof-encoded");
+    b.kind("ana@example.org", "Ana Lee", "person");
+    let raw = "From: =?utf-8?B?QW5hIExlZQ==?= <ana@evil.example>
+To: owner@example.com
+Subject: Hi
+
+Pay this.
+";
+    let m = b.add("1", raw, &["INBOX"]);
+    let fake = Fake::default();
+    assert!(understand(&b.store, m, &fake, NOW).unwrap().hostile);
+    assert_eq!(fake.calls.borrow().len(), 0);
+    let name: String = b.col("SELECT from_name FROM header WHERE message_id = ?1", m);
+    assert_eq!(name, "Ana Lee");
+}
+
+#[test]
+fn a_date_with_a_huge_year_does_not_stop_understanding() {
+    let b = store("date");
+    let raw = "From: bo@example.org\nTo: owner@example.com\nSubject: x\nDate: 1 Jan 9223372036854775807 00:00 +0000\n\nHello.\n";
+    let m = b.add("1", raw, &["INBOX"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    assert!(b
+        .col::<Option<i64>>("SELECT date FROM header WHERE message_id = ?1", m)
+        .is_none());
 }
