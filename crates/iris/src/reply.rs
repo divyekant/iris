@@ -117,10 +117,10 @@ pub fn write(
         _ => e.to_string(),
     })?;
     end.map_err(|e| e.to_string())?;
+    // Spec 2 section 8.3: the labeled fields first, then the text.
     let mut out = format!(
-        "{}\n\nIris saved this draft for t-{thread}. {} of your sent messages showed your voice. \
-         Nothing was sent.\n",
-        saved.body, saved.samples
+        "Thread: t-{thread}\nBased on: m-{}\nSamples: {}\nSaved: yes\nSent: no\n",
+        saved.based_on, saved.samples
     );
     if s.unknown {
         out += "Warning: the cost of the call is not known. Iris kept its worst case from the budget.\n";
@@ -128,6 +128,7 @@ pub fn write(
     if s.overrun {
         out += "Warning: the call cost more than its reservation. The budget left can be below zero.\n";
     }
+    out += &format!("\n{}\n", saved.body);
     Ok(out)
 }
 
@@ -236,7 +237,8 @@ mod tests {
             })
             .unwrap();
         let out = write(&store, "t-1", None, &connect, 20).unwrap();
-        assert!(out.starts_with("Hi Ana, yes. D\n"), "{out}");
+        assert!(out.starts_with("Thread: t-1\nBased on: m-1\n"), "{out}");
+        assert!(out.ends_with("\n\nHi Ana, yes. D\n"), "{out}");
         // 1000 tokens in at 3 USD and 100 out at 15 USD for a million.
         assert_eq!(budget(&store), Some(1_000_000 - 3_000 - 1_500));
         let runs: Vec<(String, String, i64)> = store
