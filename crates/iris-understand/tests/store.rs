@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use iris_model::{Error as ModelError, Reply, Stop, Usage};
 use iris_store::{NewMessage, Store};
-use iris_understand::correct::correct;
+use iris_understand::correct;
 use iris_understand::store::{understand, Error};
 use iris_understand::{Model, INSTRUCTION};
 use serde_json::{json, Value};
@@ -1638,6 +1638,11 @@ fn a_rerun_resets_a_sender_with_many_threads() {
 
 // R2-11: a correction by a person stays through the next sync and run.
 
+fn correct(b: &Store, id: &str, field: &str, value: Value, now: i64) -> Result<Value, String> {
+    b.write(|tx| Ok(correct::correct(tx, id, field, value, "person", now)?))
+        .unwrap()
+}
+
 fn corrections(b: &Box_) -> i64 {
     b.col("SELECT COUNT(*) FROM correction WHERE ?1 = ?1", 0)
 }
@@ -1650,9 +1655,7 @@ fn a_correction_stays_after_a_sync_with_new_content_and_a_new_run() {
         .unwrap()
         .items[0];
     let id = format!("c-{row}");
-    let doc = correct(&b.store, &id, "due.date", json!("2026-01-09"), NOW + 1)
-        .unwrap()
-        .unwrap();
+    let doc = correct(&b.store, &id, "due.date", json!("2026-01-09"), NOW + 1).unwrap();
     assert_eq!(doc["due"]["date"], "2026-01-09");
     assert_eq!(b.items()[0]["due"]["date"], "2026-01-09");
 
@@ -1718,7 +1721,7 @@ fn a_refused_correction_writes_nothing() {
         ("c-999", "kind", json!("reply")),
         ("seven", "kind", json!("reply")),
     ] {
-        let out = correct(&b.store, id, field, value.clone(), NOW).unwrap();
+        let out = correct(&b.store, id, field, value.clone(), NOW);
         assert!(out.is_err(), "{id} {field} {value} must be refused");
     }
     assert_eq!(corrections(&b), 0);
@@ -1745,7 +1748,6 @@ fn a_corrected_record_is_corrected_and_stays_so_after_gone() {
         json!("The lease of flat 2"),
         NOW,
     )
-    .unwrap()
     .unwrap();
     assert_eq!(status(&b), "corrected");
     assert_eq!(b.items()[0]["status"], "corrected");
@@ -1760,12 +1762,29 @@ fn a_corrected_record_is_corrected_and_stays_so_after_gone() {
             .unwrap()
     };
     sql("UPDATE item SET status_before_gone = status, status = 'gone' WHERE id = ?1");
-    correct(&b.store, &id, "fields.summary", json!("Flat 2"), NOW + 1)
-        .unwrap()
-        .unwrap();
+    correct(&b.store, &id, "fields.summary", json!("Flat 2"), NOW + 1).unwrap();
     assert_eq!(status(&b), "gone");
     sql("UPDATE item SET status = status_before_gone, status_before_gone = NULL WHERE id = ?1");
     assert_eq!(status(&b), "corrected");
     assert_eq!(b.items()[0]["fields"]["summary"], "Flat 2");
     assert_eq!(corrections(&b), 2);
+    // A changeset action records its changeset ID (specification 2, section 4).
+    b.store
+        .write(|tx| {
+            Ok(correct::correct(
+                tx,
+                &id,
+                "fields.summary",
+                json!("Flat 3"),
+                "cs-9",
+                NOW + 2,
+            )?)
+        })
+        .unwrap()
+        .unwrap();
+    let by: String = b.col(
+        "SELECT by FROM correction WHERE item_id = ?1 ORDER BY id DESC",
+        row,
+    );
+    assert_eq!(by, "cs-9");
 }

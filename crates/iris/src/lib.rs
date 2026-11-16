@@ -80,18 +80,6 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Correct one field of an item by hand (`c-7 due.date 2026-01-09`). The
-    /// correction stays through each later sync and understanding run.
-    Correct {
-        /// The item, for example `c-7`.
-        id: String,
-        /// The field, as a dotted path, for example `due.date` or
-        /// `fields.amount.value`. Not `status`, `title` or another common field.
-        field: String,
-        /// The new value: JSON (`{"value": "12.50", "currency": "EUR"}`), or
-        /// else a string.
-        value: String,
-    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -188,9 +176,6 @@ pub fn run(cli: Cli) -> Result<(), String> {
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
-        Command::Correct { id, field, value } => {
-            print(verbs::correct(&open()?, id, field, value, engine::now_ms()))
-        }
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
