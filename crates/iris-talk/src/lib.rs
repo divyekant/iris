@@ -483,49 +483,13 @@ fn party(conn: &Connection, address: &str, name: Option<&str>) -> rusqlite::Resu
     Ok(p)
 }
 
-/// The addresses in an address list header, lowercase, in order, each one
-/// time. Text in quotes and in comments is a display name or a note, never an
-/// address. In each item of the list, the address is in `<>`, or it is the
-/// item itself.
+/// The addresses of an address list header, lowercase, in order, each one
+/// time. The RFC 5322 scanner of the people step gives the same addresses, so
+/// both steps make the same sender rows.
 fn addresses(list: &str) -> Vec<String> {
-    let mut bare = String::with_capacity(list.len());
-    let (mut quoted, mut depth, mut escape) = (false, 0u32, false);
-    for c in list.chars() {
-        if escape {
-            escape = false;
-        } else if c == '\\' && (quoted || depth > 0) {
-            escape = true;
-        } else if quoted {
-            quoted = c != '"';
-        } else if c == '"' && depth == 0 {
-            quoted = true;
-        } else if c == '(' {
-            depth += 1;
-        } else if c == ')' && depth > 0 {
-            depth -= 1;
-        } else if depth == 0 {
-            bare.push(c);
-        }
-    }
     let mut out: Vec<String> = Vec::new();
-    for item in bare.split([',', ';']) {
-        // A group ("team: a@x, b@y;") puts a name and a colon first.
-        let item = item.rsplit(':').next().unwrap_or(item);
-        let a = match item.rfind('<') {
-            Some(i) => item[i + 1..].split('>').next().unwrap_or(""),
-            None => item,
-        };
-        let a = a.trim().to_lowercase();
-        let ok = match a.split_once('@') {
-            Some((l, d)) => {
-                !l.is_empty()
-                    && d.contains('.')
-                    && !d.contains('@')
-                    && !a.contains(char::is_whitespace)
-            }
-            None => false,
-        };
-        if ok && !out.contains(&a) {
+    for a in iris_people::addresses(list) {
+        if !out.contains(&a) {
             out.push(a);
         }
     }

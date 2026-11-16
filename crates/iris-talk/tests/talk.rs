@@ -865,3 +865,17 @@ fn the_kind_comes_from_the_parsed_from_address() {
         "hostile mail with a display name in From"
     );
 }
+
+#[test]
+fn a_quoted_local_part_counts() {
+    let b = Box_::new("quotedlocal");
+    let v = validator();
+    b.put(M {
+        id: "a",
+        from: ("", "\"a,b\"@example.org"),
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).expect("a conversation");
+    check(&v, &doc);
+    assert_eq!(doc["participants"][1]["address"], "\"a,b\"@example.org");
+}
