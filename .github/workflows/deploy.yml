@@ -1,21 +1,96 @@
-# Deploy: runs on each push to main (a release merge) and by hand.
-# This product has no deploy steps yet. Add them below and document them in
-# docs/DEPLOYMENT.md. Keep production secrets in GitHub environment secrets.
+# Deploy: build the iris programs and attach them to the GitHub Release.
+# Iris has no server of its own: a release is the programs that users install
+# with scripts/install.sh (docs/DEPLOYMENT.md).
+#
+# It runs on each push to main (the merge of a release PR, made with
+# RELEASE_TOKEN, so the push starts this workflow), and by hand for a tag. It
+# waits for the GitHub Release that release.py makes at the pushed commit. It
+# cross-builds the macOS programs on Linux with cargo-zigbuild: there is no
+# macOS job.
 name: deploy
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to build, for example v2026.11.16.1
+        required: true
 permissions:
-  contents: read
+  contents: write
 concurrency:
-  group: deploy
+  group: deploy-${{ inputs.tag || github.sha }}
   cancel-in-progress: false
 jobs:
-  deploy:
+  programs:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LINUX: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+      MACOS: aarch64-apple-darwin x86_64-apple-darwin
     steps:
+      # release.py publishes the release right after the merge. Wait up to
+      # 15 minutes for it; with no release, the run fails and GitHub tells
+      # the owner.
+      - name: Find the release tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="$INPUT_TAG"
+          i=0
+          while [ -z "$tag" ] && [ "$i" -lt 45 ]; do
+            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=20" \
+              --jq ".[] | select(.target_commitish == \"$GITHUB_SHA\") | .tag_name" | head -n 1)"
+            [ -n "$tag" ] || { i=$((i + 1)); sleep 20; }
+          done
+          [ -n "$tag" ] || { echo "::error::no GitHub Release at $GITHUB_SHA"; exit 1; }
+          echo "TAG=$tag" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
-      - name: Deploy
-        run: echo "No deploy steps yet. Add them in .github/workflows/deploy.yml (docs/DEPLOYMENT.md)."
+        with:
+          ref: ${{ env.TAG }}
+      # The runner image has rustup (stable), node and python3.
+      - name: Install zig and cargo-zigbuild
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install --quiet ziglang==0.13.0.post1
+          "$RUNNER_TEMP/zig/bin/python" -c 'import ziglang, os; print(os.path.dirname(ziglang.__file__))' >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild --version 0.24.1
+          rustup target add $LINUX $MACOS
+      - name: Build the web client
+        run: cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile && npm run build
+      - name: Build the programs
+        env:
+          IRIS_REQUIRE_CLIENT: "1"
+          # `iris --version` shows the release tag.
+          IRIS_RELEASE: ${{ env.TAG }}
+        run: |
+          mkdir dist
+          for t in $LINUX $MACOS; do
+            if cargo zigbuild --release --locked -p iris --target "$t"; then
+              tar -czf "dist/iris-$t.tar.gz" -C "target/$t/release" iris
+            else
+              case " $LINUX " in
+                *" $t "*) echo "::error::the build for $t failed"; exit 1 ;;
+              esac
+              # A macOS cross build failure keeps the Linux programs.
+              # macOS users then build from source (docs/DEPLOYMENT.md).
+              echo "::warning::the build for $t failed; the release has no program for $t"
+            fi
+          done
+          # The runner can run the x86_64 Linux program: check its version line.
+          test "$(target/x86_64-unknown-linux-musl/release/iris --version)" = "iris $TAG"
+          cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      # Replace the files of the same name first, then remove the archives
+      # that the new SHA256SUMS does not name. If an upload stops partway,
+      # install.sh refuses each archive whose sum does not match, so nothing
+      # wrong is installed. A rerun from the same tag repairs the release.
+      - name: Attach the programs to the release
+        run: |
+          gh release upload "$TAG" dist/*.tar.gz --clobber
+          gh release upload "$TAG" dist/SHA256SUMS --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' |
+            { grep -E '^iris-.*\.tar\.gz$' || true; } |
+            while read -r name; do
+              [ -f "dist/$name" ] || gh release delete-asset "$TAG" "$name" --yes
+            done

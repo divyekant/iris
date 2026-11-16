@@ -1,0 +1,8 @@
+[package]
+name = "iris-service"
+description = "Writes and removes the background service of Iris: a launchd agent on macOS, a systemd user unit on Linux."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true

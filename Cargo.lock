@@ -637,9 +637,11 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "clap",
+ "iris-api",
  "iris-auth",
  "iris-fakegmail",
  "iris-gmail",
+ "iris-service",
  "iris-store",
  "iris-sync",
  "iris-synth",
@@ -735,6 +737,22 @@ dependencies = [
  "serde_json",
  "sha2",
 ]
+
+[[package]]
+name = "iris-people"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
+ "rusqlite",
+]
+
+[[package]]
+name = "iris-service"
+version = "0.0.0"
 
 [[package]]
 name = "iris-spec"
