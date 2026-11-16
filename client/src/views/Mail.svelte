@@ -3,7 +3,7 @@
   client never renders the HTML of a mail. Each open adds 1 to the open count (R1-22).
 -->
 <script lang="ts">
-  import type { Message } from "../api";
+  import { download, type Message } from "../api";
   import { initials, when } from "../format";
   import { countOpen } from "../opens";
   import { href } from "../route";
@@ -14,6 +14,8 @@
     countOpen();
   });
 
+  let failed = $state("");
+  const original = () => download(message.id).then(() => (failed = ""), (e: Error) => (failed = e.message));
   const address = (a: { name?: string; address: string }) => (a.name ? `${a.name} <${a.address}>` : a.address);
 </script>
 
@@ -51,7 +53,8 @@
       {#each message.items as id (id)}<a href={href.item(id)}>{id}</a>{/each}
     {/if}
     {#if message.text !== null}
-      <a class="raw" href={`/api/messages/${encodeURIComponent(message.id)}/raw`} download>Download the original</a>
+      <button type="button" class="raw" onclick={original}>Download the original</button>
+      {#if failed}<p class="note" role="alert">{failed}</p>{/if}
     {/if}
   </footer>
 </article>
@@ -126,11 +129,19 @@
   }
   .raw {
     margin-left: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
   }
-  a {
+  a,
+  .raw {
     color: var(--color-text-muted);
   }
-  a:hover {
+  a:hover,
+  .raw:hover {
     color: var(--color-text);
   }
 </style>

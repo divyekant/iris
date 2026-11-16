@@ -296,7 +296,7 @@ test("a mail shows as escaped text, with a warning when it is hostile", async ()
   assert.match(html, /&lt;script>alert\(1\)&lt;\/script>/);
   assert.match(text(html), /This mail looks hostile \(dmarc\)/);
   // The raw source needs the sign-in token, so a plain link cannot work: a button fetches it.
-  assert.match(html, /<button[^>]*class="raw"[^>]*>Download the original</);
+  assert.match(html, /<button[^>]*class="raw[^"]*"[^>]*>Download the original</);
   assert.doesNotMatch(html, /href="\/api\/messages\/m-55210\/raw"/);
   assert.match(html, /href="#\/item\/c-311"/);
 });
@@ -408,12 +408,13 @@ test("the client trades the code of the sign-in address for a token, and sends t
     await signIn({ hash: "#/brief", pathname: "/", search: "" }, hist, store);
     assert.equal(calls.length, 0);
     // The download of the original sends the token too.
-    await signIn(loc, hist, store).catch(() => {});
+    globalThis.fetch = async () => new Response(JSON.stringify({ token: "t-2" }), { status: 200 });
+    await signIn(loc, hist, store);
     globalThis.fetch = async (url, init) => (calls.push({ url, init }), new Response("From: a@example.com\r\n\r\nHi", { status: 200 }));
     const saved_ = [];
     await download("m-55210", (blob, name) => saved_.push([blob, name]));
     assert.equal(calls.at(-1).url, "/api/messages/m-55210/raw");
-    assert.match(calls.at(-1).init.headers.authorization, /^Bearer /);
+    assert.equal(calls.at(-1).init.headers.authorization, "Bearer t-2");
     assert.equal(saved_[0][1], "m-55210.eml");
     assert.equal(await saved_[0][0].text(), "From: a@example.com\r\n\r\nHi");
   } finally {

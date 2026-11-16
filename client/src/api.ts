@@ -99,14 +99,89 @@ export type Message = Summary & {
   items: string[];
 };
 
-export const SIGN_IN = "Open the sign-in address that iris serve printed, then reload this page.";
+export const SIGN_IN = "Open the sign-in address that iris serve printed.";
+export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
+
+// Spec 2 section 8.6 and crates/iris-api/README.md: the API gives a token one
+// time for the code of the sign-in address. The token stays in the storage of
+// this origin only, not in a cookie, because a cookie goes to each port of a host.
+type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+const KEY = "iris.token";
+function session(): Store | undefined {
+  try {
+    return globalThis.sessionStorage;
+  } catch {
+    return undefined;
+  }
+}
+let token: string | null = null;
+try {
+  token = session()?.getItem(KEY) ?? null;
+} catch {
+  token = null;
+}
+let ready: Promise<void> = Promise.resolve();
+
+/** Trade the code in the address (`#code=...`) for the token. Does nothing with no code. */
+export function signIn(
+  loc: Pick<Location, "hash" | "pathname" | "search"> | undefined = globalThis.location,
+  hist: Pick<History, "replaceState"> | undefined = globalThis.history,
+  store: Store | undefined = session(),
+): Promise<void> {
+  const code = loc?.hash.match(/^#code=([^&]+)/)?.[1];
+  if (!loc || !code) return Promise.resolve();
+  // Remove the code from the address bar and the history before the exchange.
+  hist?.replaceState(null, "", `${loc.pathname}${loc.search}#/`);
+  ready = (async () => {
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: decodeURIComponent(code) }),
+    });
+    const body = await response.json().catch(() => null);
+    if (!response.ok || typeof body?.token !== "string") throw new Error(SIGN_IN_FAILED);
+    token = body.token;
+    try {
+      store?.setItem(KEY, body.token);
+    } catch {
+      // No storage: the token works until the page closes.
+    }
+  })();
+  return ready;
+}
+// Read the code before the first view reads the hash.
+signIn().catch(() => {});
+
+async function call(path: string, accept: string): Promise<Response> {
+  await ready;
+  const headers: Record<string, string> = { accept };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const response = await fetch(`/api/${path}`, { headers });
+  if (response.status === 401) throw new Error(SIGN_IN);
+  return response;
+}
 
 /** Get one JSON resource from the local API. Throws an Error with the API's error text. */
 export async function get<T>(path: string): Promise<T> {
-  const response = await fetch(`/api/${path}`, { headers: { accept: "application/json" } });
-  // Spec 2 section 8.6: the API needs the session cookie that the one-time sign-in address sets.
-  if (response.status === 401) throw new Error(SIGN_IN);
+  const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(body?.error ?? `The engine answered ${response.status}.`);
   return body as T;
+}
+
+function save(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = Object.assign(document.createElement("a"), { href: url, download: name });
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Download the original (RFC 5322) of a message. A link cannot send the token, so fetch it and save the blob. */
+export async function download(id: string, keep: (blob: Blob, name: string) => void = save): Promise<void> {
+  const response = await call(`messages/${encodeURIComponent(id)}/raw`, "message/rfc822");
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.error ?? `The engine answered ${response.status}.`);
+  }
+  keep(await response.blob(), `${id}.eml`);
 }

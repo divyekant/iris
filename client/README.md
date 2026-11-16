@@ -24,9 +24,13 @@ serves a fallback page that tells you to build the client.
    `127.0.0.1:4800` (`iris serve`). With no engine, use
    `pnpm dev --mode fixtures`: the answers come from `dev/fixtures.ts`, which
    uses the examples of `docs/spec/schema/examples`.
-   With an engine, open the one-time sign-in address that `iris serve` prints,
-   on the dev origin: `http://localhost:5173/api/session?code=...`. It sets the
-   session cookie of the API.
+   With an engine, `iris serve` prints a one-time sign-in address,
+   `http://127.0.0.1:4800/#code=...`. To use it on the dev server, open the
+   same fragment on the dev origin: `http://localhost:5173/#code=...`. The
+   client removes the code from the address, gets a token for it from
+   `POST /api/session`, and keeps the token in `sessionStorage`. Each API call
+   sends the token in the `Authorization` header. The dev proxy sends the
+   `Host` of the engine, and the `Origin` of the engine for the dev page only.
 3. Before a commit, run `npm run lint` (type check) and `npm test` (a test build in `.test-build` and the tests).
 
 ## Design tokens
