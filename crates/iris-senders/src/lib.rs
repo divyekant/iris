@@ -687,6 +687,7 @@ mod tests {
             ("paypall.co.uk", "paypal.co.uk"),
             ("paypal-verify.co.uk", "paypal.co.uk"),
             ("paypa1.duckdns.org", "paypal.duckdns.org"),
+            ("paypa1.wordpress.com", "paypal.wordpress.com"),
         ];
         for (d, k) in yes {
             assert!(near_copy(d, k), "{d} {k}");
