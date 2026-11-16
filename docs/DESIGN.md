@@ -39,18 +39,23 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 
 | Part | File | Use |
 |---|---|---|
-| Navigation bar | `App.svelte` | One link for each view. The active link has a gold line under it. |
-| Line | `Line.svelte` | One item on one line: the title opens the item, the other party and the date in muted text, and "Mail" opens the source mail. |
-| Section | `Brief.svelte` | A heading with a muted count, up to 7 lines, and an "All N" link to the full list. |
-| Field list | `Item.svelte`, `Mail.svelte` | Labels in muted text and values in a grid of two columns. |
-| Record table | `RecordTable.svelte` | One column for each field of the record type, and a "Mail" column. |
-| Type choice | `Records.svelte` | Round buttons. The chosen button has a gold border. |
-| Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail. |
-| Large code | `Item.svelte` | A login code in mono type at `font-size-4`. Never for an expired code. |
-| Button link | `Setup.svelte` | A gold border of 2px and text in the `text` color. |
+| Header | `App.svelte` | The Iris mark (a gold ring), and one link for each view. The active link has a gold line under it. On a phone the links scroll in one row. |
+| Opening | `Brief.svelte` | The greeting and the date in muted text, then one sentence in `font-size-4` that says what needs you. |
+| Line | `Line.svelte` | The round mark with the initials of the other party, the title, and one muted line of detail. The whole line opens the item. The envelope opens the source mail. A gold dot marks a conversation that waits for you. |
+| Due tone | `Line.svelte` | A dot after the due date: `warning` for 2 days or less, `error` when late. The words say the same, so color is not the only sign. |
+| Section | `Brief.svelte` | A heading with the count on the right, a line under it, at most 7 lines, and an "All N" link. An empty section does not show. |
+| Code | `Code.svelte` | A login code in mono type, a Copy button, and the time left. It goes away when the code expires. |
+| Quote | `Item.svelte` | The words of the mail that made the item, with a gold line on the left and the link to the mail. |
+| Chips | `Brief.svelte`, `Records.svelte` | Round links or buttons with a count. The chosen chip and a chip under the pointer have a gold border. |
+| Primary button | `Code.svelte`, `Setup.svelte` | A gold background with the `on-primary` text color. One for each screen at most. |
+| Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail or an error. |
 
-Gold is a border or a line, never the text color and never the background of
-text, because light gold on a light background fails the contrast rule.
+The token `on-primary` is the text color on gold: `#0a0a0a` in the dark
+palette and `#2C2418` in the light palette. Both are colors of the palette, so
+the count of colors does not change. `test/tokens.test.mjs` checks the contrast.
+
+Gold is never the text color, because light gold on a light background fails
+the contrast rule.
 
 ## Rules
 

@@ -1,133 +1,187 @@
-<!-- One item with its fields and its sources. Each source opens its mail in one step. -->
+<!--
+  One item. The words of the mail that made it come first, so that a person
+  seldom needs the mail itself. Each source opens its mail in one step.
+-->
 <script lang="ts">
   import type { Item } from "../api";
-  import { field, money, party, RECORD_FIELDS, when } from "../format";
+  import { watch } from "../clock";
+  import { due, field, money, other, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
+  import Code from "./Code.svelte";
 
-  let { item, now = new Date() }: { item: Item; now?: Date } = $props();
+  let { item, now: start = new Date() }: { item: Item; now?: Date } = $props();
+  // svelte-ignore state_referenced_locally
+  let now = $state(start);
+  $effect(() => (item.form === "signal" && item.expires ? watch(item.expires, (d) => (now = d)) : undefined));
 
+  const FORMS: Record<string, string> = {
+    commitment: "Commitment",
+    conversation: "Conversation",
+    record: "Record",
+    feed: "To read",
+    signal: "Signal",
+  };
+
+  let quoted = $derived(item.sources.find((s) => s.role === "origin" && s.quote));
   let rows: [string, string][] = $derived.by(() => {
-    const r: [string, string][] = [["Status", item.status]];
+    const r: [string, string][] = [];
     switch (item.form) {
-      case "commitment":
-        r.push(["Who must act", party(item.owner)], ["Who waits", party(item.counterparty)], ["Kind", item.kind ?? ""]);
-        if (item.due) r.push(["Due", `${when(item.due.date ?? item.due.at)}${item.due.strict ? " (firm)" : ""}`]);
+      case "commitment": {
+        const d = due(item, now);
+        r.push(["Who acts", party(item.owner)], ["Who waits", party(item.counterparty)]);
+        if (d) r.push(["Due", `${when(item.due?.date ?? item.due?.at)}, ${d.text}${item.due?.strict ? ". The date is firm." : ""}`]);
         if (item.amount) r.push(["Amount", money(item.amount)]);
+        r.push(["Kind", item.kind ?? ""]);
         break;
+      }
       case "conversation":
-        r.push(
-          ["With", (item.participants ?? []).filter((p) => p.kind !== "self").map(party).join(", ")],
-          ["Messages", `${item.messages ?? 0}, ${item.new ?? 0} new`],
-          ["Your turn", item.your_turn ? "Yes" : "No"],
-        );
+        r.push(["With", (item.participants ?? []).filter((p) => p.kind !== "self").map(party).join(", ")]);
+        r.push(["Messages", `${item.messages ?? 0}, of which ${item.new ?? 0} new`]);
+        r.push(["Next step", item.your_turn ? "Your reply" : "Theirs"]);
         if (item.latest) r.push(["Latest", `${party(item.latest.from)}, ${when(item.latest.at)}: ${item.latest.snippet}`]);
         if (item.summary) r.push(["Summary", item.summary]);
         break;
       case "record":
-        r.push(["Type", item.type ?? ""], ["Issuer", party(item.issuer)]);
         for (const key of RECORD_FIELDS[item.type ?? "other"] ?? []) {
           const value = field(item.fields?.[key]);
           if (value) r.push([key.replaceAll("_", " "), value]);
         }
+        r.push(["From", party(item.issuer)]);
         break;
       case "feed":
-        r.push(["Publisher", party(item.publisher)], ["Published", when(item.published)]);
+        r.push(["From", party(item.publisher)], ["Sent", when(item.published)]);
         if (item.summary) r.push(["Summary", item.summary]);
         break;
       case "signal":
-        r.push(["Kind", item.kind ?? ""], ["Issuer", party(item.issuer)], ["Expires", when(item.expires)]);
+        r.push(["From", party(item.issuer)], ["Kind", item.kind ?? ""], ["Ends", when(item.expires)]);
         break;
     }
+    r.push(["State", item.status]);
     return r;
   });
-
-  // Spec 1 section 6.6: never show an expired code in large type.
-  let code = $derived(
-    item.form === "signal" && item.code && item.status === "active" && item.expires && new Date(item.expires) > now ? item.code : "",
-  );
   let made = $derived(
-    item.derived.by === "rule" ? `a rule (${item.derived.rule})` : item.derived.by === "model" ? `the model ${item.derived.model}` : "a person",
+    item.derived.by === "rule" ? `a fixed rule (${item.derived.rule})` : item.derived.by === "model" ? `the model ${item.derived.model}` : "you",
   );
 </script>
 
-<p class="form">{item.form}</p>
-<h1>{item.title}</h1>
-{#if code}<p class="code" aria-label="Code">{code}</p>{/if}
+<article>
+  <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
+  <h1>{item.title}</h1>
 
-<dl>
-  {#each rows as [label, value] (label)}
-    <dt>{label}</dt>
-    <dd>{value}</dd>
-  {/each}
-</dl>
+  {#if item.form === "signal" && item.code}
+    <div class="code"><Code {item} {now} /></div>
+  {/if}
 
-<h2>Sources</h2>
-<ul>
-  {#each item.sources as source (source.message)}
-    <li>
-      <a href={href.mail(source.message)}>Open the mail</a>
-      <span class="role">{source.role}</span>
-      {#if source.quote}<blockquote>{source.quote}</blockquote>{/if}
-    </li>
-  {/each}
-</ul>
-<p class="note">
-  Made by {made}{item.confidence != null ? `, confidence ${Math.round(item.confidence * 100)} %` : ""}. Updated {when(item.updated)}.
-</p>
+  {#if quoted}
+    <figure>
+      <blockquote>{quoted.quote}</blockquote>
+      <figcaption>
+        {party(other(item))}, in the mail that made this item.
+        <a href={href.mail(quoted.message)}>Open the mail</a>
+      </figcaption>
+    </figure>
+  {/if}
+
+  <dl>
+    {#each rows as [label, value] (label)}
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    {/each}
+  </dl>
+
+  {#if item.sources.length > 1 || !quoted}
+  <h2>Mail</h2>
+  <ul class="sources">
+    {#each item.sources as source, i (source.message)}
+      <li>
+        <a href={href.mail(source.message)}>{source.role === "origin" ? "The mail that made this item" : source.role === "update" ? `Update ${i}` : `Evidence ${i}`}</a>
+        {#if source.quote && source !== quoted}<span>{source.quote}</span>{/if}
+      </li>
+    {/each}
+  </ul>
+  {/if}
+
+  <p class="made">
+    Made by {made}{item.confidence != null ? `, ${Math.round(item.confidence * 100)} % sure` : ""}. Last change {when(item.updated)}.
+  </p>
+</article>
 
 <style>
+  article {
+    max-width: 680px;
+  }
   .form {
     color: var(--color-text-muted);
+    margin: var(--space-4) 0 var(--space-1);
     text-transform: capitalize;
-    margin: 0;
   }
   h1 {
     font-size: var(--font-size-3);
-    margin: 0 0 var(--space-4);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    line-height: 1.25;
+    margin: 0 0 var(--space-6);
   }
   .code {
-    font-family: var(--font-family-mono);
-    font-size: var(--font-size-4);
-    letter-spacing: 0.1em;
-    margin: 0 0 var(--space-4);
+    margin-bottom: var(--space-6);
+  }
+  figure {
+    margin: 0 0 var(--space-8);
+    padding: var(--space-4) var(--space-6);
+    border-left: 2px solid var(--color-primary);
+    background: var(--color-background-elevated);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  }
+  blockquote {
+    margin: 0 0 var(--space-3);
+    font-size: var(--font-size-1);
+    line-height: 1.45;
+  }
+  figcaption {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
+  figcaption a {
+    margin-left: var(--space-2);
   }
   dl {
     display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: var(--space-2) var(--space-6);
+    grid-template-columns: minmax(96px, max-content) 1fr;
+    gap: var(--space-3) var(--space-6);
     margin: 0 0 var(--space-8);
   }
   dt {
     color: var(--color-text-muted);
-    text-transform: capitalize;
+  }
+  dt::first-letter {
+    text-transform: uppercase;
   }
   dd {
     margin: 0;
+    overflow-wrap: anywhere;
   }
   h2 {
-    font-size: var(--font-size-1);
+    font-size: var(--font-size-0);
+    font-weight: 600;
+    margin: 0 0 var(--space-2);
   }
-  ul {
+  .sources {
     list-style: none;
     padding: 0;
+    margin: 0 0 var(--space-8);
   }
-  li {
+  .sources li {
+    display: grid;
+    gap: var(--space-1);
     padding: var(--space-2) 0;
     border-bottom: 1px solid var(--color-border-subtle);
   }
-  .role {
+  .sources span {
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
-    margin-left: var(--space-2);
   }
-  blockquote {
-    margin: var(--space-2) 0 0;
-    padding-left: var(--space-3);
-    border-left: 2px solid var(--color-accent-border);
-    color: var(--color-text-muted);
-  }
-  .note {
-    color: var(--color-text-muted);
+  .made {
+    color: var(--color-text-faint);
     font-size: var(--font-size--1);
   }
 </style>

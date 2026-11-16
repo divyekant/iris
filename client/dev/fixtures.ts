@@ -1,14 +1,14 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
 import type { Brief, Item, Message, Status } from "../src/api";
-import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json";
-import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json";
-import payment from "../../docs/spec/schema/examples/commitment-payment.json";
-import conversation from "../../docs/spec/schema/examples/conversation.json";
-import receipt from "../../docs/spec/schema/examples/record-receipt.json";
-import booking from "../../docs/spec/schema/examples/record-booking.json";
-import feed from "../../docs/spec/schema/examples/feed.json";
-import signal from "../../docs/spec/schema/examples/signal-code.json";
+import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
+import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
+import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
+import conversation from "../../docs/spec/schema/examples/conversation.json" with { type: "json" };
+import receipt from "../../docs/spec/schema/examples/record-receipt.json" with { type: "json" };
+import booking from "../../docs/spec/schema/examples/record-booking.json" with { type: "json" };
+import feed from "../../docs/spec/schema/examples/feed.json" with { type: "json" };
+import signal from "../../docs/spec/schema/examples/signal-code.json" with { type: "json" };
 
 export const items = [youOwe, owedToYou, payment, conversation, receipt, booking, feed, signal] as unknown as Item[];
 
@@ -40,6 +40,7 @@ export const brief: Brief = {
   strangers: of([]),
   hostile: 2,
   not_understood: 1,
+  oldest_fetched: null,
 };
 
 export function message(id: string): Message | undefined {

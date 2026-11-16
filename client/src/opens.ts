@@ -7,9 +7,13 @@ const KEY = "iris.opens";
 
 export type Opens = { count: number; since: string | null };
 
-export function readOpens(storage: Storage | undefined = globalThis.localStorage): Opens {
+// A browser can refuse storage: then the getter of localStorage throws.
+type Store = Pick<Storage, "getItem" | "setItem">;
+const local = (): Store | undefined => globalThis.localStorage;
+
+export function readOpens(storage: () => Store | undefined = local): Opens {
   try {
-    const value = JSON.parse(storage?.getItem(KEY) ?? "null");
+    const value = JSON.parse(storage()?.getItem(KEY) ?? "null");
     if (value && Number.isInteger(value.count)) return value;
   } catch {
     // No storage, or a bad value: start again from zero.
@@ -17,11 +21,11 @@ export function readOpens(storage: Storage | undefined = globalThis.localStorage
   return { count: 0, since: null };
 }
 
-export function countOpen(storage: Storage | undefined = globalThis.localStorage, now = new Date()): Opens {
+export function countOpen(storage: () => Store | undefined = local, now = new Date()): Opens {
   const opens = readOpens(storage);
   const next = { count: opens.count + 1, since: opens.since ?? now.toISOString() };
   try {
-    storage?.setItem(KEY, JSON.stringify(next));
+    storage()?.setItem(KEY, JSON.stringify(next));
   } catch {
     // Private windows can refuse storage. The page still works.
   }

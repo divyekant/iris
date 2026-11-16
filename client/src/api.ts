@@ -38,7 +38,9 @@ export type Item = {
   expires?: string;
 };
 
-export type Section = { count: number; items: Item[] };
+// `duplicates` maps an item ID to newer items that can be the same thing (spec 1
+// section 7.5). The newer items are not in `items`: the client shows a pair as one line.
+export type Section = { count: number; items: Item[]; duplicates?: Record<string, string[]> };
 
 export type Brief = {
   you_owe: Section;
@@ -50,6 +52,8 @@ export type Brief = {
   strangers: Section;
   hostile: number;
   not_understood: number;
+  /** While the first sync runs: the brief covers the mail from this date (spec 1 section 4.2). */
+  oldest_fetched?: string | null;
 };
 
 export type Account = {

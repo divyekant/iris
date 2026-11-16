@@ -5,7 +5,7 @@ import { render } from "./render.mjs";
 
 test("the app shows the Iris name and the views", async () => {
   const html = await render("/src/App.svelte");
-  assert.match(html, /<a class="name[^"]*" href="#\/">Iris<\/a>/);
+  assert.match(html, /<a class="name[^"]*" href="#\/brief">[\s\S]*?Iris\s*<\/a>/);
   for (const view of ["Brief", "Commitments", "Conversations", "Records", "Feed", "Signals", "Measures"]) {
     assert.match(html, new RegExp(`>${view}</a>`));
   }
