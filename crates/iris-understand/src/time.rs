@@ -23,13 +23,18 @@ fn civil(days: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
-/// RFC 3339 in UTC, for example `2026-11-02T10:00:00Z`.
+/// RFC 3339 in UTC, for example `2026-11-02T10:00:00Z`, with milliseconds
+/// when they are not zero (`2026-11-02T10:00:00.250Z`).
 pub fn rfc3339(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let (y, m, d) = civil(secs.div_euclid(86_400));
     let r = secs.rem_euclid(86_400);
+    let frac = match ms.rem_euclid(1000) {
+        0 => String::new(),
+        f => format!(".{f:03}"),
+    };
     format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}{frac}Z",
         r / 3600,
         r % 3600 / 60,
         r % 60
@@ -61,10 +66,23 @@ pub fn parse_rfc3339(v: &str) -> Option<i64> {
         return None;
     }
     let mut i = 19;
+    // Milliseconds from the first 3 digits of a fraction; more digits are
+    // below a millisecond.
+    let mut frac = 0;
     if b[i] == b'.' {
         i += 1;
+        let start = i;
         while i < b.len() && b[i].is_ascii_digit() {
+            if i - start < 3 {
+                frac = frac * 10 + i64::from(b[i] - b'0');
+            }
             i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        for _ in (i - start)..3 {
+            frac *= 10;
         }
     }
     let off = match b.get(i)? {
@@ -80,7 +98,7 @@ pub fn parse_rfc3339(v: &str) -> Option<i64> {
         _ => return None,
     };
     let days = days_from_civil(y, mo, d);
-    Some((days * 86_400 + h * 3600 + mi * 60 + s - off * 60) * 1000)
+    Some((days * 86_400 + h * 3600 + mi * 60 + s - off * 60) * 1000 + frac)
 }
 
 #[cfg(test)]
@@ -94,8 +112,27 @@ mod tests {
         assert_eq!(super::parse_rfc3339("1970-01-01T01:00:00+01:00"), Some(0));
         assert_eq!(
             super::parse_rfc3339("2024-08-31T02:09:01.25Z"),
-            Some(1_725_070_141_000)
+            Some(1_725_070_141_250)
         );
+        assert_eq!(
+            super::rfc3339(1_725_070_141_250),
+            "2024-08-31T02:09:01.250Z"
+        );
+        assert_eq!(super::parse_rfc3339("2024-08-31T02:09:01.Z"), None);
         assert_eq!(super::parse_rfc3339("2024-08-31 02:09:01"), None);
+    }
+
+    /// Each time in milliseconds goes to text and back with no change.
+    #[test]
+    fn round_trip_property() {
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        for _ in 0..10_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            // Years 1 to 9999.
+            let ms = (x % 315_537_897_600_000) as i64 - 62_135_596_800_000;
+            assert_eq!(super::parse_rfc3339(&super::rfc3339(ms)), Some(ms), "{ms}");
+        }
     }
 }

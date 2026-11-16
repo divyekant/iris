@@ -7,10 +7,10 @@ pub(crate) const HEAD_MAX: usize = 256 * 1024;
 
 /// The headers of one message, in order from the top, with folded lines
 /// joined. Names are lowercase.
-pub(crate) struct Head(Vec<(String, String)>);
+pub struct Head(Vec<(String, String)>);
 
 impl Head {
-    pub(crate) fn parse(raw: &[u8]) -> Head {
+    pub fn parse(raw: &[u8]) -> Head {
         let raw = &raw[..raw.len().min(HEAD_MAX)];
         // The first empty line ends the head, with CRLF or LF line ends.
         let end = (0..raw.len())
@@ -37,7 +37,7 @@ impl Head {
     }
 
     /// The first header with this lowercase name.
-    pub(crate) fn get(&self, name: &str) -> Option<&str> {
+    pub fn get(&self, name: &str) -> Option<&str> {
         self.0
             .iter()
             .find(|(n, _)| n == name)
@@ -61,7 +61,7 @@ impl Head {
 
     /// Spec 1 section 6.7: `List-Unsubscribe`, `List-Id`, `Precedence: bulk`,
     /// or `Auto-Submitted` other than `no`.
-    pub(crate) fn automated(&self) -> bool {
+    pub fn automated(&self) -> bool {
         // The value without comments and parameters.
         let first_word = |v: &str| {
             strip_comments(v)
@@ -142,7 +142,7 @@ fn strip_comments(v: &str) -> String {
 
 /// Split an address list at the commas that are outside quotes and angle
 /// brackets. Each entry gives (lowercase address, display name).
-pub(crate) fn addresses(v: &str) -> Vec<(String, Option<String>)> {
+pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
     let mut push = |s: &str| {

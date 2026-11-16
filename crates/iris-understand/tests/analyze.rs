@@ -157,3 +157,30 @@ fn the_date_is_internal_date_then_the_header_then_now() {
         "From: a@example.org\nDate: 1 Jan 9223372036854775807 00:00 +0000\nSubject: x\n\nHi.\n";
     assert!(analysis(huge, &[], &[], &[]).head.date.is_none());
 }
+
+#[test]
+fn attachment_text_after_32000_characters_is_kept() {
+    let long = "word ".repeat(10_000);
+    let raw = format!(
+        "From: Shop <shop@example.com>
+Subject: Papers
+Content-Type: multipart/mixed; boundary=z
+
+--z
+Content-Type: text/plain
+
+See the file.
+--z
+Content-Type: text/plain; name=invoice.txt
+Content-Disposition: attachment; filename=invoice.txt
+
+{long}
+Total due: 77.00 USD.
+--z--
+"
+    );
+    let a = analysis(&raw, &[], &[], &[]);
+    assert!(a.text.attachment_text[0]
+        .1
+        .contains("Total due: 77.00 USD."));
+}

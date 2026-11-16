@@ -102,40 +102,31 @@ pub struct Text {
     /// `(name, MIME type, size in bytes)`.
     pub attachments: Vec<(String, String, u64)>,
     /// `(name, text)` of each attachment with text (a plain-text file, an
-    /// attached message or a simple PDF), at most [`ATTACHMENT_TEXT_CHARS`]
-    /// characters in all.
+    /// attached message or a simple PDF), all the text that `iris-clean`
+    /// extracts (at most `iris_clean::ATTACHMENT_TEXT_LIMIT` bytes in all,
+    /// specification 1, section 7.2). The model call bounds its own data.
     pub attachment_text: Vec<(String, String)>,
+    /// `iris-clean` cut the clean text at its limit.
+    pub cut: bool,
 }
-
-/// The most characters of attachment text that the model gets for one
-/// message, in addition to the clean text. It bounds the cost of a call.
-pub const ATTACHMENT_TEXT_CHARS: usize = 32_000;
 
 impl Text {
     pub fn of(raw: &[u8]) -> Text {
         let c = iris_clean::clean(raw);
-        let mut left = ATTACHMENT_TEXT_CHARS;
         let mut attachment_text = Vec::new();
-        for a in &c.attachments {
-            let Some(t) = a.text.as_deref().filter(|t| !t.trim().is_empty()) else {
-                continue;
-            };
-            if left == 0 {
-                break;
+        let mut attachments = Vec::with_capacity(c.attachments.len());
+        for a in c.attachments {
+            if let Some(t) = a.text.filter(|t| !t.trim().is_empty()) {
+                attachment_text.push((a.name.clone(), t));
             }
-            let t = cut(t, left);
-            left -= t.chars().count();
-            attachment_text.push((a.name.clone(), t));
+            attachments.push((a.name, a.mime_type, a.size));
         }
         Text {
             subject: c.subject,
             text: c.text,
-            attachments: c
-                .attachments
-                .into_iter()
-                .map(|a| (a.name, a.mime_type, a.size))
-                .collect(),
+            attachments,
             attachment_text,
+            cut: c.cut,
         }
     }
 }
@@ -191,12 +182,4 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
         marks.push(Mark::Spam);
     }
     Analysis { head, text, marks }
-}
-
-/// `s` with at most `n` characters.
-fn cut(s: &str, n: usize) -> String {
-    match s.char_indices().nth(n) {
-        Some((i, _)) => s[..i].to_string(),
-        None => s.to_string(),
-    }
 }

@@ -26,7 +26,8 @@ pub struct Head {
     pub in_reply_to: Option<String>,
     pub list_id: Option<String>,
     pub list_unsubscribe: bool,
-    /// `Precedence: bulk` or `list`, or `Auto-Submitted` other than `no`.
+    /// `List-Id`, `List-Unsubscribe`, `Precedence: bulk`, or
+    /// `Auto-Submitted` other than `no` (the rule of `iris-senders`).
     pub automated: bool,
     /// The results of the top `Authentication-Results` header of Gmail.
     pub auth: Option<Auth>,
@@ -51,11 +52,14 @@ impl Auth {
         serde_json::json!({ "spf": self.spf, "dkim": self.dkim, "dmarc": self.dmarc }).to_string()
     }
 
-    /// True if a DKIM signature of `domain` passes.
+    /// True if a DKIM signature of `domain` or of a parent domain of it
+    /// passes (relaxed alignment, the rule of `iris-senders`).
     pub fn dkim_pass(&self, domain: &str) -> bool {
-        self.dkim
-            .iter()
-            .any(|(d, r)| r == "pass" && d.eq_ignore_ascii_case(domain))
+        let domain = domain.to_ascii_lowercase();
+        self.dkim.iter().any(|(d, r)| {
+            let d = d.to_ascii_lowercase();
+            r == "pass" && !d.is_empty() && (domain == d || domain.ends_with(&format!(".{d}")))
+        })
     }
 }
 
@@ -85,9 +89,6 @@ impl Head {
                 .map(|v| addresses(v).into_iter().map(|(a, _)| a).collect())
                 .unwrap_or_default()
         };
-        let auto = get("auto-submitted").is_some_and(|v| !v.eq_ignore_ascii_case("no"));
-        let bulk = get("precedence")
-            .is_some_and(|v| v.eq_ignore_ascii_case("bulk") || v.eq_ignore_ascii_case("list"));
         // Gmail adds its header at the top. A sender can add more below it.
         let auth = fields
             .iter()
@@ -104,7 +105,8 @@ impl Head {
             in_reply_to: nonempty(get("in-reply-to")),
             list_id: nonempty(get("list-id")),
             list_unsubscribe: get("list-unsubscribe").is_some(),
-            automated: auto || bulk,
+            // The same rule as the sender kinds of `iris-senders`.
+            automated: iris_senders::head::Head::parse(raw).automated(),
             auth,
             invitation: invitation(raw),
         }
@@ -133,30 +135,20 @@ fn fields(raw: &[u8]) -> Vec<(String, String)> {
     out
 }
 
-/// The addresses of an address list: `(bare address lowercase, display name)`.
-/// Commas inside quotes, angle brackets and comments do not split.
+/// The addresses of an address list: `(bare address lowercase, display name)`,
+/// with the parser of `iris-senders` (groups, quotes, comments), and the
+/// display name decoded (RFC 2047).
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
-    let mut parts = Vec::new();
-    let (mut quote, mut angle, mut paren, mut start) = (false, false, 0u32, 0);
-    let b = v.as_bytes();
-    for (i, &c) in b.iter().enumerate() {
-        match c {
-            b'"' if paren == 0 && (i == 0 || b[i - 1] != b'\\') => quote = !quote,
-            b'<' if !quote && paren == 0 => angle = true,
-            b'>' if !quote && paren == 0 => angle = false,
-            b'(' if !quote => paren += 1,
-            b')' if !quote => paren = paren.saturating_sub(1),
-            b',' if !quote && !angle && paren == 0 => {
-                parts.push(&v[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&v[start..]);
-    parts
+    iris_senders::head::addresses(v)
         .into_iter()
-        .filter_map(one_address)
+        .filter(|(a, _)| !a.contains(char::is_whitespace))
+        .map(|(a, n)| {
+            (
+                a,
+                n.map(|n| decode_name(&n.replace("\\\"", "\"")))
+                    .filter(|n| !n.is_empty()),
+            )
+        })
         .take(MAX_ADDRS)
         .collect()
 }
@@ -169,22 +161,6 @@ fn decode_name(n: &str) -> String {
     }
     let one = n.replace(['\r', '\n'], " ");
     iris_clean::clean(format!("Subject: {one}\r\n\r\n").as_bytes()).subject
-}
-
-fn one_address(p: &str) -> Option<(String, Option<String>)> {
-    let p = p.trim();
-    let (addr, name) = match (p.rfind('<'), p.rfind('>')) {
-        (Some(l), Some(r)) if l < r => (&p[l + 1..r], Some(p[..l].trim())),
-        _ => (p.split('(').next().unwrap_or(p), None),
-    };
-    let addr = addr.trim().to_ascii_lowercase();
-    if !addr.contains('@') || addr.contains(char::is_whitespace) {
-        return None;
-    }
-    let name = name
-        .map(|n| decode_name(&n.trim_matches('"').replace("\\\"", "\"")))
-        .filter(|n| !n.is_empty());
-    Some((addr, name))
 }
 
 /// The results of one `Authentication-Results` value, if its authserv-id is
@@ -262,8 +238,10 @@ fn invitation(raw: &[u8]) -> bool {
     let (mut in_head, mut cal) = (true, false);
     // The Content-Type value of the header block that the loop reads now.
     let mut ct: Option<Vec<u8>> = None;
-    // The entity has `Content-Transfer-Encoding: base64`.
+    // The entity has `Content-Transfer-Encoding: base64` or
+    // `quoted-printable`.
     let (mut b64_head, mut b64) = (false, false);
+    let (mut qp_head, mut qp) = (false, false);
     // The base64 text of a calendar body, at most CALENDAR_B64 bytes.
     let mut buf: Vec<u8> = Vec::new();
     let end_header = |ct: &mut Option<Vec<u8>>, cal: &mut bool, b: &mut Vec<Vec<u8>>| -> bool {
@@ -294,6 +272,7 @@ fn invitation(raw: &[u8]) -> bool {
                 return true;
             }
             (in_head, cal, b64_head, b64) = (true, false, false, false);
+            (qp_head, qp) = (false, false);
             buf.clear();
             continue;
         }
@@ -304,8 +283,10 @@ fn invitation(raw: &[u8]) -> bool {
                     return true;
                 }
                 b64 = cal && b64_head;
+                qp = cal && qp_head;
             } else if line.starts_with(b" ") || line.starts_with(b"\t") {
-                if let Some(v) = ct.as_mut() {
+                // A folded value stays inside the header limit.
+                if let Some(v) = ct.as_mut().filter(|v| v.len() + line.len() <= HEAD_LIMIT) {
                     v.extend_from_slice(line);
                 }
             } else {
@@ -313,18 +294,25 @@ fn invitation(raw: &[u8]) -> bool {
                     return true;
                 }
                 if line.len() > 13 && line[..13].eq_ignore_ascii_case(b"content-type:") {
-                    ct = Some(line[13..].to_vec());
+                    ct = Some(line[13..line.len().min(HEAD_LIMIT)].to_vec());
                 }
                 let cte = b"content-transfer-encoding:";
                 if line.len() > cte.len() && line[..cte.len()].eq_ignore_ascii_case(cte) {
-                    b64_head = line[cte.len()..]
-                        .trim_ascii()
-                        .eq_ignore_ascii_case(b"base64");
+                    let v = line[cte.len()..].trim_ascii();
+                    b64_head = v.eq_ignore_ascii_case(b"base64");
+                    qp_head = v.eq_ignore_ascii_case(b"quoted-printable");
                 }
             }
         } else if b64 {
             if buf.len() + line.len() <= CALENDAR_B64 {
                 buf.extend_from_slice(line.trim_ascii());
+            }
+        } else if qp {
+            if quoted_printable(line)
+                .trim_ascii()
+                .eq_ignore_ascii_case(b"METHOD:REQUEST")
+            {
+                return true;
             }
         } else if cal && line.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST") {
             return true;
@@ -336,6 +324,27 @@ fn invitation(raw: &[u8]) -> bool {
 /// The most base64 bytes of one calendar body that the scan decodes. The
 /// METHOD line comes near the start of a calendar.
 const CALENDAR_B64: usize = 64 * 1024;
+
+/// Decode one quoted-printable line (`=3A` to `:`). A short calendar line
+/// such as `METHOD:REQUEST` is not folded with a soft line break.
+fn quoted_printable(line: &[u8]) -> Vec<u8> {
+    let hex = |c: Option<&u8>| c.and_then(|&c| (c as char).to_digit(16));
+    let mut out = Vec::with_capacity(line.len());
+    let mut i = 0;
+    while i < line.len() {
+        match (line[i], hex(line.get(i + 1)), hex(line.get(i + 2))) {
+            (b'=', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
 
 /// Decode a base64 body. Line ends and other bytes that are not base64 go
 /// out first. A body that does not decode gives nothing.
@@ -462,6 +471,40 @@ From: a@bank.example\r\n\r\nbody";
             Some(1_725_070_141_000)
         );
         assert_eq!(date("not a date"), None);
+    }
+
+    #[test]
+    fn a_quoted_printable_calendar_request_is_found() {
+        let raw = b"Content-Type: multipart/mixed; boundary=z\r\n\r\n--z\r\nContent-Type: text/calendar\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD=3AREQUEST\r\nEND:VCALENDAR\r\n--z--\r\n";
+        assert!(super::invitation(raw));
+        let cancel = String::from_utf8_lossy(raw).replace("REQUEST", "CANCEL");
+        assert!(!super::invitation(cancel.as_bytes()));
+    }
+
+    #[test]
+    fn a_huge_content_type_stays_bounded() {
+        let long = "x".repeat(4 * super::HEAD_LIMIT);
+        let raw =
+            format!("Content-Type: text/calendar; a={long}\r\n {long}\r\n\r\nMETHOD:REQUEST\r\n");
+        // The scan ends and still reads the body.
+        assert!(super::invitation(raw.as_bytes()));
+    }
+
+    #[test]
+    fn groups_comments_and_parent_dkim_domains() {
+        let h = super::Head::parse(b"From: a@mail.example.org\r\nTo: Friends: alice@example.org, Bob <BOB@example.org>;\r\nPrecedence: bulk (list mail)\r\n\r\nx");
+        assert_eq!(h.to, vec!["alice@example.org", "bob@example.org"]);
+        assert!(h.automated);
+        let human =
+            super::Head::parse(b"From: a@b.c\r\nAuto-Submitted: no (human-generated)\r\n\r\nx");
+        assert!(!human.automated);
+        let a = super::Auth {
+            dkim: vec![("example.org".into(), "pass".into())],
+            ..Default::default()
+        };
+        assert!(a.dkim_pass("mail.example.org"));
+        assert!(a.dkim_pass("example.org"));
+        assert!(!a.dkim_pass("badexample.org"));
     }
 
     #[test]
