@@ -9,6 +9,7 @@ macro_rules! say {
     }};
 }
 
+pub mod cost;
 pub mod engine;
 pub mod verbs;
 
@@ -89,6 +90,70 @@ pub enum Command {
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+    /// Set or show the model of understanding, its price and its budget.
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+    /// Understand the mail: an estimate, the approval of a budget, or a run.
+    Understand {
+        /// Print the estimate and an approval code. No model call.
+        #[arg(long, conflicts_with_all = ["approve", "max_cost", "max_messages"])]
+        estimate: bool,
+        /// Approve a budget with the code of `--estimate`. Needs a terminal.
+        #[arg(long, requires = "budget", conflicts_with_all = ["max_cost", "max_messages"])]
+        approve: Option<String>,
+        /// The new budget in USD. It replaces the budget that is left.
+        #[arg(long, requires = "approve")]
+        budget: Option<String>,
+        /// Stop the run when its cost reaches this many USD.
+        #[arg(long)]
+        max_cost: Option<String>,
+        /// Stop the run after this many messages.
+        #[arg(long)]
+        max_messages: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ModelCommand {
+    /// Set the model. This clears the budget: approve a new one.
+    Set {
+        #[command(subcommand)]
+        provider: SetModel,
+    },
+    /// Show the model, the price and the budget left. Never the key.
+    Show,
+}
+
+#[derive(Subcommand)]
+pub enum SetModel {
+    /// A model of Anthropic. The API key comes from standard input.
+    Anthropic {
+        model: String,
+        /// USD for one million input tokens, 0 to 1000.
+        #[arg(long)]
+        price_in: String,
+        /// USD for one million output tokens, 0 to 1000.
+        #[arg(long)]
+        price_out: String,
+        #[arg(long, default_value_t = cost::DEFAULT_MAX_TOKENS)]
+        max_tokens: u32,
+        /// The time limit of one call, in seconds.
+        #[arg(long, default_value_t = cost::DEFAULT_TIMEOUT_S)]
+        timeout: u32,
+    },
+    /// A local OpenAI-compatible server on this machine. No key, no price.
+    Local {
+        /// For example http://127.0.0.1:8080/v1. Only localhost, 127.0.0.0/8 or [::1].
+        base_url: String,
+        model: String,
+        #[arg(long, default_value_t = cost::DEFAULT_MAX_TOKENS)]
+        max_tokens: u32,
+        /// The time limit of one call, in seconds.
+        #[arg(long, default_value_t = cost::DEFAULT_TIMEOUT_S)]
+        timeout: u32,
     },
 }
 
@@ -185,7 +250,95 @@ pub fn run(cli: Cli) -> Result<(), String> {
             println!("{}", service(*action).map_err(|e| e.to_string())?);
             Ok(())
         }
+        Command::Model { command } => {
+            let text = match command {
+                ModelCommand::Show => cost::show_model(&open()?)?,
+                ModelCommand::Set { provider } => model_set(&open()?, provider)?,
+            };
+            println!("{text}");
+            Ok(())
+        }
+        Command::Understand {
+            estimate,
+            approve,
+            budget,
+            max_cost,
+            max_messages,
+        } => {
+            let store = open()?;
+            let now = engine::now_ms();
+            let text = match (estimate, approve, budget) {
+                (true, _, _) => cost::estimate(&store, now)?,
+                (_, Some(code), Some(budget)) => cost::approve_command(&store, code, budget)?,
+                _ => {
+                    let limits = iris_understand::batch::Limits {
+                        max_messages: *max_messages,
+                        max_cost_micro_usd: max_cost
+                            .as_deref()
+                            .map(|c| cost::parse_usd(c, cost::MAX_BUDGET_USD))
+                            .transpose()?,
+                        ..Default::default()
+                    };
+                    cost::run(&store, &limits, now)?
+                }
+            };
+            println!("{text}");
+            Ok(())
+        }
     }
+}
+
+/// `iris model set`: checks the input first, then reads the key, then
+/// writes the row.
+fn model_set(store: &Store, provider: &SetModel) -> Result<String, String> {
+    let m = match provider {
+        SetModel::Anthropic {
+            model,
+            price_in,
+            price_out,
+            max_tokens,
+            timeout,
+        } => {
+            let price = (
+                cost::parse_usd(price_in, cost::MAX_PRICE_USD)?,
+                cost::parse_usd(price_out, cost::MAX_PRICE_USD)?,
+            );
+            cost::NewModel {
+                local: false,
+                base_url: "https://api.anthropic.com".into(),
+                model: model.clone(),
+                price: Some(price),
+                api_key: Some(cost::read_key()?),
+                max_tokens: *max_tokens,
+                timeout_s: *timeout,
+            }
+        }
+        SetModel::Local {
+            base_url,
+            model,
+            max_tokens,
+            timeout,
+        } => {
+            cost::local_host(base_url)?;
+            cost::NewModel {
+                local: true,
+                base_url: base_url.clone(),
+                model: model.clone(),
+                price: None,
+                api_key: None,
+                max_tokens: *max_tokens,
+                timeout_s: *timeout,
+            }
+        }
+    };
+    if m.max_tokens == 0 || m.timeout_s == 0 {
+        return Err("--max-tokens and --timeout must be larger than 0".into());
+    }
+    let version = cost::set_model(store, &m)?;
+    Ok(format!(
+        "Model set: {} (version {version}). The budget is cleared: run `iris understand --estimate`.",
+        m.model
+    ))
 }
 
 /// `iris mirror sync|verify`: each account that has a sign-in, one at a time.

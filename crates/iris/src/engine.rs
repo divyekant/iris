@@ -365,7 +365,7 @@ pub fn data_dir(setting: Option<PathBuf>) -> std::io::Result<PathBuf> {
         .ok_or_else(|| std::io::Error::other("no data folder: set --data or IRIS_DATA"))
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

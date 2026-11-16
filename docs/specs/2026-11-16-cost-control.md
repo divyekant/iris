@@ -360,15 +360,19 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
 - `iris model set anthropic <model> --price-in <usd> --price-out <usd>`
   reads the API key from standard input with no echo. It never takes the
   key as an argument.
-- `iris model set local <base-url> <model>`: no key, no price. The host of
-  `<base-url>` must be a loopback IP literal (`127.0.0.0/8` or `::1`) or
+- `iris model set local <base-url> <model>`: no key, no price. The scheme
+  of `<base-url>` must be `http`: TLS on loopback adds nothing, and the run
+  connects to an IP literal, which a certificate for `localhost` does not
+  match. The host of `<base-url>` must be a loopback IP literal (`127.0.0.0/8` or `::1`) or
   `localhost`, so the mail text stays on the machine. Any other host is
   refused. A remote server is not a local model.
 - `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an
-  error, and the body goes nowhere else. For a local model, the client also
-  checks that the address of the connection is a loopback address, also
-  after the name lookup of `localhost` (R1-15, with the host check of
-  `iris model set local`). A local model call uses no HTTP proxy: the client
+  error, and the body goes nowhere else. For a local model, `iris` looks up
+  the host before each run. Each address must be a loopback address. Then
+  the client connects to the first of these addresses that accepts a TCP
+  connection (else the first address), as an IP literal, so a later
+  name lookup cannot change the address of the connection (R1-15, with the
+  host check of `iris model set local`). A local model call uses no HTTP proxy: the client
   ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and any configured proxy
   for it, so no proxy on loopback can forward the mail.
 - `iris model show`: the settings and the budget left, never the key.
@@ -404,7 +408,12 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
 - Counts in memory: a crash loses them.
 - Built-in prices: they go out of date.
 
-No parser or protocol code is new. The model client is `iris-model`.
+The model client is `iris-model`. Two parsers of command input are new
+in `crates/iris`: the local model URL uses `http::Uri` (already in the build
+through `ureq`), and a USD amount is parsed as decimal text to whole
+micro-USD by a short parser with a property test. A decimal crate
+(`rust_decimal`, `bigdecimal`) gives more than a bounded amount with 6
+decimals needs and adds a dependency.
 
 ## Failure list
 

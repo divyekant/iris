@@ -125,6 +125,25 @@ it (tracker items R1-10 and R1-28). Before that, use `label:`, `after:` and
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
 
+## Understand the mail
+
+The understanding step reads each message once and stores its items. Fixed
+rules run first and cost nothing. A model reads the rest. A message that was
+understood is not read again, so a second run makes no model call.
+
+| Command | Does |
+|---|---|
+| `iris model set local <base-url> <model>` | Uses a model server on this machine, for example `http://localhost:11434/v1`. No key, no cost. |
+| `iris model set anthropic <model> --price-in <usd> --price-out <usd>` | Uses Anthropic. Reads the API key from standard input. The prices are USD for each million tokens. |
+| `iris model show` | The model, the prices and the budget that is left. It never shows the key. |
+| `iris understand --estimate` | The count of messages, the tokens and the cost. It makes no call. It prints an approval code. |
+| `iris understand --approve <code> --budget <usd>` | Sets the budget. It needs a terminal and asks you to type the budget again. |
+| `iris understand` | Reads the messages that are not understood yet, inside the budget. |
+
+A hosted model makes no call before you approve a budget. Each
+`iris model set` clears the budget, so a new estimate and a new approval are
+necessary.
+
 To copy the data folder while the engine runs, run:
 
 ```bash
