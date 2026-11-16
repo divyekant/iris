@@ -10,8 +10,10 @@ screen. If the product has no UI, write "No UI." below and keep the file.
 active brand. The light palette follows the viewer.
 
 The palette is "Iris": iris violet on cool ink neutrals (card R1-27,
-decision D4). The violet is the color of the product. It is never a state
-color, so it does not look like a warning or a success.
+decision D4). The violet is the color of the product. It marks the active view,
+focus, the main button, information (`info`) and a conversation that waits
+for you (`unread`). It is never `success`, `warning` or `error`, so it does
+not look like a good or a bad state.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
