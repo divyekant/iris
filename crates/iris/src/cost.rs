@@ -504,11 +504,27 @@ pub fn connect(store: &Store, row: &ModelRow) -> Result<Box<dyn iris_understand:
 pub fn run(store: &Store, limits: &Limits, now_ms: i64) -> Result<String, String> {
     let connect = |row: &ModelRow| connect(store, row);
     let r = batch::run(store, &connect, limits, now_ms).map_err(|e| e.to_string())?;
+    report_of(store, &r)
+}
+
+/// The run after a sync (R1-28): the batch runner with no limit but the
+/// budget. Gives `None` if another run holds the lock: that run reads the
+/// pending messages.
+pub fn after_sync(store: &Store) -> Result<Option<String>, String> {
+    let connect = |row: &ModelRow| connect(store, row);
+    match batch::run(store, &connect, &Limits::default(), crate::engine::now_ms()) {
+        Ok(r) => report_of(store, &r).map(Some),
+        Err(batch::Error::Busy) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn report_of(store: &Store, r: &Report) -> Result<String, String> {
     let left = store
         .read(|c| Ok(model_row(c)?))
         .map_err(|e| e.to_string())?
         .and_then(|m| m.price.and(Some(m.budget_micro_usd)));
-    Ok(report_text(&r, left))
+    Ok(report_text(r, left))
 }
 
 fn report_text(r: &Report, left: Option<Option<i64>>) -> String {

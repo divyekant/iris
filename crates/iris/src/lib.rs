@@ -400,11 +400,27 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             }
         }
     }
+    // Understanding gives the words and the senders that search finds
+    // (spec 1 section 5.6). It also runs if one account failed.
+    if matches!(command, MirrorCommand::Sync) {
+        match cost::after_sync(&store) {
+            Ok(Some(report)) => print!("{}", prefix_lines("understand: ", &report)),
+            Ok(None) => println!("understand: another run is in progress"),
+            Err(e) => {
+                failed = true;
+                say!("iris: understand: {e}");
+            }
+        }
+    }
     if failed {
-        Err("one or more accounts failed".into())
+        Err("one or more accounts, or the understanding run, failed".into())
     } else {
         Ok(())
     }
+}
+
+fn prefix_lines(prefix: &str, text: &str) -> String {
+    text.lines().map(|l| format!("{prefix}{l}\n")).collect()
 }
 
 fn print(out: verbs::Output) -> Result<(), String> {

@@ -407,3 +407,26 @@ fn a_tick_opens_a_deferred_commitment_on_its_date() {
         .unwrap();
     assert_eq!(status, "open");
 }
+
+#[test]
+fn the_engine_runs_understanding_after_a_sync() {
+    let s = setup("engine-understand", 5);
+    let mut e = Engine::new(
+        s.store.clone(),
+        config(s.fake.base_url()),
+        Some(s.tokens.uri.clone()),
+    );
+    assert_eq!(e.tick().unwrap(), vec![s.account]);
+    // The header rows (the words and the senders of search) come from
+    // understanding, not from the sync.
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM understand_run WHERE ended_at IS NOT NULL",
+        Duration::from_secs(30),
+    );
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM header",
+        Duration::from_secs(30),
+    );
+}

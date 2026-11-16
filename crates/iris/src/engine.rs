@@ -267,9 +267,17 @@ impl Worker {
     /// Sync each [`SYNC_EVERY`] until the account leaves the list of
     /// [`sync_accounts`]. Each error goes to standard error.
     pub fn run(mut self) {
+        // The first sync of the thread runs understanding too, so a model
+        // or a budget set before a restart is used without new mail. A run
+        // that another run blocked is owed to the next turn.
+        let mut owed = true;
         loop {
             match self.sync() {
-                Ok(_) => {}
+                Ok(s) => {
+                    if owed || s.fetched + s.gone > 0 {
+                        owed = !understand(&self.store, self.account);
+                    }
+                }
                 // Another process syncs the account: not an error.
                 Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
                 Err(e) => say!("iris: account {}: {e}", self.account),
@@ -279,6 +287,20 @@ impl Worker {
                 _ => {}
             }
             std::thread::sleep(SYNC_EVERY);
+        }
+    }
+}
+
+/// The run of understanding after a sync (R1-28). Gives the words and the
+/// senders that search finds (spec 1 section 5.6). If another run holds
+/// the lock, it gives false, and the caller tries again at the next turn:
+/// the other run can pass the new mail. Each error goes to standard error.
+fn understand(store: &Store, account: i64) -> bool {
+    match crate::cost::after_sync(store) {
+        Ok(ran) => ran.is_some(),
+        Err(e) => {
+            say!("iris: account {account}: understand: {e}");
+            true
         }
     }
 }

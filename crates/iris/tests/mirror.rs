@@ -106,3 +106,41 @@ fn mirror_verify_reports_an_account_that_needs_sign_in() {
     );
     assert!(out.contains("account 2: verified at history"), "{out}");
 }
+
+#[test]
+fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
+    let mailbox = Mailbox::new(5, 25);
+    // A message of a known person: its `From` address and a word of its
+    // subject, read from the raw bytes that the fake serves.
+    let (from, word) = (0..mailbox.len())
+        .filter(|&i| mailbox.truth(i).sender == iris_synth::Sender::KnownPerson)
+        .find_map(|i| {
+            let raw = mailbox.raw(i);
+            let head = iris_understand::Head::parse(&raw);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let subject = text.lines().find_map(|l| l.strip_prefix("Subject: "))?;
+            if subject.contains("=?") {
+                return None;
+            }
+            let word = subject
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .find(|w| w.len() >= 5)?
+                .to_lowercase();
+            Some((head.from_addr?, word))
+        })
+        .expect("a known person with a subject word");
+    let fake = FakeGmail::start(mailbox).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-understand");
+    let store = Store::open(&dir).unwrap();
+    add_account(&store, &gmail(fake.base_url()));
+
+    let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("understand: Run "), "{out}");
+    for query in [word, format!("from:{from}")] {
+        let (ok, out, err) = iris(&dir, &fake, &tokens, &["search", &query, "--json"]);
+        assert!(ok, "{err}");
+        assert!(!out.trim().is_empty(), "no result for {query}");
+    }
+}
