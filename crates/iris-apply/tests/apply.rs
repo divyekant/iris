@@ -434,6 +434,54 @@ fn two_applies_make_one_write() {
     }
 }
 
+/// The mode changes to observe during the reads of step 2: the action
+/// waits, with no write call. The expiry is in the same check.
+#[test]
+fn the_mark_checks_the_mode_again() {
+    let b = setup("late-mode", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    let a = b.approved("archive", &ms, PERSON);
+    // The profile call passes; the first label read gets 401, and the new
+    // token comes after the person changed the mode.
+    b.fake.fail_next(&[0, 401]);
+    let r = b.apply_as(b.account, a, &mut || {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO policy_version(text, sha256, confirmed_at)
+                     VALUES ('version = 0\nmode = \"observe\"\n', 'h4', 4)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        Some(TOKEN.into())
+    });
+    assert_eq!(r.unwrap(), Outcome::Waiting);
+    assert_eq!(b.state(a).0, "approved");
+    assert!(!b.applying(a));
+    assert_eq!(b.calls("messages"), 0);
+}
+
+/// A token of another mailbox changes nothing.
+#[test]
+fn the_token_must_be_of_the_account() {
+    let b = setup("mailbox", 40, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved("archive", &ms, PERSON);
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE account SET address = 'someone@example.com' WHERE id = ?1",
+                [b.account],
+            )?)
+        })
+        .unwrap();
+    assert!(matches!(b.apply(a), Err(Error::OtherMailbox)));
+    assert_eq!(b.state(a).0, "approved");
+    assert!(!b.applying(a));
+    assert_eq!(b.calls("messages"), 0);
+}
+
 /// More than 1,000 messages: one batchModify call for each 1,000.
 #[test]
 fn a_large_action_streams_in_pages() {

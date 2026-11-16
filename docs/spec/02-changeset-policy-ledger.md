@@ -650,7 +650,8 @@ other than success is `failed`.
 | Input or event | Failure mode | Safe result |
 |---|---|---|
 | An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. |
-| The mode is `observe` | An action applies without the mode `apply` | The action stays `approved` and waits. |
+| The mode is `observe`, also when the person changes it during the reads of step 2 | An action applies without the mode `apply` | The action stays `approved` and waits. The transaction that sets the mark checks the mode and the expiry again. |
+| A token of another mailbox | The Gmail IDs of one mailbox change messages of another | Before step 2, and after each new token, the address of the Gmail profile must be the address of the account. Else the apply changes nothing (`OtherMailbox`), or the new token counts as no token. |
 | An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | The bulk count of the last hour needs the ledger. So the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
 | The hash of the rows does not agree with the hash of the approval | The person approved one action, and another applies | The engine denies the action, by `engine`. |
 | A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |

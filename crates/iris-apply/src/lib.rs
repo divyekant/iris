@@ -40,6 +40,9 @@ pub enum Error {
     /// changed its state before its first provider call (for example a
     /// withdraw), or another apply of the action has the mark.
     NotApproved(i64),
+    /// The token is of another mailbox than the account. The action stays
+    /// as it was.
+    OtherMailbox,
     /// Another apply runs now, in this process or in another. The action
     /// stays as it was. Apply again after the other apply.
     Busy,
@@ -55,6 +58,7 @@ impl std::fmt::Display for Error {
             Error::Gmail(e) => write!(f, "Gmail: {e}"),
             Error::NotApproved(a) => write!(f, "action {a} is not approved"),
             Error::Busy => write!(f, "another apply runs now"),
+            Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
         }
     }
@@ -161,6 +165,14 @@ pub fn hash(c: &Connection, action: i64) -> rusqlite::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// True if `token` is a token of the mailbox `address` (Gmail profile).
+fn owns(gmail: &Gmail, token: &str, address: &str) -> iris_gmail::Result<bool> {
+    Ok(gmail
+        .profile(token)?
+        .email_address
+        .eq_ignore_ascii_case(address))
+}
+
 /// The file lock `apply.lock` in the data folder. The operating system
 /// frees it when the process ends.
 fn lock(store: &Store) -> Result<std::fs::File> {
@@ -233,16 +245,32 @@ pub fn apply(
         return Ok(o);
     }
 
+    // Gmail message IDs belong to one mailbox: the token must be of the
+    // mailbox of the account.
+    let address: String = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT address FROM account WHERE id = ?1",
+            [account],
+            |r| r.get(0),
+        )?)
+    })?;
     let mut run = Run {
         store,
         gmail,
         token,
         renewed: false,
+        address,
         account,
         action,
         marked: false,
         counts: Counts::default(),
     };
+    let address = run.address.clone();
+    match run.call(|g, t| owns(g, t, &address)) {
+        Ok(true) => {}
+        Ok(false) => return Err(Error::OtherMailbox),
+        Err(e) => return Err(Error::Gmail(e)),
+    }
     let mut after = 0;
     loop {
         // A gone message has no provider ID here.
@@ -281,7 +309,9 @@ pub fn apply(
         run.counts.unchanged += same.len() as u64;
         mirror(store, account, &same);
         if !todo.is_empty() {
-            run.mark()?;
+            if let Some(o) = run.mark()? {
+                return Ok(o);
+            }
         }
         if let Err(e) = run.change(&change, &todo) {
             return run.stop(e);
@@ -297,6 +327,8 @@ struct Run<'a, 'b> {
     gmail: &'a Gmail,
     token: &'a mut Token<'b>,
     renewed: bool,
+    /// The address of the account: each token must be of this mailbox.
+    address: String,
     account: i64,
     action: i64,
     /// True after the mark `applying`: a write call can have started.
@@ -315,11 +347,12 @@ impl Run<'_, '_> {
             Err(iris_gmail::Error::Unauthorized) if !self.renewed => {
                 self.renewed = true;
                 match (self.token.renew)() {
-                    Some(t) => {
+                    // A token of another mailbox is no token for this one.
+                    Some(t) if owns(self.gmail, &t, &self.address)? => {
                         self.token.token = t;
                         f(self.gmail, &self.token.token)
                     }
-                    None => Err(iris_gmail::Error::Unauthorized),
+                    _ => Err(iris_gmail::Error::Unauthorized),
                 }
             }
             other => other,
@@ -328,24 +361,33 @@ impl Run<'_, '_> {
 
     /// Mark the action before its first write call. The mark is a claim:
     /// only one apply sets it, so a second apply of the same action at the
-    /// same time makes no write call.
-    fn mark(&mut self) -> Result<()> {
+    /// same time makes no write call. The same transaction checks the
+    /// expiry and the mode again, because the reads of step 2 take time.
+    fn mark(&mut self) -> Result<Option<Outcome>> {
         if self.marked {
-            return Ok(());
+            return Ok(None);
         }
-        let n = self.store.write(|tx| {
-            Ok(tx.execute(
+        let action = self.action;
+        let (gated, n) = self.store.write(|tx| {
+            if let Some(o) = gate(tx, action)? {
+                return Ok((Some(o), 0));
+            }
+            let n = tx.execute(
                 "UPDATE changeset_action SET applying = 1
                  WHERE id = ?1 AND state = 'approved' AND applying = 0
                    AND (SELECT state FROM changeset c WHERE c.id = changeset_id) <> 'withdrawn'",
-                [self.action],
-            )?)
+                [action],
+            )?;
+            Ok((None, n))
         })?;
+        if gated.is_some() {
+            return Ok(gated);
+        }
         if n == 0 {
-            return Err(Error::NotApproved(self.action));
+            return Err(Error::NotApproved(action));
         }
         self.marked = true;
-        Ok(())
+        Ok(None)
     }
 
     /// The end after a Gmail error. Before the mark, the action stays as it
@@ -408,6 +450,28 @@ fn failed(store: &Store, action: i64, counts: Counts, error: &str) -> Result<Out
     })
 }
 
+/// The expiry and the mode, in the transaction of the caller: `expired`
+/// 14 days after the submit (section 5.5), and a wait in the mode
+/// `observe` (section 5.4). Gives the outcome if the action does not apply
+/// now.
+fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
+    let expired = tx.execute(
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
+           policy = NULL, reason = NULL,
+           decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+         WHERE id = ?1 AND state = 'approved' AND applying = 0
+           AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
+        params![action, EXPIRY_MS],
+    )?;
+    if expired > 0 {
+        return Ok(Some(Outcome::Expired));
+    }
+    if iris_policy::active(tx)?.policy.mode == Mode::Observe {
+        return Ok(Some(Outcome::Waiting));
+    }
+    Ok(None)
+}
+
 /// The checks before the first provider call of an action. Gives the
 /// outcome if the action does not apply now.
 fn check(
@@ -417,23 +481,8 @@ fn check(
     decided_by: &str,
     approved_hash: Option<String>,
 ) -> Result<Option<Outcome>> {
-    // 14 days after its submit, an open action expires (section 5.5).
-    let expired = store.write(|tx| {
-        Ok(tx.execute(
-            "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
-               policy = NULL, reason = NULL,
-               decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-             WHERE id = ?1 AND state = 'approved'
-               AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
-            params![action, EXPIRY_MS],
-        )?)
-    })?;
-    if expired > 0 {
-        return Ok(Some(Outcome::Expired));
-    }
-    let active = store.read(iris_policy::active)?;
-    if active.policy.mode == Mode::Observe {
-        return Ok(Some(Outcome::Waiting));
+    if let Some(o) = store.write(|tx| gate(tx, action))? {
+        return Ok(Some(o));
     }
     // Section 5.4 evaluates a rule approval again before the apply, with
     // the bulk count of the last hour from the ledger. With no ledger, the
