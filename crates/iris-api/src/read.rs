@@ -339,7 +339,7 @@ pub fn search(store: &Store, text: &str, limit: u32) -> Result<Vec<MessageSummar
 
 /// The summaries of the messages `ids`, in order. A message that the sync
 /// marked gone after the search is left out.
-fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary>> {
+pub(crate) fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary>> {
     let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
         if let Some((summary, more)) = message_row(c, id)? {

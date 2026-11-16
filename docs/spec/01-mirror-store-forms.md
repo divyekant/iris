@@ -482,6 +482,7 @@ Iris gives short IDs that a person and an agent can type:
 | `r-` | Record |
 | `f-` | Feed item |
 | `s-` | Signal |
+| `w-` | Watch (card R5-07) |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
 Iris install and the engine never uses it again, also after a rebuild deletes
@@ -1131,7 +1132,9 @@ changeset (specification 2, section 5.4):
 - In the policy mode `apply`, the active policy decides each `proposed`
   action of the new revision in the same transaction (specification 2,
   section 5.4, step 5), and the action keeps the reason of the decision. In
-  the mode `observe`, each action stays `proposed`.
+  the mode `observe`, each action stays `proposed`, except an action that a
+  hard limit denies (specification 2, section 6.5): it gets `denied` by
+  `limit`.
 
 Failure list of a triage run. Supported input: the account row ID and the
 forms, labels and senders in the store.

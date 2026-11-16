@@ -187,3 +187,60 @@ fn serve_refuses_an_address_that_is_not_loopback() {
     assert!(err.contains("not a loopback address"), "{err}");
     assert!(!dir.exists(), "the engine opened the store");
 }
+
+#[test]
+fn a_watch_gives_one_notice_for_a_new_synced_mail() {
+    let (store, fake) = synced("watch");
+    let tokens = token_server();
+    // The fake gives its new messages a date in 2026-01.
+    let t = 1_767_225_600_000 - 60_000;
+    let id = iris_api::add_watch(&store, "\"lantern festival\" from:ana", t).unwrap();
+    let (ok, out, err) = iris(&store, &["watch", "add", "visa from:embassy"]);
+    assert!(ok, "{err}");
+    let other = out.split(':').next().unwrap().to_string();
+    assert!(other.starts_with("w-") && other != id, "{out}");
+    let (ok, _, err) = iris(&store, &["watch", "add", "form:email"]);
+    assert!(!ok && err.contains("form:"), "{err}");
+
+    let (_, out, _) = iris(&store, &["watch", "list"]);
+    assert_eq!(out.matches("waits").count(), 2, "{out}");
+
+    fake.add_message(
+        b"From: Ana Lee <ana@example.com>\r\nTo: owner@example.com\r\n\
+          Subject: Lantern festival tickets\r\nDate: Thu, 01 Jan 2026 00:00:00 +0000\r\n\
+          Message-ID: <watch-1@example.com>\r\n\r\nThe lantern festival is on.\r\n",
+        &["INBOX"],
+    );
+    Worker::new(store.clone(), gmail(fake.base_url()), 1, Some(tokens.uri))
+        .sync()
+        .unwrap();
+    // No model is set: the free steps write the clean text.
+    iris::cost::after_sync(&store, t).unwrap();
+    let found = store.check_watches(t).unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(store.check_watches(t).unwrap().is_empty(), "one notice");
+
+    let lines: Vec<Value> = iris(&store, &["watch", "list", "--json"])
+        .1
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        value(iris_api::watches(&store).unwrap()),
+        Value::from(lines.clone())
+    );
+    let arrived = lines.iter().find(|w| w["id"] == id.as_str()).unwrap();
+    assert_eq!(arrived["state"], "arrived");
+    assert_eq!(arrived["message"]["subject"], "Lantern festival tickets");
+    let (_, out, _) = iris(&store, &["watch", "list"]);
+    assert!(
+        out.contains("arrived") && out.contains("Lantern festival tickets"),
+        "{out}"
+    );
+
+    assert!(iris(&store, &["watch", "remove", &id]).0);
+    let (ok, _, err) = iris(&store, &["watch", "remove", &id]);
+    assert!(!ok && err.contains("no watch"), "{err}");
+    let (ok, _, err) = iris(&store, &["watch", "remove", "m-1"]);
+    assert!(!ok && err.contains("not a watch ID"), "{err}");
+}
