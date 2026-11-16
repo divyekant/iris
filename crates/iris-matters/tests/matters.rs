@@ -286,7 +286,9 @@ fn a_decision_needs_a_valid_proposal_and_a_live_keep() {
     sql(&b, "UPDATE item SET status = 'gone' WHERE id = 2").unwrap();
     for text in [
         format!("UPDATE matter SET status = 'declined', decided_at = 1 WHERE id = {m}"),
-        format!("UPDATE matter SET status = 'confirmed', decided_at = 1, keep = '[1]' WHERE id = {m}"),
+        format!(
+            "UPDATE matter SET status = 'confirmed', decided_at = 1, keep = '[1]' WHERE id = {m}"
+        ),
     ] {
         assert!(sql(&b, &text).is_err(), "{text}");
     }
