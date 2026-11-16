@@ -211,7 +211,7 @@ fn only_the_moves_of_section_5_2() {
                         "UPDATE changeset SET revision = 2, submitted_at = NULL;
                          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets,
                            args, hash) VALUES (1, 2, 1, 'archive', '{}', '{}', 'h');
-                         UPDATE changeset SET submitted_at = 0;",
+                         UPDATE changeset SET submitted_at = 1209600000;",
                     )?;
                     return Ok(from != Some("replaced") && now(tx)?.as_deref() == Some(to));
                 }
@@ -548,10 +548,63 @@ fn a_new_revision_replaces_and_is_a_draft() {
     })
     .unwrap();
     assert_eq!(state(&s, "SELECT state FROM changeset"), "closed");
+    // An approved action of revision 1 comes back to review after the
+    // submit of revision 2 (section 5.5). Only the next submit replaces it.
+    s.write(|tx| {
+        Ok(tx.execute_batch(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+             VALUES (2, 1, 1, 'archive', '{}', '{}', 'h');
+             UPDATE changeset SET why = 'w', submitted_at = 10 WHERE id = 2;
+             UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 11 WHERE changeset_id = 2;
+             UPDATE changeset SET revision = 2, submitted_at = NULL WHERE id = 2;
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+             VALUES (2, 2, 1, 'archive', '{}', '{}', 'h');
+             UPDATE changeset SET submitted_at = 20 WHERE id = 2;
+             UPDATE changeset_action SET state = 'in_review', decided_by = 'policy',
+               decided_at = 21 WHERE changeset_id = 2 AND revision = 1;",
+        )?)
+    })
+    .unwrap();
+    for at in [20, 21, 22] {
+        fails(
+            &s,
+            &format!(
+                "UPDATE changeset_action SET state = 'replaced', decided_by = 'author',
+                   rule = NULL, policy = NULL, reason = NULL, decided_at = {at}
+                 WHERE changeset_id = 2 AND revision = 1"
+            ),
+        );
+    }
+    s.write(|tx| {
+        Ok(tx.execute_batch(
+            "UPDATE changeset SET revision = 3, submitted_at = NULL WHERE id = 2;
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+             VALUES (2, 3, 1, 'archive', '{}', '{}', 'h');
+             UPDATE changeset SET submitted_at = 30 WHERE id = 2;",
+        )?)
+    })
+    .unwrap();
+    assert_eq!(
+        state(
+            &s,
+            "SELECT state FROM changeset_action WHERE changeset_id = 2 AND revision = 1"
+        ),
+        "replaced"
+    );
     // All actions decided, then a new revision: the changeset is a draft.
-    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 3, submitted_at = NULL", [])?))
-        .unwrap();
-    assert_eq!(state(&s, "SELECT state FROM changeset"), "draft");
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset SET revision = 3, submitted_at = NULL WHERE id = 1",
+            [],
+        )?)
+    })
+    .unwrap();
+    assert_eq!(
+        state(&s, "SELECT state FROM changeset WHERE id = 1"),
+        "draft"
+    );
 }
 
 /// The moves are part of the trigger. No table holds them.

@@ -179,10 +179,14 @@ WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
   -- An action is cancelled only with a withdraw of its changeset.
   OR (new.state = 'cancelled'
       AND (SELECT state FROM changeset WHERE id = new.changeset_id) <> 'withdrawn')
-  -- Replaced only by the submit of a newer revision.
+  -- Replaced only by the submit of a newer revision, at the time of that
+  -- submit. An older action that comes back to review after the submit
+  -- has a later decision, and stays for the person (section 5.5).
   OR (new.state = 'replaced'
       AND NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
-                      AND revision > new.revision AND submitted_at IS NOT NULL))
+                      AND revision > new.revision AND submitted_at IS NOT NULL
+                      AND submitted_at IS new.decided_at
+                      AND coalesce(old.decided_at, old.submitted_at) <= submitted_at))
   -- Expired only 14 days after its submit (section 5.5), and not at a time
   -- after the clock of the database.
   OR (new.state = 'expired'
@@ -260,8 +264,10 @@ BEGIN
     AND changeset_id = new.id AND revision = new.revision AND state IS NULL;
   UPDATE changeset_action SET state = 'replaced', decided_by = 'author', rule = NULL,
     policy = NULL, reason = NULL, decided_at = new.submitted_at
-  WHERE new.submitted_at IS NOT NULL AND changeset_id = new.id
-    AND revision < new.revision AND state IN ('proposed', 'in_review');
+  WHERE old.submitted_at IS NULL AND new.submitted_at IS NOT NULL
+    AND changeset_id = new.id AND revision < new.revision
+    AND state IN ('proposed', 'in_review')
+    AND coalesce(decided_at, submitted_at) <= new.submitted_at;
   UPDATE changeset SET state =
     CASE WHEN new.submitted_at IS NULL THEN 'draft'
          WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
