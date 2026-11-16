@@ -43,7 +43,9 @@ test("the brief shows a live login code at the top, and not after it expires", a
   assert.ok(before.indexOf("482913") < before.indexOf('id="you_owe"'));
   const after = await render("/src/views/Brief.svelte", { brief: fx.brief, now: new Date("2026-11-16T09:20:00Z") });
   assert.doesNotMatch(after, /aria-label="Login code"/);
-  assert.match(text(after), /Signals 1 Login code for Example Bank/);
+  // Spec 1 section 8: Signals holds a signal only while its expiry is later than now.
+  assert.doesNotMatch(text(after), /Login code for Example Bank/);
+  assert.doesNotMatch(after, /id="signals"/);
 });
 
 test("the Signals heading keeps the exact count of the API when a live code shows at the top", async () => {
@@ -674,4 +676,27 @@ test("a download of an original that Iris has not copied yet says so", async () 
 test("each brief section that shows has its All link, also with fewer than 8 items", async () => {
   const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW, poll: 0 });
   assert.match(html, /href="#\/brief\/you_owe"[^>]*>All 2</);
+});
+
+test("the signals of an open brief leave at their expiry, and the count follows", async () => {
+  const { signals } = await load("/src/format.ts");
+  const code = item("s-901");
+  const notice = { ...code, id: "s-2", code: undefined, title: "Delivery window", expires: "2026-11-16T10:00:00Z" };
+  const lasting = { ...code, id: "s-3", code: undefined, title: "Account notice", expires: undefined };
+  const section = { count: 3, items: [code, notice, lasting] };
+  const open = signals(section, NOW);
+  assert.deepEqual(open.codes.map((i) => i.id), ["s-901"]);
+  assert.deepEqual(open.rows.map((i) => i.id), ["s-2", "s-3"]);
+  assert.equal(open.count, 3);
+  // The view wakes at the first expiry of any signal.
+  assert.equal(open.next, code.expires);
+  const later = signals(section, new Date(Date.parse(code.expires) + 1000));
+  assert.deepEqual(later.codes, []);
+  assert.deepEqual(later.rows.map((i) => i.id), ["s-2", "s-3"]);
+  assert.equal(later.count, 2);
+  assert.equal(later.next, notice.expires);
+  const last = signals(section, new Date("2026-11-16T10:00:01Z"));
+  assert.deepEqual(last.rows.map((i) => i.id), ["s-3"]);
+  assert.equal(last.count, 1);
+  assert.equal(last.next, undefined);
 });
