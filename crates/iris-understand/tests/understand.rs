@@ -979,3 +979,44 @@ Lease Office, 12 High Street
     let current = calls[1].1.split("The current message:").nth(1).unwrap();
     assert!(!current.contains("12 High Street"), "{current}");
 }
+
+#[test]
+fn a_rerun_that_stops_after_the_first_write_is_not_understood() {
+    let b = store("rerun-stop");
+    let m = b.add("1", ASK, &["INBOX"]);
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    let fake = Fake::default();
+    fake.answers
+        .borrow_mut()
+        .push_back(Err(ModelError::Server(529)));
+    assert!(understand(&b.store, m, &fake, NOW).is_err());
+    let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+    assert!(at.is_none());
+}
+
+#[test]
+fn a_message_that_becomes_a_draft_loses_its_items() {
+    let b = store("to-draft");
+    let m = b.add("1", ASK, &["INBOX"]);
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 1);
+    b.add("1", ASK, &["DRAFT"]);
+    assert!(understand(&b.store, m, &Fake::default(), NOW).unwrap().draft);
+    assert!(b.items().is_empty());
+    let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+    assert!(at.is_none());
+}
+
+#[test]
+fn phishing_with_bad_items_still_gives_the_mark() {
+    for answer in [r#"{"phishing": true}"#, r#"{"phishing": true, "items": [{"form": 3}]}"#] {
+        let b = store("phishing-bad");
+        let m = b.add("1", ASK, &["INBOX"]);
+        let fake = Fake::with(&[answer]);
+        let out = understand(&b.store, m, &fake, NOW).unwrap();
+        assert!(out.hostile, "{answer}");
+        assert_eq!(fake.calls.borrow().len(), 1);
+        let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+        assert_eq!(marks, r#"["phishing"]"#);
+    }
+}
