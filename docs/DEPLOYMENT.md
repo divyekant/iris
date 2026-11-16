@@ -60,8 +60,11 @@ The script does these steps:
    nothing.
 4. It installs the program to `~/.local/bin/iris`. It needs no sudo.
 5. It installs and starts the background service with
-   `iris service install`. If the program is an older version with no
-   `service` command, it tells you to start `iris serve` yourself.
+   `iris service install`. The service needs launchd (macOS) or systemd
+   (Linux). If the service install fails (for example, on Linux with no
+   systemd), the program stays installed, and the script tells you to start
+   `iris serve` yourself. An older program with no `service` command gets
+   the same message.
 
 The script connects only to `github.com` (and the GitHub download host that
 `github.com` sends it to). It sends no data about you or your computer.
