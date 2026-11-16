@@ -127,6 +127,20 @@ pub fn refresh(conn: &Connection, now_ms: i64) -> rusqlite::Result<Vec<i64>> {
     for a in &rows {
         recheck(conn, a, now_ms, &mut ch)?;
     }
+    // A person can set a kind at any time, with no call to this crate. So
+    // each domain of a row that a person decided goes to the sweep too.
+    let set: Vec<String> = conn
+        .prepare_cached(
+            "SELECT DISTINCT substr(address, instr(address, '@') + 1) FROM sender
+              WHERE decided_by = 'person'",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for d in set {
+        if !ch.domains.contains(&d) {
+            ch.domains.push(d);
+        }
+    }
     sweep(conn, now_ms, &mut ch)?;
     Ok(dedup(ch.rerun))
 }
