@@ -719,13 +719,14 @@ fn a_sender_after_your_last_message_is_not_known() {
 }
 
 #[test]
-fn the_person_rule_wins_over_an_engine_kind_and_keeps_it() {
+fn a_decided_kind_wins_over_the_person_rule() {
     let mut h = Hand::new("engine-kind");
     h.store
         .write(|tx| {
             tx.execute_batch(
                 "INSERT INTO sender(address, kind, basis, decided_by) VALUES
-                   ('ana@example.org', 'stranger', 'none', 'engine');",
+                   ('ana@example.org', 'stranger', 'none', 'engine'),
+                   ('dee@example.org', 'person', 'sent', 'engine');",
             )?;
             Ok(())
         })
@@ -737,6 +738,13 @@ fn the_person_rule_wins_over_an_engine_kind_and_keeps_it() {
         "Me",
         "john(work)@example.org, ana@example.org",
     );
+    h.add(
+        "t2",
+        "INBOX",
+        "dee@example.org",
+        "Dee Ray",
+        "me@example.com",
+    );
     let mut found: Vec<String> = h
         .people()
         .iter()
@@ -744,7 +752,9 @@ fn the_person_rule_wins_over_an_engine_kind_and_keeps_it() {
         .map(String::from)
         .collect();
     found.sort();
-    assert_eq!(found, ["ana@example.org", "john@example.org"]);
+    // Ana is a stranger for the sender step. Dee is a person for it. John
+    // has no kind yet, and matches the person rule.
+    assert_eq!(found, ["dee@example.org", "john@example.org"]);
     let kind: String = h
         .store
         .read(|c| {
