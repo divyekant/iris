@@ -321,22 +321,60 @@ fn the_bulk_flag_starts_above_500_messages_in_one_action_or_in_all() {
 }
 
 #[test]
-fn each_proposal_has_its_own_changeset_id() {
+fn the_changeset_id_names_the_content_of_the_proposal() {
     let dir = std::env::temp_dir().join(format!("iris-observe-id-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let store = Store::open(&dir).unwrap();
-    let account = store.add_account("gmail", "owner@example.com").unwrap();
-    let id = || {
+    let id = |store: &Store| {
         let mut out = Vec::new();
-        write_changeset(&store, account, "2026-11-16T09:00:00Z", &mut out).unwrap();
+        write_changeset(store, 1, "2026-11-16T09:00:00Z", &mut out).unwrap();
         let cs: serde_json::Value = serde_json::from_slice(&out).unwrap();
         cs["id"].as_str().unwrap().to_string()
     };
-    let (a, b) = (id(), id());
+    let store = Store::open(&dir).unwrap();
+    store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'INBOX', 'INBOX', 'system');
+                 INSERT INTO thread(account_id, provider_id) VALUES (1, 't1');
+                 INSERT INTO message(account_id, thread_id, provider_id) VALUES (1, 1, 'a'), (1, 1, 'b');
+                 INSERT INTO message_label(message_id, label_id) VALUES (1, 1);
+                 INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                   VALUES ('feed', 1, 'new', '{}', 0, 0), ('feed', 1, 'new', '{}', 0, 0);
+                 INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin'), (2, 2, 'origin');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let a = id(&store);
     assert!(
         a.starts_with("cs-") && a[3..].parse::<u64>().unwrap() > 0,
         "{a}"
     );
-    assert_ne!(a, b);
+    assert_eq!(id(&store), a, "the same snapshot gives the same ID");
+    drop(store);
+
+    // After a restart, a new proposal gets a new ID.
+    let store = Store::open(&dir).unwrap();
+    assert_eq!(id(&store), a);
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id) VALUES (2, 1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let b = id(&store);
+    assert_ne!(b, a);
+    // The same message count in another rule is a new proposal too.
+    store
+        .write(|tx| {
+            tx.execute("UPDATE item SET form = 'record' WHERE id = 2", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_ne!(id(&store), b);
     let _ = std::fs::remove_dir_all(&dir);
 }
