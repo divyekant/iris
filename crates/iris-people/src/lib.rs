@@ -448,13 +448,25 @@ fn one_address(text: &str) -> Option<String> {
 fn valid_address(text: &str) -> Option<String> {
     let a = text.trim().to_lowercase();
     let (local, domain) = a.rsplit_once('@')?;
-    // A second `@` outside quotes (as in `a@b@c.d`) is not a valid address.
-    let quoted = local.len() > 1 && local.starts_with('"') && local.ends_with('"');
-    let ok = !local.is_empty()
-        && (quoted || !local.contains('@'))
-        && !domain.is_empty()
-        && !domain.contains(char::is_whitespace);
+    let ok = valid_local(local) && !domain.is_empty() && !domain.contains(char::is_whitespace);
     ok.then_some(a)
+}
+
+/// Check a local part: an atom with no `@` or `"`, or one quoted string that
+/// ends at the end of the part. So `a@b@c.d` and `"a"@b"@c.d` fail.
+fn valid_local(local: &str) -> bool {
+    let Some(inner) = local.strip_prefix('"') else {
+        return !local.is_empty() && !local.contains(['@', '"']);
+    };
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.next().is_none() => return false,
+            '"' => return chars.next().is_none(),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Decode the RFC 2047 encoded words of a display name.
@@ -545,6 +557,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// For any text, an accepted address has a local part with no `@` outside
+    /// one quoted string, and that quoted string ends at the last `@`.
+    #[test]
+    fn each_address_has_one_unquoted_at() {
+        const PIECES: [&str; 11] = [
+            "a",
+            "@",
+            "\"",
+            "\\",
+            "<",
+            ">",
+            ",",
+            " ",
+            ".",
+            "b.example",
+            "(",
+        ];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..5000 {
+            let mut text = String::new();
+            for _ in 0..12 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                text.push_str(PIECES[(x % PIECES.len() as u64) as usize]);
+            }
+            for a in addresses(&text).into_iter().chain(valid_address(&text)) {
+                let (local, domain) = a.rsplit_once('@').unwrap();
+                assert!(!domain.is_empty(), "{text:?} gave {a:?}");
+                let Some(inner) = local.strip_prefix('"') else {
+                    assert!(
+                        !local.is_empty() && !local.contains(['@', '"']),
+                        "{text:?} gave {a:?}"
+                    );
+                    continue;
+                };
+                // The first quote that no `\` escapes closes the string.
+                let (mut escaped, mut close) = (false, None);
+                for (i, c) in inner.char_indices() {
+                    if c == '"' && !escaped {
+                        close = Some(i + 1);
+                        break;
+                    }
+                    escaped = c == '\\' && !escaped;
+                }
+                assert_eq!(close, Some(inner.len()), "{text:?} gave {a:?}");
+            }
+        }
+    }
+
     #[test]
     fn address_lists() {
         assert_eq!(
@@ -557,6 +619,13 @@ mod tests {
         assert_eq!(
             addresses(r#"<"a@b"@example.org>"#),
             [r#""a@b"@example.org"#]
+        );
+        for bad in [r#""a"@b"@c.d"#, r#""a"b@c.d"#, r#""a\"@c.d"#, r#"a"b@c.d"#] {
+            assert_eq!(valid_address(bad), None, "{bad}");
+        }
+        assert_eq!(
+            valid_address(r#""a\"@b"@c.d"#).as_deref(),
+            Some(r#""a\"@b"@c.d"#)
         );
         // mail-parser 1.0.1 reads a bare quoted local part such as
         // `"john.doe"@example.org` as a name and `@example.org`, so the
