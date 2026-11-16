@@ -201,7 +201,10 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                     date,
                     from_them: true,
                 });
-                if let Some(n) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+                if let Some(n) = name
+                    .map(|n| decode_words(n.trim()))
+                    .filter(|n| !n.is_empty())
+                {
                     let d = s.names.entry(n).or_insert(date);
                     *d = (*d).max(date);
                 }
@@ -223,10 +226,18 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
     store.write(|tx| {
         let mut kind =
             tx.prepare_cached("SELECT id, kind, decided_by FROM sender WHERE address = ?1")?;
+        // A new row, or a row with no kind, gets the person rule that matched
+        // (specification 1, section 6.7). A row with a kind keeps it.
         let mut add = tx.prepare_cached(
-            "INSERT INTO sender(address, name) VALUES (?1, ?2)
-             ON CONFLICT(address) DO NOTHING RETURNING id",
+            "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
+             VALUES (?1, ?2, 'person', ?3, 'engine', ?4)
+             ON CONFLICT(address) DO UPDATE SET kind = 'person', basis = excluded.basis,
+               decided_by = 'engine', decided_at = excluded.decided_at
+             WHERE sender.kind IS NULL",
         )?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
         let mut addrs: Vec<&String> = stats.keys().collect();
         addrs.sort();
         for a in addrs {
@@ -246,8 +257,18 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                 continue;
             }
             let id = match row {
-                Some((id, _, _)) => id,
-                None => add.query_row(params![a, stats[a].latest_name()], |r| r.get(0))?,
+                Some((id, Some(_), _)) => id,
+                _ => {
+                    let basis = if stats[a].seen.iter().any(|s| !s.from_them) {
+                        "sent"
+                    } else {
+                        "replied"
+                    };
+                    add.execute(params![a, stats[a].latest_name(), basis, now])?;
+                    tx.query_row("SELECT id FROM sender WHERE address = ?1", [a], |r| {
+                        r.get(0)
+                    })?
+                }
             };
             ids.insert(a.clone(), id);
             kept.push(a.clone());
