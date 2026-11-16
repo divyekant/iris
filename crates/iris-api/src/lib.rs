@@ -97,6 +97,7 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
         .route("/api/changesets/{id}", get(get_changeset))
+        .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
@@ -143,6 +144,32 @@ async fn get_changeset(State(s): State<Arc<Store>>, Path(id): Path<String>) -> R
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
+    Ok(
+        stream(move |w| {
+            iris_changeset::write_document(&s, row, w).map_err(review::changeset_error)
+        })
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideBody {
+    actions: Vec<Decision>,
+}
+
+/// The decision of the person on one changeset. The answer is the
+/// changeset after the decision.
+async fn post_decide(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<DecideBody>, JsonRejection>,
+) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    let b = body(b)?;
+    decide(&s, row, &b.actions, now_ms())?;
     Ok(
         stream(move |w| {
             iris_changeset::write_document(&s, row, w).map_err(review::changeset_error)

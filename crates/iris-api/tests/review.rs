@@ -99,7 +99,35 @@ async fn get(store: &Arc<Store>, uri: &str) -> (StatusCode, Value) {
         .unwrap();
     let code = res.status();
     let body = to_bytes(res.into_body(), 64 << 20).await.unwrap();
-    (code, serde_json::from_slice(&body).unwrap())
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+async fn post(store: &Arc<Store>, uri: &str, body: &str) -> (StatusCode, Value) {
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let req = Request::post(uri)
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth.bearer())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 64 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// The state of each action of a changeset, from its document.
+async fn states(s: &Arc<Store>, cs: i64) -> Vec<String> {
+    let (_, v) = get(s, &format!("/api/changesets/cs-{cs}")).await;
+    v["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["decision"]["state"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn ids(v: &Value) -> Vec<&str> {
@@ -319,4 +347,102 @@ fn the_ids_parser_accepts_only_message_ids_and_keeps_their_order() {
             (got, want) => panic!("{text:?}: {got:?} but expected {want:?}"),
         }
     }
+}
+
+#[tokio::test]
+async fn approves_and_denies_the_actions_of_one_changeset_together() {
+    let dir = temp("decide");
+    let s = store(&dir);
+    let cs = changeset(&s, "Clean up.", &[&["t-1"], &["m-3"]], NOW);
+    let (_, doc) = get(&s, &format!("/api/changesets/cs-{cs}")).await;
+    let hash = |i: usize| doc["actions"][i]["hash"].as_str().unwrap().to_string();
+    let uri = format!("/api/changesets/cs-{cs}/decide");
+
+    let (code, after) = post(
+        &s,
+        &uri,
+        &json!({ "actions": [
+            { "revision": 1, "n": 1, "approve": true, "hash": hash(0) },
+            { "revision": 1, "n": 2, "approve": false },
+        ] })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    // The answer is the changeset after the decision.
+    assert_eq!(after["actions"][0]["decision"]["state"], "approved");
+    assert_eq!(after["actions"][0]["decision"]["by"], "person");
+    assert_eq!(after["actions"][1]["decision"]["state"], "denied");
+    assert_eq!(after["actions"][1]["decision"]["reason"], iris_api::DENIED);
+    assert_eq!(
+        get(&s, "/api/brief").await.1["review"],
+        json!({ "changesets": 0, "actions": 0 })
+    );
+
+    // A second decision on a decided action is a conflict, not an error of the engine.
+    let again = json!({ "actions": [{ "revision": 1, "n": 2, "approve": false }] }).to_string();
+    assert_eq!(post(&s, &uri, &again).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_refused_decision_writes_nothing() {
+    let dir = temp("decide-refused");
+    let s = store(&dir);
+    let cs = changeset(&s, "Clean up.", &[&["t-1"], &["m-3"]], NOW);
+    let uri = format!("/api/changesets/cs-{cs}/decide");
+    // The deny comes first and is valid. The approval names a hash that the
+    // review did not show, so the whole decision rolls back.
+    let stale = json!({ "actions": [
+        { "revision": 1, "n": 2, "approve": false },
+        { "revision": 1, "n": 1, "approve": true, "hash": "0".repeat(64) },
+    ] })
+    .to_string();
+    let (code, v) = post(&s, &uri, &stale).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert_eq!(states(&s, cs).await, ["proposed", "proposed"]);
+    // An action that is not in the changeset.
+    let missing = json!({ "actions": [{ "revision": 1, "n": 9, "approve": false }] }).to_string();
+    assert_eq!(post(&s, &uri, &missing).await.0, StatusCode::CONFLICT);
+    // While a new revision is a draft, the store refuses an approval.
+    let (_, doc) = get(&s, &format!("/api/changesets/cs-{cs}")).await;
+    let hash = doc["actions"][0]["hash"].as_str().unwrap().to_string();
+    revise(&s, cs, &agent()).unwrap();
+    let draft = json!({ "actions": [{ "revision": 1, "n": 1, "approve": true, "hash": hash }] })
+        .to_string();
+    assert_eq!(post(&s, &uri, &draft).await.0, StatusCode::CONFLICT);
+    // A denial too: the review hides a changeset while its new revision is a draft.
+    let deny = json!({ "actions": [{ "revision": 1, "n": 2, "approve": false }] }).to_string();
+    assert_eq!(post(&s, &uri, &deny).await.0, StatusCode::CONFLICT);
+    assert_eq!(states(&s, cs).await, ["proposed", "proposed"]);
+}
+
+#[tokio::test]
+async fn refuses_a_decision_that_is_not_valid() {
+    let dir = temp("decide-bad");
+    let s = store(&dir);
+    let cs = changeset(&s, "Clean up.", &[&["t-1"]], NOW);
+    let uri = format!("/api/changesets/cs-{cs}/decide");
+    let many: Vec<Value> = (1..=501)
+        .map(|n| json!({ "revision": 1, "n": n, "approve": false }))
+        .collect();
+    for bad in [
+        "".to_string(),
+        "{}".to_string(),
+        json!({ "actions": [] }).to_string(),
+        json!({ "actions": many }).to_string(),
+        json!({ "actions": [{ "revision": 1, "n": 1, "approve": true }] }).to_string(),
+        json!({ "actions": [{ "revision": 1, "n": 1, "approve": false }, { "revision": 1, "n": 1, "approve": false }] }).to_string(),
+        json!({ "actions": [{ "revision": 1, "n": 1, "approve": false, "why": "x" }] }).to_string(),
+        json!({ "actions": [{ "revision": "1", "n": 1, "approve": false }] }).to_string(),
+    ] {
+        assert_eq!(post(&s, &uri, &bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(states(&s, cs).await, ["proposed"]);
+    let deny = json!({ "actions": [{ "revision": 1, "n": 1, "approve": false }] }).to_string();
+    assert_eq!(
+        post(&s, "/api/changesets/cs-99/decide", &deny).await.0,
+        StatusCode::NOT_FOUND
+    );
+    // A decision needs a POST.
+    assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
 }
