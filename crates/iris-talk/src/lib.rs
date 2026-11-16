@@ -495,6 +495,11 @@ mod tests {
             addresses("\"Ortiz, Sam\" <Sam@Fabrikam.example>, ana@x.org; ana@x.org"),
             ["sam@fabrikam.example", "ana@x.org"]
         );
+        // The form that the understanding step writes.
+        assert_eq!(
+            addresses("a@example.com,b@example.net"),
+            ["a@example.com", "b@example.net"]
+        );
         assert!(addresses("undisclosed-recipients:;").is_empty());
         assert!(addresses("a@b@c.d, @x.org, y@").is_empty());
     }
