@@ -139,8 +139,10 @@ Use these steps if the release has no program for your system:
 Install the release before the bad release:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=<old tag> sh install.sh
+curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=v2026.11.16.1 sh install.sh
 ```
+
+Replace `v2026.11.16.1` with the tag of the earlier release (see the GitHub Releases page).
 
 The service file points to `~/.local/bin/iris`, so the service runs the old
 program after a restart of the service. To restart it:
