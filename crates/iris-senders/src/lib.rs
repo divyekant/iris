@@ -99,13 +99,29 @@ pub fn decide(
         .collect::<rusqlite::Result<_>>()?;
     let has = |l: &str| labels.iter().any(|x| x == l);
     let from = head.from();
-    // This decision writes the evidence of this message again.
+    // This decision writes the evidence of this message again. Each
+    // recipient that loses its `sent` row is decided again after it.
+    let old: Vec<String> = conn
+        .prepare_cached(
+            "SELECT address FROM sender_evidence WHERE message_id = ?1 AND rule = 'sent'",
+        )?
+        .query_map([message], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     conn.prepare_cached("DELETE FROM sender_evidence WHERE message_id = ?1")?
         .execute([message])?;
+    let mut rerun = Vec::new();
+    if !has("SENT") || has("DRAFT") {
+        for a in &old {
+            recheck(conn, a, now_ms, &mut rerun)?;
+        }
+    }
 
     if has("DRAFT") {
         // A draft does not count for the `person` rule.
-        return Ok(own(if has("SENT") { "sent" } else { "draft" }));
+        return Ok(Decision {
+            rerun,
+            ..own(if has("SENT") { "sent" } else { "draft" })
+        });
     }
     // Only the SENT label makes mail from you. Anyone can write the account
     // address in `From`, so such mail goes through the rules for received
@@ -117,13 +133,10 @@ pub fn decide(
             .map(|(a, _)| a)
             .filter(|a| !a.eq_ignore_ascii_case(&account))
             .collect();
-        // The `hostile` rule comes before the `person` rule. It also compares
-        // each recipient with the other recipients of this message: when two
-        // domains of one message are near copies of each other, the message
-        // proves neither one.
+        // The `hostile` rule comes before the `person` rule. A recipient that
+        // becomes a person is a known sender for the next recipients of the
+        // same message.
         let mut known = known_domains(conn, "")?;
-        known.extend(recipients.iter().map(|a| domain_of(a).to_string()));
-        let mut rerun = Vec::new();
         for to in &recipients {
             conn.prepare_cached(
                 "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
@@ -139,9 +152,16 @@ pub fn decide(
                     Kind::Hostile,
                     &format!("near copy of {k}"),
                     now_ms,
-                )?,
-                None => upsert(&mut rerun, conn, to, None, Kind::Person, "sent", now_ms)?,
+                )
+                .map(drop)?,
+                None => {
+                    upsert(&mut rerun, conn, to, None, Kind::Person, "sent", now_ms)?;
+                    known.push(domain_of(to).to_string());
+                }
             };
+        }
+        for a in old.iter().filter(|a| !recipients.contains(a)) {
+            recheck(conn, a, now_ms, &mut rerun)?;
         }
         return Ok(Decision {
             rerun,
@@ -155,7 +175,7 @@ pub fn decide(
             sender: None,
             basis: "no from address".into(),
             previous: None,
-            rerun: Vec::new(),
+            rerun,
         });
     };
     // (id, kind, decided_by)
@@ -179,14 +199,13 @@ pub fn decide(
                     sender: Some(*id),
                     basis: "set by a person".into(),
                     previous,
-                    rerun: Vec::new(),
+                    rerun,
                 });
             }
         }
     }
 
-    let (kind, basis) = rules(conn, &head, &addr, message, sha.as_deref(), date)?;
-    let mut rerun = Vec::new();
+    let (kind, basis) = rules(conn, &addr, Some((&head, message, sha.as_deref(), date)))?;
     let id = upsert(
         &mut rerun,
         conn,
@@ -232,16 +251,27 @@ fn own(basis: &str) -> Decision {
     }
 }
 
-/// The engine rules in the order of spec 1 section 6.7: `hostile`, then
-/// `person`, then `service`, else `stranger`.
-fn rules(
+/// Decide the address `addr` again with no message from it: a sent message
+/// that named it lost its `sent` evidence row.
+fn recheck(
     conn: &Connection,
-    head: &Head,
     addr: &str,
-    message: i64,
-    sha: Option<&str>,
-    date: Option<i64>,
-) -> rusqlite::Result<(Kind, String)> {
+    now_ms: i64,
+    rerun: &mut Vec<i64>,
+) -> rusqlite::Result<()> {
+    let (kind, basis) = rules(conn, addr, None)?;
+    upsert(rerun, conn, addr, None, kind, &basis, now_ms)?;
+    Ok(())
+}
+
+/// The message that the rules decide: (headers, `m-` row, content hash,
+/// internal date).
+type This<'a> = (&'a Head, i64, Option<&'a str>, Option<i64>);
+
+/// The engine rules in the order of spec 1 section 6.7: `hostile`, then
+/// `person`, then `service`, else `stranger`. With `this`, the message
+/// from `addr` can qualify for the `service` rule.
+fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<(Kind, String)> {
     let domain = domain_of(addr);
     if let Some(k) = near(addr, &known_domains(conn, addr)?) {
         return Ok((Kind::Hostile, format!("near copy of {k}")));
@@ -292,7 +322,9 @@ fn rules(
         return Ok((Kind::Person, "replied".into()));
     }
 
-    if head.automated() && head.dkim_pass(domain) {
+    if let Some((_, message, sha, date)) =
+        this.filter(|(head, ..)| head.automated() && head.dkim_pass(domain))
+    {
         let earlier: i64 = conn.query_row(
             "SELECT count(*) FROM (SELECT 1 FROM header h JOIN message m ON m.id = h.message_id
               WHERE h.from_addr = ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL LIMIT 2)",
