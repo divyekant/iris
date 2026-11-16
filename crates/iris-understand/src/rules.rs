@@ -48,7 +48,7 @@ const MODEL_WORDS: [&str; 16] = [
     "policy",
 ];
 /// Whole words of a booking, a ticket or an event (spec 1, section 6.4).
-/// An invitation uses them too, so they count after the invitation rule.
+/// They send the message to the model, so that the record is not lost.
 const BOOKING_WORDS: [&str; 20] = [
     "booking",
     "booked",
