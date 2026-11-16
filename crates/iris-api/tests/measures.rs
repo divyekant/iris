@@ -226,23 +226,40 @@ fn times(s: &Store) -> Vec<(String, i64)> {
     .unwrap()
 }
 
-fn add_item(s: &Store, account: i64) {
+/// One item of the example `example` (a file of docs/spec/schema/examples),
+/// from message `message`, with the changes of `set`.
+fn put_item(s: &Store, account: i64, example: &str, message: i64, set: Value) {
+    let mut doc = iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(example));
+    for (k, v) in set.as_object().unwrap() {
+        doc[k] = v.clone();
+    }
     s.write(|tx| {
         tx.execute(
             "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
-             VALUES ('feed', ?1, 'new', '{}', 0, 0)",
-            [account],
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            params![doc["form"].as_str(), account, doc["status"].as_str(), doc.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO item_source(item_id, message_id, role) VALUES (last_insert_rowid(), ?1, 'origin')",
+            [message],
         )?;
         Ok(())
     })
     .unwrap();
 }
 
+async fn brief(s: &Arc<Store>) -> Value {
+    let (code, body) = call(s, Request::get("/api/brief").body(Body::empty()).unwrap()).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    body
+}
+
 /// The first brief runs from the first account (the connect step) to the
-/// first item. Each time is written once, at the event, and never moves:
-/// not with more accounts or items, not when the items are made again.
+/// first answer of the brief with content. An item that the brief does not
+/// show (an expired code) does not end it. Each time is written once and
+/// never moves: not with more accounts, items or briefs.
 #[tokio::test]
-async fn first_brief_times_are_written_once_at_the_event() {
+async fn first_brief_runs_to_the_first_brief_with_content() {
     let s = store("brief");
     assert_eq!(get(&s).await["first_brief"], Value::Null);
     let before = now();
@@ -252,25 +269,43 @@ async fn first_brief_times_are_written_once_at_the_event() {
     assert_eq!(t.len(), 1);
     assert_eq!(t[0].0, "connect");
     assert!((before..=after).contains(&t[0].1), "{t:?}");
-    // No item yet: no brief yet, also while the sync and the model run.
+    let m = |id: &str| NewMessage {
+        provider_id: id.into(),
+        thread_provider_id: id.into(),
+        ..Default::default()
+    };
+    s.put_messages(a, &[m("g1"), m("g2")]).unwrap();
+
+    // An empty brief, then a brief with only an expired code: no content.
+    brief(&s).await;
+    put_item(
+        &s,
+        a,
+        "signal-code.json",
+        1,
+        json!({"id": "s-1", "expires": "2020-01-01T00:00:00Z"}),
+    );
+    assert_eq!(brief(&s).await["signals"]["count"], 0);
+    assert_eq!(times(&s).len(), 1);
     assert_eq!(get(&s).await["first_brief"], Value::Null);
+
     // The two events are in different seconds, so a swap of the two times shows.
     std::thread::sleep(std::time::Duration::from_millis(1100));
-
-    add_item(&s, a);
+    put_item(
+        &s,
+        a,
+        "feed.json",
+        2,
+        json!({"id": "f-2", "status": "new", "attention": {"state": "shown"}}),
+    );
+    assert_eq!(brief(&s).await["feed"]["count"], 1);
     let first = times(&s);
     // In the order of the names: brief, then connect.
     assert_eq!(first.len(), 2);
     assert_eq!(first[1], t[0]);
-    assert!(first[0].1 >= first[1].1);
+
     s.add_account("gmail", "b@example.com").unwrap();
-    add_item(&s, a);
-    s.write(|tx| {
-        tx.execute("DELETE FROM item", [])?;
-        Ok(())
-    })
-    .unwrap();
-    add_item(&s, a);
+    brief(&s).await;
     assert_eq!(times(&s), first);
     let e = s.write(|tx| {
         tx.execute("UPDATE measure_time SET at = 0", [])?;
@@ -291,7 +326,7 @@ async fn first_brief_times_are_written_once_at_the_event() {
 fn downgrade(s: &Store) {
     s.write(|tx| {
         tx.execute_batch(
-            "DROP TRIGGER measure_connect; DROP TRIGGER measure_brief;
+            "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
              DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
         )?;
@@ -347,11 +382,6 @@ fn migration_12_takes_the_times_of_an_older_store() {
     assert_eq!(t.len(), 1);
     assert_eq!(t[0].0, "connect");
     assert!(t[0].1 >= before, "{t:?}");
-    add_item(&s, 1);
-    assert!(iris_api::measures::measures(&s, None)
-        .unwrap()
-        .first_brief
-        .is_some());
     drop(s);
 
     // No account: no time.

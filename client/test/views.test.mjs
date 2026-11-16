@@ -447,8 +447,11 @@ test("each measure says when it has no data, and the sentence names a missed tar
   const fast = { ...empty, first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:10:00Z", seconds: 600 }, memory: { rss_kib: 51_200, messages: 100_000 } };
   assert.deepEqual(rows(fast, now).slice(1, 4).map((x) => x.tone), ["met", "none", "met"]);
   // Under 50 MB with fewer than 100,000 messages does not show the target as met.
-  const small = { ...empty, memory: { rss_kib: 30_000, messages: 99_999 } };
-  assert.equal(rows(small, now)[3].tone, "flat");
+  const tone = (rss_kib, messages) => rows({ ...empty, memory: { rss_kib, messages } }, now)[3].tone;
+  assert.equal(tone(30_000, 99_999), "flat");
+  assert.equal(tone(51_201, 100_000), "missed");
+  assert.equal(tone(61_440, 200_000), "flat");
+  assert.equal(tone(51_200, 200_000), "met");
 
   // A check with differences misses; a check that stopped early cannot meet the target.
   const check = (differences, complete) => ({ ...empty, mirror: [{ account: "a@example.com", checked: "2026-11-16T07:00:00Z", differences, complete }] });

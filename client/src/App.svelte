@@ -2,7 +2,7 @@
   import { access } from "./access.svelte.ts";
   import { followSignIn, get, loadBrief, own, type Changeset, type HandledPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
-  import { count, type Measures as MeasuresData } from "./measures";
+  import { count, written, type Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
   import Brief from "./views/Brief.svelte";
@@ -107,8 +107,8 @@
     {:else if route.view === "mail"}
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "measures"}
-      <!-- The use of today first, so the page counts this visit. -->
-      {#await count("use").then(() => get<MeasuresData>("measures")) then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
+      <!-- Each count of this page first (the use of today, an open in flight), so the page includes them. -->
+      {#await count("use").then(written).then(() => get<MeasuresData>("measures")) then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "review"}
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />

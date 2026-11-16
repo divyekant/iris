@@ -13,8 +13,8 @@ CREATE TABLE use_day (
 
 -- The two times of the measure "time from install to the first brief"
 -- (specification 1, M4): `connect`, when the first account is added (the
--- connect step), and `brief`, when the first item is made (the first thing
--- that the brief can show). The triggers write each time once. A time
+-- connect step), and `brief`, when the API first gives a brief with content
+-- (crates/iris-api, GET /api/brief). Each time is written once. A time
 -- never changes after that.
 CREATE TABLE measure_time (
   name TEXT PRIMARY KEY CHECK (name IN ('connect', 'brief')),
@@ -31,22 +31,15 @@ BEGIN
   WHERE NOT EXISTS (SELECT 1 FROM measure_time WHERE name = 'connect');
 END;
 
-CREATE TRIGGER measure_brief AFTER INSERT ON item
-WHEN NOT EXISTS (SELECT 1 FROM measure_time WHERE name = 'brief')
-BEGIN
-  INSERT INTO measure_time(name, at)
-  SELECT 'brief', CAST(unixepoch('subsec') * 1000 AS INTEGER)
-  WHERE NOT EXISTS (SELECT 1 FROM measure_time WHERE name = 'brief');
-END;
-
 CREATE TRIGGER measure_time_update BEFORE UPDATE ON measure_time
 BEGIN
   SELECT RAISE(ABORT, 'iris: a measure time does not change');
 END;
 
 -- A store from before this migration: the best evidence is the start of
--- the oldest sync and the oldest item that is still there. An account
--- with no sync yet has only the time of this migration.
+-- the oldest sync and the oldest item that is still there (an estimate:
+-- the brief can show its first content later). An account with no sync
+-- yet has only the time of this migration.
 INSERT INTO measure_time(name, at)
 SELECT 'connect', coalesce(min(started_at), CAST(unixepoch('subsec') * 1000 AS INTEGER))
 FROM sync_log HAVING count(*) > 0 OR EXISTS (SELECT 1 FROM account);

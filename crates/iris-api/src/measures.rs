@@ -16,8 +16,8 @@ pub struct Measures {
     /// The newest days of use, the newest first. A day with no row is a
     /// day on which the person did not use the web client.
     pub days: Vec<Day>,
-    /// From the first account to the first item, or `null` before the
-    /// first item.
+    /// From the first account to the first brief with content, or `null`
+    /// before that brief.
     pub first_brief: Option<FirstBrief>,
     /// The last mirror check of each account that has one.
     pub mirror: Vec<Check>,
@@ -40,7 +40,7 @@ pub struct Day {
 pub struct FirstBrief {
     /// The time of the first account (the connect step).
     pub connect: String,
-    /// The time of the first item (the first brief).
+    /// The time of the first answer of GET /api/brief with content.
     pub brief: String,
     pub seconds: i64,
 }
@@ -155,6 +155,45 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             undo,
         })
     })?)
+}
+
+/// Write the time of the first brief with content, once. `brief` is the
+/// answer of GET /api/brief at `now_ms`: content is an item of a section
+/// (the brief leaves out expired signals and hidden items), a record or a
+/// bundle.
+pub fn mark_brief(store: &Store, brief: &crate::Brief, now_ms: i64) -> Result<()> {
+    let sections = [
+        &brief.you_owe,
+        &brief.owed_to_you,
+        &brief.conversations,
+        &brief.feed,
+        &brief.signals,
+        &brief.strangers,
+    ];
+    let content = sections.iter().any(|s| s.count > 0)
+        || brief.records.values().any(|n| n.as_i64().unwrap_or(0) > 0)
+        || brief.bundles.iter().any(|b| b.section.count > 0);
+    if !content {
+        return Ok(());
+    }
+    let known = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM measure_time WHERE name = 'brief')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })?;
+    if !known {
+        store.write(|tx| {
+            tx.execute(
+                "INSERT INTO measure_time(name, at) SELECT 'brief', ?1
+                 WHERE NOT EXISTS (SELECT 1 FROM measure_time WHERE name = 'brief')",
+                [now_ms],
+            )?;
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 /// The count and the end of the text that `iris_sync::verify` writes to

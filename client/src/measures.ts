@@ -29,12 +29,13 @@ export function localDay(now = new Date()): string {
 }
 
 let use: { day: string; done: Promise<void> } | null = null;
+const pending = new Set<Promise<void>>();
 
 /**
  * Count one use of the web client on the local day, or one source mail opened.
  * A use counts once for each day in this page: a second call of the same day gives
- * the promise of the first, so a caller can wait until the use of today is written.
- * A failed count does not stop the page, and the next use tries again.
+ * the promise of the first. A failed count does not stop the page, and the next use
+ * tries again.
  */
 export function count(event: "use" | "open", now = new Date()): Promise<void> {
   const day = localDay(now);
@@ -46,7 +47,14 @@ export function count(event: "use" | "open", now = new Date()): Promise<void> {
     },
   );
   if (event === "use") use = { day, done };
+  pending.add(done);
+  void done.then(() => pending.delete(done));
   return done;
+}
+
+/** Wait until each count that this page started has its answer, so a read of the measures includes it. */
+export async function written(): Promise<void> {
+  while (pending.size > 0) await Promise.all([...pending]);
 }
 
 /** The last SPAN local days, the oldest first. A day with no use has `opens: null`. */
@@ -116,8 +124,8 @@ export function rows(m: Measures, now = new Date()): Row[] {
           name: "Memory of the engine",
           value: `${num(Math.round(rss / 1024))} MB`,
           detail: `With ${plural(m.memory.messages, "message", "messages")}. Target: 50 MB or less with 100,000.`,
-          // The target holds for 100,000 messages: a smaller mailbox can only miss it.
-          tone: rss > MAX_RSS_KIB ? "missed" : m.memory.messages >= TARGET_MESSAGES ? "met" : "flat",
+          // The target is for 100,000 messages: under 50 MB with more meets it, over 50 MB with fewer misses it.
+          tone: rss <= MAX_RSS_KIB ? (m.memory.messages >= TARGET_MESSAGES ? "met" : "flat") : m.memory.messages <= TARGET_MESSAGES ? "missed" : "flat",
         },
     decided === 0
       ? { name: "Changes you approved as proposed", value: "Not yet", detail: "You have no decision on a proposed change yet. Higher is better.", tone: "none" }

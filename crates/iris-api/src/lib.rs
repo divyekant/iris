@@ -135,7 +135,11 @@ async fn get_records(State(s): State<Arc<Store>>) -> Result<Response> {
 }
 
 async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
-    Ok(Json(brief(&s, now_ms())?).into_response())
+    let now = now_ms();
+    let b = brief(&s, now)?;
+    // The first brief with content ends the measure "time to the first brief".
+    measures::mark_brief(&s, &b, now)?;
+    Ok(Json(b).into_response())
 }
 
 async fn get_handled(
