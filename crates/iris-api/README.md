@@ -149,9 +149,11 @@ engine computes them from the store. Nothing leaves the machine.
 
 - `days`: the newest 28 days of use, the newest first, each
   `{"day", "opens"}`. A day with no entry is a day with no use.
-- `first_brief`: `{"connect", "brief", "seconds"}`, or `null`. `connect` is
-  the start of the first sync. `brief` is the end of the first understanding
-  run that understood a message.
+- `first_brief`: `{"connect", "brief", "seconds"}`, or `null` before the
+  first item. `connect` is the time of the first account (the connect step).
+  `brief` is the time of the first item. The store writes each time once
+  (migration 12). For a store from before migration 12, the times are the
+  start of the oldest sync and the oldest item.
 - `mirror`: the newest mirror check (`iris mirror verify`) of each account,
   each `{"account", "checked", "differences", "complete"}`. `differences` is
   `null` if the log has no count. `complete` is `false` when an error stopped

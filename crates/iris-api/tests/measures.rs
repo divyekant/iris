@@ -217,32 +217,109 @@ async fn a_bad_request_writes_nothing() {
     assert_eq!(days(&s), vec![]);
 }
 
-/// The first brief: from the first sync row to the end of the first run
-/// that understood a message.
-#[tokio::test]
-async fn first_brief_runs_from_the_first_sync_to_the_first_understood_run() {
-    let s = store("brief");
-    let a = s.add_account("gmail", "owner@example.com").unwrap();
+fn times(s: &Store) -> Vec<(String, i64)> {
+    s.read(|c| {
+        let mut q = c.prepare("SELECT name, at FROM measure_time ORDER BY name")?;
+        let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })
+    .unwrap()
+}
+
+fn add_item(s: &Store, account: i64) {
     s.write(|tx| {
         tx.execute(
-            "INSERT INTO sync_log(account_id, kind, started_at, ended_at, result)
-             VALUES (?1, 'first', ?2, ?3, 'ok'), (?1, 'incremental', ?4, ?4, 'ok')",
-            params![a, NOON, NOON + 30_000, NOON - 999_000],
-        )?;
-        tx.execute(
-            "INSERT INTO understand_run(started_at, ended_at, model, prompt, messages)
-             VALUES (?1, ?1, 'm', 'p', 0), (?2, ?3, 'm', 'p', 4), (?4, ?4, 'm', 'p', 9)",
-            params![NOON + 10_000, NOON + 60_000, NOON + 360_000, NOON + 900_000],
+            "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+             VALUES ('feed', ?1, 'new', '{}', 0, 0)",
+            [account],
         )?;
         Ok(())
     })
     .unwrap();
+}
+
+/// The first brief runs from the first account (the connect step) to the
+/// first item. Each time is written once, at the event, and never moves:
+/// not with more accounts or items, not when the items are made again.
+#[tokio::test]
+async fn first_brief_times_are_written_once_at_the_event() {
+    let s = store("brief");
+    assert_eq!(get(&s).await["first_brief"], Value::Null);
+    let before = now();
+    let a = s.add_account("gmail", "a@example.com").unwrap();
+    let after = now();
+    let t = times(&s);
+    assert_eq!(t.len(), 1);
+    assert_eq!(t[0].0, "connect");
+    assert!((before..=after).contains(&t[0].1), "{t:?}");
+    // No item yet: no brief yet, also while the sync and the model run.
+    assert_eq!(get(&s).await["first_brief"], Value::Null);
+
+    add_item(&s, a);
+    let first = times(&s);
+    // In the order of the names: brief, then connect.
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[1], t[0]);
+    assert!(first[0].1 >= first[1].1);
+    s.add_account("gmail", "b@example.com").unwrap();
+    add_item(&s, a);
+    s.write(|tx| {
+        tx.execute("DELETE FROM item", [])?;
+        Ok(())
+    })
+    .unwrap();
+    add_item(&s, a);
+    assert_eq!(times(&s), first);
+    let e = s.write(|tx| {
+        tx.execute("UPDATE measure_time SET at = 0", [])?;
+        Ok(())
+    });
+    assert!(e.is_err());
+    assert_eq!(times(&s), first);
+
     let m = get(&s).await;
-    // The earliest sync row is the connect step, also when it is not `first`.
+    assert_eq!(m["first_brief"]["connect"], iris_api::rfc3339(first[0].1));
+    assert_eq!(m["first_brief"]["brief"], iris_api::rfc3339(first[1].1));
     assert_eq!(
-        m["first_brief"],
-        json!({"connect": "2026-11-16T11:43:21Z", "brief": "2026-11-16T12:06:00Z", "seconds": 1359})
+        m["first_brief"]["seconds"],
+        (first[1].1 - first[0].1) / 1000
     );
+}
+
+/// A store from before migration 12 gets the times from the oldest sync
+/// and the oldest item.
+#[test]
+fn migration_12_takes_the_times_of_an_older_store() {
+    let dir = std::env::temp_dir().join(format!("iris-api-measures-old-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    {
+        let s = Store::open(&dir).unwrap();
+        let a = s.add_account("gmail", "a@example.com").unwrap();
+        s.write(|tx| {
+            tx.execute_batch(
+                "DROP TRIGGER measure_connect; DROP TRIGGER measure_brief;
+                 DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
+            )?;
+            tx.execute(
+                "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'first', ?2), (?1, 'incremental', ?3)",
+                params![a, NOON + 5000, NOON],
+            )?;
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('feed', ?1, 'new', '{}', ?2, 0), ('feed', ?1, 'new', '{}', ?3, 0)",
+                params![a, NOON + 400_000, NOON + 340_000],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    let s = Store::open(&dir).unwrap();
+    assert_eq!(
+        times(&s),
+        vec![("brief".into(), NOON + 340_000), ("connect".into(), NOON)]
+    );
+    let m = iris_api::measures::measures(&s, None).unwrap();
+    assert_eq!(m.first_brief.unwrap().seconds, 340);
 }
 
 /// The mirror check: the newest verify row of each account.

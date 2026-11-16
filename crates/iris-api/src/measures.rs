@@ -16,7 +16,8 @@ pub struct Measures {
     /// The newest days of use, the newest first. A day with no row is a
     /// day on which the person did not use the web client.
     pub days: Vec<Day>,
-    /// From the first sync to the first understood mail, or `null`.
+    /// From the first account to the first item, or `null` before the
+    /// first item.
     pub first_brief: Option<FirstBrief>,
     /// The last mirror check of each account that has one.
     pub mirror: Vec<Check>,
@@ -37,9 +38,9 @@ pub struct Day {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct FirstBrief {
-    /// The start of the first sync (the connect step).
+    /// The time of the first account (the connect step).
     pub connect: String,
-    /// The end of the first understanding run that understood a message.
+    /// The time of the first item (the first brief).
     pub brief: String,
     pub seconds: i64,
 }
@@ -87,21 +88,18 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        // shortcut: a run ends after its whole batch, so the brief can show
-        // before this time; store the time of the first item if the measure
-        // must be exact.
         let first_brief = c
             .query_row(
-                "SELECT (SELECT min(started_at) FROM sync_log),
-                        (SELECT min(ended_at) FROM understand_run WHERE messages > 0)",
+                "SELECT (SELECT at FROM measure_time WHERE name = 'connect'),
+                        (SELECT at FROM measure_time WHERE name = 'brief')",
                 [],
                 |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
             .map(|times| match times {
-                (Some(a), Some(b)) if b >= a => Some(FirstBrief {
+                (Some(a), Some(b)) => Some(FirstBrief {
                     connect: rfc3339(a),
                     brief: rfc3339(b),
-                    seconds: (b - a) / 1000,
+                    seconds: (b - a).max(0) / 1000,
                 }),
                 _ => None,
             })?;
