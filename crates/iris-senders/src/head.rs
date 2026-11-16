@@ -12,10 +12,13 @@ pub(crate) struct Head(Vec<(String, String)>);
 impl Head {
     pub(crate) fn parse(raw: &[u8]) -> Head {
         let raw = &raw[..raw.len().min(HEAD_MAX)];
-        let end = raw
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .or_else(|| raw.windows(2).position(|w| w == b"\n\n"))
+        // The first empty line ends the head, with CRLF or LF line ends.
+        let end = (0..raw.len())
+            .find(|&i| {
+                raw[i] == b'\n'
+                    && (raw.get(i + 1) == Some(&b'\n')
+                        || (raw.get(i + 1) == Some(&b'\r') && raw.get(i + 2) == Some(&b'\n')))
+            })
             .unwrap_or(raw.len());
         let text = String::from_utf8_lossy(&raw[..end]);
         let mut out: Vec<(String, String)> = Vec::new();
