@@ -20,8 +20,10 @@ has the SHA-256 sum of each archive.
 
 1. `release.yml` merges the release PR into `main` and publishes the GitHub
    Release (`docs/RELEASES.md`).
-2. The `published` event of the release starts `.github/workflows/deploy.yml`.
-   The event starts the workflow because `release.py` uses `RELEASE_TOKEN`.
+2. The push to `main` starts `.github/workflows/deploy.yml`. The push starts
+   the workflow because `release.py` merges with `RELEASE_TOKEN`. The
+   workflow waits up to 15 minutes for the GitHub Release at the pushed
+   commit, and uses its tag. With no release, the run fails.
 3. `deploy.yml` builds the web client, then the program for each target. It
    builds all targets on Linux with `cargo-zigbuild`. There is no macOS job.
 4. `deploy.yml` attaches the archives and `SHA256SUMS` to the release.

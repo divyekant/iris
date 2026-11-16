@@ -2,13 +2,15 @@
 # Iris has no server of its own: a release is the programs that users install
 # with scripts/install.sh (docs/DEPLOYMENT.md).
 #
-# It runs when release.py publishes a GitHub Release (with RELEASE_TOKEN, so
-# the event starts this workflow), and by hand for a tag. It cross-builds the
-# macOS programs on Linux with cargo-zigbuild: there is no macOS job.
+# It runs on each push to main (the merge of a release PR, made with
+# RELEASE_TOKEN, so the push starts this workflow), and by hand for a tag. It
+# waits for the GitHub Release that release.py makes at the pushed commit. It
+# cross-builds the macOS programs on Linux with cargo-zigbuild: there is no
+# macOS job.
 name: deploy
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,18 +19,33 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: deploy-${{ github.event.release.tag_name || inputs.tag }}
+  group: deploy-${{ inputs.tag || github.sha }}
   cancel-in-progress: false
 jobs:
   programs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
       LINUX: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
       MACOS: aarch64-apple-darwin x86_64-apple-darwin
     steps:
+      # release.py publishes the release right after the merge. Wait up to
+      # 15 minutes for it; with no release, the run fails and GitHub tells
+      # the owner.
+      - name: Find the release tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="$INPUT_TAG"
+          i=0
+          while [ -z "$tag" ] && [ "$i" -lt 45 ]; do
+            tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=20" \
+              --jq ".[] | select(.target_commitish == \"$GITHUB_SHA\") | .tag_name" | head -n 1)"
+            [ -n "$tag" ] || { i=$((i + 1)); sleep 20; }
+          done
+          [ -n "$tag" ] || { echo "::error::no GitHub Release at $GITHUB_SHA"; exit 1; }
+          echo "TAG=$tag" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
