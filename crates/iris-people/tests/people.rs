@@ -767,3 +767,30 @@ fn a_decided_kind_wins_over_the_person_rule() {
         .unwrap();
     assert_eq!(kind, "stranger", "the sender step owns the kind");
 }
+
+#[test]
+fn a_domain_literal_is_an_address() {
+    let mut h = Hand::new("literal");
+    h.add(
+        "t1",
+        "SENT",
+        "me@example.com",
+        "Me",
+        "user@[IPv6:2001:db8::1], Bo <bo@[192.0.2.1]>, team: c@[IPv6:2001:db8::2];",
+    );
+    let mut found: Vec<String> = h
+        .people()
+        .iter()
+        .flat_map(addrs)
+        .map(String::from)
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "bo@[192.0.2.1]",
+            "c@[ipv6:2001:db8::2]",
+            "user@[ipv6:2001:db8::1]"
+        ]
+    );
+}
