@@ -256,6 +256,39 @@ fn a_planted_code_is_found_in_message_order() {
 }
 
 #[test]
+fn a_year_is_not_a_code() {
+    let raw = "From: News <news@shop.example>\nList-Id: <n.example>\nSubject: Verification in 2026\n\nRead.\n";
+    let d = one(raw, Kind::Service, &[]);
+    assert_eq!(d.item["form"], "feed");
+}
+
+#[test]
+fn a_code_late_in_a_long_line_keeps_its_quote() {
+    let raw = format!(
+        "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code {} is 482913 now\n",
+        "word ".repeat(200)
+    );
+    let d = one(&raw, Kind::Service, &[]);
+    assert_eq!(d.item["code"], "482913");
+    assert!(
+        d.quote.contains("482913") && d.quote.chars().count() <= 500,
+        "{}",
+        d.quote
+    );
+}
+
+#[test]
+fn a_long_list_id_gives_a_feed_with_no_list() {
+    let raw = LIST.replace(
+        "<weekly.news.example>",
+        &format!("<{}.example>", "w".repeat(600)),
+    );
+    let d = one(&raw, Kind::Service, &[]);
+    assert_eq!(d.item["form"], "feed");
+    assert!(d.item.get("list").is_none());
+}
+
+#[test]
 fn the_spec_examples_are_valid_and_a_bad_item_is_not() {
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),

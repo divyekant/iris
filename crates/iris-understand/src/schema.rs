@@ -67,3 +67,26 @@ pub fn validate(item: &Value) -> Result<(), String> {
         .ok_or_else(|| format!("unknown form {form:?}"))?;
     v.validate(item).map_err(|e| e.to_string())
 }
+
+/// True if a draft is valid when the store adds the fields that it owns
+/// (ID, sources, times, `derived` and the `p-` ID of a sender party).
+pub(crate) fn valid_draft(d: &crate::Draft) -> bool {
+    let mut v = d.item.clone();
+    for key in ["owner", "counterparty", "issuer", "publisher"] {
+        if v[key]["kind"] == "sender" {
+            v[key]["sender"] = Value::from("p-1");
+        }
+    }
+    let prefix = d.form().chars().next().unwrap_or('x');
+    let derived = match d.by {
+        crate::By::Rule(r) => serde_json::json!({"by": "rule", "rule": r}),
+        crate::By::Model => serde_json::json!({"by": "model", "model": "m", "prompt": "p"}),
+    };
+    v["model"] = Value::from("iris/0");
+    v["id"] = Value::from(format!("{prefix}-1"));
+    v["sources"] = serde_json::json!([{"message": "m-1", "thread": "t-1", "role": "origin", "quote": d.quote}]);
+    v["created"] = Value::from("2026-01-01T00:00:00Z");
+    v["updated"] = Value::from("2026-01-01T00:00:00Z");
+    v["derived"] = derived;
+    validate(&v).is_ok()
+}

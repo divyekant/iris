@@ -8,6 +8,8 @@ use crate::{cut, feed_status, party_sender, time, Analysis, Context, Draft, Kind
 
 /// The default life of a code signal (specification 1, section 6.6).
 const CODE_LIFE_MS: i64 = 15 * 60 * 1000;
+/// The most characters of a quote (the schema of a source).
+const QUOTE_CHARS: usize = 500;
 const CODE_WORDS: [&str; 5] = ["code", "verification", "one-time", "one time", "passcode"];
 const RECORD_WORDS: [&str; 8] = [
     "receipt",
@@ -28,6 +30,17 @@ const RECORD_WORDS: [&str; 8] = [
 /// for a list and an invitation (`(no subject)` if it is empty), the code
 /// line for a code (spec 1 section 7.5).
 pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
+    let drafts = matched(a, cx)?;
+    // A rule item that the schema refuses (for example a From address that
+    // is not a valid email address) does not count: the model reads the
+    // message.
+    drafts
+        .iter()
+        .all(crate::schema::valid_draft)
+        .then_some(drafts)
+}
+
+fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     if cx.kind == Kind::Hostile || !a.marks.is_empty() {
         return Some(Vec::new());
     }
@@ -76,7 +89,8 @@ pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
                 "publisher": party_sender(a),
                 "published": time::rfc3339(a.date(cx)),
             });
-            if let Some(l) = &a.head.list_id {
+            // A longer List-Id is not cut: a cut ID names another list.
+            if let Some(l) = a.head.list_id.as_ref().filter(|l| l.chars().count() <= 500) {
                 item["list"] = Value::String(l.clone());
             }
             return Some(vec![Draft::rule(item, "list", quote)]);
@@ -119,11 +133,12 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         if !cue(l) {
             return None;
         }
-        if let Some(code) = digits(l) {
-            return Some((code, l));
+        if let Some((code, at)) = digits(l) {
+            let quote = excerpt(l, at, code.len());
+            return Some((code, quote));
         }
         let next = *lines.get(i + 1)?;
-        let code = digits(next)?;
+        let (code, _) = digits(next)?;
         (next == code).then_some((code, next))
     })
 }
@@ -138,8 +153,10 @@ fn has_word(hay: &str, w: &str) -> bool {
     })
 }
 
-/// The first run of 4 to 8 ASCII digits with no letter or digit next to it.
-fn digits(line: &str) -> Option<String> {
+/// The first run of 4 to 8 ASCII digits with no letter or digit next to it,
+/// and its byte offset in `line`. A year from 1900 to 2099 is not a code
+/// (shortcut: issue #94).
+fn digits(line: &str) -> Option<(String, usize)> {
     let b = line.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -158,8 +175,10 @@ fn digits(line: &str) -> Option<String> {
             };
             let (b1, b2) = (back.next(), back.next());
             let (a1, a2) = (ahead.next(), ahead.next());
-            if (4..=8).contains(&(i - start)) && edge(b1, b2) && edge(a1, a2) {
-                return Some(line[start..i].to_string());
+            let run = &line[start..i];
+            let year = run.len() == 4 && matches!(&run[..2], "19" | "20");
+            if (4..=8).contains(&run.len()) && !year && edge(b1, b2) && edge(a1, a2) {
+                return Some((run.to_string(), start));
             }
         } else {
             i += 1;
@@ -168,13 +187,34 @@ fn digits(line: &str) -> Option<String> {
     None
 }
 
+/// At most [`QUOTE_CHARS`] characters of `line` that hold the bytes
+/// `at..at + len`: the whole line if it fits.
+fn excerpt(line: &str, at: usize, len: usize) -> &str {
+    if line.chars().count() <= QUOTE_CHARS {
+        return line;
+    }
+    // Start up to 100 characters before the code, at a character boundary.
+    let start = line[..at]
+        .char_indices()
+        .rev()
+        .nth(99)
+        .map_or(0, |(i, _)| i);
+    let end = line[start..]
+        .char_indices()
+        .nth(QUOTE_CHARS)
+        .map_or(line.len(), |(i, _)| start + i);
+    debug_assert!(end >= at + len);
+    &line[start..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn codes() {
-        assert_eq!(digits("Your code is 482913."), Some("482913".into()));
+        assert_eq!(digits("Your code is 482913."), Some(("482913".into(), 13)));
+        assert_eq!(digits("In 2026 code 7731"), Some(("7731".into(), 13)));
         assert_eq!(digits("Order 123456789"), None);
         assert_eq!(digits("Total 1234.50 or 1,2345"), None);
         assert_eq!(digits("ab1234"), None);
