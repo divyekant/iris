@@ -1116,6 +1116,35 @@ fn a_change_during_the_model_call_saves_nothing() {
 }
 
 #[test]
+fn a_correction_removed_during_the_model_call_saves_nothing() {
+    let b = store("pin-change");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let item = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO correction(item_id, field, value, by, at) VALUES (?1, 'due', '\"2026-01-09\"', 'person', 0)",
+                [item],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The model got the pinned item; the person removes the correction.
+    let model = Changer {
+        store: &b.store,
+        sql: "DELETE FROM correction WHERE item_id IN
+              (SELECT item_id FROM item_source WHERE message_id = ?1)",
+        message: m,
+    };
+    let out = understand(&b.store, m, &model, NOW).unwrap();
+    assert!(out.changed);
+    let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+    assert!(at.is_none());
+}
+
+#[test]
 fn a_new_item_never_takes_a_later_status_from_the_model() {
     let b = store("status");
     let m = b.add("1", ASK, &["INBOX"]);

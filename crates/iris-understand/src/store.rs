@@ -170,7 +170,6 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let first = store.read(|c| Ok(inputs_now(c)?))?;
     let known = |_: &str| first.known.clone();
-    let existing = pinned(store, message)?;
     // Steps 1 and 2 do not use the sender kind or the known parties. Write
     // 1 decides them (step 3).
     let cx = Context {
@@ -180,7 +179,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         internal_date: row.internal_date,
         now_ms,
         known_person: &known,
-        existing: &existing,
+        existing: &first.pinned,
         thread: &first.context,
         same_sender: &first.same,
         known: &[],
@@ -251,6 +250,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let cx = Context {
         kind: kind_read,
         known_person: &known,
+        existing: &after.pinned,
         thread: &after.context,
         known: &after.parties,
         ..cx
@@ -459,20 +459,22 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
 /// The documents of the pinned items whose origin is `message`.
 // shortcut: pinned means "has a correction" only; add the references of
 // open changesets and of the ledger when specification 2 builds them.
-fn pinned(store: &Store, message: i64) -> Result<Vec<Value>> {
-    Ok(store.read(|c| {
-        let mut st = c.prepare_cached(
-            "SELECT i.doc FROM item_source s JOIN item i ON i.id = s.item_id
-             WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form <> 'conversation'
-               AND EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)
-             ORDER BY i.id",
-        )?;
-        let docs = st
-            .query_map([message], |r| r.get::<_, String>(0))?
-            .filter_map(|d| d.ok().and_then(|d| serde_json::from_str(&d).ok()))
-            .collect();
-        Ok(docs)
-    })?)
+/// The documents of the pinned items (with a correction) whose origin is
+/// the message. A document that is not JSON is left out.
+fn pinned(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut st = c.prepare_cached(
+        "SELECT i.doc FROM item_source s JOIN item i ON i.id = s.item_id
+         WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form <> 'conversation'
+           AND EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)
+         ORDER BY i.id",
+    )?;
+    let docs = st
+        .query_map([message], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(docs
+        .iter()
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect())
 }
 
 fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind> {
@@ -496,6 +498,8 @@ struct Inputs {
     context: Vec<String>,
     /// The known persons in the headers of the thread (section 7.4).
     parties: Vec<String>,
+    /// The pinned items of the message, which the model gets.
+    pinned: Vec<Value>,
 }
 
 fn inputs(
@@ -514,6 +518,7 @@ fn inputs(
         same: same_sender(c, message, thread, date, from_addr)?,
         context: thread_context(c, message, thread, date)?,
         parties: known_parties(c, thread)?,
+        pinned: pinned(c, message)?,
     })
 }
 
