@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { greeting, liveCode, nextDay, party, partyKey, placeStrangers, summary, when } from "../format";
+  import { greeting, liveCode, nextDay, party, partyKey, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
@@ -17,9 +17,9 @@
     poll = 5000,
   }: { brief: Brief; status?: Status | null; now?: Date; poll?: number } = $props();
 
+  // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
-  let loaded = $state(firstBrief);
-  let brief = $derived(placeStrangers(loaded));
+  let brief = $state(firstBrief);
   // svelte-ignore state_referenced_locally
   let status = $state(firstStatus);
   // svelte-ignore state_referenced_locally
@@ -33,7 +33,7 @@
     if (!poll) return;
     return every(
       () => Promise.all([get<Brief>("brief"), get<Status>("status")]),
-      ([b, s]) => ((loaded = b), (status = s)),
+      ([b, s]) => ((brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });

@@ -129,20 +129,6 @@ export function greeting(now = new Date()): string {
   return h < 5 ? "Good evening." : h < 12 ? "Good morning." : h < 18 ? "Good afternoon." : "Good evening.";
 }
 
-/**
- * A conversation with a stranger is in two sections of the API: conversations
- * and strangers. Spec 1 section 6.7 puts it under Strangers, so it leaves Conversations.
- */
-export function placeStrangers(brief: Brief): Brief {
-  const strange = new Set(brief.strangers.items.map((i) => i.id));
-  const moved = brief.conversations.items.filter((i) => strange.has(i.id)).length;
-  if (!moved) return brief;
-  return {
-    ...brief,
-    conversations: { ...brief.conversations, count: brief.conversations.count - moved, items: brief.conversations.items.filter((i) => !strange.has(i.id)) },
-  };
-}
-
 /** Copy a text. Returns false when the browser refuses, so the view can say so. */
 export async function copyText(text: string, clipboard: Pick<Clipboard, "writeText"> | undefined = globalThis.navigator?.clipboard): Promise<boolean> {
   try {

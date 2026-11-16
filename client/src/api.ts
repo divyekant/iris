@@ -99,9 +99,13 @@ export type Message = Summary & {
   items: string[];
 };
 
+export const SIGN_IN = "Open the sign-in address that iris serve printed, then reload this page.";
+
 /** Get one JSON resource from the local API. Throws an Error with the API's error text. */
 export async function get<T>(path: string): Promise<T> {
   const response = await fetch(`/api/${path}`, { headers: { accept: "application/json" } });
+  // Spec 2 section 8.6: the API needs the session cookie that the one-time sign-in address sets.
+  if (response.status === 401) throw new Error(SIGN_IN);
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(body?.error ?? `The engine answered ${response.status}.`);
   return body as T;

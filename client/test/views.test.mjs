@@ -218,7 +218,8 @@ test("the brief shows the triage proposal and says that nothing is applied", asy
 });
 
 test("a stranger conversation shows once, under strangers", async () => {
-  const brief = { ...fx.brief, strangers: { count: 1, items: [item("v-88")] } };
+  // The API gives it only under strangers.
+  const brief = { ...fx.brief, conversations: { count: 0, items: [] }, strangers: { count: 1, items: [item("v-88")] } };
   const html = await render("/src/views/Brief.svelte", { brief, now: NOW, poll: 0 });
   assert.equal((html.match(/href="#\/item\/v-88"/g) ?? []).length, 1);
   assert.match(html, /id="strangers"/);
@@ -314,6 +315,22 @@ test("due dates read as words, with a tone for soon and late", async () => {
   assert.deepEqual(due(at("2026-11-17"), now), { text: "due tomorrow", tone: "soon" });
   assert.deepEqual(due(at("2026-11-26"), now), { text: "due in 10 days", tone: "" });
   assert.deepEqual(due(at("2026-11-14"), now), { text: "was due 2 days ago", tone: "late" });
+});
+
+test("the API client asks for the sign-in address on 401 and gives the API error text", async () => {
+  const { get, SIGN_IN } = await load("/src/api.ts");
+  const answer = (status, body) => async () => new Response(JSON.stringify(body), { status });
+  const saved = globalThis.fetch;
+  try {
+    globalThis.fetch = answer(401, { error: "no session" });
+    await assert.rejects(get("brief"), { message: SIGN_IN });
+    globalThis.fetch = answer(400, { error: "unknown status" });
+    await assert.rejects(get("items?status=x"), { message: "unknown status" });
+    globalThis.fetch = answer(200, { ok: 1 });
+    assert.deepEqual(await get("status"), { ok: 1 });
+  } finally {
+    globalThis.fetch = saved;
+  }
 });
 
 test("routes in the hash give the view", async () => {
