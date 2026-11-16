@@ -2087,4 +2087,25 @@ mod tests {
         ]);
         assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
     }
+
+    #[test]
+    fn a_later_map_replaces_a_map_that_used_the_budget() {
+        let mut big = b"begincmap 1 beginbfrange".to_vec();
+        for n in 0..70_000u32 {
+            big.extend(format!(" <{:08X}> <{:08X}> <0041>", n, n).bytes());
+        }
+        big.extend_from_slice(b" endbfrange endcmap");
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (6, "<< >>", Some(&big)),
+            (3, "<< >>", Some(CODES)),
+            (5, TYPE0, None),
+            (6, "<< >>", Some(CMAP)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
+    }
 }
