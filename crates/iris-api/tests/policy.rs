@@ -100,7 +100,7 @@ async fn the_first_start_has_no_rules_and_no_file() {
     let v = d.get().await;
     assert_eq!(
         v,
-        json!({ "mode": "observe", "version": null, "next_id": 1, "rules": [], "error": null, "file": { "state": "missing" } })
+        json!({ "mode": "observe", "version": null, "next_id": 1, "rules": [], "proposals": [], "error": null, "file": { "state": "missing" } })
     );
     let (code, status) = d.call("GET", "/api/status", None, true).await;
     assert_eq!((code, &status["mode"]), (StatusCode::OK, &json!("observe")));
@@ -269,9 +269,53 @@ async fn each_policy_endpoint_needs_the_sign_in() {
         ("POST", "/api/policy/discard"),
         ("POST", "/api/policy/mode"),
         ("POST", "/api/policy/remove"),
+        ("POST", "/api/policy/accept"),
+        ("POST", "/api/policy/dismiss"),
     ] {
         let (code, _) = d.call(method, uri, Some(json!({})), false).await;
         assert_eq!(code, StatusCode::UNAUTHORIZED, "{uri}");
     }
     assert!(!d.0.join(iris_policy::FILE).exists());
+}
+
+#[tokio::test]
+async fn a_proposal_goes_into_the_file_only_on_accept() {
+    let d = open("proposal");
+    d.1.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO rule_proposal (verb, cond, value, approvals, created_at, updated_at)
+             VALUES ('archive', 'sender', 'deals@acme.example', 12, 5, 5),
+                    ('read', 'sender_kind', 'service', 10, 6, 6);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let v = d.get().await;
+    let p = &v["proposals"][0];
+    assert_eq!((&p["id"], &p["approvals"]), (&json!(1), &json!(12)), "{v}");
+    assert_eq!(p["rule"]["name"], "Archive mail from deals@acme.example");
+    assert_eq!(p["rule"]["by"], "proposal");
+    assert_eq!(p["rule"]["when"], json!({ "sender": "deals@acme.example" }));
+    assert!(
+        !d.0.join(iris_policy::FILE).exists(),
+        "no file before the accept"
+    );
+
+    let (code, v) = d.post("dismiss", json!({ "id": 2 })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["proposals"].as_array().unwrap().len(), 1);
+    let (code, _) = d.post("dismiss", json!({ "id": 2 })).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+
+    let (code, v) = d.post("accept", json!({ "version": null, "id": 1 })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["proposals"], json!([]));
+    assert_eq!(v["rules"][0]["by"], "proposal");
+    assert_eq!(v["rules"][0]["verbs"], json!(["archive"]));
+    let text = std::fs::read_to_string(d.0.join(iris_policy::FILE)).unwrap();
+    assert!(text.contains("approved 12 of 12 archive actions"), "{text}");
+    let (code, _) = d
+        .post("accept", json!({ "version": v["version"], "id": 1 }))
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT);
 }
