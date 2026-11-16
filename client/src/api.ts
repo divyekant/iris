@@ -146,13 +146,14 @@ export function signIn(
   store: Store | undefined = session(),
 ): Promise<void> {
   const inAddress = loc?.hash.match(/^#code=([^&]+)/)?.[1];
-  const code = inAddress ? decodeURIComponent(inAddress) : quiet(() => store?.getItem(CODE));
+  // Remove the code from the address bar and the history before the exchange.
+  if (loc && inAddress) quiet(() => hist?.replaceState(null, "", `${loc.pathname}${loc.search}#/`));
+  // A bad escape (for example `%`) gives undefined. This function must not throw: it runs at import.
+  const fromAddress = inAddress ? quiet(() => decodeURIComponent(inAddress)) : undefined;
+  if (inAddress && !fromAddress) return (ready = Promise.reject(new Error(SIGN_IN_FAILED)));
+  const code = fromAddress ?? quiet(() => store?.getItem(CODE));
   if (!loc || !code) return Promise.resolve();
-  if (inAddress) {
-    quiet(() => store?.setItem(CODE, code));
-    // Remove the code from the address bar and the history before the exchange.
-    hist?.replaceState(null, "", `${loc.pathname}${loc.search}#/`);
-  }
+  if (fromAddress) quiet(() => store?.setItem(CODE, fromAddress));
   ready = (async () => {
     // A throw here (no answer) keeps the code for the next try.
     const response = await fetch("/api/session", {
@@ -172,6 +173,15 @@ export function signIn(
 }
 // Read the code before the first view reads the hash.
 signIn().catch(() => {});
+
+/** Number the requests of a view. A request applies its answer only while it is the newest. */
+export function newest(): () => () => boolean {
+  let last = 0;
+  return () => {
+    const mine = ++last;
+    return () => mine === last;
+  };
+}
 
 async function call(path: string, accept: string): Promise<Response> {
   await ready;

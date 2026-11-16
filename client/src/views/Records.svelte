@@ -1,6 +1,6 @@
 <!-- Records: one table for each type, 50 records at a time, with "Show more" for the next page. -->
 <script lang="ts">
-  import { get, type Page } from "../api";
+  import { get, newest, type Page } from "../api";
   import { addPage } from "../format";
   import RecordTable from "./RecordTable.svelte";
 
@@ -18,19 +18,23 @@
   let error = $state("");
   let busy = $state(false);
 
-  async function load(name: string, before: string | number | null) {
+  // A type chosen again (A, B, A) starts a new request. Only the newest one applies its answer.
+  const ticket = newest();
+
+  async function load(name: string, before: string | null) {
+    const current = ticket();
     busy = true;
     error = "";
     try {
       const result = await get<Page>(`items?form=record&type=${encodeURIComponent(name)}&limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`);
-      if (name !== selected) return;
+      if (!current()) return;
       items = before ? addPage(items, result.items) : result.items;
       next = result.next;
       loaded = name;
     } catch (e) {
-      error = (e as Error).message;
+      if (current()) error = (e as Error).message;
     } finally {
-      busy = false;
+      if (current()) busy = false;
     }
   }
 
