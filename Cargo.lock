@@ -637,8 +637,35 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "clap",
+ "iris-auth",
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-service",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
  "iris-web",
+ "serde",
+ "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "iris-api"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "getrandom 0.4.3",
+ "iris-observe",
+ "iris-store",
+ "iris-synth",
+ "iris-web",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -697,6 +724,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-observe"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "iris-senders"
 version = "0.0.0"
 dependencies = [
@@ -705,6 +746,10 @@ dependencies = [
  "iris-synth",
  "rusqlite",
 ]
+
+[[package]]
+name = "iris-service"
+version = "0.0.0"
 
 [[package]]
 name = "iris-spec"
@@ -734,6 +779,7 @@ dependencies = [
  "iris-store",
  "iris-synth",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]

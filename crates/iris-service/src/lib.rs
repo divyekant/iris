@@ -1,0 +1,556 @@
+//! The background service of Iris.
+//!
+//! On macOS the service is a launchd agent in `~/Library/LaunchAgents`. On
+//! Linux it is a systemd user unit in `~/.config/systemd/user`. Both run
+//! `iris serve` when the user logs in, and again after a crash.
+//!
+//! [`launchd_plist`] and [`systemd_unit`] make the file text and do no I/O.
+//! [`install`] and [`remove`] write or delete the file and tell the service
+//! manager.
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The launchd label of the agent. The plist file is `<LABEL>.plist`.
+pub const LABEL: &str = "io.github.divyekant.iris";
+
+/// The name of the systemd user unit.
+pub const UNIT: &str = "iris.service";
+
+/// A service manager.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum System {
+    /// macOS launchd, as a per-user agent.
+    Launchd,
+    /// Linux systemd, as a user unit.
+    Systemd,
+}
+
+impl System {
+    /// The service manager of this system, or `None` if Iris has none for it.
+    pub fn current() -> Option<System> {
+        if cfg!(target_os = "macos") {
+            Some(System::Launchd)
+        } else if cfg!(target_os = "linux") {
+            Some(System::Systemd)
+        } else {
+            None
+        }
+    }
+
+    /// The path of the service file under the folders of the user.
+    ///
+    /// `config` is the systemd config folder (`$XDG_CONFIG_HOME`, else
+    /// `~/.config`). launchd does not use it.
+    pub fn file(self, home: &Path, config: &Path) -> PathBuf {
+        match self {
+            System::Launchd => home
+                .join("Library/LaunchAgents")
+                .join(format!("{LABEL}.plist")),
+            System::Systemd => config.join("systemd/user").join(UNIT),
+        }
+    }
+
+    /// The text of the service file that runs `<program> serve`.
+    pub fn text(self, program: &Path, home: &Path) -> io::Result<String> {
+        match self {
+            System::Launchd => launchd_plist(program, &home.join("Library/Logs/iris.log")),
+            System::Systemd => systemd_unit(program),
+        }
+    }
+}
+
+/// The text of the launchd agent that runs `<program> serve`.
+///
+/// launchd starts the agent at login and starts it again if it stops with an
+/// error. Its output goes to `log`.
+pub fn launchd_plist(program: &Path, log: &Path) -> io::Result<String> {
+    let program = xml(checked(program)?);
+    let log = xml(checked(log)?);
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{program}</string>
+		<string>serve</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>{log}</string>
+	<key>StandardErrorPath</key>
+	<string>{log}</string>
+</dict>
+</plist>
+"#
+    ))
+}
+
+/// The text of the systemd user unit that runs `<program> serve`.
+///
+/// systemd starts the unit at login (or at boot, if lingering is on for the
+/// user) and starts it again if it stops with an error. The output goes to
+/// the journal.
+pub fn systemd_unit(program: &Path) -> io::Result<String> {
+    let program = checked(program)?;
+    // systemd reads `%` as a specifier and `$` as a variable, and a quoted
+    // word takes C escapes.
+    let mut quoted = String::from('"');
+    for c in program.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '%' => quoted.push_str("%%"),
+            '$' => quoted.push_str("$$"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    Ok(format!(
+        "[Unit]
+Description=Iris mail engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={quoted} serve
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"
+    ))
+}
+
+/// A path that is safe to put in a service file: absolute, UTF-8, and with
+/// no control characters (a new line would add a line to the file).
+fn checked(path: &Path) -> io::Result<&str> {
+    let invalid = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{why}: {}", path.display()),
+        )
+    };
+    if !path.is_absolute() {
+        return Err(invalid("the path is not absolute"));
+    }
+    let text = path
+        .to_str()
+        .ok_or_else(|| invalid("the path is not UTF-8"))?;
+    if text.chars().any(char::is_control) {
+        return Err(invalid("the path has a control character"));
+    }
+    Ok(text)
+}
+
+fn xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Write the service file for `program` under `home` and `config`, with its
+/// folder. Return its path. This does not tell the service manager.
+pub fn write(system: System, program: &Path, home: &Path, config: &Path) -> io::Result<PathBuf> {
+    let text = system.text(program, home)?;
+    let file = system.file(home, config);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if system == System::Launchd {
+        std::fs::create_dir_all(home.join("Library/Logs"))?;
+    }
+    // Write a new file, then rename it, so that a stop never leaves half a file.
+    // The name is unique for each call, so that two installs at the same
+    // time never write the same temporary file.
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let new = file.with_extension(format!("new.{}.{n}", std::process::id()));
+    if let Err(e) = std::fs::write(&new, text).and_then(|()| std::fs::rename(&new, &file)) {
+        let _ = std::fs::remove_file(&new);
+        return Err(e);
+    }
+    Ok(file)
+}
+
+/// Install the service for `program` (an absolute path to the iris program)
+/// and start it now. A second install replaces the first. Return the path of
+/// the service file.
+///
+/// If a call to the service manager fails, the service file stays and the
+/// error comes back. The state of the service manager is then not known: run
+/// `install` again to finish, or [`remove`] to undo. Both are safe to repeat.
+pub fn install(program: &Path) -> io::Result<PathBuf> {
+    let system = unsupported(System::current())?;
+    let (home, config) = folders()?;
+    let file = write(system, program, &home, &config)?;
+    activate(system, &file)?;
+    Ok(file)
+}
+
+/// Tell the service manager to load the service file and start the service.
+fn activate(system: System, file: &Path) -> io::Result<()> {
+    match system {
+        System::Launchd => {
+            let domain = format!("gui/{}", uid()?);
+            stop_agent(&domain)?;
+            run("launchctl", &["bootstrap", &domain, path_str(file)?])?;
+        }
+        System::Systemd => {
+            run("systemctl", &["--user", "daemon-reload"])?;
+            run("systemctl", &["--user", "enable", UNIT])?;
+            run("systemctl", &["--user", "restart", UNIT])?;
+        }
+    }
+    Ok(())
+}
+
+/// Stop the service and delete its file. Return the path of the deleted file,
+/// or `None` if no service was installed.
+pub fn remove() -> io::Result<Option<PathBuf>> {
+    let system = unsupported(System::current())?;
+    let (home, config) = folders()?;
+    let file = system.file(&home, &config);
+    if !file.exists() {
+        return Ok(None);
+    }
+    match system {
+        System::Launchd => {
+            // If the stop fails, keep the file, so that a second remove can try again.
+            stop_agent(&format!("gui/{}", uid()?))?;
+            std::fs::remove_file(&file)?;
+        }
+        System::Systemd => {
+            let booted = Path::new("/run/systemd/system").is_dir();
+            remove_unit("systemctl", &file, booted)?;
+        }
+    }
+    Ok(Some(file))
+}
+
+/// Stop and disable the systemd unit, then delete its file. `booted` says if
+/// systemd runs this system (the test of `sd_booted`).
+fn remove_unit(systemctl: &str, file: &Path, booted: bool) -> io::Result<()> {
+    // With no running systemd, nothing can run the unit: delete the file with
+    // no stop. A systemctl call would fail (no user bus) and block the remove.
+    if !booted {
+        return std::fs::remove_file(file);
+    }
+    // If the stop fails, keep the file, so that a second remove can try again.
+    run(systemctl, &["--user", "disable", "--now", UNIT])?;
+    std::fs::remove_file(file)?;
+    // The unit is stopped and disabled, so the remove is complete. The
+    // reload only drops the old definition from memory; systemd reads
+    // the folder again at the next login, so a failed reload is no error.
+    let _ = output(systemctl, &["--user", "daemon-reload"]);
+    Ok(())
+}
+
+fn unsupported(system: Option<System>) -> io::Result<System> {
+    system.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Iris has no background service for this system",
+        )
+    })
+}
+
+/// The home folder and the systemd config folder of the user.
+fn folders() -> io::Result<(PathBuf, PathBuf)> {
+    let var = |name| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = var("HOME").filter(|h| h.is_absolute()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is not set to an absolute path",
+        )
+    })?;
+    // The XDG rules say to ignore a relative path.
+    let config = var("XDG_CONFIG_HOME")
+        .filter(|c| c.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    Ok((home, config))
+}
+
+fn path_str(path: &Path) -> io::Result<&str> {
+    path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("the path is not UTF-8: {}", path.display()),
+        )
+    })
+}
+
+fn uid() -> io::Result<String> {
+    let out = run("id", &["-u"])?;
+    Ok(out.trim().to_string())
+}
+
+/// Stop the launchd agent in `domain` if it is loaded. A failed stop of a
+/// loaded agent is an error.
+fn stop_agent(domain: &str) -> io::Result<()> {
+    stop_agent_with("launchctl", domain)
+}
+
+/// The exit code of `launchctl print` for a service that is not loaded
+/// ("Could not find service").
+const LAUNCHCTL_NOT_FOUND: i32 = 113;
+
+fn stop_agent_with(launchctl: &str, domain: &str) -> io::Result<()> {
+    let target = format!("{domain}/{LABEL}");
+    let out = output(launchctl, &["print", &target])?;
+    match out.status.code() {
+        Some(0) => run(launchctl, &["bootout", &target]).map(|_| ()),
+        Some(LAUNCHCTL_NOT_FOUND) => Ok(()),
+        // Any other result does not say if the agent runs: stop with an error.
+        _ => Err(io::Error::other(format!(
+            "cannot find out if the service runs: launchctl print {target} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+    }
+}
+
+fn output(program: &str, args: &[&str]) -> io::Result<std::process::Output> {
+    Command::new(program).args(args).output()
+}
+
+/// Run a command. Return its output, or an error with its message if it fails.
+fn run(program: &str, args: &[&str]) -> io::Result<String> {
+    let out = output(program, args)
+        .map_err(|e| io::Error::new(e.kind(), format!("cannot run {program}: {e}")))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(io::Error::other(format!(
+            "{program} {} failed: {}",
+            args.join(" "),
+            why.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plist_runs_serve_and_escapes_the_path() {
+        let text = launchd_plist(
+            Path::new("/Users/a&b/<x>/iris"),
+            Path::new("/Users/a/Library/Logs/iris.log"),
+        )
+        .unwrap();
+        assert!(text.contains(
+            "<string>/Users/a&amp;b/&lt;x&gt;/iris</string>\n\t\t<string>serve</string>"
+        ));
+        assert!(text.contains(&format!("<string>{LABEL}</string>")));
+        assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
+        assert!(text.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
+        assert!(text.contains("<string>/Users/a/Library/Logs/iris.log</string>"));
+        assert!(!text.contains("a&b"));
+    }
+
+    #[test]
+    fn unit_runs_serve_and_quotes_the_path() {
+        let text = systemd_unit(Path::new("/home/a b/50%/$x/\"q\"\\/iris")).unwrap();
+        assert!(
+            text.contains("\nExecStart=\"/home/a b/50%%/$$x/\\\"q\\\"\\\\/iris\" serve\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nRestart=on-failure\n"));
+        assert!(text.contains("\nWantedBy=default.target\n"));
+    }
+
+    #[test]
+    fn a_bad_path_is_refused() {
+        for bad in [
+            "iris",
+            "/home/a\nExecStartPre=/bin/evil/iris",
+            "/home/a\r/iris",
+        ] {
+            assert!(systemd_unit(Path::new(bad)).is_err(), "{bad:?}");
+            assert!(
+                launchd_plist(Path::new(bad), Path::new("/l")).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// A fake launchctl: `print` exits with `code`, other calls go to `log`.
+    fn fake_launchctl(dir: &Path, code: i32) -> PathBuf {
+        let tool = dir.join(format!("launchctl-{code}"));
+        let log = dir.join(format!("calls-{code}"));
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then echo why >&2; exit {code}; fi\necho \"$@\" >> '{}'\n",
+            log.display()
+        );
+        std::fs::write(&tool, script).unwrap();
+        assert!(Command::new("chmod")
+            .arg("755")
+            .arg(&tool)
+            .status()
+            .unwrap()
+            .success());
+        tool
+    }
+
+    #[test]
+    fn stop_agent_stops_only_a_loaded_agent_and_fails_when_unsure() {
+        let dir =
+            std::env::temp_dir().join(format!("iris-service-launchctl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let call = |code| {
+            let tool = fake_launchctl(&dir, code);
+            let result = stop_agent_with(tool.to_str().unwrap(), "gui/501");
+            (
+                result,
+                std::fs::read_to_string(dir.join(format!("calls-{code}"))).ok(),
+            )
+        };
+        let (ok, calls) = call(0);
+        assert!(ok.is_ok());
+        assert_eq!(
+            calls.as_deref(),
+            Some(format!("bootout gui/501/{LABEL}\n").as_str())
+        );
+        let (ok, calls) = call(LAUNCHCTL_NOT_FOUND);
+        assert!(ok.is_ok());
+        assert_eq!(calls, None);
+        let (err, calls) = call(5);
+        assert!(err.unwrap_err().to_string().contains("cannot find out"));
+        assert_eq!(calls, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_unit_deletes_the_file_with_no_stop_only_if_systemd_does_not_run() {
+        let dir =
+            std::env::temp_dir().join(format!("iris-service-nosystemctl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("iris.service");
+        std::fs::write(&file, "unit").unwrap();
+        let missing = dir.join("no-such-systemctl");
+        let missing = missing.to_str().unwrap();
+        // systemd runs, but systemctl is not found (for example, a short PATH):
+        // the service can still run, so keep the file and fail.
+        assert!(remove_unit(missing, &file, true).is_err());
+        assert!(file.exists());
+        assert!(remove_unit(missing, &file, false).is_ok());
+        assert!(!file.exists());
+        // systemctl exists but systemd does not run (no user bus): delete the file.
+        let failing = dir.join("failing-systemctl");
+        std::fs::write(
+            &failing,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\necho 'Failed to connect to bus' >&2\nexit 1\n",
+                dir.join("calls").display()
+            ),
+        )
+        .unwrap();
+        assert!(Command::new("chmod")
+            .arg("755")
+            .arg(&failing)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(&file, "unit").unwrap();
+        assert!(remove_unit(failing.to_str().unwrap(), &file, true).is_err());
+        assert!(file.exists());
+        std::fs::remove_file(dir.join("calls")).unwrap();
+        assert!(remove_unit(failing.to_str().unwrap(), &file, false).is_ok());
+        assert!(!file.exists());
+        assert!(
+            !dir.join("calls").exists(),
+            "no systemctl call when systemd does not run"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn writes_at_the_same_time_leave_one_whole_file() {
+        let dir = std::env::temp_dir().join(format!("iris-service-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (home, config) = (dir.join("home"), dir.join("config"));
+        let runs: Vec<_> = (0..8)
+            .map(|i| {
+                let (home, config) = (home.clone(), config.clone());
+                std::thread::spawn(move || {
+                    let program = PathBuf::from(format!("/opt/iris{i}"));
+                    write(System::Systemd, &program, &home, &config)
+                })
+            })
+            .collect();
+        for run in runs {
+            run.join().unwrap().unwrap();
+        }
+        let file = System::Systemd.file(&home, &config);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let whole =
+            (0..8).any(|i| text == systemd_unit(Path::new(&format!("/opt/iris{i}"))).unwrap());
+        assert!(whole, "{text}");
+        assert_eq!(
+            std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_go_to_the_user_folders() {
+        let (home, config) = (Path::new("/h"), Path::new("/c"));
+        assert_eq!(
+            System::Launchd.file(home, config),
+            Path::new("/h/Library/LaunchAgents/io.github.divyekant.iris.plist")
+        );
+        assert_eq!(
+            System::Systemd.file(home, config),
+            Path::new("/c/systemd/user/iris.service")
+        );
+    }
+
+    #[test]
+    fn write_makes_the_file_and_replaces_it() {
+        let dir = std::env::temp_dir().join(format!("iris-service-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (home, config) = (dir.join("home"), dir.join("config"));
+        for system in [System::Launchd, System::Systemd] {
+            let first = write(system, Path::new("/old/iris"), &home, &config).unwrap();
+            let file = write(system, Path::new("/new/iris"), &home, &config).unwrap();
+            assert_eq!(first, file);
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert!(text.contains("/new/iris") && !text.contains("/old/iris"));
+            let names: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                names,
+                [file.file_name().unwrap()],
+                "no temporary file stays"
+            );
+        }
+        assert!(home.join("Library/Logs").is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
