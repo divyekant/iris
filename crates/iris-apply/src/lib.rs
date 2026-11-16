@@ -189,12 +189,13 @@ impl Change {
     /// The `ops` of the ledger row: the call, the labels to add and remove,
     /// and the number of calls.
     fn ops(&self, calls: i64) -> String {
-        format!(
-            r#"{{"call":"{}","add":{},"remove":{},"calls":{calls}}}"#,
-            if self.trash { "trash" } else { "batchModify" },
-            labels_json(&self.add),
-            labels_json(&self.remove),
-        )
+        serde_json::json!({
+            "call": if self.trash { "trash" } else { "batchModify" },
+            "add": self.add,
+            "remove": self.remove,
+            "calls": calls,
+        })
+        .to_string()
     }
 
     /// True if a message with `labels` does not have the target state.
@@ -912,7 +913,12 @@ impl Run<'_, '_> {
     /// a write call before its claim (the label create).
     fn fail_unclaimed(&mut self, action: i64, change: &Change, error: String) -> Result<Outcome> {
         let account = self.account;
-        let ok = self.store.write(|tx| {
+        let ended = self.store.write(|tx| {
+            // The mode and the expiry, as in the claim: an action that
+            // waits or expires does not fail.
+            if let Some(o) = gate(tx, action)? {
+                return Ok(Err(o));
+            }
             let n = tx.execute(
                 "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
                  SELECT ?1, ?2, ?3, 'writing', 'inverse', ?4
@@ -925,10 +931,12 @@ impl Run<'_, '_> {
                     params![tx.last_insert_rowid(), error],
                 )?;
             }
-            Ok(n == 1)
+            Ok(Ok(n == 1))
         })?;
-        if !ok {
-            return Err(Error::NotApproved(action));
+        match ended {
+            Err(o) => return Ok(o),
+            Ok(false) => return Err(Error::NotApproved(action)),
+            Ok(true) => {}
         }
         Ok(Outcome::Failed {
             counts: self.counts.clone(),
@@ -952,29 +960,15 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// A JSON array of label IDs, each as a JSON string.
+/// A JSON array of label IDs (serde_json writes the escapes).
 fn labels_json<S: AsRef<str>>(labels: impl IntoIterator<Item = S>) -> String {
-    let quoted: Vec<String> = labels
-        .into_iter()
-        .map(|l| json_string(l.as_ref()))
-        .collect();
-    format!("[{}]", quoted.join(","))
-}
-
-/// A JSON string: Gmail gives the user label IDs, so the text is escaped.
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    serde_json::Value::from(
+        labels
+            .into_iter()
+            .map(|l| l.as_ref().to_string())
+            .collect::<Vec<String>>(),
+    )
+    .to_string()
 }
 
 /// True if the account has a ledger row in `writing`.

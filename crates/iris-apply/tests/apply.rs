@@ -566,8 +566,8 @@ fn the_ledger_lists_each_changed_message() {
         })
         .unwrap();
     assert_eq!(
-        ops,
-        r#"{"call":"trash","add":["TRASH"],"remove":[],"calls":3}"#
+        serde_json::from_str::<serde_json::Value>(&ops).unwrap(),
+        serde_json::json!({"call": "trash", "add": ["TRASH"], "remove": [], "calls": 3})
     );
     assert!(history.is_some());
     // An action whose messages have the target state has a row with no
@@ -1206,5 +1206,35 @@ fn a_waiting_action_still_recovers_the_rows_of_the_account() {
     assert!(!b.writing(first));
     assert_eq!(b.state(first).0, "failed");
     assert_eq!(b.state(second).0, "approved");
+    assert_eq!(b.calls("batchModify"), 0);
+}
+
+/// A label create with no label after it: the action fails only after the
+/// same checks as the claim. Here the person changed the mode to observe
+/// during the create, so the action waits.
+#[test]
+fn a_failed_label_create_checks_the_mode_again() {
+    let b = setup("label-gate", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.labelled("label", "Never", &ms);
+    // The profile call passes; labels.list gets 401, and the new token
+    // comes after the person changed the mode.
+    b.fake.fail_next(&[0, 401]);
+    b.fake.fail_next_write(&[409], false);
+    let r = b.apply_as(b.account, a, &mut || {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO policy_version(text, sha256, confirmed_at)
+                     VALUES ('version = 0\nmode = \"observe\"\n', 'h7', 7)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        Some(TOKEN.into())
+    });
+    assert_eq!(r.unwrap(), Outcome::Waiting);
+    assert_eq!(b.state(a).0, "approved");
+    assert_eq!(b.calls("/labels"), 1);
     assert_eq!(b.calls("batchModify"), 0);
 }
