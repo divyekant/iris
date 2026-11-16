@@ -1052,3 +1052,101 @@ fn a_held_message_that_no_rule_matches_now_loses_its_rule_item() {
     assert!(out.waiting);
     assert!(b.items().is_empty());
 }
+
+/// A model that changes the message in the store during its call, as a sync
+/// can do.
+struct Changer<'a> {
+    store: &'a Store,
+    sql: &'static str,
+    message: i64,
+}
+
+impl Model for Changer<'_> {
+    fn name(&self) -> &str {
+        "fake-1"
+    }
+
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        self.store
+            .write(|tx| {
+                tx.execute(self.sql, [self.message])?;
+                Ok(())
+            })
+            .unwrap();
+        Ok(Reply {
+            stop: Stop::End,
+            text: COMMITMENT.into(),
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[test]
+fn a_change_during_the_model_call_saves_nothing() {
+    for sql in [
+        "UPDATE message SET gone_at = 1 WHERE id = ?1",
+        "INSERT INTO message_label(message_id, label_id)
+         SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+    ] {
+        let b = store("changed");
+        let m = b.add("1", ASK, &["INBOX"]);
+        let model = Changer {
+            store: &b.store,
+            sql,
+            message: m,
+        };
+        let out = understand(&b.store, m, &model, NOW).unwrap();
+        assert!(out.changed, "{sql}");
+        assert!(b.items().is_empty(), "{sql}");
+        let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+        assert!(at.is_none(), "{sql}");
+    }
+}
+
+#[test]
+fn a_new_item_never_takes_a_later_status_from_the_model() {
+    let b = store("status");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let answer = COMMITMENT.replace(
+        r#""form": "commitment","#,
+        r#""form": "commitment", "status": "done","#,
+    );
+    understand(&b.store, m, &Fake::with(&[&answer]), NOW).unwrap();
+    assert_eq!(b.items()[0]["status"], "open");
+    let record = r#"{"items": [{"form": "record", "status": "corrected", "title": "Lease",
+      "quote": "Can you send me the signed lease by Friday?", "confidence": 0.8,
+      "type": "other", "fields": {"summary": "A lease"}}]}"#;
+    understand(&b.store, m, &Fake::with(&[record]), NOW).unwrap();
+    assert_eq!(b.items()[0]["status"], "kept");
+}
+
+#[test]
+fn a_barcode_is_not_a_code_signal() {
+    let b = store("barcode");
+    b.kind("shop@example.com", "Shop", "service");
+    let raw = "From: Shop <shop@example.com>
+To: owner@example.com
+Subject: Thanks for your visit
+
+Show the barcode 123456 at the desk.
+";
+    let m = b.add("1", raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
+}
+
+#[test]
+fn a_receipt_word_late_in_a_list_mail_goes_to_the_model() {
+    let b = store("late-receipt");
+    b.kind("news@notes.example.com", "Daily Notes", "service");
+    let filler = "Some news of the week here.\n".repeat(200);
+    let raw = FEED.replace(
+        "Three new notes today.",
+        &format!("{filler}\nYour receipt: 12.00 USD."),
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 1);
+}
