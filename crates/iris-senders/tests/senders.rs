@@ -510,6 +510,19 @@ fn a_new_fetch_of_a_sent_message_clears_its_old_bcc() {
 }
 
 #[test]
+fn a_stored_sent_message_counts_before_its_own_decision() {
+    let mut c = Case::new("sent-first");
+    // The sent message is stored, but not decided yet.
+    c.n += 1;
+    let raw = format!("From: {OWNER}\r\nTo: fay@example.org\r\nSubject: x\r\n\r\nBody.\r\n");
+    let m = new_message("m1", "t1", 1000, &["SENT"], raw.as_bytes());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    let d = c.put("t2", &[], "From: Fay <fay@example.org>");
+    assert_eq!(d.kind, Kind::Person);
+    assert!(d.basis.starts_with("sent: m-1"), "{}", d.basis);
+}
+
+#[test]
 fn another_bcc_message_keeps_a_person() {
     let mut c = Case::new("bcc-two");
     let sent = format!("From: {OWNER}\r\nBcc: eve@example.org");
