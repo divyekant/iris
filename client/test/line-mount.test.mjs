@@ -116,6 +116,24 @@ test("the brief sends a held Done when the person leaves it", async () => {
   await until(() => asked.some((u) => u.endsWith("items/c-311/close")));
 });
 
+test("a page close in the hold sends at once, with keepalive", async () => {
+  const asked = [];
+  globalThis.fetch = async (url, init) => {
+    asked.push([String(url), init?.keepalive]);
+    return new Response(JSON.stringify(commitment("done")), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: copy(fx.brief), status: fx.status, watches: [], poll: 0, hold: 60_000 });
+  try {
+    box(view).click();
+    await until(() => button(view, "Undo"));
+    window.dispatchEvent(new Event("pagehide"));
+    await until(() => asked.some(([u]) => u.endsWith("/close")));
+    assert.equal(asked.find(([u]) => u.endsWith("/close"))[1], true, "keepalive");
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a poll that started before a quick Done does not bring the item back", async () => {
   let briefs = 0;
   let staleSent = false;
