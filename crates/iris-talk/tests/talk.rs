@@ -872,7 +872,8 @@ fn a_quoted_local_part_counts() {
     let v = validator();
     b.put(M {
         id: "a",
-        from: ("", "\"a,b\"@example.org"),
+        // In `<>`: mail-parser 1.0.1 reads a bare quoted local part as a name (iris-people).
+        from: ("", "<\"a,b\"@example.org>"),
         ..M::default()
     });
     let doc = b.talk("t1", NOW).expect("a conversation");
