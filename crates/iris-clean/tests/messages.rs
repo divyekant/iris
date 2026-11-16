@@ -64,6 +64,27 @@ Please sign the lease.
 }
 
 #[test]
+fn reply_header_fields_out_of_order_stay() {
+    let raw = crlf(
+        "Subject: Re: Form
+In-Reply-To: <x@example.org>
+
+Fill in the form like this:
+
+From: your name
+Subject: the course
+Sent: the date you post it
+
+Thanks.
+",
+    );
+    assert_eq!(
+        clean(&raw).text,
+        "Fill in the form like this:\n\nFrom: your name\nSubject: the course\nSent: the date you post it\n\nThanks."
+    );
+}
+
+#[test]
 fn attachments_with_text_and_names() {
     let raw = crlf(
         "Subject: Files

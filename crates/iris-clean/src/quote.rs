@@ -117,18 +117,18 @@ fn is_forward_marker(t: &str) -> bool {
 
 /// An Outlook reply header: `From:`, then `Sent:` or `Date:`, then `Subject:` or `To:`.
 fn is_header_block(lines: &[&str]) -> bool {
-    let starts = |l: &&str, p: &[&str]| p.iter().any(|p| l.trim_start().starts_with(p));
-    starts(&lines[0], &["From:"])
-        && lines
+    let starts = |l: &str, p: &[&str]| p.iter().any(|p| l.trim_start().starts_with(p));
+    let near = &lines[..lines.len().min(6)];
+    starts(near[0], &["From:"])
+        && near
             .iter()
-            .skip(1)
-            .take(4)
-            .any(|l| starts(l, &["Sent:", "Date:"]))
-        && lines
-            .iter()
-            .skip(1)
             .take(5)
-            .any(|l| starts(l, &["Subject:", "To:"]))
+            .position(|l| starts(l, &["Sent:", "Date:"]))
+            .is_some_and(|d| {
+                near[d + 1..]
+                    .iter()
+                    .any(|l| starts(l, &["Subject:", "To:"]))
+            })
 }
 
 /// Remove the signature: the text after the last `-- ` line (RFC 3676), or
