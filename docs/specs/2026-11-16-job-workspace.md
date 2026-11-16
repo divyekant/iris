@@ -168,30 +168,51 @@ The forms `feed`, `signal` and
 
 The build reads nothing else from the mailbox.
 
-### The read verbs in a session
+### The verbs in a session
 
-The same grant limits the read verbs of a session (spec 2 section 8.2,
+The same grant limits each verb of a session (spec 2 sections 8.1 and 8.2,
 session mode). The session verbs come with R4-03 and R4-04, and must keep
-this rule:
+these rules:
 
+- Each verb in a session goes through the session socket, and the engine
+  applies the current grant on each call. The direct store path of the
+  read verbs is for host mode only.
 - `iris search`, `iris show` and `iris list` see only the granted messages
   and the items of the workspace. A search never adds a thread to the
-  workspace.
+  workspace. An item in a session has the fields of the item file only
+  (`id`, `form`, `status`, `sources`), never text of the model. A message
+  in a session lists only the items of the workspace.
 - `iris brief` is a host verb only: the brief covers the whole mailbox.
-- Each read verb in a session goes through the session socket, and the
-  engine applies the current grant.
-- `iris changeset <cs-id>`, `submit` and `withdraw` in a session give only
-  changesets of the job of the session. A changeset holds IDs of messages,
-  threads and items, and the text that the agent wrote (the reason of an
-  action, a draft). In a session, the engine gives no subject or text of a
-  target message in a changeset document. The text of the agent is like
-  the agent files: it can hold a copy of text that was granted when the
-  agent wrote it (the same known limit). The direct store path of the read
-  verbs is for host mode only (spec 2 section 8.1).
 - `iris status` in a session shows only the job and the counts of the
   workspace: no account, sync or mailbox count.
+- Each target of an action that a session submits must be in the current
+  grant: a granted message, a thread of the scope, or an item of the
+  workspace. The engine checks each target at `submit`, and again just
+  before the apply. A target outside the grant at `submit` makes the
+  submit fail with no change. A target that left the grant before the
+  apply makes the action refused, with the reason, and nothing changes in
+  the mailbox.
+- `iris changeset <cs-id>`, `submit` and `withdraw` in a session give only
+  changesets of the job of the session. In a session, the engine gives no
+  subject or text of a target message in a changeset document.
 
-This PR changes spec 2 section 8.2 to say this.
+### Text that the agent or the person wrote
+
+The rules of the grant cover the data that the build reads from mail rows.
+Three places hold text that the agent or the person wrote, and the build
+copies it as it is:
+
+- The agent files (`drafts/`, `notes.md`).
+- The text of a changeset of the job (the reason of an action, a draft).
+- The text of the job in `job.json` and `JOB.md`: the goal and the answers
+  of the person, the questions and the reasons of the agent.
+
+Such text can quote mail that was granted when it was written. If the grant
+of that mail ends later (a revoke, or the message becomes hostile mail or
+gone), the quote stays: the build does not know which text is a quote, and
+a change would alter the record of the job. The agent saw the text while it
+was granted. This is a known limit, with a GitHub issue. The person can
+delete the workspace folder to remove the agent files.
 
 ### The layout
 
@@ -213,13 +234,8 @@ and `people/`. It writes them new on each build. The agent owns `drafts/` and
 `notes.md`: the build makes them when they are not there, and never changes
 or reads them. The build does not touch other paths.
 
-The rules of the grant apply to the files that the build owns. An agent can
-copy granted text into its own files. If the grant of that text ends later
-(a revoke, or the message becomes hostile mail or gone), the copy stays in
-the agent files: the build does not read them, so it cannot find the copy,
-and a delete would lose the work of the agent. The agent saw the text while
-it was granted. This is a known limit, with a GitHub issue. The person can
-delete the workspace folder to remove the agent files.
+The rules of the grant apply to the data that the build reads from mail
+rows. The text that the agent or the person wrote follows the section above.
 
 `threads/t-<id>.md`:
 
