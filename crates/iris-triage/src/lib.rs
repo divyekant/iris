@@ -23,8 +23,8 @@
 //! This crate has no provider client and makes no model call.
 
 use iris_changeset::{
-    add_action_in, create_in, decide_in, revise_in, submit_in, ActionId, Author, AuthorKind, By,
-    Error, State, Verb,
+    add_action_in, create_in, decide_in, revise_in, submit_in, withdraw_in, ActionId, Author,
+    AuthorKind, By, Error, State, Verb,
 };
 use iris_observe::Rule;
 use iris_policy::{Facts, Mode, Outcome as Policy};
@@ -45,8 +45,11 @@ pub enum Outcome {
     /// The run submitted this revision of the changeset.
     Submitted { changeset: i64, revision: i64 },
     /// The newest revision already has this proposal, or the proposal is
-    /// empty and the open actions stay.
+    /// empty and an approved action keeps the changeset open.
     Same { changeset: i64 },
+    /// The proposal is empty: the run withdrew the open changeset, so its
+    /// proposed and in_review actions are cancelled.
+    Withdrawn { changeset: i64 },
     /// No rule matches a message, and no triage changeset is open.
     Nothing,
 }
@@ -111,10 +114,26 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
     })?;
     let changeset = match open {
         None if actions == 0 => return Ok(Outcome::Nothing),
-        // shortcut: an empty proposal leaves the open actions as they are,
-        // because a revision needs an action; withdraw them when withdraw is
-        // built (R2-01 part 3).
-        Some((id, ..)) if actions == 0 => return Ok(Outcome::Same { changeset: id }),
+        // An empty proposal withdraws the changeset (a revision needs an
+        // action). The proposal leaves out the messages of an approved
+        // action, and a withdraw would cancel it, so such an action keeps
+        // the changeset open.
+        // shortcut: the proposed and in_review actions then wait for a
+        // person or the expiry (issue #220); a cancel of one action needs
+        // a new move in the trigger action_state.
+        Some((id, ..)) if actions == 0 => {
+            let approved: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM changeset_action
+                 WHERE changeset_id = ?1 AND state IN ('approved', 'held'))",
+                [id],
+                |r| r.get(0),
+            )?;
+            if approved {
+                return Ok(Outcome::Same { changeset: id });
+            }
+            withdraw_in(c, id, Some(&who))?;
+            return Ok(Outcome::Withdrawn { changeset: id });
+        }
         Some((id, revision)) if same => {
             let more: bool = c.query_row(
                 "SELECT count(*) > ?3 FROM changeset_action

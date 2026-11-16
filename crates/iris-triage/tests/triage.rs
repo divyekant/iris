@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use iris_changeset::{decide, ActionId, By, State};
+use iris_changeset::{approve, decide, ActionId, By, State};
 use iris_observe::Rule;
 use iris_store::{NewMessage, Store};
 use iris_triage::{run, Outcome, CHUNK, WHY};
@@ -236,7 +236,7 @@ fn concurrent_runs_make_one_changeset() {
 /// A large rule gives one action for each CHUNK messages, and a second run
 /// sees the same proposal. An empty proposal leaves the open actions.
 #[test]
-fn large_rule_is_split_and_empty_keeps_open_actions() {
+fn large_rule_is_split_and_empty_withdraws() {
     let dir = TempDir::new("large");
     let s = Store::open(&dir.0).unwrap();
     let a = s.add_account("gmail", "owner@example.com").unwrap();
@@ -278,8 +278,57 @@ fn large_rule_is_split_and_empty_keeps_open_actions() {
     // The feed items go away: the proposal is empty.
     s.write(|tx| Ok(tx.execute_batch("UPDATE item SET status = 'gone'")?))
         .unwrap();
-    assert_eq!(run(&s, a, NOW + 2).unwrap(), Outcome::Same { changeset });
-    assert_eq!(actions(&s, changeset).len(), 2);
+    // The open actions do not wait for a person: the run withdraws them.
+    assert_eq!(
+        run(&s, a, NOW + 2).unwrap(),
+        Outcome::Withdrawn { changeset }
+    );
+    let rows = actions(&s, changeset);
+    assert!(
+        rows.iter().all(|r| r.4.as_deref() == Some("cancelled")),
+        "{rows:?}"
+    );
+    assert_eq!(changeset_row(&s, changeset).3, "withdrawn");
+    assert_eq!(run(&s, a, NOW + 3).unwrap(), Outcome::Nothing);
+}
+
+/// An empty proposal does not withdraw a changeset with an approved
+/// action: the withdraw would cancel the approval, and the proposal leaves
+/// out the messages of the approved action.
+#[test]
+fn empty_keeps_an_approved_action() {
+    let dir = TempDir::new("approved");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    item(&s, a, "record", "g2");
+    let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
+        panic!("a proposal");
+    };
+    let first = ActionId {
+        changeset,
+        revision: 1,
+        n: 1,
+    };
+    let hex = s
+        .read(|c| {
+            let row: i64 = c.query_row(
+                "SELECT id FROM changeset_action WHERE changeset_id = ?1 AND n = 1",
+                [changeset],
+                |r| r.get(0),
+            )?;
+            Ok(iris_changeset::hash(c, row).unwrap().1)
+        })
+        .unwrap();
+    approve(&s, first, &hex, NOW).unwrap();
+    s.write(|tx| Ok(tx.execute_batch("UPDATE item SET status = 'gone' WHERE form = 'record'")?))
+        .unwrap();
+    assert_eq!(run(&s, a, NOW + 1).unwrap(), Outcome::Same { changeset });
+    let states: Vec<Option<String>> = actions(&s, changeset).into_iter().map(|r| r.4).collect();
+    assert_eq!(
+        states,
+        [Some("approved".to_string()), Some("proposed".to_string())]
+    );
+    assert_eq!(changeset_row(&s, changeset).3, "open");
 }
 
 /// A smaller proposal is a change too.
