@@ -286,6 +286,12 @@ Supported input: short IDs of section 5.7 of specification 1, an `args`
 JSON object, a reason, and the action number, revision and hash of a
 decision.
 
+The triggers of migration 5 hold the rules of this section for each write
+of the engine code, also for a defect in a code path. They are not a
+security boundary. A process that can write `iris.db` can also drop a
+trigger, so the file permissions of the data folder (specification 1,
+section 5.1) keep other users out.
+
 | Input or event | Failure mode | Safe result |
 |---|---|---|
 | A text that is not an ID, a sender ID, or IDs of two kinds in one action | The action names nothing that it can change | `add_action` refuses it. Nothing is written. |
@@ -294,7 +300,8 @@ decision.
 | Targets in two or more accounts | One approval changes two mailboxes, and the apply has no one account | Submit gives the action `denied`. One action changes one account. |
 | Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4). |
 | A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
-| A state move that section 5.2 does not allow, from any writer | A decided action changes, or skips the review | The trigger `action_state` refuses the write. |
+| A state move that section 5.2 does not allow, from any writer | A decided action changes, or skips the review | The trigger `action_state` refuses the write. The list of moves is in the trigger, not in a table. |
+| An expiry before 14 days, or with a time after the clock of the database | An action expires before the person can decide | The trigger `action_state` refuses the write. |
 | A rule decision with a policy version that is not active, or a rule ID that the active policy does not have | A decision names no rule text, or a rule that the person removed | The trigger `action_state` refuses the write. The policy of the first start has no rule, so no rule decides under it. |
 | A change of a submitted action, from any writer | The person approves one action, and another applies | The triggers refuse the write. Only the engine adds a flag, to an open action, and a flag does not go away. |
 | A new action in a submitted revision, an action that moves to another revision, an insert that replaces an action, or a state for an action while its revision is a draft | The changeset state does not agree with its actions, and an action skips the submit | The triggers refuse the write. An action goes only into the draft revision, and gets a state only with the submit of its revision. |

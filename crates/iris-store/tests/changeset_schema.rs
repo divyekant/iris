@@ -245,6 +245,9 @@ fn a_move_needs_its_event() {
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry',
            decided_at = submitted_at + 1209599999",
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry'",
+        // Not at a time after the clock.
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry',
+           decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) + 60000",
         // Replaced only by the submit of a newer revision.
         "UPDATE changeset_action SET state = 'replaced', decided_by = 'author'",
         // Cancelled only with a withdraw.
@@ -405,7 +408,7 @@ fn a_draft_has_no_decision() {
         // A decision written into the draft, or into a proposed action.
         s.dry_write(|tx| Ok(draft(tx)?)).unwrap();
         let r = s.dry_write(|tx| {
-            let cs = draft(tx)?;
+            draft(tx)?;
             tx.execute(&format!("UPDATE changeset_action SET {column}"), [])?;
             Ok(())
         });
@@ -442,6 +445,23 @@ fn a_draft_has_no_decision() {
         &s,
         "UPDATE changeset_action SET state = 'in_review', decided_by = 'policy'",
     );
+}
+
+/// The moves are part of the trigger. No table holds them.
+#[test]
+fn no_write_adds_a_move() {
+    let dir = TempDir::new("nomoves");
+    let s = store(&dir);
+    let tables: i64 = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name LIKE '%transition%'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(tables, 0);
 }
 
 /// The state of a changeset comes from its actions.

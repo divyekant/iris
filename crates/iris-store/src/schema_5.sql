@@ -88,27 +88,6 @@ CREATE TABLE action_message (
 -- Expiry (section 5.5) finds the open actions.
 CREATE INDEX changeset_action_state ON changeset_action(state);
 
--- The moves of an action between states (section 5.2). NULL is a draft
--- action: submit gives 'proposed', or 'denied' for an action that is not
--- valid; a withdraw gives 'cancelled'.
-CREATE TABLE action_transition (
-  from_state TEXT,
-  to_state TEXT NOT NULL,
-  UNIQUE (from_state, to_state)
-);
-INSERT INTO action_transition VALUES
-  (NULL, 'proposed'), (NULL, 'denied'), (NULL, 'cancelled'),
-  ('proposed', 'approved'), ('proposed', 'in_review'), ('proposed', 'denied'),
-  ('proposed', 'expired'), ('proposed', 'cancelled'), ('proposed', 'replaced'),
-  ('in_review', 'approved'), ('in_review', 'denied'), ('in_review', 'expired'),
-  ('in_review', 'cancelled'), ('in_review', 'replaced'),
-  ('approved', 'applied'), ('approved', 'failed'),
-  ('approved', 'in_review'), ('approved', 'denied'), ('approved', 'expired'),
-  ('approved', 'cancelled'),
-  ('applied', 'undone');
--- Release 3 adds approved to held and the moves of held, for a send.
--- Section 5.2 also allows failed to undone, but only when the ledger lists
--- a changed message. The ledger (R2-03) adds that move with its check.
 
 -- A new changeset is a draft of revision 1. No insert replaces a changeset.
 CREATE TRIGGER changeset_insert BEFORE INSERT ON changeset
@@ -155,11 +134,26 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: an action stays in its changeset and revision');
 END;
 
+-- The moves of an action between states (section 5.2), as 'from>to'. An
+-- empty from is a draft action: submit gives 'proposed', or 'denied' for an
+-- action that is not valid; a withdraw gives 'cancelled'. The list is in
+-- the trigger, not in a table, so no write to the store can add a move.
+-- Release 3 adds approved to held and the moves of held, for a send.
+-- Section 5.2 also allows failed to undone, but only when the ledger lists
+-- a changed message. The ledger (R2-03) adds that move with its check.
+--
 -- Only submit gives a draft action a state other than 'cancelled': it sets
 -- the hash and the submit time in the same write.
 CREATE TRIGGER action_state BEFORE UPDATE OF state ON changeset_action
-WHEN NOT EXISTS (SELECT 1 FROM action_transition
-                 WHERE from_state IS old.state AND to_state = new.state)
+WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
+    '>proposed', '>denied', '>cancelled',
+    'proposed>approved', 'proposed>in_review', 'proposed>denied', 'proposed>expired',
+    'proposed>cancelled', 'proposed>replaced',
+    'in_review>approved', 'in_review>denied', 'in_review>expired', 'in_review>cancelled',
+    'in_review>replaced',
+    'approved>applied', 'approved>failed', 'approved>in_review', 'approved>denied',
+    'approved>expired', 'approved>cancelled',
+    'applied>undone')
   -- A withdrawn changeset applies nothing more (section 5.5).
   OR (new.state IN ('in_review', 'approved', 'applied', 'failed')
       AND (SELECT state FROM changeset WHERE id = new.changeset_id) = 'withdrawn')
@@ -179,9 +173,11 @@ WHEN NOT EXISTS (SELECT 1 FROM action_transition
   OR (new.state = 'replaced'
       AND NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
                       AND revision > new.revision AND submitted_at IS NOT NULL))
-  -- Expired only 14 days after its submit (section 5.5).
+  -- Expired only 14 days after its submit (section 5.5), and not at a time
+  -- after the clock of the database.
   OR (new.state = 'expired'
-      AND (new.decided_at IS NULL OR new.decided_at - old.submitted_at < 1209600000))
+      AND (new.decided_at IS NULL OR new.decided_at - old.submitted_at < 1209600000
+           OR new.decided_at > unixepoch('subsec') * 1000))
   -- Applied and failed keep the decision that approved the action: the
   -- ledger names it (section 7.1).
   OR (new.state IN ('applied', 'failed')
