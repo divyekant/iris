@@ -287,8 +287,9 @@ A run that can cost money needs the approval of the person, on every path:
 
 - `model_setting.approved_at` and `model_setting.run_max_cost_micro_usd`
   hold the approval and the cost limit of each run.
-- `batch::run` checks them first, also before step 0. With a price and no
-  approval, it stops with `stop = approval` and makes no call. A model with
+- `batch::run` checks them after step 0 (the free sender refresh) and
+  before the first model call. With a price and no approval, it stops with
+  `stop = approval` and makes no call. A model with
   no price (local) needs no approval.
 - `batch::run` uses the smaller of the cost limit of the caller and
   `run_max_cost_micro_usd`. So an automatic run (R1-28, after each sync)
@@ -300,9 +301,12 @@ A run that can cost money needs the approval of the person, on every path:
 
 ### Rebuild
 
-`iris rebuild` (spec 1 section 7.5) resets the messages that it selects, in
-one write, and then calls `batch::run`. So a rebuild has the run lock, the
-approval check, the cost limit and the run row of every other run. No path
+`iris rebuild` (spec 1 section 7.5) calls `batch::run` with a rebuild
+selection. `batch::run` takes the run lock and does the approval check
+first. Only then does it reset the selected messages, in one write, and run
+them as pending messages. A rebuild that the lock or the approval refuses
+changes no item. So a rebuild has the run lock, the approval check, the
+cost limit and the run row of every other run. No path
 calls `store::understand` with a priced model outside `batch::run`.
 
 ### Commands
@@ -351,7 +355,7 @@ No parser or protocol code is new. The model client is `iris-model`.
 | A first sync calls the runner (R1-28) before the person saw an estimate | Paid calls with no approval | `batch::run` stops with `stop = approval`, no call. | Batch test with a priced fake model and no approval. |
 | An earlier message of an understood thread gets new content or `SPAM` | Later items used it as context | The reset covers the later messages of the thread. | Store test. |
 | Sync removes the only sent evidence of a person, and no paid run is approved | The kind stays `person` | Sync calls `batch::refresh`, which needs no approval. | Batch test: refresh with a priced model and no approval. |
-| `iris rebuild` with a priced model | Paid calls outside the guards | Rebuild calls `batch::run`. | R1 rebuild test. |
+| `iris rebuild` with a priced model and no approval, or while a run holds the lock | Items deleted with no replacement | `batch::run` refuses before the reset, so no item changes. | Batch test: a refused rebuild leaves each item. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
 | A `SPAM` label comes or goes on an understood message | The hostile mark is stale | The label write resets the message, so the next run checks it again. | Store test. |
