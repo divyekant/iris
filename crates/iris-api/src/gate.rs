@@ -58,7 +58,8 @@ const AT: &str = "coalesce(
 /// The items and their senders of the list: the items of the `strangers`
 /// section and their stranger parties, or (with `declined`) the items of
 /// declined senders and these senders. Gives the common table expressions
-/// `g(id, at)` and `party(item, sender)`.
+/// `g(id, form, doc, at)` and `party(item, sender)`. Both are materialized:
+/// each query reads them more than one time.
 fn parties(now: i64, declined: bool) -> String {
     let base = if declined {
         format!("{} AND {SHOWN}", head(&declined_sql()))
@@ -67,7 +68,7 @@ fn parties(now: i64, declined: bool) -> String {
     };
     let state = if declined { "NOT NULL" } else { "NULL" };
     format!(
-        "g AS (SELECT id, form, doc, {AT} AS at FROM item WHERE {base}),
+        "g AS MATERIALIZED (SELECT id, form, doc, {AT} AS at FROM item WHERE {base}),
          cand(item, sender) AS (
            SELECT id, CAST(substr(json_extract(doc, '$.counterparty.sender'), 3) AS INTEGER)
              FROM g WHERE form = 'commitment' AND json_extract(doc, '$.direction') = 'you_owe'
@@ -78,7 +79,7 @@ fn parties(now: i64, declined: bool) -> String {
            SELECT g.id, CAST(substr(json_extract(p.value, '$.sender'), 3) AS INTEGER)
              FROM g, json_each(g.doc, '$.participants') p
             WHERE g.form = 'conversation' AND json_extract(p.value, '$.kind') = 'sender'),
-         party(item, sender) AS (
+         party(item, sender) AS MATERIALIZED (
            SELECT cand.item, cand.sender FROM cand JOIN sender s ON s.id = cand.sender
             WHERE coalesce(s.kind, 'stranger') = 'stranger' AND s.declined_at IS {state})"
     )
