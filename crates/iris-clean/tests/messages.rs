@@ -616,7 +616,8 @@ fn a_link_target_keeps_its_last_character() {
     assert_eq!(
         clean(&raw).text,
         "[Open](https://example.org/p!) See https://example.org/q."
-    ); // A link text with lines: the target keeps its last character too.
+    );
+    // A link text with lines: the target keeps its last character too.
     let raw = crlf("Subject: L\nContent-Type: text/html\n\n<a href=\"https://example.org/p!?utm_source=x\"><p>One</p><p>Two</p></a>\n");
     assert_eq!(clean(&raw).text, "One\n\nTwo (<https://example.org/p!>)");
 }
@@ -704,4 +705,31 @@ fn a_part_with_too_many_lines_is_cut() {
     let lines = "a\n".repeat(iris_clean::MAX_LINES + 10);
     let c = clean(&crlf(&format!("Subject: Lines\n\n{lines}")));
     assert!(c.cut);
+}
+
+#[test]
+fn a_paren_in_a_link_target_does_not_keep_tracking() {
+    let raw = crlf("Subject: L\nContent-Type: text/html\n\n<a href=\"https://example.org/a)b?utm_source=x\">Open</a>\n");
+    assert_eq!(clean(&raw).text, "[Open](https://example.org/a%29b)");
+}
+
+#[test]
+fn many_elements_with_one_class_stay_fast() {
+    let rules: String = (0..256)
+        .map(|_| format!(".c{{{}}}", "color:red;".repeat(400)))
+        .collect();
+    let body = format!(
+        "<style>{rules}</style>{}",
+        "<b class=c>x</b>".repeat(60_000)
+    );
+    let raw = crlf(&format!(
+        "Subject: Css\nContent-Type: text/html\n\n{body}\n"
+    ));
+    let start = std::time::Instant::now();
+    clean(&raw);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
 }

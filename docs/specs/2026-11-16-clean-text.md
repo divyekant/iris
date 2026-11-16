@@ -108,7 +108,9 @@ hidden HTML) makes no cut.
 ### HTML
 
 - The converter is a tokenizer with an element stack of at most 512 levels.
-  The content of an element deeper than 512 levels goes out.
+  The content of an element deeper than 512 levels goes out. The converter
+  counts the start tags past that depth. Each end tag closes one of them, so
+  the text after the deep elements shows again.
 - Implied end tags: a block closes an open `p`, an `li` closes the `li`
   before it, a `td` or `th` closes the cell before it, a `tr` closes the row
   before it, and `body` closes an open `head`.
@@ -118,8 +120,9 @@ hidden HTML) makes no cut.
   These go out with their content: `head`, `svg`, `math`.
 - Links: `[text](href)` for an `http`, `https` or `mailto` target. If the
   text is the target, only the text shows. If the text has more than one
-  line, the form is `text (<href>)`. Other targets (for example
-  `javascript:`) show the text only.
+  line, the form is `text (<href>)`. In the target, a space, `(`, `)`, `<`
+  and `>` become percent codes (`%20`, `%28`, `%29`, `%3C`, `%3E`). Other
+  targets (for example `javascript:`) show the text only.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
