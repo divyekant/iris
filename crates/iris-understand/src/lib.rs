@@ -28,6 +28,12 @@ pub use head::{Auth, Head};
 pub use iris_model::Usage;
 pub use prompt::{INSTRUCTION, PROMPT};
 pub use schema::validate;
+
+/// The bounded copy of one raw message that understanding reads: every
+/// header, boundary and decoded part, at most [`RAW_LIMIT`] bytes.
+pub fn bounded_copy(raw: &[u8]) -> std::io::Result<Vec<u8>> {
+    skeleton::read(raw)
+}
 pub use store::{
     understand, Error, Outcome, Result as StoreResult, MAX_TRIES, RAW_LIMIT, RETRY_MS,
 };
