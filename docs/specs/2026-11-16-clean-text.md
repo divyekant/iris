@@ -79,7 +79,8 @@ Each budget only goes down. No step gives budget back.
 - Transfer encodings: `base64` (characters outside the alphabet are skipped),
   `quoted-printable` (an `=` without a valid escape stays), and all others as
   they are. Iris cuts the input before the decode, so a decode never uses
-  more than about its cap. The `mail-parser` base64 decoder uses memory for
+  more than about its cap. A quoted-printable cut never ends inside an escape
+  such as `=41`. The `mail-parser` base64 decoder uses memory for
   white space too, so Iris gives it only the alphabet, in chunks of 64 KiB.
   Iris counts the decoded size of a base64 body, because `mail-parser`
   decodes a body with bytes outside the alphabet to measure it.
@@ -88,9 +89,18 @@ Each budget only goes down. No step gives budget back.
   label, or a label that `encoding_rs` maps to Windows-1252 (for example
   `us-ascii` and `iso-8859-1`). Other text with no label or an unknown label
   is read as Windows-1252.
-- Headers: RFC 2047 encoded words, and RFC 2231 parameters. The parser keeps
-  `Subject` raw. Iris decodes at most the first 16 KiB of it, because a
-  decode of a 5 MB subject uses 8.5 MB.
+- Headers: RFC 2047 encoded words, and RFC 2231 parameters. Iris reads a
+  field of a part only through one function (`field`), with the limits of
+  the old parser:
+  - Only the first 1,000 fields that start in the first 256 KiB of the
+    header block count.
+  - Each value is cut at 16 KiB.
+  - The first field of a name counts.
+- The parser keeps all other fields raw, because a parse of a 5 MB subject
+  uses 8.5 MB. It always parses `Content-Type`, `Content-Disposition` and
+  `Content-Transfer-Encoding` in full, for the MIME structure. So the
+  parameters of these fields cost memory: at most about 3 bytes for each
+  byte of the message (measured: 2.3).
 
 ### A reply
 
