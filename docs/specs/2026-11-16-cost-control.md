@@ -47,12 +47,14 @@ pending state that the store gives. Each one has an issue:
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It
   calls the runner of this spec. R1-28 note: `iris serve` runs it in one
-  understanding thread apart from the sync threads. After each sync (also
-  a failed one), the thread runs only if its input changed since its last
-  good run: the pending set (`batch::pending_key`, the count and the sum of
-  the IDs), the model row or its budget. A run that stopped on `model`,
-  `unknown` or `error` runs again after a wait that doubles from 60 seconds
-  to 1 hour.
+  understanding thread apart from the sync threads, each 10 seconds, only
+  if a run can make progress (`batch::can_progress`): a reachable pending
+  message that has no `body` row yet, that is hostile mail, or any
+  reachable pending message when a model can be called (no price, or a
+  budget above 0). Mail that waits for a model makes no run. A run that
+  stopped on `model`, `unknown`, `error` or `budget` runs again after a
+  wait that doubles from 60 seconds to 1 hour. A change of the model row or
+  its budget ends the wait.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 

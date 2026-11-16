@@ -441,7 +441,7 @@ fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
 }
 
 #[test]
-fn understanding_runs_again_only_when_its_input_changes() {
+fn understanding_runs_only_when_a_run_can_make_progress() {
     let s = setup("engine-idle", 5);
     let mut u = engine::Understander::new(Duration::ZERO);
     s.worker(s.account).sync().unwrap();
@@ -450,21 +450,31 @@ fn understanding_runs_again_only_when_its_input_changes() {
         Some(iris::cost::AfterSync::Ran { .. })
     ));
     let rows = count(&s.store, "SELECT count(*) FROM understand_run");
-    // Unchanged mailbox and model: no run, no row.
+    // With no model, the mail that waits for a model gives no run.
     for _ in 0..3 {
         s.worker(s.account).sync().unwrap();
         assert_eq!(u.turn(&s.store).unwrap(), None);
     }
     assert_eq!(count(&s.store, "SELECT count(*) FROM understand_run"), rows);
-    // A change of the pending set with no mailbox change (as a repair of
-    // `iris mirror verify` makes; here a message leaves the set) gets a run. A run that the lock blocks is
+    // A SPAM label on waiting mail, with no new mail and no model: the free
+    // steps can finish it, so a run is due. A run that the lock blocks is
     // owed to the next turn.
+    let waiting = count(
+        &s.store,
+        "SELECT max(id) FROM message WHERE understood_at IS NULL",
+    );
+    assert!(waiting > 0, "mail waits for a model");
     s.store
         .write(|tx| {
             tx.execute(
-                "UPDATE message SET tries = 3
-                 WHERE id = (SELECT max(id) FROM message WHERE understood_at IS NULL)",
-                [],
+                "INSERT OR IGNORE INTO label(account_id, provider_id, name, kind)
+                 VALUES (?1, 'SPAM', 'SPAM', 'system')",
+                [s.account],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = 'SPAM'",
+                [waiting, s.account],
             )?;
             Ok(())
         })
@@ -473,4 +483,15 @@ fn understanding_runs_again_only_when_its_input_changes() {
     assert_eq!(u.turn(&s.store).unwrap(), Some(iris::cost::AfterSync::Busy));
     drop(held);
     assert!(u.turn(&s.store).unwrap().is_some());
+    assert_eq!(
+        count(
+            &s.store,
+            &format!(
+                "SELECT count(*) FROM message WHERE id = {waiting} AND understood_at IS NOT NULL"
+            )
+        ),
+        1,
+        "the SPAM mail is read with no model"
+    );
+    assert_eq!(u.turn(&s.store).unwrap(), None);
 }

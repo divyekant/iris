@@ -511,8 +511,8 @@ pub fn run(store: &Store, limits: &Limits, now_ms: i64) -> Result<String, String
 #[derive(Debug, PartialEq, Eq)]
 pub enum AfterSync {
     /// The report of a run that read a message or made a call. `retry` is
-    /// true if the run stopped on a model, unknown-cost or store error, so
-    /// the same pending set can need a later run.
+    /// true if the run stopped on a model, unknown-cost or store error, or
+    /// on the budget, so the same pending mail can need a later run.
     Ran { report: String, retry: bool },
     /// Nothing to do: the run deleted its row.
     Idle,
@@ -531,7 +531,10 @@ pub fn after_sync(store: &Store) -> Result<AfterSync, String> {
     match batch::run(store, &connect, &limits, crate::engine::now_ms()) {
         Ok(r) if r.is_idle() => Ok(AfterSync::Idle),
         Ok(r) => Ok(AfterSync::Ran {
-            retry: matches!(r.stop.as_deref(), Some("model" | "unknown" | "error")),
+            retry: matches!(
+                r.stop.as_deref(),
+                Some("model" | "unknown" | "error" | "budget")
+            ),
             report: report_of(store, &r)?,
         }),
         Err(batch::Error::Busy) => Ok(AfterSync::Busy),

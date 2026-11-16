@@ -424,9 +424,40 @@ fn the_run_after_a_sync_tries_again_after_a_model_error() {
         "{r:?}"
     );
     assert!(col(&store, pending).unwrap() < before);
-    // The key is read before each run, so mail that a sync saves during a
-    // run gets a run. One idle run (no row) follows a run that changed the
-    // pending set, then no run.
-    assert_eq!(u.turn(&store).unwrap(), Some(iris::cost::AfterSync::Idle));
     assert_eq!(u.turn(&store).unwrap(), None, "nothing changed");
+}
+
+#[test]
+fn a_run_stopped_on_the_budget_waits_until_the_budget_changes() {
+    let (store, _fake) = synced("budget-wait");
+    let model = iris::cost::NewModel {
+        local: false,
+        // A closed port: a call fails, and no mail leaves the machine.
+        base_url: "http://127.0.0.1:9".into(),
+        model: "m".into(),
+        price: Some((1_000_000, 1_000_000)),
+        api_key: Some(KEY.into()),
+        max_tokens: 100,
+        timeout_s: 1,
+    };
+    iris::cost::set_model(&store, &model).unwrap();
+    let mut u = iris::engine::Understander::new(std::time::Duration::from_secs(3600));
+    // New mail: the free steps run, the paid calls are refused.
+    let r = u.turn(&store).unwrap();
+    assert!(
+        matches!(r, Some(iris::cost::AfterSync::Ran { retry: true, .. })),
+        "{r:?}"
+    );
+    assert_eq!(u.turn(&store).unwrap(), None, "the run waits");
+    // An approved budget ends the wait.
+    let now = iris::engine::now_ms();
+    let out = iris::cost::estimate(&store, now).unwrap();
+    let code = out
+        .split("--approve ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .unwrap()
+        .to_string();
+    iris::cost::approve(&store, &code, 5_000_000, now).unwrap();
+    assert!(u.turn(&store).unwrap().is_some(), "a new budget runs");
 }

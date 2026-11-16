@@ -528,16 +528,33 @@ fn from_of(path: &std::path::Path) -> Option<String> {
     crate::Head::parse(&raw).from_addr
 }
 
-/// A fingerprint of the pending set (each pending condition but the thread
-/// rule): the count and the sum of the message IDs. A change of the set
-/// changes it: new or repaired mail, a due retry, a reset by a sender
-/// change. The run after a sync (R1-28) compares it with its last run.
-pub fn pending_key(store: &Store, now_ms: i64) -> Result<(i64, i64), Error> {
-    let sql = format!("SELECT count(*), coalesce(sum(m.id), 0) FROM message m WHERE {BASE}");
+/// True if a run can make progress now: a reachable pending message (the
+/// thread rule included) that the free steps can finish or start, or any
+/// reachable pending message when a model can be called. The free steps
+/// can act on a message with no `body` row (new or changed mail, its
+/// write 1 not done) and on hostile mail (`SPAM`, or a `hostile` sender).
+/// A model can be called if a model row exists and it has no price or a
+/// budget above 0. The run after a sync (R1-28) runs only then, so an
+/// unchanged store, or mail that waits for a model, makes no run.
+pub fn can_progress(store: &Store, now_ms: i64) -> Result<bool, Error> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM message m WHERE {BASE} AND {THREAD_RULE}
+           AND (NOT EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
+                OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+                OR EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
+                           WHERE h.message_id = m.id AND s.kind = 'hostile')
+                OR EXISTS (SELECT 1 FROM model_setting
+                           WHERE price_in IS NULL OR coalesce(budget_micro_usd, 0) > 0)))"
+    );
     Ok(store.read(|c| {
         Ok(c.prepare_cached(&sql)?.query_row(
-            rusqlite::named_params! { ":now": now_ms, ":max_tries": MAX_TRIES },
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            rusqlite::named_params! {
+                ":now": now_ms,
+                ":max_tries": MAX_TRIES,
+                ":no_date": NO_DATE,
+            },
+            |r| r.get(0),
         )?)
     })?)
 }
