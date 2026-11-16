@@ -1361,6 +1361,12 @@ async fn each_item_of_the_brief_is_shown_bundled_or_hidden_once() {
         let mut sorted = rules.clone();
         sorted.sort();
         assert_eq!(rules, sorted, "bundles in the order of the rule IDs");
+        // No policy: a bundle page is there only while the brief lists it.
+        for rule in 1..=9u64 {
+            let (code, _) = get(&store, &format!("/api/brief/bundle-{rule}")).await;
+            let listed = rules.contains(&rule);
+            assert_eq!(code == StatusCode::OK, listed, "seed {seed} rule {rule}");
+        }
     }
 }
 
@@ -1383,15 +1389,18 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
     add_item(&store, "record", "new", 14, 3, receipt);
     std::fs::write(
         store.dir().join(iris_policy::FILE),
-        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 3\nname = \"Bundle the feed\"\neffect = \"bundle\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n[[rule]]\nid = 4\nname = \"Hide receipts\"\neffect = \"hide\"\nwhen = { record_type = \"receipt\" }\nby = \"person\"\nadded = 2026-11-10\n",
+        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 3\nname = \"Bundle the feed\"\neffect = \"bundle\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n[[rule]]\nid = 4\nname = \"Hide receipts\"\neffect = \"hide\"\nwhen = { record_type = \"receipt\" }\nby = \"person\"\nadded = 2026-11-10\n[[rule]]\nid = 5\nname = \"Bundle bookings\"\neffect = \"bundle\"\nwhen = { record_type = \"booking\" }\nby = \"person\"\nadded = 2026-11-10\n",
     )
     .unwrap();
-    let sha = match iris_policy::file_state(&store).unwrap() {
-        iris_policy::FileState::Changed(l) => l.sha256,
-        other => panic!("{other:?}"),
+    let confirm = || {
+        let sha = match iris_policy::file_state(&store).unwrap() {
+            iris_policy::FileState::Changed(l) => l.sha256,
+            other => panic!("{other:?}"),
+        };
+        // The confirmation writes the attention of each item.
+        iris_policy::confirm(&store, &sha, NOW / 1000).unwrap();
     };
-    // The confirmation writes the attention of each item.
-    iris_policy::confirm(&store, &sha, NOW / 1000).unwrap();
+    confirm();
     let (_, b) = get(&store, "/api/brief").await;
     assert_eq!(b["bundles"][0]["name"], "Bundle the feed");
     assert_eq!(b["bundles"][0]["count"], 2);
@@ -1402,6 +1411,14 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
     let (code, counts) = get(&store, "/api/records").await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(counts, json!({"receipt": 1}));
+    // A bundle rule with no item yet has an empty page.
+    let (code, p) = get(&store, "/api/brief/bundle-5").await;
+    assert_eq!((code, p["count"].clone()), (StatusCode::OK, json!(0)));
+    // A rule that is not a bundle rule, or no rule: no bundle.
+    for bad in ["bundle-4", "bundle-999", "bundle-0", "bundle-4294967295"] {
+        let (code, _) = get(&store, &format!("/api/brief/{bad}")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{bad}");
+    }
     for bad in ["bundle-03", "bundle-", "bundle-x", "bundle-+3", "bundles-3"] {
         let (code, _) = get(&store, &format!("/api/brief/{bad}")).await;
         assert_eq!(code, StatusCode::NOT_FOUND, "{bad}");
@@ -1414,4 +1431,19 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
     let (code, p) = get(&store, &format!("/api/brief/bundle-3?after={next}")).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(p["items"].as_array().unwrap().len(), 1);
+    // The owner removes rule 3: its bundle goes, and the feed comes back.
+    let text = std::fs::read_to_string(store.dir().join(iris_policy::FILE)).unwrap();
+    let start = text.find("[[rule]]\nid = 3").unwrap();
+    let end = start + 1 + text[start + 1..].find("[[rule]]").unwrap();
+    std::fs::write(
+        store.dir().join(iris_policy::FILE),
+        format!("{}{}", &text[..start], &text[end..]),
+    )
+    .unwrap();
+    confirm();
+    let (code, _) = get(&store, "/api/brief/bundle-3").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (_, b) = get(&store, "/api/brief").await;
+    assert_eq!(b["feed"]["count"], 2);
+    assert!(b["bundles"].as_array().unwrap().is_empty());
 }

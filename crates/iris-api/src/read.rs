@@ -922,8 +922,27 @@ pub fn brief_section(
     let after = after
         .map(|token| decode_cursor(token, name, sort_keys(&sql.1).len()))
         .transpose()?;
-    let (mut section, mut page_keys) =
-        store.read(|c| read_section(c, sql, &tails(now), limit + 1, after.as_deref()))?;
+    let rule = bundle_rule(name);
+    let read = store.read(|c| {
+        let page = read_section(c, sql, &tails(now), limit + 1, after.as_deref())?;
+        // A bundle is there while the active policy has its `bundle` rule,
+        // or while an item is in it (until the next attention refresh).
+        let known = |r: u32| -> iris_store::Result<bool> {
+            Ok(page.0.count > 0
+                || iris_policy::active(c)?
+                    .policy
+                    .rules
+                    .iter()
+                    .any(|x| x.id == r && x.effect == iris_policy::Effect::Bundle))
+        };
+        Ok(match rule {
+            Some(r) if !known(r)? => None,
+            _ => Some(page),
+        })
+    })?;
+    let Some((mut section, mut page_keys)) = read else {
+        return Ok(None);
+    };
     let more = section.items.len() > limit as usize;
     section.items.truncate(limit as usize);
     page_keys.truncate(limit as usize);
@@ -1115,6 +1134,55 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bundle_name_is_canonical_or_no_bundle() {
+        // Property: `bundle_rule(s)` is `Some(r)` exactly when `s` is
+        // `bundle-{r}` for a `u32` `r`. Each rule has one name.
+        for r in [0, 1, 9, 10, 99, u32::MAX - 1, u32::MAX] {
+            assert_eq!(bundle_rule(&format!("bundle-{r}")), Some(r));
+        }
+        let parts = [
+            "bundle-",
+            "bundle",
+            "-",
+            "+",
+            "0",
+            "1",
+            "9",
+            "42",
+            "4294967295",
+            "4294967296",
+            " ",
+            "\u{0663}",
+            "é",
+            "%33",
+            "x",
+            "/",
+            "",
+        ];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..20_000 {
+            let mut name = String::new();
+            for _ in 0..(x % 5) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                name.push_str(parts[(x % parts.len() as u64) as usize]);
+            }
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let canonical = name
+                .strip_prefix("bundle-")
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|r| format!("bundle-{r}") == name);
+            assert_eq!(bundle_rule(&name), canonical, "{name:?}");
+            if let Some(r) = bundle_rule(&name) {
+                assert_eq!(format!("bundle-{r}"), name);
+            }
+        }
+    }
 
     #[test]
     fn summaries_leave_out_a_message_that_became_gone() {
