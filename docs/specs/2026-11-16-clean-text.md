@@ -251,7 +251,8 @@ its first 1 KiB holds `%PDF`.
   text after the last object header (`<number> <number> obj`) before it, at
   most 4 KiB back. The data ends at the
   direct `/Length` key (not `/Length1` or another key that starts with
-  `/Length`) of the stream dictionary, if `endstream` follows that
+  `/Length`) of the stream dictionary, outside its strings, comments and
+  inner dictionaries, if `endstream` follows that
   length. If not, the data ends at the next `endstream`.
 - A stream with no filter is read in place. A stream whose `/Filter` is
   `/FlateDecode` or `[/FlateDecode]` is inflated, at most 4 MiB for each stream and 32 MiB for each PDF. A

@@ -96,12 +96,61 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
     (readable(&text).then_some(text), stopped)
 }
 
-/// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
-fn declared_len(dict: &[u8]) -> Option<usize> {
+/// The position of the `/Length` key of the outer dictionary. A key inside
+/// a string, a comment or an inner dictionary does not count.
+fn direct_length_key(dict: &[u8]) -> Option<usize> {
     // The key ends at white space or a delimiter: `/Length1` is another key.
     let key_end = |b: &u8| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(b);
-    let p = (0..dict.len().saturating_sub(7))
-        .find(|&i| dict[i..].starts_with(b"/Length") && dict.get(i + 7).is_some_and(key_end))?;
+    let (mut i, mut depth) = (0, 0usize);
+    while i < dict.len() {
+        match dict[i] {
+            b'(' => {
+                // A literal string: nested parentheses and `\` escapes.
+                let mut open = 0usize;
+                while i < dict.len() {
+                    match dict[i] {
+                        b'\\' => i += 1,
+                        b'(' => open += 1,
+                        b')' => {
+                            open -= 1;
+                            if open == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'%' => {
+                while i < dict.len() && !matches!(dict[i], b'\r' | b'\n') {
+                    i += 1;
+                }
+            }
+            b'<' if dict.get(i + 1) == Some(&b'<') => {
+                depth += 1;
+                i += 1;
+            }
+            b'>' if dict.get(i + 1) == Some(&b'>') => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'/' if depth <= 1
+                && dict[i..].starts_with(b"/Length")
+                && dict.get(i + 7).is_some_and(key_end) =>
+            {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
+fn declared_len(dict: &[u8]) -> Option<usize> {
+    let p = direct_length_key(dict)?;
     let rest = &dict[p + 7..];
     let digits = rest.iter().skip_while(|b| b.is_ascii_whitespace());
     let num: Vec<u8> = digits
@@ -501,7 +550,7 @@ mod tests {
         let t = b"BT (the endstream report) Tj ET";
         let pdf = String::from_utf8(sample(t, false))
             .unwrap()
-            .replace("<< /Length", "<< /LengthX 3 /Length");
+            .replace("<< /Length", "<< /LengthX 3 /Info (/Length 3) /Length");
         assert_eq!(
             text(pdf.as_bytes(), 100).as_deref(),
             Some("the endstream report")
@@ -519,6 +568,20 @@ mod tests {
         assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), Some(31));
         assert_eq!(declared_len(b"<< /LengthX 9 /Length 31 >>"), Some(31));
         assert_eq!(declared_len(b"<< /LengthX 9 >>"), None);
+        // A key inside a string, a comment or an inner dictionary does not count.
+        assert_eq!(
+            declared_len(b"<< /Info (/Length 3) /Length 29 >>"),
+            Some(29)
+        );
+        assert_eq!(
+            declared_len(b"<< /Info (a \\\\ \\) (/Length 3)) /Length 29 >>"),
+            Some(29)
+        );
+        assert_eq!(declared_len(b"<< % /Length 3\n/Length 29 >>"), Some(29));
+        assert_eq!(
+            declared_len(b"<< /P << /Length 3 >> /Length 29 >>"),
+            Some(29)
+        );
         assert_eq!(declared_len(b"<< /Length 31 >>"), Some(31));
     }
 
