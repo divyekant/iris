@@ -57,21 +57,22 @@
 <main>
   {#if access.problem}<p class="problem" role="alert">{access.problem}</p>{/if}
   <SignInNotice />
+  {#if access.none && !["home", "setup", "brief"].includes(route.view)}
+    <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
+  {/if}
   {#if route.view === "item" || route.view === "mail" || route.view === "section"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
-    {#if route.view === "home" || route.view === "setup"}
+    {#if route.view === "home" || route.view === "setup" || route.view === "brief"}
       {#await get<Status>("status") then status}
-        {#if route.view === "setup" || home(status) === "setup"}
+        {#if route.view === "setup" || home(status, route.view === "brief" ? "brief" : "home") === "setup"}
           <Setup {status} />
         {:else}
           {#await loadBrief() then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
         {/if}
       {:catch error}{@render failed(error)}
       {/await}
-    {:else if route.view === "brief"}
-      {#await Promise.all([loadBrief(), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "section"}
       {@const key = route.key}
       {#await get<Page>(`brief/${key}?limit=50`) then page}

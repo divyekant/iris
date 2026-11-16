@@ -245,7 +245,11 @@ export async function get<T>(path: string): Promise<T> {
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(body?.error ?? `The engine answered ${response.status}.`);
   // Spec 1 section 4.7: Google refused the refresh token of these accounts, so their sync stopped.
-  if (path === "status") access.locked = ((body as Status).accounts ?? []).filter((a) => a.state === "needs_sign_in").map((a) => a.address);
+  if (path === "status") {
+    const accounts = (body as Status).accounts ?? [];
+    access.locked = accounts.filter((a) => a.state === "needs_sign_in").map((a) => a.address);
+    access.none = accounts.length === 0;
+  }
   return body as T;
 }
 

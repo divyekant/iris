@@ -188,8 +188,10 @@ export function copying(status: Status | null): Account[] {
 }
 
 /** The home view: the setup flow until there is something to show, then the brief. */
-export function home(status: Status): "setup" | "brief" {
+export function home(status: Status, view: "home" | "brief" = "home"): "setup" | "brief" {
   if (status.accounts.length === 0) return "setup";
+  // The Brief link of the header opens the brief also while the first sync has no understood mail.
+  if (view === "brief") return "brief";
   const ready = status.accounts.some((a) => a.mirror_ready_at);
   // Spec 1 section 4.2: the first brief shows during the first sync, from the mail fetched so far.
   return ready || status.messages.understood > 0 ? "brief" : "setup";

@@ -6,4 +6,6 @@ export const access = $state({
   problem: "",
   /** The addresses of the accounts that need sign-in (spec 1 section 4.7), from the last status answer. */
   locked: [] as string[],
+  /** True when the last status answer had no account: the views then link to setup. */
+  none: false,
 });
