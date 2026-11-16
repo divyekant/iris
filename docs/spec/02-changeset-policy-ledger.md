@@ -302,7 +302,7 @@ section 5.1) keep other users out.
 | An ID that is not in the mirror, a gone message, or a target of the wrong kind for the verb | Apply changes the wrong object | Submit gives the action `denied`, by `engine`, with the reason. |
 | No target, or mailbox verb targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. A state verb changes its items, so an item with no origin message is a valid target. |
 | Targets in two or more accounts | One approval changes two mailboxes, and the apply has no one account | Submit gives the action `denied`. One action changes one account. |
-| Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4). |
+| Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4): submit denies an `untrash` action with no link in `ledger_undo` (migration 12). |
 | A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
 | A state move that section 5.2 does not allow, from any writer | A decided action changes, or skips the review | The trigger `action_state` refuses the write. The list of moves is in the trigger, not in a table. |
 | An expiry before 14 days, or with a time after the clock of the database | An action expires before the person can decide | The trigger `action_state` refuses the write. The routine `expire` (each engine tick) expires each `proposed`, `in_review` and `approved` action 14 days or more after its submit, except an action that has a ledger row in `writing` (migration 11): recovery ends that action as `applied` or `failed`. |
@@ -728,33 +728,60 @@ applies it.
 
 ### 7.4 Undo
 
-1. The person selects undo on a ledger entry, in the web client.
-2. The engine makes a changeset with author `person` and one action: the
-   inverse of the entry. The choice of the person is the approval. The rules,
-   the mode `observe` and the flag `bulk` do not apply to an undo. Only Stop
-   (release 4) holds it.
-3. The engine reads the labels at Gmail as in step 2 of section 7.2. The
-   inverse changes only the messages with `done` that still have the `post`
-   state of the entry. A message that changed after the entry (for example,
-   the person moved it in Gmail) stays as it is. The result lists these
-   messages.
+1. The person selects undo on a ledger entry, in the web client. The entry
+   must be `applied` or `failed`, with the undo `inverse`, and with one or
+   more messages with `done` that are not gone. No other undo of the entry
+   is open.
+2. The engine (`iris_apply::undo`) makes a changeset with author `person`
+   and one action: the inverse of the entry (`archive` and `inbox`, `read`
+   and `unread`, `label` and `unlabel` of the same name, `trash` and
+   `untrash`). Its targets are the messages with `done` that are not gone.
+   One transaction submits it, and the person approves it: the choice of
+   the person is the approval. The table `ledger_undo` (migration 12) links
+   the action to the entry. The rules, the mode `observe` and the flag
+   `bulk` do not apply to an undo. Only Stop (release 4) holds it.
+3. The apply reads the labels at Gmail as in step 2 of section 7.2. The
+   inverse changes only the messages that still have the `post` state of
+   the entry. A message that changed after the entry (for example, the
+   person moved it in Gmail) stays as it is. The result counts these
+   messages as unchanged.
 4. For `trash`, the undo changeset has two actions, and each one is an
    ordinary action with its own ledger entry and recovery:
    1. `messages.untrash` for each message that still has `TRASH`. Only an
-      undo makes this action, with the verb `untrash`. Its `post` is "no
-      `TRASH`".
-   2. After action 1, `archive` for each message that has `INBOX` now and
-      had no `INBOX` in `pre` (for example an archived message that
-      `messages.untrash` put in the inbox).
+      undo makes this action, with the verb `untrash`: submit denies
+      `untrash` with no link. Its `post` is "no `TRASH`".
+   2. `archive` of each message whose `pre` in the entry has no `INBOX`
+      (for example an archived message that `messages.untrash` put in the
+      inbox). It changes only the messages that action 1 changed (`done`),
+      and that have `INBOX` now. Until action 1 ends, the apply of action 2
+      waits.
 
    The undo never sets a full label set, so a label that the person added
    while the message was in the trash stays. If the engine stops between the
    two actions, action 2 is still `approved`, and it applies after the start
    (section 7.2, step 2 reads the labels again).
-5. The undo gets its own ledger entry. The first entry gets `undone_by`, and
-   its action gets the state `undone`.
+5. The undo gets its own ledger entry. When the entry of action 1 becomes
+   `applied`, the same transaction sets `undone_by` of the first entry, and
+   the trigger `ledger_state` moves its action to `undone`. If the undo
+   fails, the first entry keeps its state, and the person can undo it
+   again: the next undo skips each message that this undo changed.
 
 An undo of an undo is a new action, not a delete of the record.
+
+#### Failure list of the undo
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
+| A second undo while an undo of the entry is open | Two undos change the same messages | `undo` refuses it. The trigger refuses a second open link of the same step. |
+| An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
+| A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message. |
+| A gone message, or HTTP 404 | A call on a message that does not exist | `undo` leaves a gone message out of the targets. The apply lists a message that Gmail does not have as gone. |
+| The mode `observe` | The person cannot reverse a change while Iris observes | The mode does not hold an undo. The apply checks the link of migration 12. |
+| Action 2 of the undo of `trash` before action 1 ends | An `archive` of a message that is still in the trash, or that `untrash` did not change | The apply of action 2 waits. Action 2 changes only the messages with `done` in the entry of action 1. |
+| A failed undo, or an unknown result | Some messages are back, others are not | The undo entry is `failed`, with its recovery. The first entry keeps its state, and a new undo skips each message that is back. |
+| A write of `undone_by` with an entry that is not its undo | The ledger shows a wrong undo | The trigger `ledger_undone_by` refuses it: only the entry of action 1 of its own undo makes an entry `undone`. |
+| A `label` undo of an `unlabel` whose label Gmail deleted | No label to add | The apply makes the label as for each `label` action (section 7.2, step 1). |
 
 ### 7.5 Release 3: draft, send and the held outbox
 

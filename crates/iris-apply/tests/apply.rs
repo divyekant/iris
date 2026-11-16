@@ -1238,3 +1238,185 @@ fn a_failed_label_create_checks_the_mode_again() {
     assert_eq!(b.calls("/labels"), 1);
     assert_eq!(b.calls("batchModify"), 0);
 }
+
+impl Box {
+    /// The ledger row ID of an action.
+    fn entry(&self, action: i64) -> i64 {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT id FROM ledger WHERE action_id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// The state and `undone_by` of a ledger row.
+    fn entry_state(&self, ledger: i64) -> (String, Option<i64>) {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state, undone_by FROM ledger WHERE id = ?1",
+                    [ledger],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// Make the undo of the entry of `action`, and apply each of its
+    /// actions. Gives the outcomes.
+    fn undo(&self, action: i64) -> Vec<Outcome> {
+        let actions = iris_apply::undo(&self.store, self.entry(action), now()).unwrap();
+        actions.iter().map(|&a| self.apply(a).unwrap()).collect()
+    }
+
+    fn set_mode(&self, mode: &str) {
+        self.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, ?2, 5)",
+                    params![format!("version = 0\nmode = \"{mode}\"\n"), mode],
+                )?)
+            })
+            .unwrap();
+    }
+}
+
+/// The card R2-03: each undo returns Gmail and the mirror to the state
+/// before, for each verb with an inverse.
+#[test]
+fn each_undo_returns_gmail_and_the_mirror() {
+    let b = setup("undo-verbs", 80, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 5);
+    for verb in ["archive", "unread", "read", "trash", "label"] {
+        let before: Vec<Vec<String>> = ms.iter().map(|&m| b.gmail_labels(m)).collect();
+        let a = if verb == "label" {
+            b.labelled("label", "Undo/Test", &ms)
+        } else {
+            b.approved(verb, &ms, PERSON)
+        };
+        let c = applied(b.apply(a));
+        assert!(c.changed > 0, "{verb}: the test changes nothing");
+        let entry = b.entry(a);
+        let outcomes = b.undo(a);
+        assert!(
+            outcomes.iter().all(|o| matches!(o, Outcome::Applied(_))),
+            "{verb}: {outcomes:?}"
+        );
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "{verb}: one action, as each message had INBOX"
+        );
+        for (i, &m) in ms.iter().enumerate() {
+            assert_eq!(b.gmail_labels(m), before[i], "{verb}");
+            assert_eq!(b.mirror_labels(m), before[i], "{verb}");
+        }
+        let (state, by) = b.entry_state(entry);
+        assert_eq!(state, "undone", "{verb}");
+        assert!(by.unwrap() > entry);
+        assert_eq!(b.state(a).0, "undone", "{verb}");
+        b.check_document(a);
+        // An undone entry has no second undo.
+        assert!(matches!(
+            iris_apply::undo(&b.store, entry, now()),
+            Err(Error::Undo(_))
+        ));
+    }
+}
+
+/// The undo of `trash`: `untrash`, then `archive` of each message that had
+/// no `INBOX` before the trash (section 7.4, step 4).
+#[test]
+fn the_undo_of_trash_archives_what_was_archived() {
+    let b = setup("undo-trash", 80, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    let before: Vec<Vec<String>> = ms.iter().map(|&m| b.gmail_labels(m)).collect();
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    let actions = iris_apply::undo(&b.store, b.entry(a), now()).unwrap();
+    assert_eq!(actions.len(), 2);
+    // Step 2 waits for step 1.
+    assert_eq!(b.apply(actions[1]).unwrap(), Outcome::Waiting);
+    let c = applied(b.apply(actions[0]));
+    assert_eq!(c.changed, 3);
+    let c = applied(b.apply(actions[1]));
+    assert_eq!((c.changed, c.unchanged), (1, 0));
+    for (i, &m) in ms.iter().enumerate() {
+        assert_eq!(b.gmail_labels(m), before[i]);
+        assert_eq!(b.mirror_labels(m), before[i]);
+    }
+    assert_eq!(b.state(a).0, "undone");
+    assert_eq!(b.calls("untrash"), 3);
+    b.check_document(actions[0]);
+}
+
+/// A message that changed at Gmail after the entry stays as it is, and the
+/// mode `observe` does not hold an undo (section 7.4).
+#[test]
+fn the_undo_skips_a_message_that_changed_after_the_entry() {
+    let b = setup("undo-changed", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    let a = b.approved("archive", &ms, PERSON);
+    applied(b.apply(a));
+    // The person moved one message back to the inbox in Gmail.
+    b.fake.modify_labels(&b.provider_id(ms[0]), &["INBOX"], &[]);
+    b.set_mode("observe");
+    let outcomes = b.undo(a);
+    match &outcomes[..] {
+        [Outcome::Applied(c)] => assert_eq!((c.changed, c.unchanged), (2, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.calls("batchModify"), 2);
+    assert_eq!(b.state(a).0, "undone");
+}
+
+/// One undo of an entry at a time, and an entry with no message to change
+/// has no undo.
+#[test]
+fn an_entry_has_one_open_undo() {
+    let b = setup("undo-open", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved("archive", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    let first = iris_apply::undo(&b.store, entry, now()).unwrap();
+    assert!(matches!(
+        iris_apply::undo(&b.store, entry, now()),
+        Err(Error::Undo(_))
+    ));
+    assert_eq!(b.state(first[0]), ("approved".into(), "person".into()));
+    // An action whose messages had the target state changed nothing.
+    let again = b.approved("inbox", &b.messages(IN_INBOX, 2), PERSON);
+    assert_eq!(applied(b.apply(again)).changed, 0);
+    assert!(matches!(
+        iris_apply::undo(&b.store, b.entry(again), now()),
+        Err(Error::Undo(_))
+    ));
+}
+
+/// A failed undo keeps the entry: a second undo changes only the messages
+/// that still have the state of the entry.
+#[test]
+fn a_failed_undo_keeps_the_entry() {
+    let b = setup("undo-failed", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    let actions = iris_apply::undo(&b.store, entry, now()).unwrap();
+    // The first untrash passes, the second gets a clear refusal.
+    b.fake.fail_next_write(&[0, 400], false);
+    assert!(matches!(b.apply(actions[0]), Ok(Outcome::Failed { .. })));
+    assert_eq!(b.entry_state(entry), ("applied".into(), None));
+    let c = match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => c.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((c.changed, c.unchanged), (1, 1));
+    assert_eq!(b.entry_state(entry).0, "undone");
+}

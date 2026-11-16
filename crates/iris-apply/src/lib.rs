@@ -1,11 +1,12 @@
 //! The apply of one approved changeset action to Gmail, with its ledger
-//! entry (specification 2, sections 7.1 to 7.3), for the verbs `archive`,
-//! `inbox`, `read`, `unread`, `trash`, `label` and `unlabel`.
+//! entry (specification 2, sections 7.1 to 7.4), for the verbs `archive`,
+//! `inbox`, `read`, `unread`, `trash`, `label` and `unlabel`, and
+//! `untrash` of an undo. [`undo`] makes the undo of a ledger entry.
 //!
 //! The steps of [`apply`]:
 //!
 //! 1. Expire an action 14 days after its submit. Wait while the active
-//!    policy has the mode `observe`. Send an action that a rule approved
+//!    policy has the mode `observe` (not for an undo). Send an action that a rule approved
 //!    to review (issue #168). Deny an action whose hash does not agree with
 //!    its rows. Before these checks, run the recovery of each ledger row
 //!    of the account in `writing`. For `label` and `unlabel`, find the
@@ -16,7 +17,8 @@
 //! 3. In one transaction, claim the action: the ledger row in `writing`,
 //!    with one row for each other message, its `pre`, `post` and call.
 //! 4. For each call: save its number, call Gmail (one `batchModify` call
-//!    for each 1,000 messages, or one `trash` call for each message), save
+//!    for each 1,000 messages, or one `trash` or `untrash` call for each
+//!    message), save
 //!    `done` for its messages and write the change to the mirror.
 //! 5. Set the state `applied`, or `failed`. The trigger `ledger_state`
 //!    moves the action to the same state.
@@ -31,6 +33,9 @@ use iris_policy::Mode;
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
+
+mod undo;
+pub use undo::undo;
 
 #[derive(Debug)]
 pub enum Error {
@@ -50,9 +55,10 @@ pub enum Error {
     /// or in another. The action
     /// stays as it was. Apply again after the other apply.
     Busy,
-    /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
-    /// and the state verbs.
+    /// The verb has no Gmail apply: the state verbs.
     Verb(String),
+    /// The ledger entry has no undo now, with the reason ([`undo`]).
+    Undo(String),
 }
 
 impl std::fmt::Display for Error {
@@ -64,6 +70,7 @@ impl std::fmt::Display for Error {
             Error::Busy => write!(f, "another apply runs now"),
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
+            Error::Undo(why) => write!(f, "no undo: {why}"),
         }
     }
 }
@@ -111,11 +118,15 @@ pub enum Outcome {
     /// The state is `in_review` by `engine`, with this reason: a rule
     /// approved the action.
     Review(String),
-    /// The mode is `observe`. The action stays `approved` and waits.
+    /// The mode is `observe`, or the action is step 2 of an undo and step 1
+    /// did not end. The action stays `approved` and waits.
     Waiting,
     /// 14 days passed after the submit: the state is `expired`.
     Expired,
 }
+
+/// The name of the `batchModify` call in `ops`.
+const BATCH: &str = "batchModify";
 
 /// An open action expires 14 days after its submit (section 5.5).
 const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
@@ -124,38 +135,53 @@ const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 struct Change {
     add: Vec<String>,
     remove: Vec<String>,
-    /// `messages.trash` for each message, not `batchModify`.
-    trash: bool,
+    /// The provider call: `batchModify` for each 1,000 messages, or
+    /// `trash` or `untrash` for each message.
+    call: &'static str,
 }
 
 impl Change {
     /// The change of a verb with no label argument.
     fn of(verb: &str) -> Option<Change> {
-        let (add, remove, trash): (&[&str], &[&str], bool) = match verb {
-            "archive" => (&[], &["INBOX"], false),
-            "inbox" => (&["INBOX"], &[], false),
-            "read" => (&[], &["UNREAD"], false),
-            "unread" => (&["UNREAD"], &[], false),
-            "trash" => (&["TRASH"], &[], true),
+        let (add, remove, call): (&[&str], &[&str], &str) = match verb {
+            "archive" => (&[], &["INBOX"], BATCH),
+            "inbox" => (&["INBOX"], &[], BATCH),
+            "read" => (&[], &["UNREAD"], BATCH),
+            "unread" => (&["UNREAD"], &[], BATCH),
+            "trash" => (&["TRASH"], &[], "trash"),
+            // Only an undo makes it (section 7.4).
+            "untrash" => (&[], &["TRASH"], "untrash"),
             _ => return None,
         };
         let own = |v: &[&str]| v.iter().map(|l| l.to_string()).collect();
         Some(Change {
             add: own(add),
             remove: own(remove),
-            trash,
+            call: Change::call_of(call)?,
         })
+    }
+
+    /// The static name of a provider call.
+    fn call_of(call: &str) -> Option<&'static str> {
+        [BATCH, "trash", "untrash"].into_iter().find(|c| *c == call)
+    }
+
+    /// One provider call for each message.
+    fn single(&self) -> bool {
+        self.call != BATCH
     }
 
     /// The change that a ledger row recorded in `ops` (see [`Change::ops`]).
     /// The recovery uses it: the label IDs of `label` and `unlabel` are
     /// known only at the claim.
     fn of_ledger(c: &Connection, ledger: i64) -> rusqlite::Result<Change> {
-        let trash: bool = c.query_row(
-            "SELECT json_extract(ops, '$.call') = 'trash' FROM ledger WHERE id = ?1",
+        let call: String = c.query_row(
+            "SELECT json_extract(ops, '$.call') FROM ledger WHERE id = ?1",
             [ledger],
             |r| r.get(0),
         )?;
+        // The claim wrote one of the names of `call_of`.
+        let call = Change::call_of(&call).ok_or(rusqlite::Error::InvalidQuery)?;
         let list = |key: &str| -> rusqlite::Result<Vec<String>> {
             let mut st = c.prepare(&format!(
                 "SELECT value FROM ledger, json_each(ledger.ops, '$.{key}')
@@ -167,7 +193,7 @@ impl Change {
         Ok(Change {
             add: list("add")?,
             remove: list("remove")?,
-            trash,
+            call,
         })
     }
 
@@ -180,7 +206,11 @@ impl Change {
             .add
             .iter()
             .chain(&self.remove)
-            .chain(if self.trash { &inbox[..] } else { &[] })
+            .chain(if self.call == "trash" {
+                &inbox[..]
+            } else {
+                &[]
+            })
             .filter(|w| labels.contains(w))
             .collect();
         labels_json(watched)
@@ -190,7 +220,7 @@ impl Change {
     /// and the number of calls.
     fn ops(&self, calls: i64) -> String {
         serde_json::json!({
-            "call": if self.trash { "trash" } else { "batchModify" },
+            "call": self.call,
             "add": self.add,
             "remove": self.remove,
             "calls": calls,
@@ -329,7 +359,7 @@ pub fn apply(
         ("label" | "unlabel", Some(_)) => Change {
             add: Vec::new(),
             remove: Vec::new(),
-            trash: false,
+            call: BATCH,
         },
         _ => Change::of(&verb).ok_or(Error::Verb(verb.clone()))?,
     };
@@ -406,26 +436,37 @@ pub fn apply(
     })?;
     let mut after = 0;
     loop {
-        // A gone message has no provider ID here.
-        let page: Vec<(i64, Option<String>)> = store.read(|c| {
+        // A gone message has no provider ID here. Step 2 of the undo of a
+        // `trash` changes only the messages that step 1 changed.
+        let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
             let mut st = c.prepare_cached(
-                "SELECT am.message_id, m.provider_id FROM action_message am
+                "SELECT am.message_id, m.provider_id,
+                   NOT EXISTS (SELECT 1 FROM undo_pair WHERE second = ?1)
+                   OR EXISTS (SELECT 1 FROM undo_pair p JOIN ledger l ON l.action_id = p.first
+                              JOIN ledger_message lm ON lm.ledger_id = l.id
+                              WHERE p.second = ?1 AND lm.message_id = am.message_id
+                                AND lm.done = 1)
+                 FROM action_message am
                  LEFT JOIN message m ON m.id = am.message_id AND m.gone_at IS NULL
                  WHERE am.action_id = ?1 AND am.message_id > ?2
                  ORDER BY am.message_id LIMIT ?3",
             )?;
             let rows = st.query_map(params![action, after, BATCH_LIMIT as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
-        let Some(&(last, _)) = page.last() else {
+        let Some(&(last, ..)) = page.last() else {
             break;
         };
         after = last;
         let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
         let mut todo: Vec<(i64, String)> = Vec::new();
-        for (id, provider_id) in page {
+        for (id, provider_id, eligible) in page {
+            if !eligible {
+                run.counts.unchanged += 1;
+                continue;
+            }
             let Some(provider_id) = provider_id else {
                 run.counts.gone.push(id);
                 continue;
@@ -587,7 +628,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 return Ok(Ok(None));
             }
             let n: i64 = tx.query_row("SELECT count(*) FROM temp.apply_todo", [], |r| r.get(0))?;
-            let calls = if change.trash {
+            let calls = if change.single() {
                 n
             } else {
                 (n + BATCH_LIMIT as i64 - 1) / BATCH_LIMIT as i64
@@ -605,7 +646,7 @@ impl<'a, 'b> Run<'a, 'b> {
                  SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
                  FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
                        FROM temp.apply_todo)",
-                params![ledger, change.trash, BATCH_LIMIT as i64, labels_json(&change.add)],
+                params![ledger, change.single(), BATCH_LIMIT as i64, labels_json(&change.add)],
             )?;
             tx.execute("DELETE FROM temp.apply_todo", [])?;
             Ok(Ok(Some(ledger)))
@@ -659,10 +700,17 @@ impl<'a, 'b> Run<'a, 'b> {
             if live.is_empty() {
                 continue;
             }
-            let result = if change.trash {
+            let result = if change.single() {
                 let (id, p) = &live[0];
-                self.call(|g, t| g.trash(t, p))
-                    .map(|m| vec![(*id, m.label_ids)])
+                let untrash = change.call == "untrash";
+                self.call(|g, t| {
+                    if untrash {
+                        g.untrash(t, p)
+                    } else {
+                        g.trash(t, p)
+                    }
+                })
+                .map(|m| vec![(*id, m.label_ids)])
             } else {
                 let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
                 let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
@@ -679,7 +727,7 @@ impl<'a, 'b> Run<'a, 'b> {
                             params![ledger, k],
                         )?)
                     })?;
-                    if change.trash {
+                    if change.single() {
                         mirror(self.store, self.account, &labels);
                     } else {
                         let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
@@ -724,11 +772,26 @@ impl<'a, 'b> Run<'a, 'b> {
         });
         let state = if error.is_some() { "failed" } else { "applied" };
         self.store.write(|tx| {
-            Ok(tx.execute(
+            tx.execute(
                 "UPDATE ledger SET state = ?2, error = ?3, history_id = ?4
                  WHERE id = ?1 AND state = 'writing'",
                 params![ledger, state, error, history],
-            )?)
+            )?;
+            // An applied step 1 of an undo makes its entry `undone` (section
+            // 7.4). After a failed undo, the entry keeps its state, and the
+            // person can undo it again: the next undo skips each message
+            // that this one changed.
+            if state == "applied" {
+                tx.execute(
+                    "UPDATE ledger SET state = 'undone', undone_by = ?1
+                     WHERE id = (SELECT u.ledger_id FROM ledger_undo u
+                                 JOIN ledger n ON n.action_id = u.action_id
+                                 WHERE n.id = ?1 AND u.step = 1)
+                       AND state IN ('applied', 'failed')",
+                    [ledger],
+                )?;
+            }
+            Ok(())
         })?;
         let counts = self.counts(ledger)?;
         Ok(match error {
@@ -999,7 +1062,16 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
     if expired > 0 {
         return Ok(Some(Outcome::Expired));
     }
-    if iris_policy::active(tx)?.policy.mode == Mode::Observe {
+    // The mode `observe` does not hold an undo (section 7.4). Step 2 of the
+    // undo of a `trash` waits for the end of step 1.
+    let (undo, first_open): (bool, bool) = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1),
+                EXISTS (SELECT 1 FROM undo_pair p JOIN changeset_action a ON a.id = p.first
+                        WHERE p.second = ?1 AND a.state IN ('proposed', 'in_review', 'approved'))",
+        [action],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if first_open || (!undo && iris_policy::active(tx)?.policy.mode == Mode::Observe) {
         return Ok(Some(Outcome::Waiting));
     }
     Ok(None)
