@@ -73,17 +73,24 @@ impl Head {
 
     /// True when the `Authentication-Results` header that Gmail added says
     /// DKIM passes for `domain` (or a parent domain of it). Only the top
-    /// header counts, and only with the authserv-id `mx.google.com`: a sender
-    /// can add its own header with any result (spec 1 section 6.7).
+    /// header with the authserv-id `mx.google.com` counts. Gmail puts its
+    /// header above each header that the sender wrote, and a sender can
+    /// write any result (spec 1 section 6.7).
     pub(crate) fn dkim_pass(&self, domain: &str) -> bool {
-        let Some(ar) = self.get("authentication-results") else {
+        let gmail = self.0.iter().find_map(|(n, v)| {
+            if n != "authentication-results" {
+                return None;
+            }
+            let v = strip_comments(v);
+            let (id, rest) = v.split_once(';').unwrap_or((&v, ""));
+            id.trim()
+                .eq_ignore_ascii_case("mx.google.com")
+                .then(|| rest.to_string())
+        });
+        let Some(ar) = gmail else {
             return false;
         };
-        let ar = strip_comments(ar);
         let mut parts = ar.split(';');
-        if parts.next().map(|id| id.trim().to_ascii_lowercase()) != Some("mx.google.com".into()) {
-            return false;
-        }
         parts.any(|part| {
             let mut words = part.split_whitespace();
             if !words
@@ -145,7 +152,10 @@ pub(crate) fn addresses(v: &str) -> Vec<(String, Option<String>)> {
             '"' if !angle => quoted = !quoted,
             '<' if !quoted => angle = true,
             '>' if !quoted => angle = false,
-            ',' if !quoted && !angle => {
+            // Group syntax (RFC 5322 section 3.4): the group name ends at
+            // `:` and the group ends at `;`.
+            ':' if !quoted && !angle => start = i + 1,
+            ',' | ';' if !quoted && !angle => {
                 push(&v[start..i]);
                 start = i + 1;
             }
@@ -210,7 +220,8 @@ mod tests {
         // Another provider's header above Gmail's does not hide Gmail's result.
         let other = "Authentication-Results: mx.other.example; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";
         assert!(Head::parse(other.as_bytes()).dkim_pass("shop.example.com"));
-        let none = "Authentication-Results: mx.other.example; dkim=pass header.d=shop.example.com\r\n\r\n";
+        let none =
+            "Authentication-Results: mx.other.example; dkim=pass header.d=shop.example.com\r\n\r\n";
         assert!(!Head::parse(none.as_bytes()).dkim_pass("shop.example.com"));
         // Gmail puts its header on top. A header lower down is the sender's.
         let fail = "Authentication-Results: mx.google.com; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";

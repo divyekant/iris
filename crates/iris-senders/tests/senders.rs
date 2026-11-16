@@ -201,9 +201,17 @@ fn a_reply_in_the_thread_makes_a_person_and_a_draft_does_not() {
 #[test]
 fn a_sent_message_before_a_new_participant_does_not_make_it_a_person() {
     let mut c = Case::new("later");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: ana@example.org"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ana@example.org"),
+    );
     // A new address joins the thread after the last sent message.
-    let d = c.put("t1", &["INBOX"], "From: Dee <dee@example.net>\r\nCc: owner@example.com");
+    let d = c.put(
+        "t1",
+        &["INBOX"],
+        "From: Dee <dee@example.net>\r\nCc: owner@example.com",
+    );
     assert_eq!(d.kind, Kind::Stranger);
     // A sent reply after it makes it a person.
     c.put("t1", &["SENT"], &format!("From: {OWNER}"));

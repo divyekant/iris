@@ -84,11 +84,11 @@ pub fn decide(
     now_ms: i64,
 ) -> rusqlite::Result<Decision> {
     let head = Head::parse(raw);
-    let (thread, date, account): (i64, Option<i64>, String) = conn.query_row(
-        "SELECT m.thread_id, m.internal_date, a.address FROM message m
+    let (date, account): (Option<i64>, String) = conn.query_row(
+        "SELECT m.internal_date, a.address FROM message m
            JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
         [message],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let labels: Vec<String> = conn
         .prepare_cached(
@@ -184,7 +184,7 @@ pub fn decide(
     }
 
     let old_basis = row.as_ref().and_then(|r| r.3.as_deref());
-    let (kind, basis) = rules(conn, &head, &addr, thread, date, previous, old_basis)?;
+    let (kind, basis) = rules(conn, &head, &addr, date, previous, old_basis)?;
     let mut rerun = Vec::new();
     let id = upsert(
         &mut rerun,
@@ -240,7 +240,6 @@ fn rules(
     conn: &Connection,
     head: &Head,
     addr: &str,
-    thread: i64,
     date: Option<i64>,
     previous: Option<Kind>,
     old_basis: Option<&str>,
@@ -293,22 +292,21 @@ fn rules(
     // grows with the history of the address (about 1.7 ms for each message on the
     // 100,000-message synthetic mailbox, release build). Keep a "replied"
     // flag in the store if a large mailbox makes it slow.
+    // The `replied` rule: a sent message in a thread after a message from
+    // the address. A sent message before the address joined the thread does
+    // not count. A sent message of this thread to the address also counts
+    // (the `sent` rule), because a sent message that is older than this one
+    // can still wait for its own decision (the engine reads newest first).
     let replied: bool = conn.query_row(
-        "SELECT EXISTS (
-           SELECT 1 FROM header h JOIN message m ON m.id = h.message_id
-             JOIN message s ON s.thread_id = m.thread_id
-             JOIN message_label ml ON ml.message_id = s.id
-             JOIN label l ON l.id = ml.label_id AND l.provider_id = 'SENT'
-            WHERE h.from_addr = ?1
-              AND NOT EXISTS (SELECT 1 FROM message_label d JOIN label dl ON dl.id = d.label_id
-                               WHERE d.message_id = s.id AND dl.provider_id = 'DRAFT'))
-         OR EXISTS (
-           SELECT 1 FROM message s JOIN message_label ml ON ml.message_id = s.id
-             JOIN label l ON l.id = ml.label_id AND l.provider_id = 'SENT'
-            WHERE s.thread_id = ?2
-              AND NOT EXISTS (SELECT 1 FROM message_label d JOIN label dl ON dl.id = d.label_id
-                               WHERE d.message_id = s.id AND dl.provider_id = 'DRAFT'))",
-        params![addr, thread],
+        &format!(
+            "SELECT EXISTS (
+               SELECT 1 FROM header hm JOIN message m ON m.id = hm.message_id
+                 JOIN message s ON s.thread_id = m.thread_id AND s.id != m.id
+                 JOIN header h ON h.message_id = s.id
+                WHERE hm.from_addr = ?1 AND {SENT_NOT_DRAFT}
+                  AND (s.internal_date >= m.internal_date OR {TO_ADDR_1}))"
+        ),
+        [addr],
         |r| r.get(0),
     )?;
     if replied {
