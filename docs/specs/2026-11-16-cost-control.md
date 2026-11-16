@@ -46,7 +46,24 @@ pending state that the store gives. Each one has an issue:
 - The selection and the reset of `iris rebuild` (spec 1 section 7.5). This
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It
-  calls the runner of this spec.
+  calls the runner of this spec. R1-28 note: `iris serve` runs it in one
+  understanding thread apart from the sync threads, each 10 seconds. A run
+  with nothing pending reads nothing and leaves no row
+  (`Limits::keep_idle`). A run that stopped on `model`, `unknown` or
+  `error` starts a wait that doubles from 60 seconds to 1 hour. The model
+  row holds the wait (`model_setting.retry_failures` and `retry_at`,
+  schema 5), so `iris serve` and each `iris mirror sync` command see the
+  same wait, and `iris model set` (a new row) ends it. Only evidence of the
+  model changes the wait: each run that can call the model updates it in
+  its end write, under the run lock. An error stop doubles it, a run with
+  a call and no error ends it and clears the marks, and a run with no call
+  changes nothing. During the wait, the run after a sync makes no call
+  (`Limits::wait_after_error`), and the mail that needs the model gets
+  `waits_model = 2`. The mark names its cause: 1 for a refusal of the
+  model row or the budget, 2 for the wait. The end of the wait clears only
+  the marks 2; the triggers and the approval clear both. The first such run after the wait sets `retry_at` to NULL
+  and clears the marks in the write that starts it, under the lock, then
+  calls the model. `iris understand` does not wait.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 
@@ -61,6 +78,18 @@ A message is pending when all of these are true:
 - It has no `DRAFT` label.
 - `tries` is less than `MAX_TRIES` (3), and `retry_at` is NULL or not later
   than now.
+- `waits_model` is 0 (R1-28, schema 5). The runner sets it to 1 when the
+  call of the message was refused before it went out (no model, or no
+  budget). Triggers of the store set it to 0 on each change of an input of
+  that refusal: a label, the content, `gone_at`, `hostile` or `tries` of
+  the message, or a new or changed model row (`version`). A budget change
+  clears nothing, because the runner spends and refunds the budget itself.
+  The approval (`iris understand --approve`) clears the marks in its own
+  write. So no write path can leave the mark after a change of an input,
+  and a run does not read the same waiting mail again. A thread whose only
+  unread mail waits gives no thread page. The estimate counts this mail:
+  an approval pays for it. The older-message rule below still counts a message that
+  waits.
 - Each message of its thread that is not gone has `content_sha256` set
   (spec 1 section 7.1).
 - No older message of its thread waits. An older message waits when it is
@@ -240,7 +269,10 @@ lose a rerun:
 4. For each thread in order, and for each pending message of it: check the
    stop conditions, then call `store::understand`.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
-6. At the end, write `ended_at` and `stop`.
+6. At the end, write `ended_at` and `stop`. The run after a sync
+   (`Limits::keep_idle` false, R1-28) deletes its row in the same write if
+   it read no message, made no call and holds no reservation, so a run
+   each minute adds no row.
 
 Stop conditions, checked before each message:
 

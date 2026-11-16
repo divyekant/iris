@@ -272,8 +272,55 @@ fn two_runs_share_one_budget() {
     assert_eq!(r.cost_micro_usd, Some(COST));
     assert_eq!(r.reserved_micro_usd, 0);
     assert_eq!(b.budget(), Some(WORST + 100 - COST));
+    // The refused message waits for a larger budget, so the second run
+    // reads nothing and makes no call.
+    assert_eq!(
+        b.col("SELECT count(*) FROM message WHERE waits_model = 1"),
+        Some(1)
+    );
     let r = b.run(&Limits::default()).unwrap();
-    assert_eq!((r.stop.as_deref(), r.calls), (Some("budget"), 0));
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("done"), 0));
+    assert_eq!(b.script.calls(), 1);
+}
+
+/// The end of the wait after a model error clears only the marks of that
+/// wait: a budget refusal of the same run keeps its mark.
+#[test]
+fn the_end_of_a_model_wait_keeps_the_marks_of_a_budget_refusal() {
+    let b = store("wait-end");
+    b.model(true, Some(WORST + 100));
+    let waited = b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    // The state after a model error whose wait has ended, with mail that
+    // waited for it.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE model_setting SET retry_failures = 1, retry_at = 0",
+                [],
+            )?;
+            tx.execute("UPDATE message SET waits_model = 2 WHERE id = ?1", [waited])?;
+            Ok(())
+        })
+        .unwrap();
+    let limits = Limits {
+        keep_idle: false,
+        wait_after_error: true,
+        ..Limits::default()
+    };
+    let r = b.run(&limits).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("budget"), 1));
+    assert_eq!(
+        b.col("SELECT count(*) FROM message WHERE waits_model = 1"),
+        Some(1),
+        "the budget refusal keeps its mark"
+    );
+    assert_eq!(
+        b.col("SELECT retry_failures FROM model_setting"),
+        Some(0),
+        "the call ended the wait"
+    );
+    assert!(b.run(&limits).unwrap().is_idle());
     assert_eq!(b.script.calls(), 1);
 }
 
@@ -654,4 +701,126 @@ fn the_sender_refresh_runs_before_the_model_is_made() {
     let r = batch::run(&b.store, &fail, &Limits::default(), NOW);
     assert!(matches!(r, Err(Error::Connect(_))));
     assert!(!b.understood(ana), "the refresh reset the mail of Ana");
+}
+
+#[test]
+fn an_idle_run_keeps_its_row_only_with_keep_idle() {
+    let b = store("idle");
+    b.model(false, None);
+    b.add("1", "a", 1, &["INBOX"]);
+    let rows = |b: &Box_| b.col("SELECT count(*) FROM understand_run");
+    let quiet = Limits {
+        keep_idle: false,
+        ..Limits::default()
+    };
+    let r = b.run(&quiet).unwrap();
+    assert_eq!(r.messages, 1);
+    assert_eq!(rows(&b), Some(1), "a run that read a message keeps its row");
+    let r = b.run(&quiet).unwrap();
+    assert!(r.is_idle());
+    assert_eq!(
+        rows(&b),
+        Some(1),
+        "an idle run with keep_idle false leaves no row"
+    );
+    assert!(b.run(&Limits::default()).unwrap().is_idle());
+    assert_eq!(rows(&b), Some(2), "the default keeps the row");
+}
+
+/// Property: the mark `waits_model` goes away on each change of an input
+/// of a refused call (labels, content, gone state, hostile marks, the model
+/// row), by any write path, and stays when only the budget changes (the
+/// runner spends and refunds it; an approval clears in its own write).
+#[test]
+fn the_waits_model_mark_clears_on_each_input_change() {
+    let b = store("waits");
+    b.model(true, Some(1000));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    // Each change runs for both causes of the mark (1 and 2).
+    let mark_as = std::cell::Cell::new(1i64);
+    let mark = |b: &Box_| {
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE message SET waits_model = ?2 WHERE id = ?1",
+                    [m, mark_as.get()],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let waits = |b: &Box_| b.col(&format!("SELECT waits_model FROM message WHERE id = {m}"));
+    let changes: &[(&str, &str, bool)] = &[
+        (
+            "budget down",
+            "UPDATE model_setting SET budget_micro_usd = budget_micro_usd - 1",
+            false,
+        ),
+        (
+            "budget up",
+            "UPDATE model_setting SET budget_micro_usd = budget_micro_usd + 10",
+            false,
+        ),
+        (
+            "budget set",
+            "UPDATE model_setting SET budget_micro_usd = NULL",
+            false,
+        ),
+        (
+            "new version",
+            "UPDATE model_setting SET version = version + 1",
+            true,
+        ),
+        (
+            "label removed",
+            "DELETE FROM message_label WHERE message_id = :m",
+            true,
+        ),
+        (
+            "label added",
+            "INSERT INTO message_label(message_id, label_id) SELECT :m, id FROM label LIMIT 1",
+            true,
+        ),
+        (
+            "content",
+            "UPDATE message SET content_sha256 = content_sha256 WHERE id = :m",
+            true,
+        ),
+        ("gone", "UPDATE message SET gone_at = 1 WHERE id = :m", true),
+        (
+            "back",
+            "UPDATE message SET gone_at = NULL WHERE id = :m",
+            true,
+        ),
+        (
+            "hostile",
+            "UPDATE message SET hostile = '[]' WHERE id = :m",
+            true,
+        ),
+        (
+            "unrelated",
+            "UPDATE message SET size = size WHERE id = :m",
+            false,
+        ),
+    ];
+    // Both causes, one pass of the table each.
+    let all = [1, 2]
+        .into_iter()
+        .flat_map(|v| changes.iter().map(move |c| (v, c)));
+    for (v, (name, sql, clears)) in all {
+        mark_as.set(v);
+        mark(&b);
+        let sql = sql.replace(":m", &m.to_string());
+        b.store
+            .write(|tx| {
+                tx.execute(&sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(waits(&b), Some(if *clears { 0 } else { v }), "{name} ({v})");
+    }
+    // A new model row (`iris model set` replaces the row) clears it too.
+    mark(&b);
+    b.model(false, None);
+    assert_eq!(waits(&b), Some(0), "model set");
 }
