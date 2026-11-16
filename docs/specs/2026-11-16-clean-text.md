@@ -279,12 +279,14 @@ its first 1 KiB holds `%PDF`.
 - Code maps: a stream whose data holds `begincmap` is a code map of its
   object number. The reader reads its `begincodespacerange` (at most 16),
   `beginbfchar` and `beginbfrange` entries, with a direct destination or an
-  array of destinations (at most 255 items). Each map costs 136 bytes (on a 64-bit system), each
+  array of destinations (at most 255 items). Each map costs 376 bytes (on a 64-bit system, with its code space), each
   entry 16 bytes and each UTF-16 unit 2 bytes of a budget of 1 MiB for
   each PDF. A map that does not fit in the rest of the budget is not
   kept, also not in part, and gives its cost back. A replaced map gives its
   cost back. A
-  destination has at most 64 units. The keyword `begincmap` counts only
+  destination has at most 64 units. Entries can overlap: of the 64
+  entries with the nearest start codes at or before a code, the nearest
+  entry that holds the code gives its text. The keyword `begincmap` counts only
   outside the strings and comments of the stream.
 - Text waits in one buffer of at most two times the text budget, with the
   font of each string. The fonts and the maps can come after the content.

@@ -923,11 +923,11 @@ fn decode(dec: &Dec, codes: &[u8], out: &mut String, limit: usize) -> bool {
 }
 
 /// A `ToUnicode` code map.
-#[derive(Default)]
 struct CMap {
     /// The code space ranges: the code length in bytes, the lowest and the
-    /// highest code.
-    spaces: Vec<(usize, u32, u32)>,
+    /// highest code. They are inline, so the fixed cost of a map holds them.
+    spaces: [(usize, u32, u32); 16],
+    space_count: usize,
     /// Sorted by code length, then by the lowest code.
     entries: Vec<Entry>,
     /// The UTF-16 destinations of all entries. A list destination is a
@@ -1006,7 +1006,12 @@ impl CMap {
             Hex(&'a [u8]),
             List(Vec<&'a [u8]>),
         }
-        let mut m = CMap::default();
+        let mut m = CMap {
+            spaces: [(0, 0, 0); 16],
+            space_count: 0,
+            entries: Vec::new(),
+            units: Vec::new(),
+        };
         // The operands of one entry: at most 3, because 3 operands always
         // end an entry or clear the list.
         let mut ops: Vec<Op> = Vec::new();
@@ -1039,8 +1044,9 @@ impl CMap {
             let entry = match (mode, ops.as_slice()) {
                 (b"begincodespacerange", [Op::Hex(a), Op::Hex(b)]) => {
                     if let (Some((n, lo)), Some((k, hi))) = (code(a), code(b)) {
-                        if n == k && lo <= hi && m.spaces.len() < 16 {
-                            m.spaces.push((n, lo, hi));
+                        if n == k && lo <= hi && m.space_count < m.spaces.len() {
+                            m.spaces[m.space_count] = (n, lo, hi);
+                            m.space_count += 1;
                         }
                     }
                     None
@@ -1095,7 +1101,8 @@ impl CMap {
 
     /// The length of the code at the start of `b`, at least 1.
     fn code_len(&self, b: &[u8], default: usize) -> usize {
-        if self.spaces.is_empty() {
+        let spaces = &self.spaces[..self.space_count];
+        if spaces.is_empty() {
             // Without a code space, the shortest code with an entry.
             return (1..=b.len().min(4))
                 .find(|&n| self.find(n, be(&b[..n])).is_some())
@@ -1103,24 +1110,29 @@ impl CMap {
         }
         for n in 1..=b.len().min(4) {
             let v = be(&b[..n]);
-            if self
-                .spaces
+            if spaces
                 .iter()
                 .any(|&(k, lo, hi)| k == n && lo <= v && v <= hi)
             {
                 return n;
             }
         }
-        self.spaces.iter().map(|s| s.0).min().unwrap_or(1)
+        spaces.iter().map(|s| s.0).min().unwrap_or(1)
     }
 
     /// The entry of a code.
+    /// Entries can overlap: of the 64 entries with the nearest start codes
+    /// at or before the code, the nearest one that holds the code wins.
     fn find(&self, len: usize, v: u32) -> Option<&Entry> {
         let i = self
             .entries
             .partition_point(|e| (e.len as usize, e.lo) <= (len, v));
-        let e = &self.entries[i.checked_sub(1)?];
-        (e.len as usize == len && v <= e.hi).then_some(e)
+        self.entries[..i]
+            .iter()
+            .rev()
+            .take(64)
+            .take_while(|e| e.len as usize == len)
+            .find(|e| v <= e.hi)
     }
 
     /// Add the text of one code to `out`. False if the map has no entry.
