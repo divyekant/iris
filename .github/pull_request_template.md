@@ -10,6 +10,12 @@ Card: <ID of the Iris tracker card, for example R0-09>
 <!-- The tests that you added or changed, and the checks that you ran. Local CI
 runs before you open the PR (scripts/local-ci/run.sh). -->
 
+## Known limits and deferred findings
+
+<!-- One issue for each known limit and each finding that this PR does not
+fix, with the label `limit` or `deferred` (AGENTS.md, "Known limits and
+deferred findings"). List the numbers, or write None. -->
+
 ## Release Notes
 
 - User-facing:
