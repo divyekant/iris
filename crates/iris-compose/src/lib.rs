@@ -170,32 +170,56 @@ pub fn reply_subject(parent: &str) -> String {
     }
 }
 
-/// The reply headers to the parent message: `In-Reply-To` is the parent
-/// ID; `References` is the parent `References` (or, if it has none, its
-/// `In-Reply-To`), then the parent ID. IDs may have angle brackets.
+/// The message IDs of a header value (`Message-ID`, `In-Reply-To` or
+/// `References`), with no angle brackets. Each `<...>` gives one ID; a
+/// value with no `<` gives one ID for each word. An ID that is empty, has
+/// white space or a character that is not printable ASCII is dropped, so
+/// each ID writes and reads back the same.
+fn header_ids(value: &str) -> Vec<String> {
+    let ok = |id: &&str| {
+        !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_graphic() && c != '<' && c != '>')
+    };
+    if value.contains('<') {
+        value
+            .split('<')
+            .skip(1)
+            .filter_map(|part| part.split_once('>').map(|(id, _)| id))
+            .filter(ok)
+            .map(str::to_string)
+            .collect()
+    } else {
+        value
+            .split_whitespace()
+            .filter(ok)
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// The reply headers to the parent message, from the header values of the
+/// parent as Gmail gives them: `In-Reply-To` is the parent ID;
+/// `References` is the IDs of the parent `References` (or, if it has none,
+/// of its `In-Reply-To`), then the parent ID. `None` if the parent
+/// `Message-ID` does not have exactly one ID.
 pub fn references(
     parent_id: &str,
-    parent_refs: &[String],
+    parent_refs: Option<&str>,
     parent_in_reply_to: Option<&str>,
-) -> Reply {
-    let bare = |s: &str| {
-        s.trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>')
-            .to_string()
-    };
-    let mut refs: Vec<String> = if parent_refs.is_empty() {
-        parent_in_reply_to.map(bare).into_iter().collect()
-    } else {
-        parent_refs.iter().map(|r| bare(r)).collect()
-    };
-    let id = bare(parent_id);
-    refs.retain(|r| !r.is_empty() && *r != id);
+) -> Option<Reply> {
+    let [id] = header_ids(parent_id).try_into().ok()?;
+    let mut refs = header_ids(parent_refs.unwrap_or(""));
+    if refs.is_empty() {
+        refs = header_ids(parent_in_reply_to.unwrap_or(""));
+    }
+    refs.retain(|r| *r != id);
     refs.push(id.clone());
-    Reply {
+    Some(Reply {
         in_reply_to: id,
         references: refs,
-    }
+    })
 }
 
 /// The content hash (section 1): SHA-256 (hex) of the canonical JSON of the
@@ -348,7 +372,11 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         subject: spaces(m.subject().unwrap_or("")),
         // Mail has CRLF line ends; the content has LF (Content::check).
         body: line_ends(&m.body_text(0)?),
-    };
+    }
+    // A content that the person changed at Gmail keeps the limits of a
+    // new draft (too many recipients, a large body), or gives no content.
+    .check()
+    .ok()?;
     // Each thread header of the message is in the content hash, or the
     // message gives no content: a header that the read drops (for example
     // References with no In-Reply-To) must not keep the approved hash.

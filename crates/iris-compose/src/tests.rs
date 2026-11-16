@@ -85,7 +85,8 @@ fn checked_content_reads_back_the_same() {
             continue;
         };
         accepted += 1;
-        let reply = (i % 2 == 0).then(|| references("<p.1@x.org>", &["r.0@x.org".into()], None));
+        let reply =
+            (i % 2 == 0).then(|| references("<p.1@x.org>", Some("<r.0@x.org>"), None).unwrap());
         let raw = compose(ME, "iris.1@example.com", &c, reply.as_ref(), 1_800_000_000);
         let back = read(&raw, ME)
             .unwrap_or_else(|| panic!("no read back of {c:?}:\n{}", String::from_utf8_lossy(&raw)));
@@ -153,15 +154,18 @@ fn check_folds_case_and_removes_duplicates() {
 fn a_reply_has_the_thread_headers() {
     let r = references(
         "<p@x.org>",
-        &["<a@x.org>".into(), "b@x.org".into()],
+        Some("<a@x.org>\r\n <b@x.org>"),
         Some("<b@x.org>"),
-    );
+    )
+    .unwrap();
     assert_eq!(r.in_reply_to, "p@x.org");
     assert_eq!(r.references, ["a@x.org", "b@x.org", "p@x.org"]);
-    let r = references("p@x.org", &[], Some("<q@x.org>"));
+    let r = references("p@x.org", None, Some("<q@x.org>")).unwrap();
     assert_eq!(r.references, ["q@x.org", "p@x.org"]);
-    let r = references("p@x.org", &[], None);
+    let r = references("p@x.org", Some(""), None).unwrap();
     assert_eq!(r.references, ["p@x.org"]);
+    assert_eq!(references("", None, None), None);
+    assert_eq!(references("<a@x> <b@x>", None, None), None);
 
     assert_eq!(reply_subject("Q4 numbers"), "Re: Q4 numbers");
     assert_eq!(reply_subject("RE: Q4"), "RE: Q4");
@@ -214,7 +218,7 @@ fn the_hash_changes_with_each_field() {
     let mut other = c.clone();
     other.body.push('.');
     assert_ne!(hash(&other, None), base);
-    let r = references("p@x.org", &[], None);
+    let r = references("p@x.org", None, None).unwrap();
     assert_ne!(hash(&c, Some(&r)), base);
     assert_eq!(base.len(), 64);
 }
@@ -283,7 +287,7 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
     }
     .check()
     .unwrap();
-    let reply = references("<p.1@x.org>", &["r.0@x.org".into()], None);
+    let reply = references("<p.1@x.org>", Some("<r.0@x.org>"), None).unwrap();
     let bases = [
         compose(ME, "iris.7@example.com", &c, Some(&reply), 1_800_000_000),
         compose(ME, "iris.8@example.com", &c, None, 1_800_000_000),
@@ -375,3 +379,73 @@ fn the_hash_is_the_documented_canonical_json() {
 
 const HASH_NEW: &str = "5cf35dc73cda62d2c9366a385788df198e432bbcc223a3fb7e20e27683ccfbf6";
 const HASH_REPLY: &str = "5aa550b8080a1ff0861877a81017d207d2448c6b3326cd2e54236a94f4104d8c";
+
+/// Each parent header value gives reply headers that write and read back
+/// the same, so the hash of a reply at Gmail is the approved hash.
+#[test]
+fn reply_headers_of_any_parent_read_back_the_same() {
+    const POOL: &[&str] = &[
+        "<a@x.org>",
+        "b@x.org",
+        " ",
+        "\r\n ",
+        "\t",
+        "<",
+        ">",
+        "<>",
+        "<a b@x>",
+        "(c)",
+        "<é@x>",
+        ",",
+        "<p@x.org>",
+        "<z.1@y>",
+        "\"q\"",
+        "<a@x.org>",
+    ];
+    let mut g = Gen(0x6a09_e667_f3bc_c908);
+    let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
+    let mut some = 0;
+    for _ in 0..3000 {
+        let mut value = |n: usize| -> String {
+            (0..g.below(n + 1))
+                .map(|_| POOL[g.below(POOL.len())])
+                .collect()
+        };
+        let (id, refs, irt) = (value(3), value(6), value(3));
+        let Some(r) = references(&id, Some(&refs), Some(&irt)) else {
+            continue;
+        };
+        some += 1;
+        let raw = compose(ME, "iris.5@example.com", &c, Some(&r), 1_800_000_000);
+        let back =
+            read(&raw, ME).unwrap_or_else(|| panic!("{r:?}:\n{}", String::from_utf8_lossy(&raw)));
+        assert_eq!(
+            back.reply.as_ref(),
+            Some(&r),
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+    }
+    assert!(some > 300, "only {some}");
+}
+
+/// A draft that the person changed at Gmail past the limits of a new
+/// draft gives no content.
+#[test]
+fn a_changed_draft_keeps_the_limits() {
+    let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
+    let raw =
+        String::from_utf8(compose(ME, "iris.6@example.com", &c, None, 1_800_000_000)).unwrap();
+    let many: Vec<String> = (0..MAX_RECIPIENTS).map(|i| format!("a{i}@x.org")).collect();
+    let crowded = raw.replacen(
+        "To: <p@x.org>",
+        &format!("To: <p@x.org>, {}", many.join(", ")),
+        1,
+    );
+    assert_ne!(crowded, raw);
+    assert!(read(crowded.as_bytes(), ME).is_none());
+    assert!(read_sent(crowded.as_bytes(), ME).is_none());
+    let large = format!("{raw}{}\r\n", "x".repeat(MAX_BODY));
+    assert!(read(large.as_bytes(), ME).is_none());
+    assert!(read(raw.as_bytes(), ME).is_some());
+}
