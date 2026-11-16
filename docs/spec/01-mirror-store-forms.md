@@ -688,9 +688,12 @@ and changes nothing.
 
 An accept makes the domain of the sender known, and a reopen of an accept can
 make it unknown. So in the same transaction the engine decides again each
-sender whose domain is a near copy of that domain, and runs understanding
-again on the mail of each sender that becomes `hostile` or stops being
-`hostile`.
+sender whose domain is a near copy of that domain. For each sender that
+becomes `hostile` or stops being `hostile`, the same transaction deletes the
+items that understanding made from its mail and marks that mail for
+understanding again. The understanding worker runs the model later, out of
+the transaction, so the items of such a sender come back after the next
+understanding batch.
 
 The engine decides the kind of a sender again each time it understands a
 message with that address. After each batch of sync or understanding, a

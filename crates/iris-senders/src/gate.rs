@@ -16,8 +16,8 @@
 //!
 //! Each function runs in the transaction of the caller, and gives the
 //! `sender` rows whose kind became `hostile` or stopped being `hostile`
-//! (as [`crate::refresh`] does). The caller runs understanding again on
-//! the mail of these rows in the same transaction.
+//! (as [`crate::refresh`] does). In the same transaction, the caller
+//! marks the mail of these rows for understanding again.
 
 use rusqlite::{params, Connection, OptionalExtension};
 

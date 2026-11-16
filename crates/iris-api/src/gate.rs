@@ -208,8 +208,9 @@ pub fn gate_page(
 /// sender that is not at the gate now (its kind is not `stranger`, or a rule
 /// took its items out) is [`Error::Conflict`].
 ///
-/// The answer and the understanding again of the mail of each sender whose
-/// hostile state changed are one transaction (specification 1, section 6.7).
+/// The answer, and the mark for understanding again of the mail of each
+/// sender whose hostile state changed, are one transaction (specification 1,
+/// section 6.7). The understanding worker runs the model later.
 pub fn answer(store: &Store, id: &str, answer: &str, now_ms: i64) -> Result<Option<Value>> {
     if !matches!(answer, "accept" | "decline" | "reopen") {
         return Ok(None);

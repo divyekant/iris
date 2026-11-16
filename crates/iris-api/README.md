@@ -197,9 +197,10 @@ written. A `p-` ID that no sender has, or another answer, is a 404.
 
 An accept makes the domain of the sender known, and a reopen of an accept
 can make it unknown. So the engine decides the near copies of the domain
-again (specification 1, section 6.7), and runs understanding again on the
-mail of each sender that becomes `hostile` or stops being `hostile`, in the
-same transaction.
+again (specification 1, section 6.7). In the same transaction, it deletes
+the items from the mail of each sender that becomes `hostile` or stops being
+`hostile`, and marks that mail for understanding again. The understanding
+worker runs the model later.
 
 ## Errors
 
