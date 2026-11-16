@@ -306,6 +306,9 @@ struct TokenAnswer {
 
 impl TokenAnswer {
     fn access(&self) -> Result<AccessToken> {
+        if self.access_token.expose().is_empty() {
+            return Err(Error::BadAnswer);
+        }
         let expires_at = Instant::now()
             .checked_add(Duration::from_secs(self.expires_in))
             .ok_or(Error::BadAnswer)?;
@@ -405,7 +408,9 @@ impl SignIn {
             if now >= deadline {
                 return Err(Error::Timeout);
             }
-            loop {
+            // At most MAX_OPEN new connections each turn, so a flood cannot
+            // keep the loop from the deadline and the open connections.
+            for _ in 0..MAX_OPEN {
                 match self.listener.accept() {
                     Ok((stream, _)) => {
                         if stream.set_nonblocking(true).is_ok() {
@@ -532,7 +537,11 @@ impl SignIn {
         check_scope(&answer, false)?;
         Ok(Tokens {
             access: answer.access()?,
-            refresh: answer.refresh_token.clone().ok_or(Error::NoRefreshToken)?,
+            refresh: answer
+                .refresh_token
+                .clone()
+                .filter(|r| !r.expose().is_empty())
+                .ok_or(Error::NoRefreshToken)?,
             refresh_expires_in: answer.refresh_token_expires_in,
         })
     }
