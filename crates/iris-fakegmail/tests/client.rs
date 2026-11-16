@@ -197,6 +197,10 @@ fn formats_labels_history_send_and_errors() {
 fn search_is_refused() {
     let gmail = FakeGmail::start(Mailbox::new(4, 10)).unwrap();
     assert_eq!(call(&gmail, "GET", "messages?q=from:a", None, true).0, 400);
+    assert_eq!(
+        call(&gmail, "GET", "messages?q=rfc822msgid:", None, true).0,
+        400
+    );
 }
 
 #[test]

@@ -56,6 +56,10 @@ mod cost {
     pub const MESSAGES_BATCH_MODIFY: u32 = 50;
     pub const MESSAGES_TRASH: u32 = 5;
     pub const LABELS_CREATE: u32 = 5;
+    pub const DRAFTS_CREATE: u32 = 10;
+    pub const DRAFTS_GET: u32 = 5;
+    pub const DRAFTS_LIST: u32 = 5;
+    pub const DRAFTS_SEND: u32 = 100;
 }
 
 /// The most message IDs in one `messages.batchModify` call (Gmail limit).
@@ -113,13 +117,20 @@ pub enum Error {
 
 impl Error {
     /// For a write call (`messages.send`, `batchModify`, `trash`,
-    /// `labels.create`): true if
+    /// `labels.create`, `drafts.create`, `drafts.send`): true if
     /// Gmail can have done the call (spec 2 section 7.2). A timeout, a lost
-    /// connection and HTTP 5xx give an unknown result.
+    /// connection and HTTP 5xx give an unknown result. A rate limit of a
+    /// call with one request also does: the engine never reads it as a
+    /// rejection (spec `docs/specs/2026-11-16-send.md`, section 5.2).
     pub fn write_result_unknown(&self) -> bool {
         match self {
             Error::Transport(_) => true,
-            Error::Api { status, .. } => *status >= 500,
+            Error::Api { status, reason, .. } => {
+                *status >= 500
+                    || *status == 429
+                    || (*status == 403
+                        && (reason == "rateLimitExceeded" || reason == "userRateLimitExceeded"))
+            }
             _ => false,
         }
     }
@@ -366,6 +377,29 @@ pub struct Sent {
     pub label_ids: Vec<String>,
 }
 
+/// The answer of `drafts.create`, `drafts.update` and `drafts.list`: the
+/// draft ID and its message.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct Draft {
+    pub id: String,
+    pub message: MessageRef,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DraftPage {
+    #[serde(default)]
+    drafts: Vec<Draft>,
+}
+
+/// A draft with `format=raw`: the decoded RFC 5322 text of its message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftRaw {
+    pub id: String,
+    pub message: MessageRef,
+    pub raw: Vec<u8>,
+}
+
 /// A token bucket of quota units, filled at the limit for each minute.
 struct Quota {
     units: f64,
@@ -401,6 +435,9 @@ impl Drop for GateGuard<'_> {
 enum Method<'a> {
     Get,
     Post(&'a [u8]),
+    /// A POST that the client sends one time, also after a rate limit
+    /// (spec `docs/specs/2026-11-16-send.md`, section 5.2).
+    PostOnce(&'a [u8]),
 }
 
 /// A Gmail API client. Share one client between threads.
@@ -476,6 +513,119 @@ impl Gmail {
             q.push(("pageToken", t.into()));
         }
         self.json(token, "messages", &q, cost::MESSAGES_LIST)
+    }
+
+    /// One page of `users.messages.list` for the Gmail search `q`, with
+    /// the spam and the trash. Recovery finds a sent message with
+    /// `rfc822msgid:<id>` (spec R3-01, section 6).
+    pub fn search(&self, token: &str, q: &str, page_token: Option<&str>) -> Result<MessagePage> {
+        let mut query = vec![
+            ("maxResults", PAGE_SIZE.to_string()),
+            ("q", q.to_string()),
+            ("includeSpamTrash", "true".into()),
+        ];
+        if let Some(t) = page_token {
+            query.push(("pageToken", t.into()));
+        }
+        self.json(token, "messages", &query, cost::MESSAGES_LIST)
+    }
+
+    /// The first page of `users.drafts.list` for the Gmail search `q`.
+    pub fn drafts(&self, token: &str, q: &str) -> Result<Vec<Draft>> {
+        let query = [("maxResults", PAGE_SIZE.to_string()), ("q", q.to_string())];
+        let page: DraftPage = self.json(token, "drafts", &query, cost::DRAFTS_LIST)?;
+        Ok(page.drafts)
+    }
+
+    /// `users.drafts.get` with `format=raw`. HTTP 404 gives
+    /// [`Error::NotFound`]: the draft is gone, deleted or sent.
+    pub fn draft_raw(&self, token: &str, id: &str) -> Result<DraftRaw> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Msg {
+            id: String,
+            thread_id: String,
+            raw: String,
+        }
+        #[derive(Deserialize)]
+        struct Answer {
+            id: String,
+            message: Msg,
+        }
+        let a: Answer = self.json(
+            token,
+            &format!("drafts/{}", segment(id)),
+            &[("format", "raw".into())],
+            cost::DRAFTS_GET,
+        )?;
+        // The base64url text has no quote, so it fits a JSON string as is.
+        if a.message.raw.contains(['"', '\\']) {
+            return Err(Error::Decode("raw is not base64".into()));
+        }
+        let mut raw = Vec::new();
+        raw::split(
+            format!(r#"{{"raw":"{}"}}"#, a.message.raw).as_bytes(),
+            &mut raw,
+        )
+        .map_err(|e| Error::Decode(format!("raw of a draft: {e:?}")))?;
+        Ok(DraftRaw {
+            id: a.id,
+            message: MessageRef {
+                id: a.message.id,
+                thread_id: a.message.thread_id,
+            },
+            raw,
+        })
+    }
+
+    /// `users.drafts.create` with a raw RFC 5322 message, in the thread
+    /// `thread_id` for a reply. One request, as [`Gmail::send_draft`].
+    pub fn create_draft(&self, token: &str, raw: &[u8], thread_id: Option<&str>) -> Result<Draft> {
+        let body = draft_body(None, raw, thread_id);
+        self.write(
+            token,
+            Method::PostOnce(body.as_bytes()),
+            "drafts",
+            cost::DRAFTS_CREATE,
+            "draft create",
+        )
+    }
+
+    /// `users.drafts.send` of the draft `id`, with `raw` as the message of
+    /// the draft, so that Gmail sends these bytes. One request: the client
+    /// never tries again, also after a rate limit, and the caller never
+    /// makes the call again after an unknown result (spec 2, section 7.5).
+    pub fn send_draft(
+        &self,
+        token: &str,
+        id: &str,
+        raw: &[u8],
+        thread_id: Option<&str>,
+    ) -> Result<Sent> {
+        let body = draft_body(Some(id), raw, thread_id);
+        self.write(
+            token,
+            Method::PostOnce(body.as_bytes()),
+            "drafts/send",
+            cost::DRAFTS_SEND,
+            "draft send",
+        )
+    }
+
+    /// A write call with a JSON answer. Gmail accepted the call when the
+    /// status is 2xx, so a bad answer leaves the result unknown.
+    fn write<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        method: Method<'_>,
+        path: &str,
+        units: u32,
+        what: &str,
+    ) -> Result<T> {
+        let response = self.call(token, method, path, &[], units)?;
+        read_all(response)
+            .and_then(|b| parse(&b))
+            .map_err(|e| Error::Transport(format!("answer of an accepted {what}: {e}")))
     }
 
     /// `users.messages.get` with `format=minimal`.
@@ -727,7 +877,7 @@ impl Gmail {
                     }
                     r.call()
                 }
-                Method::Post(body) => {
+                Method::Post(body) | Method::PostOnce(body) => {
                     let mut r = self
                         .agent
                         .post(&url)
@@ -748,7 +898,8 @@ impl Gmail {
             let rate_limit = status == 429
                 || (status == 403
                     && (reason == "rateLimitExceeded" || reason == "userRateLimitExceeded"));
-            if rate_limit || (is_read && status >= 500) {
+            let once = matches!(method, Method::PostOnce(_));
+            if (rate_limit && !once) || (is_read && status >= 500) {
                 std::thread::sleep(jitter(wait));
                 wait = (wait * 2).min(self.config.backoff_max);
                 continue;
@@ -802,6 +953,19 @@ fn jitter(wait: Duration) -> Duration {
         .build_hasher()
         .finish();
     wait + wait.mul_f64((r % 1000) as f64 / 2000.0)
+}
+
+/// The JSON body of `drafts.create` and `drafts.send`.
+fn draft_body(id: Option<&str>, raw: &[u8], thread_id: Option<&str>) -> String {
+    let mut message = serde_json::json!({ "raw": encode_url(raw) });
+    if let Some(t) = thread_id {
+        message["threadId"] = t.into();
+    }
+    let mut body = serde_json::json!({ "message": message });
+    if let Some(id) = id {
+        body["id"] = id.into();
+    }
+    body.to_string()
 }
 
 /// Escape an ID for one segment of the URL path.

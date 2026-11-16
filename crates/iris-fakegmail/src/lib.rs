@@ -5,8 +5,10 @@
 //! credentials. It accepts any `Authorization: Bearer` token.
 //!
 //! Supported: `users.getProfile`, `users.labels.list`, `users.labels.get`,
-//! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, no `q`),
-//! `users.messages.get` (`raw`, `metadata`, `minimal`), `users.messages.send`,
+//! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, and `q`
+//! only as `rfc822msgid:<id>`), `users.messages.get` (`raw`, `metadata`,
+//! `minimal`), `users.messages.send`, `users.drafts.create`, `.update`,
+//! `.get` (`raw`), `.list` (`q` as above) and `.send`,
 //! `users.messages.batchModify`, `users.messages.trash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
 //! of the real API. The fake returns 400 for `format=full` and for an absent
@@ -131,6 +133,10 @@ struct Store {
     write_failures: VecDeque<(u16, bool)>,
     /// Each request: method, path and query.
     log: Vec<String>,
+    /// The drafts: (draft id, message index). A sent or deleted draft
+    /// leaves the list.
+    drafts: Vec<(String, usize)>,
+    next_draft: u64,
 }
 
 impl Store {
@@ -191,6 +197,8 @@ impl Store {
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
             log: Vec::new(),
+            drafts: Vec::new(),
+            next_draft: 1,
         }
     }
 
@@ -253,6 +261,45 @@ impl Store {
         });
         self.record(i, Kind::Added, Vec::new());
         i
+    }
+
+    /// The message index of the draft `id`.
+    fn draft(&self, id: &str) -> Option<usize> {
+        self.drafts.iter().find(|(d, _)| d == id).map(|&(_, i)| i)
+    }
+
+    /// Replace the message of the draft `id` with `raw`, as Gmail does: a
+    /// new message, and the old one is deleted. Returns false if there is
+    /// no such draft.
+    fn replace_draft(&mut self, id: &str, raw: Vec<u8>) -> bool {
+        let Some(pos) = self.drafts.iter().position(|(d, _)| d == id) else {
+            return false;
+        };
+        let old = self.drafts[pos].1;
+        let thread = self.msgs[old].thread.clone();
+        self.msgs[old].deleted = true;
+        self.record(old, Kind::Deleted, Vec::new());
+        let i = self.add(raw, Some(thread), BTreeSet::from(["DRAFT".to_string()]));
+        self.drafts[pos].1 = i;
+        true
+    }
+
+    fn draft_json(&self, id: &str, i: usize) -> Value {
+        json!({ "id": id, "message": { "id": gmail_id(i as u64), "threadId": self.msgs[i].thread, "labelIds": ["DRAFT"] } })
+    }
+
+    /// True if the `Message-ID` of message `i` is `want` (with or without
+    /// the angle brackets), as the Gmail search `rfc822msgid:` finds it.
+    fn has_message_id(&self, i: usize, want: &str) -> bool {
+        let bare = |v: &str| {
+            v.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_ascii_lowercase()
+        };
+        headers_of(&self.raw(i))
+            .iter()
+            .any(|(n, v)| n.eq_ignore_ascii_case("message-id") && bare(v) == bare(want))
     }
 
     fn label_json(&self, l: &Label) -> Value {
@@ -448,6 +495,31 @@ impl FakeGmail {
             .extend(statuses.iter().map(|&c| (c, applied)));
     }
 
+    /// Change the message of a draft, as the person does in Gmail. Returns
+    /// false if there is no such draft. Makes no request log line.
+    pub fn edit_draft(&self, id: &str, raw: &[u8]) -> bool {
+        self.store.lock().unwrap().replace_draft(id, raw.to_vec())
+    }
+
+    /// Delete a draft, as the person does in Gmail. Returns false if there
+    /// is no such draft.
+    pub fn delete_draft(&self, id: &str) -> bool {
+        let mut s = self.store.lock().unwrap();
+        let Some(pos) = s.drafts.iter().position(|(d, _)| d == id) else {
+            return false;
+        };
+        let (_, i) = s.drafts.remove(pos);
+        s.msgs[i].deleted = true;
+        s.record(i, Kind::Deleted, Vec::new());
+        true
+    }
+
+    /// The IDs of the drafts now.
+    pub fn draft_ids(&self) -> Vec<String> {
+        let s = self.store.lock().unwrap();
+        s.drafts.iter().map(|(d, _)| d.clone()).collect()
+    }
+
     /// Each request so far, as `GET /gmail/v1/users/me/messages?maxResults=5`.
     pub fn requests(&self) -> Vec<String> {
         self.store.lock().unwrap().log.clone()
@@ -473,6 +545,12 @@ fn router(store: Shared) -> Router {
         .route("/gmail/v1/users/{user}/messages/{id}/trash", post(trash))
         .route("/gmail/v1/users/{user}/messages/{id}", get(message))
         .route("/gmail/v1/users/{user}/history", get(history))
+        .route(
+            "/gmail/v1/users/{user}/drafts",
+            get(list_drafts).post(create_draft),
+        )
+        .route("/gmail/v1/users/{user}/drafts/send", post(send_draft))
+        .route("/gmail/v1/users/{user}/drafts/{id}", get(get_draft))
         .layer(middleware::from_fn_with_state(store.clone(), log_and_fail))
         .with_state(store)
 }
@@ -488,7 +566,7 @@ async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Resp
         s.log.push(line);
         match s.failures.pop_front() {
             Some(c) => Some((c, false)),
-            None if req.method() == axum::http::Method::POST => s.write_failures.pop_front(),
+            None if req.method() != axum::http::Method::GET => s.write_failures.pop_front(),
             None => None,
         }
     };
@@ -557,6 +635,8 @@ struct Params {
     include_spam_trash: bool,
     format: Option<String>,
     metadata_headers: Vec<String>,
+    /// The `Message-ID` of `q=rfc822msgid:<id>`.
+    rfc822msgid: Option<String>,
 }
 
 impl Params {
@@ -581,13 +661,19 @@ impl Params {
                 "includeSpamTrash" => p.include_spam_trash = value == "true",
                 "format" => p.format = Some(value),
                 "metadataHeaders" => p.metadata_headers.push(value.to_ascii_lowercase()),
-                // Refused, so a test does not get an unfiltered list by mistake.
-                "q" => {
-                    return Err(error(
-                        StatusCode::BAD_REQUEST,
-                        "The fake does not support q.",
-                    ))
-                }
+                // Other searches are refused, so a test does not get an
+                // unfiltered list by mistake.
+                "q" => match value.trim().strip_prefix("rfc822msgid:") {
+                    Some(id) if !id.trim().is_empty() && !id.contains(char::is_whitespace) => {
+                        p.rfc822msgid = Some(id.to_string())
+                    }
+                    _ => {
+                        return Err(error(
+                            StatusCode::BAD_REQUEST,
+                            "The fake supports only q=rfc822msgid:<id>.",
+                        ))
+                    }
+                },
                 _ => {}
             }
         }
@@ -734,7 +820,12 @@ async fn list(
         .rev()
         .filter(|&i| {
             let m = &s.msgs[i];
-            !m.deleted && !hidden(m) && p.label_ids.iter().all(|l| m.labels.contains(l))
+            !m.deleted
+                && !hidden(m)
+                && p.label_ids.iter().all(|l| m.labels.contains(l))
+                && p.rfc822msgid
+                    .as_ref()
+                    .is_none_or(|q| s.has_message_id(i, q))
         })
         .collect();
     let items = matches
@@ -1007,4 +1098,160 @@ async fn history(
     let mut body = json!({ "historyId": s.latest_history().to_string() });
     page(&mut body, "history", records, offset, size, matches.len());
     Json(body).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftMessage {
+    raw: String,
+    thread_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DraftBody {
+    message: DraftMessage,
+}
+
+fn draft_raw(body: &DraftBody) -> Result<Vec<u8>, Response> {
+    base64::decode(&body.message.raw)
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Invalid value for ByteString: raw"))
+}
+
+async fn create_draft(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let raw = match draft_raw(&body) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut s = s.lock().unwrap();
+    let i = s.add(
+        raw,
+        body.message.thread_id,
+        BTreeSet::from(["DRAFT".to_string()]),
+    );
+    let id = format!("r{:015}", s.next_draft);
+    s.next_draft += 1;
+    s.drafts.push((id.clone(), i));
+    Json(s.draft_json(&id, i)).into_response()
+}
+
+async fn get_draft(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let p = match Params::parse(query) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if p.format.as_deref() != Some("raw") {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "The fake supports only format=raw for a draft.",
+        );
+    }
+    let s = s.lock().unwrap();
+    let Some(i) = s.draft(&id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    let mut body = s.draft_json(&id, i);
+    body["message"]["raw"] = Value::String(base64::encode_url(&s.raw(i)));
+    Json(body).into_response()
+}
+
+async fn list_drafts(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    RawQuery(query): RawQuery,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let p = match Params::parse(query) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let s = s.lock().unwrap();
+    let items: Vec<Value> = s
+        .drafts
+        .iter()
+        .filter(|&&(_, i)| {
+            p.rfc822msgid
+                .as_ref()
+                .is_none_or(|q| s.has_message_id(i, q))
+        })
+        .map(|(d, i)| {
+            let mut v = s.draft_json(d, *i);
+            v["message"]
+                .as_object_mut()
+                .expect("object")
+                .remove("labelIds");
+            v
+        })
+        .collect();
+    let mut body = json!({ "resultSizeEstimate": items.len() });
+    if !items.is_empty() {
+        body["drafts"] = Value::Array(items);
+    }
+    Json(body).into_response()
+}
+
+#[derive(Deserialize)]
+struct SendDraftBody {
+    id: String,
+    message: Option<DraftMessage>,
+}
+
+/// Like Gmail: the draft leaves the drafts, and its text goes out as a new
+/// message with the label `SENT` in the thread of the draft. A `message`
+/// in the request replaces the text of the draft first.
+async fn send_draft(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<SendDraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let given = match &body.message {
+        Some(m) => match base64::decode(&m.raw).filter(|r| !r.is_empty()) {
+            Some(r) => Some(r),
+            None => return error(StatusCode::BAD_REQUEST, "Invalid value for ByteString: raw"),
+        },
+        None => None,
+    };
+    let mut s = s.lock().unwrap();
+    let Some(pos) = s.drafts.iter().position(|(d, _)| *d == body.id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    if let Some(raw) = given {
+        s.replace_draft(&body.id, raw);
+    }
+    let (_, old) = s.drafts.remove(pos);
+    let (raw, thread) = (s.raw(old), s.msgs[old].thread.clone());
+    s.msgs[old].deleted = true;
+    s.record(old, Kind::Deleted, Vec::new());
+    let i = s.add(raw, Some(thread), BTreeSet::from(["SENT".to_string()]));
+    Json(json!({ "id": gmail_id(i as u64), "threadId": s.msgs[i].thread, "labelIds": ["SENT"] }))
+        .into_response()
 }
