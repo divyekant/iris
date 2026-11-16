@@ -700,3 +700,37 @@ test("the signals of an open brief leave at their expiry, and the count follows"
   assert.equal(last.count, 1);
   assert.equal(last.next, undefined);
 });
+
+test("a signal page shows its live code first, then the quote of its mail", async () => {
+  // Spec 1 section 6.6: the code is the reason to open the page, so it comes before the quote.
+  const t = text(await render("/src/views/Item.svelte", { item: item("s-901"), now: NOW }));
+  const code = t.indexOf("482913");
+  const quote = t.indexOf("From the mail that made this item");
+  assert.ok(code >= 0 && (quote < 0 || code < quote));
+});
+
+test("the brief loads each page of Signals when the API cuts the section, so a live code is not lost", async () => {
+  const { loadBrief } = await load("/src/api.ts");
+  const saved = globalThis.fetch;
+  const code = item("s-901");
+  const others = Array.from({ length: 2 }, (_, n) => ({ ...code, id: `s-${n}`, code: undefined }));
+  const asked = [];
+  try {
+    globalThis.fetch = async (url) => {
+      asked.push(url);
+      if (url === "/api/brief") return new Response(JSON.stringify({ ...fx.brief, signals: { count: 3, items: [others[0]] } }));
+      if (url === "/api/brief/signals?limit=200") return new Response(JSON.stringify({ count: 3, items: [others[0], others[1]], next: "c1" }));
+      if (url === "/api/brief/signals?limit=200&after=c1") return new Response(JSON.stringify({ count: 3, items: [code], next: null }));
+      return new Response("{}", { status: 404 });
+    };
+    const brief = await loadBrief();
+    assert.deepEqual(brief.signals.items.map((i) => i.id), ["s-0", "s-1", "s-901"]);
+    // A complete section needs no more calls.
+    asked.length = 0;
+    globalThis.fetch = async (url) => (asked.push(url), new Response(JSON.stringify(fx.brief)));
+    await loadBrief();
+    assert.deepEqual(asked, ["/api/brief"]);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
