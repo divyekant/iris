@@ -5,6 +5,11 @@ use std::net::TcpStream;
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod common;
+
+/// The messages of the synthetic mailbox for the sync budget test.
+const SYNC_MESSAGES: usize = 2_000;
+
 /// The highest resident memory (RSS) that `iris serve` can use, in KiB.
 /// The base decision of Iris is the lightest memory footprint: 50 MB.
 const MAX_RSS_KIB: u64 = 50 * 1024;
@@ -109,13 +114,13 @@ impl Drop for KillOnDrop {
     }
 }
 
-// shortcut: measures an empty program with no store; add a load of 100,000 messages when the store exists.
 #[test]
 fn serve_stays_inside_the_memory_and_start_budget() {
     let begin = Instant::now();
     let mut child = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_iris"))
-            .args(["serve", "--addr", "127.0.0.1:0"])
+            .args(["serve", "--addr", "127.0.0.1:0", "--data"])
+            .arg(common::data_dir("budget-empty"))
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
@@ -188,4 +193,48 @@ fn wait_for_http_fails_when_the_server_sends_bytes_and_never_closes() {
     let begin = Instant::now();
     assert!(wait_for_http(&addr, begin, Duration::from_millis(200)).is_err());
     assert!(begin.elapsed() < Duration::from_secs(5));
+}
+
+// shortcut: 2,000 messages in a debug build; the 100,000-message scale tests of iris-sync and iris-store cover the large load.
+#[test]
+fn serve_stays_inside_the_memory_budget_after_a_first_sync() {
+    let fake =
+        iris_fakegmail::FakeGmail::start(iris_synth::Mailbox::new(11, SYNC_MESSAGES)).unwrap();
+    let tokens = common::token_server();
+    let dir = common::data_dir("budget-sync");
+    let store = iris_store::Store::open(&dir).unwrap();
+    common::add_account(&store, &common::gmail(fake.base_url()));
+    let mut child = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .args(["serve", "--addr", "127.0.0.1:0", "--data"])
+            .arg(&dir)
+            .env("IRIS_TEST_GMAIL_URL", fake.base_url())
+            .env("IRIS_TEST_TOKEN_URI", &tokens.uri)
+            // The fake has no quota. The real quota allows 100 raw fetches each minute.
+            .env("IRIS_GMAIL_QUOTA", "100000000")
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let begin = Instant::now();
+    let ready = "SELECT count(*) FROM account WHERE mirror_ready_at IS NOT NULL";
+    while common::count(&store, ready) == 0 {
+        assert!(
+            begin.elapsed() < Duration::from_secs(120),
+            "no first sync in 120 s"
+        );
+        assert!(child.0.try_wait().unwrap().is_none(), "iris serve ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let rss = rss_kib(child.0.id());
+    let fetched = common::count(
+        &store,
+        "SELECT count(*) FROM message WHERE fetched_at IS NOT NULL",
+    );
+    eprintln!(
+        "iris serve: first sync of {fetched} messages in {:?}, RSS {rss} KiB",
+        begin.elapsed()
+    );
+    assert_eq!(fetched, SYNC_MESSAGES as i64);
+    check(rss, Duration::ZERO, MAX_RSS_KIB, MAX_START).unwrap();
 }

@@ -67,6 +67,70 @@ the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 
 `iris serve` listens on `127.0.0.1:4800`. Only this machine can connect to it.
 
+## Connect a Gmail account
+
+Release 1 reads mail only. You need the JSON file of your own Google OAuth
+client of the type "Desktop app". The decision record
+`docs/decisions/2026-11-google-sign-in.md` tells how to make one.
+
+1. Sign in:
+
+   ```bash
+   target/release/iris account add client.json
+   ```
+
+2. Open the address that the command prints, and sign in to Google.
+3. If the browser is on another machine than Iris, add `--paste`. Then copy
+   the address of the browser after the sign-in, and paste it into the
+   command.
+4. Start the engine:
+
+   ```bash
+   target/release/iris serve
+   ```
+
+The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
+the stored sign-in, run `iris account add` again.
+
+Iris keeps all state in the data folder: `~/Library/Application Support/iris`
+on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
+`IRIS_DATA` changes the folder. The refresh token and the client file are
+encrypted with the `key` file of the data folder.
+
+CAUTION: The backup folder holds the key and your mail. Keep it private.
+
+`iris serve` prints the sign-in address of the local API, with a one-time
+code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
+program can exchange the code for a token with `POST /api/session`
+(`crates/iris-api/README.md`).
+
+## Read the mirror
+
+These commands read the store. Add `--json` to get the JSON of the local API: one JSON document for one
+object, and JSON Lines for a list.
+
+| Command | Gives |
+|---|---|
+| `iris status` | The accounts, the state of the sync and the message counts |
+| `iris search "<text>"` | The messages that match the search text, newest first |
+| `iris show <id>` | One message (`m-42`) or one item (`c-7`) |
+| `iris mirror sync` | One sync of each account now |
+| `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
+
+Release 1 limit: the sync stores the raw messages only. Words and the
+`from:` and `to:` filters find a message after the understanding step reads
+it (tracker items R1-10 and R1-28). Before that, use `label:`, `after:` and
+`before:`.
+
+The text of a message is data. `iris show` removes the control characters, so
+a message cannot send commands to your terminal.
+
+To copy the data folder while the engine runs, run:
+
+```bash
+target/release/iris backup <empty-folder>
+```
+
 ## Layout
 
 | Path | Content |

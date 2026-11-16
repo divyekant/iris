@@ -21,6 +21,7 @@
     "engine": {
       "paths": [
         "crates/**",
+        "scripts/install.sh",
         "docs/spec/schema/**",
         "Cargo.toml",
         "Cargo.lock",
