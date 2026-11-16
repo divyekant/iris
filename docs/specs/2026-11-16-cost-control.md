@@ -67,6 +67,29 @@ The runner reads the pending rule again for each message, just before the
 call, not only when it selects the batch. So an older message that failed
 in the same batch holds the later messages of its thread.
 
+### Resets
+
+A reset makes a message pending again: in one write, `understood_at`,
+`tries` and `retry_at` go back to NULL, 0 and NULL. The retry state belongs
+to the old state of the message, so a reset clears it too. Without that, a
+message with 3 failed tries stays out of the pending set after a change.
+
+These writes reset the message, in the same transaction as the change:
+
+| Change | Writer |
+|---|---|
+| New content (another `content_sha256`) | `iris-store` `put_messages` |
+| A gone message comes back | `iris-sync` |
+| The label `SENT`, `DRAFT` or `SPAM` comes or goes | `iris-store` (label writes of sync) |
+| The sender of the message becomes or stops being hostile | `apply_kind_changes` (below) |
+
+The run of `store::understand` itself sets `understood_at` to NULL in write
+1. That is not a reset: the retry state stays.
+
+The build adds `SPAM` to the label check of `iris-store`, which now checks
+`SENT` and `DRAFT` only, and the clear of `tries` and `retry_at` to each
+writer in the table.
+
 ### Order
 
 1. Threads whose newest message (by `internal_date`) is not older than 90
@@ -81,6 +104,10 @@ A message with no `internal_date` sorts as the oldest.
 `iris_understand::batch::run(store, model, &Limits, now) -> Report` does
 these steps:
 
+0. Once at the start of each run, also with no pending message: in one
+   write, call `iris_senders::refresh` and apply its kind changes (below).
+   This catches the sender changes that a sync made, for example a gone
+   sent message that was the only evidence of a person.
 1. Read the next batch: at most `Limits::batch` (default 50) pending message
    IDs, in the order above. Only the IDs stay in memory.
 2. For each message that is still pending, call `store::understand`. Then
@@ -115,8 +142,7 @@ function, `apply_kind_changes(tx, changes, now)`, runs right after each
 
 - For a sender that became hostile or stopped being hostile: each message
   from that address that is not gone, and each later message of the same
-  threads, loses its items that are not pinned and gets `understood_at`
-  NULL. These messages are pending again, and their hostile check runs
+  threads, loses its items that are not pinned and gets a reset. These messages are pending again, and their hostile check runs
   again. A run that stops after this write leaves no stale item: the
   messages show as not understood.
 - For each other kind change (for example stranger to person): the
@@ -144,11 +170,21 @@ CREATE TABLE understand_run (
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cost_micro_usd INTEGER,
+  unknown_calls INTEGER NOT NULL DEFAULT 0,
+  unknown_cost_micro_usd INTEGER,
   stop TEXT
 );
 ```
 
 - `cost_micro_usd` is NULL when the model has no price (a local model).
+- `unknown_calls` counts the calls with an unknown result (a time-out, a lost
+  response, HTTP 5xx). The provider can charge for such a call. Each one
+  adds its worst case to `unknown_cost_micro_usd`: the data budget as input
+  tokens (one token for each byte, `MAX_DATA` plus `PROMPT_TOKENS`) and
+  `max_tokens` as output tokens, at the price of the model.
+- The cost check of the run uses `cost_micro_usd + unknown_cost_micro_usd`.
+  The command shows both numbers: "spent" and "up to ... more for calls with
+  no answer".
 - `stop` is the stop condition: `done`, `cost`, `messages`, `model` or
   `error`. A run that the process did not end (a crash) keeps `ended_at`
   NULL and `stop` NULL.
@@ -216,7 +252,11 @@ No parser or protocol code is new. The model client is `iris-model`.
 | A second run | All messages understood | Zero calls, zero cost. | Counting fake model, two runs. |
 | A sync during a run | A message changes between two writes | `store::understand` gives `changed`. The message stays pending for the next batch. | Existing tests of the store step. |
 | A refused key (401, 403) | No call can work | The run stops with `stop = model`. No try counts. | Fake model error. |
-| A time-out, 429, 5xx | Result not known | The run stops with `stop = model`. The message stays pending. | Fake model error. |
+| A time-out, a lost response, 5xx | Result not known; the provider can charge | The run stops with `stop = model`. The message stays pending. `unknown_calls` and `unknown_cost_micro_usd` grow by one worst case. | Fake model error: the run row has the worst case. |
+| HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
+| A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
+| A `SPAM` label comes or goes on an understood message | The hostile mark is stale | The label write resets the message, so the next run checks it again. | Store test. |
+| New content or a label change on a message with 3 tries | The message stays out of the pending set | The reset clears `tries` and `retry_at`. | Store test. |
 | The cost limit | The run reaches it | The run stops before the next message, with `stop = cost`. | Fake model with a price. |
 | A sent message makes a domain known, and an understood look-alike sender becomes hostile | Old items of the look-alike mail stay | In write 1 of the sent message, its items go and its messages are pending again. A run that stops at the cost limit right after it leaves no stale item. | Store test: look-alike first, then the sent message, run stops with `--max-messages 1`. |
 | Another kind change (stranger to person) | The conversations of other threads use the old kind | The same transaction computes them again. No model call. | Store test. |
@@ -232,7 +272,9 @@ No parser or protocol code is new. The model client is `iris-model`.
   the old and the new kind.
 - `crates/iris-understand/src/store.rs`: write 1 and the gone branch call
   `apply_kind_changes`.
-- `crates/iris-store`: `schema_3.sql` (`understand_run`, `model_setting`).
+- `crates/iris-store`: `schema_3.sql` (`understand_run`, `model_setting`);
+  resets in `put_messages` and the label writes.
+- `crates/iris-sync`: the reset when a gone message comes back.
 - `crates/iris`: the commands `iris model` and `iris understand`.
 - Spec 1: section 7.1 links this spec; section 5.5 lists the new tables.
 - Memory: one batch of IDs (50 integers) and one message at a time.
