@@ -1906,4 +1906,28 @@ mod tests {
         let time = begin.elapsed();
         assert!(time < std::time::Duration::from_secs(10), "time {time:?}");
     }
+
+    #[test]
+    fn a_replaced_object_near_the_budget_stays() {
+        let mut d = Doc::new(100);
+        let body = vec![b' '; OBJ_LIMIT];
+        let mut n = 0;
+        while d.obj_bytes + body.len() + 64 <= OBJ_BUDGET {
+            d.keep(n, &body);
+            n += 1;
+        }
+        d.keep(0, &body);
+        assert!(d.objs.contains_key(&0));
+    }
+
+    #[test]
+    fn a_character_past_the_limit_shows_a_cut() {
+        // Byte 0x80 is the euro sign: 3 bytes of UTF-8 after 4,094 letters.
+        let mut t = b"BT (".to_vec();
+        t.extend(std::iter::repeat_n(b'a', 4094));
+        t.extend_from_slice(b"\\200) Tj ET");
+        let (got, cut) = text_cut(&sample(&t, false), 4096);
+        assert_eq!(got.map(|t| t.len()), Some(4094));
+        assert!(cut);
+    }
 }
