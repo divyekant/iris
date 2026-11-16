@@ -542,8 +542,11 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
     }))
 }
 
-/// True if `text` holds `quote`, with any run of white space as one space
-/// and no difference of case.
+/// True if `text` holds `quote` with no word cut: with any run of white
+/// space as one space, and no difference of case. A word is letters and
+/// digits, also joined by one mark of [`JOIN`] (`1,234`, `07:40`, `e-mail`).
+/// Neither end of a match may fall inside a word of the text, whatever the
+/// quote starts or ends with.
 fn has(text: &str, quote: &str) -> bool {
     let norm = |s: &str| {
         s.split_whitespace()
@@ -551,8 +554,40 @@ fn has(text: &str, quote: &str) -> bool {
             .join(" ")
             .to_lowercase()
     };
-    norm(text).contains(&norm(quote))
+    let (text, quote) = (norm(text), norm(quote));
+    if quote.is_empty() {
+        return false;
+    }
+    let words = words(&text);
+    let inside = |at: usize| words.iter().any(|&(s, e)| s < at && at < e);
+    text.char_indices()
+        .any(|(i, _)| text[i..].starts_with(&quote) && !inside(i) && !inside(i + quote.len()))
 }
+
+/// The byte spans of the words of `s`: runs of letters and digits, with one
+/// mark of [`JOIN`] between two of them inside the word.
+fn words(s: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut it = s.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        let joins = JOIN.contains(&c)
+            && start.is_some()
+            && it.peek().is_some_and(|&(_, n)| n.is_alphanumeric());
+        if c.is_alphanumeric() || joins {
+            start.get_or_insert(i);
+        } else if let Some(st) = start.take() {
+            out.push((st, i));
+        }
+    }
+    if let Some(st) = start {
+        out.push((st, s.len()));
+    }
+    out
+}
+
+/// The marks that join letters and digits into one word.
+const JOIN: &[char] = &['.', ',', ':', '-', '/', '\'', '\u{2019}', '_', '@'];
 
 #[cfg(test)]
 mod tests {
@@ -679,6 +714,74 @@ mod tests {
             a.sources.iter().map(|s| s.message).collect::<Vec<_>>(),
             [101, 103]
         );
+    }
+
+    #[test]
+    fn a_quote_is_whole_words() {
+        let text = "Gate 12,  then\nFLIGHT TP1351 (Lisbon). Amount due: $1,234.50 at 07:40.";
+        for (q, want) in [
+            ("gate 12", true),
+            ("gate 1", false),
+            ("ate 12", false),
+            ("12, then flight", true),
+            ("TP135", false),
+            ("(lisbon).", true),
+            ("lisbon)", true),
+            ("amount due: $1,234", false),
+            ("$1,234.50", true),
+            ("$1,234.50 at 07", false),
+            ("at 07:40", true),
+            ("", false),
+            ("due: $1", false),
+            ("due: $1,", false),
+            ("due: $1,234.", false),
+            ("$1,234.50 at", true),
+            ("07:40.", true),
+            ("12, then", true),
+            ("  ", false),
+        ] {
+            assert_eq!(has(text, q), want, "{q:?}");
+        }
+    }
+
+    /// A span of whole words of a text is a quote, also with the
+    /// punctuation after it. A span that starts or ends at any point inside
+    /// a word is not. The oracle is the word list that makes the text, not
+    /// `words` or `has`. The words start with `w`, end with `z` and are unique
+    /// by their index, so a cut word is never a whole word of the text.
+    #[test]
+    fn property_a_cut_word_is_no_quote() {
+        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+        for _ in 0..5000 {
+            let n = 1 + rng.below(12);
+            let words: Vec<String> = (0..n)
+                .map(|i| {
+                    let join = JOIN[rng.below(JOIN.len())];
+                    format!("w{}{join}{i}z", rng.below(100))
+                })
+                .collect();
+            let gap = [" ", "\n  ", ", ", ". ", "; "][rng.below(5)];
+            let text = words.join(gap) + ".";
+            let a = rng.below(n);
+            let b = a + 1 + rng.below(n - a);
+            let span = words[a..b].join(gap);
+            assert!(has(&text, &span.to_uppercase()), "{text:?} {span:?}");
+            if b == n {
+                assert!(has(&text, &format!("{span}.")), "{text:?} {span:?}");
+            }
+            // Each cut inside the last word, and inside the first word.
+            let last = span.len() - words[b - 1].len();
+            for (k, _) in words[b - 1].char_indices().skip(1) {
+                assert!(
+                    !has(&text, &span[..last + k]),
+                    "{text:?} {:?}",
+                    &span[..last + k]
+                );
+            }
+            for (k, _) in words[a].char_indices().skip(1) {
+                assert!(!has(&text, &span[k..]), "{text:?} {:?}", &span[k..]);
+            }
+        }
     }
 
     #[test]

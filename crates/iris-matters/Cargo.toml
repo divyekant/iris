@@ -1,0 +1,13 @@
+[package]
+name = "iris-matters"
+description = "Matters of Iris: the proposals of a matter, and the confirm and the decline of the person."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-store = { version = "0.0.0", path = "../iris-store" }
+# Same version as iris-store, so the program has one copy of SQLite.
+rusqlite = "=0.43.0"

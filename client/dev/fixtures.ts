@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Message, Policy, Rule, Status, Target } from "../src/api";
+import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -116,7 +116,7 @@ export const handled: HandledPage = { count: 0, next: null, actions: [] };
 
 export function message(id: string): Message | undefined {
   const item = items.find((i) => i.sources.some((s) => s.message === id));
-  if (!item) return undefined;
+  if (!item) return askMail(id);
   const source = item.sources.find((s) => s.message === id)!;
   return {
     id,
@@ -125,9 +125,11 @@ export function message(id: string): Message | undefined {
     from: { name: "Example Sender", address: "sender@example.com" },
     subject: item.title,
     labels: ["INBOX"],
+    // A mail with a fixed head has the head of its summary everywhere.
+    ...(HEADS[id] ? (summaryOf(id) as Summary) : {}),
     to: "you@example.com",
     cc: null,
-    text: `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
+    text: ASK_MAIL[id] ?? `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
     gone: false,
     hostile: [],
     items: items.filter((i) => i.sources.some((s) => s.message === id)).map((i) => i.id),
@@ -204,6 +206,7 @@ const HEADS: Record<string, [string, string, string, string]> = {
   "m-50102": ["t-7712", "Morning Brew", "crew@morningbrew.example", "Why oil fell on Tuesday"],
   "m-50140": ["t-7713", "Product Hunt Daily", "hello@producthunt.example", "Top launches of the week"],
   "m-55210": ["t-8841", "Priya Raman", "priya@northwind.example", "Q4 numbers for the board"],
+  "m-53500": ["t-8600", "Example Air", "trips@air.example", "Your flight to Tokyo: QX7K2P"],
   "m-55211": ["t-8841", "You", "you@example.com", "Re: Q4 numbers for the board"],
   "m-60001": ["t-9002", "Dana Brooks", "dana@leadgen.example", "Quick question about your Q1 plans"],
   "m-61500": ["t-9100", "Morning Brew", "crew@morningbrew.example", "Monday: the market opens higher"],
@@ -214,6 +217,41 @@ const PUBLISHERS = [
   ["The Verge", "newsletter@theverge.example", "Verge Deals of the day"],
   ["Product Hunt Daily", "hello@producthunt.example", "Top launches of the day"],
 ] as const;
+
+/** The text of each mail that a fixture answer of Ask cites. */
+const ASK_MAIL: Record<string, string> = {
+  "m-55210": "Hi,\n\nCould you review section 4 by Tuesday? The board meets on Wednesday.\n\nPriya",
+  "m-55211": "Thanks, Priya. I will send it on Monday.",
+  "m-53500": "Booking reference QX7K2P\n\nYour flight to Tokyo leaves on 10 December at 11:05 and lands on 11 December at 07:40, Tokyo time. The gate shows 24 hours before departure.",
+};
+
+/** A mail that Ask cites, with the head of its summary, so its link opens it. */
+function askMail(id: string): Message | undefined {
+  const text = ASK_MAIL[id];
+  if (text === undefined) return undefined;
+  const s = summaryOf(id) as Summary;
+  return { ...s, to: "you@example.com", cc: null, text, gone: false, hostile: [], items: [] };
+}
+
+/** POST /api/ask: a fixed answer for each kind of question, with no model. */
+export function askAnswer(question: string): AskAnswer {
+  const source = (n: number, id: string, quote: string | null) => ({ n, quote, message: summaryOf(id) as Summary });
+  if (/weather|lottery/i.test(question)) return { answer: null, sources: [], read: 0, cost_micro_usd: null };
+  if (/flight|tokyo|trip/i.test(question)) {
+    return {
+      answer: "Your flight to Tokyo leaves on 10 December at 11:05 [1]. The booking reference is QX7K2P [1].",
+      sources: [source(1, "m-53500", "Booking reference QX7K2P")],
+      read: 6,
+      cost_micro_usd: 3_120,
+    };
+  }
+  return {
+    answer: "Priya asked you to review section 4 of the Q4 numbers by Tuesday [1]. You answered that you will send it on Monday [2].",
+    sources: [source(1, "m-55210", "Could you review section 4 by Tuesday?"), source(2, "m-55211", null)],
+    read: 9,
+    cost_micro_usd: 4_180,
+  };
+}
 
 /** A summary for each fixture message ID. The triage IDs get a newsletter head. */
 function summaryOf(id: string): Target {
@@ -335,6 +373,55 @@ export function watchPost(path: string, body: { text?: string }): [number, unkno
   return [201, w];
 }
 
+// Jobs of the agents (card R4-09): one in each state.
+const at = (day: number, h: number, m = 0) => new Date(Date.UTC(2026, 10, day, h, m)).toISOString();
+const dana = { name: "Dana Whitfield", address: "dana@northwind.example" };
+export const jobs: Record<string, Job> = {
+  "j-12": { id: "j-12", goal: "Get the signed contract from Dana before 20 Nov.", due: at(20, 0), created: at(16, 9), updated: at(16, 18, 41), state: "waiting", wait: { thread: "t-8841", until: at(18, 9) } },
+  "j-14": {
+    id: "j-14",
+    goal: "Pay the Q4 invoice from Brightline.",
+    due: at(17, 17),
+    created: at(16, 8),
+    updated: at(16, 10, 2),
+    state: "needs_you",
+    question: "The invoice says 2,400 EUR, but the quote said 2,150 EUR. Pay the full amount, or ask Brightline about the difference first?",
+  },
+  "j-15": { id: "j-15", goal: "Book a dentist appointment for next week, in the morning.", created: at(16, 11), updated: at(16, 11), state: "working" },
+  "j-9": { id: "j-9", goal: "Cancel the gym membership.", created: at(12, 9), updated: at(13, 15), state: "done", end: "complete" },
+};
+export const jobDetails: Record<string, JobDetail> = {
+  "j-12": {
+    job: {
+      ...jobs["j-12"],
+      events: [
+        { at: at(16, 9), state: "working", by: "person" },
+        { at: at(16, 9, 20), state: "waiting", by: "agent", wait: { thread: "t-8841", until: at(17, 9) }, why: "I asked Dana for the signed copy. She said she sends it today." },
+        { at: at(16, 16, 5), state: "working", by: "engine", why: "reply" },
+        { at: at(16, 16, 12), state: "needs_you", by: "agent", question: "Dana sent a version with a new clause 7 (payment in 45 days, not 30). Accept it?" },
+        { at: at(16, 18, 30), state: "working", by: "person", answer: "Accept 45 days. Ask her to sign today." },
+        { at: at(16, 18, 41), state: "waiting", by: "agent", wait: { thread: "t-8841", until: at(18, 9) }, why: "Dana signs tomorrow morning." },
+      ],
+    },
+    changesets: [
+      { id: "cs-31", at: at(16, 9, 18), state: "closed", why: "File the old drafts of the contract, so only the newest stays in the inbox.", actions: { applied: 3 } },
+      { id: "cs-34", at: at(16, 18, 38), state: "open", why: "Reply to Dana: accept clause 7 and ask for the signature.", actions: { in_review: 1 } },
+    ],
+    threads: { "t-8841": { id: "m-90211", thread: "t-8841", date: at(16, 16, 2), from: dana, subject: "Re: Northwind contract, final version", labels: ["INBOX"], gone: false } },
+  },
+  "j-14": {
+    job: { ...jobs["j-14"], events: [{ at: at(16, 8), state: "working", by: "person" }, { at: at(16, 10, 2), state: "needs_you", by: "agent", question: jobs["j-14"].question, why: "The amounts do not agree." }] },
+    changesets: [],
+    threads: {},
+  },
+};
+const jobPage = (state: string | null) => {
+  const list = Object.values(jobs)
+    .filter((j) => (state && state !== "open" ? j.state === state : j.state !== "done"))
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
+  return { jobs: list, next: null };
+};
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
@@ -364,6 +451,8 @@ export function answer(path: string): unknown {
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
   if (name === "watches") return watches;
+  if (name === "jobs" && id) return jobDetails[id];
+  if (name === "jobs") return jobPage(q.get("state"));
   return undefined;
 }
 

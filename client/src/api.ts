@@ -151,6 +151,10 @@ export type Summary = {
   labels: string[];
 };
 
+/** POST /api/ask (card R5-09). `answer` has a mark `[n]` after each fact: the source with that `n`. */
+export type AskSource = { n: number; quote: string | null; message: Summary };
+export type AskAnswer = { answer: string | null; sources: AskSource[]; read: number; cost_micro_usd: number | null };
+
 export type Message = Summary & {
   /** The To and Cc headers as text, or null. */
   to: string | null;
@@ -221,6 +225,36 @@ export type HandledPage = { count: number; actions: HandledAction[]; next: strin
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
+
+/** A job of an agent (card R4-01, docs/spec/schema/job.schema.json). */
+export type JobState = "working" | "waiting" | "needs_you" | "done";
+export type JobWait = { thread?: string; until: string };
+export type JobEvent = {
+  at: string;
+  state: JobState;
+  by: "person" | "agent" | "engine";
+  wait?: JobWait;
+  question?: string;
+  answer?: string;
+  end?: "complete" | "cancel";
+  why?: string;
+};
+export type Job = {
+  id: string;
+  goal: string;
+  due?: string;
+  created: string;
+  updated: string;
+  state: JobState;
+  wait?: JobWait;
+  question?: string;
+  end?: "complete" | "cancel";
+};
+export type JobPage = { jobs: Job[]; next: string | null };
+/** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
+export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
+/** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
 
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";

@@ -801,6 +801,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-compose"
+version = "0.0.0"
+dependencies = [
+ "mail-builder",
+ "mail-parser",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "iris-eval"
 version = "0.0.0"
 dependencies = [
@@ -841,6 +852,14 @@ dependencies = [
  "iris-talk",
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "iris-matters"
+version = "0.0.0"
+dependencies = [
+ "iris-store",
+ "rusqlite",
 ]
 
 [[package]]
@@ -1015,6 +1034,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
 dependencies = [
  "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 
@@ -1103,6 +1123,16 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "mail-builder"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aca3ad941e4c466402151719d6b4cea4bdfcb212b11e5970afa75e7d28c6502a"
+dependencies = [
+ "encodify",
+ "web-time",
+]
 
 [[package]]
 name = "mail-parser"
@@ -2002,6 +2032,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
