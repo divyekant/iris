@@ -46,6 +46,38 @@ test("the brief shows a live login code at the top, and not after it expires", a
   assert.match(text(after), /Signals 1 Login code for Example Bank/);
 });
 
+test("the Signals heading keeps the exact count of the API when a live code shows at the top", async () => {
+  const code = item("s-901");
+  const rest = Array.from({ length: 8 }, (_, n) => ({ ...code, id: `s-${n}`, code: undefined, title: `Signal ${n}` }));
+  const brief = { ...fx.brief, signals: { count: 9, items: [code, ...rest] } };
+  const t = text(await render("/src/views/Brief.svelte", { brief, now: NOW }));
+  assert.match(t, /Signals 9/);
+  assert.match(t, /All 9/);
+  // With only the live code, the code shows at the top and no empty Signals section shows.
+  const only = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, signals: { count: 1, items: [code] } }, now: NOW });
+  assert.doesNotMatch(only, /id="signals"/);
+});
+
+test("the dev proxy sends the Host of the engine, and changes only the dev page's own Origin", async () => {
+  const { engineProxy } = await load("/dev/proxy.ts");
+  const target = "http://127.0.0.1:4800";
+  const options = engineProxy(target);
+  assert.equal(options.target, target);
+  assert.equal(options.changeOrigin, true);
+  let send;
+  options.configure({ on: (event, fn) => event === "proxyReq" && (send = fn) });
+  const forward = (headers) => {
+    const out = {};
+    send({ setHeader: (k, v) => (out[k] = v) }, { headers });
+    return out;
+  };
+  // The sign-in address and API calls from the dev page reach the engine as same-origin requests.
+  assert.deepEqual(forward({ host: "localhost:5173", origin: "http://localhost:5173" }), { origin: target });
+  // Another site keeps its Origin, so the engine refuses it.
+  assert.deepEqual(forward({ host: "localhost:5173", origin: "https://example.com" }), {});
+  assert.deepEqual(forward({ host: "localhost:5173" }), {});
+});
+
 test("each brief section shows at most 7 lines and links its full list", async () => {
   const many = Array.from({ length: 9 }, (_, n) => ({ ...item("c-311"), id: `c-${n}` }));
   const brief = { ...fx.brief, you_owe: { count: 9, items: many }, strangers: { count: 8, items: many.slice(0, 8) } };
