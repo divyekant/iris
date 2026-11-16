@@ -12,8 +12,9 @@
   // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
   let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
 
-  const FIRST = 3;
+  // The messages endpoint takes at most 200 IDs, and the engine at most 500 decisions (issue 197).
   const PAGE = 200;
+  const BATCH = 500;
 
   let actions = $derived(shown(c));
   let open = $derived(actions.filter(waits));
@@ -48,8 +49,6 @@
     );
   });
   let rows: Record<string, Row[]> = $state({});
-  // The rows that show of each change: the first few, more with the button.
-  let visible: Record<string, number> = $state({});
   // The changes whose last load failed. They load again only with "Try again".
   let failed: Record<string, boolean> = $state({});
   let problem = $state("");
@@ -77,14 +76,7 @@
     failed = {};
   }
 
-  // The engine takes at most this many decisions in one request (issue 197).
-  const MAX = 500;
-  let blocked = $derived(
-    open.length > MAX
-      ? `This request has ${open.length.toLocaleString("en-US")} changes. Iris can decide at most ${MAX} in one step, so it cannot decide this request yet.`
-      : "",
-  );
-  let ready = $derived(!busy && !stale && !missing.length && !blocked);
+  let ready = $derived(!busy && !stale && !missing.length);
 
   /** Load the request again, so that the screen shows it as the store has it. */
   async function refresh(why: string) {
@@ -106,16 +98,21 @@
     if (!ready) return;
     busy = true;
     problem = saved = "";
+    const all = open.map((a) => ({ revision: a.revision, n: a.n, approve: !off[key(a)], hash: a.hash }));
+    // More than 500 changes go in batches of 500. Each batch is one transaction of the engine.
+    let done = 0;
     try {
-      const body = { actions: open.map((a) => ({ revision: a.revision, n: a.n, approve: !off[key(a)], hash: a.hash })) };
-      onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, body));
+      for (; done < all.length; done += BATCH) {
+        onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, { actions: all.slice(done, done + BATCH) }));
+      }
       saved = [yes && `You approved ${yes === 1 ? "one change" : `${yes} changes`}.`, no && `You denied ${no === 1 ? "one change" : `${no} changes`}.`].filter(Boolean).join(" ");
     } catch (e) {
       const status = (e as { status?: number }).status;
-      // A 409 is a definite refusal: the transaction wrote nothing. With no answer or a 5xx, the result is unknown.
-      if (status === 409) await refresh("Iris did not save this decision, because the request changed after you opened it. Here it is as it is now.");
-      else if (status === undefined || status >= 500) await refresh("Iris does not know if it saved your decision. Here is the request as it is now.");
-      else problem = e instanceof Error ? e.message : String(e);
+      const before = done ? `Iris saved your decision on the first ${done} changes. ` : "";
+      // A 409 is a definite refusal: the batch wrote nothing. With no answer or a 5xx, the result is unknown.
+      if (status === 409) await refresh(`${before}Iris did not save ${done ? "the rest" : "this decision"}, because the request changed after you opened it. Here it is as it is now.`);
+      else if (status === undefined || status >= 500) await refresh(`${before}Iris does not know if it saved ${done ? "the rest" : "your decision"}. Here is the request as it is now.`);
+      else problem = `${before}${e instanceof Error ? e.message : String(e)}`;
     } finally {
       busy = false;
     }
@@ -123,9 +120,7 @@
 </script>
 
 {#snippet lines(a: (typeof actions)[number])}
-  {@const have = rows[key(a)] ?? []}
-  {@const list = have.slice(0, visible[key(a)] ?? FIRST)}
-  {@const all = new Set(targets(a)).size}
+  {@const list = rows[key(a)] ?? []}
   {#if list.length}
     <ul class="messages">
       {#each list as m (m.id)}
@@ -142,11 +137,6 @@
         </li>
       {/each}
     </ul>
-  {/if}
-  {#if have.length > list.length}
-    <button type="button" class="more" onclick={() => (visible[key(a)] = list.length + PAGE)}>
-      {all - list.length > PAGE ? `Show ${PAGE} more` : `Show all ${all.toLocaleString("en-US")}`}
-    </button>
   {/if}
 {/snippet}
 
@@ -185,8 +175,8 @@
     </ol>
     <div class="decide">
       <button type="button" class="primary" class:deny={!chosen.length} disabled={!ready} onclick={decide}>{plan(chosen.length, open.length)}</button>
-      <p>{blocked || "Iris makes none of these changes before you approve them."}</p>
-      {#if missing.length && !problem && !blocked}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
+      <p>Iris makes none of these changes before you approve them.</p>
+      {#if missing.length && !problem}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
     </div>
   {/if}
   {#if problem}
@@ -346,7 +336,11 @@
     border-radius: var(--radius-full);
     background: var(--color-warning);
   }
+  /* Each row of a change shows. After about six rows, the box scrolls. */
   .messages {
+    max-height: calc(var(--space-12) * 5);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     margin-top: var(--space-3);
     border-radius: var(--radius-md);
     background: var(--color-background-elevated);

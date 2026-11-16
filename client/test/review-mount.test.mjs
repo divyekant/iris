@@ -22,25 +22,18 @@ function serve(routes = {}) {
   return asked;
 }
 
-test("a request loads the rows of each message, shows a gone message, and loads the rest with the button", async () => {
+test("a request shows every row of each change, with a gone message", async () => {
   const ids = ["m-50140", "m-1", "m-2", "m-3", "m-4"];
   const asked = serve();
   const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({ resolved: { messages: ids } })]) });
   try {
     const rows = () => view.target.querySelectorAll(".messages li");
-    await until(() => rows().length === 3);
+    await until(() => rows().length === 5);
     assert.match(text(rows()[0]), /not in your mailbox any more/);
     assert.ok(rows()[1].querySelector("a[href]"), "a message row links to the message");
-    // All rows of the change load at once (one page of up to 200), and three show.
+    // One page of up to 200 IDs, and no row behind a button.
     assert.deepEqual(asked.filter((p) => typeof p === "string" && p.startsWith("messages?")), ["messages?ids=m-50140,m-1,m-2,m-3,m-4"]);
-
-    const more = view.target.querySelector("button.more");
-    assert.equal(more.textContent.trim(), "Show all 5");
-    more.click();
-    await until(() => rows().length === 5);
-    view.flushSync();
     assert.equal(view.target.querySelector("button.more"), null);
-    assert.equal(asked.filter((p) => typeof p === "string" && p.startsWith("messages?")).length, 1, "the button shows rows that loaded");
   } finally {
     view.destroy();
   }
@@ -190,24 +183,27 @@ test("the button waits for the rows of each change, and a failed lookup has a re
   }
 });
 
-test("a request of 500 changes can be decided, and one of 501 says why not", async () => {
-  serve();
-  const many = (count) => changeset(Array.from({ length: count }, (_, i) => act({ n: i + 1 })));
-  const ok = await mount("/src/views/Request.svelte", { changeset: many(500) });
+test("a request of 501 changes goes in two batches; a refusal of the second says what Iris saved", async () => {
+  const many = changeset(Array.from({ length: 501 }, (_, i) => act({ n: i + 1, hash: `h${i + 1}` })));
+  const decided = (list) => ({ ...many, actions: many.actions.map((a) => (list.some((d) => d.n === a.n) ? { ...a, decision: { state: "approved", by: "person" } } : a)) });
+  let calls = 0;
+  const asked = serve({
+    "changesets/cs-9/decide": (body) => (++calls === 1 ? [200, decided(body.actions)] : [409, { error: "the hash changed" }]),
+    "changesets/cs-9": [200, decided(many.actions.slice(0, 500))],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [many] });
   try {
-    await until(() => !ok.target.querySelector("button.primary").disabled);
-    assert.equal(ok.target.querySelector("button.primary").textContent, "Approve all 500");
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    assert.equal(view.target.querySelector("button.primary").textContent, "Approve all 501");
+    view.target.querySelector("button.primary").click();
+    const alert = await until(() => view.target.querySelector("[role=alert]"));
+    await until(() => text(view.target).includes("asks for one change"));
+    const sent = asked.filter((x) => Array.isArray(x)).map(([, b]) => b.actions.length);
+    assert.deepEqual(sent, [500, 1]);
+    assert.match(alert.textContent, /Iris saved your decision on the first 500 changes\. Iris did not save the rest, because the request changed/);
+    assert.equal(view.target.querySelector("button.primary").textContent, "Approve the change");
   } finally {
-    ok.destroy();
-  }
-  const big = await mount("/src/views/Request.svelte", { changeset: many(501) });
-  try {
-    await new Promise((r) => setTimeout(r, 50));
-    big.flushSync();
-    assert.equal(big.target.querySelector("button.primary").disabled, true);
-    assert.match(text(big.target), /This request has 501 changes\. Iris can decide at most 500 in one step/);
-  } finally {
-    big.destroy();
+    view.destroy();
   }
 });
 
@@ -268,14 +264,13 @@ test("the button waits for every row of a change of more than one page", async (
   const ids = Array.from({ length: 250 }, (_, i) => `m-${i + 1}`);
   const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({ resolved: { messages: ids } })]) });
   try {
-    await until(() => view.target.querySelectorAll(".messages li").length === 3);
     await until(() => pages === 2);
     view.flushSync();
     assert.equal(view.target.querySelector("button.primary").disabled, true, "no decision with 50 rows not loaded");
     assert.match(text(view.target), /Iris loads everything that these changes touch/);
     release();
     await until(() => !view.target.querySelector("button.primary").disabled);
-    assert.equal(view.target.querySelector("button.more").textContent.trim(), "Show 200 more");
+    assert.equal(view.target.querySelectorAll(".messages li").length, 250, "each row shows, in a box that scrolls");
   } finally {
     view.destroy();
   }
