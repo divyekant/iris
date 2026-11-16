@@ -390,6 +390,7 @@ pub struct Draft {
 struct DraftPage {
     #[serde(default)]
     drafts: Vec<Draft>,
+    next_page_token: Option<String>,
 }
 
 /// A draft with `format=raw`: the decoded RFC 5322 text of its message.
@@ -558,11 +559,24 @@ impl Gmail {
         self.json(token, "messages", &query, cost::MESSAGES_LIST)
     }
 
-    /// The first page of `users.drafts.list` for the Gmail search `q`.
+    /// Each draft of `users.drafts.list` for the Gmail search `q`. The
+    /// client reads every page, so recovery does not miss a draft on a
+    /// later page (spec R3-01, section 6).
     pub fn drafts(&self, token: &str, q: &str) -> Result<Vec<Draft>> {
-        let query = [("maxResults", PAGE_SIZE.to_string()), ("q", q.to_string())];
-        let page: DraftPage = self.json(token, "drafts", &query, cost::DRAFTS_LIST)?;
-        Ok(page.drafts)
+        let mut all = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let mut query = vec![("maxResults", PAGE_SIZE.to_string()), ("q", q.to_string())];
+            if let Some(t) = next.take() {
+                query.push(("pageToken", t));
+            }
+            let page: DraftPage = self.json(token, "drafts", &query, cost::DRAFTS_LIST)?;
+            all.extend(page.drafts);
+            match page.next_page_token {
+                Some(t) if !t.is_empty() => next = Some(t),
+                _ => return Ok(all),
+            }
+        }
     }
 
     /// `users.drafts.get` with `format=raw`. HTTP 404 gives

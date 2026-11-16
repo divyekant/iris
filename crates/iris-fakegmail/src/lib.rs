@@ -131,6 +131,8 @@ struct Store {
     /// answer: `(status, applied)`. With `applied`, the fake makes the change
     /// first, as when Gmail applies a call and the answer is lost.
     write_failures: VecDeque<(u16, bool)>,
+    /// The most items on one list page, below `maxResults`.
+    page_limit: usize,
     /// Each request: method, path and query.
     log: Vec<String>,
     /// The drafts: (draft id, message index). A sent or deleted draft
@@ -196,6 +198,7 @@ impl Store {
             history_floor: HISTORY_BASE,
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
+            page_limit: usize::MAX,
             log: Vec::new(),
             drafts: Vec::new(),
             next_draft: 1,
@@ -493,6 +496,12 @@ impl FakeGmail {
         let mut s = self.store.lock().unwrap();
         s.write_failures
             .extend(statuses.iter().map(|&c| (c, applied)));
+    }
+
+    /// Give at most `n` items on each page of `messages.list` and
+    /// `drafts.list`, as Gmail can give fewer items than `maxResults`.
+    pub fn set_page_limit(&self, n: usize) {
+        self.store.lock().unwrap().page_limit = n.max(1);
     }
 
     /// Change the message of a draft, as the person does in Gmail. Returns
@@ -812,6 +821,7 @@ async fn list(
         Err(e) => return e,
     };
     let s = s.lock().unwrap();
+    let size = size.min(s.page_limit);
     let hidden = |m: &Msg| {
         !p.include_spam_trash && (m.labels.contains("SPAM") || m.labels.contains("TRASH"))
     };
@@ -1187,8 +1197,13 @@ async fn list_drafts(
         Ok(p) => p,
         Err(e) => return e,
     };
+    let (start, size) = match p.bounds() {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
     let s = s.lock().unwrap();
-    let items: Vec<Value> = s
+    let size = size.min(s.page_limit);
+    let matching: Vec<&(String, usize)> = s
         .drafts
         .iter()
         .filter(|&&(_, i)| {
@@ -1196,6 +1211,12 @@ async fn list_drafts(
                 .as_ref()
                 .is_none_or(|q| s.has_message_id(i, q))
         })
+        .collect();
+    let total = matching.len();
+    let items: Vec<Value> = matching
+        .into_iter()
+        .skip(start)
+        .take(size)
         .map(|(d, i)| {
             let mut v = s.draft_json(d, *i);
             v["message"]
@@ -1205,10 +1226,8 @@ async fn list_drafts(
             v
         })
         .collect();
-    let mut body = json!({ "resultSizeEstimate": items.len() });
-    if !items.is_empty() {
-        body["drafts"] = Value::Array(items);
-    }
+    let mut body = json!({ "resultSizeEstimate": total });
+    page(&mut body, "drafts", items, start, size, total);
     Json(body).into_response()
 }
 

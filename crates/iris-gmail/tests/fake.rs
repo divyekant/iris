@@ -397,3 +397,27 @@ fn a_large_draft_reads_with_no_raw() {
         Some(iris_gmail::DRAFT_LIMIT)
     );
 }
+
+#[test]
+fn a_draft_search_reads_every_page() {
+    let fake = FakeGmail::start(Mailbox::new(3, 10)).unwrap();
+    let gmail = client(&fake);
+    let other = b"Subject: Hi\r\nMessage-ID: <other@example.com>\r\n\r\nHello\r\n";
+    let raw = b"Subject: Hi\r\nMessage-ID: <iris.5@example.com>\r\n\r\nHello\r\n";
+    gmail.create_draft(TOKEN, other, None).unwrap();
+    let ids: Vec<String> = (0..3)
+        .map(|_| gmail.create_draft(TOKEN, raw, None).unwrap().id)
+        .collect();
+    fake.set_page_limit(1);
+
+    // The matching drafts are on three pages. Without the page tokens,
+    // the search finds only the first one.
+    let found = gmail
+        .drafts(TOKEN, "rfc822msgid:<iris.5@example.com>")
+        .unwrap();
+    assert_eq!(found.iter().map(|d| d.id.clone()).collect::<Vec<_>>(), ids);
+    assert!(fake
+        .requests()
+        .iter()
+        .any(|r| r.contains("drafts?") && r.contains("pageToken=2")));
+}
