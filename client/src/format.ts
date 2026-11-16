@@ -1,4 +1,4 @@
-import type { Account, Brief, Item, Money, Party, Status } from "./api";
+import type { Account, Brief, Item, Money, Party, Section, Status } from "./api";
 
 export function party(p: Party | undefined): string {
   if (!p) return "";
@@ -74,6 +74,20 @@ export function timeLeft(value: string | undefined, now = new Date()): string | 
 /** True when a signal is a login code that is still good at `now` (spec 1 section 6.6). */
 export function liveCode(item: Item, now = new Date()): boolean {
   return item.form === "signal" && !!item.code && item.status === "active" && timeLeft(item.expires, now) !== null;
+}
+
+/**
+ * The Signals of the brief at `now` (spec 1 section 8): a signal leaves at its expiry, and a live
+ * login code shows at the top, not in the rows. `next` is the first expiry still to come.
+ */
+export function signals(section: Section, now: Date) {
+  const live = section.items.filter((i) => !i.expires || Date.parse(i.expires) > now.getTime());
+  const codes = live.filter((i) => liveCode(i, now));
+  const next = live
+    .map((i) => i.expires)
+    .filter((e): e is string => !!e)
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  return { codes, rows: live.filter((i) => !codes.includes(i)), count: section.count - (section.items.length - live.length), next };
 }
 
 /** The origin source of an item: the message that made it (spec 1 section 6.1). */

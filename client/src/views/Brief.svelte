@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { copying, greeting, liveCode, nextDay, party, partyKey, summary, when } from "../format";
+  import { copying, greeting, nextDay, party, partyKey, signals, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
@@ -40,10 +40,11 @@
 
   const SHOWN = 7;
 
-  let codes = $derived(brief.signals.items.filter((i) => liveCode(i, now)));
-  // At the expiry of the first live code, the code moves from the top to Signals.
-  // The date and the due words change at midnight too. Keep `now` fresh until the first of the two.
-  let until = $derived([...codes.map((i) => i.expires!), nextDay(now)].sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
+  let signal = $derived(signals(brief.signals, now));
+  let codes = $derived(signal.codes);
+  // A signal leaves at its expiry. The date and the due words change at midnight.
+  // Keep `now` fresh until the first of the two.
+  let until = $derived([signal.next, nextDay(now)].filter((t): t is string => !!t).sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
   $effect(() => watch(until, (d) => (now = d)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
   let parts = $derived([
@@ -55,8 +56,9 @@
       key: "signals",
       title: "Signals",
       ...brief.signals,
-      // Keep the exact count of the API. The live codes show at the top, so only the rows leave them out.
-      items: brief.signals.items.filter((i) => !codes.includes(i)),
+      // The count of the API, less the signals that expired since. The live codes show at the top, so only the rows leave them out.
+      count: signal.count,
+      items: signal.rows,
       hidden: codes.length,
     },
   ]);
