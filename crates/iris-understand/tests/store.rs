@@ -1268,3 +1268,44 @@ fn a_message_over_the_read_limit_is_cut_text_for_the_model() {
     assert_eq!((out.calls, fake.calls.borrow().len()), (1, 1));
     assert!(fake.calls.borrow()[0].1.contains("Your code: 482913"));
 }
+
+#[test]
+fn an_earlier_text_of_the_sender_that_changes_during_the_call_saves_nothing() {
+    let b = store("same-change");
+    let mut first = 0;
+    for i in 0..4 {
+        let raw = format!(
+            "From: Bo Ren <bo@example.org>\nTo: owner@example.com\nSubject: S{i}\n\nNote {i}.\n"
+        );
+        let m = b.add_in(&format!("e{i}"), "t", NOW - 10 * DAY + i, &raw, &["INBOX"]);
+        understand(&b.store, m, &Fake::default(), NOW).unwrap();
+        if i == 0 {
+            first = m;
+        }
+    }
+    let m = b.add_in("now", "t", NOW - DAY, ASK, &["INBOX"]);
+    // The oldest message is outside the thread context of the model, but
+    // it is an earlier text of the sender.
+    let model = Changer {
+        store: &b.store,
+        sql: "UPDATE message SET gone_at = 1 WHERE id = ?1",
+        message: first,
+    };
+    let out = understand(&b.store, m, &model, NOW).unwrap();
+    assert!(out.changed);
+    assert!(b.items().is_empty());
+}
+
+#[test]
+fn a_received_message_from_the_mailbox_address_is_not_yours() {
+    let b = store("forged-owner");
+    let raw = "From: owner@example.com\nTo: owner@example.com\nSubject: Hi\n\nCan you call?\n";
+    let m = b.add("1", raw, &["INBOX"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let doc: String = b.col(
+        "SELECT doc FROM item WHERE form = 'conversation' AND ?1 = ?1",
+        0,
+    );
+    let doc: Value = serde_json::from_str(&doc).unwrap();
+    assert_ne!(doc["latest"]["from"]["kind"], "self", "{doc}");
+}

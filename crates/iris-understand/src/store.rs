@@ -146,7 +146,17 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let known = |_: &str| known_list.clone();
     let existing = pinned(store, message)?;
     let earlier = store.read(|c| Ok(thread_context(c, message, row.thread, row.internal_date)?))?;
-    let same = same_sender(store, message, row.thread, row.internal_date, &head)?;
+    let from_addr = head.from_addr.clone();
+    let same_now = |c: &rusqlite::Connection| {
+        same_sender(
+            c,
+            message,
+            row.thread,
+            row.internal_date,
+            from_addr.as_deref(),
+        )
+    };
+    let same = store.read(|c| Ok(same_now(c)?))?;
     // Steps 1 and 2 do not use the sender kind or the known parties. Write
     // 1 decides them (step 3).
     let cx = Context {
@@ -195,7 +205,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             .map(|n| known_person(tx, n))
             .transpose()?
             .unwrap_or_default();
-        if state(tx, message, true)? != start || known_now != known_list {
+        // The earlier texts of the sender shape the clean text (section 7.2).
+        if state(tx, message, true)? != start || known_now != known_list || same_now(tx)? != same {
             return Ok(None);
         }
         put_header(tx, message, &a)?;
@@ -310,6 +321,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             || kind_now != kind_read
             || context_now != earlier
             || known_now != known_after
+            || same_now(tx)? != same
         {
             changed = true;
             return Ok(Vec::new());
@@ -524,16 +536,16 @@ const SAME_SENDER_MESSAGES: i64 = 5;
 
 /// The clean texts of the earlier messages of the same sender in the thread.
 fn same_sender(
-    store: &Store,
+    c: &rusqlite::Connection,
     message: i64,
     thread: i64,
     internal_date: Option<i64>,
-    head: &crate::Head,
-) -> Result<Vec<String>> {
-    let (Some(date), Some(from)) = (internal_date, head.from_addr.as_deref()) else {
+    from: Option<&str>,
+) -> rusqlite::Result<Vec<String>> {
+    let (Some(date), Some(from)) = (internal_date, from) else {
         return Ok(Vec::new());
     };
-    Ok(store.read(|c| {
+    {
         let mut st = c.prepare_cached(
             "SELECT b.text FROM message m JOIN body b ON b.message_id = m.id
              JOIN header h ON h.message_id = m.id
@@ -548,7 +560,7 @@ fn same_sender(
             )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(v)
-    })?)
+    }
 }
 
 /// The most earlier messages of the thread that the model gets.

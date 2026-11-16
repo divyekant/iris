@@ -83,7 +83,7 @@ pub fn update(
     )?;
     // One query and one rule decide each message, so that the live messages,
     // the gone sources and the gone origin agree.
-    let all = mails(conn, thread, current, &me)?;
+    let all = mails(conn, thread, current)?;
     let gone_ok: Vec<(i64, i64)> = all
         .iter()
         .filter(|m| m.gone && m.clean)
@@ -327,12 +327,7 @@ fn corrections(conn: &Connection, item: i64, doc: &mut Value) -> rusqlite::Resul
 /// Each message of the thread that is understood or `current`, also when it
 /// is gone, oldest first. The content cleanup can delete the header of a gone
 /// message: then only its row decides.
-fn mails(
-    conn: &Connection,
-    thread: i64,
-    current: Option<i64>,
-    me: &str,
-) -> rusqlite::Result<Vec<Mail>> {
+fn mails(conn: &Connection, thread: i64, current: Option<i64>) -> rusqlite::Result<Vec<Mail>> {
     let mut q = conn.prepare_cached(
         "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
                 h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
@@ -363,7 +358,9 @@ fn mails(
             .query_row([&from], |r| r.get(0))
             .optional()?
             .flatten();
-        let mine = sent || (!from.is_empty() && from == me);
+        // Only the label SENT makes a message yours: anyone can write the
+        // mailbox address in From (spec 1 section 6.7).
+        let mine = sent;
         let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
         let mail = Mail {
             id: r.get(0)?,
@@ -450,9 +447,10 @@ fn doc(
             .chain(m.cc.iter().map(String::as_str))
         {
             // An alias is you in the From of sent mail and in To or Cc. A
-            // received message from the same address is from a party.
+            // received message from the same address, or from the mailbox
+            // address with no SENT label, is from a party.
             let from_party = from == Some(a);
-            if a != me && (from_party || !aliases.contains(&a)) && !order.contains(&a) {
+            if (from_party || (a != me && !aliases.contains(&a))) && !order.contains(&a) {
                 order.push(a);
             }
         }
