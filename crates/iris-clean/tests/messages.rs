@@ -681,3 +681,20 @@ fn a_hidden_part_after_a_full_text_is_no_cut() {
     assert!(!c.cut);
     assert_eq!(c.text, part);
 }
+
+#[test]
+fn an_attached_message_at_the_depth_limit_is_cut() {
+    let mut part = String::from("Content-Type: message/rfc822\n\nSubject: Deep\n\nToo deep.\n");
+    // The top message is depth 0. Each multipart adds one level.
+    for k in 0..MAX_DEPTH {
+        part = format!("Content-Type: multipart/mixed; boundary=d{k}\n\n--d{k}\n{part}--d{k}--\n");
+    }
+    let raw = crlf(&format!("Subject: Top\n{part}"));
+    let c = clean(&raw);
+    let inner = c
+        .attachments
+        .iter()
+        .find(|a| a.mime_type == "message/rfc822")
+        .expect("listed");
+    assert_eq!(inner.text.as_deref(), Some(CUT_MARK));
+}

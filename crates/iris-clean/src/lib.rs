@@ -89,7 +89,7 @@ pub fn clean(raw: &[u8]) -> Clean {
     let (subject, text, cut, files) = message(raw, 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
-        attachment(f, 0, &mut parts, &mut attach_left, &mut attachments);
+        attachment(f, &mut parts, &mut attach_left, &mut attachments);
     }
     Clean {
         subject,
@@ -142,6 +142,8 @@ struct File<'a> {
     charset: Option<String>,
     cte: String,
     body: &'a [u8],
+    /// The MIME depth of the part. An attached message goes one level deeper.
+    depth: usize,
 }
 
 /// Step 1 of one message: walk the MIME tree, make the text of each body
@@ -216,6 +218,7 @@ impl<'a> Walker<'a> {
             charset,
             cte,
             body,
+            depth,
         });
     }
 
@@ -283,13 +286,7 @@ impl<'a> Walker<'a> {
 /// `attach_left`, the one budget of the top message, in the order of the
 /// message. So the budget never has to go back. An attached message adds its
 /// own attachments after it: its text uses the budget first.
-fn attachment(
-    f: File,
-    depth: usize,
-    parts: &mut usize,
-    attach_left: &mut usize,
-    out: &mut Vec<Attachment>,
-) {
+fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec<Attachment>) {
     let size = mime::decoded_len(f.body, &f.cte);
     let mut name = f.name.unwrap_or_default();
     let mut text = None;
@@ -301,7 +298,7 @@ fn attachment(
         // attached message.
         let had_budget = *attach_left > 0;
         let (inner, clipped) = decode_capped(f.body, &f.cte, INNER_LIMIT);
-        let (subject, mut t, inner_cut, files) = message(&inner, depth + 1, parts);
+        let (subject, mut t, inner_cut, files) = message(&inner, f.depth + 1, parts);
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {
@@ -317,13 +314,7 @@ fn attachment(
         // attachments are not known. Do not list them.
         if !clipped {
             for inner_file in files {
-                attachment(
-                    inner_file,
-                    depth + 1,
-                    parts,
-                    attach_left,
-                    &mut inner_attachments,
-                );
+                attachment(inner_file, parts, attach_left, &mut inner_attachments);
             }
         }
         if name.is_empty() {
