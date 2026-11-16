@@ -53,7 +53,12 @@ mod cost {
     pub const MESSAGES_GET_RAW: u32 = 60;
     pub const HISTORY_LIST: u32 = 2;
     pub const MESSAGES_SEND: u32 = 100;
+    pub const MESSAGES_BATCH_MODIFY: u32 = 50;
+    pub const MESSAGES_TRASH: u32 = 5;
 }
+
+/// The most message IDs in one `messages.batchModify` call (Gmail limit).
+pub const BATCH_LIMIT: usize = 1000;
 
 /// The settings of a client.
 #[derive(Clone, Debug)]
@@ -106,9 +111,9 @@ pub enum Error {
 }
 
 impl Error {
-    /// For a write call (`messages.send`): true if Gmail can have done the
-    /// call (spec 2 section 7.2). A timeout, a lost connection and HTTP 5xx
-    /// give an unknown result.
+    /// For a write call (`messages.send`, `batchModify`, `trash`): true if
+    /// Gmail can have done the call (spec 2 section 7.2). A timeout, a lost
+    /// connection and HTTP 5xx give an unknown result.
     pub fn write_result_unknown(&self) -> bool {
         match self {
             Error::Transport(_) => true,
@@ -619,6 +624,52 @@ impl Gmail {
         read_all(response)
             .and_then(|b| parse(&b))
             .map_err(|e| Error::Transport(format!("answer of an accepted send: {e}")))
+    }
+
+    /// `users.messages.batchModify`: add and remove labels of at most
+    /// [`BATCH_LIMIT`] messages. A write call, as [`Gmail::send`]: see
+    /// [`Error::write_result_unknown`]. A list that is too long gives
+    /// HTTP 400 at Gmail, and the client sends no call.
+    pub fn batch_modify(
+        &self,
+        token: &str,
+        ids: &[&str],
+        add: &[&str],
+        remove: &[&str],
+    ) -> Result<()> {
+        if ids.len() > BATCH_LIMIT {
+            return Err(Error::Api {
+                status: 400,
+                reason: "invalidArgument".into(),
+                message: format!("more than {BATCH_LIMIT} message IDs"),
+            });
+        }
+        let body = serde_json::json!({ "ids": ids, "addLabelIds": add, "removeLabelIds": remove })
+            .to_string();
+        self.call(
+            token,
+            Method::Post(body.as_bytes()),
+            "messages/batchModify",
+            &[],
+            cost::MESSAGES_BATCH_MODIFY,
+        )?;
+        Ok(())
+    }
+
+    /// `users.messages.trash`. Gives the labels of the message after the
+    /// call. A write call, as [`Gmail::send`].
+    pub fn trash(&self, token: &str, id: &str) -> Result<Minimal> {
+        let response = self.call(
+            token,
+            Method::Post(b"{}"),
+            &format!("messages/{}/trash", segment(id)),
+            &[],
+            cost::MESSAGES_TRASH,
+        )?;
+        // Gmail accepted the call, so a bad answer leaves the result unknown.
+        read_all(response)
+            .and_then(|b| parse(&b))
+            .map_err(|e| Error::Transport(format!("answer of an accepted trash: {e}")))
     }
 
     fn json<T: DeserializeOwned>(

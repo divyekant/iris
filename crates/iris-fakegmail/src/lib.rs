@@ -6,8 +6,9 @@
 //!
 //! Supported: `users.getProfile`, `users.labels.list`, `users.labels.get`,
 //! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, no `q`),
-//! `users.messages.get` (`raw`, `metadata`, `minimal`), `users.messages.send`
-//! and `users.history.list` (paging, `historyTypes`). The JSON has the shape
+//! `users.messages.get` (`raw`, `metadata`, `minimal`), `users.messages.send`,
+//! `users.messages.batchModify`, `users.messages.trash` and
+//! `users.history.list` (paging, `historyTypes`). The JSON has the shape
 //! of the real API. The fake returns 400 for `format=full` and for an absent
 //! format, because the real default is `full` and the fake does not build it.
 //!
@@ -124,6 +125,10 @@ struct Store {
     history_floor: u64,
     /// The next requests get these HTTP status codes in place of an answer.
     failures: VecDeque<u16>,
+    /// The next write requests (POST) get these status codes in place of an
+    /// answer: `(status, applied)`. With `applied`, the fake makes the change
+    /// first, as when Gmail applies a call and the answer is lost.
+    write_failures: VecDeque<(u16, bool)>,
     /// Each request: method, path and query.
     log: Vec<String>,
 }
@@ -184,6 +189,7 @@ impl Store {
             // The profile id of an empty mailbox is HISTORY_BASE, so it must be valid.
             history_floor: HISTORY_BASE,
             failures: VecDeque::new(),
+            write_failures: VecDeque::new(),
             log: Vec::new(),
         }
     }
@@ -381,22 +387,8 @@ impl FakeGmail {
             add.iter().chain(remove).all(|l| s.has_label(l)),
             "unknown label"
         );
-        let added: Vec<String> = add
-            .iter()
-            .filter(|l| s.msgs[i].labels.insert(l.to_string()))
-            .map(|l| l.to_string())
-            .collect();
-        if !added.is_empty() {
-            s.record(i, Kind::LabelAdded, added);
-        }
-        let removed: Vec<String> = remove
-            .iter()
-            .filter(|l| s.msgs[i].labels.remove(**l))
-            .map(|l| l.to_string())
-            .collect();
-        if !removed.is_empty() {
-            s.record(i, Kind::LabelRemoved, removed);
-        }
+        let own = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        change_labels(&mut s, i, &own(add), &own(remove));
         true
     }
 
@@ -446,6 +438,16 @@ impl FakeGmail {
         self.store.lock().unwrap().failures.extend(statuses);
     }
 
+    /// The next write requests (POST) get these HTTP status codes, one
+    /// each, in place of an answer. Status 0 lets one write pass. With
+    /// `applied`, the fake makes the change first, so the result at the
+    /// client is not known.
+    pub fn fail_next_write(&self, statuses: &[u16], applied: bool) {
+        let mut s = self.store.lock().unwrap();
+        s.write_failures
+            .extend(statuses.iter().map(|&c| (c, applied)));
+    }
+
     /// Each request so far, as `GET /gmail/v1/users/me/messages?maxResults=5`.
     pub fn requests(&self) -> Vec<String> {
         self.store.lock().unwrap().log.clone()
@@ -461,6 +463,11 @@ fn router(store: Shared) -> Router {
         .route("/gmail/v1/users/{user}/labels/{id}", get(label))
         .route("/gmail/v1/users/{user}/messages", get(list))
         .route("/gmail/v1/users/{user}/messages/send", post(send))
+        .route(
+            "/gmail/v1/users/{user}/messages/batchModify",
+            post(batch_modify),
+        )
+        .route("/gmail/v1/users/{user}/messages/{id}/trash", post(trash))
         .route("/gmail/v1/users/{user}/messages/{id}", get(message))
         .route("/gmail/v1/users/{user}/history", get(history))
         .layer(middleware::from_fn_with_state(store.clone(), log_and_fail))
@@ -476,10 +483,19 @@ async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Resp
             None => format!("{} {}", req.method(), req.uri().path()),
         };
         s.log.push(line);
-        s.failures.pop_front()
+        match s.failures.pop_front() {
+            Some(c) => Some((c, false)),
+            None if req.method() == axum::http::Method::POST => s.write_failures.pop_front(),
+            None => None,
+        }
     };
-    match failure.and_then(|c| StatusCode::from_u16(c).ok()) {
-        Some(code) => error(code, "Injected failure."),
+    match failure.and_then(|(c, applied)| Some((StatusCode::from_u16(c).ok()?, applied))) {
+        Some((code, applied)) => {
+            if applied {
+                next.run(req).await;
+            }
+            error(code, "Injected failure.")
+        }
         None => next.run(req).await,
     }
 }
@@ -800,6 +816,91 @@ async fn send(
     let i = s.add(raw, body.thread_id, BTreeSet::from(["SENT".to_string()]));
     Json(json!({ "id": gmail_id(i as u64), "threadId": s.msgs[i].thread, "labelIds": ["SENT"] }))
         .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchModifyBody {
+    ids: Vec<String>,
+    #[serde(default)]
+    add_label_ids: Vec<String>,
+    #[serde(default)]
+    remove_label_ids: Vec<String>,
+}
+
+/// Like Gmail: 400 for more than 1,000 IDs or an unknown label. An ID that
+/// does not exist also gives 400 here, and the fake changes nothing.
+async fn batch_modify(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<BatchModifyBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let mut s = s.lock().unwrap();
+    if body.ids.len() > 1000 {
+        return error(StatusCode::BAD_REQUEST, "Too many ids.");
+    }
+    let labels = body.add_label_ids.iter().chain(&body.remove_label_ids);
+    if labels.clone().any(|l| !s.has_label(l)) {
+        return error(StatusCode::BAD_REQUEST, "Invalid label.");
+    }
+    let Some(indexes) = body
+        .ids
+        .iter()
+        .map(|id| s.index(id))
+        .collect::<Option<Vec<usize>>>()
+    else {
+        return error(StatusCode::BAD_REQUEST, "Invalid id value.");
+    };
+    for i in indexes {
+        change_labels(&mut s, i, &body.add_label_ids, &body.remove_label_ids);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// shortcut: the fake trash adds `TRASH` and removes `INBOX`; check the
+/// real label effect at Gmail before a test depends on `INBOX` after it
+/// (issue #172).
+async fn trash(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let mut s = s.lock().unwrap();
+    let Some(i) = s.index(&id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    change_labels(&mut s, i, &["TRASH".into()], &["INBOX".into()]);
+    Json(s.with_labels(i)).into_response()
+}
+
+/// Add and remove labels of message `i`, with the history records.
+fn change_labels(s: &mut Store, i: usize, add: &[String], remove: &[String]) {
+    let added: Vec<String> = add
+        .iter()
+        .filter(|l| s.msgs[i].labels.insert(l.to_string()))
+        .cloned()
+        .collect();
+    if !added.is_empty() {
+        s.record(i, Kind::LabelAdded, added);
+    }
+    let removed: Vec<String> = remove
+        .iter()
+        .filter(|l| s.msgs[i].labels.remove(*l))
+        .cloned()
+        .collect();
+    if !removed.is_empty() {
+        s.record(i, Kind::LabelRemoved, removed);
+    }
 }
 
 async fn history(
