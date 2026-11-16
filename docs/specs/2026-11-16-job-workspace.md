@@ -121,8 +121,9 @@ The granted messages of a job:
   steps in this order: move the job, end the session of the job if one
   runs and wait until it ended (R4-04), then build the workspace. So the
   mail files go at once, and no build runs while a session runs. The engine also
-  builds, at each start, the workspace of each done job that still has a
-  `threads/` folder. If the engine stops between the move and the
+  builds, at each start, the workspace of each done job whose workspace
+  folder exists. A partial build can leave any owned path absent, so the
+  check is the folder, not one path in it. If the engine stops between the move and the
   build, the session ends with the engine, and the mail files stay only
   until that start. If the build fails, the engine tries it again at that
   start. The callers come with
@@ -153,11 +154,12 @@ the granted messages:
 
    - The full document: only when each source thread of the item is a
      thread of the active scope, and each message of each source thread is
-     granted now, except a draft that is not gone. The build cannot know
-     which messages a run used as context, so it checks all of them: a
-     message that became hostile mail, gone or a signal source after the run
-     makes the document short. Understanding gives no draft text to the
-     model.
+     granted now, also each draft. The build cannot know which messages a
+     run used as context, so it checks all of them: a message that became
+     hostile mail, gone or a signal source after the run makes the document
+     short. Understanding gives the model the known persons of the headers
+     of each message of the thread, also of a draft, so a thread with a
+     draft gives the short document too.
    - The short document: for each other item that passes the source check
      above, also an item of a thread of the scope with a message outside
      the grant. It holds only `id`, `form`, `status` and
@@ -385,8 +387,8 @@ Markdown and JSON with `serde_json`.
 | An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
 | An unknown job | `Error::NotFound` | Unit test |
 | A job in the state `done` | No thread, item or person file. The job files stay | Unit test |
-| A crash between `finish` and the build of the done job | The mail files stay until the next engine start, which builds each done job with a `threads/` folder (R4-04) | Test with R4-04 |
-| A message of a source thread that became hostile mail, gone or a signal source after the run | The item gets the short document | Unit test |
+| A crash between `finish` and the build of the done job, or during that build | The mail files stay until the next engine start, which builds each done job whose workspace folder exists (R4-04) | Test with R4-04 |
+| A message of a source thread that became hostile mail, gone or a signal source after the run, or a draft in the thread | The item gets the short document | Unit test |
 
 ## Impact
 
