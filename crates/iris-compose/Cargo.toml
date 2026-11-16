@@ -1,0 +1,15 @@
+[package]
+name = "iris-compose"
+description = "The mail that Iris writes: the checks of a draft, the RFC 5322 message, the read back and the content hash. Pure functions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mail-builder = { version = "=2.0.1", default-features = false }
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = { version = "=0.11.1", default-features = false }
