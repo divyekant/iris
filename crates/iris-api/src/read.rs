@@ -523,11 +523,11 @@ fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
         .collect()
 }
 
-/// The sort keys in an `after` value. A value that is not the `next` of a
-/// page of the same section gives [`Error::Query`].
+/// The sort keys in an `after` value. A value that is empty, or that is not
+/// a cursor of section `name` with `count` keys, gives [`Error::Query`].
 fn decode_cursor(token: &str, name: &str, count: usize) -> Result<Vec<SqlValue>> {
     let bad = || Error::Query(format!("after {token} is not the next value of a page"));
-    if !token.len().is_multiple_of(2) || !token.is_ascii() {
+    if token.is_empty() || !token.len().is_multiple_of(2) || !token.is_ascii() {
         return Err(bad());
     }
     let bytes = (0..token.len())
@@ -626,8 +626,8 @@ fn read_section(
         |r| r.get(0),
     )?;
     // Seek past the sort keys of the last item of the page before, so SQLite
-    // keeps only `limit` rows in its sort. The keys come from that page, so
-    // a change to an item between two pages moves no other item.
+    // keeps only `limit` rows in its sort. An item whose key moves across
+    // these keys between two pages can show twice or not show.
     let keys = sort_keys(order);
     let list = keys
         .iter()

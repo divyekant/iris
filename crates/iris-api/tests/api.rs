@@ -899,12 +899,12 @@ async fn brief_follows_the_queries_of_section_8() {
     let mut paged = Vec::new();
     let mut after = String::new();
     loop {
-        let (code, p) = get(&store, &format!("/api/brief/you_owe?limit=3&after={after}")).await;
+        let (code, p) = get(&store, &format!("/api/brief/you_owe?limit=3{after}")).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(p["count"], 4);
         paged.extend(ids(&p["items"]).into_iter().map(str::to_string));
         match p["next"].as_str() {
-            Some(n) => after = n.to_string(),
+            Some(n) => after = format!("&after={n}"),
             None => break,
         }
     }
@@ -958,12 +958,18 @@ async fn brief_follows_the_queries_of_section_8() {
         get(&store, "/api/brief/you_owe?limit=0").await.0,
         StatusCode::BAD_REQUEST
     );
-    // An `after` that is not the `next` of a page of the section is a 400.
+    // A cursor is plain keys, not a signed value: keys before every item
+    // give the section from the start.
+    let made: String = r#"["you_owe",0,null,0,0]"#.bytes().map(|b| format!("{b:02x}")).collect();
+    let (code, p) = get(&store, &format!("/api/brief/you_owe?limit=1&after={made}")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&p["items"]), [c(sooner)]);
+    // An empty `after`, or one that is not a cursor of the section, is a 400.
     let feed_next = get(&store, "/api/brief/feed?limit=1").await.1["next"]
         .as_str()
         .unwrap()
         .to_string();
-    for bad in ["x", "c-1", "zz", "5b5d", &feed_next] {
+    for bad in ["", "x", "c-1", "zz", "5b5d", &feed_next] {
         assert_eq!(
             get(&store, &format!("/api/brief/you_owe?after={bad}"))
                 .await
@@ -1148,16 +1154,12 @@ async fn pages_a_section_larger_than_the_brief() {
             let mut all = Vec::new();
             let mut after = String::new();
             loop {
-                let (code, p) = get(
-                    &store,
-                    &format!("/api/brief/feed?limit={limit}&after={after}"),
-                )
-                .await;
+                let (code, p) = get(&store, &format!("/api/brief/feed?limit={limit}{after}")).await;
                 assert_eq!(code, StatusCode::OK);
                 assert_eq!(p["count"], 250);
                 all.extend(ids(&p["items"]).into_iter().map(str::to_string));
                 match p["next"].as_str() {
-                    Some(n) => after = n.to_string(),
+                    Some(n) => after = format!("&after={n}"),
                     None => break,
                 }
             }

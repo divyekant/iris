@@ -189,7 +189,7 @@ async fn get_brief_section(
         now_ms(),
         &section,
         q.limit.unwrap_or(50),
-        q.after.as_deref().filter(|a| !a.is_empty()),
+        q.after.as_deref(),
     )?;
     Ok(page.map_or_else(not_found, |p| Json(p).into_response()))
 }
