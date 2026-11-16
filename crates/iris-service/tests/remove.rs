@@ -52,11 +52,18 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     );
     assert!(unit.exists());
 
-    // With no systemctl on the system, remove deletes the unit file.
+    // With no systemctl found: remove deletes the unit file only if systemd
+    // does not run on this machine. Else the file stays and remove fails.
     std::fs::remove_file(bin.join("systemctl")).unwrap();
     std::env::set_var("PATH", &bin);
-    assert_eq!(iris_service::remove().unwrap(), Some(unit.clone()));
-    assert!(!unit.exists());
+    if Path::new("/run/systemd/system").is_dir() {
+        assert!(iris_service::remove().is_err());
+        assert!(unit.exists());
+        std::fs::remove_file(&unit).unwrap();
+    } else {
+        assert_eq!(iris_service::remove().unwrap(), Some(unit.clone()));
+        assert!(!unit.exists());
+    }
     std::env::set_var("PATH", format!("{}:{path}", bin.display()));
     std::fs::remove_file(home.join("calls")).unwrap();
 

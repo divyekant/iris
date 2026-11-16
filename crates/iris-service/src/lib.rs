@@ -231,23 +231,30 @@ pub fn remove() -> io::Result<Option<PathBuf>> {
             std::fs::remove_file(&file)?;
         }
         System::Systemd => {
-            // If the stop fails, keep the file, so that a second remove can try again.
-            // With no systemctl at all, no systemd can run the unit: delete the file.
-            match run("systemctl", &["--user", "disable", "--now", UNIT]) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    std::fs::remove_file(&file)?;
-                    return Ok(Some(file));
-                }
-                other => other?,
-            };
-            std::fs::remove_file(&file)?;
-            // The unit is stopped and disabled, so the remove is complete. The
-            // reload only drops the old definition from memory; systemd reads
-            // the folder again at the next login, so a failed reload is no error.
-            let _ = output("systemctl", &["--user", "daemon-reload"]);
+            let booted = Path::new("/run/systemd/system").is_dir();
+            remove_unit("systemctl", &file, booted)?;
         }
     }
     Ok(Some(file))
+}
+
+/// Stop and disable the systemd unit, then delete its file. `booted` says if
+/// systemd runs this system (the test of `sd_booted`).
+fn remove_unit(systemctl: &str, file: &Path, booted: bool) -> io::Result<()> {
+    // If the stop fails, keep the file, so that a second remove can try again.
+    match run(systemctl, &["--user", "disable", "--now", UNIT]) {
+        // No systemctl and no systemd: nothing can run the unit, so delete the file.
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !booted => {}
+        other => {
+            other?;
+        }
+    }
+    std::fs::remove_file(file)?;
+    // The unit is stopped and disabled, so the remove is complete. The
+    // reload only drops the old definition from memory; systemd reads
+    // the folder again at the next login, so a failed reload is no error.
+    let _ = output(systemctl, &["--user", "daemon-reload"]);
+    Ok(())
 }
 
 fn unsupported(system: Option<System>) -> io::Result<System> {
@@ -427,6 +434,25 @@ mod tests {
         let (err, calls) = call(5);
         assert!(err.unwrap_err().to_string().contains("cannot find out"));
         assert_eq!(calls, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_unit_with_no_systemctl_deletes_the_file_only_if_systemd_does_not_run() {
+        let dir =
+            std::env::temp_dir().join(format!("iris-service-nosystemctl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("iris.service");
+        std::fs::write(&file, "unit").unwrap();
+        let missing = dir.join("no-such-systemctl");
+        let missing = missing.to_str().unwrap();
+        // systemd runs, but systemctl is not found (for example, a short PATH):
+        // the service can still run, so keep the file and fail.
+        assert!(remove_unit(missing, &file, true).is_err());
+        assert!(file.exists());
+        assert!(remove_unit(missing, &file, false).is_ok());
+        assert!(!file.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
