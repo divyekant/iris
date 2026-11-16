@@ -162,8 +162,22 @@ fn mailbox(name: &str) -> (Box_, i64) {
             ],
         )
         .unwrap();
+    understood(&b.store);
     let t = thread_of(&b.store, "t1");
     (b, t)
+}
+
+/// Understanding finished each message with clean text.
+fn understood(store: &Store) {
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = 1 WHERE id IN (SELECT message_id FROM body)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 }
 
 fn saved(store: &Store, thread: i64) -> Option<(String, Option<String>, i64)> {
@@ -289,6 +303,98 @@ fn message_not_read_by_understanding_blocks_the_draft_but_a_gmail_draft_does_not
         Err(Error::NotReady)
     ));
     assert!(fake.calls.borrow().is_empty());
+
+    // Clean text, but understanding did not finish: the phishing answer of
+    // the model is not known yet.
+    let new: i64 = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT id FROM message WHERE provider_id = 'new'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let body = Body {
+        subject: "Lunch".into(),
+        sender: "ana@example.org".into(),
+        text: "Pay here".into(),
+    };
+    b.store.put_body(new, &body).unwrap();
+    assert!(matches!(
+        write(&b.store, t, None, &fake, 3),
+        Err(Error::NotReady)
+    ));
+    assert!(fake.calls.borrow().is_empty());
+    understood(&b.store);
+    write(&b.store, t, None, &fake, 4).unwrap();
+}
+
+#[test]
+fn hostile_or_unfinished_sent_mail_is_no_sample() {
+    let (b, t) = mailbox("samples");
+    let to = "ana@example.org";
+    b.store
+        .put_messages(
+            1,
+            &[
+                msg(
+                    "spam",
+                    "old4",
+                    350,
+                    "SENT",
+                    "me@example.com",
+                    to,
+                    Some("SPAMTEXT"),
+                ),
+                msg(
+                    "mark",
+                    "old5",
+                    360,
+                    "SENT",
+                    "me@example.com",
+                    to,
+                    Some("MARKTEXT"),
+                ),
+                msg(
+                    "open",
+                    "old6",
+                    370,
+                    "SENT",
+                    "me@example.com",
+                    to,
+                    Some("OPENTEXT"),
+                ),
+            ],
+        )
+        .unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT m.id, l.id FROM message m, label l
+                 WHERE m.provider_id = 'spam' AND l.provider_id = 'SPAM'",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE message SET understood_at = 1 WHERE provider_id IN ('spam', 'mark')",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE message SET hostile = '[\"spoof\"]' WHERE provider_id = 'mark'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fake = Fake::new(r#"{"body": "ok"}"#);
+    let s = write(&b.store, t, None, &fake, 1).unwrap();
+    assert_eq!(s.samples, 3);
+    let data = &fake.calls.borrow()[0].1;
+    for bad in ["SPAMTEXT", "MARKTEXT", "OPENTEXT"] {
+        assert!(!data.contains(bad), "{bad} in {data}");
+    }
 }
 
 #[test]
@@ -371,16 +477,79 @@ fn cut_keeps_a_prefix_of_at_most_the_limit() {
     let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
     for _ in 0..3000 {
         let mut text = String::new();
-        for _ in 0..(x % 40) {
+        let mut next = || {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            text.push_str(PIECES[(x % PIECES.len() as u64) as usize]);
+            x
+        };
+        for _ in 0..next() % 40 {
+            text.push_str(PIECES[(next() % PIECES.len() as u64) as usize]);
         }
-        let limit = (x % 30) as usize;
+        let limit = (next() % 30) as usize;
         let out = cut(&text, limit);
         let core = out.strip_suffix(CUT_MARK).unwrap_or(&out);
         assert!(core.chars().count() <= limit, "{text:?} {limit}");
         assert!(text.trim().starts_with(core), "{text:?} {limit}");
     }
+}
+
+/// For any answer text, an accepted body is the trimmed "body" string of
+/// the JSON answer, not empty, and at most `MAX_BODY` characters. Any other
+/// answer is refused.
+#[test]
+fn read_answer_accepts_only_a_valid_body() {
+    const PIECES: [&str; 16] = [
+        " ", "a", "\\n", "3", "é", "{", "}", "\"", "body", ":", ",", "\\", "[", "]", "null", "```",
+    ];
+    // The first 5 pieces are safe inside a JSON string.
+    const SAFE: u64 = 5;
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut accepted = 0;
+    for i in 0..20_000 {
+        let mut text = String::new();
+        if i % 4 == 0 {
+            text.push_str("{\"body\": \"");
+        }
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..next() % 12 {
+            let n = if i % 8 == 0 {
+                SAFE
+            } else {
+                PIECES.len() as u64
+            };
+            text.push_str(PIECES[(next() % n) as usize]);
+        }
+        if i % 4 == 0 {
+            text.push_str("\"}");
+        }
+        let reply = Reply {
+            text: text.clone(),
+            usage: Usage::default(),
+            stop: Stop::End,
+        };
+        let expect = reply
+            .json()
+            .ok()
+            .and_then(|v| {
+                v.get("body")
+                    .and_then(Value::as_str)
+                    .map(|b| b.trim().to_string())
+            })
+            .filter(|b| !b.is_empty() && b.chars().count() <= MAX_BODY);
+        match read_answer(&reply) {
+            Ok(body) => {
+                accepted += 1;
+                assert_eq!(Some(body), expect, "{text:?}");
+            }
+            Err(Error::BadAnswer(_)) => assert_eq!(expect, None, "{text:?}"),
+            Err(e) => panic!("{text:?}: {e}"),
+        }
+    }
+    assert!(accepted > 100, "too few valid answers: {accepted}");
 }

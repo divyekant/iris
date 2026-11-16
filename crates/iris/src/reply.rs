@@ -5,6 +5,7 @@
 //! the call, and the `Budgeted` model reserves the worst case first.
 
 use iris_store::{parse_id, Kind, Store};
+use iris_understand::batch;
 use iris_understand::budget::{model_row, Budgeted, ModelRow};
 use iris_understand::Model;
 use rusqlite::{params, OptionalExtension};
@@ -40,6 +41,16 @@ pub fn write(
     now_ms: i64,
 ) -> Result<String, String> {
     let thread = thread_of(store, id)?;
+    // The lock of cost control: no `iris model set` and no budget approval
+    // can change the model row or the budget during the call.
+    // shortcut: a running understanding run makes this command fail at once, wait for the lock if this bothers the owner.
+    let _lock = batch::lock(store).map_err(|e| match e {
+        batch::Error::Busy => {
+            "an understanding run or a model change is in progress: try again in a minute"
+                .to_string()
+        }
+        e => e.to_string(),
+    })?;
     let row = store
         .read(|c| Ok(model_row(c)?))
         .map_err(|e| e.to_string())?
@@ -64,12 +75,18 @@ pub fn write(
     let budgeted = Budgeted::new(model.as_ref(), store, run, Some(&row));
     let result = iris_voice::write(store, thread, intent, &budgeted, now_ms);
     let s = budgeted.state();
-    let stop = match &result {
-        Ok(_) => "done",
-        Err(_) if s.refused => "budget",
-        Err(_) if s.unknown => "unknown",
-        Err(_) if s.key_refused || s.server_failed => "model",
-        Err(_) => "error",
+    // The same stop names as a run of understanding. A valid draft can
+    // still have an unknown charge or a cost above its reservation.
+    let stop = if s.refused || s.overrun {
+        "budget"
+    } else if s.unknown {
+        "unknown"
+    } else if s.key_refused || s.server_failed {
+        "model"
+    } else if result.is_ok() {
+        "done"
+    } else {
+        "error"
     };
     let end = store.write(|tx| {
         tx.execute(
@@ -102,7 +119,8 @@ mod tests {
 
     use super::*;
 
-    struct Fake;
+    /// A model that answers a valid draft with this usage.
+    struct Fake(Usage);
 
     impl Model for Fake {
         fn name(&self) -> &str {
@@ -112,12 +130,7 @@ mod tests {
         fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
             Ok(Reply {
                 text: r#"{"body": "Hi Ana, yes. D"}"#.into(),
-                usage: Usage {
-                    input_tokens: 1000,
-                    output_tokens: 100,
-                    cost_micro_usd: None,
-                    known: true,
-                },
+                usage: self.0,
                 stop: Stop::End,
             })
         }
@@ -153,6 +166,12 @@ mod tests {
                 }],
             )
             .unwrap();
+        store
+            .write(|tx| {
+                tx.execute("UPDATE message SET understood_at = 1", [])?;
+                Ok(())
+            })
+            .unwrap();
         // A priced model with no approved budget: the call is refused.
         store
             .write(|tx| {
@@ -166,7 +185,14 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Ok(Box::new(Fake)) };
+        let usage = std::cell::Cell::new(Usage {
+            input_tokens: 1000,
+            output_tokens: 100,
+            cost_micro_usd: None,
+            known: true,
+        });
+        let connect =
+            |_: &ModelRow| -> Result<Box<dyn Model>, String> { Ok(Box::new(Fake(usage.get()))) };
         let id = format!("m-{}", ids[0]);
         let e = write(&store, &id, None, &connect, 10).unwrap_err();
         assert!(e.contains("Approve a budget"), "{e}");
@@ -210,6 +236,40 @@ mod tests {
             ]
         );
         assert!(write(&store, "c-1", None, &connect, 30).is_err());
+
+        // A valid draft with an unknown charge, then with a cost above its
+        // reservation: the run row says so.
+        usage.set(Usage {
+            known: false,
+            ..usage.get()
+        });
+        write(&store, "t-1", None, &connect, 40).unwrap();
+        usage.set(Usage {
+            input_tokens: 1000,
+            output_tokens: 10_000_000,
+            cost_micro_usd: None,
+            known: true,
+        });
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 100000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        write(&store, "t-1", None, &connect, 50).unwrap();
+        let stops: Vec<String> = store
+            .read(|c| {
+                let mut st = c.prepare("SELECT stop FROM understand_run ORDER BY id")?;
+                let rows = st.query_map([], |r| r.get(0))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert_eq!(stops, ["budget", "done", "unknown", "budget"]);
+
+        // The lock of cost control is held: no call.
+        let _lock = batch::lock(&store).unwrap();
+        let e = write(&store, "t-1", None, &connect, 60).unwrap_err();
+        assert!(e.contains("in progress"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

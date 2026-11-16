@@ -126,28 +126,36 @@ struct Msg {
     text: Option<String>,
     sent: bool,
     hostile: bool,
+    /// Understanding finished: the hostile check of the model ran too.
+    understood: bool,
 }
+
+/// SQL that is true when the message `m`, with the header `h`, is hostile
+/// mail: a hostile mark, the label `SPAM`, or a `hostile` sender (spec 1
+/// section 6.7). No hostile mail goes to the model.
+const HOSTILE: &str = "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
+           OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                      WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
+           OR EXISTS (SELECT 1 FROM sender s
+                      WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))";
 
 /// The messages of the thread that are not gone and not a Gmail draft,
 /// oldest first.
 fn thread_messages(c: &Connection, thread: i64) -> rusqlite::Result<Vec<Msg>> {
-    let mut st = c.prepare_cached(
+    let mut st = c.prepare_cached(&format!(
         "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, b.subject, b.text,
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-           (m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
-           OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                      WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
-           OR EXISTS (SELECT 1 FROM sender s
-                      WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile')
+           {HOSTILE},
+           m.understood_at IS NOT NULL
          FROM message m
          LEFT JOIN header h ON h.message_id = m.id
          LEFT JOIN body b ON b.message_id = m.id
          WHERE m.thread_id = ?1 AND m.gone_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                            WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
-         ORDER BY coalesce(m.internal_date, 0), m.id",
-    )?;
+         ORDER BY coalesce(m.internal_date, 0), m.id"
+    ))?;
     let rows = st.query_map([thread], |r| {
         let text: Option<String> = r.get(5)?;
         Ok(Msg {
@@ -159,6 +167,7 @@ fn thread_messages(c: &Connection, thread: i64) -> rusqlite::Result<Vec<Msg>> {
             text,
             sent: r.get(6)?,
             hostile: r.get(7)?,
+            understood: r.get(8)?,
         })
     })?;
     rows.collect()
@@ -169,8 +178,9 @@ fn check(msgs: &[Msg]) -> Result<&Msg> {
     if msgs.iter().any(|m| m.hostile) {
         return Err(Error::Hostile);
     }
-    // A message with no clean text did not pass the hostile check yet.
-    if msgs.iter().any(|m| m.text.is_none()) {
+    // Understanding writes the clean text first and the phishing answer of
+    // the model last: only a message that it finished passed each check.
+    if msgs.iter().any(|m| m.text.is_none() || !m.understood) {
         return Err(Error::NotReady);
     }
     msgs.last().ok_or(Error::NotReady)
@@ -200,12 +210,13 @@ fn samples(
     thread: i64,
     to: Option<&str>,
 ) -> rusqlite::Result<Vec<(Option<String>, String)>> {
-    let mut st = c.prepare_cached(
+    let mut st = c.prepare_cached(&format!(
         "SELECT h.to_addrs, b.text
          FROM message m
          JOIN body b ON b.message_id = m.id
          LEFT JOIN header h ON h.message_id = m.id
          WHERE m.account_id = ?1 AND m.thread_id <> ?2 AND m.gone_at IS NULL
+           AND m.understood_at IS NOT NULL AND NOT {HOSTILE}
            AND trim(b.text) <> ''
            AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
@@ -214,8 +225,8 @@ fn samples(
          ORDER BY coalesce(instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
                                  ',' || ?3 || ','), 0) > 0 DESC,
                   coalesce(m.internal_date, 0) DESC, m.id DESC
-         LIMIT ?4",
-    )?;
+         LIMIT ?4"
+    ))?;
     let rows = st.query_map(params![account, thread, to, MAX_SAMPLES as i64], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?;
