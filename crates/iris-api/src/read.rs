@@ -527,7 +527,7 @@ fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
 /// page of the same section gives [`Error::Query`].
 fn decode_cursor(token: &str, name: &str, count: usize) -> Result<Vec<SqlValue>> {
     let bad = || Error::Query(format!("after {token} is not the next value of a page"));
-    if token.len() % 2 != 0 || !token.is_ascii() {
+    if !token.len().is_multiple_of(2) || !token.is_ascii() {
         return Err(bad());
     }
     let bytes = (0..token.len())
