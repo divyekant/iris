@@ -678,6 +678,6 @@ mod tests {
         let cli = Cli::try_parse_from(["iris", "backup", "/tmp/b", "--data", "/tmp/d"]).unwrap();
         assert_eq!(cli.data, Some(PathBuf::from("/tmp/d")));
         let cli = Cli::try_parse_from(["iris", "export", "/tmp/e"]).unwrap();
-        assert!(matches!(cli.command, Command::Export { path } if path == PathBuf::from("/tmp/e")));
+        assert!(matches!(cli.command, Command::Export { path } if path.as_os_str() == "/tmp/e"));
     }
 }
