@@ -58,7 +58,8 @@
   $effect(() => {
     const fresh = new Map(page.senders.map((s) => [s.id, s]));
     untrack(() => {
-      const kept = rows.filter((s) => fresh.has(s.id) || answered(s)).map((s) => fresh.get(s.id) ?? s);
+      // A row stays while it has something to tell: an answer, or the refusal of an answer.
+      const kept = rows.filter((s) => fresh.has(s.id) || answered(s) || problem[s.id]).map((s) => fresh.get(s.id) ?? s);
       rows = [...kept, ...page.senders.filter((s) => !kept.some((k) => k.id === s.id))];
     });
   });

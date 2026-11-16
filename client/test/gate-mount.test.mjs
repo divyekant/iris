@@ -252,3 +252,21 @@ test("the brief shows the newest load when two loads answer out of order", async
     view.destroy();
   }
 });
+
+test("in the brief, a refused answer keeps its row and its words after the brief loads again", async () => {
+  const words = "This sender is not at the gate now. Look at the brief again.";
+  // A rule took Leo's items out after the brief loaded: the next brief has no Leo.
+  const after = { ...fx.brief, gate: { count: 2, senders: [fx.gate.senders[0], fx.gate.senders[2]], next: null } };
+  const asked = serve((path) => (path === "brief" ? [200, after] : [409, { error: words }]));
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  try {
+    buttons(view, "Accept")[1].click();
+    await until(() => asked.some(([, p]) => p === "brief"));
+    await until(() => text(view.target.querySelector("#strangers")).includes("2"));
+    view.flushSync();
+    assert.match(text(view.target), /Leo Park/);
+    assert.match(text(view.target), new RegExp(words.replace(/\./g, "\\.")));
+  } finally {
+    view.destroy();
+  }
+});
