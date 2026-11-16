@@ -216,13 +216,7 @@ messages in the thread files.
 ### The build
 
 `iris_workspace::build(store, job, dir) -> Result<Built>`. `Built` gives the
-counts of threads, messages, items and people that the build wrote, and the
-scope stamp of the scope that the build read.
-
-The scope stamp is the pair (count of the scope rows of the job, count of
-the revoked rows). Rows are only added or revoked, never deleted or changed
-back, so each change of the scope changes the stamp.
-`iris_job::scope_stamp(store, job)` gives the current stamp.
+counts of threads, messages, items and people that the build wrote.
 
 1. Make the folder that holds `dir` if it is not there. Take the lock file
    `.<name>.lock` beside `dir` (`iris_store::FileLock`),
@@ -252,12 +246,23 @@ A crash in step 6 can leave an owned path absent. The session launcher
 (R4-04) starts a session only after a build that returned `Ok`, so a session
 never sees a workspace with an absent path.
 
-A revoke can come while a build runs, after the build read the scope. The
-launcher (R4-04) must keep this rule: hold the workspace lock, build, then
-compare the stamp of the build with `scope_stamp`. If the two differ, build
-again. Start the session only when they agree. A revoke while a session
-runs takes effect in the read verbs at once (they read the current grant)
-and in the files at the next build.
+The files are a snapshot: they hold the mail that the grant gave at the
+moment of the read transaction of step 5. The grant can change after that
+moment: a revoke, a message that becomes hostile mail or gone, a message
+that becomes the source of a signal, or a job that ends. Such a change can
+come during the build, or one moment after the session starts. The two
+cases are the same for the agent, so no check at the start of a session
+can close the gap. The rules are:
+
+- The read verbs of a session read the current grant on each call, so a
+  change takes effect in them at once.
+- The files take the change at the next build. The engine builds before
+  each session (R4-04).
+- R4-04 decides if a revoke or a new hostile mark stops a running session.
+  Until then, the files can hold a message for the time between the change
+  and the next build. This is a known limit, with a GitHub issue.
+
+Only `build` takes the workspace lock. The launcher does not hold it.
 
 Each file is a new file (`create_new`), mode `0600`, so the build never
 writes through a link that the agent made. A rename and a remove act on the
@@ -308,7 +313,7 @@ Markdown and JSON with `serde_json`.
 | A change or a delete of a scope row, other than one revoke | Refused by the trigger | Unit test |
 | A revoke of a thread or an item of the scope | The next build has no file of its mail. The row stays, with `revoked_by` and `revoked_at` | Unit test |
 | A revoke by an agent | Refused | Unit test, and raw SQL |
-| A revoke while a build runs | The stamp of the build differs from `scope_stamp`, so the launcher builds again (R4-04) | Unit test: the stamp changes on each add and each revoke |
+| A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
 | An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
 | An unknown job | `Error::NotFound` | Unit test |
@@ -316,8 +321,7 @@ Markdown and JSON with `serde_json`.
 ## Impact
 
 - `crates/iris-store/src/schema_15.sql` and the migration list.
-- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`,
-  `scope_stamp`.
+- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`.
 - `crates/iris-talk`: the clean messages of a thread become public, so the
   build uses the same rule of hostile mail as the conversation.
 - New crate `crates/iris-workspace`.
