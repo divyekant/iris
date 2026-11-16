@@ -61,19 +61,26 @@
       "minItems": 1,
       "prefixItems": [
         {
-          "properties": {
-            "state": {
-              "const": "working"
+          "allOf": [
+            {
+              "$ref": "#/$defs/event"
             },
-            "by": {
-              "const": "person"
+            {
+              "properties": {
+                "state": {
+                  "const": "working"
+                },
+                "by": {
+                  "const": "person"
+                }
+              },
+              "not": {
+                "required": [
+                  "answer"
+                ]
+              }
             }
-          },
-          "not": {
-            "required": [
-              "answer"
-            ]
-          }
+          ]
         }
       ],
       "items": {
