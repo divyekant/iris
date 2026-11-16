@@ -312,16 +312,23 @@ fn corrections(conn: &Connection, item: i64, doc: &mut Value) -> rusqlite::Resul
         let Ok(value) = serde_json::from_str::<Value>(&value) else {
             continue;
         };
-        let mut at = &mut *doc;
-        for key in field.split('.') {
-            if !at.is_object() {
-                *at = json!({});
-            }
-            at = &mut at[key];
-        }
-        *at = value;
+        set_field(doc, &field, value);
     }
     Ok(())
+}
+
+/// Set the field at the dotted path `field` (for example `due.date`) of
+/// `doc` to `value`. A missing or non-object step becomes an empty object.
+/// The one rule that applies a correction, for each caller.
+pub fn set_field(doc: &mut Value, field: &str, value: Value) {
+    let mut at = doc;
+    for key in field.split('.') {
+        if !at.is_object() {
+            *at = json!({});
+        }
+        at = &mut at[key];
+    }
+    *at = value;
 }
 
 /// Each message of the thread that is understood or `current`, also when it

@@ -11,6 +11,7 @@
 
 pub mod batch;
 pub mod budget;
+pub mod correct;
 pub mod head;
 pub mod prompt;
 pub mod rules;

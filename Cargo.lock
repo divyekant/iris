@@ -692,6 +692,7 @@ dependencies = [
  "iris-store",
  "iris-sync",
  "iris-synth",
+ "iris-understand",
  "iris-web",
  "serde",
  "serde_json",

@@ -1,7 +1,7 @@
 //! The read verbs (tracker item R1-23): `iris status`, `iris search` and
 //! `iris show`. Each verb calls the same `iris_api` function as the HTTP
 //! route, so the verb and the client get the same data. `--json` prints the
-//! JSON of the route.
+//! JSON of the route. `iris correct` (R2-11) is the one write verb.
 
 use std::fmt::Write as _;
 
@@ -126,6 +126,17 @@ pub fn show(store: &Store, id: &str, as_json: bool) -> Output {
         .ok_or_else(not_found)?;
     // An item is a form document: JSON is its only format.
     to_json(&item)
+}
+
+/// `iris correct`: one correction by a person (R2-11). Prints the item after
+/// the change, as `iris show` does.
+pub fn correct(store: &Store, id: &str, field: &str, value: &str, now_ms: i64) -> Output {
+    // shortcut: text that is not JSON is a string, so `2026-01-09` needs no
+    // quotes; a string that is also JSON (`42`, `true`) needs them.
+    let value = serde_json::from_str(value).unwrap_or_else(|_| value.into());
+    iris_understand::correct::correct(store, id, field, value, now_ms)
+        .map_err(|e| e.to_string())??;
+    show(store, id, true)
 }
 
 fn summary_line(m: &iris_api::MessageSummary) -> String {

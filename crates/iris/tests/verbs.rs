@@ -187,3 +187,40 @@ fn serve_refuses_an_address_that_is_not_loopback() {
     assert!(err.contains("not a loopback address"), "{err}");
     assert!(!dir.exists(), "the engine opened the store");
 }
+
+#[test]
+fn correct_changes_a_field_and_refuses_a_common_field() {
+    let (store, _fake) = synced("correct");
+    let example = include_str!("../../../docs/spec/schema/examples/record-receipt.json");
+    let row: i64 = store
+        .write(|tx| {
+            let id: i64 = tx.query_row(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at, derived_by)
+                 VALUES ('record', 1, 'kept', '{}', 0, 0, 'model') RETURNING id",
+                [],
+                |r| r.get(0),
+            )?;
+            let doc = example.replace("r-1201", &format!("r-{id}"));
+            tx.execute("UPDATE item SET doc = ?2 WHERE id = ?1", (id, doc))?;
+            Ok(id)
+        })
+        .unwrap();
+    let id = format!("r-{row}");
+    // Text that is not JSON is a string.
+    let doc = json(&store, &["correct", &id, "fields.date", "2026-11-03"]);
+    assert_eq!(doc["fields"]["date"], "2026-11-03");
+    assert_eq!(doc["status"], "corrected");
+    let doc = json(
+        &store,
+        &["correct", &id, "fields.amount", r#"{"value": "25.00", "currency": "EUR"}"#],
+    );
+    assert_eq!(doc["fields"]["amount"]["value"], "25.00");
+    assert_eq!(json(&store, &["show", &id]), doc);
+
+    let (ok, _, err) = iris(&store, &["correct", &id, "title", "Other"]);
+    assert!(!ok);
+    assert!(err.contains("common field"), "{err}");
+    let (ok, _, err) = iris(&store, &["correct", "r-999", "fields.date", "2026-11-03"]);
+    assert!(!ok);
+    assert!(err.contains("no item"), "{err}");
+}

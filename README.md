@@ -125,6 +125,17 @@ it (tracker items R1-10 and R1-28). Before that, use `label:`, `after:` and
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
 
+To correct a wrong item, change one field:
+
+```bash
+target/release/iris correct c-7 due.date 2026-01-09
+```
+
+The value is JSON, or else a string. The correction stays through each later
+sync and understanding run. You cannot correct `status`, `title`, `sources` or
+another common field (specification 1, section 6.1). If the item is not valid
+after the change, the command changes nothing.
+
 To copy the data folder while the engine runs, run:
 
 ```bash
