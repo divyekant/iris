@@ -2024,4 +2024,21 @@ mod tests {
             Some("Hello World\nHello World")
         );
     }
+
+    #[test]
+    fn a_later_stream_replaces_an_older_object_of_its_number() {
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< /Resources << /Font << /F1 9 0 R >> >> >>", None),
+            (9, "<< /Type /Font /Subtype /Type1 >>", None),
+            (3, "<< >>", Some(CODES)),
+            (5, TYPE0, None),
+            (6, "<< >>", Some(CMAP)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
+    }
 }
