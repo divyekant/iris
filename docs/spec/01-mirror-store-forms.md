@@ -319,7 +319,9 @@ makes a copy while the engine runs:
    (section 4.5) does not start, and the engine does not write
    `policy.toml`. The cleanup takes the same lock for its full step: the
    database change and the file delete.
-2. Copy `iris.db` with the SQLite online backup.
+2. Copy `iris.db` with `VACUUM INTO`. It reads one snapshot in one read
+   transaction. The SQLite online backup starts again after each write of
+   another connection, so it can fail to end while the engine writes.
 3. Copy each content file that the copy of `iris.db` refers to.
 4. Copy `key` with mode `0600`, and copy `policy.toml`. Without `key`, the
    backup cannot decrypt the secrets.
