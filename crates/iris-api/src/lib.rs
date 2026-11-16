@@ -77,6 +77,7 @@ pub fn router(store: Arc<Store>) -> Router {
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/brief", get(get_brief))
+        .route("/api/proposal", get(get_proposal))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/search", get(get_search))
@@ -99,6 +100,11 @@ async fn get_status(State(s): State<Arc<Store>>) -> Result<Response> {
 
 async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(brief(&s, now_ms())?).into_response())
+}
+
+async fn get_proposal(State(s): State<Arc<Store>>) -> Result<Response> {
+    let body = proposal(&s, now_ms())?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
 
 #[derive(Deserialize)]

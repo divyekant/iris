@@ -582,6 +582,28 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     Ok(brief)
 }
 
+/// The triage proposal of specification 1, section 8, in the changeset
+/// format of specification 2: `{"changesets": [...]}`, one changeset for each
+/// account, with the message IDs of each action. Each action is `proposed`.
+/// Nothing is applied or stored. The value is JSON text, so the ID lists are
+/// not held twice.
+pub fn proposal(store: &Store, now: i64) -> Result<Vec<u8>> {
+    let accounts: Vec<i64> = store.read(|c| {
+        let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
+        let ids = st.query_map([], |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
+    })?;
+    let mut out = b"{\"changesets\":[".to_vec();
+    for (i, account) in accounts.into_iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        iris_observe::write_changeset(store, account, &rfc3339(now), &mut out)?;
+    }
+    out.extend_from_slice(b"]}");
+    Ok(out)
+}
+
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
 fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSummary, Message)>> {

@@ -800,6 +800,22 @@ async fn brief_follows_the_queries_of_section_8() {
         b["proposal"],
         json!({"count": want, "verbs": {"archive": want}})
     );
+    // The full proposal: a changeset with the message IDs of each action.
+    let (code, p) = get(&store, "/api/proposal").await;
+    assert_eq!(code, StatusCode::OK);
+    let cs = &p["changesets"].as_array().unwrap()[0];
+    assert!(cs["id"].as_str().unwrap().starts_with("cs-"));
+    let actions = cs["actions"].as_array().unwrap();
+    let targets: usize = actions
+        .iter()
+        .map(|a| {
+            assert_eq!(a["decision"]["state"], "proposed");
+            let ids = a["targets"]["messages"].as_array().unwrap();
+            assert!(ids.iter().all(|m| m.as_str().unwrap().starts_with("m-")));
+            ids.len()
+        })
+        .sum();
+    assert_eq!(targets as u64, want);
 
     // The HTTP route gives the same shape.
     let (code, http) = get(&store, "/api/brief").await;
