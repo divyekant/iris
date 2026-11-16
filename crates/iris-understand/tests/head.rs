@@ -119,6 +119,17 @@ fn a_folded_part_header_is_unfolded_like_the_top_header() {
 }
 
 #[test]
+fn the_calendar_type_and_method_parameter_match_whole_tokens() {
+    let other =
+        b"Content-Type: application/x-text/calendar; method=REQUEST\r\n\r\nMETHOD:REQUEST\r\n";
+    assert!(!inv(other));
+    let x = b"Content-Type: text/calendar; x-method=REQUEST\r\n\r\nMETHOD:CANCEL\r\n";
+    assert!(!inv(x));
+    let quoted = b"Content-Type: Text/Calendar; charset=utf-8; Method=\"REQUEST\"\r\n\r\nx\r\n";
+    assert!(inv(quoted));
+}
+
+#[test]
 fn named_zones_and_unknown_zones() {
     assert_eq!(
         date("Thu, 25 Jan 2024 06:26:35 EST"),

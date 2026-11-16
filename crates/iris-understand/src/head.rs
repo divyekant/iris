@@ -332,32 +332,44 @@ enum Enc {
 }
 
 /// Read one header block: record its boundary, and set the body rule.
-/// True if its `Content-Type` has `method=REQUEST`.
+/// True if its `Content-Type` is `text/calendar` with `method=REQUEST`.
+/// The `Content-Type` parser of `mail-parser` reads the media type and the
+/// parameter names as whole tokens (quotes, comments, RFC 2231).
 fn end_block(block: &[u8], boundaries: &mut Vec<Vec<u8>>, body: &mut Enc) -> bool {
-    let f = fields(block);
-    let get = |name: &str| {
-        f.iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map_or("", |(_, v)| v.as_str())
+    let mut head = Vec::with_capacity(block.len() + 2);
+    head.extend_from_slice(block);
+    head.extend_from_slice(b"\n\n");
+    let Some(msg) = mail_parser::MessageParser::default().parse_headers(&head) else {
+        *body = Enc::Other;
+        return false;
     };
-    let ct = get("content-type").as_bytes();
-    let low = ct.to_ascii_lowercase();
-    if let Some(bd) = param(&low, ct, b"boundary=") {
-        if boundaries.len() < 50 {
-            boundaries.push(bd);
+    let part = msg.root_part();
+    let ct = part.content_type();
+    if let Some(bd) = ct.as_ref().and_then(|c| c.attribute("boundary")) {
+        if boundaries.len() < 50 && !bd.is_empty() {
+            boundaries.push(bd.as_bytes().to_vec());
         }
     }
-    let cal = contains(&low, b"text/calendar");
-    *body = match get("content-transfer-encoding")
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    let cal = ct.as_ref().is_some_and(|c| {
+        c.ctype().eq_ignore_ascii_case("text")
+            && c.subtype()
+                .is_some_and(|t| t.eq_ignore_ascii_case("calendar"))
+    });
+    let enc = part
+        .content_transfer_encoding()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    *body = match enc.as_str() {
         _ if !cal => Enc::Other,
         "base64" => Enc::Base64,
         "quoted-printable" => Enc::Qp,
         _ => Enc::Plain,
     };
-    cal && param(&low, ct, b"method=").is_some_and(|m| m.eq_ignore_ascii_case(b"request"))
+    cal && ct
+        .as_ref()
+        .and_then(|c| c.attribute("method"))
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"))
 }
 
 /// True if the decoded calendar text in `buf` has a `METHOD:REQUEST` line.
@@ -413,27 +425,6 @@ fn base64(src: &[u8]) -> Vec<u8> {
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/'))
         .collect();
     LAX.decode(clean).unwrap_or_default()
-}
-
-fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len()).any(|w| w == needle)
-}
-
-/// The value of the parameter `name` (lowercase, with `=`) in a header
-/// value, with its case kept. `low` is the value in lowercase.
-fn param(low: &[u8], v: &[u8], name: &[u8]) -> Option<Vec<u8>> {
-    let at = low.windows(name.len()).position(|w| w == name)? + name.len();
-    let rest = &v[at..];
-    let val = match rest.strip_prefix(b"\"") {
-        Some(q) => &q[..q.iter().position(|&c| c == b'"').unwrap_or(q.len())],
-        None => {
-            &rest[..rest
-                .iter()
-                .position(|&c| c == b';' || c.is_ascii_whitespace())
-                .unwrap_or(rest.len())]
-        }
-    };
-    (!val.is_empty()).then(|| val.to_vec())
 }
 
 const MONTHS: [&str; 12] = [
