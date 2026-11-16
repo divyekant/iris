@@ -33,7 +33,7 @@ pub const TEXT_LIMIT: usize = 32_000;
 pub const ATTACHMENT_TEXT_LIMIT: usize = 1_000_000;
 /// The most decoded bytes of body text parts (plain text or HTML) for each message.
 pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
-/// The most bytes of text that go into the quote and signature steps.
+/// The most bytes of text that stay after the quote and signature steps, for the URL and tidy steps.
 const STEP_LIMIT: usize = 512 * 1024;
 /// The most MIME parts that the parser reads in one message.
 pub const MAX_PARTS: usize = 500;
@@ -129,19 +129,21 @@ impl Walker {
     fn render(&mut self, bodies: Vec<String>, is_reply: bool) -> String {
         let mut text = String::new();
         let mut left = STEP_LIMIT;
-        for mut t in bodies {
+        for t in bodies {
+            // Each part has its own quotes and signature: a cut in one part
+            // must not remove the text of a later part. The body budget
+            // bounds the input, and only the text that stays uses the step
+            // budget, so quoted history cannot use up the room of later parts.
+            let t = t.replace("\r\n", "\n").replace('\r', "\n");
+            let mut t = quote::strip_signature(&quote::strip_quotes(&t, is_reply));
+            if t.trim().is_empty() {
+                continue;
+            }
             if t.len() > left {
                 t.truncate(floor_char(&t, left));
                 self.cut = true;
             }
             left -= t.len();
-            // Each part has its own quotes and signature: a cut in one part
-            // must not remove the text of a later part.
-            let t = t.replace("\r\n", "\n").replace('\r', "\n");
-            let t = quote::strip_signature(&quote::strip_quotes(&t, is_reply));
-            if t.trim().is_empty() {
-                continue;
-            }
             if !text.is_empty() {
                 text.push_str("\n\n");
             }

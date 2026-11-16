@@ -500,3 +500,15 @@ fn an_attached_message_keeps_its_body_before_its_attachment_text() {
         .as_deref()
         .is_some_and(|t| t.ends_with("[Iris cut the text here.]")));
 }
+
+#[test]
+fn long_quoted_history_leaves_room_for_a_later_part() {
+    let history = "> old line of the thread\n".repeat(30_000);
+    let raw = crlf(&format!(
+        "Subject: Re: Plan\nIn-Reply-To: <a@example.org>\nContent-Type: multipart/mixed; boundary=m\n\n\
+         --m\nContent-Type: text/plain\n\nShort reply.\n\nOn Mon, Ana wrote:\n{history}\
+         --m\nContent-Type: text/plain\n\nThe new part.\n--m--\n"
+    ));
+    let c = clean(&raw);
+    assert_eq!(c.text, "Short reply.\n\nThe new part.");
+}
