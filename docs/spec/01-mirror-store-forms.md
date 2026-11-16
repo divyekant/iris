@@ -127,9 +127,10 @@ other sync of the account runs.
    - `messageDeleted`: mark the message as gone (section 4.5). If the mirror
      does not have the message, ignore the record.
    - `labelAdded` and `labelRemoved`: change the label set of the message.
-3. Save the `historyId` of the response as the new history ID. Save it in the
-   same SQLite transaction as the last change, so that a crash cannot save a
-   history ID without its changes.
+3. Save the `historyId` of the response as the new history ID. Save it only
+   after the last change is saved, so that a crash cannot save a history ID
+   without its changes. A crash before this step leaves the old history ID.
+   The next sync applies the same records again, and gets the same mirror.
 
 If a `labelAdded` or `labelRemoved` record names a message that the mirror
 does not have, fetch the message as for `messageAdded`.
@@ -217,6 +218,10 @@ gets its saved status again.
 - On HTTP 401, the engine gets a new access token with the refresh token, one
   time. If that fails, the account goes to the state "needs sign-in", and the
   brief shows it.
+- A message that gives an error that a new try does not fix (a bad answer,
+  or HTTP 400) does not stop the sync. The engine records the message in the
+  sync log with the kind `fetch`, keeps it as "known, not fetched", and
+  continues. Verify (section 4.8) finds the message and fetches it again.
 - The engine never parses a message body in the sync. The sync stores bytes.
   The understanding step reads them later (section 7). A defect in a parser
   cannot stop the mirror.
