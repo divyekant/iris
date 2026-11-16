@@ -277,27 +277,18 @@ fn the_person_rule() {
     assert_eq!(bo.name.as_deref(), Some("Bo Hart"));
     // Newest first: Ana (6000), then the list and Bo.
     assert_eq!(addrs(&all[0]), ["ana@example.org"]);
-    // The new sender rows record the person rule (specification 1, section 6.7).
-    let rows: Vec<(String, String, String, String)> = h
+    // The new sender rows have no kind: the sender step decides it.
+    let kinds: i64 = h
         .store
         .read(|c| {
-            let mut st = c.prepare(
-                "SELECT address, kind, basis, decided_by FROM sender
-                 WHERE decided_at > 0 ORDER BY address",
-            )?;
-            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            Ok(c.query_row(
+                "SELECT count(*) FROM sender WHERE kind IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?)
         })
         .unwrap();
-    let row = |a: &str, basis: &str| (a.into(), "person".into(), basis.into(), "engine".into());
-    assert_eq!(
-        rows,
-        [
-            row("ana@example.org", "sent"),
-            row("bo@example.org", "replied"),
-            row("list@example.org", "sent")
-        ]
-    );
+    assert_eq!(kinds, 0);
 }
 
 #[test]
@@ -728,14 +719,13 @@ fn a_sender_after_your_last_message_is_not_known() {
 }
 
 #[test]
-fn the_person_rule_changes_an_engine_kind() {
-    let mut h = Hand::new("reclass");
+fn the_person_rule_wins_over_an_engine_kind_and_keeps_it() {
+    let mut h = Hand::new("engine-kind");
     h.store
         .write(|tx| {
             tx.execute_batch(
                 "INSERT INTO sender(address, kind, basis, decided_by) VALUES
-                   ('ana@example.org', 'stranger', 'none', 'engine'),
-                   ('bo@example.org', 'service', 'list', 'engine');",
+                   ('ana@example.org', 'stranger', 'none', 'engine');",
             )?;
             Ok(())
         })
@@ -745,17 +735,25 @@ fn the_person_rule_changes_an_engine_kind() {
         "SENT",
         "me@example.com",
         "Me",
-        "ana@example.org, bo@example.org",
+        "john(work)@example.org, ana@example.org",
     );
-    assert_eq!(h.people().len(), 2);
-    let kinds: Vec<(String, String)> = h
+    let mut found: Vec<String> = h
+        .people()
+        .iter()
+        .flat_map(addrs)
+        .map(String::from)
+        .collect();
+    found.sort();
+    assert_eq!(found, ["ana@example.org", "john@example.org"]);
+    let kind: String = h
         .store
         .read(|c| {
-            let mut st = c.prepare("SELECT kind, basis FROM sender ORDER BY address")?;
-            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            Ok(c.query_row(
+                "SELECT kind FROM sender WHERE address = 'ana@example.org'",
+                [],
+                |r| r.get(0),
+            )?)
         })
         .unwrap();
-    let person = ("person".to_string(), "sent".to_string());
-    assert_eq!(kinds, [person.clone(), person]);
+    assert_eq!(kind, "stranger", "the sender step owns the kind");
 }

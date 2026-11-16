@@ -16,6 +16,7 @@
 //! (section 7.1, step 1). The profile ID is the `p-` ID of the first sender
 //! row of its addresses. This crate adds a sender row (address and name, no
 //! kind) for each address that has no row, so that each address has its ID.
+//! It never writes a kind: the sender step decides the kind.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -226,21 +227,12 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
     store.write(|tx| {
         let mut kind =
             tx.prepare_cached("SELECT id, kind, decided_by FROM sender WHERE address = ?1")?;
-        // A new row, or a row that the engine did not set to `person`, gets
-        // the person rule that matched (specification 1, section 6.7). The
-        // engine checks `hostile` first, and a kind that a person set wins,
-        // so those rows never get here.
+        // A new row has no kind: the sender step decides it (specification
+        // 1, section 6.7). This crate never writes a kind.
         let mut add = tx.prepare_cached(
-            "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
-             VALUES (?1, ?2, 'person', ?3, 'engine', ?4)
-             ON CONFLICT(address) DO UPDATE SET kind = 'person', basis = excluded.basis,
-               decided_by = 'engine', decided_at = excluded.decided_at
-             WHERE sender.kind IS NULL
-               OR (sender.kind NOT IN ('person', 'hostile') AND sender.decided_by IS NOT 'person')",
+            "INSERT INTO sender(address, name) VALUES (?1, ?2)
+             ON CONFLICT(address) DO NOTHING RETURNING id",
         )?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
         let mut addrs: Vec<&String> = stats.keys().collect();
         addrs.sort();
         for a in addrs {
@@ -260,18 +252,8 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                 continue;
             }
             let id = match row {
-                Some((id, Some(k), _)) if k == "person" || by == Some("person") => id,
-                _ => {
-                    let basis = if stats[a].seen.iter().any(|s| !s.from_them) {
-                        "sent"
-                    } else {
-                        "replied"
-                    };
-                    add.execute(params![a, stats[a].latest_name(), basis, now])?;
-                    tx.query_row("SELECT id FROM sender WHERE address = ?1", [a], |r| {
-                        r.get(0)
-                    })?
-                }
+                Some((id, _, _)) => id,
+                None => add.query_row(params![a, stats[a].latest_name()], |r| r.get(0))?,
             };
             ids.insert(a.clone(), id);
             kept.push(a.clone());
@@ -537,7 +519,11 @@ pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
                         part.comment = Some(t.to_string());
                     }
                     comment.clear();
-                    target(&mut part, &mut comment, 0, angle, " ", false);
+                    // A comment separates words of a name, but not the
+                    // parts of an address such as `john(x)@example.org`.
+                    if !angle {
+                        part.name.push(' ');
+                    }
                 } else {
                     comment.push(c);
                 }

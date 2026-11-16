@@ -602,6 +602,12 @@ message.
 Order: the engine checks `hostile` first, then `person`, then `service`. A
 sender that matches no rule is a `stranger`.
 
+A sender row can have no kind yet. A step that needs the `p-` ID of an
+address (conversations, people) adds the row with the address and the name
+only, and never writes a kind. The sender step (section 7.1, step 3) sets the
+kind, `basis` and `decided_by`. A reader that needs the kind of a row with no
+kind applies the rules of this section itself.
+
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
 A decision by a person always wins over the engine, and the engine never
 changes it. From release 2, the person sets the kind in the web client. In
