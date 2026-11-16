@@ -273,6 +273,8 @@ export const watches = [
   { id: "w-1", text: "invoice from:dana", created: "2026-11-02T10:00:00Z", state: "waits", arrived: null, message: null },
 ];
 
+let lastWatch = 10;
+
 export function watchPost(path: string, body: { text?: string }): [number, unknown] {
   const remove = path.match(/^\/watches\/([^/?]+)\/remove$/);
   if (remove) {
@@ -283,7 +285,7 @@ export function watchPost(path: string, body: { text?: string }): [number, unkno
   }
   const text = (body.text ?? "").trim();
   if (!text) return [400, { error: "watch: the watch has no search text" }];
-  const w = { id: `w-${watches.length + 10}`, text, created: new Date().toISOString(), state: "waits", arrived: null, message: null };
+  const w = { id: `w-${++lastWatch}`, text, created: new Date().toISOString(), state: "waits", arrived: null, message: null };
   watches.unshift(w);
   return [201, w];
 }

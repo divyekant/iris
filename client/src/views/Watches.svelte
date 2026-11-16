@@ -6,7 +6,8 @@
   import { own } from "../api";
   import { addWatch, day, removeWatch, type Watch } from "../watches";
 
-  let { watches, onchange }: { watches: Watch[]; onchange: () => void } = $props();
+  // `onadded` gets the new watch, or null when the engine gave none (an older engine).
+  let { watches, onadded, onstopped }: { watches: Watch[]; onadded: (w: Watch | null) => void; onstopped: (id: string) => void } = $props();
 
   let adding = $state(false);
   let text = $state("");
@@ -24,10 +25,10 @@
     busy = true;
     error = "";
     try {
-      await addWatch(text);
+      const w = await addWatch(text);
       text = "";
       adding = false;
-      onchange();
+      onadded(w?.id ? w : null);
     } catch (e) {
       error = own(e) || "Iris could not start the watch. Try again.";
     } finally {
@@ -40,9 +41,9 @@
     error = "";
     try {
       await removeWatch(id);
-      onchange();
+      onstopped(id);
     } catch (e) {
-      if ((e as { status?: number }).status === 404) onchange();
+      if ((e as { status?: number }).status === 404) onstopped(id);
       else error = own(e) || "Iris could not stop the watch. Try again.";
     } finally {
       busy = false;

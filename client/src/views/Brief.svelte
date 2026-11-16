@@ -4,7 +4,7 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, newest, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
@@ -17,7 +17,7 @@
   let {
     brief: firstBrief,
     status: firstStatus = null,
-    watches: firstWatches = [],
+    watches: firstWatches,
     now: start = new Date(),
     poll = 5000,
   }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number } = $props();
@@ -28,7 +28,7 @@
   // svelte-ignore state_referenced_locally
   let status = $state(firstStatus);
   // svelte-ignore state_referenced_locally
-  let watches = $state(firstWatches);
+  let watches = $state(firstWatches ?? []);
   // svelte-ignore state_referenced_locally
   let now = $state(start);
   let arrived = $derived(watches.filter((w) => w.state === "arrived"));
@@ -39,7 +39,20 @@
     if (!arrived.length) return rest;
     return rest === NOTHING ? arrivedLine(arrived) : `${arrivedLine(arrived)} ${rest}`;
   });
-  const reloadWatches = () => loadWatches().then((w) => (watches = w), () => {});
+  // Each watch load and each change takes a ticket. A load applies only while its ticket is the newest,
+  // so an older answer never undoes a newer change. A failed load keeps the last list.
+  const ticket = newest();
+  async function reloadWatches() {
+    const fresh = ticket();
+    try {
+      const w = await loadWatches();
+      if (fresh()) watches = w;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  const change = (next: (w: Watch[]) => Watch[]) => (ticket(), (watches = next(watches)));
+  const removed = (id: string) => change((w) => w.filter((x) => x.id !== id));
   const ready = (s: Status | null) => copying(s).length === 0;
 
   // Load the brief again while it is open: every 5 seconds while the first sync
@@ -53,8 +66,14 @@
       syncing ? poll : poll * 12,
     );
   });
-  // The watches load apart, so a failed watch load never keeps the brief old. A failure keeps the last list.
-  $effect(() => (poll ? every(loadWatches, (w) => (watches = w), poll * 12) : undefined));
+  // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
+  // svelte-ignore state_referenced_locally
+  if (firstWatches === undefined) reloadWatches();
+  $effect(() => {
+    if (!poll) return;
+    const timer = setInterval(reloadWatches, poll * 12);
+    return () => clearInterval(timer);
+  });
 
   const SHOWN = 7;
 
@@ -115,7 +134,7 @@
 
 {#if arrived.length}
   <div class="arrivals">
-    {#each arrived as w (w.id)}<Arrived watch={w} ondone={(id) => (watches = watches.filter((x) => x.id !== id))} />{/each}
+    {#each arrived as w (w.id)}<Arrived watch={w} ondone={removed} />{/each}
   </div>
 {/if}
 
@@ -195,7 +214,7 @@
 <!-- Watches (R5-07, option A of the owner): the watches that wait, and the quiet button that starts one. -->
 <section class="watching" aria-labelledby={waiting.length ? "watching" : undefined} aria-label={waiting.length ? undefined : "Watches"}>
   {#if waiting.length}<h2 id="watching"><span>Iris watches for</span> <span class="count">{waiting.length}</span></h2>{/if}
-  <Watches watches={waiting} onchange={reloadWatches} />
+  <Watches watches={waiting} onadded={(w) => (w ? change((all) => [w, ...all.filter((x) => x.id !== w.id)]) : reloadWatches())} onstopped={removed} />
 </section>
 
 {#if publishers.length || records.length}

@@ -13,7 +13,6 @@
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
-  import { loadWatches } from "./watches";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
@@ -75,8 +74,7 @@
           <Setup {status} />
         {:else}
           <PolicyNotice />
-          <!-- The watches never stop the brief: with no answer, the brief shows none. -->
-          {#await Promise.all([loadBrief(), loadWatches().catch(() => [])]) then [brief, watches]}<Brief {brief} {status} {watches} />{:catch error}{@render failed(error)}{/await}
+          {#await loadBrief() then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
         {/if}
       {:catch error}{@render failed(error)}
       {/await}

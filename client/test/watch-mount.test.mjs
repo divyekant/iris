@@ -83,8 +83,8 @@ test("a mail that left the mailbox shows as words, with no link", async () => {
 
 test("a new watch starts from the quiet button, and the engine's reason shows", async () => {
   const asked = serve((path, body) => (body.text.includes("form:email") ? [400, { error: "form: takes one of commitment, conversation" }] : [201, { id: "w-9" }]));
-  let changed = 0;
-  const view = await mount("/src/views/Watches.svelte", { watches: waiting(), onchange: () => changed++ });
+  let added = null;
+  const view = await mount("/src/views/Watches.svelte", { watches: waiting(), onadded: (w) => (added = w), onstopped: () => {} });
   try {
     assert.match(text(view.target), /"lease renewal" from:harbor/);
     button(view, "Watch for another mail").click();
@@ -99,13 +99,14 @@ test("a new watch starts from the quiet button, and the engine's reason shows", 
     submit.click();
     await until(() => view.target.querySelector("[role=alert]"));
     assert.match(text(view.target), /form: takes one of/);
-    assert.equal(changed, 0);
+    assert.equal(added, null);
 
     input.value = "passport from:consulate";
     input.dispatchEvent(new Event("input"));
     view.flushSync();
     submit.click();
-    await until(() => changed);
+    await until(() => added);
+    assert.equal(added.id, "w-9");
     assert.deepEqual(asked.at(-1), ["POST", "watches", { text: "passport from:consulate" }]);
     view.flushSync();
     assert.equal(view.target.querySelector("input") === null, true, "the field closes");
@@ -116,11 +117,12 @@ test("a new watch starts from the quiet button, and the engine's reason shows", 
 
 test("Stop removes a watch that waits", async () => {
   const asked = serve(() => [200, { removed: "w-1" }]);
-  let changed = 0;
-  const view = await mount("/src/views/Watches.svelte", { watches: waiting(), onchange: () => changed++ });
+  let stopped = null;
+  const view = await mount("/src/views/Watches.svelte", { watches: waiting(), onadded: () => {}, onstopped: (id) => (stopped = id) });
   try {
     view.target.querySelector('button[aria-label="Stop the watch for invoice from:dana"]').click();
-    await until(() => changed);
+    await until(() => stopped);
+    assert.equal(stopped, "w-1");
     assert.deepEqual(asked, [["POST", "watches/w-1/remove", {}]]);
   } finally {
     view.destroy();
@@ -166,4 +168,58 @@ test("a failed watch load keeps the last watches and does not stop the brief", a
   } finally {
     view.destroy();
   }
+});
+
+test("the brief shows at once while the watches still load", async () => {
+  serve((path) => (path === "watches" ? new Promise(() => {}) : [200, {}]));
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status: fx.status, poll: 0 });
+  try {
+    assert.match(text(view.target.querySelector("h1")), /^Four changes wait/);
+    assert.ok(button(view, "Watch for a mail"));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("an older watch answer never undoes a newer change, and a change shows without a reload", async () => {
+  // Each GET of the watches waits until the test lets it go, with the list of that moment.
+  const gets = [];
+  serve((path, body) => {
+    if (path === "watches" && body === undefined) return new Promise((r) => gets.push(() => r([200, copy(fx.watches)])));
+    if (path === "watches") return [201, { id: "w-20", text: body.text, created: "2026-11-16T10:00:00Z", state: "waits", arrived: null, message: null }];
+    return [200, { removed: path.split("/")[1] }];
+  });
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status: fx.status, watches: copy(fx.watches), poll: 5 });
+  try {
+    await until(() => gets.length);
+    button(view, "Done").click();
+    await until(() => !view.target.querySelector("article"));
+    gets.splice(0).forEach((go) => go()); // The old answers still hold w-3.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(view.target.querySelector("article") === null, true, "the notice stays gone");
+
+    // An add shows at once, also while the watch loads fail.
+    serve((path, body) => (path === "watches" && body === undefined ? [500, { error: "locked" }] : [201, { id: "w-20", text: body.text, created: "2026-11-16T10:00:00Z", state: "waits", arrived: null, message: null }]));
+    button(view, "Watch for another mail").click();
+    view.flushSync();
+    const input = view.target.querySelector("input");
+    input.value = "passport";
+    input.dispatchEvent(new Event("input"));
+    view.flushSync();
+    button(view, "Watch").click();
+    await until(() => /Iris watches for 3/.test(text(view.target)));
+    await new Promise((r) => setTimeout(r, 150));
+    assert.match(text(view.target), /Iris watches for 3/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("the fixture gives each new watch its own ID", () => {
+  const [, a] = fx.watchPost("/watches", { text: "one" });
+  fx.watchPost(`/watches/${a.id}/remove`, {});
+  fx.watchPost("/watches/w-1/remove", {});
+  const [, b] = fx.watchPost("/watches", { text: "two" });
+  const [, c] = fx.watchPost("/watches", { text: "three" });
+  assert.equal(new Set([a.id, b.id, c.id]).size, 3);
 });
