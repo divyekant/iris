@@ -1225,3 +1225,60 @@ Content-Transfer-Encoding: base64
         &calls[0].1[..500.min(calls[0].1.len())]
     );
 }
+
+#[test]
+fn a_part_after_a_large_attachment_is_still_read() {
+    let b = store("large-before");
+    let big = "QUFB\n".repeat((iris_understand::RAW_LIMIT as usize + 1024 * 1024) / 5);
+    let raw = format!(
+        "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: Photos and plan
+Content-Type: multipart/mixed; boundary=z
+
+--z
+Content-Type: image/jpeg; name=photo.jpg
+Content-Disposition: attachment; filename=photo.jpg
+Content-Transfer-Encoding: base64
+
+{big}--z
+Content-Type: text/plain
+
+Can you send the photos back by Friday?
+--z
+Content-Type: text/calendar; method=REQUEST
+
+BEGIN:VCALENDAR
+METHOD:REQUEST
+END:VCALENDAR
+--z--
+"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    // The calendar part after the attachment gives the invitation rule.
+    assert_eq!(fake.calls.borrow().len(), 0);
+    assert_eq!(b.items()[0]["kind"], "invitation");
+    assert_eq!(b.store.search("photos", 10).unwrap(), vec![m]);
+}
+
+#[test]
+fn a_new_thread_or_date_during_the_model_call_saves_nothing() {
+    for sql in [
+        "UPDATE message SET internal_date = internal_date + 1 WHERE id = ?1",
+        "UPDATE message SET thread_id = (SELECT id FROM thread WHERE id <> thread_id LIMIT 1) WHERE id = ?1",
+    ] {
+        let b = store("thread-date");
+        b.add("2", ASK, &["INBOX"]);
+        let m = b.add("1", ASK, &["INBOX"]);
+        let model = Changer {
+            store: &b.store,
+            sql,
+            message: m,
+        };
+        let out = understand(&b.store, m, &model, NOW).unwrap();
+        assert!(out.changed, "{sql}");
+        assert!(b.items().is_empty(), "{sql}");
+    }
+}
