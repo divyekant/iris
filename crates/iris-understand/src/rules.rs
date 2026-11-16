@@ -236,6 +236,14 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         } else if let Some(&next) = lines.get(i + 1).filter(|n| self::cues(n).is_empty()) {
             // The cue line and the next line as one text, with the cues at
             // their own offsets and the numbers after the line break.
+            // A second line that is only a number, of any length, makes the
+            // code not clear, also with the same value: "Your code:\n1234\n5678"
+            // (#100).
+            if let Some(after) = lines.get(i + 2) {
+                if bare_number(after) {
+                    return None;
+                }
+            }
             let both = format!("{l}\n{next}");
             let shift = l.len() + 1;
             bound(&both, &cues, &numbers(next), shift)
@@ -265,6 +273,15 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         return None;
     }
     Some((code.to_string(), excerpt(line, s, e - s)))
+}
+
+/// `line` holds only digits, with spaces or `-` between groups: "12",
+/// "123456789", "123 456".
+fn bare_number(line: &str) -> bool {
+    line.bytes().any(|b| b.is_ascii_digit())
+        && line
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b' ' || b == b'-')
 }
 
 /// The numbers of `nums` (moved by `shift` in `text`) that bind to one of

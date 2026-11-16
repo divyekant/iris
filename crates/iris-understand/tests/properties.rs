@@ -87,6 +87,7 @@ fn random_mail_never_stops_the_parsers() {
             existing: &[],
             thread: &[],
             same_sender: &[],
+            known: &[],
         };
         let a = analyze(&raw, &cx);
         let mut sorted = a.marks.clone();

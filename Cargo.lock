@@ -875,7 +875,10 @@ name = "iris-understand"
 version = "0.0.0"
 dependencies = [
  "iris-clean",
+ "iris-eval",
+ "iris-model",
  "iris-senders",
+ "iris-synth",
  "jsonschema",
  "serde_json",
 ]

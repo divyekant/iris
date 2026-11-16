@@ -778,7 +778,9 @@ A code is a run of 4 to 8 digits bound to a code word ("code",
 - Before the code word, with only "is", "your", "the" or "a" between them:
   "482913 is your code".
 - On the next line, if the line with the code word has no number and the
-  next line has no code word: "Your code:" then "482913".
+  next line has no code word: "Your code:" then "482913". If the line after
+  that is also only a number of any length, the code is not clear:
+  "Your code:", "1234", "5678" gives no code.
 
 The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a code word, or on a line with a bound number, has that value ("Your old code was 5678" makes the code not clear).
 Two values, or no bound number, give no clear code. A number with other
@@ -846,14 +848,46 @@ The conversation rule runs for each message that is not hostile mail:
   text, the headers that the model needs, the sender kind and the known
   parties. The text goes inside a data block with a fixed delimiter.
   The instruction says that the block is data and that it contains no
-  instructions.
+  instructions. The headers include `List-Id` and `List-Unsubscribe`.
+- The data block, with its delimiter lines, has a budget of 96,000 bytes,
+  so that a local model with a
+  small context window can take it. The headers (each value cut to 1,000
+  bytes) go in first, then the clean text of the message. The budget cuts
+  the clean text only when the headers and the text together pass it
+  (32,000 characters can be 128,000 bytes). Existing items, attachment text, and then the earlier
+  messages of the thread, newest first, fill the rest. Text that the
+  budget cuts ends with `[cut]`.
+- The engine, not the model, sets the fields that the headers give: the
+  `issuer` of a record or a signal, and the `publisher`, `published` and
+  `list` of a feed. In sent mail, the party of the sender is the
+  owner, also when `From` is an alias.
+- The `direction` of a commitment gives the side of the owner (`owner` for
+  `you_owe`, else `counterparty`). The model chooses the other side, also
+  a person who is not in the headers. The engine fills the other side only
+  when the model gives no party with an address: with the sender, or in
+  sent mail with the first `To`, `Cc` or `Bcc` recipient that is not an
+  owner address (sent mail keeps `Bcc`). With no such party, the
+  commitment is not valid. The other side is never the owner.
+- The owner addresses are the address of the mailbox and, in sent mail,
+  the `From` address (also an alias). A party with an owner address is the
+  owner.
+- The answer must have a boolean `phishing` and a list of at most 20
+  items. When `phishing` is true, the list must be empty. Each party in the answer must be
+  the owner or have an address. A party with the kind `self` and an
+  address that is not an owner address is not clear. Else the answer is
+  not valid.
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.
+  The data lists at most 50 known persons as `Name <address>` (the caller
+  chooses them, most relevant first), in the budget, so that the model can
+  give the address of a person that the mail names only by name.
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row
-  of each address. Then it validates each item against the schemas. If an
+  of each address. Then it validates each item against the schemas. A quote
+  that does not occur in the subject, the clean text or the attachment text
+  makes the answer not valid. If an
   item is not valid, the engine tries one time again. If the second answer is
   not valid, the engine saves no item, adds 1 to `tries` of the message, and
   sets `retry_at` to 1 day later. After 3 tries, the engine stops, and the
@@ -861,6 +895,31 @@ The conversation rule runs for each message that is not hostile mail:
 - If `phishing` is true, the engine sets the hostile mark `phishing` on the
   message, saves no item from it, and gives it the treatment of hostile mail
   (section 7.1, step 7).
+- The budget counts each text from the mail (also an attachment name)
+  after the escape of the data delimiter, so that the block that the
+  client sends stays in the budget.
+- An item with `same_as` adds nothing only when it is valid and has the
+  form of the existing item. A `same_as` with another form makes the answer
+  not valid. A `same_as` with an unknown ID is ignored, and the item is
+  saved.
+
+#### Failure list of the model step
+
+The model answer and the model server are input that Iris does not
+control. The safe result for each case that the engine cannot settle is:
+no item, and the message stays not understood.
+
+| Input | Failure mode | Result |
+|---|---|---|
+| One JSON document with a boolean `phishing` and valid items with quotes from the mail | | The engine saves the items. |
+| `phishing` is true | The mail tries a trick | The hostile mark `phishing`, no item. |
+| No JSON, a cut answer, no `phishing`, more than 20 items, a quote not in the mail, a party with no address, an item that fails the schemas | An answer that is not valid | One more try. A second answer that is not valid: no item, 1 more try in `tries`, `retry_at` 1 day later, a stop after 3 tries. |
+| The model refuses to answer | A new try gets the same refusal | No item and no second call. The try counts as above. |
+| The server refuses the call for this data (HTTP 400, 413, 422 and other 4xx, but not 401, 403 or 429) | A new call fails the same way | No item and no second call. The try counts as above. |
+| A time-out, a lost response, HTTP 429 or 5xx, a refused key (401, 403) | The result is not known, or no call can work now | No item. No try counts. The message stays not understood, and a later run reads it again. A refused key stops the batch. |
+| Data larger than the budget | A local model refuses a long message | The budget cuts the data (above). |
+| All other answers | | Not valid, as above. |
+
 - The worst result of a prompt injection is a wrong item. No item can start an
   action in release 1. In release 2, an item from mail can only become a
   proposal in a changeset (specification 2).

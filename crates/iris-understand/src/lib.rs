@@ -2,14 +2,15 @@
 //! (specification 1, section 7).
 //!
 //! Steps 1 to 3: [`analyze`] reads the raw bytes of one message and gives
-//! its headers, its clean text and its hostile marks. Step 6:
-//! [`rules::apply`] gives the items of the fixed rules. Step 8:
-//! [`validate`] checks an item against the open model schema. The model and
-//! the store writes come in later parts.
+//! its headers, its clean text and its hostile marks. Steps 5 to 7:
+//! [`decide`] runs the hostile check, the fixed rules ([`rules::apply`]) and
+//! then the model, and checks each item against the open model schema
+//! ([`validate`]). The store writes come in a later part.
 //!
 //! Mail text is data, never instructions. Code only compares the text.
 
 pub mod head;
+pub mod prompt;
 pub mod rules;
 mod schema;
 pub mod time;
@@ -17,6 +18,8 @@ pub mod time;
 use serde_json::{json, Value};
 
 pub use head::{Auth, Head};
+pub use iris_model::Usage;
+pub use prompt::{INSTRUCTION, PROMPT};
 pub use schema::validate;
 
 /// The kind of the sender of one message (section 6.7).
@@ -97,6 +100,11 @@ pub struct Context<'a> {
     /// An end block that the text shares with one of them goes out, for
     /// example a signature without a `-- ` line (section 7.2).
     pub same_sender: &'a [String],
+    /// Known persons that the model can name as parties, as
+    /// `Name <address>` lines, most relevant first: for example the persons
+    /// of the thread. The data holds at most `prompt::MAX_KNOWN` of them,
+    /// in the budget (section 7.4).
+    pub known: &'a [String],
 }
 
 /// The clean text of one message: the only use of `iris-clean`.
@@ -237,9 +245,161 @@ impl Draft {
         }
     }
 
+    fn model(item: Value, quote: &str) -> Draft {
+        Draft {
+            item,
+            quote: cut(quote, 500),
+            by: By::Model,
+        }
+    }
+
     pub fn form(&self) -> &str {
         self.item["form"].as_str().unwrap_or("")
     }
+}
+
+/// The status of a new feed item: `new` while the message has the label
+/// `UNREAD` (section 6.8), else `read`.
+fn feed_status(cx: &Context) -> &'static str {
+    if cx.labels.iter().any(|l| l == "UNREAD") {
+        "new"
+    } else {
+        "read"
+    }
+}
+
+/// One model: `iris_model::Client` with its model name. Tests use a fake.
+pub trait Model {
+    /// The model name for `derived.model`.
+    fn name(&self) -> &str;
+    fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error>;
+}
+
+/// An `iris_model::Client` and the name of its model.
+pub struct Named {
+    pub client: iris_model::Client,
+    pub name: String,
+}
+
+impl Model for Named {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        self.client.ask(instruction, data)
+    }
+}
+
+/// The result of steps 5 to 7 for one message.
+#[derive(Clone, Debug, Default)]
+pub struct Decision {
+    /// Valid drafts. Empty for hostile mail.
+    pub drafts: Vec<Draft>,
+    /// Hostile mail: a hostile mark, a `hostile` sender, or `phishing` from
+    /// the model.
+    pub hostile: bool,
+    /// The model answered `phishing` true.
+    pub phishing: bool,
+    /// Two model answers in a row were not valid: no item, one more try.
+    pub failed: bool,
+    /// No rule matched and the retry state holds the model call: nothing
+    /// to save.
+    pub waiting: bool,
+    pub calls: u32,
+    pub usage: Usage,
+}
+
+/// Steps 5 to 7: hostile mail gives nothing, then the fixed rules, then the
+/// model, with one more try after an answer that is not valid. A model
+/// error that a new try can fix, or a refused key, is an `Err`: the message
+/// stays not understood, and no try counts. A refusal, or a call that the
+/// server refuses for this data, gives `failed` with no second call.
+///
+/// `model` is `None` when the retry state holds the model call (section
+/// 7.4). The hostile check and the fixed rules run in all cases.
+pub fn decide(
+    a: &Analysis,
+    cx: &Context,
+    model: Option<&dyn Model>,
+) -> Result<Decision, iris_model::Error> {
+    let mut d = Decision::default();
+    if !a.marks.is_empty() || cx.kind == Kind::Hostile {
+        d.hostile = true;
+        return Ok(d);
+    }
+    if let Some(mut drafts) = rules::apply(a, cx) {
+        // A rule finds an existing item again by its form and its rule.
+        drafts.retain(|x| {
+            let By::Rule(rule) = x.by else { return true };
+            !cx.existing.iter().any(|e| {
+                e["form"].as_str() == Some(x.form()) && e["derived"]["rule"].as_str() == Some(rule)
+            })
+        });
+        d.drafts = drafts;
+        return Ok(d);
+    }
+    let Some(model) = model else {
+        d.waiting = true;
+        return Ok(d);
+    };
+    let data = prompt::data(a, cx);
+    for attempt in 0..2 {
+        let instruction = if attempt == 0 {
+            INSTRUCTION.to_string()
+        } else {
+            format!("{INSTRUCTION}{}", prompt::RETRY_NOTE)
+        };
+        let reply = match model.ask(&instruction, &data) {
+            Ok(r) => r,
+            // HTTP 200 with a body of an unknown format: the answer is not valid.
+            Err(iris_model::Error::BadAnswer(_)) => {
+                d.calls += 1;
+                continue;
+            }
+            // A call that the server refuses for this data (HTTP 400, 413,
+            // 422, ...) fails the same way again: a try counts. A refused key
+            // (401, 403) stops the batch.
+            Err(iris_model::Error::Rejected { status, .. }) if status != 401 && status != 403 => {
+                d.calls += 1;
+                break;
+            }
+            Err(e) => return Err(e),
+        };
+        d.calls += 1;
+        add(&mut d.usage, reply.usage);
+        match reply.stop {
+            iris_model::Stop::End => {}
+            // The model refuses this mail: a new try gets the same answer,
+            // so the try counts and the message waits a day (section 7.4).
+            iris_model::Stop::Refused => break,
+            iris_model::Stop::Truncated => continue,
+        }
+        let Some((drafts, phishing)) = reply.json().ok().and_then(|j| prompt::read(&j, a, cx))
+        else {
+            continue;
+        };
+        if phishing {
+            d.phishing = true;
+            d.hostile = true;
+            return Ok(d);
+        }
+        if drafts.iter().all(schema::valid_draft) {
+            d.drafts = drafts;
+            return Ok(d);
+        }
+    }
+    d.failed = true;
+    Ok(d)
+}
+
+fn add(sum: &mut Usage, u: Usage) {
+    sum.input_tokens += u.input_tokens;
+    sum.output_tokens += u.output_tokens;
+    sum.cost_micro_usd = match (sum.cost_micro_usd, u.cost_micro_usd) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    };
 }
 
 /// The party of the sender of the message.

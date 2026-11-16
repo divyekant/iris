@@ -18,6 +18,8 @@ pub struct Head {
     pub to: Vec<String>,
     /// Bare `Cc` addresses, lowercase.
     pub cc: Vec<String>,
+    /// Bare `Bcc` addresses, lowercase. Only sent mail keeps this header.
+    pub bcc: Vec<String>,
     /// The `Date` header in milliseconds since the Unix epoch.
     pub date: Option<i64>,
     pub message_id: Option<String>,
@@ -96,6 +98,7 @@ impl Head {
             from_name,
             to: addrs("to"),
             cc: addrs("cc"),
+            bcc: addrs("bcc"),
             date: get("date").and_then(date),
             message_id: nonempty(get("message-id")),
             in_reply_to: nonempty(get("in-reply-to")),
