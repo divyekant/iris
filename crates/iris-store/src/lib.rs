@@ -465,7 +465,9 @@ fn bound<'a>(text: &'a str, limit: usize, mark: &str) -> Cow<'a, str> {
     }
 }
 
-fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
+/// Save the clean text of a message in an open write transaction, so that
+/// the caller can save it with other rows in one checked write.
+pub fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
     let text = bound(&b.text, TEXT_LIMIT, CUT_MARK);
     let subject = bound(&b.subject, FIELD_LIMIT, "");
     let sender = bound(&b.sender, FIELD_LIMIT, "");

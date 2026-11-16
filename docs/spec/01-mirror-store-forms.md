@@ -879,9 +879,10 @@ The conversation rule runs for each message that is not hostile mail:
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.
-  The data lists at most 50 known persons as `Name <address>` (the caller
-  chooses them, most relevant first), in the budget, so that the model can
-  give the address of a person that the mail names only by name.
+  The data lists at most 50 known persons as `Name <address>`, in the
+  budget, so that the model can give the address of a person that the mail
+  names only by name. They are the `person` senders in the `From`, `To` and
+  `Cc` headers of the messages of the thread.
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row
