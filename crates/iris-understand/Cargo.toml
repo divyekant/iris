@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
