@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Changeset, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Changeset, type HandledPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -12,12 +12,13 @@
   import Measures from "./views/Measures.svelte";
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
+  import Handled from "./views/Handled.svelte";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
-  let active = $derived(route.view === "home" || route.view === "section" || route.view === "bundle" ? "#/brief" : `#/${hash.replace(/^#\/?/, "").split("/")[0]}`);
+  let active = $derived(route.view === "home" || route.view === "section" || route.view === "bundle" || route.view === "handled" ? "#/brief" : `#/${hash.replace(/^#\/?/, "").split("/")[0]}`);
 
   $effect(() => {
     const update = () => {
@@ -63,7 +64,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle"}
+  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -86,6 +87,10 @@
       {@const rule = route.rule}
       {#await Promise.all([get<Page>(`brief/bundle-${rule}?limit=50`), get<Policy>("policy").catch(() => null)]) then [page, policy]}
         <List title={policy?.rules.find((r) => r.id === rule)?.name ?? `Rule ${rule}`} {page} more={`brief/bundle-${rule}?limit=50`} cursor="after" />
+      {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "handled"}
+      {#await Promise.all([get<HandledPage>("handled?limit=50"), get<Page & { count: number }>("brief/hidden?limit=50")]) then [changes, hidden]}
+        <Handled {changes} {hidden} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "list"}
       {@const form = route.form}

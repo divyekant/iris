@@ -258,11 +258,57 @@ test("a list pages through its API path with Show more", async () => {
   assert.doesNotMatch(last, /Show more/);
 });
 
-test("the brief shows the triage proposal and says that nothing is applied", async () => {
+test("the brief puts the stored triage proposal under the review, and has no separate proposal section", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
-  assert.match(t, /Iris would make 447 changes to your mailbox: archive 412, label 35\. Nothing is applied\./);
+  assert.match(t, /Waits for your review 4 Triage proposes to archive 412 messages, label 35 messages\. Open the review/);
+  assert.doesNotMatch(t, /Triage proposal|Nothing is applied/);
   const none = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, proposal: null }, now: NOW }));
-  assert.doesNotMatch(none, /Triage proposal/);
+  assert.doesNotMatch(none, /Triage proposes/);
+  const one = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, proposal: { count: 1, verbs: { archive: 1 } } }, now: NOW }));
+  assert.match(one, /Triage proposes to archive 1 message\./);
+});
+
+test("the brief counts what Iris handled without you and links the list (R2-09)", async () => {
+  const brief = { ...fx.brief, handled: { count: 504, verbs: { archive: 500 } } };
+  const html = await render("/src/views/Brief.svelte", { brief, status: { ...fx.status, mode: "apply" }, now: NOW, poll: 0 });
+  const t = text(html);
+  assert.match(t, /Handled without you 504 4 hidden from this brief, changes to 500 messages under your rules\. See what and why/);
+  assert.match(html, /href="#\/handled"/);
+  // A rule changed mail: the footer does not say that Iris changed nothing, also with an old status.
+  assert.doesNotMatch(t, /It changed nothing/);
+  assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief, now: NOW })), /It changed nothing/);
+  // Only hidden items: one part, and the observe footer stays.
+  const only = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, handled: { count: 1, verbs: {} }, hidden: 1 }, now: NOW }));
+  assert.match(only, /Handled without you 1 1 hidden from this brief\. See what and why/);
+  assert.match(only, /Iris only observes\. It changed nothing in your mailbox\./);
+  // Nothing handled: no section.
+  const none = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, handled: { count: 0, verbs: {} }, hidden: 0 }, now: NOW }));
+  assert.doesNotMatch(none, /Handled without you/);
+  // Apply mode: Iris does not say that it only observes.
+  const apply = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, handled: { count: 0, verbs: {} }, hidden: 0 }, status: { ...fx.status, mode: "apply" }, now: NOW, poll: 0 }));
+  assert.doesNotMatch(apply, /only observes/);
+});
+
+test("the handled view lists each change and each hidden item with its reason", async () => {
+  const hidden = { count: fx.hidden.length, items: fx.hidden, next: "c1" };
+  const html = await render("/src/views/Handled.svelte", { changes: { ...fx.handled, next: "9" }, hidden });
+  const t = text(html);
+  assert.match(t, /Changes to your mailbox 1 Archive 500 messages Rule 5 \(Archive old newsletters\) allows archive\. Done, /);
+  assert.match(t, /Hidden from your brief 4/);
+  assert.equal((t.match(/Hidden by rule 2: Hide Acme Deals/g) ?? []).length, 4);
+  // Each hidden item opens as usual.
+  for (const item of fx.hidden) assert.match(html, new RegExp(`href="#/item/${item.id}"`));
+  // A next page of each list.
+  assert.equal((html.match(/>Show more</g) ?? []).length, 2);
+  // The reason of the author when the decision has none, and the state in words.
+  const plain = { ...fx.handled.actions[0], reason: null, state: "approved", at: null };
+  const t2 = text(await render("/src/views/Handled.svelte", { changes: { count: 1, actions: [plain], next: null }, hidden: { count: 0, items: [], next: null } }));
+  assert.match(t2, /Feed items that you did not open in 30 days\. Approved, waits to apply/);
+  assert.doesNotMatch(t2, /Hidden from your brief|Show more/);
+  // Nothing: one sentence and a link to the rules.
+  const none = await render("/src/views/Handled.svelte", { changes: { count: 0, actions: [], next: null }, hidden: { count: 0, items: [], next: null } });
+  assert.match(text(none), /Iris has handled nothing without you yet\./);
+  assert.match(none, /href="#\/rules"/);
 });
 
 test("a stranger conversation shows once, under strangers", async () => {
@@ -850,15 +896,12 @@ test("the brief shows each bundle as one line and counts the hidden items (spec 
   assert.match(t, /Bundle the school , 40 items From Mail Weekly and others/);
   assert.match(html, /href="#\/brief\/bundle\/3"/);
   assert.match(html, /href="#\/brief\/bundle\/8"/);
-  assert.match(t, /Your rules hide 23 items from this brief\. See the rules/);
-  assert.match(html, /href="#\/rules"/);
-  // One hidden item, no bundle: no section, and the words fit one.
+  // One hidden item, no bundle: no bundle section.
   const one = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, bundles: [], hidden: 1 }, now: NOW }));
   assert.doesNotMatch(one, /Bundled by your rules/);
-  assert.match(one, /Your rules hide 1 item from this brief\./);
-  // An API from before bundles: no section and no hidden line.
-  const old = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, bundles: undefined, hidden: undefined }, now: NOW }));
-  assert.doesNotMatch(old, /Bundled by your rules|Your rules hide/);
+  // An API from before bundles and R2-09: no section and no handled count.
+  const old = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, bundles: undefined, hidden: undefined, handled: undefined }, now: NOW }));
+  assert.doesNotMatch(old, /Bundled by your rules|Handled without you/);
 });
 
 test("a bundle has a route, and a bad rule number opens the brief", async () => {

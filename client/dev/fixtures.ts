@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, Brief, Changeset, Item, Message, Policy, Rule, Status, Target } from "../src/api";
+import type { Action, Brief, Changeset, HandledPage, Item, Message, Policy, Rule, Status, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -46,7 +46,38 @@ export const brief: Brief = {
   proposal: { count: 447, verbs: { archive: 412, label: 35 } },
   bundles: [{ rule: 3, name: "Bundle the feed", ...of(byForm("feed")) }],
   hidden: 4,
+  // Observe mode: no rule approves an action, so only the hidden items count.
+  handled: { count: 4, verbs: {} },
   review: { changesets: 2, actions: 4 },
+};
+
+/** The items that rule 2 hides (spec 2 section 6.4): the four hidden items of the brief. */
+export const hidden = items.slice(0, 4).map((i, n) => ({
+  ...i,
+  id: `${i.id}-h${n}`,
+  attention: { state: "hidden" as const, rule: 2, reason: "Hidden by rule 2: Hide Acme Deals" },
+}));
+
+/** The actions that a rule approved (GET /api/handled). */
+export const handled: HandledPage = {
+  count: 1,
+  next: null,
+  actions: [
+    {
+      changeset: "cs-14",
+      revision: 1,
+      n: 1,
+      verb: "archive",
+      args: {},
+      messages: 500,
+      state: "applied",
+      rule: 5,
+      policy: 3,
+      why: "Feed items that you did not open in 30 days.",
+      reason: "Rule 5 (Archive old newsletters) allows archive.",
+      at: "2026-11-16T08:12:00Z",
+    },
+  ],
 };
 
 export function message(id: string): Message | undefined {
@@ -204,6 +235,8 @@ export function answer(path: string): unknown {
     return bundle ? { count: bundle.count, items: bundle.items, next: null } : undefined;
   }
   if (name === "records") return { receipt: 1, booking: 1 };
+  if (name === "brief" && id === "hidden") return { count: hidden.length, items: hidden, next: null };
+  if (name === "handled") return handled;
   if (name === "brief" && id) {
     const section = brief[id as "you_owe"];
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
