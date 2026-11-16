@@ -56,6 +56,22 @@ fn from_addr(raw: &[u8]) -> String {
     addr.to_ascii_lowercase()
 }
 
+/// The bare lowercase addresses of a header, joined by `,`, as the
+/// understanding step saves `header.to_addrs` and `header.cc_addrs`.
+fn addr_list(raw: &[u8], name: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+    let line = text.split("\r\n").find_map(|l| l.strip_prefix(name))?;
+    let list: Vec<String> = line
+        .split(',')
+        .filter(|p| p.contains('@'))
+        .map(|p| {
+            let p = p.rsplit('<').next().unwrap().trim_end_matches('>');
+            p.trim().to_ascii_lowercase()
+        })
+        .collect();
+    Some(list.join(","))
+}
+
 fn new_message(id: &str, thread: &str, date: i64, labels: &[&str], raw: &[u8]) -> NewMessage {
     NewMessage {
         provider_id: id.into(),
@@ -64,6 +80,8 @@ fn new_message(id: &str, thread: &str, date: i64, labels: &[&str], raw: &[u8]) -
         labels: labels.iter().map(|l| l.to_string()).collect(),
         header: Header {
             from_addr: Some(from_addr(raw)),
+            to_addrs: addr_list(raw, "To: "),
+            cc_addrs: addr_list(raw, "Cc: "),
             ..Header::default()
         },
         ..NewMessage::default()
@@ -269,7 +287,26 @@ fn mail_from_the_account_address_is_self() {
         "From: Owner <OWNER@example.com>\r\nTo: dee@example.org",
     );
     assert_eq!(d.kind, Kind::SelfOwner);
-    assert_eq!(c.row("dee@example.org").1.as_deref(), Some("person"));
+    // A From with the account address is no proof of a sent message: anyone
+    // can write it. The recipients stay unknown.
+    assert_eq!(c.row("dee@example.org").1, None);
+}
+
+#[test]
+fn a_person_without_sent_mail_is_decided_again() {
+    let mut c = Case::new("evidence");
+    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    let head = "From: Bo <bo@example.net>\r\nTo: owner@example.com";
+    assert_eq!(c.put("t2", &["INBOX"], head).kind, Kind::Person);
+    // The only sent message loses its label (for example, it is deleted).
+    c.store
+        .write(|tx| {
+            tx.execute("DELETE FROM message_label WHERE message_id = 1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let d = c.put("t3", &["INBOX"], head);
+    assert_eq!((d.kind, d.previous), (Kind::Stranger, Some(Kind::Person)));
 }
 
 fn answer(kind: Kind) -> Sender {

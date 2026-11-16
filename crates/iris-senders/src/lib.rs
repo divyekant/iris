@@ -374,6 +374,8 @@ mod tests {
             ("paypall.com", "paypal.com"),
             ("pyapal.com", "paypal.com"),
             ("rnicrosoft.com", "microsoft.com"),
+            ("paypall.co.uk", "paypal.co.uk"),
+            ("paypal-verify.co.uk", "paypal.co.uk"),
         ];
         for (d, k) in yes {
             assert!(near_copy(d, k), "{d} {k}");
@@ -386,6 +388,9 @@ mod tests {
             ("word.example.net", "shop.example.com"),
             ("mail-secure.other.net", "mail.example.com"),
             ("my-app.example.net", "app.example.com"),
+            ("shop.co.uk", "shop.com"),
+            ("mail.shop.co.uk", "shop.co.uk"),
+            ("other.co.uk", "shop.co.uk"),
             ("gmail.com", "email.com"),
             ("abc.com", "abd.com"),
             ("github.com", "gitlab.com"),
