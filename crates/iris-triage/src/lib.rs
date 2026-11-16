@@ -130,7 +130,15 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
     each_action(c, account, |rule, ids| {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         let verb = Verb::parse(rule.verb()).expect("a verb of section 4");
-        add_action_in(c, changeset, &who, verb, &ids, &Map::new(), Some(rule.why()))?;
+        add_action_in(
+            c,
+            changeset,
+            &who,
+            verb,
+            &ids,
+            &Map::new(),
+            Some(rule.why()),
+        )?;
         Ok(())
     })?;
     submit_in(c, changeset, &who, WHY, now_ms)?;

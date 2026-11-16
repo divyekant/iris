@@ -188,7 +188,10 @@ fn a_failed_run_writes_nothing() {
     assert_eq!(n, 0);
     s.write(|tx| Ok(tx.execute_batch("DROP TRIGGER test_fail")?))
         .unwrap();
-    assert!(matches!(run(&s, a, NOW).unwrap(), Outcome::Submitted { revision: 1, .. }));
+    assert!(matches!(
+        run(&s, a, NOW).unwrap(),
+        Outcome::Submitted { revision: 1, .. }
+    ));
 }
 
 /// Two runs at the same time, also from two store handles (two
@@ -284,7 +287,10 @@ fn fewer_actions_give_a_new_revision() {
         .unwrap();
     assert_eq!(
         run(&s, a, NOW + 1).unwrap(),
-        Outcome::Submitted { changeset, revision: 2 }
+        Outcome::Submitted {
+            changeset,
+            revision: 2
+        }
     );
 }
 
