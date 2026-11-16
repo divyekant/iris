@@ -33,6 +33,8 @@ pub const CALLBACK: &str = "/oauth/callback";
 const BODY_LIMIT: u64 = 64 * 1024;
 /// Largest request line that the loopback listener reads.
 const REQUEST_LIMIT: usize = 8 * 1024;
+/// Most browser connections that the loopback listener keeps open at a time.
+const MAX_OPEN: usize = 16;
 
 /// A secret value: a token, a client secret or a PKCE verifier.
 /// `Debug` shows no part of the value, and `Secret` has no `Display`.
@@ -332,6 +334,24 @@ fn random_text() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Reads what a connection has now. Gives `true` when the request line is
+/// complete, the limit is reached, or the connection ended.
+fn read_some(stream: &mut TcpStream, buf: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; 1024];
+    loop {
+        if buf.windows(2).any(|w| w == b"\r\n") || buf.len() >= REQUEST_LIMIT {
+            return true;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return true,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return true,
+        }
+    }
+}
+
 /// One sign-in that waits for the redirect from Google.
 pub struct SignIn {
     client: Client,
@@ -377,26 +397,43 @@ impl SignIn {
         // A longer wait is of no use, and the cap keeps the Instant sum in range.
         let deadline = Instant::now() + timeout.min(Duration::from_secs(24 * 3600));
         self.listener.set_nonblocking(true).map_err(Error::Io)?;
+        // Each open browser connection: the stream, the bytes so far, its end time.
+        // All are read without a block, so an idle one cannot hide the callback.
+        let mut open: Vec<(TcpStream, Vec<u8>, Instant)> = Vec::new();
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            let now = Instant::now();
+            if now >= deadline {
                 return Err(Error::Timeout);
             }
-            match self.listener.accept() {
-                Ok((stream, _)) => {
-                    if let Some(answer) = self.serve(stream, left) {
+            loop {
+                match self.listener.accept() {
+                    Ok((stream, _)) => {
+                        if stream.set_nonblocking(true).is_ok() {
+                            // When full, drop the oldest, so a new callback always gets in.
+                            if open.len() == MAX_OPEN {
+                                open.remove(0);
+                            }
+                            open.push((stream, Vec::new(), now + Duration::from_secs(5)));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(Error::Io(e)),
+                }
+            }
+            let mut i = 0;
+            while i < open.len() {
+                let (stream, buf, end) = &mut open[i];
+                if read_some(stream, buf) || now >= *end {
+                    let (stream, buf, _) = open.swap_remove(i);
+                    if let Some(answer) = self.serve(stream, &buf) {
                         return self.complete(answer);
                     }
+                } else {
+                    i += 1;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::Timeout);
-                    }
-                    // shortcut: std has no accept with a time limit, so poll each 50 ms.
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => return Err(Error::Io(e)),
             }
+            // shortcut: std has no poll, so check the sockets each 20 ms.
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -412,25 +449,10 @@ impl SignIn {
         }
     }
 
-    /// Reads one browser request. Gives an answer only for the callback with
+    /// Answers one browser request. Gives an answer only for the callback with
     /// the right `state`. Other requests get an error page, and the wait goes on.
-    /// Reads for at most `left` (the rest of the wait), and at most 5 s.
-    fn serve(&self, mut stream: TcpStream, left: Duration) -> Option<Answer> {
-        let end = Instant::now() + left.min(Duration::from_secs(5));
-        let _ = stream.set_nonblocking(false);
-        let mut buf = Vec::with_capacity(1024);
-        let mut chunk = [0u8; 1024];
-        while !buf.windows(2).any(|w| w == b"\r\n") && buf.len() < REQUEST_LIMIT {
-            let rest = end.saturating_duration_since(Instant::now());
-            if rest.is_zero() || stream.set_read_timeout(Some(rest)).is_err() {
-                break;
-            }
-            match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            }
-        }
-        let line = String::from_utf8_lossy(&buf);
+    fn serve(&self, mut stream: TcpStream, buf: &[u8]) -> Option<Answer> {
+        let line = String::from_utf8_lossy(buf);
         let target = line
             .lines()
             .next()
@@ -456,6 +478,8 @@ impl SignIn {
                 ),
             }
         };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
         let _ = write!(
             stream,
             "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
