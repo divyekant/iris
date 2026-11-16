@@ -64,6 +64,50 @@ Please sign the lease.
 }
 
 #[test]
+fn outlook_header_with_subject_five_lines_after_sent() {
+    let raw = crlf(
+        "Subject: RE: Lease
+References: <x@example.org>
+
+Done.
+
+From: Ana Bel <ana@example.org>
+Sent: Monday, 3 February 2025 10:00
+To: Bo <bo@example.net>
+Cc: Cy <cy@example.net>
+Cc: Di <di@example.net>
+Cc: Ed <ed@example.net>
+Subject: Lease
+
+Please sign the lease.
+",
+    );
+    assert_eq!(clean(&raw).text, "Done.");
+}
+
+#[test]
+fn outlook_header_with_subject_six_lines_after_sent_stays() {
+    let raw = crlf(
+        "Subject: RE: Lease
+References: <x@example.org>
+
+From: Ana Bel
+Sent: Monday
+a
+b
+c
+d
+e
+Subject: Lease
+",
+    );
+    assert_eq!(
+        clean(&raw).text,
+        "From: Ana Bel\nSent: Monday\na\nb\nc\nd\ne\nSubject: Lease"
+    );
+}
+
+#[test]
 fn reply_header_fields_out_of_order_stay() {
     let raw = crlf(
         "Subject: Re: Form

@@ -176,8 +176,8 @@ The search reads the lines in order and stops at the first of these:
   this line stays.
 - In a reply: an "-----Original Message-----" line (also "-----Ursprüngliche
   Nachricht-----"), or an Outlook header block (`From:`, then `Sent:` or
-  `Date:` in the next 4 lines, then `Subject:` or `To:` in the next 5
-  lines). The history starts at this line.
+  `Date:` in the 4 lines after `From:`, then `Subject:` or `To:` in the 5
+  lines after that line). The history starts at this line.
 - An attribution line: a line, or two lines that start with `On `, that end
   with `wrote:` or the same word in French, German, Spanish, Italian, Danish
   or Norwegian or Swedish, Dutch or Polish. It is history only if the next
