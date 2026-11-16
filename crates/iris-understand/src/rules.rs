@@ -90,13 +90,14 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     // List-Id too: the model reads it, so that the record and the payment
     // are not lost.
     // A file can hold a record that no word of the text names. The
-    // calendar part of an invitation is no such file.
+    // calendar part of an invitation is no such file. A cut text can hold a
+    // record after the cut.
     let file = a
         .text
         .attachments
         .iter()
-        .any(|(_, mime, _)| !mime.eq_ignore_ascii_case("text/calendar"));
-    if looks_like_record(a) || file {
+        .any(|(_, mime, _)| !(a.text.invitation && mime.eq_ignore_ascii_case("text/calendar")));
+    if a.text.cut || file || looks_like_record(a) {
         return None;
     }
     let subject = a.text.subject.as_str();
@@ -251,6 +252,13 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         } else {
             Vec::new()
         };
+        // Each code-shaped number of the line with the code must be the code:
+        // "1234 5678" or "Account 123456: your code is 482913" is not clear.
+        if let Some(&(code, line, _, _)) = bound.first() {
+            if numbers(line).iter().any(|&(s, e)| &line[s..e] != code) {
+                return None;
+            }
+        }
         for c in bound {
             match &found {
                 None => found = Some(c),
@@ -414,7 +422,8 @@ mod tests {
         // Two values: no clear code.
         assert_eq!(code("Your code is 1234 or code 5678", ""), None);
         assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
-        assert_eq!(code("Account 123456: your code is 482913", ""), six);
+        assert_eq!(code("Account 123456: your code is 482913", ""), None);
+        assert_eq!(code("Your code:", "1234 5678"), None);
         // A number with other words between it and the code word.
         assert_eq!(
             code("Verification for account 123456", "Your code: 482913"),

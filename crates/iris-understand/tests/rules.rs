@@ -313,7 +313,8 @@ fn an_unclear_code_in_a_list_message_goes_to_the_model() {
 
 #[test]
 fn a_long_line_of_one_code_is_read_in_linear_time() {
-    let line = "code 1234 ".repeat(30_000);
+    // 25 KB: inside the limit of the clean text, so that the search runs.
+    let line = "code 1234 ".repeat(2_500);
     let raw = format!("From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{line}\n");
     let start = std::time::Instant::now();
     let d = one(&raw, Kind::Service, &[]);
@@ -327,8 +328,8 @@ fn a_long_line_of_one_code_is_read_in_linear_time() {
 
 #[test]
 fn a_long_line_of_codes_is_read_in_linear_time() {
-    // About 300 KB on one line: a slow search takes minutes, not seconds.
-    let line = "code 1234 code 5678 ".repeat(15_000);
+    // 25 KB: inside the limit of the clean text, so that the search runs.
+    let line = "code 1234 code 5678 ".repeat(1_250);
     let raw = format!("From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{line}\n");
     let start = std::time::Instant::now();
     assert!(drafts(&raw, Kind::Service, &[]).is_none());
@@ -418,6 +419,20 @@ fn an_invitation_or_a_code_with_a_file_goes_to_the_model() {
     // The same mail with no file gives the code.
     let plain = code.replace(file, "--a--");
     assert_eq!(one(&plain, Kind::Service, &[]).item["code"], "482913");
+}
+
+#[test]
+fn a_cut_text_or_a_calendar_file_goes_to_the_model() {
+    // A record after the limit of the clean text.
+    let long = LIST.replace(
+        "Read the news.",
+        &format!("{}\nInvoice 77.", "Read the news. ".repeat(4_000)),
+    );
+    assert!(iris_understand::Text::of(long.replace('\n', "\r\n").as_bytes()).cut);
+    assert!(drafts(&long, Kind::Service, &[]).is_none());
+    // A calendar file that is no request is a file.
+    let publish = "From: Mail Weekly <news@weekly.example>\nList-Id: <weekly.news.example>\nSubject: Events\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=a\n\n--a\nContent-Type: text/plain\n\nThe events.\n--a\nContent-Type: text/calendar; method=PUBLISH; name=\"e.ics\"\nContent-Disposition: attachment; filename=\"e.ics\"\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--\n";
+    assert!(drafts(publish, Kind::Service, &[]).is_none());
 }
 
 #[test]
