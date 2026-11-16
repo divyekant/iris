@@ -25,7 +25,7 @@ use iris_store::{NewMessage, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 
 mod verify;
-pub use verify::{verify, Difference, Report};
+pub use verify::{verify, Difference, Report, LISTED};
 
 /// `account.sync_kind` of a first sync.
 pub const KIND_FIRST: &str = "first";

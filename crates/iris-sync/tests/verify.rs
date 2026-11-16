@@ -208,3 +208,73 @@ fn a_repair_that_stops_keeps_each_difference_and_the_resync() {
     );
     assert_eq!(sync_state(&store).0.as_deref(), Some(KIND_RESYNC));
 }
+
+#[test]
+fn a_delete_between_two_list_pages_gives_no_difference() {
+    // More than one list page (500 messages for each page).
+    let (fake, store, account) = synced("v-page", 30, 700);
+    let at_fake = fake.clone();
+    // Message 690 is on the first page (newest first).
+    let gmail = client(hook_proxy(fake.addr(), "pageToken=", move || {
+        assert!(at_fake.delete_message(&FakeGmail::id_of(690)));
+    }));
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(r.differences, vec![]);
+    assert!(!r.resync);
+}
+
+#[test]
+fn a_message_deleted_during_verify_is_not_a_content_difference() {
+    let (fake, store, account) = synced("v-content-gone", 31, 50);
+    let id = FakeGmail::id_of(4);
+    let path = store.content_path(&sha_of(&store, &id).unwrap()).unwrap();
+    std::fs::write(&path, b"bad").unwrap();
+    let (at_fake, victim) = (fake.clone(), id.clone());
+    let gmail = client(hook_proxy(fake.addr(), "labelIds=", move || {
+        assert!(at_fake.delete_message(&victim));
+    }));
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(r.differences, vec![]);
+}
+
+#[test]
+fn a_shared_content_file_is_repaired_by_the_other_message() {
+    let fake = FakeGmail::start(Mailbox::new(32, 10)).unwrap();
+    let raw = b"Subject: same\r\n\r\nsame bytes\r\n";
+    let first = fake.add_message(raw, &["INBOX"]);
+    let second = fake.add_message(raw, &["INBOX"]);
+    let store = Store::open(&data_dir("v-shared")).unwrap();
+    let account = store.add_account("gmail", OWNER).unwrap();
+    sync(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    let sha = sha_of(&store, &first).unwrap();
+    assert_eq!(sha_of(&store, &second), Some(sha.clone()));
+    let path = store.content_path(&sha).unwrap();
+    std::fs::write(&path, b"bad").unwrap();
+    let at_fake = fake.clone();
+    // The fetch of the first message gets HTTP 400; the second repairs the file.
+    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || {
+        at_fake.fail_next(&[400])
+    }));
+
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(r.differences, vec![Difference::Content(first)]);
+    assert_eq!(std::fs::read(&path).unwrap(), raw);
+}
+
+#[test]
+fn many_bad_files_are_counted_and_the_list_is_bounded() {
+    let n = iris_sync::LISTED + 100;
+    let (fake, store, account) = synced("v-many", 33, n);
+    for e in std::fs::read_dir(store.dir().join("content")).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_dir() {
+            std::fs::remove_dir_all(e.path()).unwrap();
+        }
+    }
+    let r = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    assert_eq!(r.total, n as u64);
+    assert_eq!(r.differences.len(), iris_sync::LISTED);
+    assert!(!r.resync);
+    let again = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    assert_eq!(again.total, 0, "each file is repaired");
+}

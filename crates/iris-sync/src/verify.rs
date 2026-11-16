@@ -69,9 +69,29 @@ impl fmt::Display for Difference {
 pub struct Report {
     /// `V`: the history ID of the mirror at the start of the compare.
     pub history_id: u64,
+    /// The first [`LISTED`] differences. `total` counts all of them.
     pub differences: Vec<Difference>,
+    /// The count of all differences.
+    pub total: u64,
+    /// True if a difference of step 7 was found: the next [`sync`] runs a
+    /// full resync.
+    pub resync: bool,
     /// The messages that changed during verify. The compare leaves them out.
     pub skipped: u64,
+}
+
+/// The most differences that a [`Report`] lists, so that memory stays flat
+/// for a mirror with many differences (specification 1, section 9).
+pub const LISTED: usize = 1_000;
+
+impl Report {
+    fn push(&mut self, d: Difference) {
+        self.total += 1;
+        self.resync |= d.is_sync();
+        if self.differences.len() < LISTED {
+            self.differences.push(d);
+        }
+    }
 }
 
 /// Verify `account` (specification 1, section 4.8). It holds the sync lock
@@ -90,7 +110,7 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
     let result = compare(store, gmail, account, token, v);
     let text = match &result {
         Ok(r) => {
-            let mut t = format!("{} differences, {} skipped", r.differences.len(), r.skipped);
+            let mut t = format!("{} differences, {} skipped", r.total, r.skipped);
             for d in r.differences.iter().take(100) {
                 t.push_str(&format!("\n{d}"));
             }
@@ -98,9 +118,7 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
         }
         Err(e) => format!("error: {e}"),
     };
-    let resync = result
-        .as_ref()
-        .is_ok_and(|r| r.differences.iter().any(Difference::is_sync));
+    let resync = result.as_ref().is_ok_and(|r| r.resync);
     // One transaction: a logged sync difference always has its resync.
     let saved = store.write(|tx| {
         tx.execute(
@@ -166,7 +184,6 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
         skipped: changed.len() as u64,
         ..Report::default()
     };
-    let d = &mut report.differences;
     let mirror_labels: Vec<(String, String)> = store.read(|c| {
         let mut st = c.prepare("SELECT provider_id, name FROM label WHERE account_id = ?1")?;
         let rows = st.query_map([account], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -174,22 +191,19 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
     })?;
     for l in after.iter().filter(|l| !label_changed.contains(&l.id)) {
         match mirror_labels.iter().find(|(id, _)| *id == l.id) {
-            None => d.push(Difference::MissingLabel(l.id.clone())),
-            Some((_, name)) if *name != l.name => d.push(Difference::LabelName(l.id.clone())),
+            None => report.push(Difference::MissingLabel(l.id.clone())),
+            Some((_, name)) if *name != l.name => report.push(Difference::LabelName(l.id.clone())),
             Some(_) => {}
         }
     }
     for (id, _) in &mirror_labels {
         if !label_changed.contains(id) && !after.iter().any(|l| l.id == *id) {
-            d.push(Difference::ExtraLabel(id.clone()));
+            report.push(Difference::ExtraLabel(id.clone()));
         }
     }
-    d.extend(
-        other_thread
-            .into_iter()
-            .filter(|id| !changed.contains(id))
-            .map(Difference::Thread),
-    );
+    for id in other_thread.into_iter().filter(|id| !changed.contains(id)) {
+        report.push(Difference::Thread(id));
+    }
     let keep = |id: &String| !changed.contains(id);
     // Gmail has the message: a mirror row that is not gone, or no row.
     each_page(
@@ -201,8 +215,9 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
         account,
         |id, _, _| {
             if keep(&id) {
-                d.push(Difference::MissingMessage(id));
+                report.push(Difference::MissingMessage(id));
             }
+            Ok(())
         },
     )?;
     each_page(
@@ -213,9 +228,18 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
          ORDER BY m.provider_id LIMIT ?3",
         account,
         |id, _, _| {
-            if keep(&id) {
-                d.push(Difference::ExtraMessage(id));
+            if !keep(&id) {
+                return Ok(());
             }
+            // A list can miss a message when another message leaves an
+            // earlier page between two page calls. Gmail has the last word.
+            match gmail.minimal(token, &id) {
+                Ok(_) => {}
+                Err(iris_gmail::Error::NotFound) => report.push(Difference::ExtraMessage(id)),
+                Err(e) if per_message(&e) => report.push(Difference::ExtraMessage(id)),
+                Err(e) => return Err(e.into()),
+            }
+            Ok(())
         },
     )?;
     each_page(
@@ -239,13 +263,17 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
                     .collect()
             };
             if keep(&id) && set(&gmail_labels) != set(&mirror_labels) {
-                d.push(Difference::Labels(id));
+                report.push(Difference::Labels(id));
             }
+            Ok(())
         },
     )?;
 
-    // Step 8: the bytes of each message that is not gone.
-    let mut bad: Vec<(String, String)> = Vec::new();
+    // Step 8: the bytes of each message that is not gone, page by page. A
+    // message that changed during verify is left out: Gmail can have
+    // deleted it. After an error that stops each fetch (network, sign-in),
+    // no more fetches start, and each bad file stays a difference.
+    let mut stop: Option<Error> = None;
     each_page(
         store,
         "SELECT m.provider_id, coalesce(m.content_sha256, ''), t.provider_id
@@ -254,34 +282,37 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
          ORDER BY m.provider_id LIMIT ?3",
         account,
         |id, sha, thread| {
-            if !content_ok(store, &sha) {
-                bad.push((id, thread));
+            if !keep(&id) || content_ok(store, &sha) {
+                return Ok(());
             }
+            if stop.is_none() {
+                let r = repair(store, gmail, token, account, &id, &thread).and_then(|done| {
+                    if done || sha.is_empty() {
+                        return Ok(());
+                    }
+                    // Other messages with the same bytes share the file: a
+                    // fetch of one of them repairs it too.
+                    for (other, t) in sharing(store, account, &sha, &id)? {
+                        if keep(&other) && repair(store, gmail, token, account, &other, &t)? {
+                            break;
+                        }
+                    }
+                    Ok(())
+                });
+                if let Err(e) = r {
+                    stop = Some(e);
+                }
+            }
+            let fixed =
+                !sha.is_empty() && content_ok(store, &sha) || fetched_now(store, account, &id)?;
+            report.push(if fixed {
+                Difference::Content(id)
+            } else {
+                Difference::Unrepaired(id)
+            });
+            Ok(())
         },
     )?;
-    // After an error that stops each fetch (network, sign-in), the rest is
-    // not fetched. Each bad file stays a difference.
-    let mut stop: Option<Error> = None;
-    for (id, thread) in bad {
-        // A local defect: fetch the message again to repair it.
-        let mut counts = Done::default();
-        if stop.is_none() {
-            let r = fetch_one(store, gmail, token, &id, &thread).and_then(|f| match f {
-                Fetched::Message(m) => save(store, gmail, token, account, vec![*m], &mut counts),
-                // Gmail deleted it during verify: the next sync marks it gone.
-                Fetched::Gone(_) => Ok(()),
-                Fetched::Failed(id, e) => record_failure(store, account, &id, &e),
-            });
-            if let Err(e) = r {
-                stop = Some(e);
-            }
-        }
-        report.differences.push(if counts.fetched == 1 {
-            Difference::Content(id)
-        } else {
-            Difference::Unrepaired(id)
-        });
-    }
     if let Some(e) = stop {
         log(
             store,
@@ -298,14 +329,60 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
     Ok(report)
 }
 
+/// Fetch one message again to repair its content file. Gives true if the
+/// new file is saved.
+fn repair(
+    store: &Store,
+    gmail: &Gmail,
+    token: &str,
+    account: i64,
+    id: &str,
+    thread: &str,
+) -> Result<bool> {
+    let mut counts = Done::default();
+    match fetch_one(store, gmail, token, id, thread)? {
+        Fetched::Message(m) => save(store, gmail, token, account, vec![*m], &mut counts)?,
+        // Gmail deleted it during verify: the next sync marks it gone.
+        Fetched::Gone(_) => {}
+        Fetched::Failed(id, e) => record_failure(store, account, &id, &e)?,
+    }
+    Ok(counts.fetched == 1)
+}
+
+/// Up to 8 other messages (not gone) with the content file `sha`.
+fn sharing(store: &Store, account: i64, sha: &str, id: &str) -> Result<Vec<(String, String)>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT m.provider_id, t.provider_id FROM message m JOIN thread t ON t.id = m.thread_id
+             WHERE m.account_id = ?1 AND m.content_sha256 = ?2 AND m.provider_id <> ?3
+               AND m.gone_at IS NULL LIMIT 8",
+        )?;
+        let rows = st.query_map(params![account, sha, id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })?)
+}
+
+/// True if the message now has a content file with its hash.
+fn fetched_now(store: &Store, account: i64, id: &str) -> Result<bool> {
+    let sha: Option<String> = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT content_sha256 FROM message WHERE account_id = ?1 AND provider_id = ?2",
+            params![account, id],
+            |r| r.get(0),
+        )?)
+    })?;
+    Ok(sha.is_some_and(|s| content_ok(store, &s)))
+}
+
 /// Run `sql` page by page. The query gives (id, a, b) in the order of id,
 /// and takes the account as `?1`, the last id as `?2` and the page size as
-/// `?3`.
+/// `?3`. `f` runs after the read of each page ends, so it can call Gmail and
+/// write to the store.
 fn each_page(
     store: &Store,
     sql: &str,
     account: i64,
-    mut f: impl FnMut(String, String, String),
+    mut f: impl FnMut(String, String, String) -> Result<()>,
 ) -> Result<()> {
     let mut after = String::new();
     loop {
@@ -321,7 +398,7 @@ fn each_page(
         };
         after = last.0.clone();
         for (id, a, b) in rows {
-            f(id, a, b);
+            f(id, a, b)?;
         }
     }
 }
