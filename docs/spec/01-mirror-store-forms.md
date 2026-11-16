@@ -1048,17 +1048,21 @@ changeset (specification 2, section 5.4):
   `account-<row ID>`. Each account has its own changeset, because one action
   changes one account.
 - Each rule gives one action for each 500 of its messages, with the reason of
-  the rule. The changeset has its own reason. Submit gives each action
-  `proposed`, so nothing applies without a rule or an approval.
+  the rule. The changeset has its own reason. Nothing applies without a rule
+  or an approval.
 - A run uses the open triage changeset of the account. It submits a new
-  revision only when the count, the verb, the reason or the targets of an
-  action changed. So an action in review does not change while the mailbox
+  revision only when the count, the verb, the reason or the targets of the
+  actions that wait for a decision (`proposed` or `in_review`) changed. So an action in review does not change while the mailbox
   does not change.
 - One run is one write transaction. It reads the IDs of one action at a time.
-- A decision holds. A message that a decided triage action of the account
-  named (`denied`, `applied`, `failed`, `expired`, `cancelled` or `undone`)
-  does not come back in a later proposal, also when its changeset is
-  closed. Only a `replaced` action was not decided.
+- A decision holds. A message that a triage action of the account named
+  does not come back in a later proposal while that action is decided or
+  approved (each state except `proposed`, `in_review` and `replaced`), also
+  when its changeset is closed.
+- In the policy mode `apply`, the active policy decides each `proposed`
+  action of the new revision in the same transaction (specification 2,
+  section 5.4, step 5), and the action keeps the reason of the decision. In
+  the mode `observe`, each action stays `proposed`.
 
 Failure list of a triage run. Supported input: the account row ID and the
 forms, labels and senders in the store.

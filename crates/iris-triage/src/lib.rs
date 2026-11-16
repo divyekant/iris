@@ -17,12 +17,17 @@
 //! Memory: a rule gives one action for each [`CHUNK`] messages, and the run
 //! reads the IDs of one action at a time (specification 1, section 9).
 //!
+//! In the policy mode `apply`, the active policy then decides each action
+//! (spec 2, section 5.4, step 5), with the reason of the decision.
+//!
 //! This crate has no provider client and makes no model call.
 
 use iris_changeset::{
-    add_action_in, create_in, revise_in, submit_in, Author, AuthorKind, Error, Verb,
+    add_action_in, create_in, decide_in, revise_in, submit_in, ActionId, Author, AuthorKind, By,
+    Error, State, Verb,
 };
 use iris_observe::Rule;
+use iris_policy::{Facts, Mode, Outcome as Policy};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -77,8 +82,9 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    // Pass 1: compare the proposal with the newest revision, one action at
-    // a time.
+    // Pass 1: compare the proposal with the actions of the newest revision
+    // that wait for a decision, one action at a time. The proposal leaves
+    // out the messages of the other actions.
     let mut actions = 0i64;
     let mut same = open.is_some();
     each_action(c, account, |rule, ids| {
@@ -87,8 +93,10 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
             let old: Option<(String, Option<String>, String)> = c
                 .query_row(
                     "SELECT verb, why, targets FROM changeset_action
-                     WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
-                    params![id, revision, actions],
+                     WHERE changeset_id = ?1 AND revision = ?2
+                       AND state IN ('proposed', 'in_review')
+                     ORDER BY n LIMIT 1 OFFSET ?3",
+                    params![id, revision, actions - 1],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
@@ -109,8 +117,9 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
         Some((id, ..)) if actions == 0 => return Ok(Outcome::Same { changeset: id }),
         Some((id, revision)) if same => {
             let more: bool = c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM changeset_action
-                 WHERE changeset_id = ?1 AND revision = ?2 AND n > ?3)",
+                "SELECT count(*) > ?3 FROM changeset_action
+                 WHERE changeset_id = ?1 AND revision = ?2
+                   AND state IN ('proposed', 'in_review')",
                 params![id, revision, actions],
                 |r| r.get(0),
             )?;
@@ -142,15 +151,92 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
         Ok(())
     })?;
     submit_in(c, changeset, &who, WHY, now_ms)?;
-    let revision = c.query_row(
+    let revision: i64 = c.query_row(
         "SELECT revision FROM changeset WHERE id = ?1",
         [changeset],
         |r| r.get(0),
     )?;
+    decide_all(c, changeset, revision, now_ms)?;
     Ok(Outcome::Submitted {
         changeset,
         revision,
     })
+}
+
+/// Spec 2 section 5.4, step 5: in the mode `apply`, the active policy
+/// decides each `proposed` action of the revision, with its reason. In the
+/// mode `observe`, each action stays `proposed`.
+fn decide_all(c: &Connection, changeset: i64, revision: i64, now_ms: i64) -> Result<(), Error> {
+    let active = iris_policy::active(c)?;
+    if active.policy.mode != Mode::Apply {
+        return Ok(());
+    }
+    let now = now_ms.div_euclid(1000);
+    // One row for each action (at most one for each CHUNK messages).
+    let actions: Vec<(i64, i64, String, String)> = c
+        .prepare(
+            "SELECT id, n, verb, flags FROM changeset_action
+             WHERE changeset_id = ?1 AND revision = ?2 AND state = 'proposed' ORDER BY n",
+        )?
+        .query_map(params![changeset, revision], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, n, verb, flags) in actions {
+        let verb = iris_policy::Verb::from_name(&verb).expect("a triage verb");
+        let bulk = serde_json::from_str::<Vec<String>>(&flags)
+            .map_err(|e| Error::Refused(format!("flags: {e}")))?
+            .iter()
+            .any(|f| f == "bulk");
+        // At most CHUNK messages: the action holds their facts.
+        let mut facts: Vec<Facts> = Vec::new();
+        let ids: Vec<i64> = c
+            .prepare("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for m in ids {
+            facts.extend(iris_policy::facts(c, m, now)?);
+        }
+        let d = active.policy.decide(
+            &iris_policy::Action {
+                verb,
+                author: iris_policy::Author::Triage,
+                job: None,
+                bulk,
+                now,
+            },
+            facts.iter().map(Facts::message),
+        );
+        let to = match d.outcome {
+            Policy::Allow => State::Approved,
+            Policy::Review => State::InReview,
+            Policy::Deny => State::Denied,
+        };
+        let by = match (d.rule, active.version) {
+            (Some(rule), Some(policy)) => By::Rule {
+                id: rule.into(),
+                policy,
+            },
+            // A rule decision needs the confirmed version (spec 2, 5.1).
+            (Some(_), None) => return Err(Error::Refused("a rule with no policy version".into())),
+            // No rule: a hard limit (spec 2, section 6.5) or the default review.
+            (None, _) if bulk || to == State::Denied => By::Limit,
+            (None, _) => By::Policy,
+        };
+        decide_in(
+            c,
+            ActionId {
+                changeset,
+                revision,
+                n,
+            },
+            to,
+            by,
+            Some(&d.reason),
+            now_ms,
+        )?;
+    }
+    Ok(())
 }
 
 /// Call `f` for each action of the proposal, in order: each rule, in groups
@@ -161,16 +247,17 @@ fn each_action(
     mut f: impl FnMut(Rule, &[String]) -> Result<(), Error>,
 ) -> Result<(), Error> {
     for rule in Rule::ALL {
-        // A decision on a message holds: a message that a decided triage
-        // action of the account named does not come back. A replaced action
-        // was not decided, and an open action is still in the proposal.
+        // A decision on a message holds: a message that a decided or an
+        // approved triage action of the account named does not come back. A
+        // replaced action was not decided, and a proposed or in_review
+        // action is still in the proposal.
         let mut st = c.prepare(&format!(
             "SELECT id FROM ({}) WHERE id NOT IN (
                SELECT m.message_id FROM action_message m
                JOIN changeset_action a ON a.id = m.action_id
                JOIN changeset s ON s.id = a.changeset_id
                WHERE s.author_kind = 'triage' AND s.author_session = ?2
-                 AND a.state NOT IN ('proposed', 'in_review', 'approved', 'held', 'replaced'))
+                 AND a.state NOT IN ('proposed', 'in_review', 'replaced'))
              ORDER BY 1",
             rule.query()
         ))?;

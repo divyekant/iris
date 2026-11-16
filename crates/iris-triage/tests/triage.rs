@@ -359,3 +359,83 @@ fn a_denial_holds() {
     };
     assert_eq!(actions(&s, next)[0].5, r#"{"messages":["m-4"]}"#);
 }
+
+/// Make `rules` (TOML `[[rule]]` tables) the active policy, in the mode
+/// `apply`.
+fn apply_policy(s: &Store, dir: &TempDir, rules: &str) {
+    let text = format!("version = 0\nmode = \"apply\"\n{rules}");
+    fs::write(dir.0.join(iris_policy::FILE), &text).unwrap();
+    let done = iris_policy::confirm(s, &iris_policy::sha256_hex(&text), 0).unwrap();
+    assert!(
+        matches!(done, iris_policy::Confirm::Done { .. }),
+        "{done:?}"
+    );
+}
+
+/// (state, decided_by, rule, reason) of each action of the newest revision.
+fn decisions(s: &Store, changeset: i64) -> Vec<(String, String, Option<i64>, String)> {
+    s.read(|c| {
+        let mut st = c.prepare(
+            "SELECT a.state, a.decided_by, a.rule, a.reason FROM changeset_action a
+             JOIN changeset s ON s.id = a.changeset_id AND s.revision = a.revision
+             WHERE s.id = ?1 ORDER BY a.n",
+        )?;
+        let rows = st.query_map([changeset], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })
+    .unwrap()
+}
+
+/// In the mode `apply`, an allow rule approves the triage action, with the
+/// rule and its reason. With no rule, the action goes to review.
+#[test]
+fn apply_mode_decides_each_action_with_a_reason() {
+    let dir = TempDir::new("apply");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    item(&s, a, "record", "g2");
+    apply_policy(
+        &s,
+        &dir,
+        "[[rule]]\nid = 1\nname = \"Archive the feed\"\neffect = \"allow\"\n\
+         verbs = [\"archive\"]\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    );
+    let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
+        panic!("a proposal");
+    };
+    let d = decisions(&s, changeset);
+    assert_eq!(d.len(), 2);
+    assert_eq!(
+        (d[0].0.as_str(), d[0].1.as_str(), d[0].2),
+        ("approved", "rule", Some(1))
+    );
+    assert!(d[0].3.contains("Rule 1"), "{}", d[0].3);
+    assert_eq!(
+        (d[1].0.as_str(), d[1].1.as_str(), d[1].2),
+        ("in_review", "policy", None)
+    );
+    assert!(!d[1].3.is_empty());
+    // The approved and the reviewed messages do not come back as new actions.
+    assert_eq!(run(&s, a, NOW + 1).unwrap(), Outcome::Same { changeset });
+}
+
+/// A deny rule denies the action, and the denial holds.
+#[test]
+fn apply_mode_deny_rule() {
+    let dir = TempDir::new("applydeny");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    apply_policy(
+        &s,
+        &dir,
+        "[[rule]]\nid = 1\nname = \"Keep the feed\"\neffect = \"deny\"\n\
+         verbs = [\"archive\"]\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    );
+    let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
+        panic!("a proposal");
+    };
+    assert_eq!(decisions(&s, changeset)[0].0, "denied");
+    assert_eq!(run(&s, a, NOW + 1).unwrap(), Outcome::Nothing);
+}
