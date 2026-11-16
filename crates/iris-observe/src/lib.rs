@@ -204,6 +204,18 @@ impl Write for Hasher {
     }
 }
 
+/// The message IDs of `rule` (`m-` short IDs), in order. Read them in the
+/// transaction of the other rules, so no message is in two lists.
+pub fn message_ids(
+    c: &rusqlite::Connection,
+    rule: Rule,
+    account: i64,
+) -> iris_store::Result<Vec<String>> {
+    let mut st = c.prepare(&format!("{} ORDER BY 1", rule.query()))?;
+    let ids = st.query_map([account], |r| Ok(format_id(Kind::Message, r.get(0)?)))?;
+    Ok(ids.collect::<rusqlite::Result<_>>()?)
+}
+
 fn write_ids(
     c: &rusqlite::Connection,
     rule: Rule,
