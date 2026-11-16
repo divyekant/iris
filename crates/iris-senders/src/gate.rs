@@ -45,17 +45,27 @@ fn row(conn: &Connection, id: i64) -> rusqlite::Result<Option<Row>> {
     .optional()
 }
 
-/// `None` when the row waits at the gate or was declined there: the engine
-/// owns its kind, and the engine rules give `stranger` now. Else the answer
-/// that refuses the change. The rules run again because the stored kind can
+/// `None` when the row waits at the gate or was declined there: the stored
+/// kind is `stranger` (or no kind yet), and the engine rules give `stranger`
+/// now, unless a person set the kind. Else the answer that refuses the
+/// change. The rules run again because the stored kind can
 /// be older than the evidence (it changes at the next refresh): a person
 /// must never accept a sender that is `hostile` now. A refusal writes
 /// nothing; the next refresh writes the new kind.
-fn refuse(conn: &Connection, addr: &str, kind: Option<&str>, by: Option<&str>) -> rusqlite::Result<Option<Answer>> {
+fn refuse(
+    conn: &Connection,
+    addr: &str,
+    kind: Option<&str>,
+    by: Option<&str>,
+) -> rusqlite::Result<Option<Answer>> {
+    // The stored kind is what the person saw: only a `stranger` is at the gate.
+    let stored = kind.and_then(Kind::parse);
+    if kind.is_some() && stored != Some(Kind::Stranger) {
+        return Ok(Some(Answer::NotStranger(stored)));
+    }
     if by == Some("person") {
-        // A person set the kind: only a `stranger` is at the gate.
-        let kind = kind.and_then(Kind::parse);
-        return Ok((kind != Some(Kind::Stranger)).then_some(Answer::NotStranger(kind)));
+        // A person set the kind: the engine rules do not apply.
+        return Ok(None);
     }
     let (now, _) = rules(conn, addr)?;
     Ok((now != Kind::Stranger).then_some(Answer::NotStranger(Some(now))))
@@ -112,10 +122,7 @@ pub fn reopen(conn: &Connection, id: i64, now_ms: i64) -> rusqlite::Result<Answe
     let Some((addr, _, by)) = row(conn, id)? else {
         return Ok(Answer::NoSender);
     };
-    conn.execute(
-        "UPDATE sender SET declined_at = NULL WHERE id = ?1",
-        [id],
-    )?;
+    conn.execute("UPDATE sender SET declined_at = NULL WHERE id = ?1", [id])?;
     let mut ch = Changes::default();
     if by.as_deref() == Some("person") {
         // The engine owns the row again. `recheck` compares the old kind with
