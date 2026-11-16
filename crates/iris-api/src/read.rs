@@ -741,6 +741,32 @@ fn read_section(
     ))
 }
 
+/// The count of each record type that is not gone and that matches `cond`.
+/// A possible duplicate pair counts once (specification 1, section 7.5).
+fn count_records(c: &Connection, cond: &str) -> iris_store::Result<serde_json::Map<String, Value>> {
+    let mut records = serde_json::Map::new();
+    let mut st = c.prepare(&format!(
+        "SELECT json_extract(doc, '$.type'), count(*) FROM item
+         WHERE {RECORD} AND {cond}
+           AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
+             (SELECT id FROM item WHERE {RECORD} AND {cond}))
+         GROUP BY 1 ORDER BY 1"
+    ))?;
+    for row in st.query_map([], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+    })? {
+        let (kind, n) = row?;
+        records.insert(kind.unwrap_or_else(|| "other".into()), n.into());
+    }
+    Ok(records)
+}
+
+/// The count of each record type that is not gone, also of the records
+/// that a rule hides or bundles: the counts of the Records view.
+pub fn records(store: &Store) -> Result<serde_json::Map<String, Value>> {
+    Ok(store.read(|c| count_records(c, "1"))?)
+}
+
 pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     let [you_owe, owed, conversations, feed, signals, strangers] = section_sql(now);
     // Outside the read of the brief: a nested read can wait for the
@@ -761,21 +787,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     let mut brief = store.read(|c| {
         let section =
             |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, None).map(|(s, _)| s);
-        let mut records = serde_json::Map::new();
-        let mut st = c.prepare(&format!(
-            "SELECT json_extract(doc, '$.type'), count(*) FROM item
-                 WHERE {RECORD} AND {SHOWN}
-                   -- A possible duplicate pair counts once (section 7.5).
-                   AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
-                     (SELECT id FROM item WHERE {RECORD} AND {SHOWN}))
-                 GROUP BY 1 ORDER BY 1"
-        ))?;
-        for row in st.query_map([], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
-        })? {
-            let (kind, n) = row?;
-            records.insert(kind.unwrap_or_else(|| "other".into()), n.into());
-        }
+        let records = count_records(c, SHOWN)?;
         let hostile = c.query_row(
             "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
              WHERE m.gone_at IS NULL AND m.internal_date >= ?1

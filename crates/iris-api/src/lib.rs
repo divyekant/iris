@@ -89,6 +89,7 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/proposal", get(get_proposal))
+        .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/search", get(get_search))
@@ -114,6 +115,10 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
 
 async fn get_status(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(status(&s)?).into_response())
+}
+
+async fn get_records(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(records(&s)?).into_response())
 }
 
 async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {

@@ -1360,9 +1360,11 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
             json!({"publisher": party(&service)}),
         );
     }
+    let receipt = json!({"type": "receipt", "issuer": party(&service)});
+    add_item(&store, "record", "new", 14, 3, receipt);
     std::fs::write(
         store.dir().join(iris_policy::FILE),
-        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 3\nname = \"Bundle the feed\"\neffect = \"bundle\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n",
+        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 3\nname = \"Bundle the feed\"\neffect = \"bundle\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n[[rule]]\nid = 4\nname = \"Hide receipts\"\neffect = \"hide\"\nwhen = { record_type = \"receipt\" }\nby = \"person\"\nadded = 2026-11-10\n",
     )
     .unwrap();
     let sha = match iris_policy::file_state(&store).unwrap() {
@@ -1375,6 +1377,12 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
     assert_eq!(b["bundles"][0]["name"], "Bundle the feed");
     assert_eq!(b["bundles"][0]["count"], 2);
     assert_eq!(b["feed"]["count"], 0);
+    // The brief leaves out the hidden receipt. The Records view counts it.
+    assert_eq!(b["hidden"], 1);
+    assert!(b["records"].get("receipt").is_none());
+    let (code, counts) = get(&store, "/api/records").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(counts, json!({"receipt": 1}));
     for bad in ["bundle-03", "bundle-", "bundle-x", "bundle-+3", "bundles-3"] {
         let (code, _) = get(&store, &format!("/api/brief/{bad}")).await;
         assert_eq!(code, StatusCode::NOT_FOUND, "{bad}");
