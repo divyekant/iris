@@ -297,17 +297,24 @@ impl Draft {
             By::Rule(r) => json!({"by": "rule", "rule": r}),
             By::Model => json!({"by": "model", "model": model, "prompt": PROMPT}),
         };
-        for key in ["owner", "counterparty", "issuer", "publisher"] {
-            if let Some(p) = v.get_mut(key) {
-                set_sender(p, sender);
-            }
-        }
-        if let Some(Value::Array(list)) = v.pointer_mut("/fields/parties") {
-            for p in list {
-                set_sender(p, sender);
-            }
-        }
+        set_senders(&mut v, sender);
         v
+    }
+}
+
+/// Set the `p-` ID of each sender party of the item `v` from its address:
+/// the one rule that links a party to its sender row, for a new item and
+/// for a correction. A sender party with no address gets no ID.
+pub fn set_senders(v: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) {
+    for key in ["owner", "counterparty", "issuer", "publisher"] {
+        if let Some(p) = v.get_mut(key) {
+            set_sender(p, sender);
+        }
+    }
+    if let Some(Value::Array(list)) = v.pointer_mut("/fields/parties") {
+        for p in list {
+            set_sender(p, sender);
+        }
     }
 }
 
@@ -325,7 +332,9 @@ fn set_sender(p: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) 
     if o.get("kind").and_then(Value::as_str) != Some("sender") {
         return;
     }
+    // A sender ID that no address supports goes.
     let Some(addr) = o.get("address").and_then(Value::as_str).map(str::to_string) else {
+        o.remove("sender");
         return;
     };
     let name = o.get("name").and_then(Value::as_str).map(str::to_string);

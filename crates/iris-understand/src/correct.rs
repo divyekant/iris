@@ -11,8 +11,6 @@
 //! item, never changes its ID, and gives the model the corrected document as
 //! an existing item (`store.rs`, `DROPPABLE` and `pinned`).
 
-use std::collections::BTreeSet;
-
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 
@@ -43,10 +41,10 @@ const COMMON: [&str; 12] = [
 ///
 /// Gives `Ok(Err(reason))` and writes nothing when the change is not
 /// allowed: no such item, a common field, a conversation, a path that does
-/// not fit the document (`iris_talk::set_field`), a new sender ID that is
-/// not a row of the store, or a document that is not valid against the
-/// schemas. Else writes the `correction` row and the new
-/// document, and gives the new document. A record gets the status
+/// not fit the document (`iris_talk::set_field`), a path to the `sender` ID
+/// of a party, or a document that is not valid against the schemas. Else
+/// writes the `correction` row and the new document, with the sender ID of
+/// each party from its address (a new address gets a sender row), and gives the new document. A record gets the status
 /// `corrected` (section 6.8). If the record is gone, `corrected` is its
 /// status after it comes back.
 pub fn correct(
@@ -58,6 +56,11 @@ pub fn correct(
     now_ms: i64,
 ) -> rusqlite::Result<Result<Value, String>> {
     let top = field.split('.').next().unwrap_or("");
+    if field.split('.').any(|s| s == "sender") {
+        return Ok(Err(
+            "the engine sets the sender ID of a party from its address".into(),
+        ));
+    }
     if COMMON.contains(&top) {
         return Ok(Err(format!(
             "the field {top} is a common field, and a correction cannot change it"
@@ -88,24 +91,8 @@ pub fn correct(
     if form == "conversation" {
         return Ok(Err("the conversation rule owns a conversation".into()));
     }
-    let before = senders(&doc);
     if !iris_talk::set_field(&mut doc, field, value.clone()) {
         return Ok(Err(format!("the field {field:?} does not fit the item")));
-    }
-    // Each sender that a party names is a row of the store.
-    for p in senders(&doc).difference(&before) {
-        let row = match iris_store::parse_id(p) {
-            Some((iris_store::Kind::Sender, row)) => row,
-            _ => 0,
-        };
-        let known: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sender WHERE id = ?1)",
-            [row],
-            |r| r.get(0),
-        )?;
-        if !known {
-            return Ok(Err(format!("no sender has the ID {p:?}")));
-        }
     }
     doc["updated"] = iris_talk::rfc3339(now_ms).into();
     // The status column holds `gone` while the record is gone, and the
@@ -113,8 +100,23 @@ pub fn correct(
     if form == "record" {
         doc["status"] = "corrected".into();
     }
-    if let Err(e) = validate(&doc) {
+    // The engine links each sender party to the sender row of its address,
+    // as for a new item, so an ID and an address cannot disagree. First the
+    // check with a placeholder ID, so a refused correction writes no row.
+    let mut check = doc.clone();
+    crate::set_senders(&mut check, &mut |_, _| 1);
+    if let Err(e) = validate(&check) {
         return Ok(Err(format!("the corrected item is not valid: {e}")));
+    }
+    let mut failed = None;
+    crate::set_senders(&mut doc, &mut |addr, name| {
+        crate::store::sender_row(tx, addr, name).unwrap_or_else(|e| {
+            failed.get_or_insert(e);
+            0
+        })
+    });
+    if let Some(e) = failed {
+        return Err(e);
     }
     tx.execute(
         "INSERT INTO correction(item_id, field, value, by, at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -130,24 +132,4 @@ pub fn correct(
         params![item, doc.to_string(), now_ms],
     )?;
     Ok(Ok(doc))
-}
-
-/// The string values of each `sender` key of `doc`: the sender rows that its
-/// parties name (specification 1, section 6.1).
-fn senders(doc: &Value) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let mut stack = vec![doc];
-    while let Some(v) = stack.pop() {
-        match v {
-            Value::Object(m) => {
-                if let Some(Value::String(s)) = m.get("sender") {
-                    out.insert(s.clone());
-                }
-                stack.extend(m.values());
-            }
-            Value::Array(a) => stack.extend(a),
-            _ => {}
-        }
-    }
-    out
 }

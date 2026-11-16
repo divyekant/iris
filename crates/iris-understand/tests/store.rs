@@ -1727,12 +1727,18 @@ fn a_refused_correction_writes_nothing() {
             "counterparty",
             json!({"kind": "sender", "sender": "p-999"}),
         ),
+        (&id, "counterparty.address", json!("not an address")),
     ] {
         let out = correct(&b.store, id, field, value.clone(), NOW);
         assert!(out.is_err(), "{id} {field} {value} must be refused");
     }
     assert_eq!(corrections(&b), 0);
     assert_eq!(b.items(), before);
+    let senders: i64 = b.col(
+        "SELECT COUNT(*) FROM sender WHERE address = 'not an address' AND ?1 = ?1",
+        0,
+    );
+    assert_eq!(senders, 0, "a refused correction adds no sender row");
 }
 
 #[test]
@@ -1837,17 +1843,24 @@ fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversati
         "SELECT id FROM sender WHERE address = 'ana@example.org' AND ?1 = ?1",
         0,
     );
-    let party =
-        json!({"kind": "sender", "sender": format!("p-{ana}"), "address": "ana@example.org"});
+    // A wrong sender ID in the value goes: the address decides it.
+    let party = json!({"kind": "sender", "sender": "p-999", "address": "ana@example.org"});
+    let doc = correct(&b.store, &format!("c-{c}"), "counterparty", party, NOW).unwrap();
+    assert_eq!(doc["counterparty"]["sender"], format!("p-{ana}"));
+    // A new address gets its own sender row, and the ID follows it.
     let doc = correct(
         &b.store,
         &format!("c-{c}"),
-        "counterparty",
-        party.clone(),
+        "counterparty.address",
+        json!("kai@example.net"),
         NOW,
     )
     .unwrap();
-    assert_eq!(doc["counterparty"], party);
+    let kai: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'kai@example.net' AND ?1 = ?1",
+        0,
+    );
+    assert_eq!(doc["counterparty"]["sender"], format!("p-{kai}"));
 
     let v: i64 = b.col(
         "SELECT id FROM item WHERE form = 'conversation' AND ?1 = ?1",
