@@ -177,9 +177,15 @@ pub fn write(system: System, program: &Path, home: &Path, config: &Path) -> io::
         std::fs::create_dir_all(home.join("Library/Logs"))?;
     }
     // Write a new file, then rename it, so that a stop never leaves half a file.
-    let new = file.with_extension("new");
-    std::fs::write(&new, text)?;
-    std::fs::rename(&new, &file)?;
+    // The name is unique for each call, so that two installs at the same
+    // time never write the same temporary file.
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let new = file.with_extension(format!("new.{}.{n}", std::process::id()));
+    if let Err(e) = std::fs::write(&new, text).and_then(|()| std::fs::rename(&new, &file)) {
+        let _ = std::fs::remove_file(&new);
+        return Err(e);
+    }
     Ok(file)
 }
 
@@ -457,6 +463,35 @@ mod tests {
     }
 
     #[test]
+    fn writes_at_the_same_time_leave_one_whole_file() {
+        let dir = std::env::temp_dir().join(format!("iris-service-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (home, config) = (dir.join("home"), dir.join("config"));
+        let runs: Vec<_> = (0..8)
+            .map(|i| {
+                let (home, config) = (home.clone(), config.clone());
+                std::thread::spawn(move || {
+                    let program = PathBuf::from(format!("/opt/iris{i}"));
+                    write(System::Systemd, &program, &home, &config)
+                })
+            })
+            .collect();
+        for run in runs {
+            run.join().unwrap().unwrap();
+        }
+        let file = System::Systemd.file(&home, &config);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let whole =
+            (0..8).any(|i| text == systemd_unit(Path::new(&format!("/opt/iris{i}"))).unwrap());
+        assert!(whole, "{text}");
+        assert_eq!(
+            std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn files_go_to_the_user_folders() {
         let (home, config) = (Path::new("/h"), Path::new("/c"));
         assert_eq!(
@@ -480,7 +515,15 @@ mod tests {
             assert_eq!(first, file);
             let text = std::fs::read_to_string(&file).unwrap();
             assert!(text.contains("/new/iris") && !text.contains("/old/iris"));
-            assert!(!file.with_extension("new").exists());
+            let names: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                names,
+                [file.file_name().unwrap()],
+                "no temporary file stays"
+            );
         }
         assert!(home.join("Library/Logs").is_dir());
         std::fs::remove_dir_all(&dir).unwrap();
