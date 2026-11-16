@@ -168,7 +168,7 @@ fn sent_mail_makes_each_recipient_a_person() {
     );
     assert_eq!((d.kind, d.sender), (Kind::SelfOwner, None));
     assert_eq!(c.row("ana@example.org").1.as_deref(), Some("person"));
-    assert_eq!(c.row("bo@example.net").2.as_deref(), Some("sent"));
+    assert_eq!(c.row("bo@example.net").2.as_deref(), Some("sent: m-1"));
     // A new thread from Ana: still a person.
     let d = c.put(
         "t2",
@@ -295,7 +295,11 @@ fn mail_from_the_account_address_is_self() {
 #[test]
 fn a_person_without_sent_mail_is_decided_again() {
     let mut c = Case::new("evidence");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: bo@example.net"),
+    );
     let head = "From: Bo <bo@example.net>\r\nTo: owner@example.com";
     assert_eq!(c.put("t2", &["INBOX"], head).kind, Kind::Person);
     // The only sent message loses its label (for example, it is deleted).

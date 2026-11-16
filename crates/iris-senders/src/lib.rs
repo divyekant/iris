@@ -10,6 +10,7 @@
 //!
 //! Mail text is data: this crate only compares header bytes.
 
+use iris_store::{format_id, parse_id, Kind as IdKind};
 use rusqlite::{params, Connection, OptionalExtension};
 
 mod head;
@@ -70,7 +71,9 @@ pub struct Decision {
 /// Rows are keyed on the lowercase address. A row with `decided_by` =
 /// `person` never changes. The function reads the `header`, `message`,
 /// `message_label` and `sender` tables, so call it after the `header` row
-/// of each earlier message is saved. `now_ms` goes to `decided_at`.
+/// of each earlier message is saved. In the `header` row, `from_addr` is
+/// the bare lowercase address, and `to_addrs` and `cc_addrs` are bare
+/// lowercase addresses joined by `,`. `now_ms` goes to `decided_at`.
 pub fn decide(
     conn: &Connection,
     message: i64,
@@ -101,7 +104,12 @@ pub fn decide(
         // A draft does not count for the `person` rule.
         return Ok(own(if has("SENT") { "sent" } else { "draft" }));
     }
-    if has("SENT") || from_self {
+    if from_self && !has("SENT") {
+        // Anyone can write the account address in `From`, so this is no proof
+        // of a sent message: the recipients stay as they are.
+        return Ok(own("account"));
+    }
+    if has("SENT") {
         let known = known_domains(conn, "")?;
         for to in head.recipients() {
             if to.eq_ignore_ascii_case(&account) {
@@ -117,10 +125,10 @@ pub fn decide(
                     &format!("near copy of {k}"),
                     now_ms,
                 )?,
-                None => upsert(conn, &to, None, Kind::Person, "sent", now_ms)?,
+                None => upsert(conn, &to, None, Kind::Person, &sent_basis(message), now_ms)?,
             };
         }
-        return Ok(own(if has("SENT") { "sent" } else { "account" }));
+        return Ok(own("sent"));
     }
 
     let Some((addr, name)) = from else {
@@ -131,18 +139,20 @@ pub fn decide(
             previous: None,
         });
     };
-    let row: Option<(i64, Option<String>, Option<String>)> = conn
+    // (id, kind, decided_by, basis)
+    type Row = (i64, Option<String>, Option<String>, Option<String>);
+    let row: Option<Row> = conn
         .query_row(
-            "SELECT id, kind, decided_by FROM sender WHERE address = ?1",
+            "SELECT id, kind, decided_by, basis FROM sender WHERE address = ?1",
             [&addr],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
     let previous = row
         .as_ref()
         .and_then(|r| r.1.as_deref())
         .and_then(Kind::parse);
-    if let Some((id, Some(kind), Some(by))) = &row {
+    if let Some((id, Some(kind), Some(by), _)) = &row {
         if by == "person" {
             if let Some(kind) = Kind::parse(kind) {
                 return Ok(Decision {
@@ -155,7 +165,8 @@ pub fn decide(
         }
     }
 
-    let (kind, basis) = rules(conn, &head, &addr, thread, date, previous)?;
+    let old_basis = row.as_ref().and_then(|r| r.3.as_deref());
+    let (kind, basis) = rules(conn, &head, &addr, thread, date, previous, old_basis)?;
     let id = upsert(conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
     Ok(Decision {
         kind,
@@ -163,6 +174,17 @@ pub fn decide(
         basis,
         previous,
     })
+}
+
+/// True when the message `s` has the label `SENT` and not `DRAFT`.
+const SENT_NOT_DRAFT: &str =
+    "(EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                  WHERE ml.message_id = s.id AND l.provider_id = 'SENT')
+      AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                  WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
+
+fn sent_basis(message: i64) -> String {
+    format!("sent: {}", format_id(IdKind::Message, message))
 }
 
 fn own(basis: &str) -> Decision {
@@ -183,18 +205,51 @@ fn rules(
     thread: i64,
     date: Option<i64>,
     previous: Option<Kind>,
+    old_basis: Option<&str>,
 ) -> rusqlite::Result<(Kind, String)> {
     let domain = domain_of(addr);
     if let Some(k) = near(addr, &known_domains(conn, addr)?) {
         return Ok((Kind::Hostile, format!("near copy of {k}")));
     }
 
-    // The `sent` rule: a sent message to the address made the row `person`.
+    // The `sent` rule. Each sent message makes its recipients `person` when
+    // it is decided, with the message ID in `basis`. So only a `person` row
+    // needs the check that a sent message to the address is still there:
+    // first the message of the basis, then each sent message.
     if previous == Some(Kind::Person) {
-        return Ok((Kind::Person, "sent".into()));
+        let named = old_basis
+            .and_then(|b| b.strip_prefix("sent: "))
+            .and_then(parse_id)
+            .filter(|(k, _)| *k == IdKind::Message)
+            .map(|(_, row)| row);
+        if let Some(m) = named {
+            let still: bool = conn.query_row(
+                &format!("SELECT {SENT_NOT_DRAFT} FROM message s WHERE s.id = ?1"),
+                [m],
+                |r| r.get(0),
+            )?;
+            if still {
+                return Ok((Kind::Person, sent_basis(m)));
+            }
+        }
+        let found: Option<i64> = conn
+            .query_row(
+                &format!(
+                    "SELECT s.id FROM message s JOIN header h ON h.message_id = s.id
+                      WHERE instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
+                                  ',' || ?1 || ',') > 0
+                        AND {SENT_NOT_DRAFT} LIMIT 1"
+                ),
+                [addr],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(m) = found {
+            return Ok((Kind::Person, sent_basis(m)));
+        }
     }
     // shortcut: this query reads each message from the address, so its cost
-    // grows with the history of the address (1.7 ms for each message on the
+    // grows with the history of the address (about 1.7 ms for each message on the
     // 100,000-message synthetic mailbox, release build). Keep a "replied"
     // flag in the store if a large mailbox makes it slow.
     let replied: bool = conn.query_row(
@@ -299,21 +354,10 @@ const COMMON: [&str; 26] = [
 /// near copies. Neither are equal labels under another top-level domain
 /// (`shop.de` and `shop.com`).
 pub fn near_copy(domain: &str, known: &str) -> bool {
-    // shortcut: "the last two labels" stands in for the registrable domain,
-    // with no public suffix list; add the list if co.uk-style domains give
-    // wrong results.
-    fn base(d: &str) -> Vec<&str> {
-        d.rsplitn(3, '.').take(2).collect()
-    }
     if domain == known || base(domain) == base(known) {
         return false;
     }
-    let labels = |d: &str| {
-        let mut l: Vec<&str> = d.split('.').collect();
-        l.pop();
-        l.into_iter().map(str::to_string).collect::<Vec<_>>()
-    };
-    let (mine, theirs) = (labels(domain), labels(known));
+    let (mine, theirs) = (names(domain), names(known));
     let telling: Vec<&String> = theirs
         .iter()
         .filter(|l| l.len() >= 3 && !COMMON.contains(&l.as_str()))
@@ -329,6 +373,36 @@ pub fn near_copy(domain: &str, known: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The number of labels at the end of `d` that form its public suffix.
+/// shortcut: a two-letter country domain with a common second level
+/// (`co.uk`, `com.au`) has 2, each other domain has 1; use the public suffix
+/// list if other suffixes give wrong results.
+fn suffix_len(labels: &[&str]) -> usize {
+    match labels {
+        [.., second, tld]
+            if tld.len() == 2
+                && ["co", "com", "net", "org", "ac", "gov", "edu", "ne", "or"].contains(second) =>
+        {
+            2
+        }
+        _ => 1,
+    }
+}
+
+/// The registrable domain: the suffix and one label more.
+fn base(d: &str) -> Vec<&str> {
+    let l: Vec<&str> = d.split('.').collect();
+    let keep = (suffix_len(&l) + 1).min(l.len());
+    l[l.len() - keep..].to_vec()
+}
+
+/// The labels in front of the public suffix. The last is the name label.
+fn names(d: &str) -> Vec<String> {
+    let l: Vec<&str> = d.split('.').collect();
+    let n = l.len().saturating_sub(suffix_len(&l));
+    l[..n].iter().map(|s| s.to_string()).collect()
 }
 
 /// Map look-alike characters to one form.
