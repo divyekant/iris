@@ -642,6 +642,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-auth"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "form_urlencoded",
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+]
+
+[[package]]
 name = "iris-eval"
 version = "0.0.0"
 dependencies = [
