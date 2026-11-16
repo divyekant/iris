@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 1);
+            assert_eq!(iris_store::schema_version(c)?, 2);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -549,6 +549,50 @@ fn new_content_without_a_body_removes_the_old_text() {
         })
         .unwrap();
     assert_eq!((bodies, understood), (0, None));
+}
+
+#[test]
+fn a_new_sent_or_draft_label_clears_the_understanding() {
+    let dir = TempDir::new("sentlabel");
+    let (store, acc) = setup(&dir);
+    store
+        .put_labels(
+            acc,
+            &[("SENT", "SENT", "system"), ("DRAFT", "DRAFT", "system")],
+        )
+        .unwrap();
+    let understood = |store: &Store, a: i64| -> Option<i64> {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT understood_at FROM message WHERE id = ?1",
+                    [a],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let mut m = msg("a", "t1", 1, &["INBOX"], "s", "apple");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let a = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    let mark = |store: &Store| {
+        store
+            .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 4 WHERE id = ?1", [a])?))
+            .unwrap();
+    };
+    mark(&store);
+    // Another label that is not SENT or DRAFT keeps the understanding.
+    m.labels = vec!["INBOX".into(), "Label_1".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(understood(&store, a), Some(4));
+    // The same bytes with SENT: the sender of the message is you now.
+    m.labels = vec!["SENT".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(understood(&store, a), None);
+    mark(&store);
+    m.labels = vec!["SENT".into(), "DRAFT".into()];
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(understood(&store, a), None);
 }
 
 #[test]
