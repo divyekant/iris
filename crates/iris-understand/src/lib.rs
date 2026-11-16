@@ -319,6 +319,17 @@ pub fn set_senders(v: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> 
     }
 }
 
+/// The status of a signal that a person did not use or dismiss: `expired`
+/// from its expiry on (section 6.8), else `active`. The one rule for the
+/// fixed rules, the model and a correction.
+pub(crate) fn signal_status(expires_ms: Option<i64>, now_ms: i64) -> &'static str {
+    if expires_ms.is_some_and(|e| e <= now_ms) {
+        "expired"
+    } else {
+        "active"
+    }
+}
+
 /// The row IDs and the time that [`Draft::finish`] needs.
 #[derive(Clone, Copy, Debug)]
 pub struct Ids {

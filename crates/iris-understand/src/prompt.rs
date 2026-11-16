@@ -294,14 +294,13 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
             put("expires", json!(crate::time::rfc3339(at + life)));
             m.insert("issuer".into(), sender);
             // The status follows the final expiry, also an expiry from the model.
-            let past = m
+            let expires = m
                 .get("expires")
                 .and_then(Value::as_str)
-                .and_then(crate::time::parse_rfc3339)
-                .is_some_and(|e| e <= cx.now_ms);
+                .and_then(crate::time::parse_rfc3339);
             m.insert(
                 "status".into(),
-                json!(if past { "expired" } else { "active" }),
+                json!(crate::signal_status(expires, cx.now_ms)),
             );
         }
         // The engine makes conversations (section 7.3). Other forms are not valid.

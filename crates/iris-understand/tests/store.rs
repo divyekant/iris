@@ -1901,3 +1901,42 @@ fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversati
     assert_eq!(after["summary"], "The lease");
     assert_eq!(after["thread"], doc["thread"]);
 }
+
+#[test]
+fn a_correction_of_the_expiry_of_a_signal_sets_its_status() {
+    let b = store("correct-signal");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let signal = r#"{"items": [{"form": "signal", "title": "Code", "quote": "Can you send me the signed lease by Friday?",
+      "kind": "code", "code": "1234"}], "phishing": false}"#;
+    let row = understand(&b.store, m, &Fake::with(&[signal]), NOW)
+        .unwrap()
+        .items[0];
+    let id = format!("s-{row}");
+    let status = |b: &Box_| -> String { b.col("SELECT status FROM item WHERE id = ?1", row) };
+    assert_eq!(status(&b), "expired");
+    let doc = correct(&b.store, &id, "expires", json!("2026-02-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(doc["status"], "active");
+    assert_eq!(status(&b), "active");
+    let doc = correct(&b.store, &id, "expires", json!("2025-12-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(doc["status"], "expired");
+    assert_eq!(status(&b), "expired");
+    // A gone signal keeps `gone`, and comes back with the new status.
+    let sql = |q: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(q, [row])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    sql("UPDATE item SET status_before_gone = status, status = 'gone' WHERE id = ?1");
+    correct(&b.store, &id, "expires", json!("2026-02-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(status(&b), "gone");
+    sql("UPDATE item SET status = status_before_gone, status_before_gone = NULL WHERE id = ?1");
+    assert_eq!(status(&b), "active");
+    // A used signal stays used.
+    sql("UPDATE item SET status = 'used', doc = json_set(doc, '$.status', 'used') WHERE id = ?1");
+    let doc = correct(&b.store, &id, "expires", json!("2025-12-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(doc["status"], "used");
+    assert_eq!(status(&b), "used");
+}

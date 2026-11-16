@@ -45,9 +45,11 @@ const COMMON: [&str; 12] = [
 /// not fit the document (`iris_talk::set_field`), a path to the `sender` ID
 /// of a party, or a document that is not valid against the schemas. Else
 /// writes the `correction` row and the new document, with the sender ID of
-/// each party from its address (a new address gets a sender row), and gives the new document. A record gets the status
-/// `corrected` (section 6.8). If the record is gone, `corrected` is its
-/// status after it comes back.
+/// each party from its address (a new address gets a sender row), and gives
+/// the new document. The status follows the new document (section 6.8): a
+/// record is `corrected`, and an active or expired signal follows its
+/// `expires`. A gone item keeps `gone` and gets that status when it comes
+/// back.
 pub fn correct(
     tx: &Transaction,
     id: &str,
@@ -98,10 +100,19 @@ pub fn correct(
         return Ok(Err(format!("the field {field:?} does not fit the item")));
     }
     doc["updated"] = iris_talk::rfc3339(now_ms).into();
-    // The status column holds `gone` while the record is gone, and the
-    // sync does not change the document (`iris-sync`, section 4.5).
-    if form == "record" {
-        doc["status"] = "corrected".into();
+    // The status that follows from the corrected document (section 6.8).
+    // The status column holds `gone` while the item is gone, and the sync
+    // does not change the document (`iris-sync`, section 4.5).
+    let status = match (form.as_str(), doc["status"].as_str()) {
+        ("record", _) => Some("corrected"),
+        ("signal", Some("active" | "expired")) => {
+            let expires = doc["expires"].as_str().and_then(crate::time::parse_rfc3339);
+            Some(crate::signal_status(expires, now_ms))
+        }
+        _ => None,
+    };
+    if let Some(s) = status {
+        doc["status"] = s.into();
     }
     // The engine links each sender party to the sender row of its address,
     // as for a new item, so an ID and an address cannot disagree. First the
@@ -125,14 +136,14 @@ pub fn correct(
         "INSERT INTO correction(item_id, field, value, by, at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![item, field, value.to_string(), by, now_ms],
     )?;
-    // A gone record keeps `gone` and comes back as `corrected`.
+    // A gone item keeps `gone`, and comes back with the new status.
     tx.execute(
         "UPDATE item SET doc = ?2, updated_at = ?3,
-           status = CASE WHEN form = 'record' AND status <> 'gone' THEN 'corrected' ELSE status END,
-           status_before_gone = CASE WHEN form = 'record' AND status = 'gone'
-             THEN 'corrected' ELSE status_before_gone END
+           status = CASE WHEN ?4 IS NULL OR status = 'gone' THEN status ELSE ?4 END,
+           status_before_gone = CASE WHEN ?4 IS NOT NULL AND status = 'gone'
+             THEN ?4 ELSE status_before_gone END
          WHERE id = ?1",
-        params![item, doc.to_string(), now_ms],
+        params![item, doc.to_string(), now_ms, status],
     )?;
     Ok(Ok(doc))
 }
