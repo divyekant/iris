@@ -168,7 +168,7 @@ fn sent_mail_makes_each_recipient_a_person() {
     );
     assert_eq!((d.kind, d.sender), (Kind::SelfOwner, None));
     assert_eq!(c.row("ana@example.org").1.as_deref(), Some("person"));
-    assert_eq!(c.row("bo@example.net").2.as_deref(), Some("sent: m-1"));
+    assert_eq!(c.row("bo@example.net").2.as_deref(), Some("sent: m-1 sha:-"));
     // A new thread from Ana: still a person.
     let d = c.put(
         "t2",
@@ -400,11 +400,21 @@ fn a_service_without_its_qualifying_message_is_decided_again() {
 #[test]
 fn a_bcc_person_whose_sent_message_changed_is_decided_again() {
     let mut c = Case::new("bcc-changed");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nBcc: eve@example.org"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nBcc: eve@example.org"),
+    );
     assert_eq!(c.put("t2", &[], "From: eve@example.org").kind, Kind::Person);
     // The raw bytes of the sent message are no longer the bytes that named Eve.
-    set(&c, "UPDATE message SET content_sha256 = 'other' WHERE id = 1");
-    assert_eq!(c.put("t3", &[], "From: eve@example.org").kind, Kind::Stranger);
+    set(
+        &c,
+        "UPDATE message SET content_sha256 = 'other' WHERE id = 1",
+    );
+    assert_eq!(
+        c.put("t3", &[], "From: eve@example.org").kind,
+        Kind::Stranger
+    );
 }
 
 #[test]

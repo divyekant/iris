@@ -84,11 +84,11 @@ pub fn decide(
     now_ms: i64,
 ) -> rusqlite::Result<Decision> {
     let head = Head::parse(raw);
-    let (date, account): (Option<i64>, String) = conn.query_row(
-        "SELECT m.internal_date, a.address FROM message m
+    let (date, sha, account): (Option<i64>, Option<String>, String) = conn.query_row(
+        "SELECT m.internal_date, m.content_sha256, a.address FROM message m
            JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
         [message],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let labels: Vec<String> = conn
         .prepare_cached(
@@ -99,19 +99,14 @@ pub fn decide(
         .collect::<rusqlite::Result<_>>()?;
     let has = |l: &str| labels.iter().any(|x| x == l);
     let from = head.from();
-    let from_self = from
-        .as_ref()
-        .is_some_and(|(a, _)| a.eq_ignore_ascii_case(&account));
 
     if has("DRAFT") {
         // A draft does not count for the `person` rule.
         return Ok(own(if has("SENT") { "sent" } else { "draft" }));
     }
-    if from_self && !has("SENT") {
-        // Anyone can write the account address in `From`, so this is no proof
-        // of a sent message: the recipients stay as they are.
-        return Ok(own("account"));
-    }
+    // Only the SENT label makes mail from you. Anyone can write the account
+    // address in `From`, so such mail goes through the rules for received
+    // mail.
     if has("SENT") {
         let known = known_domains(conn, "")?;
         let mut rerun = Vec::new();
@@ -136,11 +131,11 @@ pub fn decide(
                     &to,
                     None,
                     Kind::Person,
-                    &if bcc {
-                        format!("sent (bcc): {}", format_id(IdKind::Message, message))
-                    } else {
-                        sent_basis(message)
-                    },
+                    &evidence(
+                        if bcc { "sent (bcc)" } else { "sent" },
+                        message,
+                        sha.as_deref(),
+                    ),
                     now_ms,
                 )?,
             };
@@ -188,7 +183,16 @@ pub fn decide(
     }
 
     let old_basis = row.as_ref().and_then(|r| r.3.as_deref());
-    let (kind, basis) = rules(conn, &head, &addr, date, previous, old_basis)?;
+    let (kind, basis) = rules(
+        conn,
+        &head,
+        &addr,
+        message,
+        sha.as_deref(),
+        date,
+        previous,
+        old_basis,
+    )?;
     let mut rerun = Vec::new();
     let id = upsert(
         &mut rerun,
@@ -215,17 +219,31 @@ const SENT_NOT_DRAFT: &str =
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
-/// True when the header `h` names the address `?2` in `To` or `Cc`.
-const TO_ADDR: &str =
-    "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
-           ',' || ?2 || ',') > 0";
-/// [`TO_ADDR`] for the address `?1`.
-const TO_ADDR_1: &str =
-    "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
-           ',' || ?1 || ',') > 0";
+/// SQL that is true when the header `h` names the address of parameter
+/// `?n` in `To` or `Cc`.
+fn to_addr(n: u8) -> String {
+    format!(
+        "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',', ',' || ?{n} || ',') > 0"
+    )
+}
 
-fn sent_basis(message: i64) -> String {
-    format!("sent: {}", format_id(IdKind::Message, message))
+/// The `basis` of a rule that one message proves: the rule, the `m-` ID and
+/// the content hash, for example `sent: m-12 sha:ab12...`. A raw message
+/// does not change, so the same hash means the same headers.
+fn evidence(rule: &str, message: i64, sha: Option<&str>) -> String {
+    format!(
+        "{rule}: {} sha:{}",
+        format_id(IdKind::Message, message),
+        sha.unwrap_or("-")
+    )
+}
+
+/// Read a basis that [`evidence`] wrote: (rule, message row, hash).
+fn parse_evidence(basis: &str) -> Option<(&str, i64, Option<&str>)> {
+    let (rule, rest) = basis.split_once(": ")?;
+    let (id, sha) = rest.split_once(" sha:")?;
+    let (kind, row) = parse_id(id)?;
+    (kind == IdKind::Message).then_some((rule, row, (sha != "-").then_some(sha)))
 }
 
 fn own(basis: &str) -> Decision {
@@ -240,10 +258,13 @@ fn own(basis: &str) -> Decision {
 
 /// The engine rules in the order of spec 1 section 6.7: `hostile`, then
 /// `person`, then `service`, else `stranger`.
+#[allow(clippy::too_many_arguments)]
 fn rules(
     conn: &Connection,
     head: &Head,
     addr: &str,
+    message: i64,
+    sha: Option<&str>,
     date: Option<i64>,
     previous: Option<Kind>,
     old_basis: Option<&str>,
@@ -254,50 +275,43 @@ fn rules(
     }
 
     // The `sent` rule. Each sent message makes its recipients `person` when
-    // it is decided, with the message ID in `basis`. So only a `person` row
-    // needs the check that a sent message to the address is still there:
-    // first the message of the basis, then each sent message.
+    // it is decided, and `basis` names the message and its content hash.
+    // So only a `person` row needs the check that the sent message is still
+    // there, with the same bytes: first the message of the basis, then each
+    // sent message. The same bytes prove the same headers, also `Bcc`, which
+    // the store has no column for.
     if previous == Some(Kind::Person) {
-        // shortcut: the store has no Bcc column, so for a Bcc basis only the
-        // message and its SENT label are checked; add a column if needed.
-        let (named, bcc) = match old_basis {
-            Some(b) if b.starts_with("sent: ") => (b.strip_prefix("sent: "), false),
-            Some(b) => (b.strip_prefix("sent (bcc): "), true),
-            None => (None, false),
-        };
-        let named = named
-            .and_then(parse_id)
-            .filter(|(k, _)| *k == IdKind::Message)
-            .map(|(_, row)| row);
-        if let Some(m) = named {
-            // A deleted message, or one that no longer names the address, is
-            // no evidence.
-            // `?2 IS NULL` keeps the parameter `?2` in the text for a Bcc basis.
-            let to = if bcc { "1" } else { TO_ADDR };
+        if let Some((rule, m, old_sha)) = old_basis.and_then(parse_evidence) {
+            let to = match rule {
+                "sent" => to_addr(3),
+                "sent (bcc)" => "?3 IS NOT NULL".to_string(),
+                _ => "0".to_string(),
+            };
             let still: bool = conn.query_row(
                 &format!(
                     "SELECT EXISTS (SELECT 1 FROM message s JOIN header h ON h.message_id = s.id
-                      WHERE s.id = ?1 AND ({to} OR ?2 IS NULL) AND {SENT_NOT_DRAFT})"
+                      WHERE s.id = ?1 AND s.content_sha256 IS ?2 AND {to} AND {SENT_NOT_DRAFT})"
                 ),
-                params![m, addr],
+                params![m, old_sha, addr],
                 |r| r.get(0),
             )?;
             if still {
                 return Ok((Kind::Person, old_basis.unwrap_or_default().to_string()));
             }
         }
-        let found: Option<i64> = conn
+        let found: Option<(i64, Option<String>)> = conn
             .query_row(
                 &format!(
-                    "SELECT s.id FROM message s JOIN header h ON h.message_id = s.id
-                      WHERE {TO_ADDR_1} AND {SENT_NOT_DRAFT} LIMIT 1"
+                    "SELECT s.id, s.content_sha256 FROM message s JOIN header h ON h.message_id = s.id
+                      WHERE {} AND {SENT_NOT_DRAFT} LIMIT 1",
+                    to_addr(1)
                 ),
                 [addr],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some(m) = found {
-            return Ok((Kind::Person, sent_basis(m)));
+        if let Some((m, m_sha)) = found {
+            return Ok((Kind::Person, evidence("sent", m, m_sha.as_deref())));
         }
     }
     // shortcut: this query reads each message from the address, so its cost
@@ -316,7 +330,8 @@ fn rules(
                  JOIN message s ON s.thread_id = m.thread_id AND s.id != m.id
                  JOIN header h ON h.message_id = s.id
                 WHERE hm.from_addr = ?1 AND {SENT_NOT_DRAFT}
-                  AND (s.internal_date >= m.internal_date OR {TO_ADDR_1}))"
+                  AND (s.internal_date >= m.internal_date OR {}))",
+            to_addr(1)
         ),
         [addr],
         |r| r.get(0),
@@ -333,20 +348,27 @@ fn rules(
             |r| r.get(0),
         )?;
         if earlier >= 2 {
-            return Ok((Kind::Service, "automated, dkim pass, 2 earlier".into()));
+            return Ok((Kind::Service, evidence("service", message, sha)));
         }
     }
     // The kind belongs to the address. A newer message already made it a
-    // service, and an older message (read later, newest first) keeps it:
-    // a service row needs at least 3 messages from the address.
+    // service, and an older message (read later, newest first) keeps it
+    // while the qualifying message of the basis is there with the same
+    // bytes (so the same automated and DKIM headers), and still has 2
+    // earlier messages from the address.
     if previous == Some(Kind::Service) {
-        let count: i64 = conn.query_row(
-            "SELECT count(*) FROM (SELECT 1 FROM header WHERE from_addr = ?1 LIMIT 3)",
-            [addr],
-            |r| r.get(0),
-        )?;
-        if count >= 3 {
-            return Ok((Kind::Service, "known service".into()));
+        if let Some(("service", m, old_sha)) = old_basis.and_then(parse_evidence) {
+            let still: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM message q JOIN header hq ON hq.message_id = q.id
+                  WHERE q.id = ?1 AND q.content_sha256 IS ?2 AND hq.from_addr = ?3
+                    AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
+                          WHERE h.from_addr = ?3 AND e.internal_date < q.internal_date LIMIT 2)) >= 2)",
+                params![m, old_sha, addr],
+                |r| r.get(0),
+            )?;
+            if still {
+                return Ok((Kind::Service, old_basis.unwrap_or_default().to_string()));
+            }
         }
     }
     Ok((Kind::Stranger, "no rule matched".into()))
