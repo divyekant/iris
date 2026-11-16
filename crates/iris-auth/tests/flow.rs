@@ -453,3 +453,28 @@ fn a_refresh_answer_with_no_scope_is_accepted() {
         "new-access"
     );
 }
+
+#[test]
+fn an_idle_connection_does_not_hide_the_callback() {
+    let sign_in = test_client(None).sign_in().unwrap();
+    let state = params(&sign_in.url())["state"].clone();
+    let redirect = sign_in.redirect_uri().to_string();
+    let host = redirect[7..].split('/').next().unwrap().to_string();
+    // A browser can open a spare connection that sends nothing.
+    let _idle = TcpStream::connect(&host).unwrap();
+    let browser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        browser_get(&redirect, &format!("error=access_denied&state={state}"))
+    });
+    let start = std::time::Instant::now();
+    assert!(matches!(
+        sign_in.wait(Duration::from_secs(3)),
+        Err(Error::Denied(_))
+    ));
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(browser.join().unwrap().contains("200"));
+}
