@@ -375,7 +375,10 @@ fn busy_connections_do_not_hold_wait_past_its_time_limit() {
                 let _ = c.write_all(b"GET /oauth/cal");
                 open.push(c);
             }
-            std::thread::sleep(Duration::from_millis(5));
+            // No pause: keep the queue of the listener full.
+            if open.len() > 2000 {
+                open.clear();
+            }
         }
     });
     let start = std::time::Instant::now();
@@ -477,4 +480,30 @@ fn an_idle_connection_does_not_hide_the_callback() {
         start.elapsed()
     );
     assert!(browser.join().unwrap().contains("200"));
+}
+
+#[test]
+fn empty_tokens_are_refused() {
+    let empty_refresh = format!(
+        r#"{{"access_token":"{ACCESS}","expires_in":3599,"refresh_token":"","scope":"{SCOPE}"}}"#
+    );
+    assert!(matches!(
+        finish_with((200, empty_refresh)),
+        Err(Error::NoRefreshToken)
+    ));
+    let empty_access = format!(
+        r#"{{"access_token":"","expires_in":3599,"refresh_token":"{REFRESH}","scope":"{SCOPE}"}}"#
+    );
+    assert!(matches!(
+        finish_with((200, empty_access)),
+        Err(Error::BadAnswer)
+    ));
+    let (_fake, uri) = token_server(vec![(
+        200,
+        r#"{"access_token":"","expires_in":3599}"#.into(),
+    )]);
+    assert!(matches!(
+        test_client(Some(&uri)).refresh(&Secret::new(REFRESH)),
+        Err(Error::BadAnswer)
+    ));
 }
