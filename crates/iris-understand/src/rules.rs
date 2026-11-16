@@ -44,6 +44,12 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     if cx.kind == Kind::Hostile || !a.marks.is_empty() {
         return Some(Vec::new());
     }
+    // A receipt or a statement can hold a code, a calendar request or a
+    // List-Id too: the model reads it, so that the record and the payment
+    // are not lost.
+    if looks_like_record(a) {
+        return None;
+    }
     let subject = a.text.subject.as_str();
     let quote = or_none(subject);
     if a.text.invitation && cx.kind != Kind::SelfOwner {
@@ -60,11 +66,6 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         return Some(vec![Draft::rule(item, "invitation", quote)]);
     }
     if cx.kind == Kind::Service {
-        // A receipt or a statement can hold a code too: the model reads it,
-        // so that the record and the payment are not lost.
-        if looks_like_record(a) {
-            return None;
-        }
         if let Some((code, line)) = find_code(subject, &a.text.text) {
             let at = a.date(cx);
             let expires = at + CODE_LIFE_MS;
@@ -120,13 +121,15 @@ fn looks_like_record(a: &Analysis) -> bool {
 }
 
 /// The first code in the order of the message. A code is a run of 4 to 8
-/// digits on a line with a code word, bound to the word:
+/// digits bound to a code word on its line:
 /// - strong: the word, then only `:`, `-`, `=`, `#` or `is`, then the code;
 /// - weak: at most 3 other words between the code and the word, before or
 ///   after it. A weak code that looks like a year (1900 to 2099) does not
-///   count (shortcut: issue #94);
-/// - alone: a line that is only the code, right after a line with a code
-///   word and no number.
+///   count (shortcut: issue #94).
+///
+/// If a line has a code word and no number, the next line continues it: a
+/// number there binds to the code word by the same rules, with the words of
+/// both lines in the gap.
 ///
 /// Gives the code and the line that has the code (at most 500 characters).
 fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
@@ -142,24 +145,39 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
             return None;
         }
         let nums = numbers(l);
-        let code = nums.iter().find(|&&(s, e)| {
-            let year = e - s == 4 && matches!(&l[s..s + 2], "19" | "20");
-            cues.iter()
-                .any(|&(cs, ce)| match bind(l, (s, e), (cs, ce)) {
-                    Bind::Strong => true,
-                    Bind::Weak => !year,
-                    Bind::None => false,
-                })
-        });
-        if let Some(&(s, e)) = code {
+        if !nums.is_empty() {
+            let (s, e) = first_bound(l, &cues, &nums, 0)?;
             return Some((l[s..e].to_string(), excerpt(l, s, e - s)));
         }
+        // The cue line and the next line as one text, with the cues at their
+        // own offsets and the numbers after the line break.
         let next = *lines.get(i + 1)?;
-        let alone = numbers(next)
-            .first()
-            .is_some_and(|&(s, e)| (s, e) == (0, next.len()));
-        (nums.is_empty() && alone).then(|| (next.to_string(), next))
+        let both = format!("{l}\n{next}");
+        let shift = l.len() + 1;
+        let (s, e) = first_bound(&both, &cues, &numbers(next), shift)?;
+        let (s, e) = (s - shift, e - shift);
+        Some((next[s..e].to_string(), excerpt(next, s, e - s)))
     })
+}
+
+/// The first number of `nums` (moved by `shift` in `text`) that binds to one
+/// of `cues` in `text`, as a range of `text`.
+fn first_bound(
+    text: &str,
+    cues: &[(usize, usize)],
+    nums: &[(usize, usize)],
+    shift: usize,
+) -> Option<(usize, usize)> {
+    nums.iter()
+        .map(|&(s, e)| (s + shift, e + shift))
+        .find(|&(s, e)| {
+            let year = e - s == 4 && matches!(&text[s..s + 2], "19" | "20");
+            cues.iter().any(|&cue| match bind(text, (s, e), cue) {
+                Bind::Strong => true,
+                Bind::Weak => !year,
+                Bind::None => false,
+            })
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -284,6 +302,16 @@ mod tests {
             Some("7731".into())
         );
         assert_eq!(code("Weekly news", "Read 2024 stories"), None);
+        assert_eq!(
+            code("Your verification code", "Use 482913 to sign in"),
+            Some("482913".into())
+        );
+        assert_eq!(code("Your code", "Expires in 2026"), None);
+        assert_eq!(code("Your code is", "2026"), Some("2026".into()));
+        assert_eq!(
+            code("Your code", "7731\nVerification help 2026"),
+            Some("7731".into())
+        );
         assert_eq!(code("barcode 123456", ""), None);
         assert_eq!(code("decode 123456", ""), None);
         assert_eq!(

@@ -303,6 +303,14 @@ fn an_invoice_with_a_code_goes_to_the_model() {
 }
 
 #[test]
+fn an_invoice_with_a_calendar_request_goes_to_the_model() {
+    let raw = INVITE.replace("Join us.", "Invoice 77. Total: 12.50 USD");
+    assert_ne!(raw, INVITE);
+    assert!(drafts(&raw, Kind::Service, &[]).is_none());
+    assert!(drafts(&raw, Kind::Person, &[]).is_none());
+}
+
+#[test]
 fn the_spec_examples_are_valid_and_a_bad_item_is_not() {
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),
