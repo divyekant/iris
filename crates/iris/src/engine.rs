@@ -208,15 +208,16 @@ impl Worker {
         Err(Error::NeedsSignIn)
     }
 
-    /// A valid access token: the token in memory, or a new one from the
-    /// stored sign-in.
+    /// A valid access token: the token in memory while the stored sign-in
+    /// is the one that gave it, else a new one from the stored sign-in.
     fn access(&mut self) -> Result<Secret> {
+        let (mut client, refresh, sealed) = load_grant(&self.store, self.account)?;
+        // A new sign-in (`iris account add`) replaces the token in memory too.
         if let Some(t) = &self.token {
-            if t.expires_at > Instant::now() + TOKEN_MARGIN {
+            if sealed == self.sealed && t.expires_at > Instant::now() + TOKEN_MARGIN {
                 return Ok(t.token.clone());
             }
         }
-        let (mut client, refresh, sealed) = load_grant(&self.store, self.account)?;
         if let Some(uri) = &self.test_token_uri {
             client = client.with_test_token_uri(uri)?;
         }

@@ -172,6 +172,23 @@ fn a_failed_old_sign_in_does_not_undo_a_new_sign_in() {
 }
 
 #[test]
+fn a_new_sign_in_replaces_the_token_in_memory() {
+    let s = setup("new-sign-in", 3);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    // `iris account add` with another client, while the first token is valid.
+    let other = client_json().replace("fake-id", "other-id");
+    sign_in(&s.store, &gmail(s.fake.base_url()), &other, "refresh-new");
+    w.sync().unwrap();
+    let calls = s.tokens.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        calls[1].contains("client_id=other-id") && calls[1].contains("refresh-new"),
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn each_account_refreshes_with_its_own_client() {
     let s = setup("two-clients", 1);
     rename_account(&s.store, s.account, "first@example.com");
