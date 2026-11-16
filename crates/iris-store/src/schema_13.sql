@@ -2,8 +2,8 @@
 --
 -- A matter is a title and the items that belong together. Iris proposes a
 -- matter; the person confirms or declines it. The triggers below hold the
--- rules of the spec ("Store: migration 12" there; this is the 13th
--- migration), so no write path can break them.
+-- rules of the spec ("Store: migration 13"), so no write path can break
+-- them.
 
 CREATE TABLE matter (
   -- AUTOINCREMENT: the engine never uses an ID again (specification 1, 5.7).
@@ -16,7 +16,12 @@ CREATE TABLE matter (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   decided_at INTEGER,
-  CHECK ((status = 'proposed') = (decided_at IS NULL))
+  -- 0 while the proposal write inserts the members, then 1 for good.
+  sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),
+  -- The confirm: the JSON array of the item row IDs that the person kept.
+  keep TEXT,
+  CHECK ((status = 'proposed') = (decided_at IS NULL)),
+  CHECK ((status = 'confirmed') = (keep IS NOT NULL))
 );
 
 CREATE TABLE matter_item (
@@ -35,11 +40,11 @@ CREATE TABLE matter_run (
   candidates TEXT
 );
 
--- Rule 1: a matter starts as a proposal, moves only from `proposed` to
--- `confirmed` or `declined`, and changes no more after the decision. Only a
--- proposal can be deleted.
+-- Rule 1: a matter starts as an unsealed proposal, is sealed once, moves
+-- only from `proposed` to `confirmed` or `declined`, and changes no more
+-- after the decision. Only a proposal can be deleted.
 CREATE TRIGGER matter_insert BEFORE INSERT ON matter
-WHEN new.status IS NOT 'proposed'
+WHEN new.status IS NOT 'proposed' OR new.sealed IS NOT 0 OR new.keep IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'iris: a matter starts as a proposal');
 END;
@@ -49,6 +54,9 @@ WHEN old.status IS NOT 'proposed'
   OR new.id IS NOT old.id OR new.model IS NOT old.model
   OR new.prompt IS NOT old.prompt OR new.run_id IS NOT old.run_id
   OR new.created_at IS NOT old.created_at
+  -- The seal goes from 0 to 1 only, and a decision needs the seal.
+  OR new.sealed < old.sealed
+  OR (new.status IS NOT 'proposed' AND new.sealed IS NOT 1)
 BEGIN
   SELECT RAISE(ABORT, 'iris: a decided matter does not change');
 END;
@@ -59,12 +67,21 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: only a proposal can be deleted');
 END;
 
--- Rules 2, 3 and 4 on a new member row. The members go in with the
--- proposal: only the newest matter, while it is a proposal, gets rows.
+-- The confirm: each member that is not in `keep` gets `kept` = 0, in the
+-- statement of the decision.
+CREATE TRIGGER matter_confirm AFTER UPDATE OF status ON matter
+WHEN new.status = 'confirmed'
+BEGIN
+  UPDATE matter_item SET kept = 0
+  WHERE matter_id = new.id AND kept = 1
+    AND item_id NOT IN (SELECT value FROM json_each(new.keep));
+END;
+
+-- Rules 2, 3 and 4 on a new member row: members go in only during the
+-- proposal write (before the seal).
 CREATE TRIGGER matter_item_insert BEFORE INSERT ON matter_item
 WHEN new.kept IS NOT 1
-  OR new.matter_id IS NOT (SELECT max(id) FROM matter)
-  OR (SELECT status FROM matter WHERE id = new.matter_id) IS NOT 'proposed'
+  OR (SELECT status = 'proposed' AND sealed = 0 FROM matter WHERE id = new.matter_id) IS NOT 1
   OR (SELECT form FROM item WHERE id = new.item_id)
      NOT IN ('commitment', 'conversation', 'record')
   OR EXISTS (
@@ -75,12 +92,15 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: not a valid member of a new proposal');
 END;
 
--- Rule 3: only `kept` changes, from 1 to 0, while the matter is a proposal
--- (the confirm writes it before the status).
+-- Rule 3: only `kept` changes, from 1 to 0, for a member of a confirmed
+-- matter that is not in its `keep` (the trigger `matter_confirm`).
 CREATE TRIGGER matter_item_update BEFORE UPDATE ON matter_item
 WHEN new.matter_id IS NOT old.matter_id OR new.item_id IS NOT old.item_id
-  OR NOT (new.kept IS old.kept OR (old.kept = 1 AND new.kept = 0))
-  OR (SELECT status FROM matter WHERE id = old.matter_id) IS NOT 'proposed'
+  OR (new.kept IS NOT old.kept AND NOT (
+    old.kept = 1 AND new.kept = 0
+    AND (SELECT status FROM matter WHERE id = old.matter_id) = 'confirmed'
+    AND old.item_id NOT IN (
+      SELECT value FROM json_each((SELECT keep FROM matter WHERE id = old.matter_id)))))
 BEGIN
   SELECT RAISE(ABORT, 'iris: a member row does not change');
 END;
@@ -114,7 +134,7 @@ CREATE VIEW matter_live AS
 -- more threads.
 CREATE VIEW matter_valid AS
   SELECT m.id AS matter_id FROM matter m
-  WHERE m.status = 'proposed'
+  WHERE m.status = 'proposed' AND m.sealed = 1
     AND (SELECT count(*) FROM matter_live l WHERE l.matter_id = m.id) >= 2
     AND (SELECT count(DISTINCT l.thread_id) FROM matter_live l
          WHERE l.matter_id = m.id) >= 2;

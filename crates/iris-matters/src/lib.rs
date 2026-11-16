@@ -112,6 +112,7 @@ pub fn insert_proposal(
     for item in items {
         add.execute(params![id, item])?;
     }
+    tx.execute("UPDATE matter SET sealed = 1 WHERE id = ?1", [id])?;
     Ok(id)
 }
 
@@ -183,24 +184,19 @@ fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64
             return Err(Error::Conflict("an item to keep is not live now"));
         }
     }
-    let list = keep
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    // The IDs are integers that the caller gave as i64, so the list is safe
-    // in the SQL text.
-    tx.execute(
-        &format!(
-            "UPDATE matter_item SET kept = 0
-             WHERE matter_id = ?1 AND kept = 1 AND item_id NOT IN ({list})"
-        ),
-        [matter],
-    )?;
+    // The trigger `matter_confirm` sets `kept` = 0 on each other member.
+    let list = format!(
+        "[{}]",
+        keep.iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let n = tx.execute(
-        "UPDATE matter SET title = ?2, status = 'confirmed', updated_at = ?3, decided_at = ?3
+        "UPDATE matter SET title = ?2, status = 'confirmed', updated_at = ?3, decided_at = ?3,
+                keep = ?4
          WHERE id = ?1 AND status = 'proposed'",
-        params![matter, title, now],
+        params![matter, title, now, list],
     )?;
     if n != 1 {
         return Err(Error::Conflict("the matter is decided"));

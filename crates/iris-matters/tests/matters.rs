@@ -172,8 +172,16 @@ fn the_triggers_hold_the_member_rules() {
     let m = propose(&b, &[1, 2]).unwrap();
     assert!(propose(&b, &[2, 3]).is_err());
     let m2 = propose(&b, &[3, 4]).unwrap();
-    // Members go in with the newest proposal only.
-    assert!(sql(&b, &format!("INSERT INTO matter_item VALUES ({m}, 4, 1)")).is_err());
+    // Members go in only with the proposal write, also for the newest
+    // proposal, and `kept` changes only with the confirm.
+    for text in [
+        format!("INSERT INTO matter_item(matter_id, item_id) VALUES ({m}, 4)"),
+        format!("INSERT INTO matter_item(matter_id, item_id) VALUES ({m2}, 2)"),
+        format!("UPDATE matter_item SET kept = 0 WHERE matter_id = {m2}"),
+        format!("UPDATE matter SET sealed = 0 WHERE id = {m2}"),
+    ] {
+        assert!(sql(&b, &text).is_err(), "{text}");
+    }
     // A direct delete of a member row, or a change of it, is refused.
     assert!(sql(
         &b,
@@ -194,6 +202,9 @@ fn the_triggers_hold_the_member_rules() {
         format!("DELETE FROM matter WHERE id = {m}"),
         "INSERT INTO matter(title, status, model, prompt, created_at, updated_at, decided_at)
          VALUES ('x', 'confirmed', 'm', 'p', 0, 0, 0)"
+            .to_string(),
+        "INSERT INTO matter(title, status, model, prompt, created_at, updated_at, sealed)
+         VALUES ('x', 'proposed', 'm', 'p', 0, 0, 1)"
             .to_string(),
     ] {
         assert!(sql(&b, &text).is_err(), "{text}");
