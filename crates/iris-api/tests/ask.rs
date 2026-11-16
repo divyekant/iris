@@ -191,31 +191,37 @@ async fn refuses_a_bad_request_no_model_and_no_budget() {
     assert_eq!(code, StatusCode::BAD_GATEWAY);
 }
 
-/// The mail can change during the call: a source that Ask cannot read now
-/// goes, with its claims.
+/// The mail can change during the call: a source that Ask cannot read now,
+/// or that is not the mail that the model saw, goes with its claims.
 #[tokio::test]
-async fn a_source_that_goes_during_the_call_takes_its_claims() {
-    let s = store("gone", Some(1_000_000));
-    let s2 = s.clone();
-    let gone: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-        s2.write(|tx| {
-            Ok(tx
-                .execute("UPDATE message SET gone_at = 1", [])
-                .map(|_| ())?)
-        })
-        .unwrap();
-    });
-    let reply = r#"{"claims": [{"text": "It leaves at 07:40.", "sources": [1]}]}"#;
-    let (code, v) = ask(
-        &s,
-        fake_with(reply, Some(gone)),
-        r#"{"question": "When does my flight leave?"}"#,
-        true,
-    )
-    .await;
-    assert_eq!(code, StatusCode::OK, "{v}");
-    assert_eq!(
-        v,
-        json!({"answer": null, "sources": [], "read": 1, "cost_micro_usd": 110})
-    );
+async fn a_source_that_changes_during_the_call_takes_its_claims() {
+    for (name, sql) in [
+        ("gone", "UPDATE message SET gone_at = 1"),
+        (
+            "text",
+            "UPDATE body SET text = 'Departure 09:10, flight TP 1351 to Lisbon.'",
+        ),
+        ("subject", "UPDATE header SET subject = 'Your new booking'"),
+    ] {
+        let s = store(name, Some(1_000_000));
+        let s2 = s.clone();
+        let change: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            s2.write(|tx| Ok(tx.execute(sql, []).map(|_| ())?)).unwrap();
+        });
+        let reply = r#"{"claims": [{"text": "It leaves at 07:40.", "sources": [1]}],
+                        "quotes": [{"n": 1, "quote": "Departure 07:40"}]}"#;
+        let (code, v) = ask(
+            &s,
+            fake_with(reply, Some(change)),
+            r#"{"question": "When does my flight leave?"}"#,
+            true,
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{name}: {v}");
+        assert_eq!(
+            v,
+            json!({"answer": null, "sources": [], "read": 1, "cost_micro_usd": 110}),
+            "{name}"
+        );
+    }
 }

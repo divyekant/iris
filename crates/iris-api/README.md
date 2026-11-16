@@ -213,14 +213,15 @@ model as data, and answers with the messages that the answer comes from.
 
 | Field | Content |
 |---|---|
-| `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. Each claim is one sentence with one or more marks `[n]` before its end mark: the sources of its facts. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
+| `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. A claim is one fact, in one or more sentences. One or more marks `[n]` come before the end mark of its last sentence, and name the sources of all of its text. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
 | `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
 | `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
 | `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
 
 The search leaves out gone mail, hostile mail, the mail of a hostile sender,
-SPAM and TRASH. The engine checks each source against these rules again
-after the call. A claim with a source that fails the check goes. The call
+SPAM and TRASH. After the call, the engine checks each source again: against
+these rules, and for a change of the date, sender, subject or text that the
+model saw. A claim with a source that fails the check goes. The call
 takes from the one model budget (see
 `docs/specs/2026-11-16-cost-control.md`) and holds the run lock. With no
 model, with a budget that cannot pay the worst case of the call, or while a

@@ -46,7 +46,8 @@ pub struct AskAnswer {
 /// of the model row.
 ///
 /// The mail can change during the call. Each source is checked again against
-/// the rules of the search ([`ask::eligible`]) in the same snapshot as its
+/// the rules of the search, and for a change of its content ([`ask::current`]),
+/// in the same snapshot as its
 /// summary. A claim with a source that fails the check goes, so the answer
 /// shows only mail that Ask can read now.
 pub fn answer(store: &Store, connect: &Connect, question: &str, now_ms: i64) -> Result<AskAnswer> {
@@ -63,7 +64,7 @@ pub fn answer(store: &Store, connect: &Connect, question: &str, now_ms: i64) -> 
         let tx = c.unchecked_transaction()?;
         let mut rows = HashMap::new();
         for s in &a.sources {
-            if ask::eligible(&tx, s.message)? {
+            if ask::current(&tx, s)? {
                 if let Some((m, _)) = message_row(&tx, s.message)? {
                     rows.insert(s.message, m);
                 }

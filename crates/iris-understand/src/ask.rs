@@ -5,15 +5,17 @@
 //!
 //! - The search is full-text (FTS5): each word of the question that is not
 //!   a stop word is one prefix term, any term can match, and `bm25` ranks
-//!   the messages. [`eligible`] gives the rules of the mail that Ask reads:
-//!   gone mail, hostile mail, a hostile sender, SPAM and TRASH are left out.
+//!   the messages. Gone mail, hostile mail, a hostile sender, SPAM and
+//!   TRASH are left out. [`current`] checks a source again after the call.
 //! - The call goes through [`Budgeted`] with its own `understand_run` row
 //!   (`prompt` = [`PROMPT`]), so it uses the one budget and its counts. The
 //!   call holds the run lock, so the model row and its budget stay the same
 //!   from the read of the row to the settlement.
 //! - The model gives the answer as claims in JSON, each with the numbers of
-//!   its messages. Iris reads no sentence boundaries in free text. A claim
-//!   that names no message of the data goes. An answer with no claim left
+//!   its messages. The claim is the unit of a citation: its marks name the
+//!   sources of all of its text, also if the model writes two sentences in
+//!   it. Iris reads no sentence boundaries in free text. A claim that names
+//!   no message of the data goes. An answer with no claim left
 //!   is no answer. A quote stays only if the text of its message has it.
 //!
 //! Mail text is data, never instructions. The question is the person's own
@@ -23,7 +25,9 @@
 use std::collections::HashMap;
 
 use iris_store::Store;
-use rusqlite::{params, Connection};
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
 use crate::batch::{self, report, Connect};
@@ -123,9 +127,12 @@ pub struct Source {
     pub message: i64,
     /// Words of the message that support the answer, if the message has them.
     pub quote: Option<String>,
+    /// A hash of the message as the model saw it (date, sender, subject and
+    /// text), for [`current`].
+    pub seen: u64,
 }
 
-/// One fact of an answer.
+/// One fact of an answer: one or more sentences with the same sources.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {
     /// Plain text with no mark `[n]`.
@@ -150,7 +157,8 @@ pub struct Answer {
 
 impl Answer {
     /// The answer as text, with the marks `[n]` of each claim (source `n`,
-    /// from 1) before the end mark of its sentence. `None` with no claim.
+    /// from 1) before the end mark of its last sentence. The marks name the
+    /// sources of all of the text of the claim. `None` with no claim.
     pub fn text(&self) -> Option<String> {
         let claims: Vec<String> = self
             .claims
@@ -186,6 +194,8 @@ struct Doc {
     block: String,
     /// The text that the model saw, for the quote check.
     text: String,
+    /// The hash of the message as the model saw it.
+    seen: u64,
 }
 
 /// Answers `question` from the mail of the store. A question with no match
@@ -273,20 +283,24 @@ pub fn ask(store: &Store, connect: Connect, question: &str, now_ms: i64) -> Resu
     })
 }
 
-/// True if Ask can read the message with the row `id` now: the rules of
-/// the search of [`ask`]. A caller checks a source again with it before it
-/// shows the source.
-pub fn eligible(c: &Connection, id: i64) -> rusqlite::Result<bool> {
-    c.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM message m
-                           JOIN body b ON b.message_id = m.id
-                           LEFT JOIN header h ON h.message_id = m.id
-                           WHERE m.id = ?1 AND {ELIGIBLE})"
-        ),
-        [id],
-        |r| r.get(0),
-    )
+/// True if Ask can read the message of `source` now (the rules of the
+/// search of [`ask`]), and the message is the same as the model saw it. A
+/// caller checks each source with it before it shows the source, so a
+/// claim and its quote never stand for mail that changed during the call.
+pub fn current(c: &Connection, source: &Source) -> rusqlite::Result<bool> {
+    let row = c
+        .query_row(
+            &format!(
+                "SELECT {COLUMNS} FROM message m
+                 JOIN body b ON b.message_id = m.id
+                 LEFT JOIN header h ON h.message_id = m.id
+                 WHERE m.id = ?1 AND {ELIGIBLE}"
+            ),
+            [source.message],
+            row,
+        )
+        .optional()?;
+    Ok(row.is_some_and(|r| card(r).2 == source.seen))
 }
 
 fn clock_ms() -> i64 {
@@ -344,8 +358,7 @@ fn find(store: &Store, question: &str) -> Result<Vec<Doc>, Error> {
     };
     Ok(store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT m.id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
-                    h.subject, b.text
+            "SELECT {COLUMNS}
              FROM message_fts f
              JOIN message m ON m.id = f.rowid
              JOIN body b ON b.message_id = m.id
@@ -354,40 +367,64 @@ fn find(store: &Store, question: &str) -> Result<Vec<Doc>, Error> {
              ORDER BY bm25(message_fts, 4.0, 2.0, 1.0), m.id DESC
              LIMIT ?2"
         ))?;
-        let rows = st.query_map(params![query, MAX_MESSAGES as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<i64>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, String>(5)?,
-            ))
-        })?;
+        let rows = st.query_map(params![query, MAX_MESSAGES as i64], row)?;
         let mut docs = Vec::new();
-        for (i, row) in rows.enumerate() {
-            let (message, date, name, addr, subject, text) = row?;
-            let text = cut(&text, MAX_TEXT);
-            let from = match (name, addr) {
-                (Some(n), Some(a)) => format!("{n} <{a}>"),
-                (n, a) => n.or(a).unwrap_or_default(),
-            };
-            let block = format!(
-                "Message {}\nDate: {}\nFrom: {}\nSubject: {}\n\n{}",
-                i + 1,
-                date.map(time::rfc3339).unwrap_or_default(),
-                cut(&from, 300),
-                cut(&subject.unwrap_or_default(), 300),
-                text
-            );
+        for (i, r) in rows.enumerate() {
+            let (message, card, seen, text) = card(r?);
             docs.push(Doc {
                 message,
-                block,
+                block: format!("Message {}\n{card}", i + 1),
                 text,
+                seen,
             });
         }
         Ok(docs)
     })?)
+}
+
+/// The columns of a message for the data, over `message m`, `body b` and
+/// `header h`, as [`row`] reads them.
+const COLUMNS: &str =
+    "m.id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr, h.subject, b.text";
+
+type Columns = (
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+fn row(r: &Row) -> rusqlite::Result<Columns> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    ))
+}
+
+/// The message as the model sees it, with no number: the row, the card,
+/// its hash and the cut text.
+fn card((message, date, name, addr, subject, text): Columns) -> (i64, String, u64, String) {
+    let text = cut(&text, MAX_TEXT);
+    let from = match (name, addr) {
+        (Some(n), Some(a)) => format!("{n} <{a}>"),
+        (n, a) => n.or(a).unwrap_or_default(),
+    };
+    let card = format!(
+        "Date: {}\nFrom: {}\nSubject: {}\n\n{}",
+        date.map(time::rfc3339).unwrap_or_default(),
+        cut(&from, 300),
+        cut(&subject.unwrap_or_default(), 300),
+        text
+    );
+    let mut h = DefaultHasher::new();
+    card.hash(&mut h);
+    (message, card, h.finish(), text)
 }
 
 /// The end of a mark `[n]` (1 to 3 digits) that starts at byte `at`.
@@ -496,6 +533,7 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
         Some(Source {
             message: doc.message,
             quote,
+            seen: doc.seen,
         })
     }))
 }
@@ -523,6 +561,7 @@ mod tests {
                 message: 100 + i as i64,
                 block: String::new(),
                 text: format!("Departure  20 Nov at 07:40, gate {i}."),
+                seen: i as u64,
             })
             .collect()
     }
@@ -570,18 +609,32 @@ mod tests {
             Some("It leaves at 07:40 [1]. Dr. Smith flies too [1][2].")
         );
         assert_eq!(
-            a.sources,
-            vec![
-                Source {
-                    message: 103,
-                    quote: Some("departure 20 nov".into())
-                },
-                Source {
-                    message: 101,
-                    quote: None
-                },
-            ]
+            a.sources
+                .iter()
+                .map(|s| (s.message, s.quote.as_deref(), s.seen))
+                .collect::<Vec<_>>(),
+            [(103, Some("departure 20 nov"), 3), (101, None, 1)]
         );
+    }
+
+    /// The claim is the unit of a citation: two sentences of one claim
+    /// stay together, with the marks of the claim at the end.
+    #[test]
+    fn the_marks_of_a_claim_cover_all_of_its_sentences() {
+        let d = docs(2);
+        let a = answer(
+            json!({"claims": [
+                {"text": "Flight leaves at 7. Gate 2.", "sources": [1]},
+                {"text": "Dr. Smith flies too!", "sources": [2]},
+            ]}),
+            &d,
+        )
+        .unwrap();
+        assert_eq!(
+            a.text().as_deref(),
+            Some("Flight leaves at 7. Gate 2 [1]. Dr. Smith flies too [2]!")
+        );
+        assert_eq!(a.claims[0].text, "Flight leaves at 7. Gate 2.");
     }
 
     #[test]
