@@ -612,17 +612,35 @@ async fn the_person_withdraws_an_open_changeset() {
 }
 
 #[tokio::test]
-async fn withdraws_only_an_open_changeset() {
-    let dir = temp("withdraw-refused");
+async fn withdraws_each_changeset_once() {
+    let dir = temp("withdraw-states");
     let s = store(&dir);
-    let cs = changeset(&s, "Clean up.", &[&["t-1"]], NOW);
-    let uri = format!("/api/changesets/cs-{cs}/withdraw");
-    // While a new revision is a draft, the review does not show the changeset.
-    revise(&s, cs, &agent()).unwrap();
-    assert_eq!(post(&s, &uri, "").await.0, StatusCode::CONFLICT);
-    assert_eq!(states(&s, cs).await, ["proposed"]);
+    // A changeset with a new revision that is a draft: the open action and the draft action are cancelled.
+    let draft = changeset(&s, "Clean up.", &[&["t-1"]], NOW);
+    revise(&s, draft, &agent()).unwrap();
+    add_action(
+        &s,
+        draft,
+        &agent(),
+        Verb::Archive,
+        &["m-3"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    let uri = format!("/api/changesets/cs-{draft}/withdraw");
+    let (code, after) = post(&s, &uri, "").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    assert_eq!(after["state"], "withdrawn");
+    let all: Vec<&str> = after["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["decision"]["state"].as_str().unwrap_or("draft"))
+        .collect();
+    assert_eq!(all, ["cancelled", "cancelled"], "{after}");
 
-    // A closed changeset: the person denied its only action.
+    // A closed changeset: the person denied its only action. The denial stays.
     let closed = changeset(&s, "Read.", &[&["m-3"]], NOW);
     let deny = json!({ "actions": [{ "revision": 1, "n": 1, "approve": false }] }).to_string();
     assert_eq!(
@@ -631,17 +649,12 @@ async fn withdraws_only_an_open_changeset() {
             .0,
         StatusCode::OK
     );
-    assert_eq!(
-        post(&s, &format!("/api/changesets/cs-{closed}/withdraw"), "")
-            .await
-            .0,
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        get(&s, &format!("/api/changesets/cs-{closed}")).await.1["state"],
-        "closed"
-    );
+    let (code, after) = post(&s, &format!("/api/changesets/cs-{closed}/withdraw"), "").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    assert_eq!(after["state"], "withdrawn");
+    assert_eq!(states(&s, closed).await, ["denied"]);
 
+    assert_eq!(post(&s, &uri, "").await.0, StatusCode::CONFLICT);
     assert_eq!(
         post(&s, "/api/changesets/cs-99/withdraw", "").await.0,
         StatusCode::NOT_FOUND

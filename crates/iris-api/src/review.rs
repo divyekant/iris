@@ -183,21 +183,18 @@ pub fn decide(store: &Store, changeset: i64, decisions: &[Decision], now_ms: i64
     .map_err(|e| conflict(e, "the action is not in this changeset"))
 }
 
-/// The person withdraws one changeset in the review (section 5.5). Each
-/// open action becomes `cancelled`; applied actions stay. Only an open
-/// changeset, as for [`decide`]: the review shows no other. A second
-/// withdraw, or a changeset that is not open now, is [`Error::Conflict`].
+/// The person withdraws one changeset (section 5.5: "each changeset"), in
+/// any state but `withdrawn`. Each open action and each draft action
+/// becomes `cancelled`; applied actions stay. A second withdraw is
+/// [`Error::Conflict`].
 pub fn withdraw(store: &Store, changeset: i64) -> Result<()> {
-    iris_changeset::transaction(store, |c| {
-        require_open(c, changeset)?;
-        iris_changeset::withdraw_in(c, changeset, None)
-    })
-    .map_err(|e| conflict(e, "the changeset is not in the store"))
+    iris_changeset::withdraw(store, changeset, None)
+        .map_err(|e| conflict(e, "the changeset is not in the store"))
 }
 
 /// The review shows only an open changeset (the OPEN condition of the list
 /// and the counts). While a new revision is a draft, or after a withdraw or
-/// the last decision, no change of the person applies.
+/// the last decision, no decision of the person applies.
 fn require_open(c: &Connection, changeset: i64) -> iris_changeset::Result<()> {
     let open: bool = c.query_row(
         &format!("SELECT EXISTS (SELECT 1 FROM changeset c WHERE c.id = ?1 AND {OPEN})"),

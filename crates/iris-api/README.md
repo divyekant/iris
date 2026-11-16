@@ -127,10 +127,9 @@ The person decides the actions of one changeset in one request
 | Endpoint | Does |
 |---|---|
 | `POST /api/changesets/{id}/decide` | Body `{"actions": [{"revision", "n", "approve", "hash"}]}`: 1 to 500 decisions, each action once. `approve` `true` approves the action and needs the `hash` that the review showed. `false` denies it, with the reason "The person denied it in the review.". The answer is the changeset document after the decision. |
-| `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset: each open action becomes `cancelled`, and applied actions stay. The changeset must be open. A second withdraw is a 409. The answer is the changeset document after the withdraw. |
+| `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset, in any state but `withdrawn` (section 5.5: "each changeset"): each open action and each draft action becomes `cancelled`, and applied and decided actions stay. A second withdraw is a 409. The answer is the changeset document after the withdraw. |
 
-The changeset must be open for each decision and each withdraw. Each
-action of a decision must wait for a person (`proposed` or `in_review`). The
+The changeset must be open for each decision. Each action of a decision must wait for a person (`proposed` or `in_review`). The
 decisions write in one transaction. If one is refused (a hash that changed,
 an action that has a decision, a new revision that is a draft, or an action
 that is not in the changeset), nothing is written and the answer is a 409.
