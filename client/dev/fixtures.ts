@@ -250,6 +250,15 @@ export function withdraw(id: string): Changeset | undefined {
   return c;
 }
 
+/** A state verb of the person on the fixtures (spec 2 section 4). */
+export function act(id: string, verb: string, body: { date?: string }): Item | undefined {
+  const item = items.find((x) => x.id === id);
+  if (!item) return undefined;
+  item.status = verb === "close" ? "done" : verb === "decline" ? "declined" : "deferred";
+  item.deferred_until = verb === "defer" ? body.date : undefined;
+  return item;
+}
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
