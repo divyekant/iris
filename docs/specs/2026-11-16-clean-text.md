@@ -120,6 +120,8 @@ hidden HTML) makes no cut.
 - Implied end tags: a block closes an open `p`, an `li` closes the `li`
   before it, a `td` or `th` closes the cell before it, a `tr` closes the row
   before it, and `body` closes an open `head`.
+- If an attribute occurs more than once in a tag, the first one counts, as
+  in a browser.
 - Comments, `<!...>` and `<?...>` go out.
 - These elements go out with their content, as raw text: `script`, `style`,
   `title`, `template`, `textarea`, `xmp`, `noembed`, `noframes`, `iframe`.
@@ -260,6 +262,9 @@ its first 1 KiB holds `%PDF`.
   stream with another filter is skipped.
 - Streams with `/Image`, `/Length1`, `/Length2`, `/Metadata`, `/XRef`,
   `/ObjStm`, `/FontFile` or `/EmbeddedFile` are skipped.
+- The reader reads the names of a stream dictionary (`/Length`, `/Filter`
+  and the names above) only outside its strings, comments and inner
+  dictionaries.
 - Text: the strings of `Tj`, `TJ`, `'` and `"`, only between `BT` and `ET`,
   as Windows-1252. A text rendering mode (`Tr`) of 3 or 7 hides the strings
   until the next `Tr`. `T*`, `Tm`, `ET`, `'`, `"`, and `Td` or `TD` with a

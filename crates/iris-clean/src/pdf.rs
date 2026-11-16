@@ -74,7 +74,7 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
                     e.output.into()
                 }
             }
-        } else if has(dict, b"/Filter") {
+        } else if direct_name(dict, b"/Filter", true).is_some() {
             continue;
         } else {
             // A raw stream is read in place, and only up to the stream limit.
@@ -102,10 +102,10 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
     (readable(&text).then_some(text), stopped)
 }
 
-/// The position of the `/Length` key of the outer dictionary. A key inside
-/// a string, a comment or an inner dictionary does not count.
-fn direct_length_key(dict: &[u8]) -> Option<usize> {
-    // The key ends at white space or a delimiter: `/Length1` is another key.
+/// The position of a name (for example `/Length`) in the outer dictionary.
+/// A name inside a string, a comment or an inner dictionary does not count.
+/// With `exact`, a longer name does not match: `/Length1` is not `/Length`.
+fn direct_name(dict: &[u8], name: &[u8], exact: bool) -> Option<usize> {
     let key_end = |b: &u8| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(b);
     let (mut i, mut depth) = (0, 0usize);
     while i < dict.len() {
@@ -142,8 +142,8 @@ fn direct_length_key(dict: &[u8]) -> Option<usize> {
                 i += 1;
             }
             b'/' if depth <= 1
-                && dict[i..].starts_with(b"/Length")
-                && dict.get(i + 7).is_some_and(key_end) =>
+                && dict[i..].starts_with(name)
+                && (!exact || dict.get(i + name.len()).is_none_or(key_end)) =>
             {
                 return Some(i);
             }
@@ -156,7 +156,7 @@ fn direct_length_key(dict: &[u8]) -> Option<usize> {
 
 /// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
 fn declared_len(dict: &[u8]) -> Option<usize> {
-    let p = direct_length_key(dict)?;
+    let p = direct_name(dict, b"/Length", true)?;
     let rest = &dict[p + 7..];
     let digits = rest.iter().skip_while(|b| b.is_ascii_whitespace());
     let num: Vec<u8> = digits
@@ -240,13 +240,13 @@ fn is_content(dict: &[u8]) -> bool {
         b"/EmbeddedFile",
     ]
     .iter()
-    .any(|k| has(dict, k))
+    .any(|k| direct_name(dict, k, false).is_some())
 }
 
 /// True if the `/Filter` of the dictionary is `FlateDecode` and nothing
 /// else: `/FlateDecode` or `[/FlateDecode]`.
 fn only_flate(dict: &[u8]) -> bool {
-    let Some(p) = find(dict, b"/Filter") else {
+    let Some(p) = direct_name(dict, b"/Filter", true) else {
         return false;
     };
     let rest = &dict[p + 7..];
@@ -267,10 +267,6 @@ fn only_flate(dict: &[u8]) -> bool {
         .filter(|w| !w.is_empty())
         .collect();
     names == [b"FlateDecode"]
-}
-
-fn has(hay: &[u8], needle: &[u8]) -> bool {
-    find(hay, needle).is_some()
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -568,6 +564,27 @@ mod tests {
         let (got, cut) = text_cut(&pdf, 1000);
         assert_eq!(got, None);
         assert!(cut);
+    }
+
+    #[test]
+    fn names_inside_dictionary_strings_do_not_count() {
+        for info in [
+            "/Info (/Filter)",
+            "/Info (/Image /XRef)",
+            "% /Filter /Image\n",
+        ] {
+            let pdf = String::from_utf8(sample(PAGE, false))
+                .unwrap()
+                .replace("<< /Length", &format!("<< {info} /Length"));
+            assert!(text(pdf.as_bytes(), 1000).is_some(), "{info}");
+        }
+        let flate = String::from_utf8_lossy(&sample(PAGE, true)).replace(
+            "/Filter /FlateDecode",
+            "/Info (/Filter /LZWDecode) /Filter /FlateDecode",
+        );
+        assert!(only_flate(flate.as_bytes()));
+        assert!(!is_content(b"<< /Subtype /Image /Length 3 >>"));
+        assert!(!is_content(b"<< /FontFile2 4 0 R >>"));
     }
 
     #[test]

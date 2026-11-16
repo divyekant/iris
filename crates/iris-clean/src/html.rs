@@ -852,9 +852,9 @@ fn parse_tag(s: &str, start: usize) -> (Tag, usize) {
                 }
             }
         }
-        // Keep only the attributes that the converter reads, so that a tag
-        // with very many attributes costs no memory.
-        if USED_ATTRS.contains(&key.as_str()) && attrs.len() < USED_ATTRS.len() * 2 {
+        // Keep only the first of each attribute that the converter reads (as
+        // a browser does), so that a tag with very many attributes costs no memory.
+        if USED_ATTRS.contains(&key.as_str()) && !attrs.iter().any(|(k, _)| *k == key) {
             attrs.push((key, decode_entities(value).into_owned()));
         }
     }
@@ -1200,6 +1200,9 @@ mod tests {
             )),
             "ok"
         );
+        // Repeated attributes do not push out a later `hidden`.
+        let repeated = format!("<div {}hidden>secret</div>ok", "href=x ".repeat(18));
+        assert_eq!(md(&repeated), "ok");
         // A compound selector does not hide an element with only one of its names.
         assert_eq!(
             md("<style>.a.b{display:none} p.c{display:none}</style><div class=b>Visible</div><p class=c>too</p>"),
