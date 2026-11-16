@@ -963,3 +963,31 @@ fn decisions_of_the_policy_and_the_person() {
         NOW,
     ));
 }
+
+/// An open action expires 14 days after its submit (section 5.5): no
+/// approval and no other decision lands at or after the deadline.
+#[test]
+fn no_decision_after_the_expiry() {
+    const EXPIRY: i64 = 14 * 24 * 60 * 60 * 1000;
+    let dir = TempDir::new("expiry");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for m in ["m-1", "m-2", "m-4"] {
+        add_action(&s, cs, &agent(), Verb::Archive, &[m], &Map::new(), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    let late = NOW + EXPIRY;
+    approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), late - 1).unwrap();
+    refused(approve(&s, at(cs, 1, 2), &hash(&s, cs, 1, 2), late));
+    for (to, by, reason) in [
+        (State::InReview, By::Policy, None),
+        (State::Denied, By::Limit, Some("Too many.")),
+        (State::InReview, By::Engine, None),
+    ] {
+        refused(decide(&s, at(cs, 1, 3), to, by, reason, late));
+        refused(decide(&s, at(cs, 1, 1), to, by, reason, late + 1));
+    }
+    for (n, state) in [(1, "approved"), (2, "proposed"), (3, "proposed")] {
+        assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], state);
+    }
+}

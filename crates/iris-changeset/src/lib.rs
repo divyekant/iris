@@ -701,6 +701,10 @@ pub fn decide(
     })
 }
 
+/// The time from the submit of an action to its expiry (section 5.5), the
+/// same as in the trigger `action_state` of migration 7.
+const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+
 fn set_state(
     c: &Connection,
     a: ActionId,
@@ -709,6 +713,22 @@ fn set_state(
     reason: Option<&str>,
     now_ms: i64,
 ) -> Result<()> {
+    // An open action expires 14 days after its submit (section 5.5). Both
+    // decide and approve come here, so no decision lands after the deadline.
+    let submitted: Option<i64> = c
+        .query_row(
+            "SELECT submitted_at FROM changeset_action
+             WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+            params![a.changeset, a.revision, a.n],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    if submitted.is_some_and(|t| now_ms >= t + EXPIRY_MS) {
+        return Err(refused(
+            "the action expired 14 days after its submit".into(),
+        ));
+    }
     let (by, rule, policy) = by.parts();
     let changed = c.execute(
         "UPDATE changeset_action SET state = ?4, decided_by = ?5, rule = ?6, reason = ?7,
