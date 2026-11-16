@@ -139,7 +139,7 @@ test("the brief leads with the mail that came, and lists the watches that wait",
   } finally {
     view.destroy();
   }
-  const empty = { ...copy(fx.brief), review: { changesets: 0, actions: 0 }, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] } };
+  const empty = { ...copy(fx.brief), review: { changesets: 0, actions: 0 }, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] }, gate: { count: 0, senders: [], next: null } };
   const alone = await mount("/src/views/Brief.svelte", { brief: empty, status: fx.status, watches: [arrived()], poll: 0 });
   try {
     assert.equal(text(alone.target.querySelector("h1")), "The mail that you watched for came.");
