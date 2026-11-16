@@ -397,11 +397,43 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         }),
         _ => return None,
     };
-    Some(Read {
+    let read = Read {
         message_id: m.message_id()?.to_string(),
         content,
         reply,
-    })
+    };
+    // By construction: the message that Iris writes for this content has
+    // the same recipient and ID headers, as mail-parser reads them (display
+    // names, groups and comments included). So a field that the content
+    // does not hold gives no content. `From` is checked above by address
+    // only, because Gmail can add the display name of the account.
+    let again = compose(
+        account,
+        &read.message_id,
+        &read.content,
+        read.reply.as_ref(),
+        0,
+    );
+    let again = MessageParser::default().parse(&again[..])?;
+    (fields(&m) == fields(&again)).then_some(read)
+}
+
+/// The headers of the hash that hold addresses or IDs, parsed, in order.
+const FIELDS: [&str; 5] = ["to", "cc", "message-id", "in-reply-to", "references"];
+
+fn fields(m: &mail_parser::Message<'_>) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = m
+        .headers()
+        .iter()
+        .filter_map(|h| {
+            let name = h.raw_name().to_ascii_lowercase();
+            FIELDS
+                .contains(&name.as_str())
+                .then(|| (name, format!("{:?}", h.value())))
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 #[cfg(test)]

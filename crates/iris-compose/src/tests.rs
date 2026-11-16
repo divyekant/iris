@@ -453,6 +453,9 @@ fn a_changed_draft_keeps_the_limits() {
         ("To: <p@x.org>", "To: <p@x.org>\r\nCc: <p@x.org>"),
         ("To: <p@x.org>", "To: <p@x.org>, <p@x.org>"),
         ("To: <p@x.org>", "To: <P@x.org>"),
+        ("To: <p@x.org>", "To: CEO <p@x.org>"),
+        ("To: <p@x.org>", "To: (CEO) <p@x.org>"),
+        ("To: <p@x.org>", "To: team: <p@x.org>;"),
     ] {
         let changed = raw.replacen(from, to, 1).replacen("Body", "Other", 1);
         assert_ne!(changed, raw);
