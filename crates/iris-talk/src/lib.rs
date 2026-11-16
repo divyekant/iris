@@ -128,32 +128,13 @@ pub fn update(
         "gone" => old.before_gone.clone(),
         s => Some(s.to_string()),
     };
-    // A conversation needs a message from you, a person or a stranger
-    // (section 7.3). Service mail alone does not keep it.
-    if mails.iter().all(|m| m.service) {
-        // The sync can set the status column to gone first (section 4.5),
-        // so the document can still give the old status.
-        if old.status != "gone" || old.doc["status"] != "gone" {
-            let before = if old.status == "gone" {
-                old.before_gone
-            } else {
-                Some(old.status)
-            };
-            let mut doc = old.doc;
-            doc["status"] = json!("gone");
-            doc["updated"] = json!(rfc3339(now));
-            conn.execute(
-                "UPDATE item SET status = 'gone', status_before_gone = ?2, doc = ?3, updated_at = ?4
-                 WHERE id = ?1",
-                params![old.id, before, doc.to_string(), now],
-            )?;
-        }
-        return Ok(Some(old.id));
-    }
     if status.as_deref() != Some("muted") {
         status = None;
     }
-    let mut doc = doc(
+    // A conversation needs a message from you, a person or a stranger
+    // (section 7.3). Service mail alone does not keep it.
+    let gone = mails.iter().all(|m| m.service);
+    let mut doc = match doc(
         conn,
         thread,
         old.id,
@@ -162,18 +143,32 @@ pub fn update(
         now,
         &mails,
         status.as_deref(),
-    )?
-    .expect("a message counts");
+    )? {
+        Some(d) => d,
+        // No message counts: the fields of the last message that counted stay.
+        None => old.doc.clone(),
+    };
     parts.fill(&mut doc, thread, &mails, &gone_sources(conn, old.id)?, now);
     corrections(conn, old.id, &mut doc)?;
+    let before = if gone {
+        doc["status"] = json!("gone");
+        // The sync can set the status column to gone first (section 4.5).
+        if old.status == "gone" {
+            old.before_gone.clone()
+        } else {
+            Some(old.status.clone())
+        }
+    } else {
+        None
+    };
     // Compare without the time of the change, so a call that changes nothing
     // writes nothing.
     doc["updated"] = old.doc["updated"].clone();
-    if doc == old.doc && old.status != "gone" {
+    if doc == old.doc && doc["status"] == old.status.as_str() && before == old.before_gone {
         return Ok(Some(old.id));
     }
     doc["updated"] = json!(rfc3339(now));
-    save(conn, old.id, &doc, Some(()), now, &mails, old.origin)?;
+    save(conn, old.id, &doc, Some(before), now, &mails, old.origin)?;
     Ok(Some(old.id))
 }
 
@@ -213,15 +208,17 @@ fn save(
     conn: &Connection,
     id: i64,
     doc: &Value,
-    existed: Option<()>,
+    // `Some(status_before_gone)` for an item that exists, `None` for a new item.
+    existed: Option<Option<String>>,
     now: i64,
     mails: &[Mail],
     origin: i64,
 ) -> rusqlite::Result<()> {
+    let before = existed.clone().flatten();
     conn.execute(
-        "UPDATE item SET status = ?2, status_before_gone = NULL, doc = ?3, updated_at = ?4
+        "UPDATE item SET status = ?2, status_before_gone = ?5, doc = ?3, updated_at = ?4
          WHERE id = ?1",
-        params![id, doc["status"].as_str(), doc.to_string(), now],
+        params![id, doc["status"].as_str(), doc.to_string(), now, before],
     )?;
     if existed.is_some() {
         conn.execute(
@@ -286,7 +283,7 @@ fn mails(
 ) -> rusqlite::Result<Vec<Mail>> {
     let mut q = conn.prepare_cached(
         "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
-                h.to_addrs, h.cc_addrs, h.subject, b.text, m.hostile,
+                h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
                 EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
                 EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
@@ -319,6 +316,7 @@ fn mails(
             at: r.get(1)?,
             from_name: r
                 .get::<_, Option<String>>(3)?
+                .map(|n| decode_name(&n))
                 .filter(|n| !n.trim().is_empty()),
             to: addresses(r.get::<_, Option<String>>(4)?.as_deref().unwrap_or("")),
             cc: addresses(r.get::<_, Option<String>>(5)?.as_deref().unwrap_or("")),
@@ -494,6 +492,20 @@ fn addresses(list: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The display name with its RFC 2047 encoded words decoded, by the scanner
+/// of the people step.
+// shortcut: decodes through a made-up mailbox, so a name with an encoded word and a
+// bare comma stays as it is; upgrade when iris-people gives its decoder.
+fn decode_name(name: &str) -> String {
+    if !name.contains("=?") {
+        return name.to_string();
+    }
+    match iris_people::mailboxes(&format!("{name} <x@x.example>")).as_slice() {
+        [(_, Some(decoded))] => decoded.clone(),
+        _ => name.to_string(),
+    }
 }
 
 /// The text as one line: each run of white space becomes one space.
