@@ -345,6 +345,9 @@ fn a_hidden_member_is_not_live() {
         confirm(&b.store, m, "Trip", &[1], 2),
         Err(Error::Conflict(_))
     ));
+    // A decline of the same stale proposal is a conflict, not a store error.
+    assert!(matches!(decline(&b.store, m, 2), Err(Error::Conflict(_))));
+    assert_eq!(status(&b, m), "proposed");
 }
 
 /// Random proposals, decisions, item deletes and clean-ups. After each step:

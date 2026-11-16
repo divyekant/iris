@@ -163,7 +163,9 @@ pub fn confirm(store: &Store, matter: i64, title: &str, keep: &[i64], now: i64) 
     write(store, |tx| confirm_in(tx, matter, &title, &sorted, now))
 }
 
-fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64) -> Result<()> {
+/// The check before each decision: `matter` is a proposal that is valid now.
+/// The trigger `matter_decide` holds the same rule in the store.
+fn decidable(tx: &Transaction, matter: i64) -> Result<()> {
     if status(tx, matter)? != "proposed" {
         return Err(Error::Conflict("the matter is decided"));
     }
@@ -175,6 +177,11 @@ fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64
     if !valid {
         return Err(Error::Conflict("the proposal is not valid now"));
     }
+    Ok(())
+}
+
+fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64) -> Result<()> {
+    decidable(tx, matter)?;
     for item in keep {
         let member: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM matter_item WHERE matter_id = ?1 AND item_id = ?2)",
@@ -215,10 +222,11 @@ fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64
 
 /// The person declines the proposal `matter`. Its members stay as rows and
 /// are pinned, so the same grouping does not come back after a rebuild. A
-/// decline of a decided matter gets `Conflict`.
+/// decline of a decided matter, or of a proposal that is not valid now, gets
+/// `Conflict`.
 pub fn decline(store: &Store, matter: i64, now: i64) -> Result<()> {
     write(store, |tx| {
-        status(tx, matter)?;
+        decidable(tx, matter)?;
         let n = tx.execute(
             "UPDATE matter SET status = 'declined', updated_at = ?2, decided_at = ?2
                  WHERE id = ?1 AND status = 'proposed'",
