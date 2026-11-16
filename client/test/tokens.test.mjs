@@ -75,6 +75,14 @@ for (const name of ["dark", "light"]) {
       }
     }
   });
+
+  test(`${name} palette text on the primary color meets WCAG AA contrast`, () => {
+    const colors = cssPalette(name);
+    const ratio = contrast(colors.on_primary, colors.primary);
+    assert.ok(ratio >= MIN_CONTRAST, `on-primary on primary: ${ratio.toFixed(2)}`);
+    // on-primary reuses a color of the palette, so the count of colors stays the same.
+    assert.ok(Object.entries(colors).some(([k, v]) => k !== "on_primary" && v === colors.on_primary));
+  });
 }
 
 test("spacing tokens are the .kalos.yaml scale times the 4px base", () => {

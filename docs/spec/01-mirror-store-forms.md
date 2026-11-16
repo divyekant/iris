@@ -865,11 +865,18 @@ status is `gone`.
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |
 
+The sections do not overlap. A conversation with a `stranger` participant
+shows only under Strangers, so each item shows one time and each section count
+is exact. The client uses the counts of the engine and does not remove
+duplicates between sections.
+
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
 applied.") is a list that the engine computes when the brief opens, in the
 changeset format of specification 2, with each action in the state
-`proposed`. Release 1 does not store it. From release 2, triage stores it as
+`proposed`. The brief gives only the totals of the proposal: the count of
+actions, and the count for each verb. The local API gives the full list
+separately. Release 1 does not store it. From release 2, triage stores it as
 a changeset in the mode `observe`.
 
 The triage proposal of release 1 (crate `iris-observe`) has these rules:
