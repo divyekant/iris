@@ -294,7 +294,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-clean/` | The clean text of one message: MIME (through `mail-parser`), charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
 | `crates/iris-understand/` | Understanding: one message to items of the five forms. Headers, hostile marks, fixed rules, then the model, and a schema check of each item. `store::understand` runs the steps on one message of the store, with the sender axis and the conversation rule. | `engine` |
 | `crates/iris-api/` | The local API: JSON from the store for the web client and the read verbs, and the policy changes of the web client. It refuses requests that are not local. | `engine` |
-| `crates/iris-policy/` | The policy file of spec 2 section 6: reads and checks `policy.toml`, and decides each action and the attention of each item, with a reason. Keeps the active policy in `iris.db` and confirms a changed file. Writes the file only for a change from the web client, and keeps its comments. | `engine` |
+| `crates/iris-policy/` | The policy file of spec 2 section 6: reads and checks `policy.toml`, and decides each action and the attention of each item, with a reason. Keeps the active policy in `iris.db` and confirms a changed file. Writes the attention of each item after each change of the active policy. Writes the file only for a change from the web client, and keeps its comments. | `engine` |
 | `crates/iris-observe/` | Observe mode: the triage changeset from the forms, with a count of each rule. It applies nothing. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
