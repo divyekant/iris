@@ -21,6 +21,7 @@
 //! - Only a PDF of at most [`PDF_LIMIT`] bytes is decoded for its text.
 //! - The parser reads at most [`MAX_PARTS`] MIME parts, [`MAX_DEPTH`] levels deep.
 //! - The body of an attachment is not decoded to measure its size.
+//! - A message with MIME fields past [`MIME_FIELD_LIMIT`] is not parsed.
 //!
 //! So the memory use does not grow with the size of the message, and the
 //! time is linear in the size of the message. The largest use is a PDF of
@@ -31,6 +32,12 @@ mod mime;
 mod pdf;
 mod quote;
 mod url;
+
+use std::borrow::Cow;
+
+use mail_parser::{
+    Encoding, HeaderForm, HeaderName, MessageParser, MessagePart, MessageRef, PartFlags,
+};
 
 pub use quote::remove_repeated_end;
 
@@ -89,7 +96,23 @@ pub struct Attachment {
 pub fn clean(raw: &[u8]) -> Clean {
     let mut parts = 0;
     let mut attach_left = ATTACHMENT_TEXT_LIMIT;
-    let (subject, text, cut, files) = message(raw, 0, &mut parts);
+    if !mime_fields_fit(raw) {
+        return Clean {
+            subject: String::new(),
+            text: CUT_MARK.to_string(),
+            cut: true,
+            attachments: Vec::new(),
+        };
+    }
+    let Some(parsed) = parser().parse(raw) else {
+        return Clean {
+            subject: String::new(),
+            text: String::new(),
+            cut: false,
+            attachments: Vec::new(),
+        };
+    };
+    let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
         attachment(f, &mut parts, &mut attach_left, &mut attachments);
@@ -102,24 +125,148 @@ pub fn clean(raw: &[u8]) -> Clean {
     }
 }
 
+/// The most MIME parts that `mail-parser` reads in one parse. It parses an
+/// attached message that is not transfer-encoded in the same parse, so its
+/// parts count here too. The walker applies [`MAX_PARTS`] by itself and does
+/// not count the parts of an attached message in step 1, so an attached
+/// message of up to this many parts leaves the outer text.
+pub const PARSE_PARTS: usize = 10_000;
+
+/// The most bytes of all MIME fields (`Content-Type`, `Content-Disposition`
+/// and `Content-Transfer-Encoding`) of one message, with their folded lines.
+pub const MIME_FIELD_LIMIT: usize = 1024 * 1024;
+
+/// True if the MIME fields of a message fit the limits: each field at most
+/// [`VALUE_LIMIT`] bytes, all of them at most [`MIME_FIELD_LIMIT`] bytes.
+/// `mail-parser` always parses these fields in full, and their decoded
+/// parameters cost about 2.3 bytes for each byte. So a message that does not
+/// fit is not parsed at all (fail closed), and the parse memory has a fixed
+/// bound. The scan reads lines only: a body line that looks like a MIME field
+/// counts too, so the check can only refuse more, never less.
+fn mime_fields_fit(raw: &[u8]) -> bool {
+    const NAMES: [&[u8]; 3] = [
+        b"content-type:",
+        b"content-disposition:",
+        b"content-transfer-encoding:",
+    ];
+    let (mut field, mut total, mut inside) = (0usize, 0usize, false);
+    for line in raw.split(|&b| b == b'\n') {
+        let len = line.len() + 1;
+        if inside && line.first().is_some_and(|&b| b == b' ' || b == b'\t') {
+            field += len;
+        } else {
+            inside = NAMES
+                .iter()
+                .any(|n| line.len() >= n.len() && line[..n.len()].eq_ignore_ascii_case(n));
+            field = if inside { len } else { 0 };
+        }
+        if inside {
+            total += len;
+            if field > VALUE_LIMIT || total > MIME_FIELD_LIMIT {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The parser of the MIME structure. Transfer-encoded attached messages are
+/// not parsed here: step 2 decodes at most [`INNER_LIMIT`] bytes of each one.
+fn parser() -> MessageParser {
+    let p = MessageParser::new()
+        .max_parts(PARSE_PARTS)
+        .max_depth(MAX_DEPTH + 2)
+        .max_encoded_nesting(0);
+    // Iris parses these fields itself, from at most VALUE_LIMIT bytes (see
+    // `field`). A parse of the whole value costs memory: 8.5 MB for a 5 MB subject.
+    RAW_FIELDS
+        .into_iter()
+        .fold(p, |p, name| p.header(name, HeaderForm::Raw))
+}
+
+/// The fields that the parser keeps raw. It always parses the MIME fields.
+const RAW_FIELDS: [HeaderName<'static>; 33] = [
+    HeaderName::Subject,
+    HeaderName::From,
+    HeaderName::To,
+    HeaderName::Cc,
+    HeaderName::Bcc,
+    HeaderName::Date,
+    HeaderName::ReplyTo,
+    HeaderName::Sender,
+    HeaderName::Comments,
+    HeaderName::InReplyTo,
+    HeaderName::Keywords,
+    HeaderName::Received,
+    HeaderName::MessageId,
+    HeaderName::References,
+    HeaderName::ReturnPath,
+    HeaderName::ContentDescription,
+    HeaderName::ContentId,
+    HeaderName::ContentLanguage,
+    HeaderName::ContentLocation,
+    HeaderName::ListArchive,
+    HeaderName::ListHelp,
+    HeaderName::ListId,
+    HeaderName::ListOwner,
+    HeaderName::ListPost,
+    HeaderName::ListSubscribe,
+    HeaderName::ListUnsubscribe,
+    HeaderName::ResentBcc,
+    HeaderName::ResentCc,
+    HeaderName::ResentDate,
+    HeaderName::ResentFrom,
+    HeaderName::ResentMessageId,
+    HeaderName::ResentSender,
+    HeaderName::ResentTo,
+];
+
+/// The most header fields of one entity that Iris reads.
+const MAX_HEADERS: usize = 1000;
+/// The most bytes of the header block of one entity that Iris reads.
+const HEAD_LIMIT: usize = 256 * 1024;
+/// The most bytes of one header value that Iris reads.
+const VALUE_LIMIT: usize = 16 * 1024;
+
+/// The raw value of the first field `name` of a part, cut at [`VALUE_LIMIT`]
+/// bytes. Only the first [`MAX_HEADERS`] fields that start in the first
+/// [`HEAD_LIMIT`] bytes of the header block count. Each field of a part that
+/// Iris reads goes through this function.
+fn field<'m>(part: MessagePart<'m>, name: HeaderName) -> Option<&'m [u8]> {
+    let start = part.offset_header();
+    part.headers()
+        .iter()
+        .take(MAX_HEADERS)
+        .take_while(|h| ((h.offset_field() - start) as usize) < HEAD_LIMIT)
+        .find(|h| h.name() == name)
+        .map(|h| {
+            let v = h.raw_value();
+            &v[..v.len().min(VALUE_LIMIT)]
+        })
+}
+
 /// Step 1 for one message: the top message, or an attached
 /// `message/rfc822` part. Return the subject, the text (with [`CUT_MARK`]
 /// if it was cut), the cut flag and the attachments, not read yet. `parts`
 /// counts the MIME parts of the whole top message.
 fn message<'a>(
-    raw: &'a [u8],
+    m: MessageRef<'a>,
     depth: usize,
     parts: &mut usize,
 ) -> (String, String, bool, Vec<File<'a>>) {
-    let h = mime::Headers::parse(mime::split_head(raw).0);
-    let subject = mime::decode_words(h.get("subject").unwrap_or(""))
-        .trim()
-        .to_string();
+    let root = m.root_part();
+    let subject = field(root, HeaderName::Subject).map_or(String::new(), |raw| {
+        let parsed = HeaderForm::Text.parse(raw);
+        let text = parsed.value().as_text().unwrap_or("").trim().to_string();
+        text
+    });
     // Some clients send a reply without reply headers: the subject shows it.
     let re = subject
         .split_once(':')
         .is_some_and(|(p, _)| REPLY_PREFIXES.contains(&p.trim().to_lowercase().as_str()));
-    let is_reply = re || h.get("in-reply-to").is_some() || h.get("references").is_some();
+    let is_reply = re
+        || field(root, HeaderName::InReplyTo).is_some()
+        || field(root, HeaderName::References).is_some();
     // Step 1: the body text, and the list of the attachments (not decoded).
     let mut w = Walker {
         parts: *parts,
@@ -130,7 +277,7 @@ fn message<'a>(
         files: Vec::new(),
         is_reply,
     };
-    w.entity(raw, depth);
+    w.entity(root, depth);
     *parts = w.parts;
     let mut text = w.texts.join("\n\n");
     if w.cut {
@@ -144,8 +291,9 @@ struct File<'a> {
     mime_type: String,
     name: Option<String>,
     charset: Option<String>,
-    cte: String,
-    body: &'a [u8],
+    part: MessagePart<'a>,
+    /// The transfer encoding, from the fields that [`field`] reads.
+    enc: Encoding,
     /// The MIME depth of the part. An attached message goes one level deeper.
     depth: usize,
 }
@@ -168,62 +316,77 @@ struct Walker<'a> {
 }
 
 impl<'a> Walker<'a> {
-    fn entity(&mut self, raw: &'a [u8], depth: usize) {
+    fn entity(&mut self, part: MessagePart<'a>, depth: usize) {
         self.parts += 1;
         if self.parts > MAX_PARTS || depth > MAX_DEPTH {
             self.cut = true;
             return;
         }
-        let (head, body) = mime::split_head(raw);
-        let h = mime::Headers::parse(head);
-        let ct = mime::parse_value(h.get("content-type").unwrap_or(""));
-        let disp = mime::parse_value(h.get("content-disposition").unwrap_or(""));
-        let cte = h
-            .get("content-transfer-encoding")
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let mime_type = if ct.main.contains('/') {
-            ct.main.clone()
-        } else {
-            "text/plain".to_string()
+        if part.flags().contains(PartFlags::LIMIT_REACHED) {
+            self.cut = true;
+        }
+        let ct_field =
+            field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
+        let ct = ct_field.as_ref().and_then(|f| f.value().as_content_type());
+        let disp_field =
+            field(part, HeaderName::ContentDisposition).map(|v| HeaderForm::ContentType.parse(v));
+        let disp = disp_field
+            .as_ref()
+            .and_then(|f| f.value().as_content_type());
+        let mime_type = match ct.as_ref().and_then(|c| Some((c.ctype(), c.subtype()?))) {
+            Some((t, s)) => format!("{t}/{s}").to_ascii_lowercase(),
+            None => "text/plain".to_string(),
         };
-        let name =
-            mime::param(&disp.params, "filename").or_else(|| mime::param(&ct.params, "name"));
-        let charset = mime::param(&ct.params, "charset");
+        let attachment = disp.as_ref().is_some_and(|d| d.is_attachment());
+        let name = disp
+            .as_ref()
+            .and_then(|d| d.attribute("filename"))
+            .or_else(|| ct.as_ref()?.attribute("name"))
+            .map(str::to_string);
+        let charset = ct
+            .as_ref()
+            .and_then(|c| c.attribute("charset"))
+            .map(str::to_string);
+        let cte = field(part, HeaderName::ContentTransferEncoding)
+            .map(|v| String::from_utf8_lossy(v).trim().to_ascii_lowercase());
+        let enc = match cte.as_deref() {
+            Some("base64") => Encoding::Base64,
+            Some("quoted-printable") => Encoding::QuotedPrintable,
+            _ => Encoding::None,
+        };
         if let Some(sub) = mime_type
             .strip_prefix("multipart/")
             // A named multipart (for example a saved web page) is a file.
-            .filter(|_| disp.main != "attachment" && name.is_none())
+            .filter(|_| !attachment && name.is_none())
         {
-            let Some(boundary) = mime::param(&ct.params, "boundary") else {
+            if !part.is_multipart() {
                 return;
-            };
+            }
             // One part more than the limit, so that the walker sees the overflow.
-            let max = MAX_PARTS.saturating_sub(self.parts) + 1;
-            let (list, more) = mime::split_multipart(body, &boundary, max);
             // Parts past the limit are not read. A last alternative can be one of them.
-            self.cut |= more;
+            let max = MAX_PARTS.saturating_sub(self.parts) + 1;
+            let list: Vec<MessagePart<'a>> = part.children().take(max).collect();
+            self.cut |= part.children().len() > max;
             if sub == "alternative" {
                 self.alternative(list, depth);
             } else {
-                for part in list {
-                    self.entity(part, depth + 1);
+                for child in list {
+                    self.entity(child, depth + 1);
                 }
             }
             return;
         }
         let is_text = mime_type == "text/plain" || mime_type == "text/html";
-        if is_text && disp.main != "attachment" && name.is_none() {
-            self.body_part(body, &cte, mime_type == "text/html", charset.as_deref());
+        if is_text && !attachment && name.is_none() {
+            self.body_part(part, enc, mime_type == "text/html", charset.as_deref());
             return;
         }
         self.files.push(File {
             mime_type,
             name,
             charset,
-            cte,
-            body,
+            part,
+            enc,
             depth,
         });
     }
@@ -232,7 +395,7 @@ impl<'a> Walker<'a> {
     /// the clean text uses it too. The walker reads the versions from the
     /// end and uses the first one with text after the quote and signature
     /// steps. A version that is not used adds no text, no attachment and no cut.
-    fn alternative(&mut self, list: Vec<&'a [u8]>, depth: usize) {
+    fn alternative(&mut self, list: Vec<MessagePart<'a>>, depth: usize) {
         for part in list.into_iter().rev() {
             let before = (self.texts.len(), self.chars, self.cut, self.files.len());
             let dropped = self.dropped;
@@ -251,10 +414,16 @@ impl<'a> Walker<'a> {
 
     /// Make the clean text of one body part. Each part has its own quotes
     /// and signature, so a cut in one part cannot remove a later part.
-    fn body_part(&mut self, body: &[u8], cte: &str, html: bool, charset: Option<&str>) {
+    fn body_part(
+        &mut self,
+        part: MessagePart<'a>,
+        enc: Encoding,
+        html: bool,
+        charset: Option<&str>,
+    ) {
         // Also when the text is full, the part goes through the steps: only
         // a later part with clean text makes a cut.
-        let (bytes, truncated) = decode_capped(body, cte, PART_LIMIT);
+        let (bytes, truncated) = decode_capped(part.raw_body(), enc, PART_LIMIT);
         self.cut |= truncated;
         let text = mime::decode(&bytes, charset);
         drop(bytes);
@@ -303,7 +472,9 @@ impl<'a> Walker<'a> {
 /// message. So the budget never has to go back. An attached message adds its
 /// own attachments after it: its text uses the budget first.
 fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec<Attachment>) {
-    let size = mime::decoded_len(f.body, &f.cte);
+    let body = f.part.raw_body();
+    let enc = f.enc;
+    let size = decoded_len(body, enc);
     let mut name = f.name.unwrap_or_default();
     let mut text = None;
     // True if the attachment text is not complete.
@@ -313,8 +484,27 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         // Also with no budget left, the walk lists the attachments of the
         // attached message.
         let had_budget = *attach_left > 0;
-        let (inner, clipped) = decode_capped(f.body, &f.cte, INNER_LIMIT);
-        let (subject, mut t, inner_cut, files) = message(&inner, f.depth + 1, parts);
+        let (inner, clipped) = decode_capped(body, enc, INNER_LIMIT);
+        // The first parse saw an attached message that is not encoded, but
+        // its bytes past INNER_LIMIT must not count. So parse the capped bytes again.
+        let fits = mime_fields_fit(&inner);
+        let Some(parsed) = fits.then(|| parser().parse(&inner[..])).flatten() else {
+            out.push(Attachment {
+                name: String::new(),
+                mime_type: f.mime_type,
+                size,
+                // A message that Iris does not parse because of a limit is cut.
+                text: had_budget.then(|| {
+                    if fits {
+                        String::new()
+                    } else {
+                        CUT_MARK.to_string()
+                    }
+                }),
+            });
+            return;
+        };
+        let (subject, mut t, inner_cut, files) = message(parsed.root(), f.depth + 1, parts);
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {
@@ -341,7 +531,7 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
     } else if f.mime_type == "text/plain" && *attach_left > 0 {
         // UTF-16 gives one byte of text for two source bytes of ASCII.
         let wide = mime::bytes_per_byte(f.charset.as_deref());
-        let (bytes, truncated) = decode_capped(f.body, &f.cte, *attach_left * wide);
+        let (bytes, truncated) = decode_capped(body, enc, *attach_left * wide);
         let mut t = mime::decode(&bytes, f.charset.as_deref());
         cut = truncated;
         // A charset can make the text longer than its bytes.
@@ -353,8 +543,8 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         text = Some(t);
     } else if f.mime_type == "application/pdf" && *attach_left > 0 && size <= PDF_LIMIT {
         // Check the marker first, so that a file that is not a PDF costs no memory.
-        if pdf::is_pdf(&decode_capped(f.body, &f.cte, 1024).0) {
-            let (bytes, _) = decode_capped(f.body, &f.cte, PDF_LIMIT as usize);
+        if pdf::is_pdf(&decode_capped(body, enc, 1024).0) {
+            let (bytes, _) = decode_capped(body, enc, PDF_LIMIT as usize);
             // The quality check needs some text, also when little budget is
             // left. One byte more than the budget shows a cut.
             let (found, stopped) = pdf::text_cut(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
@@ -388,32 +578,107 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
     out.extend(inner_attachments);
 }
 
+/// The decoded size of a body. It uses the same chunks as the decode (see
+/// [`base64_chunks`] and [`qp_chunks`]), so the size and the decode agree.
+fn decoded_len(body: &[u8], enc: Encoding) -> u64 {
+    match enc {
+        Encoding::Base64 => {
+            let mut n = 0u64;
+            base64_chunks(body, |b| n += b.len() as u64);
+            n
+        }
+        // `mail-parser` counts a final `=4` as 1 byte but decodes 2 bytes.
+        Encoding::QuotedPrintable => {
+            let mut n = 0u64;
+            qp_chunks(body, |b| {
+                n += b.len() as u64;
+                true
+            });
+            n
+        }
+        Encoding::None => body.len() as u64,
+    }
+}
+
+/// Decode quoted-printable with the `mail-parser` decoder, in chunks of at
+/// most about 64 KiB, and give each decoded chunk to `f` until it returns
+/// false. A chunk ends after a line end, or in a long line at a byte that is
+/// not one of the 2 bytes after an `=`. An escape never crosses a line end,
+/// so each chunk decodes as in the decode of the whole body.
+fn qp_chunks(body: &[u8], mut f: impl FnMut(&[u8]) -> bool) {
+    const CHUNK: usize = 64 * 1024;
+    let mut start = 0;
+    while start < body.len() {
+        let window = &body[start..body.len().min(start + CHUNK)];
+        let mut end = match window.iter().position(|&b| b == b'\n') {
+            Some(n) => start + n + 1,
+            None => start + window.len(),
+        };
+        while end < body.len() && body[end.saturating_sub(2)..end].contains(&b'=') {
+            end += 1;
+        }
+        if !f(&Encoding::QuotedPrintable.decode(&body[start..end])) {
+            return;
+        }
+        start = end;
+    }
+}
+
+/// Decode base64 and give the bytes to `f`, in parts. The `mail-parser`
+/// decoder allocates 3/4 of its input, white space too. So it gets only the
+/// alphabet and the padding, in chunks of 64 KiB (a multiple of 4).
+fn base64_chunks(input: &[u8], mut f: impl FnMut(&[u8])) {
+    const CHUNK: usize = 64 * 1024;
+    let mut chunk = Vec::with_capacity(input.len().min(CHUNK));
+    for &b in input.iter().filter(|&&b| mime::is_b64(b) || b == b'=') {
+        chunk.push(b);
+        if chunk.len() == CHUNK {
+            f(&Encoding::Base64.decode(&chunk));
+            chunk.clear();
+        }
+    }
+    f(&Encoding::Base64.decode(&chunk));
+}
+
 /// Decode at most `cap` bytes of a body. Return the bytes and true if bytes
 /// went out. The input is cut before the decode, so the decode never
 /// allocates more than about `cap` bytes.
-fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow<'a, [u8]>, bool) {
-    // Base64 gives 3 bytes for 4 characters. The other encodings give at
-    // most 1 byte for each input byte.
-    if cte == "quoted-printable" {
-        let (bytes, more) = mime::qp_capped(body, cap);
-        return (std::borrow::Cow::Owned(bytes), more);
+fn decode_capped(body: &[u8], enc: Encoding, cap: usize) -> (Cow<'_, [u8]>, bool) {
+    if enc == Encoding::QuotedPrintable {
+        // Decode chunks until the bytes pass `cap`, then look for one more
+        // decoded byte: the cut flag.
+        let mut out = Vec::new();
+        let mut more = false;
+        qp_chunks(body, |b| {
+            if out.len() <= cap {
+                out.extend_from_slice(&b[..b.len().min(cap + 1 - out.len())]);
+                true
+            } else {
+                more = !b.is_empty();
+                !more
+            }
+        });
+        let truncated = more || out.len() > cap;
+        out.truncate(cap);
+        return (Cow::Owned(out), truncated);
     }
-    // Line ends between base64 characters do not count.
-    let max_in = if cte == "base64" {
-        mime::base64_prefix(body, cap / 3 * 4 + 4)
-    } else {
-        cap
+    let input_len = match enc {
+        // Line ends between base64 characters do not count.
+        Encoding::Base64 => mime::base64_prefix(body, cap / 3 * 4 + 4),
+        _ => body.len().min(cap),
     };
-    let input = &body[..body.len().min(max_in)];
-    let mut bytes = mime::transfer_decode(input, cte);
+    let (input, rest) = body.split_at(input_len);
+    // The base64 decoder of `mail-parser` allocates 3/4 of its input, white
+    // space too. Give it only the alphabet and the padding.
+    let mut bytes: Cow<'_, [u8]> = if enc == Encoding::Base64 {
+        let mut out = Vec::with_capacity(mime::base64_chars(input) * 3 / 4 + 3);
+        base64_chunks(input, |b| out.extend_from_slice(b));
+        Cow::Owned(out)
+    } else {
+        enc.decode(input)
+    };
     // Only data after the input is a cut: base64 padding and line ends are not.
-    let rest = &body[input.len()..];
-    let more = if cte == "base64" {
-        mime::has_base64(rest)
-    } else {
-        !rest.is_empty()
-    };
-    let truncated = more || bytes.len() > cap;
+    let truncated = decoded_len(rest, enc) > 0 || bytes.len() > cap;
     if bytes.len() > cap {
         bytes.to_mut().truncate(cap);
     }
@@ -460,18 +725,82 @@ fn tidy(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The invariant of `decode_capped`, for each cap: the bytes are the first
+    /// `min(cap, full)` bytes of the full decode, and the cut flag is true
+    /// only if bytes of the full decode went out.
+    fn check_every_cap(body: &[u8], enc: Encoding) {
+        let (full, _) = decode_capped(body, enc, usize::MAX / 4);
+        assert_eq!(
+            &full[..],
+            &enc.decode(body)[..],
+            "{enc:?} full decode of {body:?}"
+        );
+        assert_eq!(
+            decoded_len(body, enc),
+            full.len() as u64,
+            "{enc:?} size of {body:?}"
+        );
+        for cap in 0..=full.len() + 2 {
+            let (bytes, cut) = decode_capped(body, enc, cap);
+            let n = cap.min(full.len());
+            assert_eq!(
+                &bytes[..],
+                &full[..n],
+                "{enc:?} cap {cap} of {:?}",
+                String::from_utf8_lossy(body)
+            );
+            assert_eq!(
+                cut,
+                full.len() > cap,
+                "{enc:?} cap {cap} of {:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_printable_caps_keep_the_prefix_of_the_full_decode() {
+        for body in [
+            &b"=zz"[..],
+            b"a=41b",
+            b"ab=\r\ncd",
+            b"ab=\ncd=",
+            b"==41=4",
+            b"x=4=41=",
+            b"=\n=\n=\nX",
+            b"a= \r\nb=3D=3d",
+            b"=\r",
+            b"=",
+        ] {
+            check_every_cap(body, Encoding::QuotedPrintable);
+        }
+    }
+
+    #[test]
+    fn base64_caps_keep_the_prefix_of_the_full_decode() {
+        for body in [
+            &b"QQ==QQ=="[..],
+            b"QUJD\r\nREVG R0g=",
+            b"QUJDRA==\r\n  ",
+            b"Q",
+            b"QUI",
+        ] {
+            check_every_cap(body, Encoding::Base64);
+        }
+    }
+
     #[test]
     fn base64_at_the_cap_with_white_space_after_is_not_cut() {
         // 12 characters of data, then padding and line ends.
         let body = b"QUJDREVGR0hJ\r\n\r\n  \r\n";
         for cap in [9, 10, 12] {
-            let (bytes, cut) = decode_capped(body, "base64", cap);
+            let (bytes, cut) = decode_capped(body, Encoding::Base64, cap);
             assert_eq!((&bytes[..], cut), (&b"ABCDEFGHI"[..], false), "cap {cap}");
         }
-        let (bytes, cut) = decode_capped(body, "base64", 8);
+        let (bytes, cut) = decode_capped(body, Encoding::Base64, 8);
         assert_eq!((&bytes[..], cut), (&b"ABCDEFGH"[..], true));
         let pad = b"QUJDRA==\r\n";
-        assert!(!decode_capped(pad, "base64", 4).1);
+        assert!(!decode_capped(pad, Encoding::Base64, 4).1);
     }
 
     #[test]

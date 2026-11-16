@@ -72,15 +72,48 @@ Each budget only goes down. No step gives budget back.
   It uses the first version with clean text that is not empty. A version that
   it does not use adds no text, no attachment and no cut.
 - Each other multipart: each part, in order.
+- The `mail-parser` crate (1.0.1) reads the MIME tree, the headers and the
+  transfer encodings (decision D3). Iris sets its limits: at most
+  `PARSE_PARTS` (10,000) parts and `MAX_DEPTH` + 2 levels in one parse. An
+  attached message that is not transfer-encoded is part of the same parse,
+  so its parts count in `PARSE_PARTS`, but not in `MAX_PARTS` of step 1. So
+  an attached message with up to about 10,000 parts leaves the outer text.
+  Past `PARSE_PARTS`, the text is cut. The parts cost about 140 bytes each. Iris does not let it
+  parse a transfer-encoded attached message: step 2 decodes at most
+  `INNER_LIMIT` bytes of each attached message and parses these bytes again.
 - Transfer encodings: `base64` (characters outside the alphabet are skipped),
-  `quoted-printable` (an `=` without a valid escape stays), and all others as
-  they are.
+  `quoted-printable` (an `=` without a valid escape stays, but an `=` at the
+  end of the body is a soft line break and goes out), and all others as
+  they are. Iris cuts the input before the decode, so a decode never uses
+  more than about its cap. Iris decodes quoted-printable with the
+  `mail-parser` decoder in chunks of about 64 KiB that end after a line end
+  (an escape never crosses one), and stops after the cap. The size of a
+  quoted-printable attachment is the length of the same chunked decode. The `mail-parser` base64 decoder uses memory for
+  white space too, so Iris gives it only the alphabet, in chunks of 64 KiB.
+  The size of a base64 attachment is the length of the same chunked decode,
+  so the size and the decode always agree (`QQ==QQ==` is 2 bytes).
 - Charsets: the labels of the WHATWG Encoding Standard, through `encoding_rs`.
   Text that is valid UTF-8 is read as UTF-8 if it has no label, an unknown
   label, or a label that `encoding_rs` maps to Windows-1252 (for example
   `us-ascii` and `iso-8859-1`). Other text with no label or an unknown label
   is read as Windows-1252.
-- Headers: RFC 2047 encoded words, and RFC 2231 parameters.
+- Headers: RFC 2047 encoded words, and RFC 2231 parameters. Iris reads a
+  field of a part only through one function (`field`), with the limits of
+  the old parser:
+  - Only the first 1,000 fields that start in the first 256 KiB of the
+    header block count.
+  - Each value is cut at 16 KiB.
+  - The first field of a name counts.
+- The parser keeps all other fields raw, because a parse of a 5 MB subject
+  uses 8.5 MB. It always parses `Content-Type`, `Content-Disposition` and
+  `Content-Transfer-Encoding` in full, for the MIME structure, and their
+  decoded parameters cost about 2.3 bytes for each byte. So before the
+  parse, a line scan checks these fields: each at most 16 KiB, all of them
+  at most `MIME_FIELD_LIMIT` (1 MiB). A message that does not fit is not
+  parsed (fail closed): no subject, no attachments, and the text is only
+  the cut mark. The same check applies to an attached message before its
+  parse. The scan reads lines only, so a body line that looks like a MIME
+  field counts too: the check can refuse more, never less.
 
 ### A reply
 
@@ -352,6 +385,12 @@ client. They are not defects of this design:
   encrypted PDF gives no text.
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
+- Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
+  address, so the person goes out of the profiles. A quoted local part
+  outside `<>` (`"a:b"@example.org`), a comment inside an address
+  (`john(work)@example.org`), and a domain literal with a `:` outside `<>`
+  (`user@[IPv6:2001:db8::1]`). The same forms inside `<>` work. A comment
+  after a bare address (`a@example.org (Ana)`) is the display name.
 
 ### Limits and the cut
 
@@ -385,7 +424,11 @@ client. They are not defects of this design:
 
 - New crate `crates/iris-clean/`. One row in the folder table of `AGENTS.md`.
 - No caller yet. The engine (card R1-10) and the conversations (W15) call it.
-- Dependencies: `encoding_rs` 0.8 and `miniz_oxide` 0.9.
+- Dependencies: `encoding_rs` 0.8, `miniz_oxide` 0.9 and `mail-parser`
+  1.0.1 (with `encodify` and `hashify`). `mail-parser` needs Rust 1.98 or
+  newer, so `rust-toolchain.toml` pins Rust 1.100.0.
+- `iris-people` reads address lists with `mail-parser` too (see "Known
+  limits").
 
 ## Assumptions
 

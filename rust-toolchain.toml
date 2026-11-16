@@ -1,3 +1,4 @@
 [toolchain]
-channel = "stable"
+# mail-parser 1.0.1 needs Rust 1.98 or newer. rustup installs this version when it is missing.
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
