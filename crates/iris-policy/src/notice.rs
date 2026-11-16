@@ -9,6 +9,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// A mail is new for one hour after its fetch.
 pub const WINDOW_MS: i64 = 3_600_000;
 
+/// A mail that the understanding reads late is a candidate up to this time
+/// after its fetch. After that, the interrupt comes too late to help.
+pub const LATE_MS: i64 = 24 * WINDOW_MS;
+
 /// The most characters of the title and of the text of a notice.
 pub const WORDS_MAX: usize = 200;
 
@@ -32,9 +36,10 @@ pub struct Notice {
 
 /// Adds a notice for each new mail that a `notify` rule of the active
 /// policy matches, at the time `now_ms`, and gives the new notices. A mail
-/// is new when it came into the mirror [`WINDOW_MS`] or less before `now_ms`,
-/// and its date is at most [`WINDOW_MS`] before that fetch, so that the old
-/// mail of a sync gives no notice. A mail with no `body` row waits: the
+/// is a candidate when it came into the mirror, or the understanding wrote
+/// its items, [`WINDOW_MS`] or less before `now_ms`, so that a rule on a form
+/// waits for the model, up to [`LATE_MS`] after the fetch. Its date must be at most [`WINDOW_MS`] before the
+/// fetch, so that the old mail of a sync gives no notice. A mail with no `body` row waits: the
 /// hostile check writes with the body. Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
@@ -55,7 +60,8 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
         let ids: Vec<i64> = tx
             .prepare(
                 "SELECT m.id FROM message m
-                 WHERE m.fetched_at >= ?1 AND m.gone_at IS NULL
+                 WHERE (m.fetched_at >= ?1 OR (m.understood_at >= ?1 AND m.fetched_at >= ?3))
+                   AND m.gone_at IS NULL
                    AND m.internal_date >= m.fetched_at - ?2
                    AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
                    AND NOT EXISTS (SELECT 1 FROM notice n WHERE n.message_id = m.id)
@@ -63,7 +69,7 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
                        WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
                  ORDER BY m.id",
             )?
-            .query_map(params![now_ms - WINDOW_MS, WINDOW_MS], |r| r.get(0))?
+            .query_map(params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let now = now_ms.div_euclid(1000);
         let mut out = Vec::new();

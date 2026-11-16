@@ -44,7 +44,10 @@ fn activate(s: &Store, text: &str) {
         FileState::Changed(l) => l.sha256,
         other => panic!("{other:?}"),
     };
-    assert!(matches!(confirm(s, &sha, NOW / 1000).unwrap(), Confirm::Done { .. }));
+    assert!(matches!(
+        confirm(s, &sha, NOW / 1000).unwrap(),
+        Confirm::Done { .. }
+    ));
 }
 
 /// One mail: what decides if it gets a notice.
@@ -54,6 +57,8 @@ struct Mail {
     /// Minutes before NOW of the fetch, and of the date before the fetch.
     fetched_ago: i64,
     date_before_fetch: i64,
+    /// Minutes before NOW of the understanding, if any.
+    understood_ago: Option<i64>,
     body: bool,
     gone: bool,
     hostile: bool,
@@ -66,14 +71,15 @@ fn put(s: &Store, m: &Mail, n: usize) -> i64 {
     s.write(|tx| {
         let fetched = NOW - m.fetched_ago * MIN;
         tx.execute(
-            "INSERT INTO message(account_id, thread_id, provider_id, internal_date, fetched_at, gone_at, hostile)
-             VALUES (1, 1, ?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO message(account_id, thread_id, provider_id, internal_date, fetched_at, gone_at, hostile, understood_at)
+             VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 format!("m{n}"),
                 fetched - m.date_before_fetch * MIN,
                 fetched,
                 m.gone.then_some(1),
-                m.hostile.then_some("[\"phishing\"]")
+                m.hostile.then_some("[\"phishing\"]"),
+                m.understood_ago.map(|u| NOW - u * MIN)
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -108,9 +114,11 @@ fn put(s: &Store, m: &Mail, n: usize) -> i64 {
 
 fn notices(s: &Store) -> Vec<(i64, u32)> {
     s.read(|c| {
-        Ok(c.prepare("SELECT message_id, rule FROM notice ORDER BY message_id")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?)
+        Ok(
+            c.prepare("SELECT message_id, rule FROM notice ORDER BY message_id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?,
+        )
     })
     .unwrap()
 }
@@ -131,7 +139,12 @@ impl Rng {
     }
 }
 
-const SENDERS: [&str; 4] = ["ann@friends.example", "news@shop.example", "x@far.example", "who@else.example"];
+const SENDERS: [&str; 4] = [
+    "ann@friends.example",
+    "news@shop.example",
+    "x@far.example",
+    "who@else.example",
+];
 const FORMS: [&str; 3] = ["commitment", "feed", "signal"];
 
 /// A rule of the generated policy, as the oracle reads it.
@@ -159,7 +172,8 @@ fn kind_of(m: &Mail) -> &'static str {
 /// The oracle of the spec: the rule of the notice of `m`, if any.
 fn expected(m: &Mail, rules: &[Cond]) -> Option<u32> {
     let kind = kind_of(m);
-    let fresh = m.fetched_ago <= 60 && m.date_before_fetch <= 60;
+    let late = m.understood_ago.is_some_and(|u| u <= 60) && m.fetched_ago <= 24 * 60;
+    let fresh = (m.fetched_ago <= 60 || late) && m.date_before_fetch <= 60;
     let junk = m.labels.contains(&4) || m.labels.contains(&5);
     if !fresh || !m.body || m.gone || junk || kind == "hostile" || kind == "self" {
         return None;
@@ -174,7 +188,9 @@ fn expected(m: &Mail, rules: &[Cond]) -> Option<u32> {
             }) && r.kind.is_none_or(|k| k == kind)
                 && r.form.is_none_or(|f| m.forms.contains(&f))
                 && r.label.is_none_or(|l| {
-                    m.labels.iter().any(|&i| ["INBOX", "Work", "Sent", "Spam", "Trash"][i as usize - 1] == l)
+                    m.labels
+                        .iter()
+                        .any(|&i| ["INBOX", "Work", "Sent", "Spam", "Trash"][i as usize - 1] == l)
                 })
         })
         .map(|r| r.id)
@@ -192,9 +208,17 @@ fn no_notice_without_a_rule_that_matches() {
         let mut rules = Vec::new();
         let mut text = "version = 0\nmode = \"observe\"\n".to_string();
         for id in 1..=1 + rng.next() % 4 {
-            let mut c = Cond { id: id as u32, notify: rng.next() % 4 != 0, sender: None, kind: None, form: None, label: None };
+            let mut c = Cond {
+                id: id as u32,
+                notify: !rng.next().is_multiple_of(4),
+                sender: None,
+                kind: None,
+                form: None,
+                label: None,
+            };
             if rng.coin() {
-                c.sender = Some(rng.pick(&["ann@friends.example", "@shop.example", "@far.example"]));
+                c.sender =
+                    Some(rng.pick(&["ann@friends.example", "@shop.example", "@far.example"]));
             }
             if rng.coin() {
                 c.kind = Some(rng.pick(&["person", "service", "stranger", "hostile", "self"]));
@@ -202,14 +226,19 @@ fn no_notice_without_a_rule_that_matches() {
             if rng.coin() {
                 c.form = Some(rng.pick(&FORMS));
             }
-            if rng.next() % 3 == 0 {
+            if rng.next().is_multiple_of(3) {
                 c.label = Some(rng.pick(&["INBOX", "Work"]));
             }
             if c.sender.is_none() && c.kind.is_none() && c.form.is_none() && c.label.is_none() {
                 c.kind = Some("person");
             }
             let mut when = Vec::new();
-            for (k, v) in [("sender", c.sender), ("sender_kind", c.kind), ("form", c.form), ("label", c.label)] {
+            for (k, v) in [
+                ("sender", c.sender),
+                ("sender_kind", c.kind),
+                ("form", c.form),
+                ("label", c.label),
+            ] {
                 if let Some(v) = v {
                     when.push(format!("{k} = \"{v}\""));
                 }
@@ -226,12 +255,16 @@ fn no_notice_without_a_rule_that_matches() {
         for n in 0..30 {
             let m = Mail {
                 sender: rng.pick(&SENDERS),
-                fetched_ago: rng.pick(&[0, 5, 30, 59, 60, 61, 600]),
+                fetched_ago: rng.pick(&[0, 5, 30, 59, 60, 61, 600, 1440, 1441]),
                 date_before_fetch: rng.pick(&[0, 1, 30, 60, 61, 100_000]),
-                body: rng.next() % 5 != 0,
-                gone: rng.next() % 9 == 0,
-                hostile: rng.next() % 7 == 0,
-                labels: [1, 2, 3, 4, 5].into_iter().filter(|_| rng.next() % 4 == 0).collect(),
+                understood_ago: rng.pick(&[None, Some(0), Some(60), Some(61), Some(600)]),
+                body: !rng.next().is_multiple_of(5),
+                gone: rng.next().is_multiple_of(9),
+                hostile: rng.next().is_multiple_of(7),
+                labels: [1, 2, 3, 4, 5]
+                    .into_iter()
+                    .filter(|_| rng.next().is_multiple_of(4))
+                    .collect(),
                 forms: (0..rng.next() % 3).map(|_| rng.pick(&FORMS)).collect(),
                 subject: format!("Mail {n}"),
             };
@@ -256,6 +289,7 @@ fn mail() -> Mail {
         sender: "ann@friends.example",
         fetched_ago: 1,
         date_before_fetch: 1,
+        understood_ago: None,
         body: true,
         gone: false,
         hostile: false,
@@ -271,17 +305,30 @@ const ANN: &str = "version = 0\nmode = \"observe\"\n[[rule]]\nid = 4\nname = \"F
 fn a_mail_waits_for_its_body_then_gets_one_notice() {
     let (_d, s) = store("body");
     activate(&s, ANN);
-    let id = put(&s, &Mail { body: false, ..mail() }, 0);
+    let id = put(
+        &s,
+        &Mail {
+            body: false,
+            ..mail()
+        },
+        0,
+    );
     assert!(notice::refresh(&s, NOW).unwrap().is_empty());
     s.write(|tx| {
-        tx.execute("INSERT INTO body(message_id, subject, sender, text) VALUES (?1, '', '', '')", [id])?;
+        tx.execute(
+            "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, '', '', '')",
+            [id],
+        )?;
         Ok(())
     })
     .unwrap();
     let new = notice::refresh(&s, NOW).unwrap();
     assert_eq!(new.len(), 1);
     assert_eq!((new[0].rule, new[0].rule_name.as_str()), (4, "From Ann"));
-    assert_eq!((new[0].title.as_str(), new[0].text.as_str()), ("ann@friends.example", "Lunch?"));
+    assert_eq!(
+        (new[0].title.as_str(), new[0].text.as_str()),
+        ("ann@friends.example", "Lunch?")
+    );
     // After its hour, a mail is not new.
     assert!(notice::refresh(&s, NOW + WINDOW_MS).unwrap().is_empty());
 }
@@ -300,12 +347,18 @@ fn done_hides_a_notice_from_the_list() {
     put(&s, &mail(), 0);
     put(&s, &mail(), 1);
     let new = notice::refresh(&s, NOW).unwrap();
-    let list = s.read(|c| notice::list(c)).unwrap();
-    assert_eq!(list.iter().map(|n| n.id).collect::<Vec<_>>(), [new[1].id, new[0].id]);
+    let list = s.read(notice::list).unwrap();
+    assert_eq!(
+        list.iter().map(|n| n.id).collect::<Vec<_>>(),
+        [new[1].id, new[0].id]
+    );
     assert!(notice::done(&s, new[0].id, NOW).unwrap());
-    assert!(notice::done(&s, new[0].id, NOW + 1).unwrap(), "done again is fine");
+    assert!(
+        notice::done(&s, new[0].id, NOW + 1).unwrap(),
+        "done again is fine"
+    );
     assert!(!notice::done(&s, 999, NOW).unwrap());
-    let list = s.read(|c| notice::list(c)).unwrap();
+    let list = s.read(notice::list).unwrap();
     assert_eq!(list.iter().map(|n| n.id).collect::<Vec<_>>(), [new[1].id]);
 }
 
@@ -331,7 +384,10 @@ fn notice_words_are_one_short_line() {
 fn a_notify_rule_needs_no_verbs_and_decides_no_action() {
     let p = parse(ANN).unwrap();
     assert_eq!(p.rules[0].effect, Effect::Notify);
-    let bad = ANN.replace("effect = \"notify\"", "effect = \"notify\"\nverbs = [\"archive\"]");
+    let bad = ANN.replace(
+        "effect = \"notify\"",
+        "effect = \"notify\"\nverbs = [\"archive\"]",
+    );
     assert!(parse(&bad).is_err());
 }
 
@@ -341,7 +397,10 @@ fn a_spam_label_after_the_body_stops_the_notice() {
     activate(&s, ANN);
     let id = put(&s, &mail(), 0);
     s.write(|tx| {
-        tx.execute("INSERT INTO message_label(message_id, label_id) VALUES (?1, 4)", [id])?;
+        tx.execute(
+            "INSERT INTO message_label(message_id, label_id) VALUES (?1, 4)",
+            [id],
+        )?;
         Ok(())
     })
     .unwrap();
@@ -355,10 +414,62 @@ fn a_notice_keeps_the_rule_of_its_time() {
     put(&s, &mail(), 0);
     let new = notice::refresh(&s, NOW).unwrap();
     activate(&s, "version = 0\nmode = \"observe\"\n");
-    let list = s.read(|c| notice::list(c)).unwrap();
+    let list = s.read(notice::list).unwrap();
     assert_eq!(list, new);
     let version: i64 = s
         .read(|c| Ok(c.query_row("SELECT policy_version FROM notice", [], |r| r.get(0))?))
         .unwrap();
     assert_eq!(version, 1);
+}
+
+#[test]
+fn a_form_rule_waits_for_a_late_understanding() {
+    let (_d, s) = store("late");
+    activate(
+        &s,
+        &ANN.replace("sender = \"ann@friends.example\"", "form = \"feed\""),
+    );
+    put(
+        &s,
+        &Mail {
+            fetched_ago: 180,
+            understood_ago: Some(10),
+            forms: vec!["feed"],
+            ..mail()
+        },
+        0,
+    );
+    put(
+        &s,
+        &Mail {
+            fetched_ago: 180,
+            understood_ago: Some(70),
+            forms: vec!["feed"],
+            ..mail()
+        },
+        1,
+    );
+    put(
+        &s,
+        &Mail {
+            fetched_ago: 180,
+            date_before_fetch: 61,
+            understood_ago: Some(10),
+            forms: vec!["feed"],
+            ..mail()
+        },
+        2,
+    );
+    put(
+        &s,
+        &Mail {
+            fetched_ago: 1441,
+            understood_ago: Some(10),
+            forms: vec!["feed"],
+            ..mail()
+        },
+        3,
+    );
+    notice::refresh(&s, NOW).unwrap();
+    assert_eq!(notices(&s), [(1, 4)]);
 }

@@ -28,6 +28,7 @@ mod auth;
 mod export;
 pub mod gate;
 mod jobs;
+mod notice;
 pub mod policy;
 mod read;
 mod review;
@@ -37,6 +38,7 @@ pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
 pub use export::{export, Exported};
 pub use jobs::*;
+pub use notice::*;
 pub use read::*;
 pub use review::*;
 pub use verbs::*;
@@ -151,6 +153,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
+        .route("/api/notices", get(get_notices))
+        .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
@@ -615,6 +619,17 @@ async fn post_dismiss(
 ) -> Result<Response> {
     let b = body(b)?;
     Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
+}
+
+async fn get_notices(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(notices(&s)?).into_response())
+}
+
+async fn post_notice_done(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    if !notice_done(&s, &id, now_ms())? {
+        return Ok(not_found());
+    }
+    Ok(Json(serde_json::json!({ "done": id })).into_response())
 }
 
 async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {

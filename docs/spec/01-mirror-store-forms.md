@@ -483,6 +483,7 @@ Iris gives short IDs that a person and an agent can type:
 | `f-` | Feed item |
 | `s-` | Signal |
 | `w-` | Watch (card R5-07) |
+| `n-` | Notice by rule (card R5-08) |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
 Iris install and the engine never uses it again, also after a rebuild deletes

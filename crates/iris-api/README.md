@@ -45,6 +45,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/jobs?state=&limit=&after=` | `{"jobs": [...], "next"}`: the jobs of the agents (card R4-09), newest first. `state` is `open` (the default: `working`, `waiting` and `needs_you`) or one state: `working`, `waiting`, `needs_you` or `done`. Each job is the job document of `docs/spec/schema/job.schema.json` without `events`. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before (a job ID, `j-12`); the page holds the jobs with a lower ID. Another `state`, or an `after` that is not a job ID, is a 400. |
 | `/api/jobs/{id}` | One job (`j-12`): `{"job", "changesets", "threads"}`. `job` is the job document with its events. `changesets` holds each submitted changeset whose author names the job, the first submit first: `{"id", "at", "state", "why", "actions"}`, where `at` is the first submit and `actions` counts the actions of the newest revision in each state (`{"applied": 2}`). A changeset that was never submitted is not in the list. `threads` has one entry for each thread of a wait of the job: the summary of the newest message of the thread that is not gone, with `"gone": false`, or `{"id", "gone": true}`. The answer streams. If a row of the job does not parse, the answer is a 500 with no part of the job. An ID that no job has is a 404. |
 | `/api/watches` | `[watch]`, newest first. A watch is `{"id", "text", "created", "state", "arrived", "message"}`. `state` is `waits`, or `arrived` after its one notice. `message` is the summary of the first new message that matched, or `null` while the watch waits or when the message is gone. See [Watches](#watches). |
+| `/api/notices` | `[notice]`, newest first, at most 50: the notices by rule that are not done (card R5-08). A notice is `{"id", "rule", "rule_name", "title", "text", "created", "message"}`. `title` is the sender and `text` the subject, one line each. `rule` and `rule_name` are the `notify` rule at the time of the notice. `message` is the summary of the mail, or `null` when the mail is gone. |
 
 A message summary is `{"id", "thread", "date", "from": {"name", "address"},
 "subject", "labels"}`.
@@ -290,6 +291,7 @@ when a new mail matches (card R5-07, `docs/specs/2026-11-16-watch.md`).
 |---|---|
 | `POST /api/watches` | Body `{"text"}`. Adds a watch and gives it with the status 201. An empty text, a text over 500 characters, a text that is not a valid search, or a 101st watch that waits is a 400. |
 | `POST /api/watches/{id}/remove` | Removes the watch (`w-3`) and gives `{"removed"}`. A watch that is not there is a 404. An ID that is not a `w-` ID is a 400. |
+| `POST /api/notices/{id}/done` | Marks the notice (`n-3`) done and gives `{"done"}`. A notice that is done already gives 200. A notice that is not there is a 404. An ID that is not an `n-` ID is a 400. |
 
 Only a message that the mirror gets after the watch can match. It must also
 have its clean text, no hostile mark, no hostile sender, no label `SENT` or

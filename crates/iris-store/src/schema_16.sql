@@ -22,5 +22,6 @@ CREATE TABLE notice (
   done_at INTEGER
 );
 
--- The pass reads the mail of the last hour.
+-- The pass reads the mail fetched or understood in the last hour.
 CREATE INDEX message_fetched ON message(fetched_at);
+CREATE INDEX message_understood ON message(understood_at);
