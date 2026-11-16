@@ -206,10 +206,18 @@ function, `apply_kind_changes(tx, changes, now)`, runs right after each
   `From` address is not the address of that row, and each later message of
   the same threads, gets a reset. The spoof mark of these messages can
   change (spec 1 section 6.7).
-- For each other kind change (for example stranger to service): the
-  conversation of each thread with mail from that address is computed again
-  (issue #106). The items from the model keep the sender kind of their run.
-  Iris does not pay again for these messages.
+- For a sender that becomes or stops being `service`: each message from
+  that address that is not gone gets a reset (without the later messages of
+  its threads). The fixed rules depend on the `service` kind (the code
+  signal of spec 1 section 7.3), so their items can change. A model call
+  for these messages runs only in an approved run, under the cost limit.
+- For each other kind change (for example stranger to person): no reset.
+  The items from the model keep the sender kind of their run, and Iris does
+  not pay again for these messages.
+- After these steps, in the same transaction, `iris_talk::update` runs for
+  each thread with mail from a changed sender and for each thread with a
+  reset (issue #106). So no conversation keeps hostile mail or an old kind
+  after the transaction commits, also after a crash.
 
 So `iris_senders::decide` and `refresh` give each row whose kind or name
 changed, with the old and the new kind and name. The name writes of
@@ -382,6 +390,8 @@ No parser or protocol code is new. The model client is `iris-model`.
 | A pinned item whose origin message gets `SPAM`, or whose sender becomes hostile | A corrected item of hostile mail shows | The API and the brief hide it while the origin is hostile mail. It keeps its ID and corrections and shows again when the state clears. | API test. |
 | A library caller passes another paid model after the approval | The approval and the limit of another price | The runner makes the model from `model_setting` itself; the caller gives no model. | Batch test: a changed row clears the approval. |
 | A new thread of ten messages | The estimate counts only the first message | The estimate counts each reachable message. | Batch test: estimate of a ten-message thread is ten. |
+| A service sender becomes a stranger (or the reverse) | A code signal of the fixed rule stays, or one is missed | The messages of the sender get a reset; the next approved run checks them again. | Store test. |
+| A sent message makes a sender of another thread hostile | That conversation keeps hostile mail | The same transaction computes the conversation of that thread again. | Store test. |
 | `--max-messages 1` and a thread of two pending messages | The runner does both | The check comes before each message: one message, `stop = messages`. | Batch test. |
 | Two threads with pending mail, the newer one with two messages | An older thread runs between the messages of a newer one | The runner finishes the newer thread first. | Batch test of the order. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
