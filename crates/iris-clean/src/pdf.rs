@@ -2182,4 +2182,23 @@ mod tests {
         ]);
         assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
     }
+
+    #[test]
+    fn a_code_after_a_narrow_entry_in_a_wide_range() {
+        let cmap = b"begincmap 1 begincodespacerange <0000> <FFFF> endcodespacerange \
+            1 beginbfrange <0000> <00FF> <0000> endbfrange 1 beginbfchar <0048> <0048> endbfchar endcmap";
+        // Codes 0048, 0049 and 0050: H from the narrow entry, I and P from the wide range.
+        let content = b"BT /F1 9 Tf <004800490050> Tj ET";
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< >>", Some(content)),
+            (5, TYPE0, None),
+            (6, "<< >>", Some(cmap)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("HIP"));
+    }
 }
