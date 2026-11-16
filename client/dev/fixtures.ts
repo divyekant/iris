@@ -51,15 +51,15 @@ export const brief: Brief = {
   review: { changesets: 2, actions: 4 },
 };
 
-/** The items that rule 2 hides (spec 2 section 6.4): the four hidden items of the brief. */
-export const hidden = items.slice(0, 4).map((i, n) => ({
+/** The items that rule 2 hides (spec 2 section 6.4): the four hidden items of the brief, each with its own ID. */
+export const hidden: Item[] = items.slice(0, 4).map((i, n) => ({
   ...i,
-  id: `${i.id}-h${n}`,
+  id: i.id.replace(/\d+$/, String(9001 + n)),
   attention: { state: "hidden" as const, rule: 2, reason: "Hidden by rule 2: Hide Acme Deals" },
 }));
 
-/** The actions that a rule approved (GET /api/handled). */
-export const handled: HandledPage = {
+/** One action that rule 5 approved and Iris applied, for the tests of the handled view (apply mode). */
+export const decided: HandledPage = {
   count: 1,
   next: null,
   actions: [
@@ -79,6 +79,9 @@ export const handled: HandledPage = {
     },
   ],
 };
+
+/** GET /api/handled in the fixture state: observe mode, so no rule decided an action. */
+export const handled: HandledPage = { count: 0, next: null, actions: [] };
 
 export function message(id: string): Message | undefined {
   const item = items.find((i) => i.sources.some((s) => s.message === id));
@@ -242,7 +245,7 @@ export function answer(path: string): unknown {
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
   }
   if (name === "brief") return brief;
-  if (name === "items" && id) return items.find((i) => i.id === id);
+  if (name === "items" && id) return [...items, ...hidden].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
   }

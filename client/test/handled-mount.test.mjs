@@ -9,8 +9,8 @@ const text = (el) => el.textContent.replace(/\s+/g, " ");
 test("each list of the handled view loads its next page", async () => {
   const asked = [];
   const pages = {
-    "handled?limit=50": { ...fx.handled, next: "7" },
-    "handled?limit=50&after=7": { count: 1, next: null, actions: [{ ...fx.handled.actions[0], changeset: "cs-3", state: "approved" }] },
+    "handled?limit=50": { ...fx.decided, next: "7" },
+    "handled?limit=50&after=7": { count: 1, next: null, actions: [{ ...fx.decided.actions[0], changeset: "cs-3", state: "approved" }] },
     "brief/hidden?limit=50": { count: 4, items: fx.hidden.slice(0, 2), next: "c1", duplicates: { [fx.hidden[0].id]: ["c-901"] } },
     "brief/hidden?limit=50&after=c1": { count: 4, items: fx.hidden.slice(2), next: null, duplicates: { [fx.hidden[3].id]: ["c-902"] } },
   };

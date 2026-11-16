@@ -289,9 +289,27 @@ test("the brief counts what Iris handled without you and links the list (R2-09)"
   assert.doesNotMatch(apply, /only observes/);
 });
 
+test("the fixtures give one handled state, and each hidden item opens", async () => {
+  // Observe mode: no rule decides an action, so the brief count is the hidden count, and the list agrees.
+  assert.equal(fx.status.mode, "observe");
+  const list = fx.answer("/handled?limit=50");
+  const hidden = fx.answer("/brief/hidden?limit=50");
+  const decided = list.actions.reduce((n, a) => n + a.messages, 0);
+  assert.equal(list.count, 0);
+  assert.equal(fx.brief.handled.count, fx.brief.hidden + decided);
+  assert.equal(hidden.count, fx.brief.hidden);
+  assert.deepEqual(fx.brief.handled.verbs, {});
+  // The link of each hidden line resolves to its item.
+  const html = await render("/src/views/Handled.svelte", { changes: list, hidden });
+  for (const item of hidden.items) {
+    assert.match(html, new RegExp(`href="#/item/${item.id}"`));
+    assert.equal(fx.answer(`/items/${item.id}`)?.id, item.id);
+  }
+});
+
 test("the handled view lists each change and each hidden item with its reason", async () => {
   const hidden = { count: fx.hidden.length, items: fx.hidden, next: "c1" };
-  const html = await render("/src/views/Handled.svelte", { changes: { ...fx.handled, next: "9" }, hidden });
+  const html = await render("/src/views/Handled.svelte", { changes: { ...fx.decided, next: "9" }, hidden });
   const t = text(html);
   assert.match(t, /Decided by your rules 1 Archive 500 messages Rule 5 \(Archive old newsletters\) allows archive\. Done, /);
   assert.match(t, /Hidden from your brief 4/);
@@ -301,7 +319,7 @@ test("the handled view lists each change and each hidden item with its reason", 
   // A next page of each list.
   assert.equal((html.match(/>Show more</g) ?? []).length, 2);
   // The reason of the author when the decision has none, and the state in words.
-  const plain = { ...fx.handled.actions[0], reason: null, state: "approved", at: null };
+  const plain = { ...fx.decided.actions[0], reason: null, state: "approved", at: null };
   const t2 = text(await render("/src/views/Handled.svelte", { changes: { count: 1, actions: [plain], next: null }, hidden: { count: 0, items: [], next: null } }));
   assert.match(t2, /Feed items that you did not open in 30 days\. Approved, waits to apply/);
   assert.doesNotMatch(t2, /Hidden from your brief|Show more/);
