@@ -200,6 +200,62 @@ Code: 7731
 }
 
 #[test]
+fn the_first_code_in_the_message_wins() {
+    let raw = "From: Bank <no-reply@bank.example>
+Subject: Your verification code
+
+7731
+Verification help updated 2026
+";
+    let d = one(raw, Kind::Service, &[]);
+    assert_eq!(d.item["code"], "7731");
+}
+
+/// For generated lines with one planted code, the rule finds that code when
+/// no earlier cue line gives a candidate.
+#[test]
+fn a_planted_code_is_found_in_message_order() {
+    const FILL: [&str; 6] = [
+        "Hello",
+        "Order 123456789",
+        "Total 1234.50",
+        "See you",
+        "x",
+        "barcode 5555",
+    ];
+    let mut x: u64 = 0x0bad_cafe_1234_5678;
+    let mut next = |n: usize| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % n as u64) as usize
+    };
+    for _ in 0..2000 {
+        let mut lines: Vec<String> = (0..next(6))
+            .map(|_| FILL[next(FILL.len())].to_string())
+            .collect();
+        let at = next(lines.len() + 1);
+        let code = format!("{}", 1000 + next(9_000_000));
+        let planted = if next(2) == 0 {
+            vec![format!("Your code: {code}")]
+        } else {
+            vec!["Your verification code".to_string(), code.clone()]
+        };
+        // A later cue line with another number must not win.
+        lines.push("Code help updated 2026".to_string());
+        for (k, l) in planted.into_iter().enumerate() {
+            lines.insert(at + k, l);
+        }
+        let raw = format!(
+            "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{}\n",
+            lines.join("\n")
+        );
+        let d = one(&raw, Kind::Service, &[]);
+        assert_eq!(d.item["code"], code.as_str(), "{raw:?}");
+    }
+}
+
+#[test]
 fn the_spec_examples_are_valid_and_a_bad_item_is_not() {
     let dir = concat!(
         env!("CARGO_MANIFEST_DIR"),

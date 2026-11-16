@@ -100,9 +100,10 @@ fn looks_like_record(a: &Analysis) -> bool {
     RECORD_WORDS.iter().any(|w| hay.contains(w))
 }
 
-/// A code of 4 to 8 digits on a line with a code word. Else, a line that
-/// is only such a code, right after a line with a code word (a code on its
-/// own line). Gives the code and the line that has the code.
+/// The first code in the order of the message. Each line with a code
+/// word gives one candidate: a code of 4 to 8 digits on that line, else the
+/// next line if it is only such a code. A number on any other line is never
+/// a code. Gives the code and the line that has the code.
 fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
     // Empty lines do not count: HTML paragraphs give empty lines between lines.
     let lines: Vec<&str> = std::iter::once(subject)
@@ -114,15 +115,16 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         let low = l.to_lowercase();
         CODE_WORDS.iter().any(|w| has_word(&low, w))
     };
-    let same_line = lines
-        .iter()
-        .filter(|l| cue(l))
-        .find_map(|l| Some((digits(l)?, *l)));
-    same_line.or_else(|| {
-        lines.windows(2).find_map(|w| {
-            let code = digits(w[1])?;
-            (cue(w[0]) && w[1] == code).then_some((code, w[1]))
-        })
+    lines.iter().enumerate().find_map(|(i, &l)| {
+        if !cue(l) {
+            return None;
+        }
+        if let Some(code) = digits(l) {
+            return Some((code, l));
+        }
+        let next = *lines.get(i + 1)?;
+        let code = digits(next)?;
+        (next == code).then_some((code, next))
     })
 }
 
