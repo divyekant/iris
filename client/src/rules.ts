@@ -41,7 +41,7 @@ export function list(words: string[]): string {
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** What an action rule lets Iris do, as one sentence: "Archive and mark as read". Empty for hide and bundle. */
+/** What an action rule lets Iris do, as one sentence: "Archive and mark as read". Empty for hide, bundle and notify. */
 export function verbs(rule: Rule): string {
   return cap(list(rule.verbs.map((v) => VERBS[v] ?? v)));
 }
@@ -71,6 +71,7 @@ export const GROUPS: { effect: Rule["effect"]; title: string; note: string }[] =
   { effect: "allow", title: "Allowed", note: "In apply mode, Iris makes these changes by itself. Its fixed safety limits still apply." },
   { effect: "hide", title: "Hidden", note: "The brief does not show these items. Iris keeps them." },
   { effect: "bundle", title: "Bundled", note: "The brief shows these items together, as one line." },
+  { effect: "notify", title: "Tell me at once", note: "A new mail that matches gives one notice here and on the computer that runs Iris." },
 ];
 
 export const MODES = {

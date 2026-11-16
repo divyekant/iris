@@ -342,6 +342,26 @@ export function act(id: string, verb: string, body: { date?: string }): Item | u
   return item;
 }
 
+/** Notices by rule (R5-08): four mails that notify rules matched. */
+export const notices = [
+  { id: "n-4", rule: 7, rule_name: "Mail from the clinic", title: "Harbor Clinic", text: "Your test results are ready", created: "2026-11-16T14:12:00Z",
+    message: { id: "m-1", thread: "t-1", date: "2026-11-16T14:11:00Z", from: { name: "Harbor Clinic", address: "results@clinic.example" }, subject: "Your test results are ready", labels: ["INBOX"] } },
+  { id: "n-3", rule: 8, rule_name: "Replies from Dana", title: "Dana Whitfield", text: "Re: Contract draft v3, signed", created: "2026-11-16T13:40:00Z",
+    message: { id: "m-2", thread: "t-2", date: "2026-11-16T13:39:00Z", from: { name: "Dana Whitfield", address: "dana@harbor.example" }, subject: "Re: Contract draft v3, signed", labels: ["INBOX"] } },
+  { id: "n-2", rule: 7, rule_name: "Mail from the clinic", title: "Harbor Clinic", text: "Appointment moved to Thursday", created: "2026-11-16T11:05:00Z", message: null },
+  { id: "n-1", rule: 9, rule_name: "Bank security codes", title: "First Harbor Bank", text: "Your sign-in code", created: "2026-11-16T09:00:00Z",
+    message: { id: "m-3", thread: "t-3", date: "2026-11-16T09:00:00Z", from: { name: "First Harbor Bank", address: "alerts@bank.example" }, subject: "Your sign-in code", labels: ["INBOX"] } },
+];
+
+export function noticePost(path: string): [number, unknown] | undefined {
+  const done = path.match(/^\/notices\/([^/?]+)\/done$/);
+  if (!done) return undefined;
+  const i = notices.findIndex((n) => n.id === decodeURIComponent(done[1]));
+  if (i < 0) return [404, { error: "not found" }];
+  notices.splice(i, 1);
+  return [200, { done: done[1] }];
+}
+
 /** Watches (R5-07): one mail that came, and two watches that wait. */
 export const watches = [
   {
@@ -453,6 +473,7 @@ export function answer(path: string): unknown {
   if (name === "watches") return watches;
   if (name === "jobs" && id) return jobDetails[id];
   if (name === "jobs") return jobPage(q.get("state"));
+  if (name === "notices") return notices;
   return undefined;
 }
 
