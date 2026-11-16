@@ -248,6 +248,57 @@ pub fn messages_by_id(store: &Store, ids: &str) -> Result<Vec<Value>> {
 mod tests {
     use super::*;
 
+    /// Generated input: `parse_after` takes back each `next` value that
+    /// `handled` can give, and refuses each other text (signs, zeros in
+    /// front, spaces, other characters, 0, a value out of range).
+    #[test]
+    fn the_cursor_parser_accepts_only_canonical_row_ids() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let canonical = |t: &str| {
+            !t.is_empty()
+                && t.bytes().all(|b| b.is_ascii_digit())
+                && !t.starts_with('0')
+                && t.parse::<i64>().is_ok()
+        };
+        const PARTS: [&str; 14] = [
+            "0",
+            "1",
+            "7",
+            "9",
+            "42",
+            "+",
+            "-",
+            " ",
+            "x",
+            "\u{e9}",
+            "9223372036854775807",
+            "9223372036854775808",
+            "00",
+            ".",
+        ];
+        for _ in 0..20_000 {
+            // A valid row ID gives its own text, and the text gives it back.
+            let id = (next() >> 1) as i64;
+            if id > 0 {
+                assert_eq!(parse_after(&id.to_string()), Some(id));
+            }
+            // Random text from parts: the parser agrees with the oracle.
+            let t: String = (0..1 + next() % 4)
+                .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+                .collect();
+            let want = canonical(&t).then(|| t.parse::<i64>().unwrap());
+            assert_eq!(parse_after(&t), want, "{t:?}");
+        }
+        assert_eq!(parse_after(""), None);
+        assert_eq!(parse_after("0"), None);
+    }
+
     /// The list reads the IDs in pages, and each page continues after the
     /// last ID of the page before: no changeset twice, none left out.
     #[test]
@@ -332,6 +383,14 @@ pub struct HandledPage {
     pub next: Option<String>,
 }
 
+/// The row ID of an `after` value of [`handled`]: only the canonical text
+/// of a positive row ID, as `next` gives it, so one ID has one cursor.
+fn parse_after(t: &str) -> Option<i64> {
+    t.parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0 && n.to_string() == t)
+}
+
 /// The actions that an `allow` rule approved, newest first. `after` is the
 /// `next` value of the page before. Keyset on the row ID: a row ID never
 /// changes, so a page does not repeat or skip an action.
@@ -344,10 +403,7 @@ pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<Handled
     }
     let before = match after {
         None => i64::MAX,
-        Some(t) => t
-            .parse::<i64>()
-            .ok()
-            .filter(|n| *n > 0 && n.to_string() == t)
+        Some(t) => parse_after(t)
             .ok_or_else(|| Error::Query(format!("after {t} is not the next value of a page")))?,
     };
     let (count, mut rows): (i64, Vec<(i64, HandledAction)>) = store.read(|c| {

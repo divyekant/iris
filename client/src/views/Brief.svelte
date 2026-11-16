@@ -80,7 +80,8 @@
   let hidden = $derived(brief.hidden ?? 0);
   // An API from before R2-09 gives only the hidden count.
   let handled = $derived(brief.handled ?? { count: hidden, verbs: {} });
-  let changed = $derived(Object.values(handled.verbs).reduce((a, b) => a + b, 0));
+  // The messages of the actions that a rule approved. An approved action can still wait to apply, so the brief says decided, not changed.
+  let decided = $derived(Object.values(handled.verbs).reduce((a, b) => a + b, 0));
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
   let progress = $derived(status && unfinished(status).length ? status.messages : null);
   let stopped = $derived(copying(status).length === 0);
@@ -150,7 +151,7 @@
 {#if handled.count > 0}
   <section aria-labelledby="handled">
     <h2 id="handled"><span>Handled without you</span> <span class="count">{handled.count}</span></h2>
-    <p class="note">{[hidden ? `${hidden.toLocaleString("en-US")} hidden from this brief` : "", changed ? `changes to ${changed.toLocaleString("en-US")} ${changed === 1 ? "message" : "messages"} under your rules` : ""].filter(Boolean).join(", ")}.</p>
+    <p class="note">{[hidden ? `${hidden.toLocaleString("en-US")} hidden from this brief` : "", decided ? `${decided.toLocaleString("en-US")} ${decided === 1 ? "message" : "messages"} that your rules decided` : ""].filter(Boolean).join(", ")}.</p>
     <a class="all" href="#/handled">See what and why</a>
   </section>
 {/if}
@@ -183,7 +184,7 @@
   {#if brief.not_understood > 0}
     <p>Iris could not read {brief.not_understood} messages. They stay in your mailbox as they are.</p>
   {/if}
-  {#if (status?.mode ?? "observe") === "observe" && changed === 0}<p>Iris only observes. It changed nothing in your mailbox.</p>{/if}
+  {#if (status?.mode ?? "observe") === "observe" && decided === 0}<p>Iris only observes. It changed nothing in your mailbox.</p>{/if}
 </footer>
 
 <style>

@@ -272,7 +272,7 @@ test("the brief counts what Iris handled without you and links the list (R2-09)"
   const brief = { ...fx.brief, handled: { count: 504, verbs: { archive: 500 } } };
   const html = await render("/src/views/Brief.svelte", { brief, status: { ...fx.status, mode: "apply" }, now: NOW, poll: 0 });
   const t = text(html);
-  assert.match(t, /Handled without you 504 4 hidden from this brief, changes to 500 messages under your rules\. See what and why/);
+  assert.match(t, /Handled without you 504 4 hidden from this brief, 500 messages that your rules decided\. See what and why/);
   assert.match(html, /href="#\/handled"/);
   // A rule changed mail: the footer does not say that Iris changed nothing, also with an old status.
   assert.doesNotMatch(t, /It changed nothing/);
@@ -293,7 +293,7 @@ test("the handled view lists each change and each hidden item with its reason", 
   const hidden = { count: fx.hidden.length, items: fx.hidden, next: "c1" };
   const html = await render("/src/views/Handled.svelte", { changes: { ...fx.handled, next: "9" }, hidden });
   const t = text(html);
-  assert.match(t, /Changes to your mailbox 1 Archive 500 messages Rule 5 \(Archive old newsletters\) allows archive\. Done, /);
+  assert.match(t, /Decided by your rules 1 Archive 500 messages Rule 5 \(Archive old newsletters\) allows archive\. Done, /);
   assert.match(t, /Hidden from your brief 4/);
   assert.equal((t.match(/Hidden by rule 2: Hide Acme Deals/g) ?? []).length, 4);
   // Each hidden item opens as usual.

@@ -1,6 +1,7 @@
 <!--
   What Iris did without you (card R2-09): the changes that a rule approved,
   and the items that a rule hides from the brief, each with its reason.
+  An approved change can still wait to apply: each row says its state.
   The brief shows the count. This view is the one step to the list.
 -->
 <script lang="ts">
@@ -51,7 +52,7 @@
 </script>
 
 <h1>Handled without you</h1>
-<p class="lead">Iris did these things under your rules. Each one says why. Hidden mail is never deleted: it stays in your mailbox.</p>
+<p class="lead">Your rules decided these things, so Iris did not ask you. Each one says why, and if it is done yet. Hidden mail is never deleted: it stays in your mailbox.</p>
 
 {#if firstChanges.count === 0 && firstHidden.count === 0}
   <p class="empty">Iris has handled nothing without you yet. <a href="#/rules">Your rules</a> say what it can do.</p>
@@ -59,7 +60,7 @@
 
 {#if firstChanges.count > 0}
   <section aria-labelledby="changes">
-    <h2 id="changes"><span>Changes to your mailbox</span> <span class="count">{firstChanges.count}</span></h2>
+    <h2 id="changes"><span>Decided by your rules</span> <span class="count">{firstChanges.count}</span></h2>
     <ul>
       {#each actions as a (key(a))}
         <li class="change">
