@@ -455,6 +455,18 @@ fn the_wait_after_a_model_error_is_for_that_model_and_under_the_lock() {
     run(now + 1_000);
     let marked = col(&store, waits).unwrap();
     assert!(marked > 0);
+    // More turns in the wait are idle and add no run row.
+    let rows = "SELECT count(*) FROM understand_run";
+    let n = col(&store, rows);
+    assert_eq!(run(now + 2_000), AfterSync::Idle);
+    assert_eq!(run(now + 3_000), AfterSync::Idle);
+    assert_eq!(col(&store, rows), n, "idle turns in the wait keep no row");
+    // An idle manual run does not end the wait: the next turn makes no call.
+    let (ok, _, err) = iris(&store, &["understand"]);
+    assert!(ok, "{err}");
+    let before = calls.load(Ordering::SeqCst);
+    assert_eq!(run(now + 4_000), AfterSync::Idle);
+    assert_eq!(calls.load(Ordering::SeqCst), before, "still in the wait");
     // The wait has ended, but another run holds the lock: this run clears
     // no mark, so a mark set by the other run stays.
     let after = now + iris_understand::batch::RETRY_FIRST_MS + 1_000;

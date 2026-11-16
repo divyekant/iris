@@ -40,8 +40,11 @@ BEGIN
   UPDATE message SET waits_model = 0 WHERE waits_model = 1;
 END;
 
--- The model version of a run that could call the model (NULL for a run
--- with no model, or a run that waited after a model error). The wait after
--- a model error counts only the runs of the current version, so a new
--- model has no wait.
-ALTER TABLE understand_run ADD COLUMN model_version INTEGER;
+-- The wait after a model error, for the current model row (R1-28). A run
+-- that stopped on `model`, `unknown` or `error` adds 1 to `retry_failures`
+-- and sets `retry_at`; a run with a call and no error sets them back. `iris
+-- model set` replaces the row, so a new model has no wait. No trigger reads
+-- these columns.
+ALTER TABLE model_setting ADD COLUMN retry_failures INTEGER NOT NULL DEFAULT 0
+  CHECK (retry_failures >= 0);
+ALTER TABLE model_setting ADD COLUMN retry_at INTEGER;

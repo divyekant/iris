@@ -124,9 +124,9 @@ pub struct Limits {
     /// True for the run after a sync: honor the wait after a model error
     /// of [`retry_after`]. During the wait the run makes no model call, and
     /// each refused message gets the mark `waits_model`, as with no model.
-    /// The first run after the wait clears the marks and keeps its row, so
-    /// its stop ends or extends the wait. The run takes these decisions
-    /// under its lock, for the model version of the row.
+    /// The first run after the wait clears the marks and calls the model.
+    /// The run takes these decisions under its lock. Every run that can
+    /// call the model updates the wait at its end ([`end_wait`]).
     pub wait_after_error: bool,
 }
 
@@ -241,41 +241,48 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
     let _lock = lock(store)?;
     // The row, the wait and the clear of the marks, in one write under the
     // lock: no other run can mark or clear between them.
-    let (row, calls, waited, run) = store.write(|tx| {
+    let (row, calls, run) = store.write(|tx| {
         let row = model_row(tx)?;
         let wait = match &row {
-            Some(r) if limits.wait_after_error => retry_after(tx, r.version)?,
+            Some(_) if limits.wait_after_error => retry_after(tx)?,
             _ => None,
         };
         let calls = wait.is_none_or(|t| now_ms >= t);
         if calls && wait.is_some() {
+            // The wait has ended: this run takes it, so the next run does
+            // not clear the marks again. The count of errors stays, so a new
+            // error doubles the wait.
+            tx.execute("UPDATE model_setting SET retry_at = NULL", [])?;
             clear_waiting(tx)?;
         }
-        // A run with no model call records no model: `retry_after` skips it.
-        let model = row.as_ref().filter(|_| calls);
         tx.execute(
-            "INSERT INTO understand_run(started_at, model, model_version, prompt,
-                                        cost_micro_usd, unknown_cost_micro_usd)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
+                                        unknown_cost_micro_usd)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
             params![
                 now_ms,
-                model.map_or("", |r| r.model.as_str()),
-                model.map(|r| r.version),
+                row.as_ref()
+                    .filter(|_| calls)
+                    .map_or("", |r| r.model.as_str()),
                 PROMPT,
                 row.as_ref().is_some_and(|r| r.price.is_some()).then_some(0)
             ],
         )?;
-        Ok((row, calls, wait.is_some(), tx.last_insert_rowid()))
+        Ok((row, calls, tx.last_insert_rowid()))
     })?;
     let result = run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms);
     let stop = result.as_ref().map_or(Stop::Error, |s| *s);
-    let keep_idle = limits.keep_idle || waited || result.is_err();
+    let keep_idle = limits.keep_idle || result.is_err();
     let report = store.write(|tx| {
+        let ended = now_ms.max(clock_ms());
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, now_ms.max(clock_ms()), stop.as_str()],
+            params![run, ended, stop.as_str()],
         )?;
         let r = report(tx, run)?;
+        if calls && row.is_some() {
+            end_wait(tx, &stop, &r, ended)?;
+        }
         if !keep_idle && r.is_idle() {
             tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
         }
@@ -583,29 +590,43 @@ pub const RETRY_FIRST_MS: i64 = 60_000;
 /// The longest wait, in milliseconds.
 pub const RETRY_MAX_MS: i64 = 3_600_000;
 
-/// The end of the wait after model errors of the model `version`, read
-/// from the run rows, so each process sees the same wait. Only the runs
-/// that could call that model count (`model_version` is set only on a run
-/// that could call; a new model version has no wait). `None` if the last
-/// of them did not stop on `model`, `unknown` or `error`, so the first run
-/// after the wait ends it.
-pub fn retry_after(c: &Connection, version: i64) -> rusqlite::Result<Option<i64>> {
-    let mut st = c.prepare_cached(
-        "SELECT stop IN ('model', 'unknown', 'error'), ended_at
-         FROM understand_run
-         WHERE model_version = ?1 AND ended_at IS NOT NULL
-         ORDER BY id DESC LIMIT 7",
-    )?;
-    let rows = st
-        .query_map([version], |r| {
-            Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let failed = rows.iter().take_while(|(f, _)| *f).count();
-    Ok(rows.first().filter(|_| failed > 0).map(|(_, at)| {
-        let wait = RETRY_FIRST_MS.saturating_mul(1 << (failed - 1).min(6));
-        at.saturating_add(wait.min(RETRY_MAX_MS))
-    }))
+/// The end of the wait after model errors of the current model row
+/// (`model_setting.retry_at`), or `None`. `iris model set` writes a new row,
+/// so a new model has no wait.
+pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
+    Ok(
+        c.query_row("SELECT retry_at FROM model_setting", [], |r| r.get(0))
+            .optional()?
+            .flatten(),
+    )
+}
+
+/// The wait state after a run that could call the model, in the end write
+/// of the run (under its lock). Only evidence of the model changes it: a
+/// stop on `model`, `unknown` or `error` starts or doubles the wait; a run
+/// that made a call and did not stop on an error ends it and clears the
+/// marks of that wait. A run that made no call changes nothing.
+fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
+    if matches!(stop, Stop::Model | Stop::Unknown | Stop::Error) {
+        tx.execute(
+            "UPDATE model_setting SET retry_failures = retry_failures + 1,
+                    retry_at = ?1 + min(?2 << min(retry_failures, 6), ?3)",
+            params![ended, RETRY_FIRST_MS, RETRY_MAX_MS],
+        )?;
+    } else if r.calls > 0 {
+        let waited: bool =
+            tx.query_row("SELECT retry_failures > 0 FROM model_setting", [], |r| {
+                r.get(0)
+            })?;
+        if waited {
+            tx.execute(
+                "UPDATE model_setting SET retry_failures = 0, retry_at = NULL",
+                [],
+            )?;
+            clear_waiting(tx)?;
+        }
+    }
+    Ok(())
 }
 
 /// The size of the work before a run (spec "Estimate").
