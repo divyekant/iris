@@ -7,9 +7,13 @@
   import { watch } from "../clock";
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
+  import Act from "./Act.svelte";
   import Code from "./Code.svelte";
 
-  let { item, now: start = new Date() }: { item: Item; now?: Date } = $props();
+  let { item: given, now: start = new Date() }: { item: Item; now?: Date } = $props();
+  // The item after a change of the person (Done, Later, Decline).
+  // svelte-ignore state_referenced_locally
+  let item = $state(given);
   // svelte-ignore state_referenced_locally
   let now = $state(start);
   $effect(() => (item.form === "signal" && item.expires ? watch(item.expires, (d) => (now = d)) : undefined));
@@ -32,6 +36,7 @@
         if (d) r.push(["Due", `${when(item.due?.date ?? item.due?.at)}, ${d.text}${item.due?.strict ? ". The date is firm." : ""}`]);
         if (item.amount) r.push(["Amount", money(item.amount)]);
         r.push(["Kind", item.kind ?? ""]);
+        if (item.status === "deferred" && item.deferred_until) r.push(["Back on", when(item.deferred_until)]);
         break;
       }
       case "conversation":
@@ -67,6 +72,8 @@
 <article>
   <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
   <h1>{item.title}</h1>
+
+  <Act {item} {now} onchange={(next) => (item = next)} />
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>

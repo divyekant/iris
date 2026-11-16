@@ -2,7 +2,8 @@ import { access } from "./access.svelte.ts";
 import { addPage } from "./format";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads, except
-// the policy changes of the policy view (spec 2 section 6.3).
+// the policy changes of the policy view (spec 2 section 6.3), the decisions of
+// the review, and the state verbs of a commitment (spec 2 section 4).
 
 export type Party = { kind: "self" | "sender"; sender?: string; name?: string; address?: string };
 export type Money = { value: string; currency: string };
@@ -26,6 +27,8 @@ export type Item = {
   owner?: Party;
   counterparty?: Party;
   due?: { date?: string; at?: string; strict?: boolean };
+  /** The day a deferred commitment opens again. */
+  deferred_until?: string;
   amount?: Money;
   participants?: Party[];
   latest?: { at: string; from: Party; snippet: string };
