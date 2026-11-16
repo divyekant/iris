@@ -155,30 +155,31 @@ fn party(p: &str) -> Value {
 /// One web secret for all tests, so `call` can sign in each request.
 fn auth() -> Arc<Auth> {
     static AUTH: OnceLock<Arc<Auth>> = OnceLock::new();
-    AUTH.get_or_init(|| Arc::new(Auth::new().unwrap())).clone()
+    AUTH.get_or_init(|| Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap()))
+        .clone()
 }
 
-/// A request with the cookie of the sign-in.
+/// A request with the token of the sign-in.
 async fn call(
     store: &Arc<Store>,
     uri: &str,
     headers: &[(&str, &str)],
 ) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
-    call_as(store, uri, headers, Some(&auth().cookie_header())).await
+    call_as(store, uri, headers, Some(&auth().bearer())).await
 }
 
 async fn call_as(
     store: &Arc<Store>,
     uri: &str,
     headers: &[(&str, &str)],
-    cookie: Option<&str>,
+    bearer: Option<&str>,
 ) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
     let mut req = Request::get(uri);
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
-    if let Some(c) = cookie {
-        req = req.header("cookie", c);
+    if let Some(b) = bearer {
+        req = req.header("authorization", b);
     }
     let res = iris_api::router(store.clone(), auth())
         .oneshot(req.body(Body::empty()).unwrap())
@@ -204,20 +205,30 @@ fn ids(list: &Value) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn refuses_a_host_or_origin_that_is_not_local() {
+async fn refuses_a_host_or_origin_that_is_not_the_bound_address() {
     let dir = temp("host");
     let store = Arc::new(Store::open(&dir.0).unwrap());
-    let cases: [(&[(&str, &str)], StatusCode); 9] = [
+    // The router is bound to 127.0.0.1:4800 (see `auth`).
+    let cases: [(&[(&str, &str)], StatusCode); 10] = [
         (&[("host", "localhost:4800")], StatusCode::OK),
-        // The dev server of the client sends its own Host and Origin.
+        (
+            &[
+                ("host", "127.0.0.1:4800"),
+                ("origin", "http://127.0.0.1:4800"),
+            ],
+            StatusCode::OK,
+        ),
+        // Another port or another loopback name is not the bound address.
+        (&[("host", "127.0.0.1:4801")], StatusCode::FORBIDDEN),
         (
             &[
                 ("host", "localhost:5173"),
                 ("origin", "http://localhost:5173"),
             ],
-            StatusCode::OK,
+            StatusCode::FORBIDDEN,
         ),
-        // Another port, another scheme or another local name is another origin.
+        (&[("host", "[::1]:4800")], StatusCode::FORBIDDEN),
+        // Another port or scheme in Origin is another origin.
         (
             &[
                 ("host", "localhost:4800"),
@@ -232,15 +243,7 @@ async fn refuses_a_host_or_origin_that_is_not_local() {
             ],
             StatusCode::FORBIDDEN,
         ),
-        (
-            &[("host", "[::1]:4800"), ("origin", "http://127.0.0.1:4800")],
-            StatusCode::FORBIDDEN,
-        ),
         (&[("host", "evil.example")], StatusCode::FORBIDDEN),
-        (
-            &[("host", "127.0.0.1.evil.example:4800")],
-            StatusCode::FORBIDDEN,
-        ),
         (
             &[
                 ("host", "127.0.0.1:4800"),
@@ -373,7 +376,12 @@ async fn search_message_and_raw_source() {
             }
         })
         .unwrap();
-    let (code, body, h) = call(&store, "/api/messages/m-3/raw", &[("host", "localhost")]).await;
+    let (code, body, h) = call(
+        &store,
+        "/api/messages/m-3/raw",
+        &[("host", "localhost:4800")],
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(body, mailbox.raw(index));
     assert_eq!(h[header::CONTENT_TYPE], "message/rfc822");
@@ -891,11 +899,11 @@ async fn merges_with_the_web_client_router() {
     let dir = temp("merge");
     let store = Arc::new(Store::open(&dir.0).unwrap());
     let app = iris_api::router(store, auth()).merge(iris_web::router());
-    let cookie = auth().cookie_header();
+    let bearer = auth().bearer();
     let send = |uri: &str| {
         let req = Request::get(uri)
             .header("host", "127.0.0.1:4800")
-            .header("cookie", &cookie)
+            .header("authorization", &bearer)
             .body(Body::empty())
             .unwrap();
         app.clone().oneshot(req)
@@ -915,59 +923,83 @@ async fn merges_with_the_web_client_router() {
 }
 
 #[tokio::test]
-async fn needs_the_cookie_of_the_one_time_sign_in() {
+async fn needs_the_token_of_the_one_time_sign_in() {
     let dir = temp("auth");
     let (store, _) = filled(&dir);
-    let auth = Arc::new(Auth::new().unwrap());
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
     let app = iris_api::router(store, auth.clone());
-    let send = |uri: String, cookie: Option<String>| {
-        let mut req = Request::get(uri).header("host", "localhost:4800");
-        if let Some(c) = cookie {
-            req = req.header("cookie", c);
+    let send = |method: &str, uri: &str, headers: &[(&str, String)], body: &str| {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:4800");
+        for (k, v) in headers {
+            req = req.header(*k, v);
         }
-        app.clone().oneshot(req.body(Body::empty()).unwrap())
+        app.clone()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
     };
-    // Another local user with no cookie, or a wrong one, reads nothing.
+    // Another local user with no token, or a wrong one, reads nothing. A
+    // cookie with the secret is not a sign-in: a browser sends cookies to
+    // each port of a host.
+    let secret = auth.bearer()[7..].to_string();
     for uri in [
         "/api/status",
         "/api/messages/m-1",
         "/api/messages/m-1/raw",
         "/api/nothing",
     ] {
-        assert_eq!(
-            send(uri.into(), None).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED,
-            "{uri}"
-        );
-        let wrong = Some("iris_session=00".to_string());
-        assert_eq!(
-            send(uri.into(), wrong).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED,
-            "{uri}"
-        );
+        for headers in [
+            vec![],
+            vec![("authorization", "Bearer 00".to_string())],
+            vec![("cookie", format!("iris_session={secret}"))],
+        ] {
+            let res = send("GET", uri, &headers, "").await.unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{uri} {headers:?}");
+        }
     }
-    // A wrong code does not use the code.
-    let path = auth.sign_in_path().unwrap();
-    let res = send("/api/session?code=nope".into(), None).await.unwrap();
-    assert_eq!(res.status(), StatusCode::FORBIDDEN);
-    // The sign-in address sets the cookie and goes to the client.
-    let res = send(path.clone(), None).await.unwrap();
-    assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    assert_eq!(res.headers()["location"], "/");
-    let set = res.headers()["set-cookie"].to_str().unwrap().to_string();
-    assert!(
-        set.contains("HttpOnly") && set.contains("SameSite=Strict"),
-        "{set}"
-    );
-    let cookie = set.split(';').next().unwrap().to_string();
-    let res = send("/api/messages/m-1/raw".into(), Some(cookie))
+    // The sign-in address names the code in the fragment.
+    let url = auth.sign_in_url().unwrap();
+    let code = url
+        .strip_prefix("http://127.0.0.1:4800/#code=")
+        .unwrap()
+        .to_string();
+    // A wrong code, or a GET, does not use the code.
+    let res = send("POST", "/api/session", &[], r#"{"code":"nope"}"#)
         .await
         .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = send("GET", &format!("/api/session?code={code}"), &[], "")
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+    // The exchange gives the token one time.
+    let body = format!(r#"{{"code":"{code}"}}"#);
+    let res = send("POST", "/api/session", &[], &body).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    // The code works one time only.
-    assert_eq!(
-        send(path, None).await.unwrap().status(),
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(auth.sign_in_path(), None);
+    let v: Value = serde_json::from_slice(&to_bytes(res.into_body(), 1024).await.unwrap()).unwrap();
+    let bearer = format!("Bearer {}", v["token"].as_str().unwrap());
+    let res = send(
+        "GET",
+        "/api/messages/m-1/raw",
+        &[("authorization", bearer)],
+        "",
+    )
+    .await
+    .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = send("POST", "/api/session", &[], &body).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(auth.sign_in_url(), None);
+}
+
+#[tokio::test]
+async fn a_proposal_that_fails_before_its_first_part_is_a_500() {
+    let dir = temp("proposal-error");
+    let (store, _) = filled(&dir);
+    // The store cannot read the items, so the triage counts fail.
+    exec(&store, "DROP TABLE item_source", []);
+    let (code, v) = get(&store, "/api/proposal").await;
+    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(v["error"].is_string());
 }

@@ -7,9 +7,9 @@ is read only.
 ## Use
 
 ```rust
-let auth = Arc::new(iris_api::Auth::new()?);
+let auth = Arc::new(iris_api::Auth::new(addr)?);
 // Print (and open) the one-time sign-in address.
-println!("http://{addr}{}", auth.sign_in_path().unwrap());
+println!("{}", auth.sign_in_url().unwrap());
 let app = iris_api::router(Arc::new(store), auth).merge(iris_web::router());
 ```
 
@@ -81,20 +81,32 @@ An error is `{"error": "<reason>"}`:
 
 ## Sign-in
 
-The API follows specification 2, section 8.6. At each start, `Auth::new()`
+The API follows specification 2, section 8.6. At each start, `Auth::new(addr)`
 makes a random web secret of 32 bytes and a one-time code. `iris serve`
-prints the sign-in address `/api/session?code=<code>`. The address sets the
-cookie `iris_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`) and sends the
-browser to `/`. The code works one time. Each other request needs the cookie,
-so another OS user on the same machine cannot read the mail through the API.
-For a new code, start `iris serve` again.
+prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
 
-## Local requests only
+1. The client page reads the code from the fragment of the address. The
+   browser does not send a fragment to a server.
+2. The client sends `POST /api/session` with `{"code": "<code>"}`. The answer
+   is `{"token": "<secret>"}`, one time only. A wrong or used code gives 403.
+3. The client keeps the token in the storage of its origin (for example
+   `sessionStorage`), and sends `Authorization: Bearer <token>` with each
+   request. A request without it gives 401.
 
-The API also refuses each request whose
-`Host` is not `127.0.0.1`, `localhost` or `[::1]` (with an optional port), and
-each request with an `Origin` that is not `http://` and the same `Host`
-(same name and port). A web page
-on another site cannot read the API through DNS rebinding. A request with no
-`Origin` header is allowed. Each answer, also a refusal, has `X-Content-Type-Options: nosniff`
-and `Cache-Control: no-store`.
+The API does not use a cookie. A browser sends a cookie to each port of a host,
+so a server of another OS user on another loopback port could get it. Storage
+belongs to one origin, with its port. A download of `/raw` needs the header
+too: fetch it, then save the blob. For a new code, start `iris serve` again.
+
+## Bound address only
+
+The API refuses each request whose `Host` is not the bound address (for
+`127.0.0.1:4800`: `127.0.0.1:4800` or `localhost:4800`), and each request
+with an `Origin` that is not `http://` and the same `Host`. So a web page on
+another site cannot read the API through DNS rebinding. A request with no
+`Origin` header is allowed. Each answer, also a refusal, has
+`X-Content-Type-Options: nosniff` and `Cache-Control: no-store`.
+
+A dev server of the client must forward `/api` with the `Host` and the
+`Origin` of the engine (in Vite: `changeOrigin: true`, and set `Origin` to the
+target in `headers`).

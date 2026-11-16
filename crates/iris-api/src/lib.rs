@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{rejection::QueryRejection, Path, Query, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    middleware::{self, Next},
+    extract::{rejection::QueryRejection, Path, Query, State},
+    http::{header, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
     routing::{any, get},
     Json, Router,
@@ -90,10 +90,9 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
         .with_state(store)
-        // The sign-in address has no route: the check answers it.
-        .route(SIGN_IN, get(|| async { not_found() }))
-        .layer(middleware::from_fn_with_state(auth, auth::signed_in))
-        .layer(middleware::from_fn(local_only))
+        // The code exchange has no handler: the guard answers it.
+        .route(SIGN_IN, any(|| async { not_found() }))
+        .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
 // shortcut: the handlers read SQLite on the runtime thread (searches take
@@ -126,9 +125,17 @@ async fn get_proposal(State(s): State<Arc<Store>>) -> Response {
                 w.tx.blocking_send(Err(std::io::Error::other(e.to_string())));
         }
     });
-    let parts = futures_util::stream::unfold(rx, |mut rx| async move {
+    // The status waits for the first part: an error before it is a 500.
+    let mut rx = rx;
+    let first = match rx.recv().await {
+        Some(Ok(part)) => part,
+        Some(Err(e)) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        None => return error(StatusCode::INTERNAL_SERVER_ERROR, "the proposal stopped"),
+    };
+    let rest = futures_util::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|part| (part, rx))
     });
+    let parts = futures_util::StreamExt::chain(futures_util::stream::iter([Ok(first)]), rest);
     (
         [(header::CONTENT_TYPE, "application/json")],
         Body::from_stream(parts),
@@ -251,59 +258,6 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// Refuse each request with a `Host` or an `Origin` that is not local.
-async fn local_only(req: Request, next: Next) -> Response {
-    let mut res = if is_local(req.headers()) {
-        next.run(req).await
-    } else {
-        error(StatusCode::FORBIDDEN, "only local requests are allowed")
-    };
-    let h = res.headers_mut();
-    h.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    res
-}
-
-fn is_local(headers: &HeaderMap) -> bool {
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
-    let Some(host) = host else {
-        return false;
-    };
-    if !local_host(host) {
-        return false;
-    }
-    // The server speaks plain HTTP, so its own origin is `http://` and the
-    // Host, with the same port.
-    match headers.get(header::ORIGIN) {
-        None => true,
-        Some(v) => v
-            .to_str()
-            .ok()
-            .and_then(|o| o.strip_prefix("http://"))
-            .is_some_and(|o| o.eq_ignore_ascii_case(host)),
-    }
-}
-
-/// `127.0.0.1`, `localhost` or `[::1]`, with an optional port.
-fn local_host(text: &str) -> bool {
-    let name = match text.rsplit_once(':') {
-        Some((name, port)) if !text.ends_with(']') => {
-            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
-                return false;
-            }
-            name
-        }
-        _ => text,
-    };
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "127.0.0.1" | "localhost" | "[::1]"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,31 +291,5 @@ mod tests {
             got,
             (0..CHUNK * 3 + 100).map(|i| i as u8).collect::<Vec<u8>>()
         );
-    }
-
-    #[test]
-    fn local_host_accepts_only_loopback_names() {
-        for ok in [
-            "127.0.0.1",
-            "127.0.0.1:4800",
-            "localhost:5173",
-            "LOCALHOST",
-            "[::1]",
-            "[::1]:4800",
-        ] {
-            assert!(local_host(ok), "{ok}");
-        }
-        for bad in [
-            "evil.example",
-            "127.0.0.1.evil.example",
-            "localhost.evil.example:4800",
-            "127.0.0.1:",
-            "127.0.0.1:80x",
-            "[::1]x",
-            "0.0.0.0:4800",
-            "",
-        ] {
-            assert!(!local_host(bad), "{bad}");
-        }
     }
 }
