@@ -624,13 +624,32 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
 /// marks of that wait (`WAITS_RETRY` only: a budget refusal of the same
 /// run keeps its mark). A run that made no call changes nothing.
 fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
-    if matches!(stop, Stop::Model | Stop::Unknown | Stop::Error) {
+    update_wait(
+        tx,
+        matches!(stop, Stop::Model | Stop::Unknown | Stop::Error),
+        r.calls > 0,
+        ended,
+    )
+}
+
+/// The one writer of the wait after model errors, for each caller that can
+/// call the model (the runner and the proposal step of matters), under the
+/// run lock. `failed`: the model or the call failed (a refused key, a
+/// server error, an unknown result); this starts or doubles the wait.
+/// Else `called` (the model answered) ends the wait and clears its marks.
+pub fn update_wait(
+    tx: &Transaction,
+    failed: bool,
+    called: bool,
+    ended: i64,
+) -> rusqlite::Result<()> {
+    if failed {
         tx.execute(
             "UPDATE model_setting SET retry_failures = retry_failures + 1,
                     retry_at = ?1 + min(?2 << min(retry_failures, 6), ?3)",
             params![ended, RETRY_FIRST_MS, RETRY_MAX_MS],
         )?;
-    } else if r.calls > 0 {
+    } else if called {
         let waited: bool =
             tx.query_row("SELECT retry_failures > 0 FROM model_setting", [], |r| {
                 r.get(0)
