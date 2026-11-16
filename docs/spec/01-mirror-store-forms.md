@@ -844,7 +844,7 @@ status is `gone`.
 | Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
-| Signals | Signals with `status` `active`. |
+| Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
 | Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. |
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |

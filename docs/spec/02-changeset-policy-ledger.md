@@ -701,11 +701,15 @@ agent that does not work in a folder. The rules for the MCP interface:
 The web client is the only place to approve, deny, undo and change the
 policy. The engine protects its web interface:
 
-- At each start, the engine makes a random web secret of 32 bytes. `iris
-  serve` opens a one-time sign-in address in the browser, and prints it. The
-  client exchanges the one-time code for a cookie with `HttpOnly` and
-  `SameSite=Strict`. The engine refuses each request of the web interface
-  without that cookie.
+- At each start, the engine makes a random web secret of 32 bytes and a
+  one-time code. `iris serve` opens a one-time sign-in address in the
+  browser, and prints it: `http://<address>/#code=<code>`. The browser does
+  not send the fragment to a server. The client exchanges the code one time
+  (`POST /api/session`) for the web secret, keeps the secret in the storage
+  of its origin, and sends it as `Authorization: Bearer <secret>`. The engine
+  refuses each request of the web interface without that header. The engine
+  does not use a cookie: a browser sends a cookie to each port of the host, so
+  a server of another OS user on another loopback port could get it.
 - The engine refuses a request whose `Host` header is not the bound address,
   and a request whose `Origin` header is another origin. So a web page cannot
   send a request to the engine, also through DNS rebinding.
