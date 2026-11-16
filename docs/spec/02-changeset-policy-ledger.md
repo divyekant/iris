@@ -229,10 +229,12 @@ content of the draft (section 7.5).
 6. The engine returns one result for each action, and the exit code of
    section 8.4.
 
-If the policy mode is `observe`, step 5 records what the policy would do, and
-each action stays `proposed`. The triage changeset of release 2 works in this
-way. Release 1 computes the triage proposal and does not store it
-(specification 1, section 8).
+If the policy mode is `observe`, step 5 does not run, and each action stays
+`proposed`. A `proposed` action has no decision columns (section 5.6), so the
+engine does not store what the policy would do. The triage changeset of
+release 2 follows the mode of the active policy, as each other changeset does
+(specification 1, section 8). Release 1 computes the triage proposal and does
+not store it (specification 1, section 8).
 
 A change of the mode does not evaluate open actions again:
 

@@ -1025,7 +1025,7 @@ changeset format of specification 2, with each action in the state
 `proposed`. The brief gives only the totals of the proposal: the count of
 actions, and the count for each verb. The local API gives the full list
 separately. Release 1 does not store it. From release 2, triage stores it as
-a changeset in the mode `observe`.
+a changeset, in the mode of the active policy (see below).
 
 The triage proposal of release 1 (crate `iris-observe`) has these rules:
 
