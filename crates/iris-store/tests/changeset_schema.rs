@@ -53,11 +53,16 @@ fn allowed(from: Option<&str>) -> &'static [&'static str] {
             "replaced",
         ],
         Some("in_review") => &["approved", "denied", "expired", "cancelled", "replaced"],
-        // approved to held comes with release 3, failed to undone with the
-        // ledger (R2-03).
-        // The ledger migration (R2-03) adds the moves to applied, failed and
-        // undone, with their ledger entry.
-        Some("approved") => &["in_review", "denied", "expired", "cancelled"],
+        // approved to held comes with release 3. Migration 8 adds applied
+        // and failed (R2-02). The ledger migration (R2-03) adds undone.
+        Some("approved") => &[
+            "in_review",
+            "denied",
+            "expired",
+            "cancelled",
+            "applied",
+            "failed",
+        ],
         Some(_) => &[],
     }
 }
@@ -835,11 +840,12 @@ fn a_submitted_action_does_not_change() {
     );
 }
 
-/// No apply, failure or undo before the ledger (R2-03), and no flag on a
-/// closed action.
+/// Migration 8: an approved action becomes applied or failed, and keeps
+/// the decision that approved it. No undo before the ledger (R2-03), and
+/// no flag on a closed action.
 #[test]
-fn no_apply_before_the_ledger() {
-    let dir = TempDir::new("noapply");
+fn the_apply_keeps_the_decision() {
+    let dir = TempDir::new("apply");
     let s = store(&dir);
     s.write(|tx| {
         submit(tx, draft(tx)?)?;
@@ -850,14 +856,44 @@ fn no_apply_before_the_ledger() {
         )?)
     })
     .unwrap();
-    for to in ["applied", "failed", "undone"] {
-        fails(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
+    for to in ["applied", "failed"] {
+        works(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
+        for change in [
+            "decided_by = 'person', rule = NULL, policy = NULL",
+            "rule = 4",
+            "reason = 'r'",
+            "decided_at = 6",
+        ] {
+            fails(
+                &s,
+                &format!("UPDATE changeset_action SET state = '{to}', {change}"),
+            );
+        }
     }
+    fails(&s, "UPDATE changeset_action SET state = 'undone'");
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'applied';
+         UPDATE changeset_action SET state = 'undone'",
+    );
     fails(
         &s,
         "UPDATE changeset_action SET state = 'denied', decided_by = 'person', reason = 'No.',
            flags = '[\"bulk\"]'",
     );
+    // A withdrawn changeset applies nothing more.
+    fails(
+        &s,
+        "UPDATE changeset SET state = 'withdrawn';
+         UPDATE changeset_action SET state = 'applied'",
+    );
+    // The changeset closes with its last open action.
+    s.write(|tx| Ok(tx.execute("UPDATE changeset_action SET state = 'applied'", [])?))
+        .unwrap();
+    let state: String = s
+        .read(|c| Ok(c.query_row("SELECT state FROM changeset", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(state, "closed");
 }
 
 /// The changeset is open while an action is open, then closed.
