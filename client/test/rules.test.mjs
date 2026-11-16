@@ -112,6 +112,13 @@ test("the apply mode says what Iris does not do", async () => {
   assert.match(t, /Apply Iris makes the changes that your rules allow\. It never makes a change that a Never rule or a safety limit forbids\. All other changes wait for you\./);
 });
 
+test("a new load of the policy keeps a mode that the person chose and did not send", async () => {
+  const { keep } = await load("/src/rules.ts");
+  assert.equal(keep("observe", "observe", "apply"), "apply");
+  assert.equal(keep("apply", "observe", "observe"), "apply");
+  assert.equal(keep("apply", "observe", "apply"), "apply");
+});
+
 test("the notice above the brief looks at the policy again while it shows", async () => {
   const { follow } = await load("/src/clock.ts");
   mock.timers.enable({ apis: ["setTimeout"] });

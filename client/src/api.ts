@@ -97,7 +97,7 @@ export type Mode = "observe" | "apply";
 export type Policy = {
   mode: Mode;
   version: number | null;
-  /** The lowest rule ID that no rule had: the ID of a removed rule is never used again. */
+  /** One more than the highest rule ID that a rule had: the ID of a removed rule is never used again. */
   next_id: number;
   rules: Rule[];
   error: { line: number; message: string } | null;

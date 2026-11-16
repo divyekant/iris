@@ -6,9 +6,10 @@
 -->
 <script lang="ts">
   import { get, own, post, type Mode, type Policy, type Rule } from "../api";
-  import { conditions, example, GROUPS, MODES, verbs } from "../rules";
+  import { poll } from "../clock";
+  import { conditions, example, GROUPS, keep, MODES, verbs } from "../rules";
 
-  let { policy: initial }: { policy: Policy } = $props();
+  let { policy: initial, every = 30_000 }: { policy: Policy; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let policy = $state(initial);
   // svelte-ignore state_referenced_locally
@@ -18,6 +19,21 @@
   let problem = $state("");
   // The name of the copy of a discarded file, after a discard.
   let saved: string | null = $state(null);
+
+  // The person can edit the file while this screen is open: look again each `every` ms.
+  $effect(() => {
+    if (!every) return;
+    return poll(
+      () => get<Policy>("policy"),
+      (next) => {
+        if (busy) return;
+        choice = keep(choice, policy.mode, next.mode);
+        if (asking !== null && !next.rules.some((r) => r.id === asking)) asking = null;
+        policy = next;
+      },
+      every,
+    );
+  });
 
   let file = $derived(policy.file);
   // A confirmed file that is gone. At the first start there is no file, and changes from here make it.

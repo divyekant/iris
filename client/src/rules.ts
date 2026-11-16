@@ -82,7 +82,7 @@ export const MODES = {
 } as const;
 
 /**
- * An example rule that shows the feed as one line in the brief, with the ID
+ * An example rule that shows the feed as one line in the brief, with an ID
  * `id` that no rule had. With `mode` (no file yet), a complete first file:
  * the parser needs `version` and `mode`.
  */
@@ -95,4 +95,12 @@ when = { form = "feed" }
 by = "person"
 added = ${date}`;
   return mode ? `version = 0\nmode = "${mode}"\n\n${rule}` : rule;
+}
+
+/**
+ * The mode that the screen shows after a new load of the policy: a choice
+ * that the person made and did not send yet stays; else the new active mode.
+ */
+export function keep(choice: Mode, before: Mode, now: Mode): Mode {
+  return choice === before ? now : choice;
 }
