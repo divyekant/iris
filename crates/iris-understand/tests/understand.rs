@@ -883,3 +883,99 @@ fn hostile_mail_and_drafts_are_not_thread_context() {
         assert!(!data.contains(w), "{w}: {data}");
     }
 }
+
+#[test]
+fn a_sent_promise_has_the_recipient_as_the_other_party() {
+    let b = store("sent-parties");
+    let raw = "From: Owner <owner@example.com>
+To: Bo Ren <bo@example.org>
+Subject: Re: The lease
+
+I will send you the signed lease by Friday.
+";
+    let m = b.add("1", raw, &["SENT"]);
+    let answer = r#"{"items": [{"form": "commitment", "title": "Send Bo the signed lease",
+      "quote": "I will send you the signed lease by Friday.", "confidence": 0.9,
+      "direction": "you_owe", "kind": "task"}]}"#;
+    understand(&b.store, m, &Fake::with(&[answer]), NOW).unwrap();
+    let item = &b.items()[0];
+    assert_eq!(item["owner"]["kind"], "self");
+    assert_eq!(item["counterparty"]["address"], "bo@example.org");
+}
+
+#[test]
+fn a_failed_known_person_lookup_stops_before_the_model() {
+    let b = store("known-error");
+    b.store
+        .write(|tx| {
+            tx.execute_batch("ALTER TABLE sender RENAME COLUMN name TO name_x")?;
+            Ok(())
+        })
+        .unwrap();
+    let m = b.add("1", ASK, &["INBOX"]);
+    let fake = Fake::default();
+    assert!(understand(&b.store, m, &fake, NOW).is_err());
+    assert_eq!(fake.calls.borrow().len(), 0);
+}
+
+#[test]
+fn a_base64_calendar_request_is_an_invitation() {
+    let b = store("cal-b64");
+    // "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Plan\r\nDTSTART:20260105T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    let raw = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: Invitation: Plan
+Content-Type: multipart/mixed; boundary=z
+
+--z
+Content-Type: text/plain
+
+Join us.
+--z
+Content-Type: text/calendar; charset=utf-8
+Content-Transfer-Encoding: base64
+
+QkVHSU46VkNBTEVOREFSDQpNRVRIT0Q6UkVRVUVTVA0KQkVHSU46VkVWRU5UDQpTVU1NQVJZOlBs
+YW4NCkRUU1RBUlQ6MjAyNjAxMDVUMTAwMDAwWg0KRU5EOlZFVkVOVA0KRU5EOlZDQUxFTkRBUg0K
+--z--
+";
+    let m = b.add("1", raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    assert_eq!(fake.calls.borrow().len(), 0);
+    let item = &b.items()[0];
+    assert_eq!(item["kind"], "invitation");
+}
+
+#[test]
+fn a_repeated_end_block_of_the_sender_goes_out() {
+    let b = store("repeated-end");
+    let first = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: The lease
+
+Here is the plan.
+
+Bo Ren
+Lease Office, 12 High Street
+";
+    let second = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: Re: The lease
+
+Can you call me today?
+
+Bo Ren
+Lease Office, 12 High Street
+";
+    let a = b.add_in("1", "t1", NOW - 3 * DAY, first, &["INBOX"]);
+    let s = b.add_in("2", "t1", NOW - 2 * DAY, second, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, a, &fake, NOW).unwrap();
+    understand(&b.store, s, &fake, NOW).unwrap();
+    let text: String = b.col("SELECT text FROM body WHERE message_id = ?1", s);
+    assert_eq!(text.trim(), "Can you call me today?");
+    let calls = fake.calls.borrow();
+    let current = calls[1].1.split("The current message:").nth(1).unwrap();
+    assert!(!current.contains("12 High Street"), "{current}");
+}
