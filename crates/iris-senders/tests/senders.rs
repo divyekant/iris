@@ -703,6 +703,39 @@ fn a_recipient_whose_only_sent_message_loses_it_is_decided_again() {
 }
 
 #[test]
+fn a_recipient_that_a_person_set_is_not_a_known_sender() {
+    let mut c = Case::new("person-set-recipient");
+    set(
+        &c,
+        "INSERT INTO sender(address, kind, basis, decided_by)
+         VALUES ('foo@paypal.com', 'stranger', 'set', 'person')",
+    );
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: foo@paypal.com, alerts@paypa1.com"),
+    );
+    assert_eq!(c.row("foo@paypal.com").1.as_deref(), Some("stranger"));
+    assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("person"));
+}
+
+#[test]
+fn a_sent_message_at_the_same_time_is_not_a_reply() {
+    let mut c = Case::new("same-time");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ana@example.org"),
+    );
+    let head = "From: zed@example.net\r\nTo: owner@example.com";
+    assert_eq!(c.put("t1", &[], head).kind, Kind::Stranger);
+    // The new participant's message has the same time as the sent message.
+    set(&c, "UPDATE message SET internal_date = 1000 WHERE id = 2");
+    let raw = format!("{head}\r\nSubject: x\r\n\r\nBody text.\r\n");
+    assert_eq!(again(&c, 2, &raw).kind, Kind::Stranger);
+}
+
+#[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
     // Messages 3 and 4 each have 2 earlier messages.
