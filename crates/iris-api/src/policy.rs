@@ -28,6 +28,7 @@ pub fn policy(store: &Store) -> Result<Value> {
         "version": active.version,
         "next_id": store.read(iris_policy::next_rule_id)?,
         "rules": active.policy.rules.iter().map(rule).collect::<Vec<_>>(),
+        "proposals": proposals(store)?,
         "error": active.error.as_ref().map(error),
         "file": file,
     }))
@@ -75,9 +76,43 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
         Edited::FileChanged => Err(conflict(
             "The policy file changed on disk. Confirm or discard that change first.",
         )),
-        Edited::NoRule => Err(conflict("The policy has no such rule.")),
+        Edited::NoRule => Err(conflict(
+            "The policy has no such rule, or the proposal is not open any more.",
+        )),
         Edited::Invalid(e) => Err(conflict(&e.to_string())),
     }
+}
+
+/// The open proposals (spec 2, section 6.6), each with the rule that an
+/// accept adds. `rule.id` and `rule.added` are the values of now: the
+/// accept gives the next free ID and the date of the accept.
+fn proposals(store: &Store) -> Result<Vec<Value>> {
+    let (open, next) = store.read(|c| {
+        Ok((
+            iris_policy::propose::open(c)?,
+            iris_policy::next_rule_id(c)?,
+        ))
+    })?;
+    let today = iris_policy::propose::date(crate::now_s());
+    Ok(open
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "approvals": p.approvals,
+                "created_at": p.created_at,
+                "rule": rule(&p.rule(next, &today)),
+            })
+        })
+        .collect())
+}
+
+/// Dismisses an open proposal. Iris does not propose the same rule again.
+pub fn dismiss(store: &Store, id: i64, now: i64) -> Result<Value> {
+    if !iris_policy::propose::dismiss(store, id, now)? {
+        return Err(conflict("The proposal is not open any more."));
+    }
+    policy(store)
 }
 
 /// Reads a mode name of a request.

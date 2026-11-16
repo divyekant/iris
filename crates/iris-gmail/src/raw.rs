@@ -25,9 +25,26 @@ pub enum SplitError {
 
 /// Copy the decoded `raw` field of the JSON in `body` to `sink`. Return the
 /// JSON without the data of `raw`, and the count of decoded bytes.
-pub fn split<R: Read, W: Write>(mut body: R, sink: &mut W) -> Result<(Vec<u8>, u64), SplitError> {
+pub fn split<R: Read, W: Write>(body: R, sink: &mut W) -> Result<(Vec<u8>, u64), SplitError> {
+    split_at(body, sink, 1)
+}
+
+/// As [`split`], for the `raw` field of the object `message` of a draft
+/// (`users.drafts.get`): the key `raw` at the JSON depth 2.
+pub fn split_draft<R: Read, W: Write>(body: R, sink: &mut W) -> Result<(Vec<u8>, u64), SplitError> {
+    split_at(body, sink, 2)
+}
+
+fn split_at<R: Read, W: Write>(
+    mut body: R,
+    sink: &mut W,
+    level: u32,
+) -> Result<(Vec<u8>, u64), SplitError> {
     let mut buf = vec![0u8; BUFFER];
-    let mut scan = Scanner::default();
+    let mut scan = Scanner {
+        level,
+        ..Scanner::default()
+    };
     let mut decoder = Decoder::new();
     loop {
         let n = match body.read(&mut buf) {
@@ -57,9 +74,11 @@ pub fn split<R: Read, W: Write>(mut body: R, sink: &mut W) -> Result<(Vec<u8>, u
     Ok((scan.rest, decoder.total))
 }
 
-/// A JSON scanner that knows only enough to find the top-level key `raw`.
+/// A JSON scanner that knows only enough to find the key `raw` at the
+/// depth `level` (1: the top level).
 #[derive(Default)]
 struct Scanner {
+    level: u32,
     rest: Vec<u8>,
     depth: u32,
     in_string: bool,
@@ -112,13 +131,13 @@ impl Scanner {
         match b {
             b'"' => {
                 self.in_string = true;
-                if self.depth == 1 && self.expect_key {
+                if self.depth == self.level && self.expect_key {
                     self.key = Some(Vec::new());
                 }
             }
             b'{' | b'[' => {
                 self.depth += 1;
-                self.expect_key = self.depth == 1 && b == b'{';
+                self.expect_key = self.depth == self.level && b == b'{';
             }
             b'}' | b']' => {
                 self.depth = self
@@ -126,8 +145,8 @@ impl Scanner {
                     .checked_sub(1)
                     .ok_or(SplitError::Format("bad JSON nesting"))?;
             }
-            b',' if self.depth == 1 => self.expect_key = true,
-            b':' if self.depth == 1 => {
+            b',' if self.depth == self.level => self.expect_key = true,
+            b':' if self.depth == self.level => {
                 self.expect_key = false;
                 self.raw_next = self.last_key_is_raw;
                 self.last_key_is_raw = false;
@@ -244,6 +263,46 @@ mod tests {
             assert_eq!(v["raw"], "");
             assert_eq!(v["payload"]["raw"], "no");
             assert_eq!(v["sizeEstimate"], 3);
+        }
+    }
+
+    /// A draft answer in any field order, with any white space and any
+    /// chunk size, gives the raw of `message` and nothing else. A decoy
+    /// `raw` at another depth is not the raw.
+    #[test]
+    fn a_draft_answer_splits_in_any_form() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..500 {
+            let len = (next() % 3000) as usize;
+            let raw: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            let ws = [" ", "", "\n", "\t "][(next() % 4) as usize];
+            let mut fields = [
+                format!(r#""id"{ws}:{ws}"m1""#),
+                r#""threadId":"t1""#.to_string(),
+                r#""labelIds":["DRAFT",{"raw":"QQ"}]"#.to_string(),
+                format!(r#""raw"{ws}:{ws}"{}""#, encode_url(&raw)),
+            ];
+            let k = (next() % 4) as usize;
+            fields.swap(k, 3);
+            let body = format!(
+                r#"{{"raw":"decoy",{ws}"id":"r1","message":{ws}{{{}}}}}"#,
+                fields.join(&format!(",{ws}"))
+            );
+            let mut sink = Vec::new();
+            let step = 1 + (next() % 200) as usize;
+            let (rest, n) = split_draft(Slow(body.as_bytes(), step), &mut sink).unwrap();
+            assert_eq!((sink.as_slice(), n), (raw.as_slice(), len as u64));
+            let v: serde_json::Value = serde_json::from_slice(&rest).unwrap();
+            assert_eq!(
+                (v["id"].as_str(), v["message"]["id"].as_str()),
+                (Some("r1"), Some("m1"))
+            );
         }
     }
 

@@ -12,6 +12,7 @@ mod attention;
 pub use attention::{facts, refresh as refresh_attention, Facts, PASS_EVERY};
 mod edit;
 mod eval;
+pub mod propose;
 
 pub use active::{
     active, confirm, file_state, next_rule_id, version_text, Active, Confirm, FileState,
@@ -74,7 +75,7 @@ impl Effect {
 }
 
 /// The verbs of release 2 (spec 2, section 4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verb {
     Archive,
     Inbox,
@@ -463,7 +464,7 @@ fn check_when(raw: RawWhen) -> Result<When, String> {
 }
 
 /// Checks `name@domain` or `@domain`, and gives it in lower case.
-fn check_sender(s: String) -> Result<String, String> {
+pub(crate) fn check_sender(s: String) -> Result<String, String> {
     let lower = s.trim().to_lowercase();
     let ok = match lower.split_once('@') {
         Some((local, domain)) => {

@@ -10,6 +10,7 @@
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
+  import Gate from "./Gate.svelte";
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
@@ -57,23 +58,21 @@
   const removed = (id: string) => change((w) => w.filter((x) => x.id !== id));
   const ready = (s: Status | null) => copying(s).length === 0;
 
+  // Two loads of the brief can answer out of order (a poll, an answer at the gate):
+  // each takes a ticket, and a brief shows only while its ticket is the newest.
+  const briefTicket = newest();
+
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
   let syncing = $derived(!ready(status));
-  // Each brief load takes a ticket from `fresher`, so a poll that started before
-  // a quick Done never puts the closed item back.
-  const fresher = newest();
   $effect(() => {
     if (!poll) return;
     return every(
       () => {
-        const fresh = fresher();
+        const fresh = briefTicket();
         return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
       },
-      ([b, s, fresh]) => {
-        if (fresh()) brief = b;
-        status = s;
-      },
+      ([b, s, fresh]) => (fresh() && (brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });
@@ -95,17 +94,21 @@
   });
 
   const SHOWN = 7;
+  // After an answer at the gate, the items of the sender move: load the brief again.
+  // The gate stays after the last answer, so that its Undo stays too.
+  let answered = $state(false);
+  const reload = () => {
+    answered = true;
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
 
-  // After a quick Done, load the brief again, so the item and the counts change. A failed load waits for the next poll.
-  async function reload() {
-    const fresh = fresher();
-    try {
-      const b = await loadBrief();
-      if (fresh()) brief = b;
-    } catch {
-      // The next poll tries again.
-    }
-  }
+  // After a quick Done, load the brief again, so the item and the counts change. The ticket keeps a poll
+  // that started before the close from putting the item back. A failed load waits for the next poll.
+  const done = () => {
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
@@ -193,7 +196,7 @@
   <section class="soon" aria-labelledby="soon">
     <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
     <ul>
-      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={reload} delay={hold} />{/each}
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
@@ -210,13 +213,20 @@
 {/if}
 
 {#each parts as part (part.key)}
-  {#if part.count > 0}
+  {#if part.key === "strangers" && brief.gate}
+    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0 || answered}
+      <section aria-labelledby="strangers">
+        <h2 id="strangers"><span>{part.title}</span> <span class="count">{brief.gate.count}</span></h2>
+        <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />
+      </section>
+    {/if}
+  {:else if part.count > 0}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
       {#if part.items.length}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={reload} delay={hold} />{/each}
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
         </ul>
       {/if}
       <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>

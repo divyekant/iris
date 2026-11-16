@@ -101,6 +101,8 @@ endpoint gives the policy object below. `POST` endpoints take a JSON body.
 | `POST /api/policy/discard` | Body `{}`. Keeps the file on disk as a copy, then writes the text of the active policy to `policy.toml`. With no active version, no new file is written. The answer has `saved`: the name of the copy in the data folder (`policy.toml.saved-<seconds>`), or `null` when there was no file. |
 | `POST /api/policy/mode` | Body `{"version", "mode"}`. Writes the new mode to the file and makes it active. |
 | `POST /api/policy/remove` | Body `{"version", "id"}`. Removes the rule from the file and makes the file active. The ID is never used again. |
+| `POST /api/policy/accept` | Body `{"version", "id"}`: the ID of an open proposal. Adds its rule at the end of the file, with `by = "proposal"`, the next rule ID and the date of today, and makes the file active. A proposal that is not open is a 409. |
+| `POST /api/policy/dismiss` | Body `{"id"}`. Dismisses an open proposal and changes no file. Iris does not propose the same rule again. A proposal that is not open is a 409. |
 
 `version` is the active version that the person saw, `null` for the policy
 of the first start. If it is not the active version, or if the file on disk
@@ -118,6 +120,7 @@ The policy object:
 | `version` | The active version, or `null` at the first start. |
 | `next_id` | One more than the highest rule ID that a rule had. A new rule can use it, because the ID of a removed rule is never used again. |
 | `rules` | The rules of the active policy, in the order of the file. |
+| `proposals` | The open rules that Iris proposes from your approvals (spec 2, section 6.6), the oldest first. Each is `{"id", "approvals", "created_at", "rule"}`. `rule` is the rule that an accept adds, with `next_id` and the date of today; its `line` is 0. |
 | `error` | `{"line", "message"}` when the active text is not valid any more (for example after a program update), else `null`. The active policy then applies nothing. |
 | `file` | The file on disk, compared to the active policy. `state` is `same`, `missing`, `invalid` (with `error`) or `changed`. A `changed` file has `sha256`, `text`, `mode`, and the rules that it `added`, `removed` and `changed` (`{"before", "after"}`). A rule that keeps its ID and changes any field other than `line` is changed. |
 
@@ -247,6 +250,34 @@ another site cannot read the API through DNS rebinding. A request with no
 A dev server of the client must forward `/api` with the `Host` and the
 `Origin` of the engine (in Vite: `changeOrigin: true`, and set `Origin` to the
 target in `headers`).
+
+## Ask
+
+A question of the person about their mail (card R5-09). The engine searches
+the mail for the words of the question, gives the best 12 messages to the
+model as data, and answers with the messages that the answer comes from.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/ask` | Body `{"question"}`, 1 to 500 characters. The answer is `{"answer", "sources", "read", "cost_micro_usd"}`. |
+
+| Field | Content |
+|---|---|
+| `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. A claim is one fact, in one or more sentences. One or more marks `[n]` come before the end mark of its last sentence, and name the sources of all of its text. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
+| `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
+| `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
+| `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
+
+The search leaves out gone mail, hostile mail, the mail of a hostile sender,
+SPAM and TRASH. After the call, the engine checks each source again: against
+these rules, and for a change of the date, sender, subject or text that the
+model saw. A claim with a source that fails the check goes. The call
+takes from the one model budget (see
+`docs/specs/2026-11-16-cost-control.md`) and holds the run lock. With no
+model, with a budget that cannot pay the worst case of the call, or while a
+run of understanding holds the lock, the answer is a 503. A failed
+model call, or a model answer that is not valid, is a 502. The text of the
+answer is data: show it as text, never as markup.
 
 ## Watches
 
