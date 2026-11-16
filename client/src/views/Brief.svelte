@@ -108,7 +108,7 @@
       <ul>
         {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
       </ul>
-      {#if part.count > Math.min(part.items.length, SHOWN)}<a class="all" href={`#/brief/${part.key}`}>All {part.count}</a>{/if}
+      <a class="all" href={`#/brief/${part.key}`}>All {part.count}</a>
     </section>
   {/if}
 {/each}
