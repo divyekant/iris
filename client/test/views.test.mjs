@@ -58,7 +58,7 @@ test("the brief groups the feed by sender, not by name, and shows at most 7 send
   const ten = Array.from({ length: 10 }, (_, n) => feed(n, `p-${n}`, `Sender ${n}`));
   const html = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, feed: { count: 10, items: ten } }, now: NOW });
   assert.equal((html.match(/Sender \d/g) ?? []).length, 7);
-  assert.match(html, /href="#\/feed"[^>]*>All 10</);
+  assert.match(html, /href="#\/brief\/feed"[^>]*>All 10</);
 });
 
 test("the brief shows a possible duplicate pair as one line", async () => {
@@ -159,9 +159,36 @@ test("the records view shows one choice for each type, and more records on reque
   assert.match(more, />Show more</);
 });
 
-test("a section list says when the brief holds only the first part of a section", async () => {
-  const t = text(await render("/src/views/List.svelte", { title: "You owe", page: { items: [item("c-311")], next: null }, total: 250 }));
-  assert.match(t, /The brief shows the first 1 of 250/);
+test("a list pages through its API path with Show more", async () => {
+  const page = { items: [item("c-311")], next: 50 };
+  const html = await render("/src/views/List.svelte", { title: "You owe", page, more: "brief/you_owe?limit=50" });
+  assert.match(html, />Show more</);
+  const last = await render("/src/views/List.svelte", { title: "You owe", page: { ...page, next: null }, more: "brief/you_owe?limit=50" });
+  assert.doesNotMatch(last, /Show more/);
+});
+
+test("the brief shows the triage proposal and says that nothing is applied", async () => {
+  const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
+  assert.match(t, /Iris would make 447 changes to your mailbox: archive 412, label 35\. Nothing is applied\./);
+  const none = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, proposal: null }, now: NOW }));
+  assert.doesNotMatch(none, /Triage proposal/);
+});
+
+test("a stranger conversation shows once in the brief", async () => {
+  const brief = { ...fx.brief, strangers: { count: 1, items: [item("v-88")] } };
+  const html = await render("/src/views/Brief.svelte", { brief, now: NOW });
+  assert.equal((html.match(/href="#\/item\/v-88"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /id="strangers"/);
+});
+
+test("the setup flow opens the first brief while the copy continues", async () => {
+  const account = { ...fx.status.accounts[0], mirror_ready_at: null };
+  const status = { accounts: [account], messages: { total: 84212, fetched: 9000, understood: 40, gone: 0 } };
+  const html = await render("/src/views/Setup.svelte", { status, poll: 0 });
+  assert.match(text(html), /Your first brief is ready/);
+  assert.match(html, /href="#\/brief"/);
+  const early = await render("/src/views/Setup.svelte", { status: { ...status, messages: { ...status.messages, understood: 0 } }, poll: 0 });
+  assert.doesNotMatch(early, /href="#\/brief"/);
 });
 
 test("a mail shows as escaped text, with a warning when it is hostile", async () => {
@@ -221,5 +248,6 @@ test("the fixture API answers the endpoints of the local API", () => {
   assert.equal(fx.answer("items?form=record&type=receipt").items.length, 1);
   assert.equal(fx.answer("items/c-311").id, "c-311");
   assert.equal(fx.answer("messages/m-55210").items[0], "c-311");
+  assert.equal(fx.answer("brief/you_owe?limit=50").items.length, 2);
   assert.equal(fx.answer("nothing"), undefined);
 });

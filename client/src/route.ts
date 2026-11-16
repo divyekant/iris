@@ -1,7 +1,7 @@
 // Routes live in the hash (#/brief), because the engine serves one page for the client.
 
 export type Form = "commitment" | "conversation" | "feed" | "signal";
-export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals";
+export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
   | { view: "home" | "setup" | "brief" | "measures" }
@@ -18,6 +18,7 @@ export const SECTIONS: Record<SectionKey, string> = {
   conversations: "Conversations that wait for you",
   strangers: "From senders you do not know",
   signals: "Signals",
+  feed: "To read",
 };
 
 export function parse(hash: string): Route {

@@ -59,6 +59,10 @@
       <p class="big"><strong>{number(m.fetched)}</strong> of {m.total ? number(m.total) : "all"} messages copied.</p>
       <progress max={m.total || 1} value={m.fetched} aria-label="Messages copied"></progress>
       <p class="quiet">Iris only reads. Nothing in your mailbox changes. You can close this page: the copy continues.</p>
+      {#if m.understood > 0}
+        <p>Your first brief is ready. It grows as the copy continues.</p>
+        <a class="go" href="#/brief">Open the brief</a>
+      {/if}
     </section>
   {:else}
     <section>

@@ -41,6 +41,7 @@ export const brief: Brief = {
   hostile: 2,
   not_understood: 1,
   oldest_fetched: null,
+  proposal: { count: 447, verbs: { archive: 412, label: 35 } },
 };
 
 export function message(id: string): Message | undefined {
@@ -69,6 +70,10 @@ export function answer(path: string): unknown {
   const q = url.searchParams;
   const [name, id] = url.pathname.slice(1).split("/");
   if (name === "status") return status;
+  if (name === "brief" && id) {
+    const section = brief[id as "you_owe"];
+    return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
+  }
   if (name === "brief") return brief;
   if (name === "items" && id) return items.find((i) => i.id === id);
   if (name === "items") {

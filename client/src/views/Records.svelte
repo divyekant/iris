@@ -17,7 +17,7 @@
   let error = $state("");
   let busy = $state(false);
 
-  async function load(name: string, before: string | null) {
+  async function load(name: string, before: string | number | null) {
     busy = true;
     error = "";
     try {

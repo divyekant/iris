@@ -45,8 +45,9 @@ Routes are in the hash, for example `#/brief` and `#/mail/m-55210`.
 | Route | View | Card |
 |---|---|---|
 | `#/` | Setup flow until the mirror is ready, then the brief | R1-18, R1-19 |
+| `#/brief/<section>` | All items of one section of the brief, 50 for each page | R1-19 |
 | `#/commitments`, `#/conversations`, `#/feed`, `#/signals` | The list of one form | R1-20, R1-21 |
-| `#/records` | One table for each record type | R1-21 |
+| `#/records`, `#/records/<type>` | One table for each record type | R1-21 |
 | `#/item/<id>` | One item with its sources | R1-20 |
 | `#/mail/<id>` | One source mail as clean text | R1-22 |
 | `#/measures` | The open count of source mail | R1-22 |

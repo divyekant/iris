@@ -14,11 +14,20 @@
   const SHOWN = 7;
 
   let codes = $derived(brief.signals.items.filter((i) => liveCode(i, now)));
+  let shown = $derived(new Set(brief.conversations.items.map((i) => i.id)));
+  let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
   let parts = $derived([
     { key: "you_owe", title: "You owe", ...brief.you_owe },
     { key: "owed_to_you", title: "Owed to you", ...brief.owed_to_you },
     { key: "conversations", title: "Conversations", ...brief.conversations },
-    { key: "strangers", title: "From senders you do not know", ...brief.strangers },
+    // A conversation with a stranger is in both sections of the API. It shows once, under Conversations.
+    {
+      key: "strangers",
+      title: "From senders you do not know",
+      ...brief.strangers,
+      count: brief.strangers.count - brief.strangers.items.filter((i) => shown.has(i.id)).length,
+      items: brief.strangers.items.filter((i) => !shown.has(i.id)),
+    },
     {
       key: "signals",
       title: "Signals",
@@ -77,6 +86,16 @@
   {/if}
 {/each}
 
+{#if proposal}
+  <section class="proposal" aria-labelledby="proposal">
+    <h2 id="proposal"><span>Triage proposal</span> <span class="count">{proposal.count}</span></h2>
+    <p>
+      Iris would make {proposal.count.toLocaleString("en-US")} changes to your mailbox:
+      {Object.entries(proposal.verbs).map(([verb, n]) => `${verb} ${n.toLocaleString("en-US")}`).join(", ")}. Nothing is applied.
+    </p>
+  </section>
+{/if}
+
 {#if publishers.length || records.length}
   <section class="also" aria-labelledby="also">
     <h2 id="also">Also in your mail</h2>
@@ -84,7 +103,7 @@
       <p class="label">To read when you choose</p>
       <ul class="chips">
         {#each publishers.slice(0, SHOWN) as [key, group] (key)}<li><a href="#/feed">{group.name} <span>{group.items.length}</span></a></li>{/each}
-        {#if publishers.length > SHOWN}<li><a href="#/feed">All {brief.feed.count}</a></li>{/if}
+        {#if publishers.length > SHOWN}<li><a href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
       </ul>
     {/if}
     {#if records.length}
@@ -179,6 +198,10 @@
   }
   .all:hover {
     color: var(--color-text);
+  }
+  .proposal p {
+    margin: 0;
+    color: var(--color-text-muted);
   }
   .label {
     color: var(--color-text-muted);

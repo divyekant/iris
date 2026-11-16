@@ -1,12 +1,11 @@
-<!--
-  A full list: all items of one form (newest first, 50 for each page), or one
-  section of the brief (the engine gives up to 200 items of a section).
--->
+<!-- A full list, 50 items for each page: all items of one form, or one section of the brief. -->
 <script lang="ts">
   import { get, type Page } from "../api";
   import Line from "./Line.svelte";
 
-  let { title, page, form = "", total = 0 }: { title: string; page: Page; form?: string; total?: number } = $props();
+  // `more` is the API path of the list. `cursor` names the parameter that takes `next`:
+  // `before` (an ID) for the lists of a form, `offset` for the sections of the brief.
+  let { title, page, more = "", cursor = "before" }: { title: string; page: Page; more?: string; cursor?: "before" | "offset" } = $props();
 
   // svelte-ignore state_referenced_locally
   let items = $state(page.items);
@@ -15,11 +14,11 @@
   let error = $state("");
   let busy = $state(false);
 
-  async function more() {
+  async function loadMore() {
     busy = true;
     error = "";
     try {
-      const nextPage = await get<Page>(`items?form=${form}&limit=50&before=${encodeURIComponent(next ?? "")}`);
+      const nextPage = await get<Page>(`${more}&${cursor}=${encodeURIComponent(String(next ?? ""))}`);
       items = [...items, ...nextPage.items];
       next = nextPage.next;
     } catch (e) {
@@ -38,10 +37,7 @@
     {#each items as item (item.id)}<Line {item} />{/each}
   </ul>
 {/if}
-{#if total > items.length}
-  <p class="empty">The brief shows the first {items.length} of {total}. The full lists are under Commitments and Conversations.</p>
-{/if}
-{#if next && form}<button type="button" onclick={more} disabled={busy}>{busy ? "Loading" : "Show more"}</button>{/if}
+{#if next && more}<button type="button" onclick={loadMore} disabled={busy}>{busy ? "Loading" : "Show more"}</button>{/if}
 {#if error}<p role="alert">{error}</p>{/if}
 
 <style>

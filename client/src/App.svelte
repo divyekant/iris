@@ -61,12 +61,12 @@
       {#await Promise.all([get<BriefData>("brief"), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}<p role="alert">{error.message}</p>{/await}
     {:else if route.view === "section"}
       {@const key = route.key}
-      {#await get<BriefData>("brief") then brief}
-        <List title={SECTIONS[key]} page={{ items: brief[key].items, next: null }} total={brief[key].count} />
+      {#await get<Page>(`brief/${key}?limit=50&offset=0`) then page}
+        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="offset" />
       {:catch error}<p role="alert">{error.message}</p>{/await}
     {:else if route.view === "list"}
       {@const form = route.form}
-      {#await get<Page>(`items?form=${form}&limit=50`) then page}<List title={TITLES[form]} {form} {page} />{:catch error}<p role="alert">{error.message}</p>{/await}
+      {#await get<Page>(`items?form=${form}&limit=50`) then page}<List title={TITLES[form]} {page} more={`items?form=${form}&limit=50`} />{:catch error}<p role="alert">{error.message}</p>{/await}
     {:else if route.view === "records"}
       {@const type = route.type}
       {#await get<BriefData>("brief") then brief}<Records counts={brief.records} {type} />{:catch error}<p role="alert">{error.message}</p>{/await}

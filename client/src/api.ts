@@ -54,6 +54,8 @@ export type Brief = {
   not_understood: number;
   /** While the first sync runs: the brief covers the mail from this date (spec 1 section 4.2). */
   oldest_fetched?: string | null;
+  /** The release 1 triage proposal (spec 1 section 8): computed, not stored, nothing applied. */
+  proposal?: { count: number; verbs: Record<string, number> } | null;
 };
 
 export type Account = {
@@ -67,11 +69,14 @@ export type Account = {
 };
 
 export type Status = {
+  /** "observe" in release 1: Iris applies nothing. */
+  mode?: string;
   accounts: Account[];
   messages: { total: number; fetched: number; understood: number; gone: number };
 };
 
-export type Page = { items: Item[]; next: string | null };
+// `next` is the ID before which the next page starts, or an offset for a section of the brief.
+export type Page = { items: Item[]; next: string | number | null; duplicates?: Record<string, string[]> };
 
 export type Summary = {
   id: string;
