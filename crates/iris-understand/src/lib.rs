@@ -27,7 +27,9 @@ pub use head::{Auth, Head};
 pub use iris_model::Usage;
 pub use prompt::{INSTRUCTION, PROMPT};
 pub use schema::validate;
-pub use store::{understand, Error, Outcome, Result as StoreResult, MAX_TRIES, RETRY_MS};
+pub use store::{
+    understand, Error, Outcome, Result as StoreResult, MAX_TRIES, RAW_LIMIT, RETRY_MS,
+};
 
 /// The kind of the sender of one message (section 6.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

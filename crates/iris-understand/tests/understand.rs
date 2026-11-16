@@ -1150,3 +1150,78 @@ fn a_receipt_word_late_in_a_list_mail_goes_to_the_model() {
     understand(&b.store, m, &fake, NOW).unwrap();
     assert_eq!(fake.calls.borrow().len(), 1);
 }
+
+/// A model whose call runs a second understanding of the same message,
+/// with a phishing answer, before its own answer.
+struct Second<'a> {
+    store: &'a Store,
+    message: i64,
+}
+
+impl Model for Second<'_> {
+    fn name(&self) -> &str {
+        "fake-1"
+    }
+
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        let phishing = Fake::with(&[r#"{"items": [], "phishing": true}"#]);
+        assert!(
+            understand(self.store, self.message, &phishing, NOW)
+                .unwrap()
+                .hostile
+        );
+        Ok(Reply {
+            stop: Stop::End,
+            text: COMMITMENT.into(),
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[test]
+fn a_second_run_with_phishing_wins_over_an_older_run() {
+    let b = store("two-runs");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let model = Second {
+        store: &b.store,
+        message: m,
+    };
+    let out = understand(&b.store, m, &model, NOW).unwrap();
+    assert!(out.changed);
+    assert!(b.items().is_empty());
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["phishing"]"#);
+}
+
+#[test]
+fn a_message_over_the_read_bound_is_still_understood() {
+    let b = store("large");
+    let big = "A".repeat(iris_understand::RAW_LIMIT as usize + 1024 * 1024);
+    let raw = format!(
+        "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: Photos
+Content-Type: multipart/mixed; boundary=z
+
+--z
+Content-Type: text/plain
+
+Can you send the photos back by Friday?
+--z
+Content-Type: application/octet-stream; name=photos.bin
+Content-Transfer-Encoding: base64
+
+{big}
+--z--
+"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let calls = fake.calls.borrow();
+    assert!(
+        calls[0].1.contains("send the photos back"),
+        "{}",
+        &calls[0].1[..500.min(calls[0].1.len())]
+    );
+}

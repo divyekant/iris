@@ -108,8 +108,8 @@ struct Row {
 /// it again on the same message to understand it again: the items of the
 /// message that a person did not correct are made again, not duplicated.
 pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -> Result<Outcome> {
-    // The state that this run reads. Write 3 checks it again.
-    let before = store.read(|c| Ok(state(c, message)?))?;
+    // The state that this run reads. Write 1 checks it again.
+    let start = store.read(|c| Ok(state(c, message, false)?))?;
     let row = read_row(store, message)?;
     if row.gone {
         return Ok(Outcome {
@@ -122,10 +122,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         .as_deref()
         .and_then(|s| store.content_path(s))
         .ok_or(Error::NoMessage(message))?;
-    // shortcut: reads the whole content file into memory (at most the Gmail
-    // message limit, about 36 MB). Map the file instead if the memory budget
-    // test shows a peak from large messages.
-    let raw = std::fs::read(path)?;
+    let raw = read_raw(&path)?;
 
     let sent = row.labels.iter().any(|l| l == "SENT");
     let draft = row.labels.iter().any(|l| l == "DRAFT");
@@ -167,7 +164,13 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let marks = if draft { Vec::new() } else { a.marks.clone() };
 
     // Write 1: steps 1 to 3.
-    store.write(|tx| {
+    // After write 1, `seen` is the full state of the message. Each later
+    // write checks it first, so a sync or a second run between the writes
+    // makes this run save nothing.
+    let seen = store.write(|tx| {
+        if state(tx, message, false)? != start {
+            return Ok(None);
+        }
         put_header(tx, message, &a)?;
         // The message is not understood until write 3 commits, so a stop
         // between the writes leaves it for the next run (section 7.1).
@@ -179,8 +182,14 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         if draft {
             drop_old_items(tx, message)?;
         }
-        Ok(())
+        Ok(Some(state(tx, message, true)?))
     })?;
+    let Some(seen) = seen else {
+        return Ok(Outcome {
+            changed: true,
+            ..Outcome::default()
+        });
+    };
     let sender = match (&a.head.from_name, &a.head.from_addr) {
         (Some(n), Some(ad)) => format!("{n} <{ad}>"),
         (_, Some(ad)) => ad.clone(),
@@ -210,9 +219,16 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let d = decide(&a, &cx, (!held).then_some(model)).map_err(Error::Model)?;
     if d.waiting {
         // No rule supports the old items now, and the model cannot run.
-        store.write(|tx| Ok(drop_old_items(tx, message)?))?;
+        let same = store.write(|tx| {
+            let same = state(tx, message, true)? == seen;
+            if same {
+                drop_old_items(tx, message)?;
+            }
+            Ok(same)
+        })?;
         return Ok(Outcome {
-            waiting: true,
+            waiting: same,
+            changed: !same,
             ..Outcome::default()
         });
     }
@@ -237,7 +253,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             Some(f) if !sent => sender_kind_in(tx, f)?,
             _ => kind_read,
         };
-        if state(tx, message)? != before || kind_now != kind_read {
+        if state(tx, message, true)? != seen || kind_now != kind_read {
             changed = true;
             return Ok(Vec::new());
         }
@@ -294,18 +310,39 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 }
 
 /// The state of a message that understanding depends on: the content, the
-/// gone state and the labels. The sender kind is checked apart.
-fn state(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Option<String>> {
+/// gone state and the labels. With `full`, also the hostile marks and
+/// `understood_at`, which a second run of the same message changes. The
+/// sender kind is checked apart.
+fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result<Option<String>> {
     c.query_row(
         "SELECT coalesce(m.content_sha256, '') || '|' || (m.gone_at IS NOT NULL) || '|' ||
            coalesce((SELECT group_concat(provider_id, ',') FROM (
               SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
-              WHERE ml.message_id = m.id ORDER BY l.provider_id)), '')
+              WHERE ml.message_id = m.id ORDER BY l.provider_id)), '') ||
+           CASE WHEN ?2 THEN '|' || coalesce(m.hostile, '') || '|' ||
+                coalesce(m.understood_at, '') ELSE '' END
          FROM message m WHERE m.id = ?1",
-        [message],
+        params![message, full],
         |r| r.get(0),
     )
     .optional()
+}
+
+/// The most bytes of a content file that understanding reads. iris-clean
+/// bounds each decoded part, so with this bound the peak memory of one
+/// message stays far below the 50 MB budget (specification 1, M3).
+pub const RAW_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// The first `RAW_LIMIT` bytes of a content file.
+// shortcut: a message over 8 MiB loses the MIME parts after the cut (in
+// most mail, attachments). Stream the parts if such mail shows misses.
+fn read_raw(path: &std::path::Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut raw = Vec::new();
+    std::fs::File::open(path)?
+        .take(RAW_LIMIT)
+        .read_to_end(&mut raw)?;
+    Ok(raw)
 }
 
 fn read_row(store: &Store, message: i64) -> Result<Row> {
