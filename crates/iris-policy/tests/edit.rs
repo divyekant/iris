@@ -94,6 +94,17 @@ fn a_removal_keeps_each_other_rule_and_each_comment_of_the_others() {
         want.retain(|r| r.id != id);
         assert_eq!(rules(&after), want, "case {case}\n{text}\n---\n{out}");
         assert_eq!(after.mode, before.mode);
+        // A shared comment keeps the blank line that separates it.
+        let lines: Vec<&str> = out.lines().collect();
+        for (i, l) in lines.iter().enumerate() {
+            if l.starts_with("# all before") {
+                assert_eq!(
+                    lines.get(i + 1),
+                    Some(&""),
+                    "case {case}\n{text}\n---\n{out}"
+                );
+            }
+        }
         for line in text.lines().filter(|l| l.starts_with('#')) {
             let gone = *line == format!("# about {id}") || *line == format!("# inside {id}");
             assert_eq!(
@@ -103,6 +114,16 @@ fn a_removal_keeps_each_other_rule_and_each_comment_of_the_others() {
             );
         }
     }
+}
+
+#[test]
+fn a_removal_keeps_the_blank_line_after_a_shared_comment() {
+    let text = format!("# shared\n\n# about 1\n{}{}", rule(1), rule(2));
+    let out = edit_text(&text, Change::Remove(1)).unwrap().unwrap();
+    assert_eq!(out, format!("# shared\n\n{}", rule(2)));
+    let text = format!("{}\n# shared\n\n# about 2\n{}", rule(1), rule(2));
+    let out = edit_text(&text, Change::Remove(2)).unwrap().unwrap();
+    assert_eq!(out, format!("{}\n# shared\n\n", rule(1)));
 }
 
 #[test]

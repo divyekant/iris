@@ -187,10 +187,10 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
                         .and_then(|p| p.as_str())
                         .unwrap_or("")
                         .to_string();
-                    next.decor_mut().set_prefix(format!("{keep}{old}"));
+                    next.decor_mut().set_prefix(join(keep, &old));
                 } else {
                     let old = doc.trailing().as_str().unwrap_or("").to_string();
-                    doc.set_trailing(format!("{keep}{old}"));
+                    doc.set_trailing(join(keep, &old));
                 }
             }
             if doc
@@ -206,18 +206,41 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
 }
 
 /// The part of the text before a `[[rule]]` header that is not about that
-/// rule: each line up to the last blank line. A comment directly above the
-/// header belongs to the rule and goes with it.
+/// rule: each line up to the last blank line, with that blank line, which
+/// separates it from the next text. A comment directly above the header
+/// belongs to the rule and goes with it. Blank lines alone are not shared.
 fn shared_comments(prefix: &str) -> &str {
     let mut end = 0;
     let mut at = 0;
     for line in prefix.split_inclusive('\n') {
+        at += line.len();
         if line.ends_with('\n') && line.trim().is_empty() {
             end = at;
         }
-        at += line.len();
     }
-    &prefix[..end]
+    let shared = &prefix[..end];
+    if shared.trim().is_empty() {
+        ""
+    } else {
+        shared
+    }
+}
+
+/// `shared` in front of `next`, with one blank line between them: the blank
+/// line at the end of `shared` goes when `next` starts with one.
+fn join(shared: &str, next: &str) -> String {
+    let starts_blank = next
+        .split_inclusive('\n')
+        .next()
+        .is_some_and(|l| l.ends_with('\n') && l.trim().is_empty());
+    let shared = if starts_blank {
+        let body = shared.trim_end_matches([' ', '\t']);
+        let body = &body[..body.len() - 1];
+        &shared[..body.rfind('\n').map_or(0, |n| n + 1)]
+    } else {
+        shared
+    };
+    format!("{shared}{next}")
 }
 
 #[cfg(test)]
@@ -229,10 +252,18 @@ mod tests {
         assert_eq!(shared_comments(""), "");
         assert_eq!(shared_comments("\n"), "");
         assert_eq!(shared_comments("\n# about rule 1\n"), "");
-        assert_eq!(shared_comments("\n# all rules\n\n"), "\n# all rules\n");
+        assert_eq!(shared_comments("\n\n"), "");
+        assert_eq!(shared_comments("\n# all rules\n\n"), "\n# all rules\n\n");
         assert_eq!(
-            shared_comments("\n# all rules\n\n# about rule 1\n"),
-            "\n# all rules\n"
+            shared_comments("\n# all rules\n \n# about rule 1\n"),
+            "\n# all rules\n \n"
         );
+    }
+
+    #[test]
+    fn a_join_keeps_one_blank_line() {
+        assert_eq!(join("# a\n\n", "[x]"), "# a\n\n[x]");
+        assert_eq!(join("# a\n\n", "\n# b\n"), "# a\n\n# b\n");
+        assert_eq!(join("# a\n \n", " \n"), "# a\n \n");
     }
 }
