@@ -34,12 +34,15 @@ pub enum Difference {
     /// The content file of the message is missing or has other bytes. Verify
     /// fetched the message again (section 4.8). This is a local defect.
     Content(String),
+    /// The content file of the message is missing or has other bytes, and
+    /// the new fetch failed. The file stays as it is.
+    Unrepaired(String),
 }
 
 impl Difference {
     /// True for a difference of step 7, which starts a full resync.
     pub fn is_sync(&self) -> bool {
-        !matches!(self, Difference::Content(_))
+        !matches!(self, Difference::Content(_) | Difference::Unrepaired(_))
     }
 }
 
@@ -54,6 +57,9 @@ impl fmt::Display for Difference {
             Difference::ExtraLabel(id) => write!(f, "label {id}: not at Gmail"),
             Difference::LabelName(id) => write!(f, "label {id}: other name"),
             Difference::Content(id) => write!(f, "message {id}: bad content file, fetched again"),
+            Difference::Unrepaired(id) => {
+                write!(f, "message {id}: bad content file, the new fetch failed")
+            }
         }
     }
 }
@@ -247,15 +253,18 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
     )?;
     for (id, thread) in bad {
         // A local defect: fetch the message again to repair it.
+        let mut counts = Done::default();
         match fetch_one(store, gmail, token, &id, &thread)? {
-            Fetched::Message(m) => {
-                save(store, gmail, token, account, vec![*m], &mut Done::default())?
-            }
+            Fetched::Message(m) => save(store, gmail, token, account, vec![*m], &mut counts)?,
             // Gmail deleted it during verify: the next sync marks it gone.
             Fetched::Gone(_) => {}
             Fetched::Failed(id, e) => record_failure(store, account, &id, &e)?,
         }
-        report.differences.push(Difference::Content(id));
+        report.differences.push(if counts.fetched == 1 {
+            Difference::Content(id)
+        } else {
+            Difference::Unrepaired(id)
+        });
     }
     store.write(|tx| {
         tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;

@@ -167,7 +167,9 @@ fn a_repair_fetch_that_fails_is_reported_as_not_repaired() {
     let path = store.content_path(&sha_of(&store, &id).unwrap()).unwrap();
     std::fs::write(&path, b"bad").unwrap();
     let at_fake = fake.clone();
-    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || at_fake.fail_next(&[400])));
+    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || {
+        at_fake.fail_next(&[400])
+    }));
 
     let r = verify(&store, &gmail, account, TOKEN).unwrap();
     assert_eq!(r.differences, vec![Difference::Unrepaired(id)]);
