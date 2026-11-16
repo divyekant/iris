@@ -290,6 +290,12 @@ fn a_link_that_shows_a_brand_and_goes_elsewhere_is_a_mark() {
             "{target}"
         );
     }
+    // A shown address across two lines.
+    let lines = html_link("https://login.shop-secure.example.net/v").replace(
+        "https://www.shop.com/account</a>",
+        "https://www.shop.com<br>/account</a>",
+    );
+    assert_eq!(run(&lines, &[], &[], &[]), vec![Mark::Link]);
     // The real target of the shown address.
     assert!(run(&html_link("https://www.shop.com/account"), &[], &[], &[]).is_empty());
     // An authenticated sender of an unrelated domain with a plain redirect:

@@ -1,20 +1,14 @@
 //! The hostile mark `link` (card R5-10): a link that shows one web address
-//! and goes to another owner. `iris-clean` writes each HTML link whose text
-//! is not its target as `[text](target)`, so this module reads the clean
-//! text. Mail text is data: the code only compares host names.
+//! and goes to another owner. `iris-clean` lists each HTML link whose text
+//! is not its target (`Clean::links`), with the href as the HTML gives it.
+//! Mail text is data: the code only compares host names.
 
-use iris_senders::near_copy;
+use iris_clean::Link;
+use iris_senders::{near_copy, registrable};
 use url::{Host, Url};
 
-/// The registrable domain of a host by the public suffix list: two hosts
-/// with the same registrable domain have one owner. A host that is a public
-/// suffix itself is its own owner.
-fn registrable(host: &str) -> String {
-    psl::domain_str(host).unwrap_or(host).to_string()
-}
-
-/// True when the clean text `text` has a deceptive link: the link text is a
-/// web address with the host `S`, and the target is an `http` or `https`
+/// True when the message has a deceptive link: the link text is a web
+/// address with the host `S`, and the target is an `http` or `https`
 /// URL that a browser opens on another owner. Iris reads the target with
 /// the WHATWG URL standard, as a browser does. The link is deceptive in
 /// each of these cases, unless DMARC proves that the sender owns the domain
@@ -32,17 +26,24 @@ fn registrable(host: &str) -> String {
 ///   copy (`login.shop-secure.example.net` for `www.shop.example.com`), or
 ///   a host with the name of `S` in front of another domain
 ///   (`shop.example.com.evil.example.net`).
-pub fn deceptive(text: &str, from_domain: &str, authenticated: bool) -> bool {
+///
+/// `cut` is true when `iris-clean` could not list each link (a very large
+/// body). Iris cannot check the links that went out, so the message counts
+/// as deceptive.
+pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bool) -> bool {
+    if cut {
+        return true;
+    }
     let owner = registrable(&from_domain.to_ascii_lowercase());
-    for (shown, target) in links(text) {
-        let Some(shown) = shown_host(shown) else {
+    for Link { text, href } in links {
+        let Some(shown) = shown_host(text) else {
             continue;
         };
         let theirs = registrable(&shown);
         if authenticated && theirs == owner {
             continue;
         }
-        match target_host(target) {
+        match target_host(href) {
             Target::NotWeb => {}
             Target::Suspect => return true,
             Target::Host(t) if registrable(&t) == theirs => {}
@@ -61,42 +62,22 @@ pub fn deceptive(text: &str, from_domain: &str, authenticated: bool) -> bool {
     false
 }
 
-/// Each `[shown](target)` of the text, in one pass. The shown text has no
-/// `[`, `]` or line end. The target ends at `)` or at white space:
-/// `iris-clean` percent-encodes both in a link target.
-fn links(text: &str) -> impl Iterator<Item = (&str, &str)> {
-    let mut open = None;
-    let mut it = text.char_indices().peekable();
-    std::iter::from_fn(move || {
-        while let Some((i, c)) = it.next() {
-            match c {
-                '[' => open = Some(i + 1),
-                '\n' => open = None,
-                ']' => {
-                    let Some(o) = open.take() else { continue };
-                    if it.peek().map(|&(_, n)| n) != Some('(') {
-                        continue;
-                    }
-                    let from = i + 2;
-                    let end = text[from..]
-                        .find(|c: char| c == ')' || c.is_whitespace())
-                        .map_or(text.len(), |j| from + j);
-                    // A target is not a link text: the scan goes on after
-                    // it, so each character is read once.
-                    while it.next_if(|&(j, _)| j < end).is_some() {}
-                    return Some((&text[o..i], &text[from..end]));
-                }
-                _ => {}
-            }
-        }
-        None
-    })
-}
-
 /// The host of a link text that is a web address: `https://www.x.com/a`,
-/// `www.x.com` or `x.com`. A text with other words is not a web address.
+/// `www.x.com` or `x.com`. A text with other words is not a web address. A
+/// text that starts with `http://`, `https://` or `www.` is one web address
+/// also across lines (`https://bank.com<br>/login`).
 fn shown_host(shown: &str) -> Option<String> {
     let lower = shown.trim().to_lowercase();
+    let lower = if ["http://", "https://", "www."]
+        .iter()
+        .any(|p| lower.starts_with(p))
+    {
+        lower.split_whitespace().collect::<String>()
+    } else if lower.contains(char::is_whitespace) {
+        return None;
+    } else {
+        lower
+    };
     let rest = ["https://", "http://"]
         .iter()
         .find_map(|p| lower.strip_prefix(p))
@@ -129,9 +110,15 @@ enum Target {
     Host(String),
 }
 
-fn target_host(target: &str) -> Target {
-    // The URL standard drops leading control characters and spaces.
-    let target = target.trim_start_matches(|c: char| c <= ' ');
+fn target_host(href: &str) -> Target {
+    // The URL standard drops control characters and spaces at both ends,
+    // and each tab and line end inside.
+    let target: String = href
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let target = target.as_str();
     let lower = target.to_ascii_lowercase();
     let web = lower.starts_with("http:") || lower.starts_with("https:");
     // A user part, a backslash or a percent sign in front of the path
@@ -175,86 +162,96 @@ fn embeds(target: &str, theirs: &str) -> bool {
 mod tests {
     use super::*;
 
-    const SHOP: &str =
-        "[https://www.shop.example.com/account](https://login.shop-secure.example.net/verify?u=1)";
+    /// One link that shows `shown` and goes to `href`.
+    fn one(shown: &str, href: &str, from: &str, authenticated: bool) -> bool {
+        let link = Link {
+            text: shown.into(),
+            href: href.into(),
+        };
+        deceptive(&[link], false, from, authenticated)
+    }
+
+    const SHOWN: &str = "https://www.shop.example.com/account";
+    const NEAR: &str = "https://login.shop-secure.example.net/verify?u=1";
 
     #[test]
     fn a_near_copy_target_is_deceptive_also_from_an_authenticated_sender() {
-        assert!(deceptive(SHOP, "mx.example.org", true));
-        assert!(deceptive(SHOP, "mx.example.org", false));
-        assert!(deceptive(
-            &format!("Hi.\n\nGo to {SHOP} now."),
-            "x.example.org",
+        assert!(one(SHOWN, NEAR, "mx.example.org", true));
+        assert!(one(SHOWN, NEAR, "mx.example.org", false));
+        assert!(one(
+            "paypal.me.uk",
+            "https://paypa1.me.uk/",
+            "paypa1.me.uk",
             true
         ));
     }
 
     #[test]
     fn another_owner_is_deceptive_only_without_dmarc() {
-        let t = "Read [www.news.example.com](https://click.mailer.example.net/r/1)";
-        assert!(deceptive(t, "list.example.org", false));
-        assert!(!deceptive(t, "list.example.org", true));
+        let (s, t) = (
+            "www.news.example.com",
+            "https://click.mailer.example.net/r/1",
+        );
+        assert!(one(s, t, "list.example.org", false));
+        assert!(!one(s, t, "list.example.org", true));
     }
 
     #[test]
     fn the_proven_owner_of_the_shown_domain_can_redirect() {
         // A brand counts clicks on a hyphen domain of its own name.
-        let t = "[shop.example.com](https://click.shop-mail.example.net/x)";
-        assert!(!deceptive(t, "news.shop.example.com", true));
-        assert!(deceptive(t, "news.shop.example.com", false));
-    }
-
-    #[test]
-    fn a_user_part_does_not_hide_the_target() {
-        let t = "[https://www.shop.example.com](https://www.shop.example.com@evil.example.net/)";
-        assert!(deceptive(t, "evil.example.net", false));
+        let (s, t) = ("shop.com", "https://click.shop-mail.net/x");
+        assert!(!one(s, t, "news.shop.com", true));
+        assert!(one(s, t, "news.shop.com", false));
     }
 
     #[test]
     fn the_target_is_the_host_that_a_browser_opens() {
-        // Each target opens evil.example.net, or a host that Iris cannot read.
-        for target in [
+        // Each target opens evil.example.net, or a host that Iris cannot
+        // read, also for a sender that passes DMARC for another domain.
+        for href in [
             "https://evil.example.net\\@shop.example.com/",
             "https://evil%2eexample%2enet/",
-            "HTTPS://EVIL.EXAMPLE.NET./",
-            "https:evil.example.net/x",
+            "https://shop.example.com@evil.example.net/",
+            "https://shop.example.com\t@evil.example.net/",
+            "https://shop.example.com\n@evil.example.net/",
+            "https:\\\\evil.example.net\\@shop.example.com/",
+            "\u{1}https://shop.example.com@evil.example.net/",
+            " https://shop.example.com@evil.example.net/ ",
             "https://192.0.2.7/login",
             "https://0xc0.0.2.7/login",
             "https://[2001:db8::1]/login",
             "https://p\u{430}ypal.example.net/",
         ] {
-            let t = format!("[shop.example.com]({target})");
-            assert!(deceptive(&t, "evil.example.net", false), "{target}");
+            assert!(
+                one("shop.example.com", href, "mx.example.org", true),
+                "{href:?}"
+            );
         }
-        // An IP or an unreadable host is deceptive also from a sender that
-        // passes DMARC for another domain.
-        for target in [
-            "https://192.0.2.7/login",
-            "https://p\u{430}ypal.example.net/",
-            "https://shop.example.com@evil.example.net/",
-            "https://evil.example.net\\@shop.example.com/",
-            "https://evil%2eexample%2enet/",
-            "https:\\\\evil.example.net\\@shop.example.com/",
-            "\u{1}https://shop.example.com@evil.example.net/",
-        ] {
-            let t = format!("[shop.example.com]({target})");
-            assert!(deceptive(&t, "mx.example.org", true), "{target}");
+        // Without DMARC, any other owner is deceptive.
+        for href in ["HTTPS://EVIL.EXAMPLE.NET./", "https:evil.example.net/x"] {
+            assert!(
+                one("shop.example.com", href, "evil.example.net", false),
+                "{href}"
+            );
         }
     }
 
     #[test]
     fn a_shown_host_in_front_of_another_domain_is_deceptive() {
-        for target in [
+        for href in [
             "https://shop.example.com.evil.example.net/",
             "https://shop.evil.example.net/",
             "https://login-shop.evil.example.net/",
         ] {
-            let t = format!("[www.shop.com]({target})");
-            assert!(deceptive(&t, "evil.example.net", true), "{target}");
+            assert!(
+                one("www.shop.com", href, "evil.example.net", true),
+                "{href}"
+            );
         }
         // A longer word that holds the name is another name.
-        assert!(!deceptive(
-            "[shop.com](https://shopping.example.net/)",
+        assert!(!one(
+            "shop.com",
+            "https://shopping.example.net/",
             "example.net",
             true
         ));
@@ -262,70 +259,98 @@ mod tests {
 
     #[test]
     fn two_owners_under_a_public_suffix_are_two_owners() {
-        let t = "[victim.me.uk](https://attacker.me.uk/x)";
-        assert!(deceptive(t, "attacker.me.uk", false));
-        let t = "[www.victim.me.uk](https://login.victim.me.uk/x)";
-        assert!(!deceptive(t, "attacker.me.uk", false));
-        let t = "[victim.github.io](https://attacker.github.io/x)";
-        assert!(deceptive(t, "mx.example.org", false));
+        assert!(one(
+            "victim.me.uk",
+            "https://attacker.me.uk/x",
+            "attacker.me.uk",
+            false
+        ));
+        assert!(!one(
+            "www.victim.me.uk",
+            "https://login.victim.me.uk/x",
+            "a.me.uk",
+            false
+        ));
+        assert!(one(
+            "victim.github.io",
+            "https://attacker.github.io/x",
+            "x.example.org",
+            false
+        ));
     }
 
     #[test]
     fn look_alike_letters_are_deceptive_also_from_an_authenticated_sender() {
-        for t in [
-            "[paypal.example.com](https://xn--pypal-4ve.example.net/)",
-            "[p\u{430}ypal.example.com](https://login.example.net/)",
-            "[P\u{430}YPAL.com](https://xn--pypal-4ve.com/)",
+        for (s, t) in [
+            ("paypal.example.com", "https://xn--pypal-4ve.example.net/"),
+            ("p\u{430}ypal.example.com", "https://login.example.net/"),
+            ("P\u{430}YPAL.com", "https://xn--pypal-4ve.com/"),
         ] {
-            assert!(deceptive(t, "mx.example.org", true), "{t}");
+            assert!(one(s, t, "mx.example.org", true), "{s}");
         }
         // The same owner: an honest link to an IDN domain.
-        let t = "[www.xn--mnchen-3ya.de](https://xn--mnchen-3ya.de/)";
-        assert!(!deceptive(t, "mx.example.org", true));
+        assert!(!one(
+            "www.xn--mnchen-3ya.de",
+            "https://xn--mnchen-3ya.de/",
+            "x.org",
+            true
+        ));
     }
 
     #[test]
-    fn a_tab_in_a_target_cannot_hide_the_host() {
-        // iris-clean percent-encodes white space in a target.
-        let t = "[https://bank.example.com](https://bank.example.com%09@evil.example.net/x)";
-        assert!(deceptive(t, "evil.example.net", true));
+    fn a_shown_address_across_lines_or_long_counts() {
+        assert!(one(
+            "https://bank.example.com\n/login",
+            "https://evil.example.net/",
+            "e.net",
+            false
+        ));
+        assert!(one(
+            "www.bank.example.com\n/login",
+            "https://evil.example.net/",
+            "e.net",
+            false
+        ));
+        let long = format!("https://www.shop.example.com/{}", "a".repeat(2000));
+        assert!(one(
+            &long,
+            "https://evil.example.net/x",
+            "evil.example.net",
+            false
+        ));
     }
 
     #[test]
-    fn a_long_shown_address_counts() {
-        let shown = format!("https://www.shop.example.com/{}", "a".repeat(2000));
-        let t = format!("Go: [{shown}](https://evil.example.net/x)");
-        assert!(deceptive(&t, "evil.example.net", false));
+    fn a_cut_list_is_deceptive() {
+        assert!(deceptive(&[], true, "shop.example.com", true));
+        assert!(!deceptive(&[], false, "shop.example.com", false));
     }
 
     #[test]
     fn honest_links_and_other_texts_are_not_deceptive() {
-        for t in [
-            "[www.shop.example.com](https://shop.example.com/a)",
-            "[https://a.shop.example.com](https://b.shop.example.com/x)",
-            "[Click here](https://evil.example.net/)",
-            "[1.5](https://evil.example.net/)",
-            "[a@shop.example.com](https://evil.example.net/)",
-            "[www.shop.example.com](mailto:a@evil.example.net)",
-            "[www.shop.example.com](javascript:run())",
-            "[www.shop.example.com]\n(https://evil.example.net/)",
-            "[www.shop.\nexample.com](https://evil.example.net/)",
-            "no link here",
-            "](",
-            "[](https://evil.example.net)",
+        for (s, t) in [
+            ("www.shop.example.com", "https://shop.example.com/a"),
+            ("https://a.shop.example.com", "https://b.shop.example.com/x"),
+            ("Click here", "https://evil.example.net/"),
+            ("Visit\nbank.example.com", "https://evil.example.net/"),
+            ("1.5", "https://evil.example.net/"),
+            ("a@shop.example.com", "https://evil.example.net/"),
+            ("www.shop.example.com", "mailto:a@evil.example.net"),
+            ("www.shop.example.com", "javascript:run()"),
+            ("www.shop.example.com", "/relative/path"),
+            ("", "https://evil.example.net"),
         ] {
-            assert!(!deceptive(t, "x.example.org", false), "{t}");
+            assert!(!one(s, t, "x.example.org", false), "{s} {t}");
         }
     }
 
     #[test]
-    fn random_text_does_not_panic_and_stays_linear() {
+    fn random_links_do_not_panic() {
         let pieces = [
             "[",
             "]",
             "(",
             ")",
-            "](",
             "https://",
             "http://",
             "www.",
@@ -336,27 +361,31 @@ mod tests {
             "@",
             ":",
             "/",
+            "\\",
+            "%",
             "\n",
+            "\t",
             " ",
             "é",
             "\u{0}",
             "a",
+            "xn--",
         ];
         let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
-        for _ in 0..2000 {
-            let mut t = String::new();
-            for _ in 0..(x % 64) {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                t.push_str(pieces[(x % pieces.len() as u64) as usize]);
-            }
-            deceptive(&t, "example.org", x.is_multiple_of(2));
+        let mut next = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..3000 {
+            let mut part = || {
+                (0..next(24))
+                    .map(|_| pieces[next(pieces.len())])
+                    .collect::<String>()
+            };
+            let (s, t) = (part(), part());
+            one(&s, &t, "example.org", next(2) == 0);
         }
-        // A long line of link openers ends fast.
-        let long = "[a](".repeat(40_000) + "]( ";
-        let start = std::time::Instant::now();
-        assert!(!deceptive(&long, "example.org", false));
-        assert!(start.elapsed().as_secs() < 5);
     }
 }

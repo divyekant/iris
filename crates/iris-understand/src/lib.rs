@@ -132,6 +132,11 @@ pub struct Text {
     pub cut: bool,
     /// A `text/calendar` part with the method `REQUEST` (from `iris-clean`).
     pub invitation: bool,
+    /// The HTML links whose text is not their target (from `iris-clean`),
+    /// for the mark `link`.
+    pub links: Vec<iris_clean::Link>,
+    /// `iris-clean` could not list each link.
+    pub links_cut: bool,
 }
 
 impl Text {
@@ -152,6 +157,8 @@ impl Text {
             attachment_text,
             cut: c.cut,
             invitation: c.invitation,
+            links: c.links,
+            links_cut: c.links_cut,
         }
     }
 }
@@ -223,7 +230,14 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
             }
         }
     }
-    if !sent && link::deceptive(&text.text, from_domain, dmarc == Some("pass")) {
+    if !sent
+        && link::deceptive(
+            &text.links,
+            text.links_cut,
+            from_domain,
+            dmarc == Some("pass"),
+        )
+    {
         marks.push(Mark::Link);
     }
     if cx.labels.iter().any(|l| l == "SPAM") {
