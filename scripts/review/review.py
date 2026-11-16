@@ -2,6 +2,11 @@
 """Codex review of one pull request, and an optional merge of the exact reviewed head.
 
     python3 scripts/review/review.py --pr <number> [--merge] [--dry-run] [--force]
+    python3 scripts/review/review.py --pre
+
+`--pre` is the pre-review: the same review on HEAD of the branch before the PR is open.
+It posts nothing. It writes .local-ci/pre-review.json, which local CI needs for a large
+branch.
 
 The steps:
  1. Read the PR through the GitHub REST API (cloud sessions block GraphQL).
@@ -12,6 +17,8 @@ The steps:
     shell environment, and a JSON schema for the result.
  5a. A change to a spec file (review.spec_paths) adds the spec rules of spec.md.
  6. Decide the verdict in Python: any P0, P1 or P2 finding blocks. P3 is advice.
+    After the first round, a P2 finding on code that did not change since the last
+    reviewed head does not block. It goes to a follow-up card.
  7. Read the PR again. If the head, the base branch or the body changed, post nothing.
  8. Post one comment with the verdict and the findings.
  9. With --merge and a clean verdict: mark the PR ready and merge the reviewed head SHA.
@@ -43,7 +50,12 @@ SEVERITIES = ("P0", "P1", "P2", "P3")
 WRITERS = ("OWNER", "MEMBER", "COLLABORATOR")
 DEFAULTS = {"model": "gpt-6-sol", "effort": "medium", "merge_method": "squash",
             "trusted_authors": [], "codex_timeout_minutes": 30, "check_wait_seconds": 300,
-            "max_rounds": 5, "spec_paths": ["docs/spec/**", "docs/specs/**"]}
+            "max_rounds": 5, "spec_paths": ["docs/spec/**", "docs/specs/**"],
+            # The first round and the pre-review use first_effort; later rounds use effort.
+            "first_effort": "high"}
+FIX_MARKER = "<!-- starter-review-fix-findings "
+PRE_BODY = ("(This is a pre-review. The PR is not open yet and has no description. Do not report a "
+            "finding about the description or the release notes.)")
 # The reviewer's shell gets this PATH and nothing else from the host. Without a PATH,
 # the Linux sandbox cannot find bwrap and every command of the reviewer fails.
 SANDBOX_PATH = 'shell_environment_policy.set={PATH="/usr/local/bin:/usr/bin:/bin"}'
@@ -139,6 +151,38 @@ def blocked_rounds(comments: Sequence[Dict[str, Any]]) -> int:
     return sum(1 for c in comments if re.search(re.escape(MARKER) + r" .*verdict=blocked -->", c.get("body") or ""))
 
 
+def last_review(comments: Sequence[Dict[str, Any]], head: str) -> Optional[Dict[str, Any]]:
+    """The newest review comment of another head. A second review of the same head (--force)
+    must not see its own head as the last reviewed head: no line changed since then."""
+    for comment in reversed(list(comments)):
+        found = re.search(re.escape(MARKER) + r" head=(\w+) ", comment.get("body") or "")
+        if found and found.group(1) != head:
+            return {"head": found.group(1), "body": comment["body"]}
+    return None
+
+
+def changed_since(root: Path, last: Optional[str], head: str) -> Callable[[Dict[str, Any]], bool]:
+    """A test for one finding: is it on code that changed since the last reviewed head?
+    With no last head, or a last head that is not an ancestor (a rebase), all code is new."""
+    if not last or subprocess.run(["git", "merge-base", "--is-ancestor", last, head], cwd=root,
+                                  capture_output=True).returncode != 0:
+        return lambda finding: True
+
+    def changed(finding: Dict[str, Any]) -> bool:
+        # shortcut: the cited line must be in a diff hunk (3 lines of context), upgrade if
+        # the reviewer often cites a line far from the changed code.
+        if subprocess.run(["git", "cat-file", "-e", f"{head}:{finding['path']}"], cwd=root,
+                          capture_output=True).returncode != 0:
+            return True  # not a file of the head (for example the PR description): keep it blocking
+        diff = git(root, "diff", last, head, "--", finding["path"], check=False)
+        hunks = re.findall(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.MULTILINE)
+        line = finding.get("line") or 0
+        if not line or not hunks:
+            return bool(diff)  # no cited line, or a change with no lines (a mode change, a binary file)
+        return any(int(start) <= line < int(start) + int(count or 1) for start, count in hunks)
+    return changed
+
+
 def spec_files(files: Sequence[str], patterns: Sequence[str]) -> List[str]:
     return [f for f in files if any(fnmatch.fnmatchcase(f, p) for p in patterns)]
 
@@ -205,9 +249,15 @@ def check_result(result: Any, number: int, head: str) -> Dict[str, Any]:
     return result
 
 
-def decide(result: Dict[str, Any]) -> str:
-    blocking = [f for f in result["findings"] if f["severity"] in BLOCKING]
-    return "blocked" if blocking or result["verdict"] == "blocked" else "clean"
+def decide(result: Dict[str, Any], changed: Callable[[Dict[str, Any]], bool] = lambda finding: True) -> str:
+    """Marks each P2 finding on unchanged code as `older` (it does not block), then decides."""
+    for finding in result["findings"]:
+        finding["older"] = finding["severity"] == "P2" and not changed(finding)
+    serious = [f for f in result["findings"] if f["severity"] in BLOCKING]
+    if any(not f["older"] for f in serious):
+        return "blocked"
+    # A blocked verdict with no finding to explain it stays blocked.
+    return "blocked" if result["verdict"] == "blocked" and not serious else "clean"
 
 
 def run_codex(root: Path, config: Dict[str, Any], pr: Dict[str, Any], head: str, merge_base: str,
@@ -241,20 +291,28 @@ def run_codex(root: Path, config: Dict[str, Any], pr: Dict[str, Any], head: str,
         shutil.rmtree(work, ignore_errors=True)
 
 
-def render_comment(result: Dict[str, Any], verdict: str, mark: str) -> str:
+def render_comment(result: Dict[str, Any], verdict: str, mark: str, repair: bool = False) -> str:
     lines = [mark, f"## Codex review: {verdict}", "", result.get("summary", "").strip(), ""]
     findings = sorted(result["findings"], key=lambda f: f["severity"])
     if findings:
         lines += ["| Severity | Where | Finding | Requested fix |", "| --- | --- | --- | --- |"]
         for f in findings:
             where = f"`{f['path']}:{f.get('line', 0)}`"
-            cells = [f["severity"], where, f"**{f['title']}** {f['rationale']}", f["requested_fix"]]
+            severity = f["severity"] + (" (older code)" if f.get("older") else "")
+            cells = [severity, where, f"**{f['title']}** {f['rationale']}", f["requested_fix"]]
             lines.append("| " + " | ".join(c.replace("|", "\\|").replace("\n", " ") for c in cells) + " |")
         lines.append("")
     risks = result.get("residual_risks") or []
     if risks:
         lines += ["Residual risks:", *[f"- {r}" for r in risks], ""]
     lines.append("P0, P1 and P2 findings block the merge. P3 findings are advice.")
+    if any(f.get("older") for f in findings):
+        lines.append("A P2 finding on older code (code that did not change since the last review) does "
+                     "not block. Put these findings on one follow-up card.")
+    if repair:
+        lines.append("Repair signal: this round and the round before found a defect in the fix code. "
+                     "Do not patch one more case. Name the invariant and redesign the part "
+                     "(AGENTS.md, \"Fix the class\").")
     return "\n".join(lines)
 
 
@@ -328,9 +386,16 @@ def review(number: int, merge: bool, dry_run: bool, force: bool, api: Api = gh_a
                        "Run with --force only after the user says to continue.")
         changed = git(root, "diff", "--name-only", merge_base, head).splitlines()
         specs = spec_files(changed, config["spec_paths"])
+        last = last_review(comments, head)
+        if not comments:
+            config = {**config, "effort": config["first_effort"]}
         result = run_codex(root, config, pr, head, merge_base, runner, specs)
-        verdict = decide(result)
-        text = render_comment(result, verdict, marker(head, merge_base, body, verdict))
+        verdict = decide(result, changed_since(root, last and last["head"], head))
+        # Defects in the code that changed since the last review: the fix of the round before.
+        fixes = sum(1 for f in result["findings"] if last and f["severity"] in BLOCKING and not f["older"])
+        repair = bool(fixes and last and re.search(re.escape(FIX_MARKER) + r"[1-9]", last["body"]))
+        text = render_comment(result, verdict, marker(head, merge_base, body, verdict), repair)
+        text += f"\n{FIX_MARKER}{fixes} -->"
         print(text, flush=True)
         live = api("GET", f"repos/{slug}/pulls/{number}")
         if live["head"]["sha"] != head or body_hash(live.get("body")) != body or live["base"]["ref"] != config["base"]:
@@ -359,16 +424,43 @@ def review(number: int, merge: bool, dry_run: bool, force: bool, api: Api = gh_a
     return 0
 
 
+def pre_review(runner: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> int:
+    """The review of HEAD before the PR is open. Posts nothing. Writes the record for local CI."""
+    root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    config = load_config(root)
+    config["effort"] = config["first_effort"]
+    if git(root, "status", "--porcelain"):
+        raise Stop("the working tree has changes; commit them first, the pre-review reads HEAD")
+    head = git(root, "rev-parse", "HEAD")
+    git(root, "fetch", "-q", "origin", config["base"])
+    merge_base = git(root, "merge-base", f"origin/{config['base']}", head)
+    changed = git(root, "diff", "--name-only", merge_base, head).splitlines()
+    # The schema needs a PR number of 1 or more. The PR does not exist yet.
+    pr = {"number": 1, "title": f"pre-review of the branch {git(root, 'rev-parse', '--abbrev-ref', 'HEAD')}",
+          "body": PRE_BODY}
+    result = run_codex(root, config, pr, head, merge_base, runner, spec_files(changed, config["spec_paths"]))
+    verdict = decide(result)
+    print(render_comment(result, verdict, f"pre-review of {head}"), flush=True)
+    (root / ".local-ci" / "pre-review.json").write_text(
+        json.dumps({"head": head, "verdict": verdict, "findings": len(result["findings"])}), encoding="utf-8")
+    print("review: pre-review recorded. Fix each P0, P1 and P2 finding, then run scripts/local-ci/run.sh.",
+          flush=True)
+    return 0 if verdict == "clean" else 2
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Codex review of one PR, then an optional merge.")
-    parser.add_argument("--pr", type=int, required=True, help="the PR number")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--pr", type=int, help="the PR number")
+    target.add_argument("--pre", action="store_true",
+                        help="pre-review: review HEAD before the PR is open; post nothing")
     parser.add_argument("--merge", action="store_true", help="merge the reviewed head if the review is clean")
     parser.add_argument("--dry-run", action="store_true", help="print the review; post and merge nothing")
     parser.add_argument("--force", action="store_true",
                         help="review again when a review of the same inputs exists, or past review.max_rounds")
     args = parser.parse_args(argv)
     try:
-        return review(args.pr, args.merge, args.dry_run, args.force)
+        return pre_review() if args.pre else review(args.pr, args.merge, args.dry_run, args.force)
     except Stop as reason:
         print(f"review: stopped: {reason}", file=sys.stderr)
         return 2

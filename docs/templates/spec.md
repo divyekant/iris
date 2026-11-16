@@ -21,7 +21,16 @@
 
 ## Options not chosen
 
-<!-- Each option that you did not choose, and the reason, in one line each. -->
+<!-- Each option that you did not choose, and the reason, in one line each. For a
+parser, a protocol client, a format converter or security code: name the public
+libraries that you checked, and why the design uses one or writes its own code. -->
+
+## Failure list
+
+<!-- For input that the product does not control, for concurrency and for crash
+recovery: each input class and each failure mode, with the result that the design
+gives and the test that proves it. State the supported inputs. State the one safe
+result for all other input (fail closed). Write "None" if the subject has none. -->
 
 ## Impact
 
@@ -82,4 +91,5 @@ change needs no rollout step. -->
 - [ ] The spec addresses the hardest problem of the change.
 - [ ] Each acceptance criterion can go red.
 - [ ] The assumptions do not contradict each other.
+- [ ] The failure list names the supported inputs and the safe result for all other input.
 -->

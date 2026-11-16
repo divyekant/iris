@@ -2,7 +2,7 @@
 
 These rules apply to every agent that works in this repository (Claude, Codex, and
 others). `CLAUDE.md` imports this file. The process comes from the projectstarter
-kit (projectstarter 0.5.0). Product rules are at the end, in [Product rules](#product-rules).
+kit (projectstarter 0.6.0). Product rules are at the end, in [Product rules](#product-rules).
 
 Write all documentation, PR text and code comments as `docs/writing-style.md` says
 (Simplified Technical English).
@@ -49,12 +49,24 @@ To add a tool, a test command or a new folder, change `starter.json`.
      the design.
    - Give each card its own spec PR. If a spec PR is larger than about 1,500
      changed lines (lockfiles excluded), split it.
+   - For input that the product does not control, for concurrency and for crash
+     recovery, write the failure list: the supported inputs, each failure mode,
+     and one safe result for all other input.
+
+   Keep a code PR to one subsystem and to fewer than about 800 changed lines
+   (tests and lockfiles excluded). If the card needs more, split the card first.
 2. Start the branch from `develop`. If the branch has no commits of its own:
    `git fetch origin develop` and `git checkout -B <branch> origin/develop`.
 3. Write a test that fails without the change. Then write the change. If no test
    can apply (copy, docs), say why in the PR. If the change has a spec, do the
    spec checks of `docs/PLANNING.md` first. If the code goes another way than
    the spec (drift), fix the spec in the same PR.
+   - Before you write a parser, a protocol client, a format converter or
+     security code, look for a maintained public library. Write your own code
+     only if no library fits, or if a library breaks a product rule. Name the
+     libraries that you checked, and the reason for the choice, in the PR.
+   - Give each parser of input that the product does not control a property
+     test or a fuzz test. One test for each example input is not enough.
 4. Commit in logical parts. Put a dependency change in its own commit.
    Self-review before the PR:
    - For each new test: what would make it go red? If nothing in the change can,
@@ -64,6 +76,12 @@ To add a tool, a test command or a new folder, change `starter.json`.
    - For each claim in the PR, the spec or the docs: does the same diff refute
      it?
    - When you clear a risk, write the case that you checked, not "checked".
+
+   Pre-review: if the branch adds more than `review.pre_review_lines` lines
+   (default 300), run `python3 scripts/review/review.py --pre`. It runs the
+   reviewer on the branch and posts nothing. Fix each P0, P1 and P2 finding
+   with the steps of "Fix the class" below. Local CI refuses the proof commit
+   of such a branch with no pre-review.
 5. Run local CI: `scripts/local-ci/run.sh`. It tests each area that the branch
    changes and pushes an empty proof commit. If it fails, fix the cause, commit
    and run it again. Do not open the PR before the proof commit is pushed.
@@ -74,20 +92,19 @@ To add a tool, a test command or a new folder, change `starter.json`.
 7. Run the review loop:
    `python3 scripts/review/review.py --pr <number> --merge`.
    - Exit 0: the review is clean and the PR is merged. The work is done.
-   - Exit 2, review blocked: fix each P0, P1 and P2 finding. For a code finding,
-     first commit a test that fails on it, then the fix. Run local CI, then run
-     the review again.
+   - Exit 2, review blocked: fix each P0, P1 and P2 finding with the steps of
+     "Fix the class" below. Run local CI, then run the review again.
    - Exit 2, stopped for another reason: act on the reason, then run the review
      again.
    - Exit 1: an error (for example, Codex is not signed in or is out of quota).
      Leave the PR as a draft and tell the user.
-8. Stop the loop and tell the user in these cases:
-   - Two rounds in a row find a defect in a fix that you made for the round
-     before (a repair stop). Name the subsystem and what the fixes get wrong.
-     Do not push one more fix.
-   - Five review rounds end with no clean review. `review.py` stops by itself
-     after `review.max_rounds` blocked rounds (default 5). Use `--force` only
-     after the user says to continue.
+8. Stop the loop and tell the user when five review rounds end with no clean
+   review. `review.py` stops by itself after `review.max_rounds` blocked rounds
+   (default 5). Use `--force` only after the user says to continue.
+
+   After the first round, a P2 finding on code that did not change since the
+   last reviewed head does not block. The review comment marks it
+   `P2 (older code)`. Put these findings on one follow-up card.
 
    A PR that changes a file in `review.spec_paths` (default `docs/spec/**` and
    `docs/specs/**`) gets the spec rules of `scripts/review/spec.md`. Under these
@@ -97,6 +114,24 @@ To add a tool, a test command or a new folder, change `starter.json`.
 
 P3 findings are advice. They do not block the merge. Add a board card for a P3
 finding only when the follow-up is worth tracking.
+
+### Fix the class
+
+A finding names one input that fails. Do not patch that input. Do these steps:
+
+1. Name the invariant that the finding breaks, in one sentence. Example: "The
+   kind of a sender always agrees with the evidence in the store."
+2. Find each path that can break the same invariant. Use `grep` on the callers.
+   The path that the finding names is only one of them.
+3. Commit a test of the invariant that fails now. Use a property test where
+   possible, not one more example input.
+4. Change the code so that the invariant holds by construction. Do not add one
+   more special case.
+5. Write the invariant, the paths and the test in the message of the fix commit.
+
+If a second finding breaks the same invariant, or `review.py` prints a repair
+signal (two rounds in a row found a defect in the fix code), the last fix was a
+patch. Redesign that part. Do not patch one more case.
 
 ## Release notes
 

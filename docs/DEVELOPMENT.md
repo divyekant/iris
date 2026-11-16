@@ -122,9 +122,20 @@ posts the result on the PR. If the result is clean, it merges the PR. Read
 `AGENTS.md`, "Workflow for one change", for what to do with each result.
 Add review rules of the product to `scripts/review/rules.md`.
 
-Two settings in `review` of `starter.json` control the loop:
+Before the PR is open, `python3 scripts/review/review.py --pre` runs the same
+reviewer on HEAD of the branch. It posts nothing and writes
+`.local-ci/pre-review.json`. Local CI refuses the proof commit of a large branch
+that has no pre-review.
+
+After the first round, a P2 finding on code that did not change since the last
+reviewed head does not block the merge. Two rounds in a row with a defect in the
+fix code give a repair signal in the review comment.
+
+These settings in `review` of `starter.json` control the loop:
 
 | Setting | Default | Effect |
 |---|---|---|
+| `first_effort` | `"high"` | The Codex effort of the pre-review and of the first round. Later rounds use `effort`. |
+| `pre_review_lines` | `300` | A branch that adds more lines needs a pre-review before local CI writes the proof. |
 | `max_rounds` | `5` | The command stops after this number of blocked rounds. `--force` continues. |
 | `spec_paths` | `["docs/spec/**", "docs/specs/**"]` | A PR that changes a matching file gets the spec rules of `scripts/review/spec.md`. |
