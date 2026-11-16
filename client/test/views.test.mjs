@@ -484,14 +484,6 @@ test("a mail that Iris has not read yet keeps the download of the original", asy
   assert.doesNotMatch(html, /<pre/);
 });
 
-test("the brief shows an account that needs sign-in, with the step to fix it", async () => {
-  const account = { ...fx.status.accounts[0], state: "needs_sign_in" };
-  const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: { ...fx.status, accounts: [account] }, now: NOW, poll: 0 }));
-  assert.match(t, new RegExp(`Google stopped the sign-in of ${account.address.replace(".", "\\.")}\\. Iris copies no new mail from this account until you sign in again\\.`));
-  assert.match(t, /iris account add client\.json/);
-  const fine = text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: fx.status, now: NOW, poll: 0 }));
-  assert.doesNotMatch(fine, /stopped the sign-in/);
-});
 
 test("a sign-in that does not reach the engine keeps the code for a reload", async () => {
   const { signIn, SIGN_IN_FAILED } = await load("/src/api.ts");
@@ -518,13 +510,6 @@ test("a sign-in that does not reach the engine keeps the code for a reload", asy
   }
 });
 
-test("the setup flow shows an account that needs sign-in, with the step to fix it", async () => {
-  const account = { ...fx.status.accounts[0], state: "needs_sign_in", mirror_ready_at: null, sync: { kind: "first", step: 2 } };
-  const status = { accounts: [account], messages: { total: 84212, fetched: 1000, understood: 0, gone: 0 } };
-  const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
-  assert.match(t, /Google stopped the sign-in of/);
-  assert.match(t, /iris account add client\.json/);
-});
 
 test("a sign-in address with a bad escape gives the sign-in error, not a crash", async () => {
   const { signIn, SIGN_IN_FAILED } = await load("/src/api.ts");
@@ -552,6 +537,9 @@ test("one access state holds the sign-in and engine problem of every call, and a
   const saved = globalThis.fetch;
   const ok = async () => new Response(JSON.stringify({ ok: 1 }));
   try {
+    // Start from a good sign-in: an earlier test leaves a refused one.
+    globalThis.fetch = async () => new Response(JSON.stringify({ token: "t-0" }));
+    await signIn({ hash: "#code=z", pathname: "/", search: "" }, undefined, undefined);
     // A token that the engine does not know (for example after a restart of iris serve).
     globalThis.fetch = async () => new Response(JSON.stringify({ error: "no token" }), { status: 401 });
     await assert.rejects(get("status"), { message: SIGN_IN });
@@ -581,5 +569,34 @@ test("one access state holds the sign-in and engine problem of every call, and a
   } finally {
     globalThis.fetch = saved;
     access.problem = "";
+  }
+});
+
+test("each status answer sets the accounts that need sign-in, and the app shows them above every view", async () => {
+  const { get } = await load("/src/api.ts");
+  const { access } = await load("/src/access.svelte.ts");
+  const saved = globalThis.fetch;
+  const account = { ...fx.status.accounts[0], state: "needs_sign_in" };
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [account] }));
+    await get("status");
+    assert.deepEqual(access.locked, [account.address]);
+    // The views start API calls while they render. Keep them pending.
+    globalThis.fetch = () => new Promise(() => {});
+    for (const hash of ["", "#/setup", "#/brief", "#/mail/m-55210"]) {
+      globalThis.location = { hash, pathname: "/", search: "" };
+      const t = text(await render("/src/App.svelte"));
+      assert.match(t, new RegExp(`Google stopped the sign-in of ${account.address.replace(".", "\\.")}\\. Iris copies no new mail from this account until you sign in again\\.`));
+      assert.match(t, /iris account add client\.json/);
+    }
+    globalThis.fetch = async () => new Response(JSON.stringify(fx.status));
+    await get("status");
+    assert.deepEqual(access.locked, []);
+    globalThis.fetch = () => new Promise(() => {});
+    assert.doesNotMatch(text(await render("/src/App.svelte")), /stopped the sign-in/);
+  } finally {
+    globalThis.fetch = saved;
+    delete globalThis.location;
+    access.locked = [];
   }
 });

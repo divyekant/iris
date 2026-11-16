@@ -14,12 +14,17 @@ test("the app shows the Iris name and the views", async () => {
 test("the app shows the access problem above each view", async () => {
   const { load } = await import("./render.mjs");
   const { access } = await load("/src/access.svelte.ts");
+  // The views start API calls while they render. Keep them pending, so they do not change the state.
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => new Promise(() => {});
   access.problem = "Open the sign-in address that iris serve printed.";
   try {
     const html = await render("/src/App.svelte");
     assert.match(html, /<p[^>]*class="problem[^"]*"[^>]*role="alert"[^>]*>Open the sign-in address that iris serve printed\.<\/p>|<p[^>]*role="alert"[^>]*class="problem[^"]*"[^>]*>Open the sign-in address/);
+    access.problem = "";
+    assert.doesNotMatch(await render("/src/App.svelte"), /class="problem/);
   } finally {
+    globalThis.fetch = saved;
     access.problem = "";
   }
-  assert.doesNotMatch(await render("/src/App.svelte"), /class="problem/);
 });
