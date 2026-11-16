@@ -21,14 +21,19 @@ const RECORD_WORDS: [&str; 8] = [
 ];
 
 /// The items of the first rule that matches, or `None` if no rule matches
-/// and the message goes to the model. Hostile mail never comes here.
+/// and the message goes to the model. Hostile mail (a hostile mark or a
+/// `hostile` sender) matches the hostile rule: no item and no model call.
+///
+/// The quote of a rule item is the line that the rule matched: the subject
+/// for a list and an invitation (`(no subject)` if it is empty), the code
+/// line for a code (spec 1 section 7.5).
 pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
+    if cx.kind == Kind::Hostile || !a.marks.is_empty() {
+        return Some(Vec::new());
+    }
     let subject = a.text.subject.as_str();
-    // The quote of a rule is words of the message: the subject, else the
-    // first line of text, else the From address.
-    // A rule item needs a quote: with none, the message goes to the model.
-    let quote = quote(a);
-    if a.text.invitation && cx.kind != Kind::SelfOwner && !quote.is_empty() {
+    let quote = or_none(subject);
+    if a.text.invitation && cx.kind != Kind::SelfOwner {
         let owner = json!({ "kind": "self" });
         let item = json!({
             "form": "commitment",
@@ -63,10 +68,7 @@ pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
             });
             return Some(vec![Draft::rule(item, "code", line)]);
         }
-        if (a.head.list_id.is_some() || a.head.list_unsubscribe)
-            && !looks_like_record(a)
-            && !quote.is_empty()
-        {
+        if (a.head.list_id.is_some() || a.head.list_unsubscribe) && !looks_like_record(a) {
             let mut item = json!({
                 "form": "feed",
                 "status": feed_status(cx),
@@ -83,18 +85,7 @@ pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     None
 }
 
-/// The quote of a rule item: words that occur in the message.
-fn quote(a: &Analysis) -> &str {
-    [a.text.subject.as_str()]
-        .into_iter()
-        .chain(a.text.text.lines())
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .or(a.head.from_addr.as_deref())
-        .unwrap_or("")
-}
-
-/// A title for an empty subject. A title is not a quote.
+/// The subject, or `(no subject)` if it is empty.
 fn or_none(s: &str) -> &str {
     if s.trim().is_empty() {
         "(no subject)"
@@ -109,26 +100,30 @@ fn looks_like_record(a: &Analysis) -> bool {
     RECORD_WORDS.iter().any(|w| hay.contains(w))
 }
 
-/// A code of 4 to 8 digits on a line with a code word, or on the next line
-/// with text. Gives the code and the line that has the code.
+/// A code of 4 to 8 digits on a line with a code word. Else, a line that
+/// is only such a code, right after a line with a code word (a code on its
+/// own line). Gives the code and the line that has the code.
 fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
     // Empty lines do not count: HTML paragraphs give empty lines between lines.
     let lines: Vec<&str> = std::iter::once(subject)
         .chain(text.lines())
-        .filter(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
         .collect();
-    for (i, line) in lines.iter().enumerate() {
-        let low = line.to_lowercase();
-        if !CODE_WORDS.iter().any(|w| has_word(&low, w)) {
-            continue;
-        }
-        for l in lines[i..].iter().take(2) {
-            if let Some(code) = digits(l) {
-                return Some((code, l.trim()));
-            }
-        }
-    }
-    None
+    let cue = |l: &str| {
+        let low = l.to_lowercase();
+        CODE_WORDS.iter().any(|w| has_word(&low, w))
+    };
+    let same_line = lines
+        .iter()
+        .filter(|l| cue(l))
+        .find_map(|l| Some((digits(l)?, *l)));
+    same_line.or_else(|| {
+        lines.windows(2).find_map(|w| {
+            let code = digits(w[1])?;
+            (cue(w[0]) && w[1] == code).then_some((code, w[1]))
+        })
+    })
 }
 
 /// True if `w` is in `hay` as a word: no letter or digit next to it, so

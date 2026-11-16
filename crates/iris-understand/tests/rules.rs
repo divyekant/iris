@@ -53,7 +53,7 @@ fn one(raw: &str, kind: Kind, labels: &[&str]) -> Draft {
     let d = d.remove(0);
     assert_eq!(validate(&finished(&d)), Ok(()), "{:?}", d.item);
     assert!(
-        !d.quote.is_empty() && raw.contains(&d.quote),
+        d.quote == "(no subject)" || raw.contains(&d.quote),
         "{:?}",
         d.quote
     );
@@ -163,17 +163,40 @@ fn a_calendar_request_is_an_invitation() {
 }
 
 #[test]
-fn a_rule_quote_is_words_of_the_message() {
-    // No subject: the quote is the first line of text, not "(no subject)".
+fn a_rule_quote_is_the_matched_line() {
+    // No subject: the quote and the title say "(no subject)" (spec 1 section 7.5).
     let raw = INVITE.replace("Subject: Planning\n", "");
     let d = one(&raw, Kind::Person, &[]);
     assert_eq!(d.item["title"], "Invitation: (no subject)");
-    assert_eq!(d.quote, "Join us.");
-    // No subject and no text: the quote is the From address.
+    assert_eq!(d.quote, "(no subject)");
     let bare = "From: news@weekly.example\nList-Id: <w.example>\n\n";
-    assert_eq!(one(bare, Kind::Service, &[]).quote, "news@weekly.example");
-    // No words at all: no rule item, the message goes to the model.
-    assert!(drafts("List-Id: <w.example>\n\n", Kind::Service, &[]).is_none());
+    assert_eq!(one(bare, Kind::Service, &[]).quote, "(no subject)");
+}
+
+#[test]
+fn hostile_mail_matches_the_hostile_rule() {
+    // A hostile mark (the SPAM label) or a hostile sender: no item, and no
+    // model call (Some, not None).
+    for (kind, labels) in [(Kind::Person, &["SPAM"][..]), (Kind::Hostile, &[][..])] {
+        assert_eq!(drafts(INVITE, kind, labels).map(|d| d.len()), Some(0));
+        assert_eq!(drafts(LIST, kind, labels).map(|d| d.len()), Some(0));
+    }
+}
+
+#[test]
+fn a_code_on_the_cue_line_wins_over_a_number_on_the_next_line() {
+    let raw = "From: Bank <no-reply@bank.example>
+Subject: Your verification code
+
+Expires in 2026
+Code: 7731
+";
+    let d = one(raw, Kind::Service, &[]);
+    assert_eq!(d.item["code"], "7731");
+    assert_eq!(d.quote, "Code: 7731");
+    // A number after a cue line counts only on a line of its own.
+    let date = "From: Bank <no-reply@bank.example>\nSubject: Your code\n\nExpires in 2026\n";
+    assert!(drafts(date, Kind::Service, &[]).is_none());
 }
 
 #[test]
@@ -249,7 +272,7 @@ fn rule_items_hold_for_generated_messages() {
         for d in ds {
             assert_eq!(validate(&finished(&d)), Ok(()), "{raw:?} {:?}", d.item);
             assert!(
-                !d.quote.is_empty() && raw.contains(&d.quote),
+                d.quote == "(no subject)" || raw.contains(&d.quote),
                 "{raw:?} {:?}",
                 d.quote
             );
