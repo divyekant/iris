@@ -518,7 +518,7 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                         } else {
                             sql(
                                 &s,
-                                "INSERT INTO message_label(message_id, label_id) VALUES (?1, ?2)",
+                                "INSERT OR FAIL INTO message_label(message_id, label_id) VALUES (?1, ?2)",
                                 [id, l as i64 + 1],
                             );
                             m.labels.push(name);
@@ -533,7 +533,7 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                         let v = if m.hostile { Some("[\"spoof\"]") } else { None };
                         sql(
                             &s,
-                            "UPDATE message SET hostile = ?2 WHERE id = ?1",
+                            "UPDATE OR ROLLBACK message SET hostile = ?2 WHERE id = ?1",
                             rusqlite::params![id, v],
                         );
                         marked.push(id);
@@ -569,14 +569,12 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                             Some(*rng.pick(&KIND_NAMES))
                         };
                         match (old, new) {
-                            (Some(_), Some(n)) => sql(
+                            // An upsert, as the sender axis writes: its conflict
+                            // clause also applies to the statements of the triggers.
+                            (_, Some(n)) => sql(
                                 &s,
-                                "UPDATE sender SET kind = ?2 WHERE address = ?1",
-                                [addr, n],
-                            ),
-                            (None, Some(n)) => sql(
-                                &s,
-                                "INSERT INTO sender(address, kind) VALUES (?1, ?2)",
+                                "INSERT INTO sender(address, kind) VALUES (?1, ?2)
+                                 ON CONFLICT(address) DO UPDATE SET kind = excluded.kind",
                                 [addr, n],
                             ),
                             (Some(_), None) => {
