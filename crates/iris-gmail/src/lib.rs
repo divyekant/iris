@@ -55,6 +55,7 @@ mod cost {
     pub const MESSAGES_SEND: u32 = 100;
     pub const MESSAGES_BATCH_MODIFY: u32 = 50;
     pub const MESSAGES_TRASH: u32 = 5;
+    pub const LABELS_CREATE: u32 = 5;
 }
 
 /// The most message IDs in one `messages.batchModify` call (Gmail limit).
@@ -111,7 +112,8 @@ pub enum Error {
 }
 
 impl Error {
-    /// For a write call (`messages.send`, `batchModify`, `trash`): true if
+    /// For a write call (`messages.send`, `batchModify`, `trash`,
+    /// `labels.create`): true if
     /// Gmail can have done the call (spec 2 section 7.2). A timeout, a lost
     /// connection and HTTP 5xx give an unknown result.
     pub fn write_result_unknown(&self) -> bool {
@@ -670,6 +672,24 @@ impl Gmail {
         read_all(response)
             .and_then(|b| parse(&b))
             .map_err(|e| Error::Transport(format!("answer of an accepted trash: {e}")))
+    }
+
+    /// `users.labels.create` of a user label with the name `name`. A write
+    /// call, as [`Gmail::send`]. Gmail gives HTTP 409 if a label with the
+    /// name exists.
+    pub fn create_label(&self, token: &str, name: &str) -> Result<Label> {
+        let body = serde_json::json!({ "name": name }).to_string();
+        let response = self.call(
+            token,
+            Method::Post(body.as_bytes()),
+            "labels",
+            &[],
+            cost::LABELS_CREATE,
+        )?;
+        // Gmail accepted the call, so a bad answer leaves the result unknown.
+        read_all(response)
+            .and_then(|b| parse(&b))
+            .map_err(|e| Error::Transport(format!("answer of an accepted label create: {e}")))
     }
 
     fn json<T: DeserializeOwned>(

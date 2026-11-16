@@ -7,7 +7,7 @@
 //! Supported: `users.getProfile`, `users.labels.list`, `users.labels.get`,
 //! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, no `q`),
 //! `users.messages.get` (`raw`, `metadata`, `minimal`), `users.messages.send`,
-//! `users.messages.batchModify`, `users.messages.trash` and
+//! `users.messages.batchModify`, `users.messages.trash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
 //! of the real API. The fake returns 400 for `format=full` and for an absent
 //! format, because the real default is `full` and the fake does not build it.
@@ -459,7 +459,10 @@ type Shared = Arc<Mutex<Store>>;
 fn router(store: Shared) -> Router {
     Router::new()
         .route("/gmail/v1/users/{user}/profile", get(profile))
-        .route("/gmail/v1/users/{user}/labels", get(labels))
+        .route(
+            "/gmail/v1/users/{user}/labels",
+            get(labels).post(create_label),
+        )
         .route("/gmail/v1/users/{user}/labels/{id}", get(label))
         .route("/gmail/v1/users/{user}/messages", get(list))
         .route("/gmail/v1/users/{user}/messages/send", post(send))
@@ -506,6 +509,7 @@ fn error(code: StatusCode, message: &str) -> Response {
         401 => ("UNAUTHENTICATED", "authError"),
         403 | 429 => ("RESOURCE_EXHAUSTED", "rateLimitExceeded"),
         404 => ("NOT_FOUND", "notFound"),
+        409 => ("ALREADY_EXISTS", "conflict"),
         _ => ("UNAVAILABLE", "backendError"),
     };
     let body = json!({ "error": {
@@ -635,6 +639,45 @@ async fn labels(State(s): State<Shared>, Path(user): Path<String>, h: HeaderMap)
     let s = s.lock().unwrap();
     let labels: Vec<Value> = s.labels.iter().map(|l| s.label_json(l)).collect();
     Json(json!({ "labels": labels })).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateLabelBody {
+    name: String,
+}
+
+/// `labels.create`. As Gmail, a name that a label has already, with no
+/// regard to case, gives HTTP 409.
+async fn create_label(
+    State(s): State<Shared>,
+    Path(user): Path<String>,
+    h: HeaderMap,
+    body: Result<Json<CreateLabelBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
+    };
+    let mut s = s.lock().unwrap();
+    let name = body.name.to_lowercase();
+    if s.labels
+        .iter()
+        .any(|l| l.name.to_lowercase() == name || l.id.to_lowercase() == name)
+    {
+        return error(StatusCode::CONFLICT, "Label name exists or conflicts");
+    }
+    let id = format!("Label_{}", s.next_label);
+    s.next_label += 1;
+    let label = Label {
+        id,
+        name: body.name,
+        system: false,
+    };
+    let v = s.label_json(&label);
+    s.labels.push(label);
+    Json(v).into_response()
 }
 
 async fn label(

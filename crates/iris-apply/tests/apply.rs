@@ -85,15 +85,29 @@ impl Box {
     /// An action of `verb` on `messages`, submitted and approved by
     /// `decision`. Gives the action ID.
     fn approved(&self, verb: &str, messages: &[i64], decision: &str) -> i64 {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        self.approved_at(verb, messages, decision, now)
+        self.approved_at(verb, messages, decision, now())
     }
 
     /// As `approved`, with the submit time `submitted` (milliseconds).
     fn approved_at(&self, verb: &str, messages: &[i64], decision: &str, submitted: i64) -> i64 {
+        self.approved_args(verb, "{}", messages, decision, submitted)
+    }
+
+    /// A `label` or `unlabel` action of the label `name`, approved by a
+    /// person.
+    fn labelled(&self, verb: &str, name: &str, messages: &[i64]) -> i64 {
+        let args = serde_json::json!({ "label": name }).to_string();
+        self.approved_args(verb, &args, messages, PERSON, now())
+    }
+
+    fn approved_args(
+        &self,
+        verb: &str,
+        args: &str,
+        messages: &[i64],
+        decision: &str,
+        submitted: i64,
+    ) -> i64 {
         let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
         let targets = format!("{{\"messages\":[{}]}}", ids.join(","));
         self.store
@@ -105,8 +119,8 @@ impl Box {
                 let cs = tx.last_insert_rowid();
                 tx.execute(
                     "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                     VALUES (?1, 1, 1, ?2, ?3, '{}')",
-                    params![cs, verb, targets],
+                     VALUES (?1, 1, 1, ?2, ?3, ?4)",
+                    params![cs, verb, targets, args],
                 )?;
                 let a = tx.last_insert_rowid();
                 for m in messages {
@@ -244,6 +258,27 @@ impl Box {
             .filter(|r| r.starts_with("POST") && r.contains(path))
             .count()
     }
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// The provider ID of the user label `name` in the mirror.
+fn label_id(b: &Box, name: &str) -> Option<String> {
+    b.store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM label WHERE account_id = ?1 AND name = ?2 AND kind = 'user'",
+                params![b.account, name],
+                |r| r.get(0),
+            )
+            .ok())
+        })
+        .unwrap()
 }
 
 const PERSON: &str = "decided_by = 'person', decided_at = 2";
@@ -733,8 +768,137 @@ fn the_apply_refuses_what_was_not_approved() {
         Ok(Outcome::Denied(_))
     ));
 
-    let label = b.approved("label", &ms, PERSON);
-    assert!(matches!(b.apply(label), Err(Error::Verb(_))));
-    assert_eq!(b.state(label).0, "approved");
+    // A verb with no Gmail apply: a state verb (issue #164).
+    let close = b.approved("close", &ms, PERSON);
+    assert!(matches!(b.apply(close), Err(Error::Verb(_))));
+    assert_eq!(b.state(close).0, "approved");
     assert_eq!(b.calls("messages"), 0);
+}
+
+/// `label` adds the user label of the name, with no regard to case, and
+/// `unlabel` removes it. Gmail and the mirror agree after each apply.
+#[test]
+fn label_and_unlabel_change_gmail_and_the_mirror() {
+    let b = setup("label", 80, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 6);
+    let receipts = "Label_1".to_string();
+    let need = ms
+        .iter()
+        .filter(|&&m| !b.gmail_labels(m).contains(&receipts))
+        .count() as u64;
+    assert!(need > 0, "the test changes nothing");
+    let a = b.labelled("label", "receipts", &ms);
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (need, 6 - need));
+    assert_eq!(b.calls("labels"), 0, "no label is made");
+    b.check_document(a);
+    for &m in &ms {
+        let at_gmail = b.gmail_labels(m);
+        assert!(at_gmail.contains(&receipts), "{at_gmail:?}");
+        assert_eq!(b.mirror_labels(m), at_gmail);
+    }
+    let a = b.labelled("unlabel", "Receipts", &ms);
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (6, 0));
+    for &m in &ms {
+        let at_gmail = b.gmail_labels(m);
+        assert!(!at_gmail.contains(&receipts), "{at_gmail:?}");
+        assert_eq!(b.mirror_labels(m), at_gmail);
+    }
+}
+
+/// A `label` action makes its label at Gmail one time, after the mark, and
+/// the mirror gets the label. A second action of the name uses it.
+#[test]
+fn a_label_action_makes_its_label() {
+    let b = setup("label-new", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    let a = b.labelled("label", "Iris/Later", &ms);
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (3, 0));
+    assert_eq!(b.calls("/labels"), 1);
+    let id = label_id(&b, "Iris/Later").expect("the mirror has the label");
+    for &m in &ms {
+        let at_gmail = b.gmail_labels(m);
+        assert!(at_gmail.contains(&id), "{at_gmail:?}");
+        assert_eq!(b.mirror_labels(m), at_gmail);
+    }
+    let more = b.messages(IN_INBOX, 5);
+    let a = b.labelled("label", "Iris/Later", &more);
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (2, 3));
+    assert_eq!(b.calls("/labels"), 1, "the label is not made again");
+}
+
+/// After an unknown result or HTTP 409 of the create, the apply reads the
+/// labels and uses the label of the name. With no such label, the action
+/// fails. The create is not called again.
+#[test]
+fn a_create_with_no_clear_result_reads_the_labels() {
+    let b = setup("label-unknown", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    // Gmail makes the label, and the answer is lost.
+    b.fake.fail_next_write(&[503], true);
+    let a = b.labelled("label", "Lost", &ms);
+    let c = applied(b.apply(a));
+    assert_eq!(c.changed, 2);
+    assert_eq!(b.calls("/labels"), 1);
+    // Another client made the label at the same time: HTTP 409.
+    b.fake.fail_next_write(&[409], true);
+    let a = b.labelled("label", "Raced", &ms);
+    applied(b.apply(a));
+    assert!(label_id(&b, "Raced").is_some());
+    // HTTP 409 with no label of the name: failed, and no batchModify.
+    let modifies = b.calls("batchModify");
+    b.fake.fail_next_write(&[409], false);
+    let a = b.labelled("label", "Never", &ms);
+    match b.apply(a) {
+        Ok(Outcome::Failed { counts, .. }) => assert_eq!(counts.changed, 0),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.state(a).0, "failed");
+    assert_eq!(b.calls("/labels"), 3);
+    assert_eq!(b.calls("batchModify"), modifies);
+}
+
+/// `unlabel` of a name that Gmail does not have changes nothing.
+#[test]
+fn an_unlabel_of_no_label_changes_nothing() {
+    let b = setup("unlabel-none", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    let a = b.labelled("unlabel", "Nowhere", &ms);
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (0, 3));
+    assert_eq!(
+        b.fake
+            .requests()
+            .iter()
+            .filter(|r| r.starts_with("POST"))
+            .count(),
+        0
+    );
+}
+
+/// A name of a system label at Gmail is denied, also when the changeset
+/// store did not know the label.
+#[test]
+fn a_system_label_name_is_denied() {
+    let b = setup("label-system", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    for name in ["inbox", "Starred"] {
+        let a = b.labelled("label", name, &ms);
+        match b.apply(a) {
+            Ok(Outcome::Denied(_)) => {}
+            other => panic!("{name}: {other:?}"),
+        }
+        assert_eq!(b.state(a), ("denied".into(), "engine".into()));
+    }
+    assert_eq!(
+        b.fake
+            .requests()
+            .iter()
+            .filter(|r| r.starts_with("POST"))
+            .count(),
+        0
+    );
 }
