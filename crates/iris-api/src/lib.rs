@@ -24,6 +24,7 @@ use iris_store::Store;
 use serde::Deserialize;
 
 mod auth;
+pub mod gate;
 pub mod policy;
 mod read;
 mod review;
@@ -93,6 +94,9 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/handled", get(get_handled))
+        .route("/api/gate", get(get_gate))
+        .route("/api/gate/declined", get(get_declined))
+        .route("/api/senders/{id}/{answer}", post(post_answer))
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
@@ -349,6 +353,48 @@ async fn post_verb(
     }
     let b = body(b)?;
     Ok(apply_verb(&s, &id, &verb, &b, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The senders that wait at the stranger gate.
+async fn get_gate(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        false,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The senders that the person declined at the gate.
+async fn get_declined(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        true,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The answer of the person at the stranger gate: `accept`, `decline` or
+/// `reopen` (specification 1, section 6.7). The answer is the sender row.
+async fn post_answer(
+    State(s): State<Arc<Store>>,
+    Path((id, answer)): Path<(String, String)>,
+) -> Result<Response> {
+    Ok(gate::answer(&s, &id, &answer, now_ms())?
         .map_or_else(not_found, |d| Json(d).into_response()))
 }
 

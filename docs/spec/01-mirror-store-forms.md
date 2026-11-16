@@ -651,8 +651,36 @@ than `person`, the profile drops the address.
 
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
 A decision by a person always wins over the engine, and the engine never
-changes it. From release 2, the person sets the kind in the web client. In
-release 5, the stranger gate makes this a rule in the policy file.
+changes it.
+
+#### The stranger gate
+
+From release 5, the brief shows the items of strangers as a gate, by sender.
+The person gives one answer for each sender:
+
+| Answer | Effect |
+|---|---|
+| Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
+| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
+| Reopen | Removes the accept or the decline. The engine decides the kind again from the evidence in the store. |
+
+A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
+"stranger"` (specification 2, section 6.2) takes the items of strangers out of
+the gate, as it does for each section. A rule never accepts a sender: only the
+person makes a stranger a known person. Agents get no answer of the gate.
+
+The engine accepts an answer only for a sender at the gate: the stored kind is
+`stranger` (or no kind yet), and, unless a person set the kind, the rules of
+this section give `stranger` for the mail of now. The stored kind can be older
+than the evidence until the next refresh, and a person must never accept a
+sender that is `hostile` now. Else the engine refuses the answer and changes
+nothing.
+
+An accept makes the domain of the sender known, and a reopen of an accept can
+make it unknown. So in the same transaction the engine decides again each
+sender whose domain is a near copy of that domain, and runs understanding
+again on the mail of each sender that becomes `hostile` or stops being
+`hostile`.
 
 The engine decides the kind of a sender again each time it understands a
 message with that address. After each batch of sync or understanding, a
@@ -699,7 +727,7 @@ The kind changes the treatment of items (from the manifesto):
 |---|---|
 | `person` | An ask becomes a commitment in "You owe" at once. |
 | `service` | Records, feed items and signals. Payment commitments go to "You owe". |
-| `stranger` | Items go to "Strangers" in the brief, not to "You owe". |
+| `stranger` | Items go to "Strangers" in the brief, not to "You owe". From release 5 they wait at the stranger gate until the person accepts or declines the sender. |
 | `hostile` | The understanding step does not send the body to a model. The engine makes no item. The brief shows a count only. |
 
 A message with a hostile mark gets the treatment of `hostile`, whatever the
@@ -1014,17 +1042,18 @@ with the original, whatever its own attention.
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant and no declined participant. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
-| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. |
+| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. A stranger that the person declined at the gate (section 6.7) does not count. |
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |
 
 The sections do not overlap. A conversation with a `stranger` participant
 shows only under Strangers, so each item shows one time and each section count
-is exact. The client uses the counts of the engine and does not remove
+is exact. An item whose stranger the person declined, with no other stranger,
+is in no section. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
 In release 1 the brief is read-only. Each line opens its source mail in one
