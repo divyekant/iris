@@ -383,3 +383,27 @@ fn backup_copies_the_data_folder_with_the_sign_in() {
     .sync()
     .unwrap();
 }
+
+#[test]
+fn a_tick_opens_a_deferred_commitment_on_its_date() {
+    let store = Arc::new(Store::open(&data_dir("deferred")).unwrap());
+    // No token: the tick starts no sync worker.
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', ?1, 'deferred',
+                   '{\"status\":\"deferred\",\"deferred_until\":\"2000-01-01\"}', 0, 0)",
+                [account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
+    assert!(e.tick().unwrap().is_empty());
+    let status: String = store
+        .read(|c| Ok(c.query_row("SELECT status FROM item", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(status, "open");
+}
