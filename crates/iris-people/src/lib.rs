@@ -131,11 +131,13 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
             spam = flag("SPAM"),
         ))?;
         // Pass 1: your addresses (with aliases) and the threads where you sent mail.
-        let mut your_threads: HashSet<i64> = HashSet::new();
+        // For each thread: your last sent message, as (date, message ID).
+        let mut your_threads: HashMap<i64, (i64, i64)> = HashMap::new();
         for row in st.query_map([account], row)? {
-            let (_, thread, _, from, _, _, _, sent, draft, bad, _) = row?;
+            let (message, thread, date, from, _, _, _, sent, draft, bad, _) = row?;
             if sent && !draft && !bad {
-                your_threads.insert(thread);
+                let last = your_threads.entry(thread).or_insert((date, message));
+                *last = (*last).max((date, message));
                 if let Some(f) = from.and_then(|f| one_address(&f)) {
                     own.insert(f);
                 }
@@ -203,7 +205,11 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                     let d = s.names.entry(n).or_insert(date);
                     *d = (*d).max(date);
                 }
-                if your_threads.contains(&thread) {
+                // You replied: a message of yours comes after this one.
+                if your_threads
+                    .get(&thread)
+                    .is_some_and(|l| *l > (date, message))
+                {
                     known.insert(a);
                 }
             }
