@@ -253,7 +253,7 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
             // not clear the marks again. The count of errors stays, so a new
             // error doubles the wait.
             tx.execute("UPDATE model_setting SET retry_at = NULL", [])?;
-            clear_waiting(tx)?;
+            clear_retry_marks(tx)?;
         }
         tx.execute(
             "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
@@ -319,6 +319,11 @@ fn run_messages(
     let mut r = Runner {
         store,
         model: &model,
+        mark: if row.is_some() && !calls {
+            WAITS_RETRY
+        } else {
+            WAITS_INPUT
+        },
         run,
         limits,
         now_ms,
@@ -374,6 +379,8 @@ struct Runner<'a> {
     run: i64,
     limits: &'a Limits,
     now_ms: i64,
+    /// The cause that a refused message records in `waits_model`.
+    mark: i64,
     done: u64,
     since_refresh: usize,
     /// A sender rerun reset mail in this run: one more pass.
@@ -413,15 +420,16 @@ impl Runner<'_> {
             called.push(message);
             let rows = match store::understand(self.store, message, self.model, self.now_ms) {
                 Ok(o) => o.rerun,
-                // The call was refused (no model, or no budget): the message
-                // waits until an input of the refusal changes (schema 5
-                // triggers), so later runs do not read it again.
+                // The call was refused (no model, no budget, or the wait
+                // after a model error): the message waits until that cause
+                // ends, so later runs do not read it again. The mark names
+                // the cause.
                 Err(store::Error::Model(iris_model::Error::Budget(_), rows)) => {
                     self.store.write(|tx| {
                         tx.execute(
-                            "UPDATE message SET waits_model = 1
+                            "UPDATE message SET waits_model = ?2
                              WHERE id = ?1 AND understood_at IS NULL",
-                            [message],
+                            params![message, self.mark],
                         )?;
                         Ok(())
                     })?;
@@ -575,12 +583,28 @@ fn from_of(path: &std::path::Path) -> Option<String> {
     crate::Head::parse(&raw).from_addr
 }
 
-/// Clears the mark `waits_model` of each message, so the next run reads
-/// that mail again. Gives the count of messages.
+/// `waits_model`: the call was refused for an input of the store (no
+/// model, or no budget). A change of that input, or an approval, clears it.
+pub const WAITS_INPUT: i64 = 1;
+/// `waits_model`: the run made no call in the wait after a model error.
+/// Only the end of that wait clears it.
+pub const WAITS_RETRY: i64 = 2;
+
+/// Clears each mark `waits_model` (an approval), so the next run reads that
+/// mail again. Gives the count of messages.
 pub fn clear_waiting(tx: &Transaction) -> rusqlite::Result<usize> {
     tx.execute(
-        "UPDATE message SET waits_model = 0 WHERE waits_model = 1",
+        "UPDATE message SET waits_model = 0 WHERE waits_model <> 0",
         [],
+    )
+}
+
+/// Clears the marks of the wait after a model error, at the end of that
+/// wait. The marks of a budget or model refusal stay.
+fn clear_retry_marks(tx: &Transaction) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE message SET waits_model = 0 WHERE waits_model = ?1",
+        [WAITS_RETRY],
     )
 }
 
@@ -605,7 +629,8 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
 /// of the run (under its lock). Only evidence of the model changes it: a
 /// stop on `model`, `unknown` or `error` starts or doubles the wait; a run
 /// that made a call and did not stop on an error ends it and clears the
-/// marks of that wait. A run that made no call changes nothing.
+/// marks of that wait (`WAITS_RETRY` only: a budget refusal of the same
+/// run keeps its mark). A run that made no call changes nothing.
 fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
     if matches!(stop, Stop::Model | Stop::Unknown | Stop::Error) {
         tx.execute(
@@ -623,7 +648,7 @@ fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::
                 "UPDATE model_setting SET retry_failures = 0, retry_at = NULL",
                 [],
             )?;
-            clear_waiting(tx)?;
+            clear_retry_marks(tx)?;
         }
     }
     Ok(())

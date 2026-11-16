@@ -447,7 +447,7 @@ fn the_wait_after_a_model_error_is_for_that_model_and_under_the_lock() {
     let (url, calls) = flaky_model_server(1);
     let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
     assert!(ok, "{err}");
-    let waits = "SELECT count(*) FROM message WHERE waits_model = 1";
+    let waits = "SELECT count(*) FROM message WHERE waits_model <> 0";
     let now = iris::engine::now_ms();
     let run = |at: i64| iris::cost::after_sync(&store, at).unwrap();
     assert!(matches!(run(now), AfterSync::Ran { retry: true, .. }));

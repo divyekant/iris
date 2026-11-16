@@ -59,7 +59,9 @@ pending state that the store gives. Each one has an issue:
   a call and no error ends it and clears the marks, and a run with no call
   changes nothing. During the wait, the run after a sync makes no call
   (`Limits::wait_after_error`), and the mail that needs the model gets
-  `waits_model`. The first such run after the wait sets `retry_at` to NULL
+  `waits_model = 2`. The mark names its cause: 1 for a refusal of the
+  model row or the budget, 2 for the wait. The end of the wait clears only
+  the marks 2; the triggers and the approval clear both. The first such run after the wait sets `retry_at` to NULL
   and clears the marks in the write that starts it, under the lock, then
   calls the model. `iris understand` does not wait.
 - The estimate on a screen of the web client.

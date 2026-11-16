@@ -283,6 +283,47 @@ fn two_runs_share_one_budget() {
     assert_eq!(b.script.calls(), 1);
 }
 
+/// The end of the wait after a model error clears only the marks of that
+/// wait: a budget refusal of the same run keeps its mark.
+#[test]
+fn the_end_of_a_model_wait_keeps_the_marks_of_a_budget_refusal() {
+    let b = store("wait-end");
+    b.model(true, Some(WORST + 100));
+    let waited = b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    // The state after a model error whose wait has ended, with mail that
+    // waited for it.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE model_setting SET retry_failures = 1, retry_at = 0",
+                [],
+            )?;
+            tx.execute("UPDATE message SET waits_model = 2 WHERE id = ?1", [waited])?;
+            Ok(())
+        })
+        .unwrap();
+    let limits = Limits {
+        keep_idle: false,
+        wait_after_error: true,
+        ..Limits::default()
+    };
+    let r = b.run(&limits).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("budget"), 1));
+    assert_eq!(
+        b.col("SELECT count(*) FROM message WHERE waits_model = 1"),
+        Some(1),
+        "the budget refusal keeps its mark"
+    );
+    assert_eq!(
+        b.col("SELECT retry_failures FROM model_setting"),
+        Some(0),
+        "the call ended the wait"
+    );
+    assert!(b.run(&limits).unwrap().is_idle());
+    assert_eq!(b.script.calls(), 1);
+}
+
 #[test]
 fn unknown_usage_keeps_the_worst_case_and_stops() {
     let b = store("unknown");
@@ -695,10 +736,15 @@ fn the_waits_model_mark_clears_on_each_input_change() {
     let b = store("waits");
     b.model(true, Some(1000));
     let m = b.add("1", "a", 1, &["INBOX"]);
+    // Each change runs for both causes of the mark (1 and 2).
+    let mark_as = std::cell::Cell::new(1i64);
     let mark = |b: &Box_| {
         b.store
             .write(|tx| {
-                tx.execute("UPDATE message SET waits_model = 1 WHERE id = ?1", [m])?;
+                tx.execute(
+                    "UPDATE message SET waits_model = ?2 WHERE id = ?1",
+                    [m, mark_as.get()],
+                )?;
                 Ok(())
             })
             .unwrap()
@@ -757,7 +803,12 @@ fn the_waits_model_mark_clears_on_each_input_change() {
             false,
         ),
     ];
-    for (name, sql, clears) in changes {
+    // Both causes, one pass of the table each.
+    let all = [1, 2]
+        .into_iter()
+        .flat_map(|v| changes.iter().map(move |c| (v, c)));
+    for (v, (name, sql, clears)) in all {
+        mark_as.set(v);
         mark(&b);
         let sql = sql.replace(":m", &m.to_string());
         b.store
@@ -766,7 +817,7 @@ fn the_waits_model_mark_clears_on_each_input_change() {
                 Ok(())
             })
             .unwrap();
-        assert_eq!(waits(&b), Some(i64::from(!clears)), "{name}");
+        assert_eq!(waits(&b), Some(if *clears { 0 } else { v }), "{name} ({v})");
     }
     // A new model row (`iris model set` replaces the row) clears it too.
     mark(&b);

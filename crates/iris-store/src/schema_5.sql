@@ -5,12 +5,12 @@
 -- of the mirror can forget it.
 
 ALTER TABLE message ADD COLUMN waits_model INTEGER NOT NULL DEFAULT 0
-  CHECK (waits_model IN (0, 1));
+  CHECK (waits_model IN (0, 1, 2));  -- 1: an input refused the call; 2: the wait after a model error
 
 -- New content, a return from gone, a hostile change or a new understanding
 -- state of the message.
 CREATE TRIGGER waits_model_message AFTER UPDATE OF content_sha256, gone_at, hostile, tries
-  ON message WHEN NEW.waits_model = 1
+  ON message WHEN NEW.waits_model <> 0
 BEGIN
   UPDATE message SET waits_model = 0 WHERE id = NEW.id;
 END;
@@ -18,12 +18,12 @@ END;
 -- A label change (SPAM makes hostile mail, which needs no model).
 CREATE TRIGGER waits_model_label_add AFTER INSERT ON message_label
 BEGIN
-  UPDATE message SET waits_model = 0 WHERE id = NEW.message_id AND waits_model = 1;
+  UPDATE message SET waits_model = 0 WHERE id = NEW.message_id AND waits_model <> 0;
 END;
 
 CREATE TRIGGER waits_model_label_remove AFTER DELETE ON message_label
 BEGIN
-  UPDATE message SET waits_model = 0 WHERE id = OLD.message_id AND waits_model = 1;
+  UPDATE message SET waits_model = 0 WHERE id = OLD.message_id AND waits_model <> 0;
 END;
 
 -- A new model or a changed model row. A budget change clears nothing here:
@@ -31,13 +31,13 @@ END;
 -- understand --approve`) clears the marks in its own write.
 CREATE TRIGGER waits_model_setting_add AFTER INSERT ON model_setting
 BEGIN
-  UPDATE message SET waits_model = 0 WHERE waits_model = 1;
+  UPDATE message SET waits_model = 0 WHERE waits_model <> 0;
 END;
 
 CREATE TRIGGER waits_model_setting AFTER UPDATE OF version ON model_setting
   WHEN NEW.version IS NOT OLD.version
 BEGIN
-  UPDATE message SET waits_model = 0 WHERE waits_model = 1;
+  UPDATE message SET waits_model = 0 WHERE waits_model <> 0;
 END;
 
 -- The wait after a model error, for the current model row (R1-28). A run
