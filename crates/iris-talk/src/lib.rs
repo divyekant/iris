@@ -17,6 +17,19 @@ use serde_json::{json, Map, Value};
 
 /// The name of the rule in `derived.rule`.
 pub const RULE: &str = "thread";
+
+/// The fields of a conversation that this rule makes from the store on each
+/// update. A correction cannot change them (only `summary` is left), and
+/// [`update`] does not apply one.
+pub const DERIVED: [&str; 7] = [
+    "thread",
+    "participants",
+    "role",
+    "latest",
+    "messages",
+    "new",
+    "your_turn",
+];
 /// A conversation with no message for this time is `quiet` (section 6.3).
 pub const QUIET_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 /// The most characters of `latest.snippet`.
@@ -312,6 +325,10 @@ fn corrections(conn: &Connection, item: i64, doc: &mut Value) -> rusqlite::Resul
         let Ok(value) = serde_json::from_str::<Value>(&value) else {
             continue;
         };
+        let top = field.split('.').next().unwrap_or("");
+        if DERIVED.contains(&top) {
+            continue;
+        }
         // A path that does not fit this document changes nothing.
         set_field(doc, &field, value);
     }

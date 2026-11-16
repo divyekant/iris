@@ -40,7 +40,8 @@ const COMMON: [&str; 12] = [
 /// section 5.5).
 ///
 /// Gives `Ok(Err(reason))` and writes nothing when the change is not
-/// allowed: no such item, a common field, a conversation, a path that does
+/// allowed: no such item, a common field, a field that the conversation
+/// rule makes (`iris_talk::DERIVED`), a path that does
 /// not fit the document (`iris_talk::set_field`), a path to the `sender` ID
 /// of a party, or a document that is not valid against the schemas. Else
 /// writes the `correction` row and the new document, with the sender ID of
@@ -86,10 +87,12 @@ pub fn correct(
     if doc["id"].as_str() != Some(id) {
         return no_item();
     }
-    // The conversation rule makes each field of a conversation from the
+    // The conversation rule makes these fields of a conversation from the
     // store (`iris-talk`), for example its thread.
-    if form == "conversation" {
-        return Ok(Err("the conversation rule owns a conversation".into()));
+    if form == "conversation" && iris_talk::DERIVED.contains(&top) {
+        return Ok(Err(format!(
+            "the conversation rule makes the field {top} of a conversation"
+        )));
     }
     if !iris_talk::set_field(&mut doc, field, value.clone()) {
         return Ok(Err(format!("the field {field:?} does not fit the item")));

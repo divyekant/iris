@@ -1862,15 +1862,37 @@ fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversati
     );
     assert_eq!(doc["counterparty"]["sender"], format!("p-{kai}"));
 
+    // A conversation: the summary, yes; a field of the conversation rule, no.
     let v: i64 = b.col(
         "SELECT id FROM item WHERE form = 'conversation' AND ?1 = ?1",
         0,
     );
-    for (field, value) in [("summary", json!("x")), ("thread", json!("t-1"))] {
-        assert!(correct(&b.store, &format!("v-{v}"), field, value, NOW).is_err());
+    let vid = format!("v-{v}");
+    for (field, value) in [
+        ("thread", json!("t-1")),
+        ("latest.snippet", json!("x")),
+        ("new", json!(0)),
+    ] {
+        assert!(
+            correct(&b.store, &vid, field, value, NOW).is_err(),
+            "{field}"
+        );
     }
-    assert_eq!(
-        b.col::<i64>("SELECT COUNT(*) FROM correction WHERE item_id = ?1", v),
-        0
+    let doc = correct(&b.store, &vid, "summary", json!("The lease"), NOW).unwrap();
+    assert_eq!(doc["summary"], "The lease");
+    // The next message of the thread: the conversation rule makes the
+    // conversation again, and the summary stays.
+    let m2 = b.add_in(
+        "2",
+        "t1",
+        NOW,
+        &ASK.replace("Friday?", "Friday? Ping."),
+        &["INBOX"],
     );
+    understand(&b.store, m2, &Fake::default(), NOW).unwrap();
+    let after: String = b.col("SELECT doc FROM item WHERE id = ?1", v);
+    let after: Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(after["messages"], 2);
+    assert_eq!(after["summary"], "The lease");
+    assert_eq!(after["thread"], doc["thread"]);
 }
