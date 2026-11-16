@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -16,7 +16,7 @@
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
-  let active = $derived(route.view === "home" || route.view === "section" ? "#/brief" : `#/${hash.replace(/^#\/?/, "").split("/")[0]}`);
+  let active = $derived(route.view === "home" || route.view === "section" || route.view === "bundle" ? "#/brief" : `#/${hash.replace(/^#\/?/, "").split("/")[0]}`);
 
   $effect(() => {
     const update = () => {
@@ -62,7 +62,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "mail" || route.view === "section"}
+  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -81,12 +81,17 @@
       {#await get<Page>(`brief/${key}?limit=50`) then page}
         <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" expiring={key === "signals"} />
       {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "bundle"}
+      {@const rule = route.rule}
+      {#await Promise.all([get<Page>(`brief/bundle-${rule}?limit=50`), get<Policy>("policy").catch(() => null)]) then [page, policy]}
+        <List title={policy?.rules.find((r) => r.id === rule)?.name ?? `Rule ${rule}`} {page} more={`brief/bundle-${rule}?limit=50`} cursor="after" />
+      {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "list"}
       {@const form = route.form}
       {#await get<Page>(`items?form=${form}&limit=50`) then page}<List title={TITLES[form]} {page} more={`items?form=${form}&limit=50`} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "records"}
       {@const type = route.type}
-      {#await get<BriefData>("brief") then brief}<Records counts={brief.records} {type} />{:catch error}{@render failed(error)}{/await}
+      {#await get<Record<string, number>>("records") then counts}<Records {counts} {type} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "item"}
       {#await get<ItemData>(`items/${encodeURIComponent(route.id)}`) then item}<Item {item} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "mail"}

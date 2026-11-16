@@ -59,7 +59,13 @@ export type Brief = {
   oldest_fetched?: string | null;
   /** The release 1 triage proposal (spec 1 section 8): computed, not stored, nothing applied. */
   proposal?: { count: number; verbs: Record<string, number> } | null;
+  /** One entry for each `bundle` rule that bundles items (spec 2 section 6.4): the newest items, at most 20. */
+  bundles?: Bundle[];
+  /** The count of items that a `hide` rule leaves out of the brief. */
+  hidden?: number;
 };
+
+export type Bundle = Section & { rule: number; name: string };
 
 export type Account = {
   id: number;

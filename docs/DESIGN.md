@@ -58,6 +58,8 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 | Header | `App.svelte` | The Iris mark (a `primary` ring around a dot, like an iris), and one link for each view. The active link has a `primary` line under it. On a phone the links scroll in one row. |
 | Opening | `Brief.svelte` | The greeting and the date in muted text, then one sentence in `font-size-4` that says what needs you. |
 | Line | `Line.svelte` | The round mark with the initials of the other party, the title, and one muted line of detail. The whole line opens the item. The envelope opens the source mail. An `unread` dot marks a conversation that waits for you. |
+| Bundle line | `Bundle.svelte` | One `bundle` rule on one line, in the section "Bundled by your rules" of the brief: a stack mark (a round mark with the count, and a second mark behind it), the rule name, and one muted line that names up to 3 senders. A chevron takes the place of the envelope. The whole line opens the list of the bundle. |
+| Hidden count | `Brief.svelte` | One muted line in the footer of the brief: how many items the rules hide, and a link to the rules. |
 | Due tone | `Line.svelte` | A dot after the due date: `warning` for 2 days or less, `error` when late. The words say the same, so color is not the only sign. |
 | Section | `Brief.svelte` | A heading with the count on the right, a line under it, at most 7 lines, and an "All N" link. An empty section does not show. |
 | Code | `Code.svelte` | A login code in mono type, a Copy button, and the time left. It goes away when the code expires. |
