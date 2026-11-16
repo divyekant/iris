@@ -61,7 +61,7 @@ The text of a message is data. Show it as text, never as markup.
 | `hostile` | The count of hostile mail of the last 7 days. |
 | `not_understood` | The count of messages that the model failed 3 times. |
 | `proposal` | The triage proposal of specification 1, section 8: `{"count", "verbs": {"archive": 412}}`, from `iris_observe::counts` for each account when the brief opens. Nothing is applied or stored. `/api/proposal` gives the full list of actions. |
-| `review` | `{"changesets", "actions"}`: the count of the actions that wait for a person (`proposed` or `in_review`, specification 2, section 5.5), and of the changesets that have them. |
+| `review` | `{"changesets", "actions"}`: the count of the actions that wait for a person (`proposed` or `in_review`, specification 2, section 5.5) in the open changesets of `/api/changesets`, and of those changesets. A changeset whose new revision is a draft is not open, so it is not counted. |
 | `oldest_fetched` | The date of the oldest fetched message that is not gone, or `null`. While the first sync continues, the brief covers only the mail from this date (specification 1, section 4.2). |
 
 Each list field is `{"count", "items"}`. `count` is the full count. `items`

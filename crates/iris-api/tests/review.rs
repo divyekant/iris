@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use iris_api::Auth;
-use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+use iris_changeset::{add_action, create, revise, submit, Author, AuthorKind, Verb};
 use iris_store::{Header, NewMessage, Store};
 use serde_json::{json, Map, Value};
 use tower::ServiceExt;
@@ -145,6 +145,33 @@ async fn lists_each_open_changeset_newest_first() {
     // The brief counts the open changesets and the actions that wait for a person.
     let (_, b) = get(&s, "/api/brief").await;
     assert_eq!(b["review"], json!({ "changesets": 2, "actions": 2 }));
+
+    // A new revision is a draft: the store refuses an approval until its
+    // submit, so the list and the brief both leave the changeset out, though
+    // its older actions are still proposed.
+    revise(&s, first, &agent()).unwrap();
+    let (_, v) = get(&s, "/api/changesets").await;
+    assert_eq!(ids(&v["changesets"]), [format!("cs-{second}")]);
+    assert_eq!(
+        get(&s, "/api/brief").await.1["review"],
+        json!({ "changesets": 1, "actions": 1 })
+    );
+    // After the submit of the new revision, it is open again, with only its new action.
+    add_action(
+        &s,
+        first,
+        &agent(),
+        Verb::Archive,
+        &["m-3"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&s, first, &agent(), "Only the news.", NOW + 3000).unwrap();
+    assert_eq!(
+        get(&s, "/api/brief").await.1["review"],
+        json!({ "changesets": 2, "actions": 2 })
+    );
 }
 
 #[tokio::test]

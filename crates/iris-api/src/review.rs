@@ -24,10 +24,19 @@ pub struct Review {
     pub actions: i64,
 }
 
+/// The changesets that the review lists. A changeset whose new revision
+/// is a draft is not open: the store refuses an approval until the submit
+/// (section 5.5). The list and the counts both use this condition, so the
+/// brief counts only what the review shows.
+const OPEN: &str = "c.state = 'open'";
+
 pub(crate) fn review_counts(c: &Connection) -> rusqlite::Result<Review> {
     c.query_row(
-        "SELECT count(DISTINCT changeset_id), count(*) FROM changeset_action
-         WHERE state IN ('proposed', 'in_review')",
+        &format!(
+            "SELECT count(DISTINCT a.changeset_id), count(*) FROM changeset_action a
+             JOIN changeset c ON c.id = a.changeset_id
+             WHERE {OPEN} AND a.state IN ('proposed', 'in_review')"
+        ),
         [],
         |r| {
             Ok(Review {
@@ -67,10 +76,10 @@ fn write_open_paged(store: &Store, out: &mut impl Write, page: i64) -> Result<()
     let mut before = i64::MAX;
     loop {
         let ids: Vec<i64> = store.read(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT id FROM changeset WHERE state = 'open' AND id < ?1
-                 ORDER BY id DESC LIMIT ?2",
-            )?;
+            let mut st = c.prepare_cached(&format!(
+                "SELECT c.id FROM changeset c WHERE {OPEN} AND c.id < ?1
+                 ORDER BY c.id DESC LIMIT ?2"
+            ))?;
             let ids = st
                 .query_map([before, page], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
