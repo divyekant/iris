@@ -444,8 +444,11 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.equal(r[1].tone, "missed");
   assert.equal(r[3].tone, "missed");
   assert.equal(lead(slow, now).text, "2 measures miss their target.");
-  const fast = { ...empty, first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:10:00Z", seconds: 600 }, memory: { rss_kib: 51_200, messages: 1 } };
+  const fast = { ...empty, first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:10:00Z", seconds: 600 }, memory: { rss_kib: 51_200, messages: 100_000 } };
   assert.deepEqual(rows(fast, now).slice(1, 4).map((x) => x.tone), ["met", "none", "met"]);
+  // Under 50 MB with fewer than 100,000 messages does not show the target as met.
+  const small = { ...empty, memory: { rss_kib: 30_000, messages: 99_999 } };
+  assert.equal(rows(small, now)[3].tone, "flat");
 
   // A check with differences misses; a check that stopped early cannot meet the target.
   const check = (differences, complete) => ({ ...empty, mirror: [{ account: "a@example.com", checked: "2026-11-16T07:00:00Z", differences, complete }] });
@@ -473,7 +476,18 @@ test("a use counts once a day, and an open counts each time, on the local day", 
     await count("use", day);
     await count("open", day);
     await count("open", day);
-    await count("use", new Date(2026, 10, 17, 0, 10));
+    // A use in flight: a second use of the day waits for the same request.
+    let release;
+    globalThis.fetch = (url, init) => {
+      sent.push([url, init?.body]);
+      return new Promise((r) => (release = () => r(new Response("{}", { status: 200 }))));
+    };
+    const next = new Date(2026, 10, 17, 0, 10);
+    const first = count("use", next);
+    assert.equal(count("use", next), first);
+    while (!release) await new Promise((r) => setTimeout(r, 1));
+    release();
+    await first;
     assert.deepEqual(sent, [
       ["/api/measures/use", '{"day":"2026-11-16"}'],
       ["/api/measures/use", '{"day":"2026-11-16"}'],

@@ -254,6 +254,8 @@ async fn first_brief_times_are_written_once_at_the_event() {
     assert!((before..=after).contains(&t[0].1), "{t:?}");
     // No item yet: no brief yet, also while the sync and the model run.
     assert_eq!(get(&s).await["first_brief"], Value::Null);
+    // The two events are in different seconds, so a swap of the two times shows.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     add_item(&s, a);
     let first = times(&s);
@@ -278,12 +280,24 @@ async fn first_brief_times_are_written_once_at_the_event() {
     assert_eq!(times(&s), first);
 
     let m = get(&s).await;
-    assert_eq!(m["first_brief"]["connect"], iris_api::rfc3339(first[0].1));
-    assert_eq!(m["first_brief"]["brief"], iris_api::rfc3339(first[1].1));
-    assert_eq!(
-        m["first_brief"]["seconds"],
-        (first[1].1 - first[0].1) / 1000
-    );
+    let (brief, connect) = (first[0].1, first[1].1);
+    assert!(brief > connect, "{first:?}");
+    assert_eq!(m["first_brief"]["connect"], iris_api::rfc3339(connect));
+    assert_eq!(m["first_brief"]["brief"], iris_api::rfc3339(brief));
+    assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
+}
+
+/// Make the store a store of migration 11 again.
+fn downgrade(s: &Store) {
+    s.write(|tx| {
+        tx.execute_batch(
+            "DROP TRIGGER measure_connect; DROP TRIGGER measure_brief;
+             DROP TRIGGER person_decision; DROP TABLE person_decision;
+             DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
 }
 
 /// A store from before migration 12 gets the times from the oldest sync
@@ -295,11 +309,8 @@ fn migration_12_takes_the_times_of_an_older_store() {
     {
         let s = Store::open(&dir).unwrap();
         let a = s.add_account("gmail", "a@example.com").unwrap();
+        downgrade(&s);
         s.write(|tx| {
-            tx.execute_batch(
-                "DROP TRIGGER measure_connect; DROP TRIGGER measure_brief;
-                 DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 11;",
-            )?;
             tx.execute(
                 "INSERT INTO sync_log(account_id, kind, started_at) VALUES (?1, 'first', ?2), (?1, 'incremental', ?3)",
                 params![a, NOON + 5000, NOON],
@@ -320,6 +331,59 @@ fn migration_12_takes_the_times_of_an_older_store() {
     );
     let m = iris_api::measures::measures(&s, None).unwrap();
     assert_eq!(m.first_brief.unwrap().seconds, 340);
+    drop(s);
+
+    // An account with no sync yet: the connect time is the time of the
+    // migration, so the first item still gives a measure.
+    let _ = std::fs::remove_dir_all(&dir);
+    {
+        let s = Store::open(&dir).unwrap();
+        s.add_account("gmail", "a@example.com").unwrap();
+        downgrade(&s);
+    }
+    let before = now();
+    let s = Store::open(&dir).unwrap();
+    let t = times(&s);
+    assert_eq!(t.len(), 1);
+    assert_eq!(t[0].0, "connect");
+    assert!(t[0].1 >= before, "{t:?}");
+    add_item(&s, 1);
+    assert!(iris_api::measures::measures(&s, None)
+        .unwrap()
+        .first_brief
+        .is_some());
+    drop(s);
+
+    // No account: no time.
+    let _ = std::fs::remove_dir_all(&dir);
+    {
+        let s = Store::open(&dir).unwrap();
+        downgrade(&s);
+    }
+    assert_eq!(times(&Store::open(&dir).unwrap()), vec![]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A store from before migration 12 gets the decisions of the person that
+/// the actions still show.
+#[test]
+fn migration_12_takes_the_decisions_of_an_older_store() {
+    let dir = std::env::temp_dir().join(format!(
+        "iris-api-measures-old-decide-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    {
+        let s = Store::open(&dir).unwrap();
+        decided(&s);
+        downgrade(&s);
+    }
+    let s = Store::open(&dir).unwrap();
+    let m = iris_api::measures::measures(&s, None).unwrap();
+    assert_eq!(m.approvals.decided, 3);
+    assert_eq!(m.approvals.approved, 2);
+    drop(s);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The mirror check: the newest verify row of each account.
@@ -375,12 +439,9 @@ fn agent() -> Author {
     }
 }
 
-/// Approvals count the decisions of the person on the actions of another
-/// author. The state verbs of the person are not proposals. Undo counts
-/// the applied actions that an undo reversed, and not the undo itself.
-#[tokio::test]
-async fn approvals_and_undo_count_the_decisions_of_the_person() {
-    let s = store("decide");
+/// An account with 3 messages, and an agent changeset with 3 actions: the
+/// person approves 2 and denies 1. Gives the changeset ID.
+fn decided(s: &Store) -> i64 {
     let a = s.add_account("gmail", "owner@example.com").unwrap();
     let m = |id: &str| NewMessage {
         provider_id: id.into(),
@@ -388,10 +449,10 @@ async fn approvals_and_undo_count_the_decisions_of_the_person() {
         ..Default::default()
     };
     s.put_messages(a, &[m("g1"), m("g2"), m("g3")]).unwrap();
-    let cs = create(&s, &agent(), NOON).unwrap();
+    let cs = create(s, &agent(), NOON).unwrap();
     for t in ["m-1", "m-2", "m-3"] {
         add_action(
-            &s,
+            s,
             cs,
             &agent(),
             Verb::Archive,
@@ -401,7 +462,7 @@ async fn approvals_and_undo_count_the_decisions_of_the_person() {
         )
         .unwrap();
     }
-    submit(&s, cs, &agent(), "Old mail.", NOON).unwrap();
+    submit(s, cs, &agent(), "Old mail.", NOON).unwrap();
     let id = |n| ActionId {
         changeset: cs,
         revision: 1,
@@ -417,9 +478,21 @@ async fn approvals_and_undo_count_the_decisions_of_the_person() {
         })
         .unwrap()
     };
-    approve(&s, id(1), &hash(1), NOON).unwrap();
-    approve(&s, id(2), &hash(2), NOON).unwrap();
-    decide(&s, id(3), State::Denied, By::Person, Some("No."), NOON).unwrap();
+    approve(s, id(1), &hash(1), NOON).unwrap();
+    approve(s, id(2), &hash(2), NOON).unwrap();
+    decide(s, id(3), State::Denied, By::Person, Some("No."), NOON).unwrap();
+    cs
+}
+
+/// Approvals count the decisions of the person on the actions of another
+/// author. The state verbs of the person are not proposals. Undo counts
+/// the applied actions that an undo reversed, and not the undo itself.
+#[tokio::test]
+async fn approvals_and_undo_count_the_decisions_of_the_person() {
+    let s = store("decide");
+    let cs = decided(&s);
+    // The account of decided().
+    let a = 1;
 
     // Two state verbs of the person: one applied, one failed (the second
     // close of a done commitment).
@@ -456,6 +529,15 @@ async fn approvals_and_undo_count_the_decisions_of_the_person() {
     assert_eq!(m["approvals"], json!({"decided": 3, "approved": 2}));
     assert_eq!(m["undo"], json!({"applied": 1, "undone": 0}));
     assert_eq!(m["memory"]["messages"], 3);
+
+    // A withdraw cancels the two approved actions: the decisions of the
+    // person stay in the measure.
+    let (code, _) = post(&s, &format!("/api/changesets/cs-{cs}/withdraw"), "").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        get(&s).await["approvals"],
+        json!({"decided": 3, "approved": 2})
+    );
 
     // No undo exists yet (R2-03): make the failed entry the undo of the
     // applied one, past the triggers.

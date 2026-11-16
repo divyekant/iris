@@ -15,7 +15,7 @@
   let label = $derived(
     `Source mail opened each day: ${shown.map((b) => `${shortDay(b.day)}, ${b.opens === null ? "no use" : b.opens}`).join("; ")}.`,
   );
-  const TONE = { met: "Meets the target", missed: "Misses the target", flat: "No fixed target", none: "No data yet" };
+  const TONE = { met: "Meets the target", missed: "Misses the target", flat: "Not checked against a target", none: "No data yet" };
 </script>
 
 <h1>Measures</h1>

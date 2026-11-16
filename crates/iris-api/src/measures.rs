@@ -123,9 +123,7 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
             .collect::<rusqlite::Result<_>>()?;
         let messages = c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?;
         let approvals = c.query_row(
-            "SELECT count(*), coalesce(sum(a.state <> 'denied'), 0)
-             FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id
-             WHERE a.decided_by = 'person' AND cs.author_kind <> 'person'",
+            "SELECT count(*), coalesce(sum(approved), 0) FROM person_decision",
             [],
             |r| {
                 Ok(Approvals {

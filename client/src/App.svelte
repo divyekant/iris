@@ -107,7 +107,8 @@
     {:else if route.view === "mail"}
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "measures"}
-      {#await get<MeasuresData>("measures") then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
+      <!-- The use of today first, so the page counts this visit. -->
+      {#await count("use").then(() => get<MeasuresData>("measures")) then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "review"}
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />

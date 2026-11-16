@@ -45,8 +45,37 @@ BEGIN
 END;
 
 -- A store from before this migration: the best evidence is the start of
--- the oldest sync and the oldest item that is still there.
+-- the oldest sync and the oldest item that is still there. An account
+-- with no sync yet has only the time of this migration.
 INSERT INTO measure_time(name, at)
-SELECT 'connect', min(started_at) FROM sync_log HAVING count(*) > 0;
+SELECT 'connect', coalesce(min(started_at), CAST(unixepoch('subsec') * 1000 AS INTEGER))
+FROM sync_log HAVING count(*) > 0 OR EXISTS (SELECT 1 FROM account);
 INSERT INTO measure_time(name, at)
 SELECT 'brief', min(created_at) FROM item HAVING count(*) > 0;
+
+-- The decision of the person on each action of another author (an agent,
+-- triage or a local tool): the measure "proposed actions that you approve
+-- without an edit". A later state (applied, expired, cancelled) changes
+-- `decided_by` of the action, so the decision has its own row. A new
+-- decision of the person on the same action replaces the row.
+CREATE TABLE person_decision (
+  action_id INTEGER PRIMARY KEY REFERENCES changeset_action(id),
+  approved INTEGER NOT NULL CHECK (approved IN (0, 1)),
+  at INTEGER NOT NULL
+);
+
+CREATE TRIGGER person_decision AFTER UPDATE OF state ON changeset_action
+WHEN new.decided_by IS 'person' AND new.state IN ('approved', 'denied')
+  AND new.state IS NOT old.state
+  AND (SELECT author_kind FROM changeset WHERE id = new.changeset_id) <> 'person'
+BEGIN
+  DELETE FROM person_decision WHERE action_id = new.id;
+  INSERT INTO person_decision(action_id, approved, at)
+  VALUES (new.id, new.state = 'approved', coalesce(new.decided_at, 0));
+END;
+
+-- The decisions of the person that the actions still show.
+INSERT INTO person_decision(action_id, approved, at)
+SELECT a.id, a.state <> 'denied', coalesce(a.decided_at, 0)
+FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
+WHERE a.decided_by = 'person' AND c.author_kind <> 'person';

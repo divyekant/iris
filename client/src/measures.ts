@@ -20,6 +20,7 @@ export type Bar = { day: string; opens: number | null };
 export const SPAN = 14;
 const MAX_RSS_KIB = 50 * 1024;
 const MAX_FIRST_BRIEF = 600;
+const TARGET_MESSAGES = 100_000;
 
 /** The local date of `now`, YYYY-MM-DD. */
 export function localDay(now = new Date()): string {
@@ -27,22 +28,25 @@ export function localDay(now = new Date()): string {
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 
-let counted = "";
+let use: { day: string; done: Promise<void> } | null = null;
 
 /**
  * Count one use of the web client on the local day, or one source mail opened.
- * A use counts once for each day in this page. A failed count does not stop the page.
+ * A use counts once for each day in this page: a second call of the same day gives
+ * the promise of the first, so a caller can wait until the use of today is written.
+ * A failed count does not stop the page, and the next use tries again.
  */
 export function count(event: "use" | "open", now = new Date()): Promise<void> {
   const day = localDay(now);
-  if (event === "use" && counted === day) return Promise.resolve();
-  if (event === "use") counted = day;
-  return post(`measures/${event}`, { day }).then(
+  if (event === "use" && use?.day === day) return use.done;
+  const done: Promise<void> = post(`measures/${event}`, { day }).then(
     () => {},
     () => {
-      if (event === "use" && counted === day) counted = "";
+      if (use?.done === done) use = null;
     },
   );
+  if (event === "use") use = { day, done };
+  return done;
 }
 
 /** The last SPAN local days, the oldest first. A day with no use has `opens: null`. */
@@ -112,7 +116,8 @@ export function rows(m: Measures, now = new Date()): Row[] {
           name: "Memory of the engine",
           value: `${num(Math.round(rss / 1024))} MB`,
           detail: `With ${plural(m.memory.messages, "message", "messages")}. Target: 50 MB or less with 100,000.`,
-          tone: rss <= MAX_RSS_KIB ? "met" : "missed",
+          // The target holds for 100,000 messages: a smaller mailbox can only miss it.
+          tone: rss > MAX_RSS_KIB ? "missed" : m.memory.messages >= TARGET_MESSAGES ? "met" : "flat",
         },
     decided === 0
       ? { name: "Changes you approved as proposed", value: "Not yet", detail: "You have no decision on a proposed change yet. Higher is better.", tone: "none" }
