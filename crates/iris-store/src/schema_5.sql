@@ -13,6 +13,8 @@ CREATE TABLE changeset (
   author_name TEXT,
   author_session TEXT,
   author_job TEXT,
+  -- The reason of the newest revision. changeset_revision keeps the reason
+  -- of each submitted revision.
   why TEXT,
   created_at INTEGER NOT NULL,
   submitted_at INTEGER,
@@ -22,9 +24,22 @@ CREATE TABLE changeset (
   -- value.
   state TEXT NOT NULL DEFAULT 'draft'
     CHECK (state IN ('draft', 'open', 'closed', 'withdrawn')),
+  -- The revision that the trigger changeset_submit replaces in, while it
+  -- runs. NULL at all other times. Only that trigger writes it.
+  replacing INTEGER,
   -- coalesce: a CHECK that gives NULL passes.
   CHECK (submitted_at IS NULL OR length(trim(coalesce(why, ''))) > 0)
 );
+
+-- Each submitted revision, with its reason and its submit time. The trigger
+-- changeset_submit writes a row. Rows do not change.
+CREATE TABLE changeset_revision (
+  changeset_id INTEGER NOT NULL REFERENCES changeset(id),
+  revision INTEGER NOT NULL,
+  why TEXT NOT NULL,
+  submitted_at INTEGER NOT NULL,
+  PRIMARY KEY (changeset_id, revision)
+) WITHOUT ROWID;
 
 CREATE TABLE changeset_action (
   id INTEGER PRIMARY KEY,
@@ -179,14 +194,13 @@ WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
   -- An action is cancelled only with a withdraw of its changeset.
   OR (new.state = 'cancelled'
       AND (SELECT state FROM changeset WHERE id = new.changeset_id) <> 'withdrawn')
-  -- Replaced only by the submit of a newer revision, at the time of that
-  -- submit. An older action that comes back to review after the submit
-  -- has a later decision, and stays for the person (section 5.5).
+  -- Replaced only in the submit of a newer revision (trigger
+  -- changeset_submit). An older action that comes back to review after the
+  -- submit stays for the person (section 5.5).
   OR (new.state = 'replaced'
       AND NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
-                      AND revision > new.revision AND submitted_at IS NOT NULL
-                      AND submitted_at IS new.decided_at
-                      AND coalesce(old.decided_at, old.submitted_at) <= submitted_at))
+                      AND replacing = revision AND revision > new.revision
+                      AND submitted_at IS new.decided_at))
   -- Expired only 14 days after its submit (section 5.5), and not at a time
   -- after the clock of the database.
   OR (new.state = 'expired'
@@ -262,12 +276,17 @@ BEGIN
   UPDATE changeset_action SET state = 'proposed', submitted_at = new.submitted_at
   WHERE old.submitted_at IS NULL AND new.submitted_at IS NOT NULL
     AND changeset_id = new.id AND revision = new.revision AND state IS NULL;
+  INSERT INTO changeset_revision(changeset_id, revision, why, submitted_at)
+  SELECT new.id, new.revision, new.why, new.submitted_at
+  WHERE old.submitted_at IS NULL AND new.submitted_at IS NOT NULL;
+  UPDATE changeset SET replacing = new.revision
+  WHERE id = new.id AND old.submitted_at IS NULL AND new.submitted_at IS NOT NULL;
   UPDATE changeset_action SET state = 'replaced', decided_by = 'author', rule = NULL,
     policy = NULL, reason = NULL, decided_at = new.submitted_at
   WHERE old.submitted_at IS NULL AND new.submitted_at IS NOT NULL
     AND changeset_id = new.id AND revision < new.revision
-    AND state IN ('proposed', 'in_review')
-    AND coalesce(decided_at, submitted_at) <= new.submitted_at;
+    AND state IN ('proposed', 'in_review');
+  UPDATE changeset SET replacing = NULL WHERE id = new.id AND replacing IS NOT NULL;
   UPDATE changeset SET state =
     CASE WHEN new.submitted_at IS NULL THEN 'draft'
          WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
@@ -275,6 +294,24 @@ BEGIN
            THEN 'open'
          ELSE 'closed' END
   WHERE id = new.id;
+END;
+
+CREATE TRIGGER changeset_revision_insert BEFORE INSERT ON changeset_revision
+WHEN NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
+                 AND revision = new.revision AND why IS new.why
+                 AND submitted_at IS new.submitted_at)
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a revision row comes from its submit');
+END;
+
+CREATE TRIGGER changeset_revision_update BEFORE UPDATE ON changeset_revision
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a submitted revision does not change');
+END;
+
+CREATE TRIGGER changeset_revision_delete BEFORE DELETE ON changeset_revision
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a submitted revision does not change');
 END;
 
 -- The state of a changeset comes from its actions. Only a withdraw writes

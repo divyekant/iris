@@ -549,7 +549,8 @@ fn a_new_revision_replaces_and_is_a_draft() {
     .unwrap();
     assert_eq!(state(&s, "SELECT state FROM changeset"), "closed");
     // An approved action of revision 1 comes back to review after the
-    // submit of revision 2 (section 5.5). Only the next submit replaces it.
+    // submit of revision 2 (section 5.5). Only the next submit replaces it,
+    // also with a clock that went back (15 is before the review at 21).
     s.write(|tx| {
         Ok(tx.execute_batch(
             "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
@@ -582,7 +583,7 @@ fn a_new_revision_replaces_and_is_a_draft() {
             "UPDATE changeset SET revision = 3, submitted_at = NULL WHERE id = 2;
              INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
              VALUES (2, 3, 1, 'archive', '{}', '{}', 'h');
-             UPDATE changeset SET submitted_at = 30 WHERE id = 2;",
+             UPDATE changeset SET submitted_at = 15 WHERE id = 2;",
         )?)
     })
     .unwrap();
@@ -593,6 +594,35 @@ fn a_new_revision_replaces_and_is_a_draft() {
         ),
         "replaced"
     );
+    // Each submitted revision keeps its reason and its time.
+    let revisions: Vec<(i64, String, i64)> = s
+        .read(|c| {
+            let mut q = c.prepare(
+                "SELECT revision, why, submitted_at FROM changeset_revision
+                 WHERE changeset_id = 2 ORDER BY revision",
+            )?;
+            let rows = q
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert_eq!(
+        revisions,
+        [
+            (1, "w".into(), 10),
+            (2, "w".into(), 20),
+            (3, "w".into(), 15)
+        ]
+    );
+    for sql in [
+        "UPDATE changeset_revision SET why = 'x'",
+        "DELETE FROM changeset_revision",
+        "INSERT INTO changeset_revision VALUES (2, 4, 'x', 40)",
+        "INSERT INTO changeset_revision VALUES (1, 3, 'w', 0)",
+    ] {
+        fails(&s, sql);
+    }
     // All actions decided, then a new revision: the changeset is a draft.
     s.write(|tx| {
         Ok(tx.execute(
