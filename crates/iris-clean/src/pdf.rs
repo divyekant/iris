@@ -168,6 +168,8 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
     let mut last_num = 0.0f64;
     // A viewer shows text only inside a text object (`BT` to `ET`).
     let mut in_text = false;
+    // Text rendering modes 3 and 7 draw nothing a person can see.
+    let mut invisible = false;
     let mut i = 0;
     while i < c.len() && out.len() < limit {
         match c[i] {
@@ -231,8 +233,9 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                 }
                 match &c[s..i] {
                     b"BT" => in_text = true,
-                    b"Tj" | b"TJ" if in_text => emit(out, &mut strings, limit),
-                    b"'" | b"\"" if in_text => {
+                    b"Tr" => invisible = last_num == 3.0 || last_num == 7.0,
+                    b"Tj" | b"TJ" if in_text && !invisible => emit(out, &mut strings, limit),
+                    b"'" | b"\"" if in_text && !invisible => {
                         newline(out);
                         emit(out, &mut strings, limit);
                     }
@@ -420,10 +423,10 @@ mod tests {
 
     #[test]
     fn text_outside_a_text_object_goes_out() {
-        let t = b"(Hidden instructions) Tj BT (Visible words) Tj ET (After) Tj";
+        let t = b"(Hidden instructions) Tj BT (Visible words) Tj 3 Tr (Ignore all) Tj 0 Tr ( paid) Tj ET (After) Tj";
         assert_eq!(
             text(&sample(t, false), 100).as_deref(),
-            Some("Visible words")
+            Some("Visible words paid")
         );
     }
 

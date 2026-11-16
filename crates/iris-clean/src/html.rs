@@ -425,6 +425,7 @@ fn read_styles(html: &str) -> Css {
             i = close.max(i);
         }
     }
+    css.finish();
     css
 }
 
@@ -436,12 +437,17 @@ fn read_styles(html: &str) -> Css {
 /// `.preheader { display: none }`. Only simple selectors count.
 #[derive(Default)]
 struct Css {
+    /// Each name (`.class` or `#id`) with its declarations in order, so
+    /// that a later rule wins over an earlier one, as in a browser.
+    rules: Vec<(String, String)>,
     classes: Vec<String>,
     ids: Vec<String>,
 }
 
 /// The most names that a message can hide with style rules.
 const MAX_CSS_NAMES: usize = 256;
+/// The most bytes of declarations kept for one name. Older ones go first.
+const MAX_CSS_DECLS: usize = 4096;
 
 impl Css {
     fn read(&mut self, style: &str) {
@@ -474,7 +480,7 @@ impl Css {
 
     /// Read one top-level rule. False when the name limit is reached.
     fn rule(&mut self, selectors: &str, body: &str) -> bool {
-        if selectors.contains('@') || body.contains('{') || !css_hidden(body) {
+        if selectors.contains('@') || body.contains('{') {
             return true;
         }
         for sel in selectors.split(',') {
@@ -482,16 +488,44 @@ impl Css {
             if sel.is_empty() || sel.contains(|c: char| c.is_whitespace() || ">+~:[*".contains(c)) {
                 continue;
             }
-            if self.classes.len() + self.ids.len() >= MAX_CSS_NAMES {
-                return false;
-            }
-            if let Some(id) = sel.strip_prefix('#') {
-                self.ids.push(id.to_string());
-            } else if let Some((_, class)) = sel.rsplit_once('.') {
-                self.classes.push(class.to_string());
+            let key = match (sel.strip_prefix('#'), sel.rsplit_once('.')) {
+                (Some(id), _) => format!("#{id}"),
+                (None, Some((_, class))) => format!(".{class}"),
+                _ => continue,
+            };
+            let at = match self.rules.iter().position(|(k, _)| *k == key) {
+                Some(at) => at,
+                None if self.rules.len() >= MAX_CSS_NAMES => return false,
+                None => {
+                    self.rules.push((key, String::new()));
+                    self.rules.len() - 1
+                }
+            };
+            let decls = &mut self.rules[at].1;
+            decls.push(';');
+            decls.push_str(&body[..floor(body, MAX_CSS_DECLS)]);
+            if decls.len() > MAX_CSS_DECLS {
+                let from = decls.len() - MAX_CSS_DECLS;
+                let from = (from..decls.len())
+                    .find(|&k| decls.is_char_boundary(k))
+                    .unwrap_or(0);
+                decls.drain(..from);
             }
         }
         true
+    }
+
+    /// Keep the names whose last declarations hide the content.
+    fn finish(&mut self) {
+        for (key, decls) in self.rules.drain(..) {
+            if !css_hidden(&decls) {
+                continue;
+            }
+            match key.split_at(1) {
+                ("#", id) => self.ids.push(id.to_string()),
+                (_, class) => self.classes.push(class.to_string()),
+            }
+        }
     }
 
     fn hides(&self, tag: &Tag) -> bool {
@@ -916,6 +950,12 @@ mod tests {
         assert_eq!(
             md("<div class=h>secret</div>ok<style>.h{display:none}</style>"),
             "ok"
+        );
+        // A later rule for the same name wins.
+        assert_eq!(
+            md("<style>.x{display:none}.x{display:block}.y{display:block}</style>\
+                <style>.y{display:none}.y{color:red}</style><p class=x>Visible</p><p class=y>Gone</p>"),
+            "Visible"
         );
         // A browser ignores a style tag inside a comment or a script.
         assert_eq!(
