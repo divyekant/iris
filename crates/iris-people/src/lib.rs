@@ -5,8 +5,9 @@
 //! 6.7: you sent a message to the address, or you sent a message in a thread
 //! where the address sent one. A draft does not count. A message with a
 //! hostile mark or the label `SPAM` does not count, because its `From` can be
-//! false. A kind in the `sender` table changes the result: `hostile` always
-//! removes the address, and a kind that a person set always wins.
+//! false. A kind in the `sender` table wins: only `person` gives a profile.
+//! A row with no kind is not decided yet, and the person rule decides the
+//! profile for display only (section 6.7).
 //!
 //! One profile can have more than one address. Two known addresses go into
 //! one profile when their latest display names are the same, with two words
@@ -225,8 +226,7 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
     let mut ids: HashMap<String, i64> = HashMap::new();
     let mut kept: Vec<String> = Vec::new();
     store.write(|tx| {
-        let mut kind =
-            tx.prepare_cached("SELECT id, kind, decided_by FROM sender WHERE address = ?1")?;
+        let mut kind = tx.prepare_cached("SELECT id, kind FROM sender WHERE address = ?1")?;
         // A new row has no kind: the sender step decides it (specification
         // 1, section 6.7). This crate never writes a kind.
         let mut add = tx.prepare_cached(
@@ -236,23 +236,21 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
         let mut addrs: Vec<&String> = stats.keys().collect();
         addrs.sort();
         for a in addrs {
-            let row: Option<(i64, Option<String>, Option<String>)> = kind
-                .query_row([a], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            let row: Option<(i64, Option<String>)> = kind
+                .query_row([a], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?;
-            let (k, by) = row
-                .as_ref()
-                .map(|(_, k, b)| (k.as_deref(), b.as_deref()))
-                .unwrap_or((None, None));
-            let include = match (k, by) {
-                (Some("hostile"), _) => false,
-                (k, Some("person")) => k == Some("person"),
-                _ => known.contains(a),
+            // A decided kind wins, also a kind that a person set. A row with
+            // no kind is not decided: the person rule shows it, for display
+            // only (section 6.7).
+            let include = match row.as_ref().and_then(|(_, k)| k.as_deref()) {
+                Some(k) => k == "person",
+                None => known.contains(a),
             };
             if !include {
                 continue;
             }
             let id = match row {
-                Some((id, _, _)) => id,
+                Some((id, _)) => id,
                 None => add.query_row(params![a, stats[a].latest_name()], |r| r.get(0))?,
             };
             ids.insert(a.clone(), id);
