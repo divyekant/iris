@@ -16,6 +16,10 @@ fn addresses_split_and_lowercase() {
         ]
     );
     assert!(addresses("undisclosed-recipients:;").is_empty());
+    assert_eq!(
+        addresses(r#"Jo <"j o"@example.org>"#),
+        vec![(r#""j o"@example.org"#.into(), Some("Jo".into()))]
+    );
 }
 
 #[test]

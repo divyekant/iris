@@ -698,27 +698,60 @@ fn decoded_len(body: &[u8], enc: Encoding) -> u64 {
 }
 
 /// Decode quoted-printable with the `mail-parser` decoder, in chunks of at
-/// most about 64 KiB, and give each decoded chunk to `f` until it returns
-/// false. A chunk ends after a line end, or in a long line at a byte that is
-/// not one of the 2 bytes after an `=`. An escape never crosses a line end,
-/// so each chunk decodes as in the decode of the whole body.
+/// most [`QP_CHUNK`] + 2 bytes, and give each decoded chunk to `f` until it
+/// returns false. Each chunk ends at a boundary where the decode keeps no
+/// state (see [`qp_chunk_end`]), so the chunks decode as the whole body does.
 fn qp_chunks(body: &[u8], mut f: impl FnMut(&[u8]) -> bool) {
-    const CHUNK: usize = 64 * 1024;
     let mut start = 0;
     while start < body.len() {
-        let window = &body[start..body.len().min(start + CHUNK)];
-        let mut end = match window.iter().position(|&b| b == b'\n') {
-            Some(n) => start + n + 1,
-            None => start + window.len(),
-        };
-        while end < body.len() && body[end.saturating_sub(2)..end].contains(&b'=') {
-            end += 1;
-        }
+        let end = qp_chunk_end(body, start);
         if !f(&Encoding::QuotedPrintable.decode(&body[start..end])) {
             return;
         }
         start = end;
     }
+}
+
+/// The encoded bytes of one quoted-printable chunk, before its boundary.
+const QP_CHUNK: usize = 64 * 1024;
+
+/// The end of the chunk that starts at `start`, a boundary.
+///
+/// A boundary is after a line end, or else after the last token in the
+/// first [`QP_CHUNK`] bytes that leaves no state: an escape `=XY` (two hex
+/// digits), a pair `=X` that the decoder keeps as it is (`X` is not white
+/// space, CR or LF), or a byte that is not `=`, white space or CR. After
+/// white space, a CR or `=` with white space, the decode depends on the
+/// next bytes (a line end deletes white space and makes a soft break).
+fn qp_chunk_end(body: &[u8], start: usize) -> usize {
+    let limit = body.len().min(start + QP_CHUNK);
+    if let Some(n) = body[start..limit].iter().position(|&b| b == b'\n') {
+        return start + n + 1;
+    }
+    if limit == body.len() {
+        return limit;
+    }
+    let hex = |i: usize| body.get(i).is_some_and(u8::is_ascii_hexdigit);
+    let (mut i, mut safe) = (start, None);
+    while i < limit {
+        let (len, keeps_no_state) = match body[i] {
+            b'=' if hex(i + 1) && hex(i + 2) => (3, true),
+            b'=' => (
+                2,
+                !matches!(body.get(i + 1), Some(b' ' | b'\t' | b'\r' | b'\n') | None),
+            ),
+            b' ' | b'\t' | b'\r' => (1, false),
+            _ => (1, true),
+        };
+        i += len;
+        if keeps_no_state {
+            safe = Some(i.min(body.len()));
+        }
+    }
+    // shortcut: a line of more than QP_CHUNK bytes of only white space, CR
+    // and `=` with white space splits at the limit, so its white space can
+    // differ from the whole decode; upgrade if real mail has such lines (#90).
+    safe.unwrap_or(limit)
 }
 
 /// Decode base64 and give the bytes to `f`, in parts. The `mail-parser`
@@ -821,6 +854,57 @@ fn tidy(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// For any quoted-printable body: each chunk has at most QP_CHUNK + 2
+    /// bytes, and the chunks decode to the decode of the whole body.
+    #[test]
+    fn qp_chunks_stay_bounded_and_decode_as_the_whole() {
+        const PIECES: [&[u8]; 12] = [
+            b"=", b"A", b"3", b"=4", b"1", b"\r\n", b" ", b"=\r\n", b"\t", b"\r", b"G", b"= ",
+        ];
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        for round in 0..40 {
+            let mut body = Vec::new();
+            // Long lines with no line end, so the token rule decides.
+            while body.len() < 3 * QP_CHUNK {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let p = PIECES[(x % PIECES.len() as u64) as usize];
+                if round % 2 == 0 && p.contains(&b'\n') {
+                    continue;
+                }
+                body.extend_from_slice(p);
+            }
+            let (mut out, mut max, mut at) = (Vec::new(), 0, 0);
+            while at < body.len() {
+                let end = qp_chunk_end(&body, at);
+                max = max.max(end - at);
+                at = end;
+            }
+            qp_chunks(&body, |b| {
+                out.extend_from_slice(b);
+                true
+            });
+            assert!(max <= QP_CHUNK + 2, "chunk of {max} bytes");
+            assert_eq!(
+                out,
+                Encoding::QuotedPrintable.decode(&body),
+                "round {round}"
+            );
+        }
+        for b in *b"= " {
+            let run = vec![b; 4 * 1024 * 1024];
+            assert!(qp_chunk_end(&run, 0) <= QP_CHUNK + 2);
+        }
+        let eq = vec![b'='; 4 * 1024 * 1024 + 1];
+        let mut out = Vec::new();
+        qp_chunks(&eq, |b| {
+            out.extend_from_slice(b);
+            true
+        });
+        assert_eq!(out, Encoding::QuotedPrintable.decode(&eq));
+    }
 
     /// The invariant of `decode_capped`, for each cap: the bytes are the first
     /// `min(cap, full)` bytes of the full decode, and the cut flag is true

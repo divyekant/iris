@@ -142,3 +142,25 @@ fn base64_lines(data: &[u8]) -> String {
         .map(|l| format!("{}\r\n", std::str::from_utf8(l).unwrap()))
         .collect()
 }
+
+/// A METHOD line inside one long quoted-printable line (with encoded line
+/// ends), at each offset around the chunk size of 64 KiB.
+#[test]
+fn a_method_line_across_each_quoted_printable_chunk_boundary_counts() {
+    for pad in 65_500..65_560 {
+        let fill = "x".repeat(pad);
+        for method in [
+            "METHOD:REQUEST",
+            "=4D=45=54=48=4F=44=3A=52=45=51=55=45=53=54",
+        ] {
+            let raw = format!(
+                "Content-Type: text/calendar\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n{fill}=0D=0A{method}=0D=0AEND:VCALENDAR"
+            );
+            assert!(inv(raw.as_bytes()), "pad {pad} {method}");
+            let cancel = raw
+                .replace("REQUEST", "CANCEL")
+                .replace("=52=45=51=55=45=53=54", "=43=41=4E=43=45=4C");
+            assert!(!inv(cancel.as_bytes()), "pad {pad} cancel");
+        }
+    }
+}

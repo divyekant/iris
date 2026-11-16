@@ -142,7 +142,14 @@ fn fields(raw: &[u8]) -> Vec<(String, String)> {
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     iris_senders::head::addresses(v)
         .into_iter()
-        .filter(|(a, _)| !a.contains(char::is_whitespace))
+        // White space is valid only inside a quoted local part.
+        .filter(|(a, _)| {
+            a.rsplit_once('@').is_some_and(|(local, domain)| {
+                let quoted = local.len() > 1 && local.starts_with('"') && local.ends_with('"');
+                (quoted || !local.contains(char::is_whitespace))
+                    && !domain.contains(char::is_whitespace)
+            })
+        })
         // `a@b.example (Ana Lee)`: the comment shows as the display name.
         .map(|(a, n)| {
             let n = n.or_else(|| comment_name(v, &a));

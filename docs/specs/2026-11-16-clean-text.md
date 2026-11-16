@@ -86,8 +86,10 @@ Each budget only goes down. No step gives budget back.
   end of the body is a soft line break and goes out), and all others as
   they are. Iris cuts the input before the decode, so a decode never uses
   more than about its cap. Iris decodes quoted-printable with the
-  `mail-parser` decoder in chunks of about 64 KiB that end after a line end
-  (an escape never crosses one), and stops after the cap. The size of a
+  `mail-parser` decoder in chunks of at most 64 KiB + 2 bytes, and stops
+  after the cap. A chunk ends after a line end, or else after the last token
+  that leaves the decoder with no state (an escape `=XY`, a pair `=X` that
+  stays as it is, or a byte that is not `=`, white space or CR). The size of a
   quoted-printable attachment is the length of the same chunked decode. The `mail-parser` base64 decoder uses memory for
   white space too, so Iris gives it only the alphabet, in chunks of 64 KiB.
   The size of a base64 attachment is the length of the same chunked decode,
@@ -404,6 +406,9 @@ client. They are not defects of this design:
   encrypted PDF gives no text.
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
+- A quoted-printable line of more than 64 KiB that has only white space,
+  CR and `=` with white space splits at 64 KiB. Its white space can then
+  differ from the decode of the whole body.
 - Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
   address, so the person goes out of the profiles. A comment inside an
   address (`john(work)@example.org`), a domain literal with a `:` outside
