@@ -460,16 +460,13 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
     row.ok_or(Error::NoMessage(message))
 }
 
-/// The documents of the pinned items whose origin is `message`.
-// shortcut: pinned means "has a correction" only; add the references of
-// open changesets and of the ledger when specification 2 builds them.
-/// The documents of the pinned items (with a correction) whose origin is
+/// The documents of the pinned items (the view `item_pin`) whose origin is
 /// the message. A document that is not JSON is left out.
 fn pinned(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Vec<Value>> {
     let mut st = c.prepare_cached(
         "SELECT i.doc FROM item_source s JOIN item i ON i.id = s.item_id
          WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form <> 'conversation'
-           AND EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)
+           AND EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)
          ORDER BY i.id",
     )?;
     let docs = st
@@ -699,10 +696,10 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
 }
 
 /// Before understanding runs again: delete the items whose origin is this
-/// message, that a rule or the model made, and that are not pinned (no
-/// correction, section 7.5). Conversations belong to the conversation rule.
-// shortcut: pinned means "has a correction" only; add the references of
-// open changesets and of the ledger when specification 2 builds them.
+/// message, that a rule or the model made, and that are not pinned
+/// (`item_pin`, section 7.5). Conversations belong to the conversation rule.
+// shortcut: `item_pin` has no ledger references yet; the ledger (R2-03)
+// adds them to the view.
 /// Makes the mail of the `sender` rows `rows` pending again: a sender that
 /// became or stopped being hostile (section 6.7). For each message from
 /// these addresses that is not gone: deletes its items that are not pinned
@@ -762,10 +759,11 @@ pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store:
 pub const RERUN_PAGE: i64 = 500;
 
 /// The items of an origin message `src` that a new run replaces: not the
-/// conversation, made by a rule or the model, and with no correction.
+/// conversation, made by a rule or the model, and not pinned (`item_pin`: a
+/// correction, or an open changeset action that names the item).
 const DROPPABLE: &str = "src.role = 'origin' AND i.form <> 'conversation'
   AND i.derived_by IN ('rule', 'model')
-  AND NOT EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)";
+  AND NOT EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)";
 
 fn drop_old_items(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
@@ -815,13 +813,13 @@ fn put_item(
         *invalid = Some(e);
         return Err(iris_store::Error::Query("an item is not valid".into()));
     }
-    // A possible duplicate of a pinned item (one with a correction): same
-    // form, same origin message.
+    // A possible duplicate of a pinned item (`item_pin`): same form, same
+    // origin message.
     let pinned: Option<i64> = tx
         .query_row(
             "SELECT i.id FROM item_source s JOIN item i ON i.id = s.item_id
              WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form = ?2
-               AND EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)
+               AND EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)
              ORDER BY i.id LIMIT 1",
             params![ids.message, form],
             |r| r.get(0),

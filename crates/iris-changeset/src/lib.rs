@@ -469,14 +469,17 @@ pub fn submit_in(
     while let Some((id, n, verb, targets, args)) = next_action(c, changeset, revision, last)? {
         last = n;
         let verb = Verb::parse(&verb).expect("the CHECK of the table");
-        // Only the targets give the messages: drop rows of another writer.
-        c.execute("DELETE FROM action_message WHERE action_id = ?1", [id])?;
-        let denial = match supported(c, verb, &args)? {
+        // Only the targets give the rows: drop rows of another writer.
+        clear(c, id)?;
+        let mut denial = match supported(c, verb, &args)? {
             Err(why) => Some(why),
-            Ok(()) => resolve(c, id, &targets)?,
+            Ok(()) => resolve(c, id, verb, &targets)?,
         };
+        if denial.is_none() && verb == Verb::Correct {
+            denial = check_correct(c, id, &args, now_ms)?;
+        }
         if let Some(why) = denial {
-            c.execute("DELETE FROM action_message WHERE action_id = ?1", [id])?;
+            clear(c, id)?;
             denials.push((id, why));
         }
     }
@@ -499,10 +502,12 @@ pub fn submit_in(
         |r| r.get(0),
     )?;
     let mut last = 0;
-    while let Some((id, n, ..)) = next_action(c, changeset, revision, last)? {
+    while let Some((id, n, verb, ..)) = next_action(c, changeset, revision, last)? {
         last = n;
         let (count, hash) = hash(c, id)?;
-        let valid = count > 0;
+        // The flags of a mailbox verb: a state verb changes no message, and
+        // has no target thread.
+        let valid = count > 0 && !STATE_VERBS.contains(&verb.as_str());
         let mut flags = Vec::new();
         if valid && (count > BULK || total > BULK) {
             flags.push("bulk");
@@ -584,8 +589,6 @@ const SYSTEM_LABELS: [&str; 9] = [
 
 /// The argument checks of each verb (section 4). Gives the reason of the
 /// denial for an action that is not valid.
-// shortcut: the state verbs are denied; the next R2-01 PR adds their
-// argument checks and item targets (issue #164).
 fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Result<(), String>> {
     // add_action writes an object. Another writer of the table may not.
     let Ok(args) = serde_json::from_str::<Map<String, Value>>(args) else {
@@ -600,9 +603,23 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
             }
         }
         Verb::Label | Verb::Unlabel => label_name(c, &args)?,
+        Verb::Close | Verb::Decline => match (args.get("reason"), args.len()) {
+            (Some(Value::String(r)), 1) if !r.trim().is_empty() => Ok(()),
+            _ => Err(format!(
+                "{} needs one reason: {{\"reason\": \"...\"}}",
+                verb.as_str()
+            )),
+        },
+        Verb::Defer => match (args.get("date"), args.len()) {
+            (Some(Value::String(d)), 1) if is_date(d) => Ok(()),
+            _ => Err("defer needs one date: {\"date\": \"YYYY-MM-DD\"}".into()),
+        },
+        Verb::Correct => match (args.get("field"), args.get("value"), args.len()) {
+            (Some(Value::String(f)), Some(_), 2) if !f.is_empty() => Ok(()),
+            _ => Err("correct needs {\"field\": \"...\", \"value\": ...}".into()),
+        },
         // The undo of a trash (R2-03, section 7.4) makes its own changeset.
         Verb::Untrash => Err("only the undo of a trash makes untrash".into()),
-        _ => Err(format!("{} is not available yet", verb.as_str())),
     })
 }
 
@@ -614,7 +631,7 @@ fn label_name(
     args: &Map<String, Value>,
 ) -> Result<std::result::Result<(), String>> {
     let name = match (args.get("label"), args.len()) {
-        (Some(Value::String(n)), 1) if !n.trim().is_empty() && n.trim() == n => n,
+        (Some(Value::String(n)), 1) if !n.trim().is_empty() => n,
         _ => {
             return Ok(Err(
                 "the argument is one label name: {\"label\": \"...\"}".into()
@@ -625,7 +642,7 @@ fn label_name(
     // `lower` change only ASCII letters, and a lower case does not equate
     // each case pair (for example `Σ` and `ς`). The store has a few system
     // labels for each account.
-    let folded = UniCase::new(name.as_str());
+    let folded = UniCase::new(name.trim());
     let mut system = SYSTEM_LABELS.iter().any(|l| UniCase::new(*l) == folded)
         || UniCase::new(name.get(..9).unwrap_or("")) == UniCase::new("CATEGORY_");
     let mut st = c.prepare("SELECT name, provider_id FROM label WHERE kind = 'system'")?;
@@ -641,10 +658,25 @@ fn label_name(
     })
 }
 
-/// Resolve the targets of an action to `action_message` rows (section 4). A
-/// thread gives each of its messages that is not gone and has no `SPAM` or
-/// `TRASH`. Gives the reason of the denial, or `None`.
-fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>> {
+/// The verbs that change Iris state, not a mailbox (section 4). Their
+/// targets are items.
+const STATE_VERBS: [&str; 4] = ["close", "defer", "decline", "correct"];
+
+/// Delete the rows that submit derives from the targets of an action.
+fn clear(c: &Connection, action: i64) -> Result<()> {
+    c.execute("DELETE FROM action_message WHERE action_id = ?1", [action])?;
+    c.execute("DELETE FROM action_item WHERE action_id = ?1", [action])?;
+    Ok(())
+}
+
+/// Resolve the targets of an action (section 4). A mailbox verb takes
+/// threads or messages and gives `action_message` rows: a thread gives each
+/// of its messages that is not gone and has no `SPAM` or `TRASH`. A state
+/// verb takes items (`close`, `defer` and `decline` take commitments only)
+/// and gives `action_item` rows, which pin the items while the action is
+/// open, and the origin messages of the items as `action_message` rows, for
+/// the rules (section 6.2). Gives the reason of the denial, or `None`.
+fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Option<String>> {
     // add_action writes one group of IDs. Another writer of the table may not.
     let bad = || Ok(Some("the targets are not valid".to_string()));
     let Ok(targets) = serde_json::from_str::<Map<String, Value>>(targets) else {
@@ -653,8 +685,11 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
     let (Some((group, Value::Array(ids))), 1) = (targets.iter().next(), targets.len()) else {
         return bad();
     };
-    if group != "threads" && group != "messages" {
-        return Ok(Some("a mailbox verb takes threads or messages".into()));
+    let state = STATE_VERBS.contains(&verb.as_str());
+    match (state, group.as_str()) {
+        (false, "threads" | "messages") | (true, "items") => {}
+        (false, _) => return Ok(Some("a mailbox verb takes threads or messages".into())),
+        (true, _) => return Ok(Some(format!("{} takes items", verb.as_str()))),
     }
     let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
@@ -694,6 +729,27 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
                         |r| r.get(0),
                     )?
             }
+            (Kind::Thread | Kind::Message | Kind::Sender, _) => return bad(),
+            (_, "items") => {
+                if verb != Verb::Correct && kind != Kind::Commitment {
+                    return Ok(Some(format!("{} takes only commitments", verb.as_str())));
+                }
+                // The document holds its ID, so the prefix must fit the item.
+                let found = c.execute(
+                    "INSERT OR IGNORE INTO action_item(action_id, item_id)
+                     SELECT ?1, id FROM item WHERE id = ?2 AND json_extract(doc, '$.id') = ?3",
+                    params![action, row, format_id(kind, row)],
+                )? == 1;
+                if found {
+                    c.execute(
+                        "INSERT OR IGNORE INTO action_message(action_id, message_id)
+                         SELECT ?1, message_id FROM item_source
+                         WHERE item_id = ?2 AND role = 'origin'",
+                        params![action, row],
+                    )?;
+                }
+                found
+            }
             _ => return bad(),
         };
         if !found {
@@ -701,19 +757,24 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
             return Ok(Some(format!("{id} is not in the mirror")));
         }
     }
-    // No target, or a thread with each message gone or in SPAM or TRASH.
+    // No target, or a thread with each message gone or in SPAM or TRASH. An
+    // item can have no origin message.
     let none: bool = c.query_row(
         "SELECT NOT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)",
         [action],
         |r| r.get(0),
     )?;
-    if none {
+    if none && !state {
         return Ok(Some("the targets have no message to change".into()));
     }
     // One action changes one mailbox: the apply and the undo use one account.
     let accounts: i64 = c.query_row(
-        "SELECT count(DISTINCT m.account_id) FROM action_message am
-         JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1",
+        "SELECT count(DISTINCT account) FROM (
+           SELECT m.account_id AS account FROM action_message am
+           JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1
+           UNION ALL
+           SELECT i.account_id FROM action_item ai
+           JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1)",
         [action],
         |r| r.get(0),
     )?;
@@ -721,6 +782,51 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
         return Ok(Some("the targets are in two or more accounts".into()));
     }
     Ok(None)
+}
+
+/// `correct` (section 4): the rules of a correction (`iris_understand::correct`)
+/// hold for each item. Gives the reason of the denial, or `None`.
+fn check_correct(c: &Connection, action: i64, args: &str, now_ms: i64) -> Result<Option<String>> {
+    let args: Map<String, Value> = serde_json::from_str(args).expect("supported read it");
+    let (field, value) = (args["field"].as_str().expect("supported"), &args["value"]);
+    let mut st = c.prepare(
+        "SELECT i.doc ->> '$.id' FROM action_item a JOIN item i ON i.id = a.item_id
+         WHERE a.action_id = ?1 ORDER BY i.id",
+    )?;
+    let mut rows = st.query([action])?;
+    while let Some(r) = rows.next()? {
+        let id: String = r.get(0)?;
+        if let Err(why) = iris_understand::correct::check(c, &id, field, value.clone(), now_ms)? {
+            return Ok(Some(format!("{id}: {why}")));
+        }
+    }
+    Ok(None)
+}
+
+/// `YYYY-MM-DD`, a date of the Gregorian calendar.
+fn is_date(text: &str) -> bool {
+    let b = text.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if b.len() != 10
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !digits(0..4)
+        || !digits(5..7)
+        || !digits(8..10)
+    {
+        return false;
+    }
+    let n = |r: std::ops::Range<usize>| text[r].parse::<u32>().expect("digits");
+    let (y, m, d) = (n(0..4), n(5..7), n(8..10));
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&d)
 }
 
 /// The count of resolved messages, and the SHA-256 (hex) of the verb, the

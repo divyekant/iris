@@ -11,7 +11,7 @@
 //! item, never changes its ID, and gives the model the corrected document as
 //! an existing item (`store.rs`, `DROPPABLE` and `pinned`).
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
 use crate::validate;
@@ -58,6 +58,60 @@ pub fn correct(
     by: &str,
     now_ms: i64,
 ) -> rusqlite::Result<Result<Value, String>> {
+    let (item, mut doc, status) = match corrected(tx, id, field, value.clone(), now_ms)? {
+        Ok(c) => c,
+        Err(why) => return Ok(Err(why)),
+    };
+    let mut failed = None;
+    crate::set_senders(&mut doc, &mut |addr, name| {
+        crate::store::sender_row(tx, addr, name).unwrap_or_else(|e| {
+            failed.get_or_insert(e);
+            0
+        })
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    tx.execute(
+        "INSERT INTO correction(item_id, field, value, by, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![item, field, value.to_string(), by, now_ms],
+    )?;
+    // A gone item keeps `gone`, and comes back with the new status.
+    tx.execute(
+        "UPDATE item SET doc = ?2, updated_at = ?3,
+           status = CASE WHEN ?4 IS NULL OR status = 'gone' THEN status ELSE ?4 END,
+           status_before_gone = CASE WHEN ?4 IS NOT NULL AND status = 'gone'
+             THEN ?4 ELSE status_before_gone END
+         WHERE id = ?1",
+        params![item, doc.to_string(), now_ms, status],
+    )?;
+    Ok(Ok(doc))
+}
+
+/// Gives the reason why [`correct`] refuses the change, or `Ok(())`, and
+/// writes nothing. The submit of a `correct` action (specification 2,
+/// section 4) uses it, so the submit and the apply use one rule.
+pub fn check(
+    c: &Connection,
+    id: &str,
+    field: &str,
+    value: Value,
+    now_ms: i64,
+) -> rusqlite::Result<Result<(), String>> {
+    Ok(corrected(c, id, field, value, now_ms)?.map(|_| ()))
+}
+
+/// The checks of [`correct`]: the item row, the corrected document (with
+/// the sender IDs still to set) and the new status, or the reason of the
+/// refusal.
+#[allow(clippy::type_complexity)]
+fn corrected(
+    tx: &Connection,
+    id: &str,
+    field: &str,
+    value: Value,
+    now_ms: i64,
+) -> rusqlite::Result<Result<(i64, Value, Option<&'static str>), String>> {
     let top = field.split('.').next().unwrap_or("");
     if field.split('.').any(|s| s == "sender") {
         return Ok(Err(
@@ -133,28 +187,5 @@ pub fn correct(
     if let Err(e) = validate(&check) {
         return Ok(Err(format!("the corrected item is not valid: {e}")));
     }
-    let mut failed = None;
-    crate::set_senders(&mut doc, &mut |addr, name| {
-        crate::store::sender_row(tx, addr, name).unwrap_or_else(|e| {
-            failed.get_or_insert(e);
-            0
-        })
-    });
-    if let Some(e) = failed {
-        return Err(e);
-    }
-    tx.execute(
-        "INSERT INTO correction(item_id, field, value, by, at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![item, field, value.to_string(), by, now_ms],
-    )?;
-    // A gone item keeps `gone`, and comes back with the new status.
-    tx.execute(
-        "UPDATE item SET doc = ?2, updated_at = ?3,
-           status = CASE WHEN ?4 IS NULL OR status = 'gone' THEN status ELSE ?4 END,
-           status_before_gone = CASE WHEN ?4 IS NOT NULL AND status = 'gone'
-             THEN ?4 ELSE status_before_gone END
-         WHERE id = ?1",
-        params![item, doc.to_string(), now_ms, status],
-    )?;
-    Ok(Ok(doc))
+    Ok(Ok((item, doc, status)))
 }

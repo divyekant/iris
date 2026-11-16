@@ -70,13 +70,25 @@ fn store(dir: &TempDir) -> Store {
     )
     .unwrap();
     s.write(|tx| {
-        for form in ["commitment", "record"] {
+        // The examples of the open model, as items c-1 and r-2. The
+        // commitment has message 1 as its origin.
+        for (form, file, id) in [
+            ("commitment", "commitment-you-owe.json", "c-1"),
+            ("record", "record-receipt.json", "r-2"),
+        ] {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            doc["id"] = json!(id);
             tx.execute(
                 "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
-                 VALUES (?1, ?2, 'open', '{}', 0, 0)",
-                rusqlite::params![form, a],
+                 VALUES (?1, ?2, ?3, ?4, 0, 0)",
+                rusqlite::params![form, a, doc["status"].as_str().unwrap(), doc.to_string()],
             )?;
         }
+        tx.execute(
+            "INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin')",
+            [],
+        )?;
         // Policy version 1, with the rule IDs 1 to 4.
         tx.execute_batch(
             "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('a', 'h1', 0);
@@ -189,8 +201,7 @@ fn submit_denies_an_action_that_is_not_valid() {
         (Verb::Archive, &["t-3"], json!({})),
         (Verb::Archive, &["m-1"], json!({"label": "x"})),
         (Verb::Label, &["m-1"], json!({"label": "INBOX"})),
-        // The next R2-01 PR adds the state verbs (issue #164).
-        (Verb::Close, &["c-1"], json!({"reason": "Done."})),
+        (Verb::Close, &["t-1"], json!({"reason": "Done."})),
         (Verb::Untrash, &["m-3"], json!({})),
     ];
     for (verb, targets, a) in &cases {
@@ -1102,7 +1113,7 @@ fn label_takes_one_user_label() {
     })
     .unwrap();
     let cs = create(&s, &agent(), NOW).unwrap();
-    let cases: [(Verb, Value, bool); 20] = [
+    let cases: [(Verb, Value, bool); 21] = [
         (Verb::Label, json!({"label": "Finance"}), true),
         (Verb::Unlabel, json!({"label": "Finance"}), true),
         // A new label: the apply makes it (section 7.2).
@@ -1114,7 +1125,9 @@ fn label_takes_one_user_label() {
         (Verb::Label, json!({"label": "label_9"}), false),
         (Verb::Label, json!({}), false),
         (Verb::Label, json!({"label": ""}), false),
-        (Verb::Label, json!({"label": " Finance"}), false),
+        // A name with a space at an end is a user label too (#204).
+        (Verb::Label, json!({"label": " Finance"}), true),
+        (Verb::Label, json!({"label": " "}), false),
         (Verb::Label, json!({"label": 7}), false),
         (Verb::Label, json!({"label": "Finance", "x": 1}), false),
         (Verb::Label, json!({"name": "Finance"}), false),
@@ -1168,4 +1181,164 @@ fn an_action_names_each_target_once() {
     let start = std::time::Instant::now();
     add_action(&s, cs, &agent(), Verb::Archive, &many, &Map::new(), None).unwrap();
     assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
+}
+
+/// The state verbs (section 4) take items: `close`, `decline` and `defer`
+/// take commitments, `correct` takes any item. Each argument has one shape.
+#[test]
+fn state_verbs_take_items() {
+    let dir = TempDir::new("state");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let cases: [(Verb, &[&str], Value, bool); 22] = [
+        (Verb::Close, &["c-1"], json!({"reason": "Done."}), true),
+        (Verb::Decline, &["c-1"], json!({"reason": "No time."}), true),
+        (Verb::Defer, &["c-1"], json!({"date": "2028-02-29"}), true),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "due.date", "value": "2026-12-01"}),
+            true,
+        ),
+        (
+            Verb::Correct,
+            &["r-2"],
+            json!({"field": "fields.order", "value": "EB-1"}),
+            true,
+        ),
+        (Verb::Close, &["r-2"], json!({"reason": "Done."}), false),
+        (Verb::Close, &["c-9"], json!({"reason": "Done."}), false),
+        // The prefix does not fit the item.
+        (
+            Verb::Correct,
+            &["s-1"],
+            json!({"field": "title", "value": "x"}),
+            false,
+        ),
+        (Verb::Close, &["c-1"], json!({}), false),
+        (Verb::Close, &["c-1"], json!({"reason": " "}), false),
+        (
+            Verb::Decline,
+            &["c-1"],
+            json!({"reason": "x", "why": "y"}),
+            false,
+        ),
+        (Verb::Defer, &["c-1"], json!({"date": "2026-02-29"}), false),
+        (Verb::Defer, &["c-1"], json!({"date": "2026-13-01"}), false),
+        (Verb::Defer, &["c-1"], json!({"date": "2026-1-01"}), false),
+        (Verb::Defer, &["c-1"], json!({"date": 20260101}), false),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "status", "value": "done"}),
+            false,
+        ),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "due.date", "value": 7}),
+            false,
+        ),
+        (Verb::Correct, &["c-1"], json!({"field": "due.date"}), false),
+        (
+            Verb::Correct,
+            &["c-1"],
+            json!({"field": "", "value": "x"}),
+            false,
+        ),
+        (
+            Verb::Correct,
+            &["r-2"],
+            json!({"field": "issuer.sender", "value": "p-1"}),
+            false,
+        ),
+        (Verb::Archive, &["c-1"], json!({}), false),
+        (Verb::Close, &["m-1"], json!({"reason": "Done."}), false),
+    ];
+    for (verb, targets, a, _) in &cases {
+        add_action(&s, cs, &agent(), *verb, targets, &args(a.clone()), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+    for (i, (verb, targets, a, ok)) in cases.iter().enumerate() {
+        let d = hash_doc(&s, cs, 1, i as i64 + 1);
+        let expect = if *ok { "proposed" } else { "denied" };
+        assert_eq!(
+            d["decision"]["state"],
+            expect,
+            "{} {targets:?} {a}: {d}",
+            verb.as_str()
+        );
+        // A state verb has no bulk flag and no first_contact flag.
+        assert_eq!(d["flags"], json!([]), "{d}");
+    }
+    // The origin message of the commitment is the resolved message, for the
+    // rules. The record has no origin row in this store.
+    assert_eq!(
+        hash_doc(&s, cs, 1, 1)["resolved"]["messages"],
+        json!(["m-1"])
+    );
+    assert_eq!(hash_doc(&s, cs, 1, 5)["resolved"]["messages"], json!([]));
+}
+
+/// An item that an open action names is pinned (specification 1, section
+/// 7.5): understanding does not delete it. A decided action does not pin.
+#[test]
+fn an_open_action_pins_its_items() {
+    let dir = TempDir::new("pin");
+    let s = store(&dir);
+    let pins = |s: &Store| -> Vec<i64> {
+        s.read(|c| {
+            let mut st = c.prepare("SELECT item_id FROM item_pin ORDER BY 1")?;
+            let v = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
+        })
+        .unwrap()
+    };
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Close,
+        &["c-1"],
+        &args(json!({"reason": "Done."})),
+        None,
+    )
+    .unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Close,
+        &["r-2"],
+        &args(json!({"reason": "Done."})),
+        None,
+    )
+    .unwrap();
+    assert_eq!(pins(&s), Vec::<i64>::new(), "a draft does not pin");
+    submit(&s, cs, &agent(), "Done.", NOW).unwrap();
+    assert_eq!(pins(&s), vec![1], "a denied action does not pin");
+    decide(&s, at(cs, 1, 1), State::InReview, By::Policy, None, NOW).unwrap();
+    assert_eq!(pins(&s), vec![1]);
+    decide(
+        &s,
+        at(cs, 1, 1),
+        State::Denied,
+        By::Person,
+        Some("No."),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(pins(&s), Vec::<i64>::new());
+    // The rows of a submitted action do not change.
+    for sql in [
+        "DELETE FROM action_item",
+        "UPDATE action_item SET item_id = 2",
+        "INSERT OR REPLACE INTO action_item(action_id, item_id) VALUES (1, 1)",
+        "INSERT INTO action_item(action_id, item_id) VALUES (1, 2)",
+    ] {
+        assert!(s.write(|tx| Ok(tx.execute(sql, [])?)).is_err(), "{sql}");
+    }
 }
