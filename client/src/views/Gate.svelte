@@ -34,7 +34,8 @@
   // The answer of each sender in this view. The row stays, with an Undo, also when the
   // brief loads again and the sender is not in the page any more.
   let done = $state<Record<string, Verb>>({});
-  let busy = $state<string | null>(null);
+  // The senders whose answer waits for the engine. A sender takes one answer at a time.
+  let busy = $state<Record<string, boolean>>({});
   let problem = $state<Record<string, string>>({});
   // svelte-ignore state_referenced_locally
   let rows = $state<GateSender[]>(page.senders);
@@ -58,7 +59,8 @@
   const UNDO: Record<Verb, Verb> = { accept: "reopen", decline: "reopen", reopen: "decline" };
 
   async function answer(sender: GateSender, verb: Verb, undo = false) {
-    busy = sender.id;
+    if (busy[sender.id]) return;
+    busy = { ...busy, [sender.id]: true };
     problem = { ...problem, [sender.id]: "" };
     try {
       await answerSender(sender.id, verb);
@@ -70,7 +72,8 @@
     } catch (e) {
       problem = { ...problem, [sender.id]: own(e) || "Iris could not save the answer. Try again." };
     } finally {
-      busy = null;
+      const { [sender.id]: _, ...rest } = busy;
+      busy = rest;
     }
   }
 
@@ -99,11 +102,11 @@
 {#snippet buttons(sender: GateSender)}
   <div class="answers">
     {#if declinedList}
-      <button class="quiet" disabled={busy === sender.id} onclick={() => answer(sender, "reopen")} aria-label={`Ask again about ${nameOf(sender)}`}>Ask again</button>
+      <button class="quiet" disabled={busy[sender.id]} onclick={() => answer(sender, "reopen")} aria-label={`Ask again about ${nameOf(sender)}`}>Ask again</button>
     {:else}
-      <button class="quiet" disabled={busy === sender.id} onclick={() => answer(sender, "decline")} aria-label={`Ignore ${nameOf(sender)}`}>Ignore</button>
+      <button class="quiet" disabled={busy[sender.id]} onclick={() => answer(sender, "decline")} aria-label={`Ignore ${nameOf(sender)}`}>Ignore</button>
     {/if}
-    <button class="accept" disabled={busy === sender.id} onclick={() => answer(sender, "accept")} aria-label={`Accept ${nameOf(sender)}`}>Accept</button>
+    <button class="accept" disabled={busy[sender.id]} onclick={() => answer(sender, "accept")} aria-label={`Accept ${nameOf(sender)}`}>Accept</button>
   </div>
 {/snippet}
 
@@ -111,13 +114,13 @@
   {@const verb = done[sender.id]}
   <p class="result" role="status">
     {#if verb === "accept"}
-      You know {nameOf(sender)} now. {items(sender.count)} moved into your brief.
+      You know {nameOf(sender)} now.
     {:else if verb === "decline"}
-      Iris keeps {nameOf(sender)} out of your brief.
+      You ignored {nameOf(sender)}.
     {:else}
-      Iris asks you about {nameOf(sender)} again in the brief.
+      Iris asks you about {nameOf(sender)} again.
     {/if}
-    <button class="undo" disabled={busy === sender.id} onclick={() => answer(sender, UNDO[verb], true)}>Undo</button>
+    <button class="undo" disabled={busy[sender.id]} onclick={() => answer(sender, UNDO[verb], true)}>Undo</button>
   </p>
   {#if problem[sender.id]}<p class="problem">{problem[sender.id]}</p>{/if}
 {/snippet}

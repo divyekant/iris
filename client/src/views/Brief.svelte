@@ -42,7 +42,9 @@
 
   const SHOWN = 7;
   // After an answer at the gate, the items of the sender move: load the brief again.
-  const reload = () => void loadBrief().then((b) => (brief = b)).catch(() => {});
+  // The gate stays after the last answer, so that its Undo stays too.
+  let answered = $state(false);
+  const reload = () => ((answered = true), void loadBrief().then((b) => (brief = b)).catch(() => {}));
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
@@ -142,7 +144,7 @@
 
 {#each parts as part (part.key)}
   {#if part.key === "strangers" && brief.gate}
-    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0}
+    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0 || answered}
       <section aria-labelledby="strangers">
         <h2 id="strangers"><span>{part.title}</span> <span class="count">{brief.gate.count}</span></h2>
         <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />

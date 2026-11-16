@@ -32,7 +32,6 @@ test("Accept answers the sender, and Undo asks again", async () => {
     buttons(view, "Accept")[0].click();
     await until(() => text(view.target).includes("You know Maria Ruiz now."));
     assert.deepEqual(asked, [["POST", "senders/p-71/accept"]]);
-    assert.match(text(view.target), /2 items moved into your brief\./);
     assert.equal(buttons(view, "Accept").length, 2, "the other senders still wait");
     assert.equal(answers, 1);
 
@@ -66,7 +65,7 @@ test("on the list of ignored senders, Ask again reopens, and Undo ignores again"
   try {
     assert.equal(button(view, "Ignore"), undefined);
     button(view, "Ask again").click();
-    await until(() => text(view.target).includes("Iris asks you about Dana Brooks again in the brief."));
+    await until(() => text(view.target).includes("Iris asks you about Dana Brooks again."));
     button(view, "Undo").click();
     await until(() => button(view, "Ask again"));
     assert.deepEqual(asked, [
@@ -104,7 +103,7 @@ test("in the brief, an answered sender keeps its row and its Undo after the brie
     await until(() => asked.some(([, p]) => p === "brief"));
     await until(() => text(gate()).includes("2"));
     const t = text(gate());
-    assert.match(t, /You know Maria Ruiz now\. 2 items moved into your brief\. Undo/);
+    assert.match(t, /You know Maria Ruiz now\. Undo/);
     // The row keeps its place: first, before the senders that still wait.
     assert.ok(t.indexOf("Maria Ruiz") < t.indexOf("Leo Park"), t);
     assert.equal([...gate().querySelectorAll("button")].filter((b) => b.textContent.trim() === "Accept").length, 2);
@@ -115,4 +114,69 @@ test("in the brief, an answered sender keeps its row and its Undo after the brie
   } finally {
     view.destroy();
   }
+});
+
+test("Undo stays after you answer the last sender of the gate", async () => {
+  const only = { ...fx.brief, gate: { count: 1, senders: fx.gate.senders.slice(0, 1), next: null }, declined: 0 };
+  const after = { ...fx.brief, gate: { count: 0, senders: [], next: null }, declined: 0 };
+  const asked = serve((path) => (path === "brief" ? [200, after] : [200, row("p-71")]));
+  const view = await mount("/src/views/Brief.svelte", { brief: only, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  try {
+    button(view, "Accept").click();
+    await until(() => asked.some(([, p]) => p === "brief"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.match(text(view.target), /You know Maria Ruiz now\. Undo/);
+    button(view, "Undo").click();
+    await until(() => asked.some(([, p]) => p === "senders/p-71/reopen"));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a sender takes one answer at a time, also while another sender waits", async () => {
+  const held = [];
+  const asked = [];
+  globalThis.fetch = (url) => {
+    asked.push(String(url).replace(/^\/api\//, ""));
+    return new Promise((done) => held.push(() => done(new Response(JSON.stringify(row("x")), { status: 200 }))));
+  };
+  const view = await mount("/src/views/Gate.svelte", { page: fx.gate });
+  try {
+    buttons(view, "Accept")[0].click();
+    await until(() => asked.length === 1);
+    buttons(view, "Ignore")[1].click();
+    await until(() => asked.length === 2);
+    view.flushSync();
+    // Maria's answer still waits: her buttons stay off, and a click sends nothing.
+    assert.equal(buttons(view, "Accept")[0].disabled, true);
+    assert.equal(buttons(view, "Ignore")[0].disabled, true);
+    buttons(view, "Ignore")[0].click();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(asked, ["senders/p-71/accept", "senders/p-72/decline"]);
+    held.forEach((go) => go());
+    await until(() => text(view.target).includes("You know Maria Ruiz now.") && text(view.target).includes("You ignored Leo Park."));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("the dev fixtures apply each answer to the gate and the brief", () => {
+  const ids = (page) => page.senders.map((s) => s.id);
+  const owe = () => fx.answer("brief").you_owe.items.map((i) => i.id);
+  assert.deepEqual(ids(fx.answer("gate")), ["p-71", "p-72", "p-73"]);
+  assert.ok(!owe().includes("c-401"));
+  fx.answerSender("p-71", "accept");
+  assert.deepEqual(ids(fx.answer("gate")), ["p-72", "p-73"]);
+  assert.ok(owe().includes("c-401"), "Maria's ask is under You owe");
+  assert.ok(fx.answer("brief/conversations").items.some((i) => i.id === "v-402"));
+  assert.ok(!fx.answer("brief").strangers.items.some((i) => i.id === "c-401"));
+  fx.answerSender("p-72", "decline");
+  assert.deepEqual(ids(fx.answer("gate/declined")), ["p-72", "p-74"]);
+  assert.equal(fx.answer("brief").declined, 2);
+  // Undo of each answer.
+  fx.answerSender("p-71", "reopen");
+  fx.answerSender("p-72", "reopen");
+  assert.deepEqual(ids(fx.answer("gate")), ["p-71", "p-72", "p-73"]);
+  assert.ok(!owe().includes("c-401"));
+  assert.equal(fx.answer("brief").declined, 1);
 });
