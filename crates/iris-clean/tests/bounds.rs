@@ -232,6 +232,25 @@ fn memory_and_time_stay_bounded() {
     eprintln!("peak: {peak} bytes (PDF with a code map of empty hex strings)");
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
+    // Many tiny code maps with no entry: each map costs its budget.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut n = 1;
+    while pdf.len() < 9 * 1024 * 1024 {
+        pdf.extend(format!("{n} 0 obj<</Length 9>>stream\nbegincmap\nendstream endobj\n").bytes());
+        n += 1;
+    }
+    for chunk in pdf.chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, _) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with many empty code maps)");
+    assert!(peak < 16 * 1024 * 1024, "peak {peak}");
+
     // A plain body part of 2 MiB of empty lines and of short quote lines.
     for line in ["\n", "> a\n", "-- \n"] {
         let mut raw = b"Subject: Re: Lines\r\nIn-Reply-To: <a@b>\r\n\r\nHi\n".to_vec();
