@@ -9,7 +9,7 @@
 mod active;
 mod eval;
 
-pub use active::{active, confirm, file_state, Active, Confirm, FileState};
+pub use active::{active, confirm, file_state, version_text, Active, Confirm, FileState};
 pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
 
 use serde::Deserialize;

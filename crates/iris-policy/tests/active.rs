@@ -45,6 +45,7 @@ fn the_first_start_is_observe_with_no_rules() {
         a,
         Active {
             policy: Policy::default(),
+            version: None,
             sha256: None,
             error: None
         }
@@ -63,10 +64,16 @@ fn a_file_on_disk_is_not_active_before_the_confirmation() {
 
     assert_eq!(
         confirm(&s, &seen.sha256, 10).unwrap(),
-        Confirm::Done(seen.policy.clone())
+        Confirm::Done {
+            version: 1,
+            policy: seen.policy.clone()
+        }
     );
     let a = s.read(active).unwrap();
-    assert_eq!((a.policy, a.sha256), (seen.policy, Some(seen.sha256)));
+    assert_eq!(
+        (a.policy, a.version, a.sha256),
+        (seen.policy, Some(1), Some(seen.sha256))
+    );
     assert_eq!(file_state(&s).unwrap(), FileState::Same);
 
     // A new rule on disk does not apply before the next confirmation.
@@ -122,9 +129,15 @@ fn a_removed_rule_id_is_never_used_again() {
         (&[1][..], false),
     ] {
         write(&s, &file(ids));
-        let seen = changed(&s);
-        match confirm(&s, &seen.sha256, 10).unwrap() {
-            Confirm::Done(_) => assert!(ok, "{ids:?} must be refused"),
+        // The status before the confirmation already names the error.
+        if !ok {
+            let FileState::Invalid(e) = file_state(&s).unwrap() else {
+                panic!("{ids:?} must be invalid")
+            };
+            assert!(e.message.contains("removed rule"), "{e}");
+        }
+        match confirm(&s, &sha256_hex(&file(ids)), 10).unwrap() {
+            Confirm::Done { .. } => assert!(ok, "{ids:?} must be refused"),
             Confirm::Invalid(e) => {
                 assert!(!ok, "{ids:?}: {e}");
                 assert!(e.message.contains("removed rule"), "{e}");
@@ -148,11 +161,37 @@ fn a_removed_rule_id_is_never_used_again() {
 fn an_active_text_that_is_no_longer_valid_applies_nothing() {
     let (_d, s) = store("stricter");
     s.write(|tx| {
-        tx.execute("INSERT INTO policy_active (id, text, sha256, confirmed_at) VALUES (1, 'version = 9', 'x', 1)", [])?;
+        tx.execute("INSERT INTO policy_version (text, sha256, confirmed_at) VALUES ('version = 9', 'x', 1)", [])?;
         Ok(())
     })
     .unwrap();
     let a = s.read(active).unwrap();
     assert_eq!(a.policy, Policy::default());
     assert!(a.error.is_some());
+}
+
+#[test]
+fn each_confirmed_version_keeps_its_rule_text() {
+    // A rule keeps its ID when the person edits it. The version and the ID
+    // together name one rule text.
+    let (_d, s) = store("versions");
+    let one = file(&[1]);
+    write(&s, &one);
+    confirm(&s, &sha256_hex(&one), 10).unwrap();
+    let edited = one.replace("form = \"feed\"", "form = \"record\"");
+    write(&s, &edited);
+    let Confirm::Done { version, .. } = confirm(&s, &sha256_hex(&edited), 11).unwrap() else {
+        panic!()
+    };
+    assert_eq!(version, 2);
+    assert_eq!(
+        s.read(|c| version_text(c, 1)).unwrap().as_deref(),
+        Some(one.as_str())
+    );
+    assert_eq!(
+        s.read(|c| version_text(c, 2)).unwrap().as_deref(),
+        Some(edited.as_str())
+    );
+    assert_eq!(s.read(|c| version_text(c, 3)).unwrap(), None);
+    assert_eq!(s.read(active).unwrap().version, Some(2));
 }
