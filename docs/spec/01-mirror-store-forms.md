@@ -248,6 +248,8 @@ content:
    that the history is too old.
 7. Compare the message IDs, the thread IDs, the label sets and the label list
    with the mirror. Compare only the messages of the mirror that are not gone.
+   A message that is not fetched (section 4.7) has no label set yet, so its
+   labels are not compared. Step 8 fetches it.
 8. For each message that is not gone, read its content file and compute the
    SHA-256 hash. A missing file, or a hash that is not `content_sha256`, is a
    difference.

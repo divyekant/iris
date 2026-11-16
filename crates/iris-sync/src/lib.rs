@@ -24,6 +24,9 @@ use iris_gmail::{Change, Gmail, HistoryType, MAX_GETS};
 use iris_store::{NewMessage, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 
+mod verify;
+pub use verify::{verify, Difference, Report};
+
 /// `account.sync_kind` of a first sync.
 pub const KIND_FIRST: &str = "first";
 /// `account.sync_kind` of a full resync (specification 1, section 4.4).
@@ -381,7 +384,13 @@ fn resync_steps(
         step = RESYNC_LABELS;
     }
     if step == RESYNC_LABELS {
-        label_sets(store, gmail, account, token)?;
+        let labels: Vec<String> = store.read(|c| {
+            let mut st =
+                c.prepare("SELECT provider_id FROM label WHERE account_id = ?1 ORDER BY id")?;
+            let rows = st.query_map([account], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })?;
+        label_sets(store, gmail, account, token, &labels)?;
         store.write(|tx| {
             // Step 7: the label set of each listed message is the set of
             // the label lists that name it (section 4.10).
@@ -509,7 +518,13 @@ fn check_unlisted(
 /// Step 7 of the full resync, and step 4 of verify: mark in `sync_seen` the
 /// labels of each listed message, from one list for each label (section
 /// 4.10). A list that stopped starts again from no labels.
-fn label_sets(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<()> {
+fn label_sets(
+    store: &Store,
+    gmail: &Gmail,
+    account: i64,
+    token: &str,
+    labels: &[String],
+) -> Result<()> {
     store.write(|tx| {
         tx.execute(
             "UPDATE sync_seen SET labels = '[]' WHERE account_id = ?1",
@@ -517,13 +532,7 @@ fn label_sets(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
         )?;
         Ok(())
     })?;
-    let labels: Vec<String> = store.read(|c| {
-        let mut st =
-            c.prepare("SELECT provider_id FROM label WHERE account_id = ?1 ORDER BY id")?;
-        let rows = st.query_map([account], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    })?;
-    for label in &labels {
+    for label in labels {
         list_pages(store, gmail, account, token, &[label], Mark::Label(label))?;
     }
     Ok(())
@@ -856,7 +865,8 @@ fn list(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<()> {
         )?;
         Ok(())
     })?;
-    list_pages(store, gmail, account, token, &[], Mark::Known)
+    list_pages(store, gmail, account, token, &[], Mark::Known)?;
+    Ok(())
 }
 
 /// What [`list_pages`] writes for each listed message.
@@ -868,10 +878,14 @@ enum Mark<'a> {
     KnownAndSeen,
     /// The label in the `sync_seen` row of the message, if it has one.
     Label(&'a str),
+    /// Only a `sync_seen` row (verify: the mirror does not change).
+    Seen,
 }
 
 /// List each message (with `includeSpamTrash`) that has each label of
-/// `labels`, page by page, one transaction for each page.
+/// `labels`, page by page, one transaction for each page. With
+/// [`Mark::Seen`], gives each listed message that the mirror has (not gone)
+/// in another thread.
 fn list_pages(
     store: &Store,
     gmail: &Gmail,
@@ -879,8 +893,9 @@ fn list_pages(
     token: &str,
     labels: &[&str],
     mark: Mark,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mut page_token: Option<String> = None;
+    let mut other_thread = Vec::new();
     loop {
         let page = gmail.messages(token, labels, true, page_token.as_deref())?;
         store.write(|tx| {
@@ -892,8 +907,21 @@ fn list_pages(
                 "UPDATE sync_seen SET labels = json_insert(labels, '$[#]', ?3)
                  WHERE account_id = ?1 AND message_id = ?2",
             )?;
+            let mut thread = tx.prepare_cached(
+                "SELECT t.provider_id FROM message m JOIN thread t ON t.id = m.thread_id
+                 WHERE m.account_id = ?1 AND m.provider_id = ?2 AND m.gone_at IS NULL",
+            )?;
             for m in &page.messages {
                 match mark {
+                    Mark::Seen => {
+                        seen.execute(params![account, m.id])?;
+                        let t: Option<String> = thread
+                            .query_row(params![account, m.id], |r| r.get(0))
+                            .optional()?;
+                        if t.is_some_and(|t| t != m.thread_id) {
+                            other_thread.push(m.id.clone());
+                        }
+                    }
                     Mark::Known => insert_known(tx, account, &m.id, &m.thread_id)?,
                     Mark::KnownAndSeen => {
                         insert_known(tx, account, &m.id, &m.thread_id)?;
@@ -908,7 +936,7 @@ fn list_pages(
         })?;
         match page.next_page_token {
             Some(t) => page_token = Some(t),
-            None => return Ok(()),
+            None => return Ok(other_thread),
         }
     }
 }
