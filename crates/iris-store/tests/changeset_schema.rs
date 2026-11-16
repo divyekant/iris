@@ -272,7 +272,20 @@ fn a_move_needs_its_event() {
         &s,
         "UPDATE changeset_action SET state = 'proposed', hash = 'h', submitted_at = 0",
     );
-    // An action stays in its changeset and revision.
+    // An action keeps its ID, and stays in its changeset and revision.
+    fails(&s, "UPDATE changeset_action SET id = 7");
+    // Also an action with no message row, where no foreign key holds it.
+    fails(
+        &s,
+        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 1, 5, 'close', '{}', '{}');
+         UPDATE changeset_action SET id = 70 WHERE n = 5;",
+    );
+    works(
+        &s,
+        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 1, 5, 'close', '{}', '{}');",
+    );
     fails(&s, "UPDATE changeset_action SET revision = 2");
     fails(&s, "UPDATE changeset_action SET n = 2");
     // A draft is cancelled only with a withdraw.
@@ -387,6 +400,12 @@ fn a_submitted_revision_stays_submitted() {
         })
         .unwrap();
     assert_eq!(resolved, 1);
+    // No submit in the same write as a withdraw: each submit has its row.
+    fails(
+        &s,
+        "UPDATE changeset_action SET hash = 'h' WHERE revision = 2;
+         UPDATE changeset SET state = 'withdrawn', why = 'w', submitted_at = 123;",
+    );
     // A withdrawn changeset does not change.
     s.write(|tx| Ok(tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?))
         .unwrap();
@@ -769,6 +788,7 @@ fn a_submitted_action_does_not_change() {
         "UPDATE changeset_action SET submitted_at = 1",
         "UPDATE changeset_action SET why = 'x'",
         "UPDATE changeset_action SET n = 2",
+        "UPDATE changeset_action SET id = 2",
         "UPDATE changeset_action SET reason = 'x'",
         "UPDATE changeset_action SET decided_by = 'person'",
         "UPDATE action_message SET message_id = 2",

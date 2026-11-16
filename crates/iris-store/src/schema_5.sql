@@ -126,11 +126,12 @@ END;
 -- only in two ways: the submit of the draft revision, and a new draft
 -- revision after the submit. A submitted revision does not become a draft
 -- again, and a withdrawn changeset does not change.
-CREATE TRIGGER changeset_revision BEFORE UPDATE OF revision, submitted_at, why,
+CREATE TRIGGER changeset_revision BEFORE UPDATE OF id, revision, submitted_at, why,
   author_kind, author_name, author_session, author_job, created_at ON changeset
 WHEN new.author_kind IS NOT old.author_kind OR new.author_name IS NOT old.author_name
   OR new.author_session IS NOT old.author_session OR new.author_job IS NOT old.author_job
-  OR new.created_at IS NOT old.created_at OR old.state = 'withdrawn'
+  OR new.created_at IS NOT old.created_at OR new.id IS NOT old.id
+  OR old.state = 'withdrawn' OR new.state = 'withdrawn'
   OR NOT ((new.revision = old.revision AND old.submitted_at IS NULL)
           OR (new.revision = old.revision + 1 AND old.submitted_at IS NOT NULL
               AND new.submitted_at IS NULL AND new.why IS old.why))
@@ -153,8 +154,8 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: a new action goes into the draft revision, with no state');
 END;
 
--- An action stays in its changeset, revision and place.
-CREATE TRIGGER action_place BEFORE UPDATE OF changeset_id, revision, n ON changeset_action
+-- An action keeps its ID, and stays in its changeset, revision and place.
+CREATE TRIGGER action_place BEFORE UPDATE OF id, changeset_id, revision, n ON changeset_action
 BEGIN
   SELECT RAISE(ABORT, 'iris: an action stays in its changeset and revision');
 END;
