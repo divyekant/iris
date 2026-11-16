@@ -62,12 +62,17 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         let decoded: std::borrow::Cow<[u8]> = if only_flate(dict) {
             match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, STREAM_LIMIT) {
                 Ok(v) => v.into(),
-                Err(e) => e.output.into(),
+                Err(e) => {
+                    // More output than the limit: text after it is not read.
+                    stopped |= e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput;
+                    e.output.into()
+                }
             }
         } else if has(dict, b"/Filter") {
             continue;
         } else {
             // A raw stream is read in place, and only up to the stream limit.
+            stopped |= data.len() > STREAM_LIMIT;
             data[..data.len().min(STREAM_LIMIT)].into()
         };
         total += decoded.len();
@@ -479,6 +484,16 @@ mod tests {
         assert_eq!(got.as_deref(), Some("Hello"));
         assert!(cut);
         assert!(!text_cut(&sample(PAGE, false), 1000).1);
+        // Text after the stream limit is not read: that is a cut too.
+        let big = format!(
+            "BT (Hello world) Tj ET\n{}BT (later) Tj ET",
+            " ".repeat(STREAM_LIMIT)
+        );
+        for flate in [false, true] {
+            let (got, cut) = text_cut(&sample(big.as_bytes(), flate), 1000);
+            assert_eq!(got.as_deref(), Some("Hello world"));
+            assert!(cut, "flate {flate}");
+        }
     }
 
     #[test]

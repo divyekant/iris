@@ -163,8 +163,9 @@ selector of the list that is one class or one ID counts. A rule inside an
 one part (`.a.b`, `p.x`, `div .x`, `.x:hover`, `[a]`) does not count. A
 `<style>` element inside a comment or a raw-text element does not count. At
 most 256 rules count, and at most 4,096 selectors over all rules. A rule
-counts once, for all of its selectors. At most 4,096 bytes of each rule
-count. Comments and
+counts once, for all of its selectors. At most 4,096 bytes of the
+declarations of each rule count. The selector list has no byte limit of its
+own: the 4,096 selectors and the 2 MiB part limit bound it. Comments and
 the content of strings in CSS have no effect on rules or declarations.
 
 These go out also: `class` `gmail_signature` and `moz-signature`. In a
@@ -264,7 +265,8 @@ its first 1 KiB holds `%PDF`.
   `.,;:!?'"()-/%&@€$£#*+=`. If not, `text` is `None`.
 - The check reads at least 4,096 bytes of text, also when less budget is
   left. Then the text is clipped to the budget. If the reader stops at a
-  limit before the end of the PDF, the text gets `CUT_MARK`, also when
+  limit before the end of the PDF (the text budget, the stream limit or
+  the PDF limit), the text gets `CUT_MARK`, also when
   trimmed white space makes the text shorter than the budget.
 
 ### Known limits

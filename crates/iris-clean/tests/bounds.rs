@@ -117,7 +117,9 @@ fn memory_and_time_stay_bounded() {
     raw.extend_from_slice(b"--m--\r\n");
     let (peak, _, c) = peak_of(&raw);
     eprintln!("peak: {peak} bytes (PDF with a raw stream of 9 MiB)");
-    assert_eq!(c.attachments[0].text.as_deref(), Some("Hello raw words"));
+    // The reader stops at the stream limit, so the text shows a cut.
+    let want = format!("Hello raw words{}", iris_clean::CUT_MARK);
+    assert_eq!(c.attachments[0].text.as_deref(), Some(want.as_str()));
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
     // A PDF stream of 4 MiB with many short text lines.
