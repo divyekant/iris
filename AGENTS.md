@@ -91,10 +91,17 @@ To add a tool, a test command or a new folder, change `starter.json`.
    `## Known limits and deferred findings` and `## Release Notes`. Move the
    card to `doing` if it is not there yet.
 7. Run the review loop:
-   `python3 scripts/review/review.py --pr <number> --merge`.
-   - Before the round that can merge, file the issues of
-     [Known limits and deferred findings](#known-limits-and-deferred-findings).
-   - Exit 0: the review is clean and the PR is merged. The work is done.
+   `python3 scripts/review/review.py --pr <number>`. It does not merge.
+   - Exit 0: the review is clean. Then do these steps:
+     1. File the issues of the clean review: each P3 finding that you do not
+       fix and each residual risk that names a limit of the product, not of
+       the review run (see
+       [Known limits and deferred findings](#known-limits-and-deferred-findings)).
+     2. List their numbers in one PR comment. Do not edit the PR body, because
+       a new body needs a new review.
+     3. Run `python3 scripts/review/review.py --pr <number> --merge`. It uses
+       the clean review of the same head and body, and merges. The work is
+       done.
    - Exit 2, review blocked: fix each P0, P1 and P2 finding with the steps of
      "Fix the class" below. Run local CI, then run the review again.
    - Exit 2, stopped for another reason: act on the reason, then run the review
@@ -138,7 +145,8 @@ Do these steps:
 3. In the body, write what the limit or the finding is, its effect, why the PR
    leaves it, when to change it, and `Source: #<PR>`.
 4. List the issue numbers in `## Known limits and deferred findings` of the
-   PR. If there is none, write `None.`
+   PR body before the review. If there is none, write `None.` List the issues
+   of the clean review in a PR comment (step 7).
 
 The issues record limits and findings only. The board stays the tracker of
 the work. A card that fixes a limit names its issue.
