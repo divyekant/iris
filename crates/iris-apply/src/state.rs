@@ -29,27 +29,40 @@ use crate::{expire, now, Counts, Error, Outcome, Result};
 /// The state verbs.
 const VERBS: &str = "'close', 'decline', 'defer', 'correct'";
 
-/// Apply each approved action of a state verb, oldest first. The engine
-/// calls it at each tick. Gives the outcome of each action.
-pub fn apply_states(store: &Store) -> Result<Vec<(i64, Outcome)>> {
-    let actions: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare(&format!(
-            "SELECT id FROM changeset_action WHERE state = 'approved' AND verb IN ({VERBS})
-             ORDER BY id"
-        ))?;
-        let rows = st.query_map([], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    })?;
-    let mut out = Vec::with_capacity(actions.len());
-    for action in actions {
-        match apply_state(store, action) {
-            Ok(o) => out.push((action, o)),
-            // Another writer decided it first: nothing to apply.
-            Err(Error::NotApproved(_)) => {}
-            Err(e) => return Err(e),
+/// The actions that [`apply_states`] reads in one page (specification 2,
+/// section 9: no list of changesets in memory).
+const PAGE: i64 = 100;
+
+/// Apply each approved action of a state verb, oldest first, one page of
+/// IDs at a time. The engine calls it at each tick. Gives the count of
+/// actions that applied. An action that waits stays, and the next page
+/// starts after it.
+pub fn apply_states(store: &Store) -> Result<usize> {
+    let (mut after, mut applied) = (0, 0);
+    loop {
+        let page: Vec<i64> = store.read(|c| {
+            let mut st = c.prepare_cached(&format!(
+                "SELECT id FROM changeset_action
+                 WHERE state = 'approved' AND verb IN ({VERBS}) AND id > ?1
+                 ORDER BY id LIMIT ?2"
+            ))?;
+            let rows = st.query_map([after, PAGE], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })?;
+        for &action in &page {
+            match apply_state(store, action) {
+                Ok(Outcome::Applied(_)) => applied += 1,
+                Ok(_) => {}
+                // Another writer decided it first: nothing to apply.
+                Err(Error::NotApproved(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match page.last() {
+            Some(&last) if page.len() as i64 == PAGE => after = last,
+            _ => return Ok(applied),
         }
     }
-    Ok(out)
 }
 
 /// Apply one approved action of a state verb, in one transaction. See the

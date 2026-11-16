@@ -371,16 +371,30 @@ fn only_the_person_approval_applies() {
                 )?)
             })
             .unwrap();
-        let out = apply_states(&b.store).unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(apply_states(&b.store).unwrap(), 0);
         assert_eq!(b.state(a), want);
         assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
     }
     let b = setup("tick", "open", Some(APPLY_POLICY));
     let a = b.approved(Verb::Close, json!({ "reason": "Done." }));
+    assert_eq!(apply_states(&b.store).unwrap(), 1);
+    assert_eq!(b.state(a), "applied");
+    assert_eq!(apply_states(&b.store).unwrap(), 0);
+}
+
+/// The tick reads the actions in pages of 100: each of 250 actions gets
+/// its entry. The first close applies, and each later one fails, because
+/// the commitment is done.
+#[test]
+fn the_tick_reads_the_actions_in_pages() {
+    let b = setup("pages", "open", Some(APPLY_POLICY));
+    for _ in 0..250 {
+        b.approved(Verb::Close, json!({ "reason": "Done." }));
+    }
+    assert_eq!(apply_states(&b.store).unwrap(), 1);
+    assert_eq!(b.one("SELECT count(*) FROM ledger"), json!(250));
     assert_eq!(
-        apply_states(&b.store).unwrap(),
-        vec![(a, Outcome::Applied(Default::default()))]
+        b.one("SELECT count(*) FROM changeset_action WHERE state = 'failed'"),
+        json!(249)
     );
-    assert!(apply_states(&b.store).unwrap().is_empty());
 }
