@@ -81,6 +81,9 @@ impl Stats {
 /// newest message first.
 pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
     let (stats, known, tainted) = store.read(|c| {
+        // One read transaction: both passes see the same snapshot, also
+        // while a sync writes.
+        let c = &c.unchecked_transaction()?;
         let mut own: HashSet<String> = HashSet::new();
         if let Some(a) = c
             .query_row(
