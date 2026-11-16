@@ -810,34 +810,38 @@ fn set_state(
 /// action number, and the hash that the review showed. The engine refuses
 /// it for an old revision or another hash.
 pub fn approve(store: &Store, action: ActionId, hash: &str, now_ms: i64) -> Result<()> {
+    write(store, |c| approve_in(c, action, hash, now_ms))
+}
+
+/// [`approve`] in a write transaction of the caller, with the same checks.
+/// Use [`transaction`] to run more than one step in one transaction.
+pub fn approve_in(c: &Connection, action: ActionId, hash: &str, now_ms: i64) -> Result<()> {
     let ActionId {
         changeset,
         revision,
         n,
     } = action;
-    write(store, |c| {
-        let row: Option<(i64, Option<i64>, Option<String>)> = c
-            .query_row(
-                "SELECT c.revision, c.submitted_at, a.hash FROM changeset c
+    let row: Option<(i64, Option<i64>, Option<String>)> = c
+        .query_row(
+            "SELECT c.revision, c.submitted_at, a.hash FROM changeset c
                  JOIN changeset_action a ON a.changeset_id = c.id
                  WHERE c.id = ?1 AND a.revision = ?2 AND a.n = ?3",
-                params![changeset, revision, n],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let (_, submitted, seen) = row.ok_or(Error::NotFound)?;
-        // The submit of a new revision replaces each older action with no
-        // decision, and the trigger refuses to approve a replaced action. An
-        // older action that stays open was approved, and can come back to
-        // review (section 5.4): the person approves it with its hash.
-        if submitted.is_none() {
-            return Err(refused("a new revision is a draft".into()));
-        }
-        if seen.as_deref() != Some(hash) {
-            return Err(refused("the action changed after the review".into()));
-        }
-        set_state(c, action, State::Approved, By::Person, None, now_ms)
-    })
+            params![changeset, revision, n],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let (_, submitted, seen) = row.ok_or(Error::NotFound)?;
+    // The submit of a new revision replaces each older action with no
+    // decision, and the trigger refuses to approve a replaced action. An
+    // older action that stays open was approved, and can come back to
+    // review (section 5.4): the person approves it with its hash.
+    if submitted.is_none() {
+        return Err(refused("a new revision is a draft".into()));
+    }
+    if seen.as_deref() != Some(hash) {
+        return Err(refused("the action changed after the review".into()));
+    }
+    set_state(c, action, State::Approved, By::Person, None, now_ms)
 }
 
 /// Write a changeset as JSON (section 5.1). The message IDs stream from the

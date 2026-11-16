@@ -1,0 +1,39 @@
+{
+  "model": "iris/0",
+  "id": "cs-4183",
+  "revision": 1,
+  "author": {
+    "kind": "triage",
+    "name": "Iris"
+  },
+  "why": "Triage proposes these mailbox changes. Nothing is applied.",
+  "created": "2026-11-16T09:00:00Z",
+  "submitted": "2026-11-16T09:00:00Z",
+  "state": "open",
+  "actions": [
+    {
+      "n": 1,
+      "revision": 1,
+      "verb": "archive",
+      "targets": {
+        "messages": [
+          "m-301",
+          "m-305"
+        ]
+      },
+      "resolved": {
+        "messages": [
+          "m-301",
+          "m-305"
+        ]
+      },
+      "args": {},
+      "why": "Feed items. They stay in the feed of Iris.",
+      "flags": [],
+      "hash": null,
+      "decision": {
+        "state": "proposed"
+      }
+    }
+  ]
+}

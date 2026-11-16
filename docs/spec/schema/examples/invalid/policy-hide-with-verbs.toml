@@ -1,0 +1,11 @@
+version = 0
+mode = "apply"
+
+[[rule]]
+id = 1
+name = "Archive newsletters"
+effect = "hide"
+verbs = ["archive"]
+when = { form = "feed" }
+by = "person"
+added = 2026-11-10

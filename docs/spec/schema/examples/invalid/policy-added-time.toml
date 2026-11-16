@@ -1,0 +1,10 @@
+version = 0
+mode = "apply"
+
+[[rule]]
+id = 1
+name = "Hide the feed"
+effect = "hide"
+when = { form = "feed" }
+by = "person"
+added = 2026-11-10T10:00:00Z

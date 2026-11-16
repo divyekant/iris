@@ -179,6 +179,9 @@ pub struct Brief {
     /// changes that observe mode would propose, with nothing applied.
     /// Computed from `iris_observe::counts` for each account; not stored.
     pub proposal: Option<Proposal>,
+    /// The open changesets and their actions that wait for a person
+    /// (specification 2, section 5.5).
+    pub review: crate::review::Review,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -747,6 +750,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             not_understood,
             oldest_fetched,
             proposal: None,
+            review: crate::review::review_counts(c)?,
         })
     })?;
     brief.proposal = Some(proposal);
@@ -849,7 +853,10 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
 
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
-fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
+pub(crate) fn message_row(
+    c: &Connection,
+    row: i64,
+) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,

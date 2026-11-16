@@ -12,7 +12,7 @@ const NOW = new Date("2026-11-16T09:05:00Z");
 test("the brief opens with what needs you, in words", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
   assert.match(t, /You owe two things\. One thing is owed to you\. One conversation waits for you\./);
-  const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] } };
+  const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] }, strangers: { count: 0, items: [] }, review: { changesets: 0, actions: 0 } };
   assert.match(text(await render("/src/views/Brief.svelte", { brief: empty, now: NOW })), /Nothing needs you now\./);
   // Only stranger items: the opening must not say that nothing needs you.
   const strangers = { ...empty, strangers: { count: 2, items: [] } };
