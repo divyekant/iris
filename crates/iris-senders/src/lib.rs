@@ -115,7 +115,7 @@ pub fn decide(
     if has("SENT") {
         let known = known_domains(conn, "")?;
         let mut rerun = Vec::new();
-        for to in head.recipients() {
+        for (to, bcc) in head.recipients() {
             if to.eq_ignore_ascii_case(&account) {
                 continue;
             }
@@ -136,7 +136,11 @@ pub fn decide(
                     &to,
                     None,
                     Kind::Person,
-                    &sent_basis(message),
+                    &if bcc {
+                        format!("sent (bcc): {}", format_id(IdKind::Message, message))
+                    } else {
+                        sent_basis(message)
+                    },
                     now_ms,
                 )?,
             };
@@ -254,24 +258,32 @@ fn rules(
     // needs the check that a sent message to the address is still there:
     // first the message of the basis, then each sent message.
     if previous == Some(Kind::Person) {
-        let named = old_basis
-            .and_then(|b| b.strip_prefix("sent: "))
+        // shortcut: the store has no Bcc column, so for a Bcc basis only the
+        // message and its SENT label are checked; add a column if needed.
+        let (named, bcc) = match old_basis {
+            Some(b) if b.starts_with("sent: ") => (b.strip_prefix("sent: "), false),
+            Some(b) => (b.strip_prefix("sent (bcc): "), true),
+            None => (None, false),
+        };
+        let named = named
             .and_then(parse_id)
             .filter(|(k, _)| *k == IdKind::Message)
             .map(|(_, row)| row);
         if let Some(m) = named {
             // A deleted message, or one that no longer names the address, is
             // no evidence.
+            // `?2 IS NULL` keeps the parameter `?2` in the text for a Bcc basis.
+            let to = if bcc { "1" } else { TO_ADDR };
             let still: bool = conn.query_row(
                 &format!(
                     "SELECT EXISTS (SELECT 1 FROM message s JOIN header h ON h.message_id = s.id
-                      WHERE s.id = ?1 AND {TO_ADDR} AND {SENT_NOT_DRAFT})"
+                      WHERE s.id = ?1 AND ({to} OR ?2 IS NULL) AND {SENT_NOT_DRAFT})"
                 ),
                 params![m, addr],
                 |r| r.get(0),
             )?;
             if still {
-                return Ok((Kind::Person, sent_basis(m)));
+                return Ok((Kind::Person, old_basis.unwrap_or_default().to_string()));
             }
         }
         let found: Option<i64> = conn
@@ -322,6 +334,19 @@ fn rules(
         )?;
         if earlier >= 2 {
             return Ok((Kind::Service, "automated, dkim pass, 2 earlier".into()));
+        }
+    }
+    // The kind belongs to the address. A newer message already made it a
+    // service, and an older message (read later, newest first) keeps it:
+    // a service row needs at least 3 messages from the address.
+    if previous == Some(Kind::Service) {
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM header WHERE from_addr = ?1 LIMIT 3)",
+            [addr],
+            |r| r.get(0),
+        )?;
+        if count >= 3 {
+            return Ok((Kind::Service, "known service".into()));
         }
     }
     Ok((Kind::Stranger, "no rule matched".into()))

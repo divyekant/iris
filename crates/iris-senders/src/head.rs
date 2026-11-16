@@ -41,13 +41,13 @@ impl Head {
         addresses(self.get("from")?).into_iter().next()
     }
 
-    /// Each address of `To` and `Cc`, lowercase.
-    pub(crate) fn recipients(&self) -> Vec<String> {
+    /// Each address of `To`, `Cc` and `Bcc`, lowercase, with `true` for an
+    /// address of `Bcc`. A sent message keeps its `Bcc` header.
+    pub(crate) fn recipients(&self) -> Vec<(String, bool)> {
         self.0
             .iter()
-            .filter(|(n, _)| n == "to" || n == "cc")
-            .flat_map(|(_, v)| addresses(v))
-            .map(|(a, _)| a)
+            .filter(|(n, _)| n == "to" || n == "cc" || n == "bcc")
+            .flat_map(|(n, v)| addresses(v).into_iter().map(move |(a, _)| (a, n == "bcc")))
             .collect()
     }
 
@@ -179,10 +179,10 @@ mod tests {
             h.from(),
             Some(("ana.lee@example.org".into(), Some("Lee, Ana".into())))
         );
-        assert_eq!(
-            h.recipients(),
-            ["a@example.com", "b@example.net", "c@example.com"]
-        );
+        let to: Vec<String> = h.recipients().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(to, ["a@example.com", "b@example.net", "c@example.com"]);
+        let h = Head::parse(b"Bcc: d@example.org\r\n\r\n");
+        assert_eq!(h.recipients(), [("d@example.org".to_string(), true)]);
     }
 
     #[test]
@@ -190,10 +190,8 @@ mod tests {
         let h = Head::parse(
             b"To: Friends: Ana <ana@example.org>, bob@example.org;, cy@example.net\r\nCc: Empty:;\r\n\r\n",
         );
-        assert_eq!(
-            h.recipients(),
-            ["ana@example.org", "bob@example.org", "cy@example.net"]
-        );
+        let to: Vec<String> = h.recipients().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(to, ["ana@example.org", "bob@example.org", "cy@example.net"]);
     }
 
     #[test]

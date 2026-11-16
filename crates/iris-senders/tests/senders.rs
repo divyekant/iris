@@ -222,12 +222,19 @@ fn a_sent_message_before_a_new_participant_does_not_make_it_a_person() {
 #[test]
 fn a_bcc_recipient_becomes_a_person() {
     let mut c = Case::new("bcc");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nBcc: Eve <eve@example.org>"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nBcc: Eve <eve@example.org>"),
+    );
     assert_eq!(c.row("eve@example.org").1.as_deref(), Some("person"));
     let d = c.put("t2", &["INBOX"], "From: Eve <eve@example.org>");
     assert_eq!(d.kind, Kind::Person);
     // The row stays a person on the next message too.
-    assert_eq!(c.put("t3", &["INBOX"], "From: Eve <eve@example.org>").kind, Kind::Person);
+    assert_eq!(
+        c.put("t3", &["INBOX"], "From: Eve <eve@example.org>").kind,
+        Kind::Person
+    );
 }
 
 #[test]
@@ -246,7 +253,10 @@ fn older_mail_of_a_known_service_keeps_the_service() {
             .write(|tx| Ok(decide(tx, *id, raw.as_bytes(), 7)?))
             .unwrap();
     }
-    assert_eq!(c.row("no-reply@shop.example.com").1.as_deref(), Some("service"));
+    assert_eq!(
+        c.row("no-reply@shop.example.com").1.as_deref(),
+        Some("service")
+    );
 }
 
 #[test]
@@ -257,15 +267,24 @@ fn a_service_needs_automated_mail_gmail_dkim_and_two_earlier_messages() {
     let d = c.put("t3", &[], &service_mail());
     assert_eq!((d.kind, d.previous), (Kind::Service, Some(Kind::Stranger)));
 
-    // Not automated: a stranger.
+    // The kind belongs to the address: a plain message keeps the service.
     let plain = service_mail().replace("Auto-Submitted: auto-generated\r\n", "");
-    assert_eq!(c.put("t4", &[], &plain).kind, Kind::Stranger);
+    assert_eq!(c.put("t4", &[], &plain).kind, Kind::Service);
+
+    // Not automated: never a service.
+    let mut c = Case::new("service-plain");
+    for t in ["t1", "t2", "t3"] {
+        assert_eq!(c.put(t, &[], &plain).kind, Kind::Stranger);
+    }
     // A pass that the sender wrote itself, under Gmail's failed result.
     let forged = service_mail().replace(
         "Authentication-Results: mx.google.com;",
         "Authentication-Results: mx.google.com; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com;",
     );
-    assert_eq!(c.put("t5", &[], &forged).kind, Kind::Stranger);
+    let mut c = Case::new("service-forged");
+    for t in ["t1", "t2", "t3"] {
+        assert_eq!(c.put(t, &[], &forged).kind, Kind::Stranger);
+    }
 }
 
 #[test]

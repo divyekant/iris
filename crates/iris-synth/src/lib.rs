@@ -109,9 +109,9 @@ struct Meta {
     /// The other side of the thread is a stranger, not a known person.
     stranger_thread: bool,
     /// The true kind of the sender, by the rules of spec 1 section 6.7. It is
-    /// `sender`, except in two cases. A stranger that the owner wrote to in
-    /// the thread is a known person. The first 2 messages of a service are
-    /// from a stranger, because a known service needs 2 earlier messages.
+    /// `sender`, except for a stranger that the owner wrote to in the thread:
+    /// that is a known person. The kind belongs to the address, so the first
+    /// messages of a service are from a known service too.
     truth: Sender,
     traits: u8,
 }
@@ -170,19 +170,9 @@ impl Mailbox {
             .filter(|m| m.sender == Sender::Owner)
             .map(|m| m.thread)
             .collect();
-        let mut service_seen = std::collections::HashMap::new();
         for m in &mut metas {
             if m.sender == Sender::Stranger && owner_threads.contains(&m.thread) {
                 m.truth = Sender::KnownPerson;
-            }
-            if m.sender == Sender::KnownService {
-                let seen = service_seen
-                    .entry(text::service_addr(seed, m.thread))
-                    .or_insert(0u32);
-                if *seen < 2 {
-                    m.truth = Sender::Stranger;
-                }
-                *seen += 1;
             }
         }
         Mailbox { seed, metas }
@@ -333,7 +323,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0x825e_b486_add8_8cef;
+    const GOLDEN_42_2000: u64 = 0x300f_c186_69b7_f8d7;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {
