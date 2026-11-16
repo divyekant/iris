@@ -92,8 +92,8 @@ after a crash. So two runners never pay for the same message.
 ### Model and budget
 
 The table `model_setting` has one row: `provider`, `base_url`, `model`,
-`price_in`, `price_out` (micro-USD for one million tokens, NULL for no
-price), `api_key` (BLOB, sealed with the store key, NULL for a local model),
+`version`, `price_in`, `price_out` (micro-USD for one million tokens, NULL
+for no price), `api_key` (BLOB, sealed with the store key, NULL for a local model),
 `max_tokens`, `timeout_s`, and the budget `budget_micro_usd` (NULL for no
 approval).
 
@@ -107,7 +107,7 @@ approval).
 - A model with no price (a local model) needs no budget.
 - With a price, the budget is the money that the person approved for all
   runs together, not for one run. The person approves more with
-  `iris understand --budget <usd> --yes`.
+  `iris understand --approve <code> --budget <usd>`.
 - The runner reserves money before each message and settles after it
   (below). The budget never pays for a call that it did not reserve first.
 
@@ -127,12 +127,17 @@ it, in its own writes:
    `budget_micro_usd`, take it from `reserved_micro_usd`, and add the counts
    to the run row.
 
-The worst case of one call is the byte count of the instruction and the
-data block that the call sends, as input tokens (a token covers at least one
-byte), and `max_tokens` as output tokens, at the price of the row. The
-wrapper knows the bytes before it sends them. So the second try of
-`decide` is reserved on its own, and the budget never pays for a call that
-it did not reserve.
+The worst case of one call is the byte count of the whole HTTP request body
+that `iris-model` sends (the system note, the instruction, the data block
+and the JSON framing), as input tokens, and `max_tokens` as output tokens,
+at the price of the row. A token covers at least one byte of the text that
+the provider bills, and the body holds all of that text, so the byte count
+is an upper bound. `iris-model` gives this count before it sends
+(`Client::request_bytes`). The second try of `decide` is reserved on its own.
+
+If a known usage is still larger than the reservation, the settle write
+takes the real cost, the budget can go below zero, and the run stops with
+`stop = budget`. The run row keeps the overrun, and the command shows it.
 
 A crash between steps 1 and 3 keeps the whole worst case taken from the
 budget. Iris never gives it back, because it cannot know the real charge.
@@ -267,17 +272,22 @@ message. No path calls `store::understand` with a priced model outside
 - `iris model set anthropic <model> --price-in <usd> --price-out <usd>`
   reads the API key from standard input with no echo. It never takes the
   key as an argument.
-- `iris model set local <base-url> <model>`: no key, no price.
+- `iris model set local <base-url> <model>`: no key, no price. The host of
+  `<base-url>` must be a loopback address (`127.0.0.0/8`, `::1` or
+  `localhost`), so the mail text stays on the machine. Any other host is
+  refused. A remote server is not a local model.
 - `iris model show`: the settings and the budget left, never the key.
-- `iris understand --estimate`: the estimate, no call.
-- `iris understand [--budget <usd>] [--max-cost <usd>] [--max-messages <n>]
-  [--yes]`: takes the run lock first and keeps it to the end. Under the lock
-  it reads `model_setting`, prints the estimate for that row (model, price),
-  and, with `--budget <usd> --yes`, writes the budget on that same row in the
-  same lock. No other command can change the row in between, so the budget
-  always belongs to the model and price of the estimate that the person saw.
-  Then it runs the batch runner (which takes the lock in the same process
-  through the held guard) and prints the run row.
+- `iris understand --estimate`: prints the estimate, no call. It ends with
+  an approval code: the `version` of the `model_setting` row (a number that
+  each `iris model set` makes larger) that the estimate used.
+- `iris understand --approve <code> --budget <usd>`: approves the budget.
+  It takes the run lock, and writes the budget only if `<code>` is the
+  `version` of the row now. So the person approves only after they saw the
+  estimate of the same model and price, in an earlier command.
+- `iris understand [--max-cost <usd>] [--max-messages <n>]`: runs the batch
+  runner with the budget that is left, and prints the run row. With no
+  budget, the free steps run and paid calls are refused (see
+  "Reservation").
 
 ## Options not chosen
 
@@ -303,7 +313,9 @@ more calls.
 | A crash between the reservation and the settle write | Items saved, counts not | The budget keeps the whole worst case taken. The run row misses the tokens of one message. | Limit #113 (counts only); batch test of the reservation. |
 | The budget covers one call but not two | A second try outside the budget | The wrapper reserves each call; it refuses the second call. | Batch test. |
 | `iris model set` during a run | Calls on an old row with a new budget | `iris model set` needs the run lock and fails. | Command test. |
-| `iris model set` between the estimate and the approval | A budget for a model the person did not see | `iris understand` holds the lock from the estimate to the approval and the run. | Command test. |
+| `iris model set` between the estimate and the approval | A budget for a model the person did not see | The approval code is the row version; a changed row refuses the approval. | Command test. |
+| `iris model set local https://remote.example/v1 m` | Mail text leaves the machine | Refused: the host is not a loopback address. | Command test. |
+| A provider bills more input tokens than the body bytes | Settle passes the reservation | The budget can go below zero once; the run stops with `stop = budget` and shows the overrun. | Fake model with a large usage. |
 | The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
 | A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
