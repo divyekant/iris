@@ -8,6 +8,7 @@ This folder holds the specifications of Iris and the open model.
 | [02-changeset-policy-ledger.md](02-changeset-policy-ledger.md) | The changeset, the policy file, the ledger and the `iris` command | 2 |
 | [schema/](schema/) | Version 0 of the open model as JSON Schema (draft 2020-12), with sample documents | 1 |
 | [schema/changeset.schema.json](schema/changeset.schema.json) | The changeset document of specification 2, section 5.1, as JSON Schema, with sample documents | 2 |
+| [schema/policy.schema.json](schema/policy.schema.json) | The policy file of specification 2, section 6.2, as JSON Schema for its TOML data, with sample files | 2 |
 
 ## Status
 

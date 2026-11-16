@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:policy",
+  "title": "Iris open model 0 (draft): policy file",
+  "description": "Draft. The policy file policy.toml, as the JSON form of its TOML data: a TOML date is a string YYYY-MM-DD. See docs/spec/02-changeset-policy-ledger.md, sections 6.1 and 6.2. The engine also refuses a file larger than 256 KiB and two rules with the same id. A schema cannot check these two rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "mode"
+  ],
+  "properties": {
+    "version": {
+      "const": 0
+    },
+    "mode": {
+      "enum": [
+        "observe",
+        "apply"
+      ]
+    },
+    "rule": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    }
+  },
+  "$defs": {
+    "verb": {
+      "$comment": "The verbs of release 2 (section 4). untrash is not a verb of a rule: only an undo makes it.",
+      "enum": [
+        "archive",
+        "inbox",
+        "label",
+        "unlabel",
+        "read",
+        "unread",
+        "trash",
+        "close",
+        "defer",
+        "decline",
+        "correct"
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "effect",
+        "when",
+        "by",
+        "added"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "name": {
+          "$comment": "One line of text: no control character.",
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$"
+            }
+          ]
+        },
+        "effect": {
+          "enum": [
+            "allow",
+            "review",
+            "deny",
+            "hide",
+            "bundle"
+          ]
+        },
+        "verbs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/verb"
+          }
+        },
+        "when": {
+          "$ref": "#/$defs/when"
+        },
+        "by": {
+          "enum": [
+            "person",
+            "proposal"
+          ]
+        },
+        "added": {
+          "$ref": "urn:iris:model:0:common#/$defs/date"
+        },
+        "job": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      },
+      "if": {
+        "properties": {
+          "effect": {
+            "enum": [
+              "allow",
+              "review",
+              "deny"
+            ]
+          }
+        }
+      },
+      "then": {
+        "$comment": "An action effect names its verbs.",
+        "required": [
+          "verbs"
+        ]
+      },
+      "else": {
+        "$comment": "An item has no verb, no author and no job, so a hide or a bundle rule with one could never match.",
+        "properties": {
+          "verbs": false,
+          "job": false,
+          "when": {
+            "properties": {
+              "author": false
+            }
+          }
+        }
+      }
+    },
+    "when": {
+      "$comment": "Each condition must match. A when with no condition is refused, so that no rule is wide by accident.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "form": {
+          "enum": [
+            "commitment",
+            "conversation",
+            "record",
+            "feed",
+            "signal"
+          ]
+        },
+        "sender": {
+          "$comment": "An address, or a domain with @ in front. The engine ignores case and the spaces around it.",
+          "type": "string",
+          "pattern": "^\\s*[^@\\s]*@[^@\\s]+\\s*$"
+        },
+        "sender_kind": {
+          "enum": [
+            "self",
+            "person",
+            "service",
+            "stranger",
+            "hostile"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "record_type": {
+          "enum": [
+            "receipt",
+            "booking",
+            "statement",
+            "ticket",
+            "contract",
+            "event",
+            "other"
+          ]
+        },
+        "commitment_kind": {
+          "enum": [
+            "task",
+            "reply",
+            "payment",
+            "invitation",
+            "decision"
+          ]
+        },
+        "author": {
+          "enum": [
+            "person",
+            "agent",
+            "triage",
+            "local"
+          ]
+        },
+        "older_than_days": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    }
+  }
+}

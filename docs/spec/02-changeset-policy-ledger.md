@@ -330,6 +330,13 @@ section 5.1) keep other users out.
 The policy is the file `policy.toml` in the data folder. TOML is a plain text
 format that a person can read and edit, and comments in the file stay.
 
+`schema/policy.schema.json` is the JSON Schema of the file, with sample
+files in `schema/examples/` (files `policy*.toml`). A TOML editor that reads
+JSON Schema can use it. The schema reads the TOML data as JSON, with each
+TOML date as a text `YYYY-MM-DD`. The engine refuses two more cases that the
+schema does not see: two rules with the same `id`, and a file larger than
+256 KiB.
+
 ```toml
 # Iris policy. Version 0 (draft).
 version = 0
