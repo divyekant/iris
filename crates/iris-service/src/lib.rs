@@ -249,10 +249,11 @@ pub fn remove() -> io::Result<Option<PathBuf>> {
 fn remove_unit(systemctl: &str, file: &Path, booted: bool) -> io::Result<()> {
     // With no running systemd, nothing can run the unit: delete the file with
     // no stop. A systemctl call would fail (no user bus) and block the remove.
-    if booted {
-        // If the stop fails, keep the file, so that a second remove can try again.
-        run(systemctl, &["--user", "disable", "--now", UNIT])?;
+    if !booted {
+        return std::fs::remove_file(file);
     }
+    // If the stop fails, keep the file, so that a second remove can try again.
+    run(systemctl, &["--user", "disable", "--now", UNIT])?;
     std::fs::remove_file(file)?;
     // The unit is stopped and disabled, so the remove is complete. The
     // reload only drops the old definition from memory; systemd reads
@@ -461,7 +462,10 @@ mod tests {
         let failing = dir.join("failing-systemctl");
         std::fs::write(
             &failing,
-            "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n",
+            format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\necho 'Failed to connect to bus' >&2\nexit 1\n",
+                dir.join("calls").display()
+            ),
         )
         .unwrap();
         assert!(Command::new("chmod")
@@ -473,8 +477,13 @@ mod tests {
         std::fs::write(&file, "unit").unwrap();
         assert!(remove_unit(failing.to_str().unwrap(), &file, true).is_err());
         assert!(file.exists());
+        std::fs::remove_file(dir.join("calls")).unwrap();
         assert!(remove_unit(failing.to_str().unwrap(), &file, false).is_ok());
         assert!(!file.exists());
+        assert!(
+            !dir.join("calls").exists(),
+            "no systemctl call when systemd does not run"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
