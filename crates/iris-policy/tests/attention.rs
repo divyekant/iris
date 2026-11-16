@@ -458,14 +458,14 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
     // of a fact of its origin message: a label, a label name, the hostile
     // marks, the date, the kind of the sender, a new item of the message,
     // or a new form, type or document of the item. Each such change marks
-    // the message in `attention_due` (store migration 7).
+    // the message in `attention_due` (store migration 8).
     for seed in 1..=20u64 {
         let (_d, s) = store(&format!("r{seed}"));
         let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
         let mut mail = mailbox(&s, &mut rng);
         // Each new item marks its message.
         assert_eq!(due(&s).len(), mail.len(), "seed {seed}: new items");
-        // A store from before migration 7 has items and no mark: the
+        // A store from before migration 8 has items and no mark: the
         // first refresh evaluates each item.
         sql(&s, "DELETE FROM attention_due", []);
         // With no policy, each item is shown.

@@ -3,7 +3,7 @@
 //! message, written to the `attention` field of the item document. The
 //! engine evaluates each item again when the active policy changes, and the
 //! items of each message in `attention_due` when a fact of that message
-//! changes (store migration 7).
+//! changes (store migration 8).
 
 use crate::{CommitmentKind, Form, Item, Message, Policy, RecordType, SenderKind};
 use iris_store::{Result, Store};

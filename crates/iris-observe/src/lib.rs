@@ -151,14 +151,19 @@ pub fn write_changeset(
             if n > 1 {
                 out.write_all(b",")?;
             }
-            write!(out, r#"{{"n":{n},"verb":"{}","targets":{{"messages":["#, rule.verb())?;
+            write!(
+                out,
+                r#"{{"n":{n},"revision":1,"verb":"{}","targets":{{"messages":["#,
+                rule.verb()
+            )?;
             write_ids(c, rule, account, out)?;
             out.write_all(br#"]},"resolved":{"messages":["#)?;
             write_ids(c, rule, account, out)?;
             let bulk = count > BULK || total > BULK;
             write!(
                 out,
-                r#"]}},"args":{{}},"why":"{}","flags":[{}],"decision":{{"state":"proposed"}}}}"#,
+                // No hash: the proposal is not stored, so no one can approve it.
+                r#"]}},"args":{{}},"why":"{}","flags":[{}],"hash":null,"decision":{{"state":"proposed"}}}}"#,
                 rule.why(),
                 if bulk { r#""bulk""# } else { "" },
             )?;
