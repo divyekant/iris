@@ -453,6 +453,11 @@ The engine adds indexes for the queries of the brief: `item(form, status)`,
   filters into SQL conditions and the words into an FTS5 query. It never
   passes the text of a person or an agent to FTS5 without the escape of
   quotes and operators.
+- The sync stores bytes only (section 4.7). The `header` and `body` rows,
+  and so the words and the `from:` and `to:` filters, come from step 8 of
+  understanding (section 7.1). Until understanding reads a message, only
+  `label:`, `after:` and `before:` find it. The engine runs understanding
+  after each sync (tracker item R1-28, after R1-10).
 
 ### 5.7 IDs
 
@@ -611,8 +616,9 @@ an expired code in large type.
 
 ### 6.7 The sender axis
 
-Each sender row has a kind. The kind is a property of the address, not of one
-message.
+Each sender row has a kind after the sender step decides it (see the
+paragraph about a row with no kind below). The kind is a property of the
+address, not of one message.
 
 | Kind | Rule in version 0 |
 |---|---|
@@ -623,6 +629,16 @@ message.
 
 Order: the engine checks `hostile` first, then `person`, then `service`. A
 sender that matches no rule is a `stranger`.
+
+A sender row can have no kind yet. A step that needs the `p-` ID of an
+address (conversations, people) adds the row with the address and the name
+only, and never writes a kind. The sender step (section 7.1, step 3) sets the
+kind, `basis` and `decided_by`. A row with no kind is not decided, and no
+step treats it as `person` for a treatment of this section. The people
+profiles are an exception for display only: a profile shows an address
+with no kind that matches the `person` rule, and the near-copy check of
+`hostile` waits for the sender step. When the sender step sets a kind other
+than `person`, the profile drops the address.
 
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
 A decision by a person always wins over the engine, and the engine never

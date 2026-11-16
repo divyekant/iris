@@ -117,6 +117,13 @@ fn sender(store: &Store, address: &str, kind: Option<&str>) -> String {
     format!("p-{id}")
 }
 
+/// The stored document of item row `row`.
+fn exec_doc(store: &Store, row: i64) -> String {
+    store
+        .read(|c| Ok(c.query_row("SELECT doc FROM item WHERE id = ?1", [row], |r| r.get(0))?))
+        .unwrap()
+}
+
 /// Add an item with `doc` (merged over the common fields), with message
 /// row `source` as its origin. Gives the row ID.
 fn add_item(store: &Store, form: &str, status: &str, source: i64, created: i64, doc: Value) -> i64 {
@@ -888,6 +895,127 @@ async fn brief_follows_the_queries_of_section_8() {
         .sum();
     assert_eq!(targets as u64, want);
 
+    // Pages of one section: the same items in the same order as the brief.
+    let mut paged = Vec::new();
+    let mut after = String::new();
+    loop {
+        let (code, p) = get(&store, &format!("/api/brief/you_owe?limit=3{after}")).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(p["count"], 4);
+        paged.extend(ids(&p["items"]).into_iter().map(str::to_string));
+        match p["next"].as_str() {
+            Some(n) => after = format!("&after={n}"),
+            None => break,
+        }
+    }
+    assert_eq!(paged, ids(&b["you_owe"]["items"]));
+    // A page has the duplicates of its own items only.
+    let (_, p1) = get(&store, "/api/brief/you_owe?limit=1").await;
+    assert_eq!(ids(&p1["items"]), [c(sooner)]);
+    assert_eq!(p1["duplicates"], Value::Null);
+    let after1 = p1["next"].as_str().unwrap().to_string();
+    let (_, p2) = get(
+        &store,
+        &format!("/api/brief/you_owe?limit=1&after={after1}"),
+    )
+    .await;
+    assert_eq!(ids(&p2["items"]), [c(soon)]);
+    let (_, p3) = get(
+        &store,
+        &format!(
+            "/api/brief/you_owe?limit=1&after={}",
+            p2["next"].as_str().unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(p3["duplicates"], json!({ c(late): [c(dup)] }));
+    // The last item of a page leaves the section, and its sort key changes
+    // (due later than all others). The next page still starts at `soon`.
+    let before = exec_doc(&store, sooner);
+    exec(
+        &store,
+        "UPDATE item SET status = 'done',
+           doc = json_set(doc, '$.due', json('{\"date\": \"2027-06-01\"}')) WHERE id = ?1",
+        [sooner],
+    );
+    let (code, p) = get(
+        &store,
+        &format!("/api/brief/you_owe?limit=1&after={after1}"),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&p["items"]), [c(soon)]);
+    exec(
+        &store,
+        "UPDATE item SET status = 'open', doc = ?2 WHERE id = ?1",
+        rusqlite::params![sooner, before],
+    );
+    assert_eq!(
+        get(&store, "/api/brief/records").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&store, "/api/brief/you_owe?limit=0").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    // A cursor is plain keys, not a signed value: keys before every item
+    // give the section from the start.
+    let made: String = r#"["you_owe",0,null,0,0]"#.bytes().map(|b| format!("{b:02x}")).collect();
+    let (code, p) = get(&store, &format!("/api/brief/you_owe?limit=1&after={made}")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&p["items"]), [c(sooner)]);
+    // An empty `after`, or one that is not a cursor of the section, is a 400.
+    let feed_next = get(&store, "/api/brief/feed?limit=1").await.1["next"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for bad in ["", "x", "c-1", "zz", "5b5d", &feed_next] {
+        assert_eq!(
+            get(&store, &format!("/api/brief/you_owe?after={bad}"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+
+    // The kind of the sender of a message.
+    assert_eq!(
+        get(&store, "/api/messages/m-23").await.1["sender_kind"],
+        "hostile"
+    );
+    exec(
+        &store,
+        "UPDATE header SET from_addr = 'DANA@contoso.example' WHERE message_id = 24",
+        [],
+    );
+    assert_eq!(
+        get(&store, "/api/messages/m-24").await.1["sender_kind"],
+        "person"
+    );
+    // Rows whose addresses differ only in case: a row with no kind is a
+    // stranger and wins over a person, and hostile wins over all.
+    sender(&store, "dANA@contoso.example", None);
+    assert_eq!(
+        get(&store, "/api/messages/m-24").await.1["sender_kind"],
+        "stranger"
+    );
+    // Two sender rows whose addresses differ only in case: hostile wins.
+    sender(&store, "Dana@Contoso.example", Some("hostile"));
+    assert_eq!(
+        get(&store, "/api/messages/m-24").await.1["sender_kind"],
+        "hostile"
+    );
+    exec(
+        &store,
+        "UPDATE header SET from_addr = 'nobody@nowhere.example' WHERE message_id = 25",
+        [],
+    );
+    assert_eq!(
+        get(&store, "/api/messages/m-25").await.1["sender_kind"],
+        "stranger"
+    );
+
     // The HTTP route gives the same shape.
     let (code, http) = get(&store, "/api/brief").await;
     assert_eq!(code, StatusCode::OK);
@@ -1002,4 +1130,48 @@ async fn a_proposal_that_fails_before_its_first_part_is_a_500() {
     let (code, v) = get(&store, "/api/proposal").await;
     assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(v["error"].is_string());
+}
+
+#[tokio::test]
+async fn pages_a_section_larger_than_the_brief() {
+    let dir = temp("pages");
+    let (store, _) = filled(&dir);
+    let a = sender(&store, "a@one.example", Some("service"));
+    let b = sender(&store, "b@two.example", Some("service"));
+    // 250 feed items: three publishers (one with no sender row and no
+    // address, so its sort key is NULL), equal times, and no time.
+    for i in 0..250i64 {
+        let publisher = [a.as_str(), b.as_str(), "p-99999"][(i % 3) as usize];
+        let mut doc = json!({"publisher": party(publisher)});
+        if i % 5 != 0 {
+            doc["published"] = json!(format!("2026-11-0{}T00:00:00Z", 1 + i % 4));
+        }
+        add_item(&store, "feed", "new", 13, i, doc);
+    }
+    let pages = |limit: u32| {
+        let store = store.clone();
+        async move {
+            let mut all = Vec::new();
+            let mut after = String::new();
+            loop {
+                let (code, p) = get(&store, &format!("/api/brief/feed?limit={limit}{after}")).await;
+                assert_eq!(code, StatusCode::OK);
+                assert_eq!(p["count"], 250);
+                all.extend(ids(&p["items"]).into_iter().map(str::to_string));
+                match p["next"].as_str() {
+                    Some(n) => after = format!("&after={n}"),
+                    None => break,
+                }
+            }
+            all
+        }
+    };
+    let big = pages(200).await;
+    let small = pages(7).await;
+    assert_eq!(big.len(), 250);
+    assert_eq!(big, small);
+    let unique: std::collections::HashSet<_> = big.iter().collect();
+    assert_eq!(unique.len(), 250);
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ids(&brief["feed"]["items"]), big[..200]);
 }
