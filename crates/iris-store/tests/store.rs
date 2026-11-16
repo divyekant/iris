@@ -663,8 +663,8 @@ fn dry_write_gives_the_result_and_writes_nothing() {
 fn a_deferred_commitment_opens_on_its_date() {
     let dir = TempDir::new("deferred");
     let (store, acc) = setup(&dir);
-    // 2026-11-16T12:00:00Z
-    let now = 1_794_830_400_000;
+    // 2026-11-16T12:00:00.007Z
+    let now = 1_794_830_400_007;
     let add = |status: &str, before: Option<&str>, doc: &str| -> i64 {
         store
             .write(|tx| {
@@ -680,7 +680,7 @@ fn a_deferred_commitment_opens_on_its_date() {
     let past = add(
         "deferred",
         None,
-        r#"{"status":"deferred","deferred_until":"2026-11-15","kind":"task"}"#,
+        r#"{"status":"deferred","updated":"2026-11-01T09:00:00.000Z","deferred_until":"2026-11-15","kind":"task"}"#,
     );
     let today = add(
         "deferred",
@@ -712,7 +712,10 @@ fn a_deferred_commitment_opens_on_its_date() {
     };
     let (status, doc, at) = row(past);
     assert_eq!(status, "open");
-    assert_eq!(doc, r#"{"status":"open","kind":"task"}"#);
+    assert_eq!(
+        doc,
+        r#"{"status":"open","updated":"2026-11-16T12:00:00.007Z","kind":"task"}"#
+    );
     assert_eq!(at, now);
     assert_eq!(row(today).0, "open");
     assert_eq!(row(later).0, "deferred");
