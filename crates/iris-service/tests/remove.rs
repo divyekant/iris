@@ -79,7 +79,9 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     );
     assert!(file.exists(), "a failed stop must keep the file");
 
-    fake(&bin, "exit 0");
+    // A failed reload after the stop does not fail the remove: the unit is
+    // stopped, disabled and its file is gone.
+    fake(&bin, "case \"$*\" in *daemon-reload*) exit 1 ;; esac");
     assert_eq!(iris_service::remove().unwrap(), Some(file.clone()));
     assert!(!file.exists());
     std::fs::remove_dir_all(&dir).unwrap();
