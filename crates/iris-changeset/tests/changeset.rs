@@ -1518,6 +1518,9 @@ fn open_actions_expire_14_days_after_the_submit() {
         ]
     );
     assert_eq!(d["actions"][1]["decision"]["by"], "expiry");
-    assert_eq!(d["state"], "open", "the action with a writing ledger row is still open");
+    assert_eq!(
+        d["state"], "open",
+        "the action with a writing ledger row is still open"
+    );
     assert!(doc(&s, draft)["actions"][0]["decision"].is_null());
 }
