@@ -74,7 +74,9 @@ test("the review shows an open request whose actions all have a decision, with t
     const details = view.target.querySelector("details");
     assert.ok(details.open, "the decided changes show open when nothing in the request waits");
     assert.match(text(details), /Archive 1 message/i);
-    assert.equal(view.target.querySelector(".decide"), null);
+    // No approve button: the decision row holds only the withdraw.
+    assert.equal(view.target.querySelector("button.primary"), null);
+    assert.ok(view.target.querySelector(".decide button.end"));
   } finally {
     view.destroy();
   }
@@ -287,7 +289,7 @@ test("withdraw asks once, then cancels each change that Iris did not make", asyn
   const asked = serve({ "changesets/cs-9/withdraw": [200, after] });
   const view = await mount("/src/views/Review.svelte", { changesets: [before] });
   try {
-    const control = () => [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw");
+    const control = () => view.target.querySelector("button.end");
     // "Keep it" closes the question and sends nothing.
     control().click();
     view.flushSync();
@@ -303,7 +305,7 @@ test("withdraw asks once, then cancels each change that Iris did not make", asyn
     await until(() => text(view.target).includes("You withdrew this request. Iris cancelled 2 changes."));
     assert.doesNotMatch(text(view.target), /started|This request is withdrawn/);
     assert.deepEqual(asked.filter((x) => Array.isArray(x)).map(([p]) => p), ["changesets/cs-9/withdraw"]);
-    assert.equal(control(), undefined, "a withdrawn request has no control");
+    assert.equal(control(), null, "a withdrawn request has no control");
     assert.match(text(view.target), /Nothing waits for your review\./);
     assert.equal(view.target.querySelectorAll(".decided li").length, 3);
     assert.match(text(view.target.querySelector(".decided")), /Withdrawn.*Withdrawn.*Done/);
@@ -323,7 +325,7 @@ test("a withdraw counts from the states that the store gives back: a started cha
   serve({ "changesets/cs-9/withdraw": [200, after] });
   const view = await mount("/src/views/Review.svelte", { changesets: [before] });
   try {
-    [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw").click();
+    view.target.querySelector("button.end").click();
     view.flushSync();
     // The question promises no count: the page cannot see which approved change Iris started.
     assert.doesNotMatch(text(view.target.querySelector(".question")), /\d/);
@@ -343,7 +345,7 @@ test("a withdraw keeps each change that it cancelled in view, also one of an old
   serve({ "changesets/cs-9/withdraw": [200, after] });
   const view = await mount("/src/views/Review.svelte", { changesets: [before] });
   try {
-    [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw").click();
+    view.target.querySelector("button.end").click();
     view.flushSync();
     view.target.querySelector(".question button.outline").click();
     await until(() => text(view.target).includes("Iris cancelled 2 changes."));
@@ -352,6 +354,23 @@ test("a withdraw keeps each change that it cancelled in view, also one of an old
     for (const row of rows) assert.match(row, /Withdrawn/);
   } finally {
     view.destroy();
+  }
+});
+
+test("withdraw sits at the end of the decision row, also when no change waits", async () => {
+  serve();
+  const waiting = await mount("/src/views/Request.svelte", { changeset: changeset([act({ n: 1 })]) });
+  try {
+    assert.ok(waiting.target.querySelector(".decide button.end"), "after the approve button");
+    assert.equal(waiting.target.querySelector("header button"), null, "not in the head");
+  } finally {
+    waiting.destroy();
+  }
+  const approved = await mount("/src/views/Request.svelte", { changeset: changeset([act({ n: 1, decision: { state: "approved", by: "person" } })]) });
+  try {
+    assert.match(text(approved.target.querySelector(".decide")), /No change of this request waits for your decision\. Withdraw the request/);
+  } finally {
+    approved.destroy();
   }
 });
 
@@ -365,7 +384,7 @@ test("a withdraw that is refused or has no answer loads the request again and sa
     serve({ "changesets/cs-9/withdraw": route, "changesets/cs-9": [200, gone] });
     const view = await mount("/src/views/Review.svelte", { changesets: [before] });
     try {
-      [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw").click();
+      view.target.querySelector("button.end").click();
       view.flushSync();
       view.target.querySelector(".question button.outline").click();
       const alert = await until(() => view.target.querySelector("[role=alert]"));

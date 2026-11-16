@@ -172,6 +172,11 @@
   {/if}
 {/snippet}
 
+<!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
+{#snippet ask()}
+  <button type="button" class="quiet end" disabled={busy || stale} onclick={() => (asking = true)}>Withdraw the request</button>
+{/snippet}
+
 {#snippet question()}
   <div class="question" role="group" aria-labelledby={`${c.id}-ask`}>
     <p id={`${c.id}-ask`}><b>Withdraw this request?</b></p>
@@ -199,11 +204,7 @@
     {/if}
     <p id={`${c.id}-who`}><b>{who}</b> <span class="time">{short(c.submitted)}</span></p>
     <span class="id">{c.id}{c.revision > 1 ? `, revision ${c.revision}` : ""}</span>
-    {#if c.state === "open" && !asking}
-      <button type="button" class="quiet" disabled={busy || stale} onclick={() => (asking = true)}>Withdraw</button>
-    {/if}
   </header>
-  {#if asking}{@render question()}{/if}
   {#if c.why}<blockquote>{c.why}</blockquote>{/if}
 
   {#if open.length}
@@ -227,8 +228,15 @@
       <button type="button" class="primary" class:deny={!chosen.length} disabled={!ready} onclick={decide}>{plan(chosen.length, open.length)}</button>
       <p>Iris makes none of these changes before you approve them.</p>
       {#if missing.length && !problem}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
+      {#if !asking}{@render ask()}{/if}
+    </div>
+  {:else if c.state === "open" && !asking}
+    <div class="decide">
+      <p>No change of this request waits for your decision.</p>
+      {@render ask()}
     </div>
   {/if}
+  {#if asking}{@render question()}{/if}
   {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
   {#if problem}
     <p role="alert">
@@ -498,6 +506,9 @@
   .quiet:disabled {
     cursor: default;
     opacity: 0.6;
+  }
+  .end {
+    margin-left: auto;
   }
   /* The withdraw question: a notice with a warning line, as the observe note of the review. */
   .question {
