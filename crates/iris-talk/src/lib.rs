@@ -17,6 +17,19 @@ use serde_json::{json, Map, Value};
 
 /// The name of the rule in `derived.rule`.
 pub const RULE: &str = "thread";
+
+/// The fields of a conversation that this rule makes from the store on each
+/// update. A correction cannot change them (only `summary` is left), and
+/// [`update`] does not apply one.
+pub const DERIVED: [&str; 7] = [
+    "thread",
+    "participants",
+    "role",
+    "latest",
+    "messages",
+    "new",
+    "your_turn",
+];
 /// A conversation with no message for this time is `quiet` (section 6.3).
 pub const QUIET_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 /// The most characters of `latest.snippet`.
@@ -312,16 +325,55 @@ fn corrections(conn: &Connection, item: i64, doc: &mut Value) -> rusqlite::Resul
         let Ok(value) = serde_json::from_str::<Value>(&value) else {
             continue;
         };
-        let mut at = &mut *doc;
-        for key in field.split('.') {
-            if !at.is_object() {
-                *at = json!({});
-            }
-            at = &mut at[key];
+        let top = field.split('.').next().unwrap_or("");
+        if DERIVED.contains(&top) {
+            continue;
         }
-        *at = value;
+        // A path that does not fit this document changes nothing.
+        set_field(doc, &field, value);
     }
     Ok(())
+}
+
+/// Set the field at the dotted path `field` (for example `due.date` or
+/// `fields.items.0.name`) of `doc` to `value`. The one rule that applies a
+/// correction, for each caller.
+///
+/// A step into an object names a key; a missing key before the last step
+/// becomes an empty object. A step into an array is the decimal index of an
+/// element (`0`, not `00`). Gives false, and leaves `doc` as it was, for an
+/// empty step, an index that is not an element, or a step into a value that
+/// is not an object or an array. So no array or object changes its kind.
+pub fn set_field(doc: &mut Value, field: &str, value: Value) -> bool {
+    let steps: Vec<&str> = field.split('.').collect();
+    if steps.iter().any(|s| s.is_empty()) {
+        return false;
+    }
+    // On a copy: a step that fails after a new empty object changes nothing.
+    let mut new = doc.clone();
+    let mut at = &mut new;
+    for (i, key) in steps.iter().enumerate() {
+        let last = i + 1 == steps.len();
+        let next = match at {
+            Value::Object(m) => {
+                Some(
+                    m.entry(*key)
+                        .or_insert_with(|| if last { Value::Null } else { json!({}) }),
+                )
+            }
+            Value::Array(a) => key
+                .parse::<usize>()
+                .ok()
+                .filter(|n| n.to_string() == *key)
+                .and_then(|n| a.get_mut(n)),
+            _ => None,
+        };
+        let Some(next) = next else { return false };
+        at = next;
+    }
+    *at = value;
+    *doc = new;
+    true
 }
 
 /// Each message of the thread that is understood or `current`, also when it

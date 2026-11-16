@@ -6,9 +6,10 @@ use std::path::PathBuf;
 
 use iris_model::{Error as ModelError, Reply, Stop, Usage};
 use iris_store::{NewMessage, Store};
+use iris_understand::correct;
 use iris_understand::store::{understand, Error};
 use iris_understand::{Model, INSTRUCTION};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const NOW: i64 = 1_767_225_600_000; // 2026-01-01
 const DAY: i64 = 86_400_000;
@@ -1633,4 +1634,328 @@ fn a_rerun_resets_a_sender_with_many_threads() {
         0,
     );
     assert_eq!(left, 0);
+}
+
+// R2-11: a correction by a person stays through the next sync and run.
+
+fn correct(b: &Store, id: &str, field: &str, value: Value, now: i64) -> Result<Value, String> {
+    b.write(|tx| Ok(correct::correct(tx, id, field, value, "person", now)?))
+        .unwrap()
+}
+
+fn corrections(b: &Box_) -> i64 {
+    b.col("SELECT COUNT(*) FROM correction WHERE ?1 = ?1", 0)
+}
+
+#[test]
+fn a_correction_stays_after_a_sync_with_new_content_and_a_new_run() {
+    let b = store("correct-sync");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let row = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    let id = format!("c-{row}");
+    let doc = correct(&b.store, &id, "due.date", json!("2026-01-09"), NOW + 1).unwrap();
+    assert_eq!(doc["due"]["date"], "2026-01-09");
+    assert_eq!(b.items()[0]["due"]["date"], "2026-01-09");
+
+    // The sync gets new content for the message: understanding runs again.
+    let m2 = b.add("1", &ASK.replace("Friday?", "Friday? Thanks."), &["INBOX"]);
+    assert_eq!(m2, m);
+    assert!(b
+        .col::<Option<i64>>("SELECT understood_at FROM message WHERE id = ?1", m)
+        .is_none());
+    // The model finds the wrong date again, and names the pinned item.
+    let same = COMMITMENT.replace(
+        r#""form": "commitment","#,
+        &format!(r#""form": "commitment", "same_as": "{id}","#),
+    );
+    let fake = Fake::with(&[&same]);
+    understand(&b.store, m, &fake, NOW + 2).unwrap();
+    // The model got the corrected document.
+    assert!(fake.calls.borrow()[0].1.contains("2026-01-09"));
+    let items = b.items();
+    assert_eq!(items.len(), 1, "no duplicate");
+    assert_eq!(items[0]["id"], id);
+    assert_eq!(items[0]["due"]["date"], "2026-01-09");
+
+    // A model that does not name it: the corrected item stays, the new one
+    // is a possible duplicate.
+    let out = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW + 3).unwrap();
+    let items = b.items();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["due"]["date"], "2026-01-09");
+    assert_eq!(
+        b.col::<Option<i64>>("SELECT duplicate_of FROM item WHERE id = ?1", out.items[0]),
+        Some(row)
+    );
+}
+
+#[test]
+fn a_refused_correction_writes_nothing() {
+    let b = store("correct-refused");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let row = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    let id = format!("c-{row}");
+    let before = b.items();
+    for (id, field, value) in [
+        (id.as_str(), "status", json!("done")),
+        (&id, "title", json!("Other")),
+        (&id, "sources.0.quote", json!("x")),
+        (&id, "derived", json!({"by": "person"})),
+        (&id, "", json!("x")),
+        (&id, "due..date", json!("2026-01-09")),
+        (&id, "due.date", json!("Friday")),
+        (
+            &id,
+            "due",
+            json!({"date": "2026-01-09", "at": "2026-01-09T10:00:00Z"}),
+        ),
+        (&id, "kind", json!("party")),
+        (&id, "unknown", json!(1)),
+        (&format!("r-{row}"), "kind", json!("reply")),
+        (&format!("m-{m}"), "kind", json!("reply")),
+        (&format!("c-0{row}"), "kind", json!("reply")),
+        ("c-999", "kind", json!("reply")),
+        ("seven", "kind", json!("reply")),
+        (&id, "kind.0", json!("reply")),
+        (&id, "counterparty.sender", json!("p-999")),
+        (
+            &id,
+            "counterparty",
+            json!({"kind": "sender", "sender": "p-999"}),
+        ),
+        (&id, "counterparty.address", json!("not an address")),
+    ] {
+        let out = correct(&b.store, id, field, value.clone(), NOW);
+        assert!(out.is_err(), "{id} {field} {value} must be refused");
+    }
+    assert_eq!(corrections(&b), 0);
+    assert_eq!(b.items(), before);
+    let senders: i64 = b.col(
+        "SELECT COUNT(*) FROM sender WHERE address = 'not an address' AND ?1 = ?1",
+        0,
+    );
+    assert_eq!(senders, 0, "a refused correction adds no sender row");
+}
+
+#[test]
+fn a_corrected_record_is_corrected_and_stays_so_after_gone() {
+    let b = store("correct-record");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let record = r#"{"items": [{"form": "record", "title": "Lease",
+      "quote": "Can you send me the signed lease by Friday?", "confidence": 0.8,
+      "type": "other", "fields": {"summary": "A lease"}}], "phishing": false}"#;
+    let row = understand(&b.store, m, &Fake::with(&[record]), NOW)
+        .unwrap()
+        .items[0];
+    let id = format!("r-{row}");
+    let status = |b: &Box_| -> String { b.col("SELECT status FROM item WHERE id = ?1", row) };
+    assert_eq!(status(&b), "kept");
+    correct(
+        &b.store,
+        &id,
+        "fields.summary",
+        json!("The lease of flat 2"),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(status(&b), "corrected");
+    assert_eq!(b.items()[0]["status"], "corrected");
+    // The same SQL as the sync (section 4.5): gone, a second correction,
+    // then back.
+    let sql = |q: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(q, [row])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    sql("UPDATE item SET status_before_gone = status, status = 'gone' WHERE id = ?1");
+    correct(&b.store, &id, "fields.summary", json!("Flat 2"), NOW + 1).unwrap();
+    assert_eq!(status(&b), "gone");
+    sql("UPDATE item SET status = status_before_gone, status_before_gone = NULL WHERE id = ?1");
+    assert_eq!(status(&b), "corrected");
+    assert_eq!(b.items()[0]["fields"]["summary"], "Flat 2");
+    assert_eq!(corrections(&b), 2);
+    // A changeset action records its changeset ID (specification 2, section 4).
+    b.store
+        .write(|tx| {
+            Ok(correct::correct(
+                tx,
+                &id,
+                "fields.summary",
+                json!("Flat 3"),
+                "cs-9",
+                NOW + 2,
+            )?)
+        })
+        .unwrap()
+        .unwrap();
+    let by: String = b.col(
+        "SELECT by FROM correction WHERE item_id = ?1 ORDER BY id DESC",
+        row,
+    );
+    assert_eq!(by, "cs-9");
+}
+
+#[test]
+fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversation() {
+    let b = store("correct-paths");
+    b.kind("ana@example.org", "Ana Lee", "person");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let receipt = r#"{"items": [{"form": "record", "title": "Lease",
+      "quote": "Can you send me the signed lease by Friday?", "confidence": 0.8,
+      "type": "receipt", "fields": {"vendor": "Bo", "date": "2025-12-31",
+      "amount": {"value": "10.00", "currency": "EUR"},
+      "items": [{"name": "a"}, {"name": "b"}]}}], "phishing": false}"#;
+    let row = understand(&b.store, m, &Fake::with(&[receipt]), NOW)
+        .unwrap()
+        .items[0];
+    let doc = correct(
+        &b.store,
+        &format!("r-{row}"),
+        "fields.items.1.name",
+        json!("c"),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        doc["fields"]["items"],
+        json!([{"name": "a"}, {"name": "c"}])
+    );
+    assert!(correct(
+        &b.store,
+        &format!("r-{row}"),
+        "fields.items.2.name",
+        json!("c"),
+        NOW
+    )
+    .is_err());
+
+    let c = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    let ana: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'ana@example.org' AND ?1 = ?1",
+        0,
+    );
+    // A wrong sender ID in the value goes: the address decides it.
+    let party = json!({"kind": "sender", "sender": "p-999", "address": "ana@example.org"});
+    let doc = correct(&b.store, &format!("c-{c}"), "counterparty", party, NOW).unwrap();
+    assert_eq!(doc["counterparty"]["sender"], format!("p-{ana}"));
+    // A new address gets its own sender row, and the ID follows it.
+    let doc = correct(
+        &b.store,
+        &format!("c-{c}"),
+        "counterparty.address",
+        json!("kai@example.net"),
+        NOW,
+    )
+    .unwrap();
+    let kai: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'kai@example.net' AND ?1 = ?1",
+        0,
+    );
+    assert_eq!(doc["counterparty"]["sender"], format!("p-{kai}"));
+    // A party that becomes the owner names no sender row.
+    let rid = format!("r-{row}");
+    assert!(b.items()[0]["issuer"]["sender"].is_string());
+    // The kind alone: a self party with the address of another person.
+    assert!(correct(&b.store, &rid, "issuer.kind", json!("self"), NOW).is_err());
+    // The owner address, or a self party: only `{"kind": "self"}` stays.
+    let doc = correct(
+        &b.store,
+        &rid,
+        "issuer.address",
+        json!("Owner@Example.com"),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc["issuer"], json!({"kind": "self"}));
+    let doc = correct(
+        &b.store,
+        &rid,
+        "issuer",
+        json!({"kind": "self", "name": "Bo"}),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc["issuer"], json!({"kind": "self"}));
+
+    // A conversation: the summary, yes; a field of the conversation rule, no.
+    let v: i64 = b.col(
+        "SELECT id FROM item WHERE form = 'conversation' AND ?1 = ?1",
+        0,
+    );
+    let vid = format!("v-{v}");
+    for (field, value) in [
+        ("thread", json!("t-1")),
+        ("latest.snippet", json!("x")),
+        ("new", json!(0)),
+    ] {
+        assert!(
+            correct(&b.store, &vid, field, value, NOW).is_err(),
+            "{field}"
+        );
+    }
+    let doc = correct(&b.store, &vid, "summary", json!("The lease"), NOW).unwrap();
+    assert_eq!(doc["summary"], "The lease");
+    // The next message of the thread: the conversation rule makes the
+    // conversation again, and the summary stays.
+    let m2 = b.add_in(
+        "2",
+        "t1",
+        NOW,
+        &ASK.replace("Friday?", "Friday? Ping."),
+        &["INBOX"],
+    );
+    understand(&b.store, m2, &Fake::default(), NOW).unwrap();
+    let after: String = b.col("SELECT doc FROM item WHERE id = ?1", v);
+    let after: Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(after["messages"], 2);
+    assert_eq!(after["summary"], "The lease");
+    assert_eq!(after["thread"], doc["thread"]);
+}
+
+#[test]
+fn a_correction_of_the_expiry_of_a_signal_sets_its_status() {
+    let b = store("correct-signal");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let signal = r#"{"items": [{"form": "signal", "title": "Code", "quote": "Can you send me the signed lease by Friday?",
+      "kind": "code", "code": "1234"}], "phishing": false}"#;
+    let row = understand(&b.store, m, &Fake::with(&[signal]), NOW)
+        .unwrap()
+        .items[0];
+    let id = format!("s-{row}");
+    let status = |b: &Box_| -> String { b.col("SELECT status FROM item WHERE id = ?1", row) };
+    assert_eq!(status(&b), "expired");
+    let doc = correct(&b.store, &id, "expires", json!("2026-02-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(doc["status"], "active");
+    assert_eq!(status(&b), "active");
+    let doc = correct(&b.store, &id, "expires", json!("2025-12-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(doc["status"], "expired");
+    assert_eq!(status(&b), "expired");
+    // A gone signal keeps `gone`, and comes back with the new status.
+    let sql = |q: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute(q, [row])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    sql("UPDATE item SET status_before_gone = status, status = 'gone' WHERE id = ?1");
+    correct(&b.store, &id, "expires", json!("2026-02-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(status(&b), "gone");
+    sql("UPDATE item SET status = status_before_gone, status_before_gone = NULL WHERE id = ?1");
+    assert_eq!(status(&b), "active");
+    // A used signal stays used.
+    sql("UPDATE item SET status = 'used', doc = json_set(doc, '$.status', 'used') WHERE id = ?1");
+    let doc = correct(&b.store, &id, "expires", json!("2025-12-01T00:00:00Z"), NOW).unwrap();
+    assert_eq!(doc["status"], "used");
+    assert_eq!(status(&b), "used");
 }
