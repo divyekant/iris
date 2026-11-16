@@ -470,16 +470,17 @@ fn read_styles(html: &str) -> Css {
 /// its selector counts. Other rules are ignored, so their content shows.
 #[derive(Default)]
 struct Css {
-    /// Each rule as its selector and its declarations, in the order of the sheet.
-    /// The count of rules read.
-    count: usize,
-    /// For each selector, the values of its rules, each with the number of
-    /// the rule that set it last. The number gives the sheet order.
+    /// The declarations of each rule read, in sheet order.
+    rules: Vec<Decls>,
+    /// The count of selectors read, over all rules.
+    selectors: usize,
+    /// For each selector, the number of the last rule that sets each property.
     by_selector: std::collections::HashMap<String, Sheet>,
 }
 
 /// The most style rules that the converter keeps for one message.
 const MAX_CSS_RULES: usize = 256;
+const MAX_CSS_SELECTORS: usize = 4096;
 /// The most bytes of declarations that the converter reads from one rule or
 /// one `style` attribute.
 const MAX_CSS_DECLS: usize = 4096;
@@ -521,33 +522,46 @@ impl Css {
             return true;
         }
         let body = &body[..floor(body, MAX_CSS_DECLS)];
-        for sel in selectors.split(',') {
-            let sel = sel.trim();
-            // Only a single class or ID: a compound selector (`.a.b`, `p.x`)
-            // or a combinator matches fewer elements than its last name.
+        // Only a single class or ID: a compound selector (`.a.b`, `p.x`)
+        // or a combinator matches fewer elements than its last name.
+        let simple = |sel: &&str| {
             let name = sel.get(1..).unwrap_or("");
-            let simple = name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-            if !sel.starts_with(['.', '#']) || name.is_empty() || !simple {
-                continue;
+            sel.starts_with(['.', '#'])
+                && !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        };
+        let mut sels = selectors
+            .split(',')
+            .map(str::trim)
+            .filter(simple)
+            .peekable();
+        if sels.peek().is_none() {
+            return true;
+        }
+        if self.rules.len() >= MAX_CSS_RULES {
+            return false;
+        }
+        let d = Decls::parse(body);
+        let n = self.rules.len();
+        for sel in sels {
+            if self.selectors >= MAX_CSS_SELECTORS {
+                break;
             }
-            if self.count >= MAX_CSS_RULES {
-                return false;
-            }
-            let d = Decls::parse(body);
+            self.selectors += 1;
             let sheet = self.by_selector.entry(sel.to_string()).or_default();
             for k in 0..PROPS.len() {
-                if let Some(v) = &d.normal[k] {
-                    sheet.normal[k] = Some((self.count, v.clone()));
+                if d.normal[k].is_some() {
+                    sheet.normal[k] = Some(n);
                 }
-                if let Some(v) = &d.important[k] {
-                    sheet.important[k] = Some((self.count, v.clone()));
+                if d.important[k].is_some() {
+                    sheet.important[k] = Some(n);
                 }
             }
-            self.count += 1;
         }
-        true
+        self.rules.push(d);
+        self.selectors < MAX_CSS_SELECTORS
     }
 
     /// The properties that apply to an element, in cascade order: the
@@ -570,10 +584,10 @@ impl Css {
                     best.later(sheet);
                 }
             }
-            d.then(&best.decls());
+            d.then(&best.decls(&self.rules));
         }
         if let Some(sheet) = id.and_then(|id| self.by_selector.get(&format!("#{}", id.trim()))) {
-            d.then(&sheet.decls());
+            d.then(&sheet.decls(&self.rules));
         }
         if let Some(inline) = inline {
             d.then(&Decls::parse(&inline[..floor(inline, MAX_CSS_DECLS)]));
@@ -586,18 +600,16 @@ impl Css {
 /// element), each with the number of the rule that set it.
 #[derive(Clone, Default)]
 struct Sheet {
-    normal: [Option<(usize, String)>; 9],
-    important: [Option<(usize, String)>; 9],
+    normal: [Option<usize>; 9],
+    important: [Option<usize>; 9],
 }
 
 impl Sheet {
     /// Keep, for each property, the value of the later rule.
     fn later(&mut self, other: &Sheet) {
-        let pick = |a: &mut Option<(usize, String)>, b: &Option<(usize, String)>| {
-            if b.as_ref()
-                .is_some_and(|(n, _)| a.as_ref().is_none_or(|(m, _)| n > m))
-            {
-                a.clone_from(b);
+        let pick = |a: &mut Option<usize>, b: &Option<usize>| {
+            if b.is_some_and(|n| a.is_none_or(|m| n > m)) {
+                *a = *b;
             }
         };
         for k in 0..PROPS.len() {
@@ -606,11 +618,14 @@ impl Sheet {
         }
     }
 
-    fn decls(&self) -> Decls {
-        let value = |x: &Option<(usize, String)>| x.as_ref().map(|(_, v)| v.clone());
+    fn decls(&self, rules: &[Decls]) -> Decls {
         Decls {
-            normal: std::array::from_fn(|k| value(&self.normal[k])),
-            important: std::array::from_fn(|k| value(&self.important[k])),
+            normal: std::array::from_fn(|k| {
+                self.normal[k].and_then(|n| rules[n].normal[k].clone())
+            }),
+            important: std::array::from_fn(|k| {
+                self.important[k].and_then(|n| rules[n].important[k].clone())
+            }),
         }
     }
 }
@@ -1159,6 +1174,15 @@ mod tests {
             md("<div style=\"visibility:hidden\">no <span style=\"visibility:visible\">Shown</span> no</div>\
                 <style>.v{visibility:hidden}</style><p class=v>gone</p>"),
             "Shown"
+        );
+        // A list of more than 256 selectors is one rule: its last selector counts.
+        let list: Vec<String> = (0..300).map(|i| format!(".s{i}")).collect();
+        assert_eq!(
+            md(&format!(
+                "<style>{}{{display:none}}</style><p class=s299>secret</p>ok",
+                list.join(",")
+            )),
+            "ok"
         );
         // A compound selector does not hide an element with only one of its names.
         assert_eq!(

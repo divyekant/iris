@@ -159,7 +159,9 @@ selector of the list that is one class or one ID counts. A rule inside an
 `@` block (for example `@media`) does not count. A selector with more than
 one part (`.a.b`, `p.x`, `div .x`, `.x:hover`, `[a]`) does not count. A
 `<style>` element inside a comment or a raw-text element does not count. At
-most 256 rules count, and at most 4,096 bytes of each rule. Comments and
+most 256 rules count, and at most 4,096 selectors over all rules. A rule
+counts once, for all of its selectors. At most 4,096 bytes of each rule
+count. Comments and
 the content of strings in CSS have no effect on rules or declarations.
 
 These go out also: `class` `gmail_signature` and `moz-signature`. In a
@@ -241,7 +243,8 @@ its first 1 KiB holds `%PDF`.
 - Streams: the reader finds each `stream` keyword. Its dictionary is the
   text after the last object header (`<number> <number> obj`) before it, at
   most 4 KiB back. The data ends at the
-  direct `/Length` of the stream dictionary, if `endstream` follows that
+  direct `/Length` key (not `/Length1` or another key that starts with
+  `/Length`) of the stream dictionary, if `endstream` follows that
   length. If not, the data ends at the next `endstream`.
 - A stream with no filter is read in place. A stream whose `/Filter` is
   `/FlateDecode` or `[/FlateDecode]` is inflated, at most 4 MiB for each stream and 32 MiB for each PDF. A

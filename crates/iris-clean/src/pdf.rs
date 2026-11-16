@@ -89,7 +89,10 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
 
 /// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
 fn declared_len(dict: &[u8]) -> Option<usize> {
-    let p = find(dict, b"/Length")?;
+    // The key ends at white space or a delimiter: `/Length1` is another key.
+    let key_end = |b: &u8| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(b);
+    let p = (0..dict.len().saturating_sub(7))
+        .find(|&i| dict[i..].starts_with(b"/Length") && dict.get(i + 7).is_some_and(key_end))?;
     let rest = &dict[p + 7..];
     let digits = rest.iter().skip_while(|b| b.is_ascii_whitespace());
     let num: Vec<u8> = digits
@@ -103,7 +106,7 @@ fn declared_len(dict: &[u8]) -> Option<usize> {
         .filter(|w| !w.is_empty())
         .nth(1)
         .is_some_and(|w| w.starts_with(b"R"));
-    if num.is_empty() || num.len() > 12 || is_ref || rest.first().is_some_and(u8::is_ascii_digit) {
+    if num.is_empty() || num.len() > 12 || is_ref {
         return None;
     }
     std::str::from_utf8(&num).ok()?.parse().ok()
@@ -462,6 +465,18 @@ mod tests {
     }
 
     #[test]
+    fn another_length_key_before_length() {
+        let t = b"BT (the endstream report) Tj ET";
+        let pdf = String::from_utf8(sample(t, false))
+            .unwrap()
+            .replace("<< /Length", "<< /LengthX 3 /Length");
+        assert_eq!(
+            text(pdf.as_bytes(), 100).as_deref(),
+            Some("the endstream report")
+        );
+    }
+
+    #[test]
     fn endstream_inside_a_string_does_not_end_the_stream() {
         let t = b"BT (the endstream report) Tj ET";
         assert_eq!(
@@ -469,7 +484,9 @@ mod tests {
             Some("the endstream report")
         );
         assert_eq!(declared_len(b"<< /Length 5 0 R >>"), None);
-        assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), None);
+        assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), Some(31));
+        assert_eq!(declared_len(b"<< /LengthX 9 /Length 31 >>"), Some(31));
+        assert_eq!(declared_len(b"<< /LengthX 9 >>"), None);
         assert_eq!(declared_len(b"<< /Length 31 >>"), Some(31));
     }
 
