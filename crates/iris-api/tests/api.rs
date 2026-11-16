@@ -1270,6 +1270,25 @@ async fn each_item_of_the_brief_is_shown_bundled_or_hidden_once() {
             };
             rows.push(add_item(&store, form, status, 13 + i % 40, i, doc));
         }
+        // Possible duplicate pairs, one level deep, in the same section or
+        // not. The pair counts once (spec 1 section 7.5), whatever the
+        // attention of each member.
+        let mut originals = Vec::new();
+        for (i, row) in rows.iter().enumerate().skip(1) {
+            if next() % 3 == 0 {
+                let original = rows[(next() % i as u64) as usize];
+                if !originals.contains(row) && original != *row {
+                    exec(
+                        &store,
+                        "UPDATE item SET duplicate_of = ?1
+                         WHERE id = ?2 AND ?1 NOT IN
+                           (SELECT id FROM item WHERE duplicate_of IS NOT NULL)",
+                        [original, *row],
+                    );
+                    originals.push(original);
+                }
+            }
+        }
         let (_, before) = get(&store, "/api/brief").await;
         let universe = shown_total(&before);
         assert_eq!(before["hidden"], 0);
