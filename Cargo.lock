@@ -720,6 +720,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "iris-observe",
+ "iris-policy",
  "iris-store",
  "iris-synth",
  "iris-web",

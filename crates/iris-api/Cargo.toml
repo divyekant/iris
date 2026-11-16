@@ -1,6 +1,6 @@
 [package]
 name = "iris-api"
-description = "The local API of Iris: read-only JSON for the web client and the read verbs."
+description = "The local API of Iris: JSON for the web client and the read verbs, and the policy changes of the web client."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }
+iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 rusqlite = "=0.43.0"
 serde = { version = "1", features = ["derive"] }

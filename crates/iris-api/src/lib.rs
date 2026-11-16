@@ -10,17 +10,21 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{rejection::QueryRejection, Path, Query, State},
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        Path, Query, State,
+    },
     http::{header, StatusCode},
     middleware,
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::{any, get, post},
     Json, Router,
 };
 use iris_store::Store;
 use serde::Deserialize;
 
 mod auth;
+pub mod policy;
 mod read;
 pub use auth::{Auth, SIGN_IN};
 pub use read::*;
@@ -30,6 +34,9 @@ pub enum Error {
     Store(iris_store::Error),
     /// The input is not valid: a search text, an ID or a filter.
     Query(String),
+    /// The request cannot apply to the state of now, for example a policy
+    /// that changed after the person saw it.
+    Conflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -38,7 +45,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Query(why) => write!(f, "{why}"),
+            Error::Query(why) | Error::Conflict(why) => write!(f, "{why}"),
         }
     }
 }
@@ -58,6 +65,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let code = match self {
             Error::Query(_) => StatusCode::BAD_REQUEST,
+            Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         error(code, &self.to_string())
@@ -86,6 +94,11 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
+        .route("/api/policy", get(get_policy))
+        .route("/api/policy/confirm", post(post_confirm))
+        .route("/api/policy/discard", post(post_discard))
+        .route("/api/policy/mode", post(post_mode))
+        .route("/api/policy/remove", post(post_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -272,6 +285,68 @@ async fn get_raw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
         ),
     ];
     Ok((headers, Body::from_stream(parts)).into_response())
+}
+
+async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(policy::policy(&s)?).into_response())
+}
+
+/// A JSON body that does not parse gives the JSON error of the API.
+fn body<T>(b: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
+    b.map(|Json(v)| v).map_err(|e| Error::Query(e.body_text()))
+}
+
+#[derive(Deserialize)]
+struct ConfirmBody {
+    sha256: String,
+}
+
+async fn post_confirm(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ConfirmBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(Json(policy::confirm(&s, &b.sha256, now_s())?).into_response())
+}
+
+async fn post_discard(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(policy::discard(&s)?).into_response())
+}
+
+/// `version` is the active version that the person saw, `null` for the
+/// policy of the first start.
+#[derive(Deserialize)]
+struct ModeBody {
+    version: Option<i64>,
+    mode: String,
+}
+
+async fn post_mode(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ModeBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let change = iris_policy::Change::Mode(policy::mode(&b.mode)?);
+    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+#[derive(Deserialize)]
+struct RemoveBody {
+    version: Option<i64>,
+    id: u32,
+}
+
+async fn post_remove(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<RemoveBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let change = iris_policy::Change::Remove(b.id);
+    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+fn now_s() -> i64 {
+    now_ms() / 1000
 }
 
 fn now_ms() -> i64 {

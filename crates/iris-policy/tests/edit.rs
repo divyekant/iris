@@ -208,11 +208,11 @@ fn a_discard_keeps_a_copy_and_writes_the_active_text() {
     assert!(!discard(&s).unwrap());
     assert!(!path.exists());
 
-    // A file at the first start: the discard writes the default text.
+    // A file at the first start: the discard leaves no file.
     let edit = format!("version = 0\nmode = \"apply\"\n{}", rule(1));
     std::fs::write(&path, &edit).unwrap();
     assert!(discard(&s).unwrap());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_TEXT);
+    assert_eq!(file_state(&s).unwrap(), FileState::Missing);
     assert_eq!(
         std::fs::read_to_string(s.dir().join(DISCARDED)).unwrap(),
         edit

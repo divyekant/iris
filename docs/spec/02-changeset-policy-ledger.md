@@ -404,6 +404,9 @@ An `allow` rule never matches an action with no message.
   of the active policy, changes only the lines of that change, and keeps all
   other text and comments. If the file on disk is not the same as the active
   policy, the person first confirms or discards that difference.
+  A discard renames the file on disk to `policy.toml.discarded`, so that no
+  edit is lost, and writes the text of the active policy to `policy.toml`.
+  At the first start there is no active text, so no new file is written.
 - If the file is not valid, the active policy stays. The brief shows the
   error and the line number. The person cannot confirm a file that is not
   valid.

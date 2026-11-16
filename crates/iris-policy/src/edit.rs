@@ -87,25 +87,24 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
 
 /// Writes the text of the active policy to `policy.toml`, so that a change
 /// on disk that the person did not confirm goes away. A file on disk is
-/// first renamed to [`DISCARDED`], so that no edit is lost. Gives false
-/// when there is nothing to discard.
+/// first renamed to [`DISCARDED`], so that no edit is lost. At the first
+/// start there is no active text, so no file stays. Gives false when there
+/// is nothing to discard.
 pub fn discard(store: &Store) -> Result<bool> {
     // The write lock keeps a confirmation or a change out while the file
     // changes. Nothing is written to the database.
     store.write(|tx| {
         let active = active(tx)?;
-        let path = store.dir().join(FILE);
-        let text = match active.version {
-            Some(v) => crate::version_text(tx, v)?.unwrap_or_default(),
-            None => DEFAULT_TEXT.to_string(),
-        };
         match check(tx, store.dir())? {
             Checked::Ok(l) if Some(&l.sha256) == active.sha256.as_ref() => return Ok(false),
             Checked::Missing if active.version.is_none() => return Ok(false),
             Checked::Missing => {}
-            _ => std::fs::rename(&path, store.dir().join(DISCARDED))?,
+            _ => std::fs::rename(store.dir().join(FILE), store.dir().join(DISCARDED))?,
         }
-        write_file(store.dir(), &text)?;
+        if let Some(v) = active.version {
+            let text = crate::version_text(tx, v)?.unwrap_or_default();
+            write_file(store.dir(), &text)?;
+        }
         Ok(true)
     })
 }
