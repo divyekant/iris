@@ -946,7 +946,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | host | 1 |
 | `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
-| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item has only `id`, `form`, `status` and `sources`, with no text of the model. | both | 1 |
+| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item has only `id`, `form` and `sources`, with no text of the model and no status. | both | 1 |
 | `iris list <form> [filters]` | Lists items of one form. In session mode, only the items of the workspace, with the fields of `show`. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
@@ -966,11 +966,13 @@ Each command that adds an action prints the changeset ID and the action
 number, and changes nothing outside the draft changeset. Nothing leaves the
 engine before `submit`.
 
-In session mode, each target of an action must be in the current grant of
-the job (`docs/specs/2026-11-16-job-workspace.md`). The engine checks the
-targets at `submit` and again just before the apply. A target outside the
-grant at `submit` makes the submit fail with no change. A target that left
-the grant before the apply makes the action refused, with the reason.
+In session mode, each message that an action changes must be in the
+current grant of the job (`docs/specs/2026-11-16-job-workspace.md`): the
+engine checks each message that a target resolves to, at `submit` and again
+just before the apply. A message outside the grant at `submit` makes the
+submit fail with no change. A message that left the grant before the apply
+makes the action refused, with the reason. `iris draft` and `iris send` are
+refused in session mode until a card defines their grant.
 
 ### 8.3 Output
 
