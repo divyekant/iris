@@ -132,10 +132,12 @@ fn is_header_block(lines: &[&str]) -> bool {
 pub fn strip_signature(text: &str) -> String {
     let mut lines: Vec<&str> = text.split('\n').collect();
     let bare = |l: &str| l.trim_end_matches([' ', '\u{a0}']) == "--";
-    if let Some(i) = lines.iter().rposition(|l| bare(l)) {
-        if lines[i] != "--" || lines.len() - i <= 11 {
-            lines.truncate(i);
-        }
+    // The last separator that counts: a `-- ` line always, a bare `--` line
+    // only with at most 10 lines after it.
+    let n = lines.len();
+    let counts = |(i, l): &(usize, &&str)| bare(l) && (**l != "--" || n - i <= 11);
+    if let Some((i, _)) = lines.iter().enumerate().rfind(counts) {
+        lines.truncate(i);
     }
     while lines.last().is_some_and(|l| {
         let t = l.trim();
@@ -180,6 +182,13 @@ pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_bare_rule_after_a_signature_line() {
+        let after = "x\n".repeat(11);
+        let t = format!("Hi\n-- \nSignature\n--\n{after}");
+        assert_eq!(strip_signature(&t), "Hi");
+    }
 
     #[test]
     fn reply_history_goes_out() {
