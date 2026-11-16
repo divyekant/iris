@@ -4,7 +4,7 @@ export type Form = "commitment" | "conversation" | "feed" | "signal";
 export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
-  | { view: "home" | "setup" | "brief" | "measures" | "rules" }
+  | { view: "home" | "setup" | "brief" | "measures" | "rules" | "review" }
   | { view: "records"; type: string }
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
@@ -33,7 +33,7 @@ export function parse(hash: string): Route {
   if ((name === "item" || name === "mail") && id) return { view: name, id };
   if (name === "brief" && id in SECTIONS) return { view: "section", key: id as SectionKey };
   if (name === "records") return { view: "records", type: id };
-  if (name === "setup" || name === "brief" || name === "measures" || name === "rules") return { view: name };
+  if (name === "setup" || name === "brief" || name === "measures" || name === "rules" || name === "review") return { view: name };
   return { view: "home" };
 }
 
@@ -44,6 +44,7 @@ export const href = {
 
 export const NAV = [
   ["#/brief", "Brief"],
+  ["#/review", "Review"],
   ["#/commitments", "Commitments"],
   ["#/conversations", "Conversations"],
   ["#/records", "Records"],

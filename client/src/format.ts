@@ -176,6 +176,8 @@ export function summary(brief: Brief): string {
   // Use the section counts, not the items: the API gives at most 200 items of a section.
   const talks = brief.conversations.count;
   const parts = [];
+  const review = brief.review?.actions ?? 0;
+  if (review) parts.push(`${capital(count(review, "change waits", "changes wait"))} for your review.`);
   if (brief.you_owe.count) parts.push(`You owe ${count(brief.you_owe.count, "thing", "things")}.`);
   if (brief.owed_to_you.count) parts.push(`${capital(count(brief.owed_to_you.count, "thing is", "things are"))} owed to you.`);
   if (talks) parts.push(`${capital(count(talks, "conversation waits", "conversations wait"))} for you.`);
