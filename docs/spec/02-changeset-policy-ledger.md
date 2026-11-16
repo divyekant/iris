@@ -70,8 +70,8 @@ not have the label `SPAM` or `TRASH`.
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `correct` | any item | field, value | none (Iris state) | set the old value (below) | 2 |
-| `draft` | thread, a draft, or none for new mail | recipients, subject, text | `drafts.create` or `drafts.update` (section 7.5) | a later specification | 3 |
-| `send` | a draft | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
+| `draft` | one thread (a reply), one draft (a change), or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` or `drafts.update` (section 7.5) | a later specification | 3 |
+| `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
@@ -201,7 +201,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. Each other verb: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
-| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
+| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. For an action with a draft target (release 3), the content hash of the draft follows (`docs/specs/2026-11-16-send.md`, section 5). An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
