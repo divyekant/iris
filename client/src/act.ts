@@ -51,7 +51,10 @@ export function firstName(now: Date): string {
 /** A day as short words: "Tue 17 Nov". */
 export function day(value: string): string {
   const [y, m, d] = value.split("-").map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
+  // Not new Date(y, ...): it maps the years 0 to 99 to 1900 to 1999.
+  const date = new Date(2000, 0, 1);
+  date.setFullYear(y, m - 1, d);
+  return date.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 }
 
 /** What the person did, as the page says it. */

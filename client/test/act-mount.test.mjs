@@ -43,6 +43,19 @@ test("the days of Later", () => {
   assert.equal(act.said("defer", "2026-11-23"), "Later, on Mon 23 Nov.");
 });
 
+test("day() names the right weekday for each date, also before the year 100", () => {
+  const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  let seed = 7;
+  const rand = (n) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
+  for (let i = 0; i < 2000; i++) {
+    const t = new Date(0);
+    t.setUTCFullYear(1 + rand(9999), rand(12), 1 + rand(28));
+    const value = t.toISOString().slice(t.getUTCFullYear() > 9999 ? 1 : 0, 10).replace(/^\+0*/, "").padStart(10, "0");
+    assert.ok(act.day(value).startsWith(names[t.getUTCDay()]), `${value}: ${act.day(value)}`);
+  }
+  assert.ok(act.day("0001-01-05").startsWith("Fri"));
+});
+
 test("Done waits, then sends close and shows the new item", async () => {
   const asked = serve((path) => [200, { ...commitment("done") }]);
   let changed = null;
