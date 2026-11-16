@@ -163,6 +163,11 @@ impl Writer {
             // Show the real target: a link text that is not its target is a phishing sign.
             self.out.push_str(&format!("[{text}]({href})"));
         }
+        // A long target must not pass the output limit.
+        if self.out.len() > OUT_LIMIT {
+            self.out.truncate(floor(&self.out, OUT_LIMIT));
+            self.full = true;
+        }
     }
 }
 
@@ -950,6 +955,17 @@ mod tests {
         let (out, full) = to_markdown(&h, false);
         assert!(full);
         assert!(out.len() <= OUT_LIMIT + 64, "{}", out.len());
+        // A long link target does not pass the limit.
+        let long = format!(
+            "<a href=\"https://example.org/{}\">x</a>",
+            "a".repeat(OUT_LIMIT)
+        );
+        let (link_out, link_full) = to_markdown(&long, false);
+        assert!(
+            link_full && link_out.len() <= OUT_LIMIT,
+            "{}",
+            link_out.len()
+        );
         assert!(out
             .lines()
             .nth(1)

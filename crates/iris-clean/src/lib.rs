@@ -305,11 +305,13 @@ fn attachment(
         let had_budget = *attach_left > 0;
         let (inner, clipped) = decode_capped(f.body, &f.cte, INNER_LIMIT);
         let (subject, mut t, inner_cut, files) = message(&inner, depth + 1, parts);
-        if clipped && !inner_cut {
-            t.push_str(CUT_MARK);
+        // The cut mark is not part of the budget: take it off, and put one
+        // mark on below.
+        if inner_cut {
+            t.truncate(t.len() - CUT_MARK.len());
         }
+        cut = inner_cut || clipped;
         if t.len() > *attach_left {
-            // The cut mark goes on below.
             t.truncate(floor_char(&t, *attach_left));
             cut = true;
         }

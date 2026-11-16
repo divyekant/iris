@@ -74,10 +74,13 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
         .filter(|(i, l)| !(*i < stop && is_quote(l) && (is_reply || *i >= tail)))
         .map(|(_, l)| *l)
         .collect();
-    // A rule line or an empty line before the history goes out too.
-    while kept
-        .last()
-        .is_some_and(|l| l.trim().chars().all(|c| "_-=*".contains(c)))
+    // A rule line or an empty line just before the history goes out too.
+    // Without history, the text keeps its last lines.
+    let found = kept.len() < lines.len();
+    while found
+        && kept
+            .last()
+            .is_some_and(|l| l.trim().chars().all(|c| "_-=*".contains(c)))
     {
         kept.pop();
     }
@@ -213,6 +216,7 @@ mod tests {
             "New answer"
         );
         assert_eq!(strip_quotes("> only a quote", false), "> only a quote");
+        assert_eq!(strip_quotes("Plan\n---", true), "Plan\n---");
         let t = "FYI\n\n---------- Forwarded message ---------\nFrom: Ana\nDate: Mon\nSubject: Plan\nTo: Avel\n\nOn Sun Bo wrote:\n> x";
         assert_eq!(strip_quotes(t, true), t);
     }

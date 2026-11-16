@@ -649,3 +649,23 @@ fn the_joined_text_stays_inside_the_limit() {
     assert!(c.cut);
     assert_eq!(without.chars().count(), iris_clean::TEXT_LIMIT);
 }
+
+#[test]
+fn an_attached_message_has_one_whole_cut_mark() {
+    // 16 bytes of budget are left for an attached message with the text "x"
+    // and a cut (its parts are nested deeper than the limit).
+    let notes = "n".repeat(iris_clean::ATTACHMENT_TEXT_LIMIT - 16);
+    let mut deep = String::from("Content-Type: text/plain\n\ndeep\n");
+    for k in 0..12 {
+        deep = format!("Content-Type: multipart/mixed; boundary=d{k}\n\n--d{k}\n{deep}--d{k}--\n");
+    }
+    let raw = crlf(&format!(
+        "Subject: Two\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\nHi\n\
+         --m\nContent-Type: text/plain; name=notes.txt\n\n{notes}\n\
+         --m\nContent-Type: message/rfc822\n\nSubject: Inner\nContent-Type: multipart/mixed; boundary=i\n\n\
+         --i\nContent-Type: text/plain\n\nx\n--i\n{deep}--i--\n--m--\n"
+    ));
+    let c = clean(&raw);
+    let t = c.attachments[1].text.as_deref().unwrap_or_default();
+    assert_eq!(t, format!("x{}", iris_clean::CUT_MARK));
+}
