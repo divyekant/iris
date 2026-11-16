@@ -441,6 +441,38 @@ fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
 }
 
 #[test]
+fn the_engine_writes_the_attention_of_each_item() {
+    let s = setup("engine-attention", 5);
+    s.worker(s.account).sync().unwrap();
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('feed', ?1, 'new', '{}', 0, 0)",
+                [s.account],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), min(id), 'origin' FROM message",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut e = Engine::new(
+        s.store.clone(),
+        config(s.fake.base_url()),
+        Some(s.tokens.uri.clone()),
+    );
+    e.tick().unwrap();
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM item WHERE json_extract(doc, '$.attention.state') = 'shown'",
+        Duration::from_secs(30),
+    );
+}
+
+#[test]
 fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
     let s = setup("engine-idle", 5);
     s.worker(s.account).sync().unwrap();

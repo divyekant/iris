@@ -462,6 +462,18 @@ rule that matches and has the lowest `id`. With no match, the item is `shown`. T
 records the rule in its `attention` field (specification 1, section 6.1).
 Hidden is never deleted: a `hide` rule changes only what the brief shows.
 
+The engine evaluates the attention of an item again at these times:
+
+- When the active policy changes, for each item, in the same transaction.
+- When a fact that a rule reads changes: a new item or a new origin of an
+  item, the form, the record type or the commitment kind of the item, or the
+  labels, a label name, the hostile marks, the date or the sender kind of
+  its origin message. A store trigger marks the message, and the engine
+  evaluates its items within about 10 seconds. Until then, an item keeps its
+  last attention, and a new item has no `attention` field.
+- Each hour, for each item: an `older_than_days` rule matches more items as
+  time goes on, with no change in the store.
+
 ### 6.5 Hard limits
 
 The engine enforces these limits before the policy. They are in the code, not

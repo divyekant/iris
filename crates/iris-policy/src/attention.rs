@@ -1,10 +1,12 @@
 //! The attention of each item (spec 2, sections 6.3 and 6.4): the `hide` or
 //! `bundle` rule with the lowest ID that matches the item and its origin
 //! message, written to the `attention` field of the item document. The
-//! engine evaluates each item again when the active policy changes.
+//! engine evaluates each item again when the active policy changes, and the
+//! items of each message in `attention_due` when a fact of that message
+//! changes (store migration 7).
 
 use crate::{CommitmentKind, Form, Item, Message, Policy, RecordType, SenderKind};
-use iris_store::Result;
+use iris_store::{Result, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// The longest `reason` of the schema (`docs/spec/schema/common.schema.json`).
@@ -19,6 +21,56 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
         .prepare("SELECT DISTINCT message_id FROM item_source WHERE role = 'origin'")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    evaluate_messages(tx, policy, now, &messages)?;
+    // Each item is current now.
+    tx.execute("DELETE FROM attention_due", [])?;
+    Ok(())
+}
+
+/// The most messages that one transaction of [`refresh`] evaluates, so that a
+/// sync does not wait long for the write lock.
+const BATCH: i64 = 1000;
+
+/// Writes the attention of the items of each message in `attention_due`,
+/// with the active policy, at the time `now` (seconds since 1970-01-01 UTC),
+/// in transactions of at most [`BATCH`] messages. With `all`, each item:
+/// this is for the rules with `older_than_days`, whose match changes with
+/// time. Gives the number of messages.
+pub fn refresh(store: &Store, now: i64, all: bool) -> Result<u64> {
+    if all {
+        store.write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO attention_due(message_id)
+                 SELECT DISTINCT message_id FROM item_source WHERE role = 'origin'",
+                [],
+            )?;
+            Ok(())
+        })?;
+    }
+    let mut done = 0;
+    loop {
+        let n = store.write(|tx| {
+            let policy = crate::active(tx)?.policy;
+            let ids: Vec<i64> = tx
+                .prepare("SELECT message_id FROM attention_due ORDER BY message_id LIMIT ?1")?
+                .query_map([BATCH], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            evaluate_messages(tx, &policy, now, &ids)?;
+            let mut clear = tx.prepare("DELETE FROM attention_due WHERE message_id = ?1")?;
+            for id in &ids {
+                clear.execute([id])?;
+            }
+            Ok(ids.len() as i64)
+        })?;
+        done += n as u64;
+        if n < BATCH {
+            return Ok(done);
+        }
+    }
+}
+
+/// Writes the attention of the items whose origin message is in `messages`.
+fn evaluate_messages(tx: &Connection, policy: &Policy, now: i64, messages: &[i64]) -> Result<()> {
     let mut head = tx.prepare(
         "SELECT h.from_addr, coalesce(h.date, m.internal_date),
                 m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')
@@ -51,7 +103,7 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
                           '$.updated', strftime('%Y-%m-%dT%H:%M:%fZ', ?5, 'unixepoch'))
          WHERE id = ?1 AND coalesce(json_extract(doc, '$.attention'), '') <> (SELECT v FROM a)",
     )?;
-    for id in messages {
+    for &id in messages {
         let Some((sender, date, hostile)) = head
             .query_row([id], |r| {
                 Ok((

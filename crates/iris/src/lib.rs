@@ -426,9 +426,16 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             }
             break;
         }
+        // The attention of the new items (spec 2 section 6.4).
+        if let Err(e) =
+            iris_policy::refresh_attention(&store, engine::now_ms().div_euclid(1000), false)
+        {
+            failed = true;
+            say!("iris: attention: {e}");
+        }
     }
     if failed {
-        Err("one or more accounts, or the understanding run, failed".into())
+        Err("one or more accounts, the understanding run or the attention, failed".into())
     } else {
         Ok(())
     }
