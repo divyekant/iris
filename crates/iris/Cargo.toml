@@ -19,6 +19,8 @@ iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal"] }
 
 [dev-dependencies]

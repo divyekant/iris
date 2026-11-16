@@ -78,9 +78,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
             command: AccountCommand::Add { client, paste },
         } => account_add(&open()?, client, *paste),
         Command::Backup { path } => {
-            let store = open()?;
-            let files = store.backup(path).map_err(|e| format!("backup: {e}"))?;
-            engine::backup_client(&store, path).map_err(|e| format!("backup: {e}"))?;
+            let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
             Ok(())
         }
@@ -109,8 +107,7 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
     }
     .map_err(|e| e.to_string())?;
     let (_, address) =
-        engine::save_sign_in(store, &gmail()?, &tokens).map_err(|e| e.to_string())?;
-    engine::save_client(store, &json).map_err(|e| e.to_string())?;
+        engine::save_sign_in(store, &gmail()?, &json, &tokens).map_err(|e| e.to_string())?;
     println!("iris: added {address}");
     if tokens.refresh_expires_in.is_some() {
         eprintln!(
@@ -126,6 +123,10 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
 /// `IRIS_TEST_GMAIL_URL` to a fake server on 127.0.0.1. Any other address is
 /// refused, so the token cannot go elsewhere.
 pub fn gmail() -> Result<iris_gmail::Gmail, String> {
+    gmail_config().map(iris_gmail::Gmail::new)
+}
+
+fn gmail_config() -> Result<iris_gmail::Config, String> {
     let mut config = iris_gmail::Config::default();
     if let Ok(quota) = std::env::var("IRIS_GMAIL_QUOTA") {
         config.quota_per_minute = quota
@@ -136,12 +137,22 @@ pub fn gmail() -> Result<iris_gmail::Gmail, String> {
     }
     if let Some(url) = std::env::var_os("IRIS_TEST_GMAIL_URL") {
         let url = url.into_string().unwrap_or_default();
-        if !url.starts_with("http://127.0.0.1:") {
+        if !is_local_url(&url) {
             return Err("IRIS_TEST_GMAIL_URL must be http://127.0.0.1:<port>".into());
         }
         config.base_url = url;
     }
-    Ok(iris_gmail::Gmail::new(config))
+    Ok(config)
+}
+
+/// True for `http://127.0.0.1:<port>` with an optional path. The host part
+/// ends at the first `/`, so `http://127.0.0.1:80@other.host/` is refused.
+pub fn is_local_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
+    let port = rest.split('/').next().unwrap_or_default();
+    !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Tests set `IRIS_TEST_TOKEN_URI` to a fake token endpoint on 127.0.0.1.
@@ -160,11 +171,11 @@ pub fn app() -> axum::Router {
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
-    let gmail = gmail().map_err(std::io::Error::other)?;
+    let gmail = gmail_config().map_err(std::io::Error::other)?;
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
         .name("sync".into())
-        .spawn(move || engine::run(sync))?;
+        .spawn(move || sync.run())?;
 
     // One thread: the lightest memory footprint has priority.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -197,6 +208,22 @@ mod tests {
             panic!("not serve")
         };
         assert_eq!(addr.to_string(), DEFAULT_ADDR);
+    }
+
+    #[test]
+    fn only_a_loopback_url_is_local() {
+        assert!(is_local_url("http://127.0.0.1:4800"));
+        assert!(is_local_url("http://127.0.0.1:4800/gmail/v1"));
+        for bad in [
+            "http://127.0.0.1:80@evil.example",
+            "http://127.0.0.1:80@evil.example/gmail/v1",
+            "http://127.0.0.1:/x",
+            "http://127.0.0.1:80x/",
+            "http://127.0.0.1.evil.example:80/",
+            "https://evil.example/",
+        ] {
+            assert!(!is_local_url(bad), "{bad}");
+        }
     }
 
     #[test]

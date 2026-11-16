@@ -3,13 +3,15 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use iris_auth::{AccessToken, Client, Secret};
 use iris_gmail::Gmail;
 use iris_store::Store;
+use serde::{Deserialize, Serialize};
 
 /// `account.state` of an account that syncs.
 pub const STATE_OK: &str = "ok";
@@ -22,9 +24,6 @@ pub const SYNC_EVERY: Duration = Duration::from_secs(60);
 /// The time between two runs of the content cleanup (section 4.5).
 pub const CLEAN_EVERY: Duration = Duration::from_secs(3600);
 
-/// The file in the data folder that holds the sealed OAuth client file.
-const CLIENT_FILE: &str = "google-client";
-
 /// Get a new access token when the old one has less time than this.
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 
@@ -34,8 +33,6 @@ pub enum Error {
     Gmail(iris_gmail::Error),
     Store(iris_store::Error),
     Sync(iris_sync::Error),
-    /// No OAuth client is saved in the data folder.
-    NoClient,
     /// The account has no stored sign-in, or Google refused it.
     NeedsSignIn,
 }
@@ -47,9 +44,6 @@ impl fmt::Display for Error {
             Error::Gmail(e) => write!(f, "Gmail: {e}"),
             Error::Store(e) => write!(f, "store: {e}"),
             Error::Sync(e) => write!(f, "sync: {e}"),
-            Error::NoClient => {
-                f.write_str("no OAuth client is saved: run `iris account add <client.json>`")
-            }
             Error::NeedsSignIn => {
                 f.write_str("the account needs a new sign-in: run `iris account add <client.json>`")
             }
@@ -79,73 +73,41 @@ impl From<iris_sync::Error> for Error {
         Error::Sync(e)
     }
 }
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Store(e.into())
-    }
-}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Save the OAuth client file in the data folder, sealed with the key of the
-/// store (specification 1, section 5.4). One client serves each account.
-pub fn save_client(store: &Store, json: &[u8]) -> Result<()> {
-    let sealed = store.seal(json)?;
-    let path = store.dir().join(CLIENT_FILE);
-    let tmp = store.dir().join(format!("{CLIENT_FILE}.tmp"));
-    let mut file = private_file(&tmp)?;
-    file.write_all(&sealed)?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-/// Read the OAuth client that [`save_client`] saved.
-pub fn load_client(store: &Store) -> Result<Client> {
-    let sealed = match std::fs::read(store.dir().join(CLIENT_FILE)) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Error::NoClient),
-        Err(e) => return Err(e.into()),
-    };
-    Ok(Client::from_json(&store.unseal(&sealed)?)?)
-}
-
-/// Copy the sealed OAuth client into the backup folder `dest`, after
-/// `Store::backup`. The store does not know this file. `iris account add`
-/// replaces the file with a rename, so the copy is one complete version.
-pub fn backup_client(store: &Store, dest: &Path) -> Result<()> {
-    match std::fs::read(store.dir().join(CLIENT_FILE)) {
-        Ok(bytes) => {
-            let mut file = private_file(&dest.join(CLIENT_FILE))?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    o.open(path)
+/// The sign-in of one account, sealed in `account.token`: the OAuth client
+/// file and the refresh token that Google gave to that client. One sealed
+/// value keeps the two together, so each account can have its own client,
+/// and a backup (one database snapshot) has a matching pair.
+#[derive(Serialize, Deserialize)]
+struct Grant {
+    client: Box<serde_json::value::RawValue>,
+    refresh: String,
 }
 
 /// Save a completed sign-in: find the address of the mailbox, add the
-/// account (or find the account with this address), and store the refresh
-/// token sealed. Gives the account ID and the address.
+/// account (or find the account with this address), and store the client
+/// file and the refresh token sealed, in one write. Gives the account ID and
+/// the address.
 pub fn save_sign_in(
     store: &Store,
     gmail: &Gmail,
+    client_json: &[u8],
     tokens: &iris_auth::Tokens,
 ) -> Result<(i64, String)> {
+    // The caller read the client with `Client::from_json`, so the file is JSON.
+    let client = serde_json::from_slice::<Box<serde_json::value::RawValue>>(client_json)
+        .map_err(|_| iris_auth::Error::ClientFile("the file is not an OAuth client JSON file"))?;
+    let grant = Grant {
+        client,
+        refresh: tokens.refresh.expose().to_string(),
+    };
+    let plain = serde_json::to_vec(&grant).expect("a grant serializes");
+    let sealed = store.seal(&plain)?;
     let profile = gmail.profile(tokens.access.token.expose())?;
     let address = profile.email_address;
     let id = store.add_account("gmail", &address)?;
-    let sealed = store.seal(tokens.refresh.expose().as_bytes())?;
     store.write(|tx| {
         tx.execute(
             "UPDATE account SET token = ?2, state = ?3 WHERE id = ?1",
@@ -154,6 +116,35 @@ pub fn save_sign_in(
         Ok(())
     })?;
     Ok((id, address))
+}
+
+/// Read the sealed sign-in of `account`: the client, the refresh token, and
+/// the sealed value itself.
+fn load_grant(store: &Store, account: i64) -> Result<(Client, Secret, Vec<u8>)> {
+    let sealed: Option<Vec<u8>> = store.read(|c| {
+        Ok(
+            c.query_row("SELECT token FROM account WHERE id = ?1", [account], |r| {
+                r.get(0)
+            })?,
+        )
+    })?;
+    let sealed = sealed.ok_or(Error::NeedsSignIn)?;
+    let grant: Grant = serde_json::from_slice(&store.unseal(&sealed)?)
+        .map_err(|_| iris_store::Error::Key("the stored sign-in is not valid"))?;
+    let client = Client::from_json(grant.client.get().as_bytes())?;
+    Ok((client, Secret::new(grant.refresh), sealed))
+}
+
+/// Set `account` to "needs sign-in", but only while `account.token` is still
+/// `sealed`: the sign-in that failed. A new sign-in of `iris account add`
+/// in the meantime keeps its state. Gives true if the state changed.
+pub fn mark_needs_sign_in(store: &Store, account: i64, sealed: &[u8]) -> Result<bool> {
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE account SET state = ?2 WHERE id = ?1 AND token = ?3",
+            (account, STATE_NEEDS_SIGN_IN, sealed),
+        )? > 0)
+    })?)
 }
 
 /// The accounts that the engine syncs: each account with a stored sign-in
@@ -171,137 +162,168 @@ pub fn sync_accounts(store: &Store) -> Result<Vec<i64>> {
     })?)
 }
 
-/// The engine state between two syncs. The access tokens stay in memory only.
-pub struct Engine {
-    pub store: std::sync::Arc<Store>,
-    pub gmail: Gmail,
+/// The sync of one account. The access token stays in memory only.
+pub struct Worker {
+    store: Arc<Store>,
+    gmail: Gmail,
+    account: i64,
     test_token_uri: Option<String>,
-    tokens: HashMap<i64, AccessToken>,
-    last_clean: Option<Instant>,
+    token: Option<AccessToken>,
+    /// The sealed sign-in that gave `token`.
+    sealed: Vec<u8>,
 }
 
-impl Engine {
-    /// The engine reads the saved OAuth client at each token refresh, so an
-    /// `iris account add` while the engine runs takes effect without a
-    /// restart. `test_token_uri` is for tests: a token endpoint on 127.0.0.1.
+impl Worker {
+    /// `test_token_uri` is for tests: a token endpoint on 127.0.0.1.
     pub fn new(
-        store: std::sync::Arc<Store>,
+        store: Arc<Store>,
         gmail: Gmail,
+        account: i64,
         test_token_uri: Option<String>,
-    ) -> Engine {
-        Engine {
+    ) -> Worker {
+        Worker {
             store,
             gmail,
+            account,
             test_token_uri,
-            tokens: HashMap::new(),
-            last_clean: None,
+            token: None,
+            sealed: Vec::new(),
         }
     }
 
-    /// One turn of the schedule: sync each account, then run the content
-    /// cleanup if [`CLEAN_EVERY`] passed. An error of one account does not
-    /// stop the other accounts. Gives the result of each account.
-    pub fn tick(&mut self) -> Vec<(i64, Result<iris_sync::Synced>)> {
-        let accounts = match sync_accounts(&self.store) {
-            Ok(a) => a,
-            Err(e) => return vec![(0, Err(e))],
-        };
-        let out = accounts
-            .into_iter()
-            .map(|id| (id, self.sync_account(id)))
-            .collect();
-        if self.last_clean.is_none_or(|t| t.elapsed() >= CLEAN_EVERY) {
-            self.last_clean = Some(Instant::now());
-            if let Err(e) = self.store.clean_gone(now_ms()) {
-                eprintln!("iris: content cleanup: {e}");
-            }
-        }
-        out
-    }
-
-    /// Sync one account. On HTTP 401, get a new access token one time and
-    /// sync again (specification 1, section 4.7).
-    pub fn sync_account(&mut self, account: i64) -> Result<iris_sync::Synced> {
-        let token = self.access(account)?;
-        match iris_sync::sync(&self.store, &self.gmail, account, token.expose()) {
-            Err(iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)) => {
-                self.tokens.remove(&account);
-                let token = self.access(account)?;
-                match iris_sync::sync(&self.store, &self.gmail, account, token.expose()) {
-                    Err(iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)) => {
-                        self.tokens.remove(&account);
-                        self.needs_sign_in(account)?;
-                        Err(Error::NeedsSignIn)
-                    }
-                    r => Ok(r?),
+    /// Sync the account one time. On HTTP 401, get a new access token one
+    /// time and sync again. If the new token gets HTTP 401 too, the account
+    /// needs a new sign-in (specification 1, section 4.7).
+    pub fn sync(&mut self) -> Result<iris_sync::Synced> {
+        for _ in 0..2 {
+            let token = self.access()?;
+            match iris_sync::sync(&self.store, &self.gmail, self.account, token.expose()) {
+                Err(iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)) => {
+                    self.token = None;
                 }
+                r => return Ok(r?),
             }
-            r => Ok(r?),
         }
+        mark_needs_sign_in(&self.store, self.account, &self.sealed)?;
+        Err(Error::NeedsSignIn)
     }
 
-    /// A valid access token of `account`: the token in memory, or a new one
-    /// from the stored refresh token.
-    fn access(&mut self, account: i64) -> Result<Secret> {
-        if let Some(t) = self.tokens.get(&account) {
+    /// A valid access token: the token in memory, or a new one from the
+    /// stored sign-in.
+    fn access(&mut self) -> Result<Secret> {
+        if let Some(t) = &self.token {
             if t.expires_at > Instant::now() + TOKEN_MARGIN {
                 return Ok(t.token.clone());
             }
         }
-        let mut client = load_client(&self.store)?;
+        let (mut client, refresh, sealed) = load_grant(&self.store, self.account)?;
         if let Some(uri) = &self.test_token_uri {
             client = client.with_test_token_uri(uri)?;
         }
-        let sealed: Option<Vec<u8>> = self.store.read(|c| {
-            Ok(
-                c.query_row("SELECT token FROM account WHERE id = ?1", [account], |r| {
-                    r.get(0)
-                })?,
-            )
-        })?;
-        let sealed = sealed.ok_or(Error::NeedsSignIn)?;
-        let plain = self.store.unseal(&sealed)?;
-        let refresh =
-            Secret::new(String::from_utf8(plain).map_err(|_| iris_store::Error::Key("bad token"))?);
         match client.refresh(&refresh) {
             Ok(t) => {
                 let token = t.token.clone();
-                self.tokens.insert(account, t);
+                self.token = Some(t);
+                self.sealed = sealed;
                 Ok(token)
             }
+            // Google refused the refresh token: only a new sign-in helps. A
+            // network or server error keeps the account, and the next turn
+            // tries again (specification 1, section 4.7).
             Err(iris_auth::Error::Revoked) => {
-                self.needs_sign_in(account)?;
+                mark_needs_sign_in(&self.store, self.account, &sealed)?;
                 Err(Error::NeedsSignIn)
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    fn needs_sign_in(&self, account: i64) -> Result<()> {
-        self.store.write(|tx| {
-            tx.execute(
-                "UPDATE account SET state = ?2 WHERE id = ?1",
-                (account, STATE_NEEDS_SIGN_IN),
-            )?;
-            Ok(())
-        })?;
-        Ok(())
-    }
-}
-
-/// Run the schedule until the process ends: a sync at once, then each
-/// [`SYNC_EVERY`]. Each error goes to standard error.
-pub fn run(mut engine: Engine) {
-    loop {
-        for (account, result) in engine.tick() {
-            match result {
+    /// Sync each [`SYNC_EVERY`] until the account leaves the list of
+    /// [`sync_accounts`]. Each error goes to standard error.
+    pub fn run(mut self) {
+        loop {
+            match self.sync() {
                 Ok(_) => {}
                 // Another process syncs the account: not an error.
                 Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
-                Err(e) => eprintln!("iris: account {account}: {e}"),
+                Err(e) => eprintln!("iris: account {}: {e}", self.account),
+            }
+            match sync_accounts(&self.store) {
+                Ok(a) if !a.contains(&self.account) => return,
+                _ => {}
+            }
+            std::thread::sleep(SYNC_EVERY);
+        }
+    }
+}
+
+/// The schedule: one sync thread for each account, so a long first sync of
+/// one account does not stop the syncs of the other accounts.
+pub struct Engine {
+    store: Arc<Store>,
+    /// Each worker gets its own client: the Gmail quota is per mailbox.
+    gmail: iris_gmail::Config,
+    test_token_uri: Option<String>,
+    workers: HashMap<i64, JoinHandle<()>>,
+    last_clean: Option<Instant>,
+}
+
+impl Engine {
+    pub fn new(
+        store: Arc<Store>,
+        gmail: iris_gmail::Config,
+        test_token_uri: Option<String>,
+    ) -> Engine {
+        Engine {
+            store,
+            gmail,
+            test_token_uri,
+            workers: HashMap::new(),
+            last_clean: None,
+        }
+    }
+
+    /// Start a sync thread for each account that has none, and run the
+    /// content cleanup if [`CLEAN_EVERY`] passed. So an account that
+    /// `iris account add` adds or signs in again starts to sync without a
+    /// restart. Gives the accounts that got a new thread.
+    pub fn tick(&mut self) -> Result<Vec<i64>> {
+        self.workers.retain(|_, w| !w.is_finished());
+        let mut started = Vec::new();
+        for account in sync_accounts(&self.store)? {
+            if self.workers.contains_key(&account) {
+                continue;
+            }
+            let worker = Worker::new(
+                self.store.clone(),
+                Gmail::new(self.gmail.clone()),
+                account,
+                self.test_token_uri.clone(),
+            );
+            let handle = std::thread::Builder::new()
+                .name(format!("sync-{account}"))
+                .spawn(move || worker.run())
+                .map_err(iris_store::Error::Io)?;
+            self.workers.insert(account, handle);
+            started.push(account);
+        }
+        if self.last_clean.is_none_or(|t| t.elapsed() >= CLEAN_EVERY) {
+            self.last_clean = Some(Instant::now());
+            if let Err(e) = self.store.clean_gone(now_ms()) {
+                eprintln!("iris: content cleanup: {e}");
             }
         }
-        std::thread::sleep(SYNC_EVERY);
+        Ok(started)
+    }
+
+    /// Run [`Engine::tick`] each [`SYNC_EVERY`] until the process ends.
+    pub fn run(mut self) {
+        loop {
+            if let Err(e) = self.tick() {
+                eprintln!("iris: schedule: {e}");
+            }
+            std::thread::sleep(SYNC_EVERY);
+        }
     }
 }
 

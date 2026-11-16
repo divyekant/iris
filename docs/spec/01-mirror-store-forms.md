@@ -200,6 +200,8 @@ gets its saved status again.
 
 - The engine runs an incremental sync each 60 seconds, and at once when a
   person opens the brief.
+- Each account has its own sync thread and its own quota count, so a long
+  first sync of one account does not delay the syncs of another account.
 - Gmail push notifications need Google Cloud Pub/Sub and a public endpoint.
   A self-hosted engine often has no public endpoint, so release 1 does not use
   push. A later release can add push as an option.
@@ -218,8 +220,12 @@ gets its saved status again.
   The wait starts at 1 second, doubles each time to a maximum of 5 minutes,
   and has a random part of up to 50 percent.
 - On HTTP 401, the engine gets a new access token with the refresh token, one
-  time. If that fails, the account goes to the state "needs sign-in", and the
-  brief shows it.
+  time. If the new token gets HTTP 401 too, or Google refuses the refresh
+  token (`invalid_grant`), the account goes to the state "needs sign-in", and
+  the brief shows it. A network error or a server error of the token endpoint
+  keeps the state: the next sync tries again. A refusal changes the state only
+  while the stored sign-in is the one that failed, so a new sign-in in the
+  meantime keeps its state.
 - A message that gives an error that a new try does not fix (a bad answer,
   or HTTP 400) does not stop the sync. The engine records the message in the
   sync log with the kind `fetch`, keeps it as "known, not fetched", and
@@ -270,8 +276,10 @@ The exit criterion of release 1 is 0 differences each day for 7 days.
   loopback redirect (`http://127.0.0.1:<port>/oauth/callback`) and PKCE.
 - Release 1 asks only for the scope `https://www.googleapis.com/auth/gmail.readonly`.
   Release 2 asks for `gmail.modify` when the person turns on writes.
-- The engine stores the refresh token encrypted in the store (section 5.4). It
-  keeps the access token only in memory.
+- The engine stores the refresh token encrypted in the store (section 5.4),
+  together with the OAuth client file that got it, in `account.token`. So each
+  account has its own client, and a backup has a matching client and token.
+  The engine keeps the access token only in memory.
 - The OAuth client ID is a setting. Each user gives the JSON file of an own
   OAuth client of the type "Desktop app", published to "In production".
   Do not use the "Testing" status: its refresh tokens expire after 7 days.
