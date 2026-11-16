@@ -21,8 +21,8 @@ change, and the person cannot withdraw a changeset from the terminal (issue
   host mode, with the author `local` (the syntax is in "The command"):
   - the verbs that add an action: `close`, `defer`, `decline`, `correct`,
     `archive`, `inbox`, `label`, `unlabel`, `read`, `unread` and `trash`;
-  - `iris changeset <cs-id>`, `iris submit <cs-id> --why <text>` and
-    `iris withdraw <cs-id>`.
+  - `iris changeset <cs-id>`, `iris changeset --drafts`,
+    `iris submit <cs-id> --why <text>` and `iris withdraw <cs-id>`.
 - The exit codes follow specification 2, section 8.4. Code 4 means that the
   engine is not reachable.
 
@@ -75,6 +75,7 @@ Request:
 |---|---|---|
 | `add` | `{"verb", "targets": ["c-7"], "args": {...}, "why"?, "changeset"?}` | Adds one action. With no `changeset`, it makes a new draft changeset of the author `local`. Answer: `{"changeset": "cs-12", "n": 1}`. |
 | `show` | `{"changeset"}` | Answer: the changeset document (specification 2, section 5.1). |
+| `drafts` | `{}` | Answer: `{"changesets": ["cs-12", ...]}`, each changeset of the author `local` whose newest revision is a draft, the newest first, at most 200. |
 | `submit` | `{"changeset", "why"}` | Submits the draft revision. Answer: the changeset document after the submit. |
 | `withdraw` | `{"changeset"}` | Withdraws a changeset of the same author (section 5.5). Answer: the changeset document after the withdraw. |
 
@@ -116,6 +117,10 @@ Each request is one call of the `iris-changeset` functions: `create` with
 `add_action`, `add_action`, `write_document`, `submit` or `withdraw`. Each call
 is one SQLite transaction. The engine runs it on a blocking thread
 (`spawn_blocking`), so the runtime thread does not wait on SQLite.
+
+The submit and the decisions of the policy run in one transaction, as in
+triage today: if the engine stops before the end, nothing of the submit
+stays, and the draft can be submitted again.
 
 After `submit`, the policy decides each `proposed` action (section 5.4, step
 5). Today only `iris-triage` has this step, for its own author. The build
@@ -184,7 +189,7 @@ the answer:
 | A line over 64 KiB, or no newline | Code 2, then the engine closes. | A test with 64 KiB plus 1 byte. |
 | No request in 10 s | The engine closes the connection. | A test with a short limit. |
 | More than 64 connections | The engine waits to accept until one ends. | A test with the limit set to 1. |
-| The engine stops after the transaction and before the answer | The command gets no answer and exits 1: "the result is not known: run `iris changeset <cs-id>`" (or, for an `add` with no changeset, "run `iris status`"). The draft can hold the action. A draft has no effect before `submit`. | A test that closes the connection before the answer. |
+| The engine stops after the transaction and before the answer, or the answer takes more than 30 s | The command exits 1: "the result is not known: run `iris changeset <cs-id>`". For an `add` with no `--changeset`, the command has no ID, so it says "run `iris changeset --drafts`", which lists the drafts of the author `local`. The draft can hold the action. A draft has no effect before `submit`, so a second draft from a retry changes nothing outside Iris; the caller withdraws it or leaves it. | A test that closes the connection before the answer. |
 | The engine stops before the transaction ends | SQLite rolls back. Nothing is written. Same message as above. | Covered by the store tests of transactions. |
 | Two commands add to the same draft at the same time | SQLite runs the two transactions one after the other. Each gets its own action number. | A test with two threads. |
 | A changeset of another author (`agent`, `person`, `triage`) | Code 2, "only the author can do this" (`check_author`). | A test. |
