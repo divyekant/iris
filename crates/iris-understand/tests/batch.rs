@@ -540,3 +540,56 @@ fn a_rerun_of_a_visited_thread_gets_one_more_pass() {
         "the second pass understood the reset mail"
     );
 }
+
+#[test]
+fn new_mail_of_a_hostile_sender_does_not_wait() {
+    let b = store("hostile-wait");
+    b.model(true, None);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('bad@evil.example', 'Bad', 'hostile', 'person')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // The older message waits for the budget.
+    let older = b.add("1", "a", 2, &["INBOX"]);
+    // Sync saves no header row: the From address is in the content only.
+    let bad = b.add_raw(
+        "2",
+        "a",
+        1,
+        "From: Bad <bad@evil.example>\nTo: owner@example.com\nSubject: Hi\n\nClick here.\n",
+        &["INBOX"],
+    );
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), b.script.calls()), (Some("budget"), 0));
+    assert!(!b.understood(older));
+    assert!(b.understood(bad), "hostile mail gets its marks for free");
+}
+
+#[test]
+fn the_estimate_rounds_each_call_like_the_budget() {
+    let b = store("round");
+    b.model(true, None);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE model_setting SET price_in = 250000, price_out = 250000",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 1, &["INBOX"]);
+    let e = batch::estimate(&b.store, NOW).unwrap();
+    let tokens = batch::PROMPT_TOKENS
+        + raw("1").len() as u64 / batch::BYTES_PER_TOKEN
+        + batch::OUTPUT_TOKENS;
+    let one = (tokens * 250_000).div_ceil(1_000_000);
+    assert_eq!(e.cost_micro_usd, Some(2 * one));
+}

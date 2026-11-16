@@ -337,7 +337,7 @@ impl Runner<'_> {
         loop {
             let next = self
                 .store
-                .read(|c| Ok(next_pending(c, thread, &called, self.now_ms)?))?;
+                .read(|c| Ok(next_pending(self.store, c, thread, &called, self.now_ms)?))?;
             let Some(message) = next else {
                 return Ok(None);
             };
@@ -435,31 +435,72 @@ fn threads_after(
     rows.collect()
 }
 
-/// The oldest pending message of `thread` that is not in `skip`.
+/// The bytes of the content file that the `From` check reads.
+const HEAD_BYTES: u64 = 64 * 1024;
+
+/// The oldest pending message of `thread` that is not in `skip`. A message
+/// that the thread rule holds still runs when it is hostile mail: `SPAM`,
+/// or a `From` sender of the kind `hostile`. Sync saves no header row, so
+/// the `From` address of such a message comes from the head of its content
+/// file (fixed rules, no model).
 fn next_pending(
+    store: &Store,
     c: &Connection,
     thread: i64,
     skip: &[i64],
     now_ms: i64,
 ) -> rusqlite::Result<Option<i64>> {
     let sql = format!(
-        "SELECT m.id FROM message m
-         WHERE m.thread_id = :thread AND {BASE} AND {THREAD_RULE}
+        "SELECT m.id, {THREAD_RULE}, m.content_sha256, h.from_addr FROM message m
+         LEFT JOIN header h ON h.message_id = m.id
+         WHERE m.thread_id = :thread AND {BASE}
            AND m.id NOT IN (SELECT value FROM json_each(:skip))
-         ORDER BY coalesce(m.internal_date, :no_date), m.id LIMIT 1"
+         ORDER BY coalesce(m.internal_date, :no_date), m.id"
     );
-    c.prepare_cached(&sql)?
-        .query_row(
-            rusqlite::named_params! {
-                ":thread": thread,
-                ":now": now_ms,
-                ":max_tries": MAX_TRIES,
-                ":no_date": NO_DATE,
-                ":skip": serde_json::to_string(skip).unwrap_or_else(|_| "[]".into()),
-            },
-            |r| r.get(0),
-        )
-        .optional()
+    let mut st = c.prepare_cached(&sql)?;
+    let mut rows = st.query(rusqlite::named_params! {
+        ":thread": thread,
+        ":now": now_ms,
+        ":max_tries": MAX_TRIES,
+        ":no_date": NO_DATE,
+        ":skip": serde_json::to_string(skip).unwrap_or_else(|_| "[]".into()),
+    })?;
+    while let Some(r) = rows.next()? {
+        let (id, free): (i64, bool) = (r.get(0)?, r.get(1)?);
+        if free {
+            return Ok(Some(id));
+        }
+        let from: Option<String> = match r.get::<_, Option<String>>(3)? {
+            Some(a) => Some(a),
+            None => r
+                .get::<_, Option<String>>(2)?
+                .and_then(|sha| store.content_path(&sha))
+                .and_then(|path| from_of(&path)),
+        };
+        if let Some(from) = from {
+            let kind: Option<String> = c
+                .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
+                .query_row([&from], |r| r.get(0))
+                .optional()?
+                .flatten();
+            if kind.as_deref() == Some("hostile") {
+                return Ok(Some(id));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The bare `From` address in the head of a content file, lowercase.
+fn from_of(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut raw = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(HEAD_BYTES)
+        .read_to_end(&mut raw)
+        .ok()?;
+    crate::Head::parse(&raw).from_addr
 }
 
 /// The size of the work before a run (spec "Estimate").
@@ -487,52 +528,48 @@ pub fn estimate(store: &Store, now_ms: i64) -> Result<Estimate, Error> {
 fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
     let rows = iris_senders::refresh(tx, now_ms)?;
     rerun_senders(tx, &rows, now_ms)?;
+    let price = model_row(tx)?;
+    let version = price.as_ref().map(|r| r.version);
+    let price = price.and_then(|r| r.price);
+    // One row for each reachable message, read as a stream: the memory
+    // stays bounded. Each call is rounded on its own, like the budget.
     let sql = format!(
-        "SELECT count(*),
-           coalesce(sum((SELECT max(t.internal_date) FROM message t
-                         WHERE t.thread_id = m.thread_id AND t.gone_at IS NULL) >= :recent), 0),
-           coalesce(sum(CASE WHEN spam THEN 0 ELSE 1 END), 0),
-           coalesce(sum(CASE WHEN spam THEN 0
-                    ELSE min(coalesce(m.size, :max_data), :max_data) / :bpt END), 0)
-         FROM (SELECT m.*, EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                                   WHERE ml.message_id = m.id AND l.provider_id = 'SPAM') AS spam
-               FROM message m) m
-         WHERE {BASE}"
+        "SELECT (SELECT max(t.internal_date) FROM message t
+                 WHERE t.thread_id = m.thread_id AND t.gone_at IS NULL) >= :recent,
+                EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                        WHERE ml.message_id = m.id AND l.provider_id = 'SPAM'),
+                min(coalesce(m.size, :max_data), :max_data)
+         FROM message m WHERE {BASE}"
     );
-    let (messages, recent, calls, data_tokens): (i64, i64, i64, i64) = tx.query_row(
-        &sql,
-        rusqlite::named_params! {
-            ":now": now_ms,
-            ":max_tries": MAX_TRIES,
-            ":recent": now_ms.saturating_sub(RECENT_MS),
-            ":max_data": MAX_DATA as i64,
-            ":bpt": BYTES_PER_TOKEN as i64,
-        },
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    )?;
-    let [messages, recent, calls, data_tokens] =
-        [messages, recent, calls, data_tokens].map(|v| v.max(0) as u64);
-    let input_tokens = calls
-        .saturating_mul(PROMPT_TOKENS)
-        .saturating_add(data_tokens);
-    let output_tokens = calls.saturating_mul(OUTPUT_TOKENS);
-    let row = model_row(tx)?;
-    let cost_micro_usd = row.as_ref().and_then(|r| r.price).map(|p| {
-        cost(
-            Usage {
-                input_tokens,
-                output_tokens,
-                ..Usage::default()
-            },
-            p,
-        )
-    });
-    Ok(Estimate {
-        messages,
-        recent,
-        input_tokens,
-        output_tokens,
-        cost_micro_usd,
-        model_version: row.map(|r| r.version),
-    })
+    let mut st = tx.prepare(&sql)?;
+    let mut rows = st.query(rusqlite::named_params! {
+        ":now": now_ms,
+        ":max_tries": MAX_TRIES,
+        ":recent": now_ms.saturating_sub(RECENT_MS),
+        ":max_data": MAX_DATA as i64,
+    })?;
+    let mut e = Estimate {
+        cost_micro_usd: price.map(|_| 0),
+        model_version: version,
+        ..Estimate::default()
+    };
+    while let Some(r) = rows.next()? {
+        let (recent, spam, size): (Option<bool>, bool, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        e.messages += 1;
+        e.recent += u64::from(recent == Some(true));
+        if spam {
+            continue;
+        }
+        let call = Usage {
+            input_tokens: PROMPT_TOKENS + size.max(0) as u64 / BYTES_PER_TOKEN,
+            output_tokens: OUTPUT_TOKENS,
+            ..Usage::default()
+        };
+        e.input_tokens = e.input_tokens.saturating_add(call.input_tokens);
+        e.output_tokens = e.output_tokens.saturating_add(call.output_tokens);
+        if let (Some(sum), Some(p)) = (e.cost_micro_usd.as_mut(), price) {
+            *sum = sum.saturating_add(cost(call, p));
+        }
+    }
+    Ok(e)
 }
