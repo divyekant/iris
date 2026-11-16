@@ -396,3 +396,25 @@ fn a_resume_with_a_token_of_another_mailbox_is_refused() {
     );
     assert_eq!(sync_state(&store).2, Some(STEP_FETCH));
 }
+
+#[test]
+fn a_second_sync_of_the_account_does_not_run_at_the_same_time() {
+    let fake = FakeGmail::start(Mailbox::new(19, 30)).unwrap();
+    let gmail = client(fake.base_url());
+    let store = Store::open(&data_dir("lock")).unwrap();
+    let account = store.add_account("gmail", OWNER).unwrap();
+
+    // The incremental sync (R1-06) takes the same lock.
+    let held = iris_sync::lock(&store, account).unwrap();
+    let before = fake.requests().len();
+    assert!(matches!(
+        first_sync(&store, &gmail, account, TOKEN),
+        Err(Error::OtherSync)
+    ));
+    assert_eq!(fake.requests().len(), before);
+    assert_eq!(count(&store, "SELECT count(*) FROM message"), 0);
+    assert!(matches!(iris_sync::lock(&store, account), Err(Error::OtherSync)));
+
+    drop(held);
+    assert_eq!(first_sync(&store, &gmail, account, TOKEN).unwrap().fetched, 30);
+}
