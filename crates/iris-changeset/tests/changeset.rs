@@ -92,10 +92,18 @@ fn args(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
+/// The JSON document of a changeset. Each document of each test agrees
+/// with the published changeset schema (R2-12).
 fn doc(s: &Store, cs: i64) -> Value {
     let mut out = Vec::new();
     write_document(s, cs, &mut out).unwrap();
-    serde_json::from_slice(&out).unwrap()
+    let d: Value = serde_json::from_slice(&out).unwrap();
+    let errors: Vec<String> = iris_spec::validator("changeset")
+        .iter_errors(&d)
+        .map(|e| format!("{e} at {}", e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    d
 }
 
 fn refused<T: std::fmt::Debug>(r: Result<T, Error>) {
@@ -180,8 +188,8 @@ fn submit_denies_an_action_that_is_not_valid() {
         (Verb::Archive, &["c-1"], json!({})),
         (Verb::Archive, &["t-3"], json!({})),
         (Verb::Archive, &["m-1"], json!({"label": "x"})),
-        // Part 2 of R2-01 adds these verbs.
-        (Verb::Label, &["m-1"], json!({"label": "Finance"})),
+        (Verb::Label, &["m-1"], json!({"label": "INBOX"})),
+        // The next R2-01 PR adds the state verbs (issue #164).
         (Verb::Close, &["c-1"], json!({"reason": "Done."})),
         (Verb::Untrash, &["m-3"], json!({})),
     ];
@@ -568,7 +576,24 @@ fn random_target_rows() {
         })
         .unwrap();
         submit(&s, cs, &agent(), "Fuzz.", NOW).unwrap();
-        for a in doc(&s, cs)["actions"].as_array().unwrap() {
+        // The rows of another writer can break the schema (issue #158), so
+        // only the proposed actions go through the schema check.
+        let mut out = Vec::new();
+        write_document(&s, cs, &mut out).unwrap();
+        let mut d: Value = serde_json::from_slice(&out).unwrap();
+        let all = d["actions"].as_array().unwrap().clone();
+        d["actions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["decision"]["state"] == "proposed");
+        if !d["actions"].as_array().unwrap().is_empty() {
+            let errors: Vec<String> = iris_spec::validator("changeset")
+                .iter_errors(&d)
+                .map(|e| format!("{e} at {}", e.instance_path()))
+                .collect();
+            assert!(errors.is_empty(), "round {round}: {errors:#?}");
+        }
+        for a in &all {
             let resolved = a["resolved"]["messages"].as_array().unwrap();
             match a["decision"]["state"].as_str().unwrap() {
                 "proposed" => {
@@ -1055,5 +1080,54 @@ fn one_review_decision_is_all_or_nothing() {
     .unwrap();
     for (n, state) in [(1, "approved"), (2, "approved"), (3, "denied")] {
         assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], state);
+    }
+}
+
+/// `label` and `unlabel` take one user label name. A system label, by name
+/// or ID and in any case, changes only through its own verb (section 4).
+#[test]
+fn label_takes_one_user_label() {
+    let dir = TempDir::new("label");
+    let s = store(&dir);
+    // A system label of the store that is not in the Gmail list.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO label(account_id, provider_id, name, kind)
+             VALUES (1, 'Label_9', 'Muted', 'system')",
+            [],
+        )?)
+    })
+    .unwrap();
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let cases: [(Verb, Value, bool); 16] = [
+        (Verb::Label, json!({"label": "Finance"}), true),
+        (Verb::Unlabel, json!({"label": "Finance"}), true),
+        // A new label: the apply makes it (section 7.2).
+        (Verb::Label, json!({"label": "Trips/2026"}), true),
+        (Verb::Label, json!({"label": "inbox"}), false),
+        (Verb::Unlabel, json!({"label": "Unread"}), false),
+        (Verb::Label, json!({"label": "category_promotions"}), false),
+        (Verb::Label, json!({"label": "MUTED"}), false),
+        (Verb::Label, json!({"label": "label_9"}), false),
+        (Verb::Label, json!({}), false),
+        (Verb::Label, json!({"label": ""}), false),
+        (Verb::Label, json!({"label": " Finance"}), false),
+        (Verb::Label, json!({"label": 7}), false),
+        (Verb::Label, json!({"label": "Finance", "x": 1}), false),
+        (Verb::Label, json!({"name": "Finance"}), false),
+        (Verb::Unlabel, json!({"label": ["Finance"]}), false),
+        (Verb::Unlabel, json!({"label": "SENT"}), false),
+    ];
+    for (verb, a, _) in &cases {
+        add_action(&s, cs, &agent(), *verb, &["t-1"], &args(a.clone()), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Labels.", NOW).unwrap();
+    for (i, (verb, a, ok)) in cases.iter().enumerate() {
+        let d = hash_doc(&s, cs, 1, i as i64 + 1);
+        let expect = if *ok { "proposed" } else { "denied" };
+        assert_eq!(d["decision"]["state"], expect, "{} {a}", verb.as_str());
+        if *ok {
+            assert_eq!(d["resolved"]["messages"], json!(["m-1", "m-2"]), "{d}");
+        }
     }
 }

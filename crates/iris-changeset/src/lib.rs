@@ -329,7 +329,11 @@ fn targets_json(targets: &[&str]) -> Result<String> {
         }
         first = Some(kind);
         group = Some(g);
-        ids.push(Value::String(format_id(kind, row)));
+        let id = Value::String(format_id(kind, row));
+        if ids.contains(&id) {
+            return Err(refused(format!("{t} is a target two times")));
+        }
+        ids.push(id);
     }
     let g = group.ok_or_else(|| refused("an action needs a target".into()))?;
     Ok(Value::Object(Map::from_iter([(g.to_string(), Value::Array(ids))])).to_string())
@@ -464,7 +468,7 @@ pub fn submit_in(
         let verb = Verb::parse(&verb).expect("the CHECK of the table");
         // Only the targets give the messages: drop rows of another writer.
         c.execute("DELETE FROM action_message WHERE action_id = ?1", [id])?;
-        let denial = match supported(verb, &args) {
+        let denial = match supported(c, verb, &args)? {
             Err(why) => Some(why),
             Ok(()) => resolve(c, id, &targets)?,
         };
@@ -561,26 +565,75 @@ fn first_contact(c: &Connection, action: i64) -> Result<bool> {
     )?)
 }
 
-/// Part 1 of R2-01 submits the mailbox verbs with no arguments. Gives the
-/// reason of the denial for each other action.
-// shortcut: label, unlabel and the state verbs are denied; part 2 of R2-01
-// adds their argument checks and item targets.
-fn supported(verb: Verb, args: &str) -> std::result::Result<(), String> {
-    match verb {
+/// The Gmail system labels (Gmail API, labels guide). The store also has the
+/// system labels of each account in `label`.
+const SYSTEM_LABELS: [&str; 9] = [
+    "INBOX",
+    "SPAM",
+    "TRASH",
+    "UNREAD",
+    "STARRED",
+    "IMPORTANT",
+    "SENT",
+    "DRAFT",
+    "CHAT",
+];
+
+/// The argument checks of each verb (section 4). Gives the reason of the
+/// denial for an action that is not valid.
+// shortcut: the state verbs are denied; the next R2-01 PR adds their
+// argument checks and item targets (issue #164).
+fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Result<(), String>> {
+    // add_action writes an object. Another writer of the table may not.
+    let Ok(args) = serde_json::from_str::<Map<String, Value>>(args) else {
+        return Ok(Err("the arguments are not a JSON object".into()));
+    };
+    Ok(match verb {
         Verb::Archive | Verb::Inbox | Verb::Read | Verb::Unread | Verb::Trash => {
-            // Another writer can store an empty object as other text.
-            let empty =
-                serde_json::from_str::<Map<String, Value>>(args).is_ok_and(|a| a.is_empty());
-            if empty {
+            if args.is_empty() {
                 Ok(())
             } else {
                 Err(format!("{} takes no arguments", verb.as_str()))
             }
         }
+        Verb::Label | Verb::Unlabel => label_name(c, &args)?,
         // The undo of a trash (R2-03, section 7.4) makes its own changeset.
         Verb::Untrash => Err("only the undo of a trash makes untrash".into()),
         _ => Err(format!("{} is not available yet", verb.as_str())),
-    }
+    })
+}
+
+/// `label` and `unlabel` take one user label name (section 4). A name that
+/// is the same as the name or the ID of a system label, with no regard to
+/// case, is refused: a system label changes only through its own verb.
+fn label_name(
+    c: &Connection,
+    args: &Map<String, Value>,
+) -> Result<std::result::Result<(), String>> {
+    let name = match (args.get("label"), args.len()) {
+        (Some(Value::String(n)), 1) if !n.trim().is_empty() && n.trim() == n => n,
+        _ => {
+            return Ok(Err(
+                "the argument is one label name: {\"label\": \"...\"}".into()
+            ))
+        }
+    };
+    // `upper` of SQLite changes only ASCII letters, so both sides use the
+    // ASCII upper case.
+    let upper = name.to_ascii_uppercase();
+    let system = SYSTEM_LABELS.contains(&upper.as_str())
+        || upper.starts_with("CATEGORY_")
+        || c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM label WHERE kind = 'system'
+               AND (upper(name) = ?1 OR upper(provider_id) = ?1))",
+            [&upper],
+            |r| r.get(0),
+        )?;
+    Ok(if system {
+        Err(format!("{name} is a system label: use its own verb"))
+    } else {
+        Ok(())
+    })
 }
 
 /// Resolve the targets of an action to `action_message` rows (section 4). A
@@ -598,10 +651,14 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
     if group != "threads" && group != "messages" {
         return Ok(Some("a mailbox verb takes threads or messages".into()));
     }
-    for id in ids {
+    for (i, id) in ids.iter().enumerate() {
         let Some((kind, row)) = id.as_str().and_then(parse_id) else {
             return bad();
         };
+        // The short form, once: the document shows the targets as stored.
+        if id.as_str() != Some(format_id(kind, row).as_str()) || ids[..i].contains(id) {
+            return bad();
+        }
         let found: bool = match (kind, group.as_str()) {
             (Kind::Thread, "threads") => {
                 c.execute(
@@ -663,7 +720,10 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
 /// The count of resolved messages, and the SHA-256 (hex) of the verb, the
 /// targets, the arguments and the resolved message IDs that a review shows
 /// (section 5.5).
-fn hash(c: &Connection, action: i64) -> Result<(i64, String)> {
+///
+/// `action` is the row ID of the action. The apply (R2-02) checks the
+/// stored hash again with this function, in the transaction of the apply.
+pub fn hash(c: &Connection, action: i64) -> Result<(i64, String)> {
     let (verb, targets, args): (String, String, String) = c.query_row(
         "SELECT verb, targets, args FROM changeset_action WHERE id = ?1",
         [action],
