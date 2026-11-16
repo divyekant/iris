@@ -63,10 +63,14 @@ const KINDS: [&str; 3] = ["task", "reply", "payment"];
 struct Msg {
     sender: String,
     kind: SenderKind,
+    /// The message has the SENT or DRAFT label.
+    own: bool,
     hostile: bool,
     labels: Vec<String>,
     /// `None`: the message has no date.
     date: Option<i64>,
+    /// The date of the message row, which counts when there is no header date.
+    internal: Option<i64>,
     items: Vec<(i64, Item)>,
 }
 
@@ -155,6 +159,7 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                     };
                     items.push((item, it));
                 }
+                let internal = if in_header { None } else { Some(date) };
                 // With no header, a date only in the header is no date.
                 let date = if addr.is_empty() && in_header { None } else { Some(date) };
                 out.push(Msg {
@@ -164,9 +169,11 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                         "News@Shop.example" => SenderKind::Stranger,
                         _ => k.and_then(SenderKind::from_name).unwrap_or(SenderKind::Stranger),
                     },
+                    own: sent,
                     hostile,
                     labels,
                     date,
+                    internal,
                     items,
                 });
             }
@@ -396,4 +403,350 @@ fn iso(_: &Store, t: i64) -> String {
         secs % 3600 / 60,
         secs % 60
     )
+}
+
+/// Activates the policy `text` at the time `t`.
+fn activate(s: &Store, text: &str, t: i64) -> Policy {
+    std::fs::write(s.dir().join(FILE), text).unwrap();
+    let sha = match file_state(s).unwrap() {
+        FileState::Changed(l) => l.sha256,
+        other => panic!("{other:?}"),
+    };
+    match confirm(s, &sha, t).unwrap() {
+        Confirm::Done { policy, .. } => policy,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The messages in `attention_due`.
+fn due(s: &Store) -> Vec<i64> {
+    s.read(|c| {
+        c.prepare("SELECT message_id FROM attention_due ORDER BY message_id")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
+    })
+    .unwrap()
+}
+
+fn sql(s: &Store, q: &str, p: impl rusqlite::Params) {
+    s.write(|tx| {
+        tx.execute(q, p)?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// The message IDs of the mailbox are 1, 2, ... in the order of `mail`.
+fn msg_id(i: usize) -> i64 {
+    i as i64 + 1
+}
+
+/// The kind of each sender row that the test changes (the lowercase address).
+const MOVABLE: [&str; 4] = [
+    "ann@friends.example",
+    "deals@shop.example",
+    "x@far.example",
+    "unknown@else.example",
+];
+const KIND_NAMES: [&str; 4] = ["person", "service", "stranger", "hostile"];
+
+#[test]
+fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
+    // Invariant: after `refresh_attention`, the attention of each item is
+    // the attention that the active policy gives it, also after a change
+    // of a fact of its origin message: a label, a label name, the hostile
+    // marks, the date, the kind of the sender, a new item of the message,
+    // or a new form, type or document of the item. Each such change marks
+    // the message in `attention_due` (store migration 8).
+    for seed in 1..=20u64 {
+        let (_d, s) = store(&format!("r{seed}"));
+        let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
+        let mut mail = mailbox(&s, &mut rng);
+        // Each new item marks its message.
+        assert_eq!(due(&s).len(), mail.len(), "seed {seed}: new items");
+        // A store from before migration 8 has items and no mark: the
+        // first refresh evaluates each item.
+        sql(&s, "DELETE FROM attention_due", []);
+        // With no policy, each item is shown.
+        assert_eq!(refresh_attention(&s, NOW).unwrap(), mail.len() as u64);
+        assert!(stored(&s)
+            .iter()
+            .all(|(_, f)| f.0.as_deref() == Some("shown")));
+        let mut ids = 0;
+        let text = format!("# r\n{}", random_policy(&mut rng, &mut ids));
+        let policy = activate(&s, &text, NOW);
+        assert!(
+            due(&s).is_empty(),
+            "seed {seed}: a confirmation evaluates each item"
+        );
+        let mut kinds: Vec<(&str, Option<SenderKind>)> = MOVABLE
+            .iter()
+            .map(|a| {
+                let k = SENDERS
+                    .iter()
+                    .find(|(x, _)| x.to_lowercase() == *a)
+                    .unwrap()
+                    .1;
+                (*a, k.and_then(SenderKind::from_name))
+            })
+            .collect();
+        // One time for each round: only the `all` pass follows the time.
+        let t = NOW;
+        let mut names: Vec<String> = LABELS.iter().map(|l| l.0.to_string()).collect();
+        for round in 0..8 {
+            let mut what = format!("seed {seed} round {round}\n{text}");
+            let mut marked = Vec::new();
+            for _ in 0..1 + rng.next() % 3 {
+                let i = (rng.next() % mail.len() as u64) as usize;
+                let id = msg_id(i);
+                let op = rng.next() % 10;
+                what += &format!("\nop {op} on message {id}");
+                match op {
+                    // A label on or off.
+                    0 => {
+                        let l = (rng.next() % LABELS.len() as u64) as usize;
+                        let name = names[l].clone();
+                        let m = &mut mail[i];
+                        if let Some(p) = m.labels.iter().position(|x| *x == name) {
+                            sql(
+                                &s,
+                                "DELETE FROM message_label WHERE message_id = ?1 AND label_id = ?2",
+                                [id, l as i64 + 1],
+                            );
+                            m.labels.remove(p);
+                        } else {
+                            sql(
+                                &s,
+                                "INSERT OR FAIL INTO message_label(message_id, label_id) VALUES (?1, ?2)",
+                                [id, l as i64 + 1],
+                            );
+                            m.labels.push(name);
+                        }
+                        m.own = m.labels.iter().any(|x| x == "Sent");
+                        marked.push(id);
+                    }
+                    // The hostile marks.
+                    1 => {
+                        let m = &mut mail[i];
+                        m.hostile = !m.hostile;
+                        let v = if m.hostile { Some("[\"spoof\"]") } else { None };
+                        sql(
+                            &s,
+                            "UPDATE OR ROLLBACK message SET hostile = ?2 WHERE id = ?1",
+                            rusqlite::params![id, v],
+                        );
+                        marked.push(id);
+                    }
+                    // The date: of the header if the message has one.
+                    2 => {
+                        let d = NOW - (rng.next() % 60) as i64 * DAY;
+                        let m = &mut mail[i];
+                        if m.sender.is_empty() {
+                            sql(
+                                &s,
+                                "UPDATE message SET internal_date = ?2 WHERE id = ?1",
+                                [id, d * 1000],
+                            );
+                            m.internal = Some(d);
+                        } else {
+                            sql(
+                                &s,
+                                "UPDATE header SET date = ?2 WHERE message_id = ?1",
+                                [id, d * 1000],
+                            );
+                        }
+                        m.date = Some(d);
+                        marked.push(id);
+                    }
+                    // The kind of a sender: an update, a new row or no row.
+                    3 => {
+                        let k = (rng.next() % MOVABLE.len() as u64) as usize;
+                        let (addr, old) = kinds[k];
+                        let new = if rng.next().is_multiple_of(4) {
+                            None
+                        } else {
+                            Some(*rng.pick(&KIND_NAMES))
+                        };
+                        match (old, new) {
+                            // An upsert, as the sender axis writes: its conflict
+                            // clause also applies to the statements of the triggers.
+                            (_, Some(n)) => sql(
+                                &s,
+                                "INSERT INTO sender(address, kind) VALUES (?1, ?2)
+                                 ON CONFLICT(address) DO UPDATE SET kind = excluded.kind",
+                                [addr, n],
+                            ),
+                            (Some(_), None) => {
+                                sql(&s, "DELETE FROM sender WHERE address = ?1", [addr])
+                            }
+                            (None, None) => {}
+                        }
+                        kinds[k].1 = new.and_then(SenderKind::from_name);
+                        for (j, m) in mail.iter().enumerate() {
+                            if m.sender == addr && old != kinds[k].1 {
+                                marked.push(msg_id(j));
+                            }
+                        }
+                    }
+                    // A new type of a record or kind of a commitment, or a
+                    // new document with no attention, as a rewrite of a
+                    // conversation gives.
+                    4 | 5 => {
+                        let m = &mut mail[i];
+                        let n = (rng.next() % m.items.len() as u64) as usize;
+                        let (item, it) = &mut m.items[n];
+                        let item = *item;
+                        let (doc, rt, ck) = match it.form {
+                            Form::Record => {
+                                let t = *rng.pick(&TYPES);
+                                (
+                                    format!(r#"{{"type":"{t}"}}"#),
+                                    RecordType::from_name(t),
+                                    None,
+                                )
+                            }
+                            Form::Commitment => {
+                                let c = *rng.pick(&KINDS);
+                                (
+                                    format!(r#"{{"kind":"{c}"}}"#),
+                                    None,
+                                    CommitmentKind::from_name(c),
+                                )
+                            }
+                            _ => ("{}".to_string(), None, None),
+                        };
+                        let before = stored(&s);
+                        sql(
+                            &s,
+                            "UPDATE item SET doc = ?2 WHERE id = ?1",
+                            rusqlite::params![item, doc],
+                        );
+                        // The old attention stays until the refresh.
+                        assert_eq!(
+                            stored(&s).iter().find(|(x, _)| *x == item),
+                            before.iter().find(|(x, _)| *x == item),
+                            "{what}: item {item} lost its attention"
+                        );
+                        it.record_type = rt;
+                        it.commitment_kind = ck;
+                        marked.push(id);
+                    }
+                    // A new item of the message.
+                    6 => {
+                        sql(&s, "INSERT INTO item(form, account_id, status, doc, created_at, updated_at) VALUES ('feed', 1, 'new', '{}', 0, 0)", []);
+                        let item: i64 = s
+                            .read(
+                                |c| Ok(c.query_row("SELECT max(id) FROM item", [], |r| r.get(0))?),
+                            )
+                            .unwrap();
+                        sql(&s, "INSERT INTO item_source(item_id, message_id, role) VALUES (?1, ?2, 'origin')", [item, id]);
+                        mail[i].items.push((
+                            item,
+                            Item {
+                                form: Form::Feed,
+                                record_type: None,
+                                commitment_kind: None,
+                            },
+                        ));
+                        marked.push(id);
+                    }
+                    // A new origin of an item, as a conversation gets when
+                    // its origin becomes hostile mail: both messages.
+                    7 => {
+                        let j = (rng.next() % mail.len() as u64) as usize;
+                        if j != i && mail[i].items.len() > 1 {
+                            let (item, it) = mail[i].items.remove(0);
+                            sql(&s, "UPDATE item_source SET message_id = ?2 WHERE item_id = ?1 AND role = 'origin'", [item, msg_id(j)]);
+                            mail[j].items.push((item, it));
+                            marked.push(msg_id(j));
+                        }
+                    }
+                    // A header that comes after the items, or the cleanup of
+                    // gone mail that deletes the header.
+                    8 => {
+                        let m = &mut mail[i];
+                        if m.sender.is_empty() {
+                            let d = NOW - (rng.next() % 60) as i64 * DAY;
+                            sql(&s, "INSERT INTO header(message_id, date, from_addr) VALUES (?1, ?2, 'ann@friends.example')", [id, d * 1000]);
+                            m.sender = "ann@friends.example".into();
+                            m.date = Some(d);
+                        } else {
+                            sql(&s, "DELETE FROM header WHERE message_id = ?1", [id]);
+                            m.sender = String::new();
+                            m.date = m.internal;
+                        }
+                        marked.push(id);
+                    }
+                    // A new name of a label: each message with it.
+                    _ => {
+                        let l = 1 + (rng.next() % 2) as usize;
+                        let old = names[l].clone();
+                        let new = if old == LABELS[l].0 {
+                            format!("Renamed {l}")
+                        } else {
+                            LABELS[l].0.to_string()
+                        };
+                        names[l] = new.clone();
+                        sql(
+                            &s,
+                            "UPDATE label SET name = ?2 WHERE id = ?1",
+                            rusqlite::params![l as i64 + 1, new],
+                        );
+                        for (j, m) in mail.iter_mut().enumerate() {
+                            if let Some(x) = m.labels.iter_mut().find(|x| **x == old) {
+                                if s.read(|c| Ok(c.query_row(
+                                    "SELECT count(*) FROM message_label WHERE message_id = ?1 AND label_id = ?2",
+                                    [msg_id(j), l as i64 + 1], |r| r.get::<_, i64>(0))?)).unwrap() == 1
+                                {
+                                    *x = new.clone();
+                                    marked.push(msg_id(j));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for m in mail.iter_mut() {
+                m.kind = if m.own {
+                    SenderKind::SelfOwner
+                } else if m.sender == "news@shop.example" {
+                    SenderKind::Stranger
+                } else {
+                    kinds
+                        .iter()
+                        .find(|(a, _)| *a == m.sender)
+                        .and_then(|(_, k)| *k)
+                        .unwrap_or(SenderKind::Stranger)
+                };
+            }
+            let now_due = due(&s);
+            for id in &marked {
+                assert!(now_due.contains(id), "{what}: message {id} is not marked");
+            }
+            refresh_attention(&s, t).unwrap();
+            assert!(due(&s).is_empty(), "{what}: a refresh clears each mark");
+            for ((id, g), (_, w)) in stored(&s).iter().zip(expected(&policy, &mail, t)) {
+                assert!(agrees(g, w, &policy), "{what} item {id}: {g:?} != {w:?}");
+            }
+        }
+        // The attention write marks nothing.
+        sql(&s, "UPDATE item SET updated_at = 5, doc = json_set(doc, '$.attention', json('{\"state\":\"hidden\"}'), '$.updated', 'x')", []);
+        assert!(
+            due(&s).is_empty(),
+            "seed {seed}: the attention write marked a message"
+        );
+        // Each hour, each item, also with no mark: a rule with
+        // `older_than_days` matches more items as time goes on.
+        assert_eq!(refresh_attention(&s, t + PASS_EVERY - 1).unwrap(), 0);
+        let later = NOW + 40 * DAY;
+        assert_eq!(refresh_attention(&s, later).unwrap(), mail.len() as u64);
+        assert_eq!(refresh_attention(&s, later + 60).unwrap(), 0);
+        for ((id, g), (_, w)) in stored(&s).iter().zip(expected(&policy, &mail, later)) {
+            assert!(
+                agrees(g, w, &policy),
+                "seed {seed} later item {id}: {g:?} != {w:?}"
+            );
+        }
+    }
 }
