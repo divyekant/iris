@@ -108,6 +108,11 @@ struct Meta {
     sender: Sender,
     /// The other side of the thread is a stranger, not a known person.
     stranger_thread: bool,
+    /// The true kind of the sender, by the rules of spec 1 section 6.7. It is
+    /// `sender`, except in two cases. A stranger that the owner wrote to in
+    /// the thread is a known person. The first 2 messages of a service are
+    /// from a stranger, because a known service needs 2 earlier messages.
+    truth: Sender,
     traits: u8,
 }
 
@@ -160,6 +165,26 @@ impl Mailbox {
         }
         metas.truncate(count);
         metas.sort_by_key(|m| (m.date, m.thread, m.pos));
+        let owner_threads: std::collections::HashSet<u32> = metas
+            .iter()
+            .filter(|m| m.sender == Sender::Owner)
+            .map(|m| m.thread)
+            .collect();
+        let mut service_seen = std::collections::HashMap::new();
+        for m in &mut metas {
+            if m.sender == Sender::Stranger && owner_threads.contains(&m.thread) {
+                m.truth = Sender::KnownPerson;
+            }
+            if m.sender == Sender::KnownService {
+                let seen = service_seen
+                    .entry(text::service_addr(seed, m.thread))
+                    .or_insert(0u32);
+                if *seen < 2 {
+                    m.truth = Sender::Stranger;
+                }
+                *seen += 1;
+            }
+        }
         Mailbox { seed, metas }
     }
 
@@ -179,7 +204,7 @@ impl Mailbox {
             thread: m.thread,
             date: m.date,
             form: m.form,
-            sender: m.sender,
+            sender: m.truth,
             traits: m.traits,
         }
     }
@@ -270,6 +295,7 @@ fn plan_thread(seed: u64, thread: u32, out: &mut Vec<Meta>) {
             form,
             sender: if owner { Sender::Owner } else { sender },
             stranger_thread: sender == Sender::Stranger,
+            truth: if owner { Sender::Owner } else { sender },
             traits: t,
         });
         date += 600 + r.below(2 * 86_400) as i64;
@@ -307,7 +333,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0xdcd8_5b12_bbca_bd4d;
+    const GOLDEN_42_2000: u64 = 0x825e_b486_add8_8cef;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {

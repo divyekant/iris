@@ -118,6 +118,14 @@ fn thread_vals(seed: u64, thread: u32) -> ThreadVals {
     }
 }
 
+/// The address of the known service of a thread.
+pub(crate) fn service_addr(seed: u64, thread: u32) -> String {
+    format!(
+        "no-reply@{}.example.com",
+        thread_vals(seed, thread).service.1
+    )
+}
+
 /// The total of a receipt: the first two values of the body stream.
 fn amount(r: &mut Rng) -> String {
     format!("{}.{:02}", 5 + r.below(400), r.below(100))
