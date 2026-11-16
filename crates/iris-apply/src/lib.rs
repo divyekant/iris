@@ -156,7 +156,7 @@ impl Change {
 
     /// The `ops` of the ledger row: the call, the labels to add and remove,
     /// and the number of calls.
-    fn ops(&self, calls: usize) -> String {
+    fn ops(&self, calls: i64) -> String {
         format!(
             r#"{{"call":"{}","add":{},"remove":{},"calls":{calls}}}"#,
             if self.trash { "trash" } else { "batchModify" },
@@ -298,8 +298,16 @@ pub fn apply(
     run.recover_account()?;
 
     // Step 2: the labels at Gmail. The mirror gets the labels of each
-    // message as Gmail gave them.
-    let mut todo: Vec<(i64, String)> = Vec::new();
+    // message as Gmail gave them. The messages to change wait in a table
+    // of the write connection, page by page (section 9), until the claim.
+    store.write(|tx| {
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS apply_todo(
+               message_id INTEGER PRIMARY KEY, pre TEXT NOT NULL);
+             DELETE FROM temp.apply_todo;",
+        )?;
+        Ok(())
+    })?;
     let mut after = 0;
     loop {
         // A gone message has no provider ID here.
@@ -320,6 +328,7 @@ pub fn apply(
         };
         after = last;
         let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
+        let mut todo: Vec<(i64, String)> = Vec::new();
         for (id, provider_id) in page {
             let Some(provider_id) = provider_id else {
                 run.counts.gone.push(id);
@@ -342,9 +351,17 @@ pub fn apply(
             }
         }
         mirror(store, account, &seen);
+        store.write(|tx| {
+            let mut add =
+                tx.prepare_cached("INSERT INTO temp.apply_todo(message_id, pre) VALUES (?1, ?2)")?;
+            for (id, pre) in &todo {
+                add.execute(params![id, pre])?;
+            }
+            Ok(())
+        })?;
     }
     // Step 3: the claim, with the ledger row in `writing`.
-    match run.claim(action, &change, &todo)? {
+    match run.claim(action, &change)? {
         Ok(ledger) => run.calls(ledger, &change),
         Err(o) => Ok(o),
     }
@@ -459,18 +476,8 @@ impl<'a, 'b> Run<'a, 'b> {
     /// transaction checks the expiry and the mode again, because the reads
     /// of step 2 take time. Gives the ledger row, or the outcome of the
     /// expiry or the mode.
-    fn claim(
-        &mut self,
-        action: i64,
-        change: &Change,
-        todo: &[(i64, String)],
-    ) -> Result<std::result::Result<i64, Outcome>> {
+    fn claim(&mut self, action: i64, change: &Change) -> Result<std::result::Result<i64, Outcome>> {
         let account = self.account;
-        let calls = if change.trash {
-            todo.len()
-        } else {
-            todo.len().div_ceil(BATCH_LIMIT)
-        };
         let claimed = self.store.write(|tx| {
             if let Some(o) = gate(tx, action)? {
                 return Ok(Err(o));
@@ -483,23 +490,28 @@ impl<'a, 'b> Run<'a, 'b> {
             if !approved {
                 return Ok(Ok(None));
             }
+            let n: i64 = tx.query_row("SELECT count(*) FROM temp.apply_todo", [], |r| r.get(0))?;
+            let calls = if change.trash {
+                n
+            } else {
+                (n + BATCH_LIMIT as i64 - 1) / BATCH_LIMIT as i64
+            };
             tx.execute(
                 "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
                  VALUES (?1, ?2, ?3, 'writing', 'inverse', ?4)",
                 params![action, account, change.ops(calls), now()],
             )?;
             let ledger = tx.last_insert_rowid();
-            let mut add = tx.prepare_cached(
+            // One trash call for each message, one batchModify call for
+            // each 1,000 messages, in the order of the message IDs.
+            tx.execute(
                 "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
+                 FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
+                       FROM temp.apply_todo)",
+                params![ledger, change.trash, BATCH_LIMIT as i64, labels_json(change.add)],
             )?;
-            let post = labels_json(change.add);
-            for (i, (id, pre)) in todo.iter().enumerate() {
-                // One trash call for each message, one batchModify call for
-                // each 1,000 messages.
-                let call = if change.trash { i + 1 } else { i / BATCH_LIMIT + 1 };
-                add.execute(params![ledger, id, call as i64, pre, post])?;
-            }
+            tx.execute("DELETE FROM temp.apply_todo", [])?;
             Ok(Ok(Some(ledger)))
         })?;
         match claimed {
@@ -627,24 +639,34 @@ impl<'a, 'b> Run<'a, 'b> {
         })
     }
 
-    /// The counts of step 2 with the messages of the ledger row.
+    /// The counts of step 2 with the messages of the ledger row. Only the
+    /// listed messages come back as IDs.
     fn counts(&self, ledger: i64) -> Result<Counts> {
         let mut counts = self.counts.clone();
-        let rows: Vec<(i64, bool, Option<String>)> = self.store.read(|c| {
+        let (changed, skipped): (i64, i64) = self.store.read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FILTER (WHERE done = 1),
+                        count(*) FILTER (WHERE listed = 'skipped')
+                 FROM ledger_message WHERE ledger_id = ?1",
+                [ledger],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })?;
+        counts.changed += changed as u64;
+        counts.unchanged += skipped as u64;
+        let listed: Vec<(i64, String)> = self.store.read(|c| {
             let mut st = c.prepare(
-                "SELECT message_id, done, listed FROM ledger_message WHERE ledger_id = ?1
-                 ORDER BY 1",
+                "SELECT message_id, listed FROM ledger_message
+                 WHERE ledger_id = ?1 AND listed IN ('gone', 'unknown') ORDER BY 1",
             )?;
-            let rows = st.query_map([ledger], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let rows = st.query_map([ledger], |r| Ok((r.get(0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
-        for (id, done, listed) in rows {
-            match (done, listed.as_deref()) {
-                (true, _) => counts.changed += 1,
-                (_, Some("skipped")) => counts.unchanged += 1,
-                (_, Some("gone")) => counts.gone.push(id),
-                (_, Some(_)) => counts.unknown.push(id),
-                (false, None) => {}
+        for (id, why) in listed {
+            if why == "gone" {
+                counts.gone.push(id);
+            } else {
+                counts.unknown.push(id);
             }
         }
         counts.gone.sort_unstable();

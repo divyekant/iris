@@ -725,6 +725,27 @@ fn a_large_action_streams_in_pages() {
     let c = applied(b.apply(a));
     assert_eq!((c.changed, c.unchanged), (need, 1050 - need));
     assert_eq!(b.calls("batchModify"), 2);
+    // The claim numbers the calls in the order of the message IDs: 1,000
+    // messages in call 1, the rest in call 2.
+    let (state, call, rows) = b.ledger(a);
+    assert_eq!(
+        (state.as_str(), call, rows.len() as u64),
+        ("applied", 2, need)
+    );
+    let calls: Vec<i64> = b
+        .store
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT call FROM ledger_message WHERE ledger_id =
+                   (SELECT id FROM ledger WHERE action_id = ?1) ORDER BY message_id",
+            )?;
+            let rows = st.query_map([a], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let first = calls.iter().filter(|&&c| c == 1).count();
+    assert_eq!(first, 1000.min(need as usize));
+    assert!(calls.windows(2).all(|w| w[0] <= w[1]));
     for &m in ms.iter().step_by(97) {
         assert_eq!(b.mirror_labels(m), b.gmail_labels(m));
     }

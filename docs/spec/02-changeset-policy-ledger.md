@@ -637,9 +637,10 @@ The `ledger_message` table has one row for each message of the entry:
    1. Set `call` of the row to the number of the call, and commit.
    2. Call the provider.
    3. If the call succeeds, set `done` for its messages, and commit.
-5. After the last call, set the state `applied` if each message has `done`,
-   else `failed` (section 7.3). Save the history ID. Update the mirror with
-   the new labels.
+5. After the last call, set the state `failed` after a clear refusal (step
+   6), or when one or more messages are `unknown` (section 7.3). Else set
+   `applied`: a gone or a skipped message does not fail the row. Save the
+   history ID. Update the mirror with the new labels.
 6. Act on each other result of a call as follows:
 
 | Result | Meaning | The engine |
