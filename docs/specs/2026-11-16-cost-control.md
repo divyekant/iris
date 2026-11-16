@@ -351,7 +351,9 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
 - `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an
   error, and the body goes nowhere else. For a local model, the client also
   checks that the address of the connection is a loopback address, also
-  after the name lookup of `localhost`.
+  after the name lookup of `localhost`. A local model call uses no HTTP proxy: the client
+  ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and any configured proxy
+  for it, so no proxy on loopback can forward the mail.
 - `iris model show`: the settings and the budget left, never the key.
 - `iris understand --estimate`: prints the estimate, no call. It writes an
   estimate receipt (a row of `understand_estimate`: a random ID, the
@@ -403,6 +405,7 @@ more calls.
 | `iris model set` between the estimate and the approval | A budget for a model the person did not see | The approval code is the row version; a changed row refuses the approval. | Command test. |
 | `iris model set local https://remote.example/v1 m` | Mail text leaves the machine | Refused: the host is not a loopback address. | Command test. |
 | A local server answers 307 or 308 to a remote host | The client sends the mail to the remote host | No redirect is followed: the call fails. | Model client test with a redirecting fake server. |
+| A proxy on loopback forwards to a remote host | The mail leaves the machine through the proxy | A local model call uses no proxy. | Model client test: `HTTP_PROXY` set to a loopback proxy, the call goes direct. |
 | `--approve` with a code that no estimate made, an old code, or a code of another model version | Approval with no estimate | Refused. | Command test. |
 | `--approve` with no terminal | An agent approves spend | Refused. | Command test. |
 | A provider bills more input tokens than the body bytes | Settle passes the reservation | The budget can go below zero once; the run stops with `stop = budget` and shows the overrun. | Fake model with a large usage. |
