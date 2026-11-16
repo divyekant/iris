@@ -151,23 +151,15 @@ struct State {
 /// account runs, in this process or in another (specification 1, section
 /// 4.2). Each sync of the account takes it first. The operating system
 /// frees the lock when the process ends.
-pub struct SyncLock(#[allow(dead_code)] std::fs::File);
+pub struct SyncLock(#[allow(dead_code)] iris_store::FileLock);
 
 /// Take the sync lock of `account`, or give [`Error::OtherSync`] if another
 /// sync holds it.
 pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
     let path = store.dir().join(format!("sync-{account}.lock"));
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-        .map_err(iris_store::Error::Io)?;
-    // flock on Linux and macOS: two opens of the file conflict, also in one process.
-    match file.try_lock() {
-        Ok(()) => Ok(SyncLock(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Err(Error::OtherSync),
-        Err(std::fs::TryLockError::Error(e)) => Err(iris_store::Error::Io(e).into()),
+    match iris_store::FileLock::try_take(&path).map_err(iris_store::Error::Io)? {
+        Some(l) => Ok(SyncLock(l)),
+        None => Err(Error::OtherSync),
     }
 }
 
