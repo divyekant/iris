@@ -43,7 +43,8 @@ pub enum Error {
     /// The token is of another mailbox than the account. The action stays
     /// as it was.
     OtherMailbox,
-    /// Another apply runs now, in this process or in another. The action
+    /// Another apply, or a sync of the account, runs now, in this process
+    /// or in another. The action
     /// stays as it was. Apply again after the other apply.
     Busy,
     /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
@@ -198,6 +199,10 @@ pub const LOCK_FILE: &str = "apply.lock";
 pub struct Token<'a> {
     pub token: String,
     pub renew: &'a mut dyn FnMut() -> Option<String>,
+    /// Set by the apply when Gmail refused the new token too, or there is
+    /// no new token. The caller then sets the account to "needs sign-in"
+    /// (section 7.2), as the engine does after a sync.
+    pub refused: bool,
 }
 
 /// Apply the approved action `action` to the mailbox `account` at Gmail.
@@ -219,6 +224,14 @@ pub fn apply(
     // One apply at a time. While the lock lives, a mark found below is the
     // mark of an apply that stopped, not of one that runs.
     let _lock = lock(store)?;
+    // No sync of the account runs while the apply reads labels and writes
+    // them to the mirror, so no label that a sync saved is lost.
+    let _sync = match iris_sync::lock(store, account) {
+        Ok(l) => l,
+        Err(iris_sync::Error::Store(e)) => return Err(Error::Store(e)),
+        // The lock gives only a store error or OtherSync.
+        Err(_) => return Err(Error::Busy),
+    };
     let head: Option<(String, Option<String>, String, bool)> = store.read(|c| {
         Ok(c.query_row(
             "SELECT verb, hash, decided_by, applying FROM changeset_action
@@ -347,20 +360,26 @@ impl Run<'_, '_> {
         &mut self,
         f: impl Fn(&Gmail, &str) -> iris_gmail::Result<T>,
     ) -> iris_gmail::Result<T> {
-        match f(self.gmail, &self.token.token) {
-            Err(iris_gmail::Error::Unauthorized) if !self.renewed => {
-                self.renewed = true;
-                match (self.token.renew)() {
-                    // A token of another mailbox is no token for this one.
-                    Some(t) if owns(self.gmail, &t, &self.address)? => {
+        let mut r = f(self.gmail, &self.token.token);
+        if matches!(r, Err(iris_gmail::Error::Unauthorized)) && !self.renewed {
+            self.renewed = true;
+            r = match (self.token.renew)() {
+                // A token of another mailbox is no token for this one.
+                Some(t) => match owns(self.gmail, &t, &self.address) {
+                    Ok(true) => {
                         self.token.token = t;
                         f(self.gmail, &self.token.token)
                     }
-                    _ => Err(iris_gmail::Error::Unauthorized),
-                }
-            }
-            other => other,
+                    Ok(false) => Err(iris_gmail::Error::Unauthorized),
+                    Err(e) => Err(e),
+                },
+                None => Err(iris_gmail::Error::Unauthorized),
+            };
         }
+        if matches!(r, Err(iris_gmail::Error::Unauthorized)) {
+            self.token.refused = true;
+        }
+        r
     }
 
     /// Mark the action before its first write call. The mark is a claim:

@@ -11,10 +11,10 @@ publish.workspace = true
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-sync = { version = "0.0.0", path = "../iris-sync" }
 rusqlite = "=0.43.0"
 sha2 = { version = "=0.11.1", default-features = false }
 
 [dev-dependencies]
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
-iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

@@ -146,6 +146,7 @@ impl Box {
         let mut token = Token {
             token: TOKEN.into(),
             renew,
+            refused: false,
         };
         apply(&self.store, &self.gmail, &mut token, account, action)
     }
@@ -410,6 +411,11 @@ fn two_applies_make_one_write() {
     assert_eq!(b.state(a).0, "approved");
     assert!(!b.applying(a));
     drop(other);
+    // A sync of the account runs.
+    let sync = iris_sync::lock(&b.store, b.account).unwrap();
+    assert!(matches!(b.apply(a), Err(Error::Busy)));
+    assert!(!b.applying(a));
+    drop(sync);
     for round in 0..5 {
         let verb = if round % 2 == 0 { "archive" } else { "inbox" };
         let a = b.approved(verb, &ms, PERSON);
@@ -608,6 +614,21 @@ fn a_refused_token_gets_one_new_token() {
     ));
     assert_eq!(b.state(a).0, "approved");
     assert!(!b.applying(a));
+
+    // A new token that Gmail refuses too: the caller learns it, to set the
+    // account to needs sign-in.
+    b.fake.fail_next(&[401, 401]);
+    let mut renew = || Some(TOKEN.to_string());
+    let mut token = Token {
+        token: TOKEN.into(),
+        renew: &mut renew,
+        refused: false,
+    };
+    assert!(matches!(
+        apply(&b.store, &b.gmail, &mut token, b.account, a),
+        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+    ));
+    assert!(token.refused);
     applied(b.apply(a));
 }
 
