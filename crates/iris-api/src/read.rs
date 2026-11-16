@@ -758,7 +758,11 @@ fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSumm
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
                     h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile,
                     coalesce((SELECT s.kind FROM sender s
-                              WHERE s.address = h.from_addr COLLATE NOCASE), 'stranger')
+                              WHERE s.address = h.from_addr COLLATE NOCASE
+                              -- Rows can differ only in case: the most cautious kind wins.
+                              ORDER BY CASE s.kind WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
+                                       WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END
+                              LIMIT 1), 'stranger')
              FROM message m LEFT JOIN header h ON h.message_id = m.id
              LEFT JOIN body b ON b.message_id = m.id WHERE m.id = ?1",
             [row],
