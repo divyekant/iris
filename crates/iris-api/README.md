@@ -103,6 +103,8 @@ endpoint gives the policy object below. `POST` endpoints take a JSON body.
 | `POST /api/policy/discard` | Body `{}`. Keeps the file on disk as a copy, then writes the text of the active policy to `policy.toml`. With no active version, no new file is written. The answer has `saved`: the name of the copy in the data folder (`policy.toml.saved-<seconds>`), or `null` when there was no file. |
 | `POST /api/policy/mode` | Body `{"version", "mode"}`. Writes the new mode to the file and makes it active. |
 | `POST /api/policy/remove` | Body `{"version", "id"}`. Removes the rule from the file and makes the file active. The ID is never used again. |
+| `POST /api/policy/accept` | Body `{"version", "id"}`: the ID of an open proposal. Adds its rule at the end of the file, with `by = "proposal"`, the next rule ID and the date of today, and makes the file active. A proposal that is not open is a 409. |
+| `POST /api/policy/dismiss` | Body `{"id"}`. Dismisses an open proposal and changes no file. Iris does not propose the same rule again. A proposal that is not open is a 409. |
 
 `version` is the active version that the person saw, `null` for the policy
 of the first start. If it is not the active version, or if the file on disk
@@ -120,6 +122,7 @@ The policy object:
 | `version` | The active version, or `null` at the first start. |
 | `next_id` | One more than the highest rule ID that a rule had. A new rule can use it, because the ID of a removed rule is never used again. |
 | `rules` | The rules of the active policy, in the order of the file. |
+| `proposals` | The open rules that Iris proposes from your approvals (spec 2, section 6.6), the oldest first. Each is `{"id", "approvals", "created_at", "rule"}`. `rule` is the rule that an accept adds, with `next_id` and the date of today; its `line` is 0. |
 | `error` | `{"line", "message"}` when the active text is not valid any more (for example after a program update), else `null`. The active policy then applies nothing. |
 | `file` | The file on disk, compared to the active policy. `state` is `same`, `missing`, `invalid` (with `error`) or `changed`. A `changed` file has `sha256`, `text`, `mode`, and the rules that it `added`, `removed` and `changed` (`{"before", "after"}`). A rule that keeps its ID and changes any field other than `line` is changed. |
 

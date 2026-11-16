@@ -14,6 +14,7 @@
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
+  import { flushHolds, HOLD } from "../act";
 
   let {
     brief: firstBrief,
@@ -21,7 +22,8 @@
     watches: firstWatches,
     now: start = new Date(),
     poll = 5000,
-  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number } = $props();
+    hold = HOLD,
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -74,6 +76,14 @@
       syncing ? poll : poll * 12,
     );
   });
+  // A quick Done holds for Undo. If the person leaves the brief or the page, the click stands: send it now.
+  $effect(() => {
+    window.addEventListener("pagehide", flushHolds);
+    return () => {
+      window.removeEventListener("pagehide", flushHolds);
+      flushHolds();
+    };
+  });
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
@@ -89,6 +99,13 @@
   let answered = $state(false);
   const reload = () => {
     answered = true;
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
+
+  // After a quick Done, load the brief again, so the item and the counts change. The ticket keeps a poll
+  // that started before the close from putting the item back. A failed load waits for the next poll.
+  const done = () => {
     const fresh = briefTicket();
     loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
   };
@@ -179,7 +196,7 @@
   <section class="soon" aria-labelledby="soon">
     <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
     <ul>
-      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} />{/each}
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
@@ -209,7 +226,7 @@
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
       {#if part.items.length}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
         </ul>
       {/if}
       <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>

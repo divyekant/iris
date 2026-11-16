@@ -118,6 +118,9 @@ export type Rule = {
 
 export type Mode = "observe" | "apply";
 
+/** A rule that Iris proposes. `rule` is the rule that an accept adds to the file; its `line` is 0. */
+export type Proposal = { id: number; approvals: number; created_at: number; rule: Rule };
+
 /** GET /api/policy: the active policy and the file on disk, compared to it. */
 export type Policy = {
   mode: Mode;
@@ -125,6 +128,8 @@ export type Policy = {
   /** One more than the highest rule ID that a rule had: the ID of a removed rule is never used again. */
   next_id: number;
   rules: Rule[];
+  /** The open rules that Iris proposes from your approvals (spec 2 section 6.6). */
+  proposals?: Proposal[];
   error: { line: number; message: string } | null;
   file:
     | { state: "same" | "missing" }
