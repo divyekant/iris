@@ -72,9 +72,19 @@ export type Brief = {
   hidden?: number;
   /** The open changesets, and their actions that wait for a person (spec 2 section 5.5). */
   review?: { changesets: number; actions: number };
+  /** The senders that wait at the stranger gate: the first 20 (spec 1 section 6.7). */
+  gate?: GatePage;
+  /** The count of senders that you ignored at the gate. */
+  declined?: number;
 };
 
 export type Bundle = Section & { rule: number; name: string };
+
+/** One sender at the stranger gate (spec 1 section 6.7): its count of items, and the newest 3. */
+export type GateSender = { id: string; address: string; name: string | null; count: number; items: Item[] };
+export type GatePage = { count: number; senders: GateSender[]; next: string | null };
+/** The sender row after an answer at the gate. */
+export type GateAnswer = { id: string; address: string; name: string | null; kind: string; decided_by: string | null; declined: boolean };
 
 export type Account = {
   id: number;
@@ -108,6 +118,9 @@ export type Rule = {
 
 export type Mode = "observe" | "apply";
 
+/** A rule that Iris proposes. `rule` is the rule that an accept adds to the file; its `line` is 0. */
+export type Proposal = { id: number; approvals: number; created_at: number; rule: Rule };
+
 /** GET /api/policy: the active policy and the file on disk, compared to it. */
 export type Policy = {
   mode: Mode;
@@ -115,6 +128,8 @@ export type Policy = {
   /** One more than the highest rule ID that a rule had: the ID of a removed rule is never used again. */
   next_id: number;
   rules: Rule[];
+  /** The open rules that Iris proposes from your approvals (spec 2 section 6.6). */
+  proposals?: Proposal[];
   error: { line: number; message: string } | null;
   file:
     | { state: "same" | "missing" }
@@ -409,4 +424,9 @@ export async function loadBrief(): Promise<Brief> {
   } while (next);
   // A signal that came in between the calls makes the pages longer than the first count.
   return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
+}
+
+/** Your answer to a sender at the stranger gate: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo). */
+export function answerSender(id: string, answer: "accept" | "decline" | "reopen"): Promise<GateAnswer> {
+  return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

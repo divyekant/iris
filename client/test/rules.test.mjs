@@ -146,7 +146,25 @@ test("the brief shows a notice when the policy file waits or has an error", asyn
   assert.match(await notice(fx.policy), /Your policy file changed\. .* Review the change/);
   assert.match(await notice({ ...same, file: { state: "invalid", error: { line: 4, message: "x" } } }), /error on line 4/);
   assert.match(await notice({ ...same, error: { line: 2, message: "x" } }), /Iris cannot use its rules/);
-  assert.equal((await notice(same)).trim(), "");
+  assert.equal((await notice({ ...same, proposals: [] })).trim(), "");
+});
+
+test("the suggestions of Iris show above the mode, and wait while the file waits", async () => {
+  const t = text(await render("/src/views/Rules.svelte", { policy: same }));
+  assert.ok(t.indexOf("Suggested by Iris") < t.indexOf("Mode"), t);
+  assert.match(t, /Archive mail from deals@acme\.example Archive From deals@acme\.example You approved all 14 archive changes like this\. Add the rule Dismiss/);
+  assert.match(t, /Mark mail from services as read Mark as read From services You approved all 11 read changes like this\./);
+  const blocked = await render("/src/views/Rules.svelte", { policy: fx.policy });
+  // Add waits for the file; Dismiss changes no file.
+  assert.equal(blocked.match(/class="accept[^"]*"[^>]*disabled/g)?.length, 2);
+  assert.doesNotMatch(text(await render("/src/views/Rules.svelte", { policy: { ...same, proposals: [] } })), /Suggested by Iris/);
+});
+
+test("the brief says that Iris suggests rules, after each notice of the file", async () => {
+  const notice = (policy) => render("/src/views/PolicyNotice.svelte", { policy }).then(text);
+  assert.match(await notice(same), /Iris suggests 2 rules from your approvals\. See the suggestions/);
+  assert.match(await notice({ ...same, proposals: [same.proposals[0]] }), /Iris suggests a rule from/);
+  assert.doesNotMatch(await notice(fx.policy), /suggests/);
 });
 
 test("a policy change is a POST with JSON and the token, and gives the API error text", async () => {

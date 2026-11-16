@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Changeset, type HandledPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Changeset, type GatePage, type HandledPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -13,12 +13,13 @@
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
+  import Gate from "./views/Gate.svelte";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
-  let active = $derived(route.view === "home" || route.view === "section" || route.view === "bundle" || route.view === "handled" ? "#/brief" : `#/${hash.replace(/^#\/?/, "").split("/")[0]}`);
+  let active = $derived(route.view === "home" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" ? "#/brief" : `#/${hash.replace(/^#\/?/, "").split("/")[0]}`);
 
   $effect(() => {
     const update = () => {
@@ -64,7 +65,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled"}
+  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -91,6 +92,11 @@
     {:else if route.view === "handled"}
       {#await Promise.all([get<HandledPage>("handled?limit=50"), get<Page & { count: number }>("brief/hidden?limit=50")]) then [changes, hidden]}
         <Handled {changes} {hidden} />
+      {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "gate"}
+      {@const path = route.declined ? "gate/declined?limit=50" : "gate?limit=50"}
+      {#await get<GatePage>(path) then page}
+        <Gate {page} title={route.declined ? "Senders that you ignored" : "From senders you do not know"} declinedList={route.declined} more={path} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "list"}
       {@const form = route.form}

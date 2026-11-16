@@ -1,4 +1,4 @@
-//! The store rules of matters (migration 13) and the writes of the person.
+//! The store rules of matters (migration 16) and the writes of the person.
 
 use iris_matters::{check_title, clean, confirm, decline, insert_proposal, write, Error};
 use iris_store::{NewMessage, Store};

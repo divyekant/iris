@@ -23,13 +23,16 @@ use axum::{
 use iris_store::Store;
 use serde::Deserialize;
 
+mod ask;
 mod auth;
 mod export;
+pub mod gate;
 pub mod policy;
 mod read;
 mod review;
 mod verbs;
 mod watch;
+pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
 pub use export::{export, Exported};
 pub use read::*;
@@ -45,6 +48,11 @@ pub enum Error {
     /// The request cannot apply to the state of now, for example a policy
     /// that changed after the person saw it.
     Conflict(String),
+    /// The engine cannot do the request now, for example with no model or
+    /// no budget.
+    Unavailable(String),
+    /// The model failed or gave an answer that is not valid.
+    Model(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -53,7 +61,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "{e}"),
-            Error::Query(why) | Error::Conflict(why) => write!(f, "{why}"),
+            Error::Query(why)
+            | Error::Conflict(why)
+            | Error::Unavailable(why)
+            | Error::Model(why) => write!(f, "{why}"),
         }
     }
 }
@@ -75,6 +86,8 @@ impl IntoResponse for Error {
         let code = match self {
             Error::Query(_) => StatusCode::BAD_REQUEST,
             Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Error::Model(_) => StatusCode::BAD_GATEWAY,
             Error::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         error(code, &self.to_string())
@@ -89,15 +102,32 @@ fn not_found() -> Response {
     error(StatusCode::NOT_FOUND, "not found")
 }
 
+/// The routes of the API, under `/api`, with no model: `POST /api/ask`
+/// answers 503. See [`router_with_model`].
+pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
+    routes(store, auth, None)
+}
+
 /// The routes of the API, under `/api`. Merge them before the fallback of
 /// `iris_web::router()`. Each request needs the bearer token of the sign-in
-/// of `auth` (see [`Auth`]).
-pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
+/// of `auth` (see [`Auth`]). `connect` makes the model client of
+/// `POST /api/ask`.
+pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -> Router {
+    routes(store, auth, Some(connect))
+}
+
+fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
+    let ask = Router::new()
+        .route("/api/ask", post(post_ask))
+        .with_state((store.clone(), connect));
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/handled", get(get_handled))
+        .route("/api/gate", get(get_gate))
+        .route("/api/gate/declined", get(get_declined))
+        .route("/api/senders/{id}/{answer}", post(post_answer))
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
@@ -115,12 +145,15 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/policy/discard", post(post_discard))
         .route("/api/policy/mode", post(post_mode))
         .route("/api/policy/remove", post(post_remove))
+        .route("/api/policy/accept", post(post_accept))
+        .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
         .with_state(store)
+        .merge(ask)
         // The code exchange has no handler: the guard answers it.
         .route(SIGN_IN, any(|| async { not_found() }))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
@@ -206,6 +239,27 @@ async fn post_withdraw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> R
         })
         .await,
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskBody {
+    question: String,
+}
+
+/// One question of the person. The model call runs on a blocking thread,
+/// so the other requests go on.
+async fn post_ask(
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
+    b: std::result::Result<Json<AskBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
+    let a = tokio::task::spawn_blocking(move || answer(&s, &connect, &b.question, now_ms()))
+        .await
+        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(Json(a).into_response())
 }
 
 #[derive(Deserialize)]
@@ -359,6 +413,48 @@ async fn post_verb(
         .map_or_else(not_found, |d| Json(d).into_response()))
 }
 
+/// The senders that wait at the stranger gate.
+async fn get_gate(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        false,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The senders that the person declined at the gate.
+async fn get_declined(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        true,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The answer of the person at the stranger gate: `accept`, `decline` or
+/// `reopen` (specification 1, section 6.7). The answer is the sender row.
+async fn post_answer(
+    State(s): State<Arc<Store>>,
+    Path((id, answer)): Path<(String, String)>,
+) -> Result<Response> {
+    Ok(gate::answer(&s, &id, &answer, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
@@ -462,6 +558,35 @@ async fn post_remove(
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
     Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+/// `id` is the ID of an open proposal (spec 2, section 6.6).
+#[derive(Deserialize)]
+struct ProposalBody {
+    version: Option<i64>,
+    id: i64,
+}
+
+async fn post_accept(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ProposalBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let change = iris_policy::Change::Accept(b.id);
+    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+#[derive(Deserialize)]
+struct DismissBody {
+    id: i64,
+}
+
+async fn post_dismiss(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<DismissBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
 }
 
 async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {

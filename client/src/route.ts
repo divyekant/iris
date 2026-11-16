@@ -9,6 +9,7 @@ export type Route =
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
   | { view: "bundle"; rule: number }
+  | { view: "gate"; declined: boolean }
   | { view: "item" | "mail"; id: string };
 
 const LISTS = { commitments: "commitment", conversations: "conversation", feed: "feed", signals: "signal" } as const;
@@ -32,6 +33,8 @@ export function parse(hash: string): Route {
   }
   if (name in LISTS) return { view: "list", form: LISTS[name as keyof typeof LISTS] };
   if ((name === "item" || name === "mail") && id) return { view: name, id };
+  // #/brief/gate: all senders at the stranger gate. #/brief/declined: the senders that you ignored.
+  if (name === "brief" && (id === "gate" || id === "declined")) return { view: "gate", declined: id === "declined" };
   if (name === "brief" && id in SECTIONS) return { view: "section", key: id as SectionKey };
   // #/brief/bundle/3: the items of bundle rule 3 (spec 2 section 6.4).
   const rule = hash.replace(/^#\/?/, "").split("/")[2] ?? "";

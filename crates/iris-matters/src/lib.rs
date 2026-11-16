@@ -2,7 +2,7 @@
 //! items that belong together. Iris proposes a matter; the person confirms
 //! or declines it.
 //!
-//! The store holds the rules of the spec as triggers (migration 13), and
+//! The store holds the rules of the spec as triggers (migration 16), and
 //! the one validity rule of a proposal as the view `matter_valid`. This
 //! crate writes through these rules: it never decides validity in Rust.
 //!
