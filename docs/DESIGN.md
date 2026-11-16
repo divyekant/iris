@@ -68,6 +68,7 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 | Quote | `Item.svelte` | The words of the mail that made the item, with a `primary` line on the left and the link to the mail. |
 | Chips | `Brief.svelte`, `Records.svelte` | Round links or buttons with a count. The chosen chip and a chip under the pointer have a `primary` border. |
 | Primary button | `Code.svelte`, `Setup.svelte` | A `primary` background with the `on-primary` text color. One for each screen at most. |
+| Due soon | `Brief.svelte` | The first section of the brief, after the live login codes: each commitment that you owe in 2 days or less, or that is late, in the local day of the viewer. It has the `warning` border on the left. You owe counts and lists the rest, and its "All" link opens the full list. |
 | Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail or an error. |
 | Access notice | `App.svelte` | Above every view: why the API cannot answer now (no sign-in, a used sign-in address, or no engine). It goes away at the next good answer. It uses the `warning` border. |
 | Setup link | `App.svelte` | Above each view other than setup and the brief, when Iris has no account: a link to setup. The Brief link opens setup in that case. It uses the `warning` border. |
