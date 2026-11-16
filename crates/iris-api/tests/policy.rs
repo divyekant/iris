@@ -242,7 +242,12 @@ async fn a_file_that_is_not_valid_shows_its_line_and_can_be_discarded() {
         (code, v["file"].clone()),
         (StatusCode::OK, json!({ "state": "missing" }))
     );
-    assert!(d.0.join(iris_policy::DISCARDED).exists());
+    let saved = v["saved"].as_str().unwrap();
+    assert!(saved.starts_with("policy.toml.saved-"), "{saved}");
+    assert_eq!(
+        std::fs::read_to_string(d.0.join(saved)).unwrap(),
+        "version = 0\nmode = \"auto\"\n"
+    );
 }
 
 #[tokio::test]

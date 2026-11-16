@@ -12,7 +12,7 @@ mod edit;
 mod eval;
 
 pub use active::{active, confirm, file_state, version_text, Active, Confirm, FileState};
-pub use edit::{change, discard, edit_text, Change, Edited, DEFAULT_TEXT, DISCARDED};
+pub use edit::{change, discard, edit_text, Change, Discarded, Edited, DEFAULT_TEXT};
 pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
 
 use serde::Deserialize;

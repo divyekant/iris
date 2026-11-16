@@ -201,22 +201,44 @@ fn a_change_waits_while_the_file_is_not_the_active_policy() {
 }
 
 #[test]
+fn a_change_after_a_confirmation_needs_the_file() {
+    // A missing file after a confirmation is not the active policy either.
+    let (_d, s) = store("gone");
+    let text = format!("version = 0\nmode = \"apply\"\n{}", rule(1));
+    std::fs::write(s.dir().join(FILE), &text).unwrap();
+    assert!(matches!(
+        confirm(&s, &sha256_hex(&text), 1).unwrap(),
+        Confirm::Done { .. }
+    ));
+    std::fs::remove_file(s.dir().join(FILE)).unwrap();
+    assert_eq!(
+        change(&s, Some(1), Change::Remove(1), 2).unwrap(),
+        Edited::FileChanged
+    );
+    assert!(!s.dir().join(FILE).exists());
+    assert_eq!(s.read(active).unwrap().version, Some(1));
+}
+
+fn saved(d: Discarded) -> String {
+    match d {
+        Discarded::Done { saved: Some(p) } => std::fs::read_to_string(p).unwrap(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_discard_keeps_a_copy_and_writes_the_active_text() {
     let (_d, s) = store("discard");
     let path = s.dir().join(FILE);
     // Nothing to discard at the first start with no file.
-    assert!(!discard(&s).unwrap());
+    assert_eq!(discard(&s).unwrap(), Discarded::Nothing);
     assert!(!path.exists());
 
-    // A file at the first start: the discard leaves no file.
+    // A file at the first start: the discard leaves no file, and keeps a copy.
     let edit = format!("version = 0\nmode = \"apply\"\n{}", rule(1));
     std::fs::write(&path, &edit).unwrap();
-    assert!(discard(&s).unwrap());
+    assert_eq!(saved(discard(&s).unwrap()), edit);
     assert_eq!(file_state(&s).unwrap(), FileState::Missing);
-    assert_eq!(
-        std::fs::read_to_string(s.dir().join(DISCARDED)).unwrap(),
-        edit
-    );
     assert_eq!(s.read(active).unwrap().version, None);
 
     // A file that is not valid, after a confirmation: the discard writes the active text.
@@ -226,14 +248,16 @@ fn a_discard_keeps_a_copy_and_writes_the_active_text() {
         confirm(&s, &sha256_hex(&text), 1).unwrap(),
         Confirm::Done { .. }
     ));
-    std::fs::write(&path, "mode = ").unwrap();
-    assert!(discard(&s).unwrap());
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
-    assert_eq!(file_state(&s).unwrap(), FileState::Same);
-    assert!(!discard(&s).unwrap());
+    for bad in ["mode = ", "version = 0\nmode = \"observe\"\n"] {
+        std::fs::write(&path, bad).unwrap();
+        assert_eq!(saved(discard(&s).unwrap()), bad);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(file_state(&s).unwrap(), FileState::Same);
+    }
+    assert_eq!(discard(&s).unwrap(), Discarded::Nothing);
 
     // A missing file comes back.
     std::fs::remove_file(&path).unwrap();
-    assert!(discard(&s).unwrap());
+    assert_eq!(discard(&s).unwrap(), Discarded::Done { saved: None });
     assert_eq!(file_state(&s).unwrap(), FileState::Same);
 }

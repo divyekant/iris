@@ -3,7 +3,7 @@
 //! person makes in the web client.
 
 use crate::{Error, Result};
-use iris_policy::{Change, Confirm, Edited, FileState, Mode, Policy, Rule};
+use iris_policy::{Change, Confirm, Discarded, Edited, FileState, Mode, Policy, Rule};
 use iris_store::Store;
 use serde_json::{json, Value};
 
@@ -44,11 +44,24 @@ pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Value> {
     }
 }
 
-/// Writes the active policy to the file, and keeps the old file as
-/// `policy.toml.discarded`.
+/// Writes the active policy to the file. The engine keeps the old file as
+/// a copy; `saved` is its name.
 pub fn discard(store: &Store) -> Result<Value> {
-    iris_policy::discard(store)?;
-    policy(store)
+    let saved = match iris_policy::discard(store)? {
+        Discarded::Nothing => None,
+        Discarded::Done { saved } => saved,
+        Discarded::FileChanged => {
+            return Err(conflict(
+                "The policy file changed again. Look at the new change.",
+            ))
+        }
+    };
+    let mut v = policy(store)?;
+    v["saved"] = json!(saved
+        .as_deref()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy()));
+    Ok(v)
 }
 
 /// Changes the mode, or removes a rule, if the active version is `seen`.

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use iris_store::{Body, Cleaned, Error, NewMessage, Store, GONE_KEEP_MS};
+use iris_store::{Body, Cleaned, Error, NewMessage, PolicyExpect, Store, GONE_KEEP_MS};
 use rusqlite::Connection;
 
 const NOW: i64 = 1_800_000_000_000;
@@ -310,7 +310,15 @@ fn a_backup_restores_to_a_new_folder_with_secrets_and_policy() {
             )?)
         })
         .unwrap();
-    store.write_policy(b"[rules]\nsend = \"hold\"\n").unwrap();
+    let lock = store.backup_lock().unwrap();
+    store
+        .write_policy(
+            &lock,
+            PolicyExpect::Any,
+            Some(b"[rules]\nsend = \"hold\"\n"),
+        )
+        .unwrap();
+    drop(lock);
     let id = store
         .put_messages(acc, &[msg(&store, "a", b"raw a", "apple")])
         .unwrap()[0];
@@ -360,7 +368,11 @@ fn the_policy_write_waits_for_a_backup() {
     let store = Arc::new(Store::open(&dir.0).unwrap());
     let held = store.backup_lock().unwrap();
     let s = Arc::clone(&store);
-    let writer = std::thread::spawn(move || s.write_policy(b"v2").unwrap());
+    let writer = std::thread::spawn(move || {
+        let lock = s.backup_lock().unwrap();
+        s.write_policy(&lock, PolicyExpect::Any, Some(b"v2"))
+            .unwrap()
+    });
     std::thread::sleep(Duration::from_millis(200));
     assert!(
         !dir.0.join("policy.toml").exists(),
@@ -401,4 +413,76 @@ fn a_message_with_a_missing_content_file_writes_nothing() {
         store.put_messages(acc, &[bad]),
         Err(Error::MissingContent(_))
     ));
+}
+
+/// The files of the data folder whose names start with `policy.toml`.
+fn policy_files(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("policy.toml")
+        })
+        .map(|p| {
+            (
+                p.file_name().unwrap().to_str().unwrap().to_string(),
+                fs::read(&p).unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_policy_write_never_loses_a_file_text() {
+    // Invariant: each text that was at policy.toml is the expected text, is
+    // back at policy.toml, or stays as a saved copy.
+    let dir = TempDir::new("policy-keep");
+    let store = Store::open(&dir.0).unwrap();
+    let lock = store.backup_lock().unwrap();
+    let path = dir.0.join("policy.toml");
+    let write = |expect, text: Option<&[u8]>| store.write_policy(&lock, expect, text).unwrap();
+
+    // No file is expected, and there is none.
+    assert!(write(PolicyExpect::Missing, Some(b"v1")).done);
+    assert_eq!(
+        policy_files(&dir.0),
+        [("policy.toml".into(), b"v1".to_vec())]
+    );
+    // The expected text: replaced, with no copy.
+    assert!(write(PolicyExpect::Text(b"v1"), Some(b"v2")).done);
+    assert_eq!(
+        policy_files(&dir.0),
+        [("policy.toml".into(), b"v2".to_vec())]
+    );
+    // Another text than the expected one: it goes back.
+    for expect in [PolicyExpect::Text(b"v1"), PolicyExpect::Missing] {
+        let got = write(expect, Some(b"v3"));
+        assert!(!got.done && got.saved.is_none());
+        assert_eq!(
+            policy_files(&dir.0),
+            [("policy.toml".into(), b"v2".to_vec())]
+        );
+    }
+    // A file was expected and there is none: nothing is written.
+    fs::remove_file(&path).unwrap();
+    assert!(!write(PolicyExpect::Text(b"v2"), Some(b"v3")).done);
+    assert!(policy_files(&dir.0).is_empty());
+
+    // Each discard keeps its own copy.
+    fs::write(&path, b"edit a").unwrap();
+    let a = write(PolicyExpect::Any, Some(b"v2"));
+    fs::write(&path, b"edit b").unwrap();
+    let b = write(PolicyExpect::Any, None);
+    assert!(a.done && b.done);
+    assert_ne!(a.saved, b.saved);
+    assert_eq!(fs::read(a.saved.unwrap()).unwrap(), b"edit a");
+    assert_eq!(fs::read(b.saved.unwrap()).unwrap(), b"edit b");
+    assert!(!path.exists());
+    assert!(!dir.0.join("policy.toml.tmp").exists());
 }

@@ -357,9 +357,12 @@ makes a copy while the engine runs:
 5. Release the lock.
 
 The engine makes the backup folder with mode `0700`, because it holds the key
-and the mail. The engine writes `policy.toml` to a temporary file and then
-renames it, and it does not write the file during a backup. So the copy has
-one complete version of the policy.
+and the mail. The engine writes `policy.toml` to a temporary file, and it
+does not write the file during a backup. So the copy has one complete version
+of the policy. The person can save the file at any time, so the engine first
+renames the old file to a copy, checks that copy, and then puts the new file
+in place with a hard link, which never replaces a file. So a save during the
+write is never lost.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.

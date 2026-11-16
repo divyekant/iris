@@ -78,13 +78,15 @@ endpoint gives the policy object below. `POST` endpoints take a JSON body.
 |---|---|
 | `GET /api/policy` | Gives the policy object. Changes nothing. |
 | `POST /api/policy/confirm` | Body `{"sha256"}`: the `file.sha256` that the person saw. Makes the file on disk the active policy. |
-| `POST /api/policy/discard` | Body `{}`. Renames the file on disk to `policy.toml.discarded`, then writes the text of the active policy to `policy.toml`. With no active version, no new file is written. |
+| `POST /api/policy/discard` | Body `{}`. Keeps the file on disk as a copy, then writes the text of the active policy to `policy.toml`. With no active version, no new file is written. The answer has `saved`: the name of the copy in the data folder (`policy.toml.saved-<seconds>`), or `null` when there was no file. |
 | `POST /api/policy/mode` | Body `{"version", "mode"}`. Writes the new mode to the file and makes it active. |
 | `POST /api/policy/remove` | Body `{"version", "id"}`. Removes the rule from the file and makes the file active. The ID is never used again. |
 
 `version` is the active version that the person saw, `null` for the policy
 of the first start. If it is not the active version, or if the file on disk
-is not the active policy, the change is a 409. A change keeps the other text
+is not the active policy (also no file after a confirmation), the change is a
+409. A file that the person saves during a change or a discard is never
+replaced. A change keeps the other text
 and the comments of the file. A comment directly above a removed rule goes
 with the rule. A comment that a blank line separates from the rule stays.
 

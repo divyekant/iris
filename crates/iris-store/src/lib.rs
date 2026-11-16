@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, Transaction};
 
-pub use backup::{BackupLock, Cleaned, GONE_KEEP_MS};
+pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
