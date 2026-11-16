@@ -481,9 +481,15 @@ fn content_text(c: &[u8], num: Option<u32>, doc: &mut Doc) {
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(0.0);
-                // In a `TJ` array, a large negative number moves to the next word.
+                // In a `TJ` array, a large negative number moves to the next
+                // word. The space is a tag, not a code byte, so two-byte codes
+                // stay aligned.
                 if in_array && n < -200.0 {
-                    add(&mut strings, b" ");
+                    if in_text && !invisible {
+                        doc.strings(&strings);
+                        doc.space();
+                    }
+                    strings.clear();
                 } else {
                     last_num = n;
                 }
