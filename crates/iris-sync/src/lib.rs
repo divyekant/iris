@@ -211,6 +211,8 @@ fn run(
     let profile = gmail.profile(token)?;
     let mut done = Done::default();
     let mut resync = false;
+    // True after a resync of this call began from a new H1.
+    let mut fresh = false;
     loop {
         let s = state(store, account)?;
         if !profile.email_address.eq_ignore_ascii_case(&s.address) {
@@ -225,14 +227,16 @@ fn run(
             (Some(KIND_RESYNC), _) => {
                 *kind = KIND_RESYNC;
                 resync = true;
+                fresh |= s.start.is_none();
                 resync_steps(store, gmail, account, token, &s, &mut done)?
             }
             (Some(_), _) => return Err(Error::BadState("unknown sync kind")),
         };
         match incremental(store, gmail, account, token, from, &mut done) {
-            // H1 of a resync of this call is too old too: stop, do not loop.
-            Err(Error::Gmail(iris_gmail::Error::HistoryExpired)) if !resync => {
-                // Section 4.4: the next turn of the loop starts the full resync.
+            Err(Error::Gmail(iris_gmail::Error::HistoryExpired)) => {
+                // Section 4.4: the next turn of the loop, or the next call,
+                // starts a full resync from a new H1. A saved H1 can be too
+                // old after a long stop, so it does not stay.
                 store.write(|tx| {
                     tx.execute(
                         "UPDATE account SET sync_kind = ?2, sync_start = NULL, sync_step = NULL
@@ -241,6 +245,10 @@ fn run(
                     )?;
                     Ok(())
                 })?;
+                // A new H1 of this call is too old too: stop, do not loop.
+                if fresh {
+                    return Err(iris_gmail::Error::HistoryExpired.into());
+                }
             }
             r => {
                 return Ok(Synced {
