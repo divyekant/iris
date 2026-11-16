@@ -83,6 +83,10 @@ pub struct Outcome {
     /// No fixed rule matched, and the message has 3 failed tries or a later
     /// `retry_at`: no model call, and step 8 wrote nothing.
     pub waiting: bool,
+    /// The message changed in the store while the model worked (content,
+    /// labels, sender kind or gone). Step 8 wrote nothing, and the message
+    /// stays not understood for the next run.
+    pub changed: bool,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -104,6 +108,8 @@ struct Row {
 /// it again on the same message to understand it again: the items of the
 /// message that a person did not correct are made again, not duplicated.
 pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -> Result<Outcome> {
+    // The state that this run reads. Write 3 checks it again.
+    let before = store.read(|c| Ok(state(c, message)?))?;
     let row = read_row(store, message)?;
     if row.gone {
         return Ok(Outcome {
@@ -129,6 +135,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     } else {
         sender_kind(store, head.from_addr.as_deref())?
     };
+    let (from, kind_read) = (head.from_addr.clone(), kind);
     // The spoof check needs this lookup: a read error stops understanding
     // before any model call.
     let known_list = match &head.from_name {
@@ -224,7 +231,16 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 
     // Write 3: step 8.
     let mut invalid = None;
+    let mut changed = false;
     let written = store.write(|tx| {
+        let kind_now = match &from {
+            Some(f) if !sent => sender_kind_in(tx, f)?,
+            _ => kind_read,
+        };
+        if state(tx, message)? != before || kind_now != kind_read {
+            changed = true;
+            return Ok(Vec::new());
+        }
         if d.failed {
             // The old items are not supported by this run: remove them. The
             // message is not understood until a run succeeds.
@@ -266,7 +282,30 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         (_, Some(e)) => return Err(Error::Invalid(e)),
         (r, None) => r?,
     };
+    if changed {
+        return Ok(Outcome {
+            changed: true,
+            calls: out.calls,
+            usage: out.usage,
+            ..Outcome::default()
+        });
+    }
     Ok(out)
+}
+
+/// The state of a message that understanding depends on: the content, the
+/// gone state and the labels. The sender kind is checked apart.
+fn state(c: &rusqlite::Connection, message: i64) -> rusqlite::Result<Option<String>> {
+    c.query_row(
+        "SELECT coalesce(m.content_sha256, '') || '|' || (m.gone_at IS NOT NULL) || '|' ||
+           coalesce((SELECT group_concat(provider_id, ',') FROM (
+              SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+              WHERE ml.message_id = m.id ORDER BY l.provider_id)), '')
+         FROM message m WHERE m.id = ?1",
+        [message],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 fn read_row(store: &Store, message: i64) -> Result<Row> {
@@ -334,14 +373,15 @@ fn sender_kind(store: &Store, from: Option<&str>) -> Result<Kind> {
     let Some(from) = from else {
         return Ok(Kind::Stranger);
     };
-    let kind: Option<Option<String>> = store.read(|c| {
-        Ok(
-            c.query_row("SELECT kind FROM sender WHERE address = ?1", [from], |r| {
-                r.get(0)
-            })
-            .optional()?,
-        )
-    })?;
+    Ok(store.read(|c| Ok(sender_kind_in(c, from)?))?)
+}
+
+fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind> {
+    let kind: Option<Option<String>> = c
+        .query_row("SELECT kind FROM sender WHERE address = ?1", [from], |r| {
+            r.get(0)
+        })
+        .optional()?;
     Ok(kind.flatten().map_or(Kind::Stranger, |k| Kind::parse(&k)))
 }
 

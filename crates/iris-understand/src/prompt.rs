@@ -129,9 +129,16 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
         let t = cut(t, 200);
         m.insert("title".into(), Value::String(t));
     }
-    if form == "feed" {
-        // The label decides the status of a feed, not the model.
-        m.insert("status".into(), json!(crate::feed_status(cx)));
+    // The engine sets the first status, not the model: later mail, a person
+    // or a gone source changes it. The label decides the status of a feed.
+    let status = match form.as_str() {
+        "commitment" => Some("open"),
+        "record" => Some("kept"),
+        "feed" => Some(crate::feed_status(cx)),
+        _ => None,
+    };
+    if let Some(st) = status {
+        m.insert("status".into(), json!(st));
     }
     let sender = party_sender(a);
     let mut put = |k: &str, v: Value| {
@@ -140,7 +147,6 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     let at = a.date(cx);
     match form.as_str() {
         "commitment" => {
-            put("status", json!("open"));
             let you_owe = src.get("direction").and_then(Value::as_str) == Some("you_owe");
             // In sent mail the sender is the owner: the other party is the
             // first recipient. With no recipient, the item is not valid.
@@ -159,7 +165,6 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
             put("counterparty", other);
         }
         "record" => {
-            put("status", json!("kept"));
             put("issuer", sender);
         }
         "feed" => {

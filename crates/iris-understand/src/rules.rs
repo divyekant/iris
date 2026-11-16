@@ -9,8 +9,6 @@ use crate::{cut, party_sender, Analysis, Context, Draft, Kind};
 /// The default life of a code signal (specification 1, section 6.6).
 const CODE_LIFE_MS: i64 = 15 * 60 * 1000;
 /// The most characters of the body that the receipt pattern reads.
-const SCAN_CHARS: usize = 4_000;
-
 const CODE_WORDS: [&str; 5] = ["code", "verification", "one-time", "one time", "passcode"];
 const RECORD_WORDS: [&str; 8] = [
     "receipt",
@@ -88,8 +86,8 @@ fn or_none(s: &str) -> &str {
 }
 
 fn looks_like_record(a: &Analysis) -> bool {
-    let body: String = a.text.text.chars().take(SCAN_CHARS).collect();
-    let hay = format!("{}\n{}", a.text.subject, body).to_lowercase();
+    // The whole clean text: it is bounded, and a receipt can come late.
+    let hay = format!("{}\n{}", a.text.subject, a.text.text).to_lowercase();
     RECORD_WORDS.iter().any(|w| hay.contains(w))
 }
 
@@ -103,7 +101,7 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         .collect();
     for (i, line) in lines.iter().enumerate() {
         let low = line.to_lowercase();
-        if !CODE_WORDS.iter().any(|w| low.contains(w)) {
+        if !CODE_WORDS.iter().any(|w| has_word(&low, w)) {
             continue;
         }
         for l in lines[i..].iter().take(2) {
@@ -113,6 +111,16 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         }
     }
     None
+}
+
+/// True if `w` is in `hay` as a word: no letter or digit next to it, so
+/// "barcode" does not hold the word "code".
+fn has_word(hay: &str, w: &str) -> bool {
+    hay.match_indices(w).any(|(i, _)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + w.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// The first run of 4 to 8 ASCII digits with no letter or digit next to it.
@@ -160,5 +168,8 @@ mod tests {
             Some(("7731".into(), "7731"))
         );
         assert_eq!(find_code("Weekly news", "Read 2024 stories"), None);
+        assert!(has_word("your code: 1234", "code"));
+        assert!(!has_word("barcode 123456", "code"));
+        assert!(!has_word("decode it", "code"));
     }
 }
