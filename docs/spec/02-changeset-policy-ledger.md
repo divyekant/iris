@@ -353,6 +353,12 @@ match in two ways, so that each reading is the strict one:
 - For a `deny` or a `review` rule, a message matches when one or more of its
   items has that value.
 
+These two readings apply only to `form`, `record_type` and
+`commitment_kind`. The other conditions do not read items. So an `allow`
+rule with no item condition, for example `sender = "@shop.example"`, matches
+a message with no items too: the person wrote a rule about the sender, not
+about the items.
+
 A rule without `author` matches each author, `local` included.
 
 The engine refuses a file that is not valid (section 6.3). A file is not
@@ -378,6 +384,11 @@ An `allow` rule never matches an action with no message.
 - When the file changes on disk, the engine reads it again. If the file is
   valid, the web client shows the difference to the active policy, and the
   person confirms it. Only then does the file become the active policy.
+- A confirmation names the SHA-256 hash of the text that the person saw. The
+  engine reads the file again in the transaction of the confirmation. If the
+  hash of that text is not the hash of the confirmation, the engine refuses
+  the confirmation, and the web client shows the new difference. So a
+  confirmation never makes active a text that the person did not see.
 - When the person changes the policy in the web client (a change of `mode`,
   an accepted proposal or the removal of a rule), the engine writes the file
   and makes it the active policy in one step. The engine starts from the text
@@ -392,6 +403,19 @@ An `allow` rule never matches an action with no message.
 
 This is fail closed: a change on disk that the person did not confirm, or a
 defect in the file, can never allow more.
+
+Failure list of the policy file. Supported input: a UTF-8 TOML file of at
+most 256 KiB that follows section 6.2.
+
+| Failure | Safe result |
+|---|---|
+| The file does not exist. | The active policy stays. At the first start it is the mode `observe` with no rules. |
+| The engine cannot read the file (permissions, an I/O error). | The active policy stays. The brief shows the error. |
+| The file is not UTF-8, is larger than 256 KiB, or is not valid TOML or not valid under section 6.2. | The active policy stays. The brief shows the error and the line, when the error has one. |
+| The file changes between the view of the difference and the confirmation. | The engine refuses the confirmation (hash check above). The person reviews the new text. |
+| The file changes while the engine reads it, so the engine reads a part of an edit. | The text is not valid, or it is a new text with its own hash. Either way it is not active until the person confirms that text. |
+| A crash during a confirmation, or during a change from the web client. | The active policy and its hash change in one SQLite transaction. After the start, the active policy is the old one or the new one, never a mix. If the file on disk is not the active policy, the person confirms or discards the difference. |
+| Any other input. | The active policy stays. |
 
 When the active policy changes, the engine evaluates the attention of each
 item again (section 6.4).
