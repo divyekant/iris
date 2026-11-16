@@ -246,10 +246,27 @@ fn set_step(store: &Store, account: i64, start: Option<u64>, step: i64) -> Resul
 }
 
 /// Step 3: save each listed message as "known, not fetched", one page in
-/// each transaction. A message that the store has stays as it is, so a list
-/// again after a stop loses no fetch. The `AUTOINCREMENT` row IDs keep the
-/// list order (newest first) for the fetch step.
+/// each transaction. A message that the store has stays as it is. The
+/// `AUTOINCREMENT` row IDs keep the list order (newest first) for the fetch
+/// step.
+///
+/// A list that stopped starts again from the first page. In the list step no
+/// message is fetched yet, so the rows of the stopped list go first: new
+/// rows then follow the order of the new list, also for mail that came in
+/// a new thread after the stop.
 fn list(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<()> {
+    store.write(|tx| {
+        tx.execute(
+            "DELETE FROM message WHERE account_id = ?1 AND fetched_at IS NULL AND gone_at IS NULL",
+            [account],
+        )?;
+        tx.execute(
+            "DELETE FROM thread WHERE account_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM message m WHERE m.thread_id = thread.id)",
+            [account],
+        )?;
+        Ok(())
+    })?;
     let mut page_token: Option<String> = None;
     loop {
         let page = gmail.messages(token, &[], true, page_token.as_deref())?;
