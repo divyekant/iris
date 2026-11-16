@@ -670,3 +670,8 @@ test("a download of an original that Iris has not copied yet says so", async () 
     globalThis.fetch = saved;
   }
 });
+
+test("each brief section that shows has its All link, also with fewer than 8 items", async () => {
+  const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW, poll: 0 });
+  assert.match(html, /href="#\/brief\/you_owe"[^>]*>All 2</);
+});
