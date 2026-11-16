@@ -132,6 +132,9 @@ pub struct Usage {
     pub output_tokens: u64,
     /// `None` when the config has no price.
     pub cost_micro_usd: Option<u64>,
+    /// True when the answer gave both token counts. False: the provider can
+    /// charge, but the counts above are not known (they are 0).
+    pub known: bool,
 }
 
 /// The answer of the model. The usage is there also when the text is not JSON,
@@ -175,6 +178,9 @@ pub enum Error {
     BadAnswer(String),
     /// The answer text is not one JSON document ([`Reply::json`]).
     NotJson,
+    /// The caller refused the call before it went out, for example because
+    /// the budget cannot pay it. No request was sent.
+    Budget(String),
 }
 
 impl Error {
@@ -205,6 +211,7 @@ impl fmt::Display for Error {
             ),
             Error::BadAnswer(e) => write!(f, "the model server answer has an unknown format: {e}"),
             Error::NotJson => write!(f, "the model answer is not one JSON document"),
+            Error::Budget(why) => write!(f, "no call: {why}"),
         }
     }
 }
@@ -226,17 +233,35 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: Config) -> Self {
-        let agent = ureq::Agent::config_builder()
+        // No redirect: the body with the mail goes only to the configured
+        // URL. A local server gets no proxy, so no proxy can forward the
+        // mail off the machine (docs/specs/2026-11-16-cost-control.md).
+        let mut b = ureq::Agent::config_builder()
             .timeout_global(Some(config.timeout))
             .http_status_as_error(false)
-            .build()
-            .new_agent();
+            .max_redirects(0);
+        if config.provider == Provider::OpenAiCompatible {
+            b = b.proxy(None);
+        }
+        let agent = b.build().new_agent();
         Self { config, agent }
     }
 
     /// Sends `instruction` as the system text and `data` (mail text) inside the
     /// data block. Makes one HTTP call, with no retry.
     pub fn ask(&self, instruction: &str, data: &str) -> Result<Reply, Error> {
+        let (url, body) = self.request(instruction, data);
+        self.send(&url, body)
+    }
+
+    /// The byte count of the request body that [`Client::ask`] sends for
+    /// these texts. A provider bills at most one input token for each byte
+    /// of the text in the body, so this is a bound of the input tokens.
+    pub fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
+        self.request(instruction, data).1.to_string().len() as u64
+    }
+
+    fn request(&self, instruction: &str, data: &str) -> (String, Value) {
         let c = &self.config;
         let system = format!("{instruction}\n\n{DATA_NOTE}");
         let user = data_block(data);
@@ -263,10 +288,14 @@ impl Client {
                 }),
             ),
         };
+        (url, body)
+    }
 
+    fn send(&self, url: &str, body: Value) -> Result<Reply, Error> {
+        let c = &self.config;
         let mut req = self
             .agent
-            .post(&url)
+            .post(url)
             .header("content-type", "application/json");
         match (c.provider, &c.api_key) {
             (Provider::Anthropic, Some(k)) => {
@@ -394,6 +423,7 @@ impl Client {
             input_tokens: input.unwrap_or(0),
             output_tokens: output.unwrap_or(0),
             cost_micro_usd: None,
+            known: input.is_some() && output.is_some(),
         };
         let usage = Usage {
             cost_micro_usd: c.price.map(|p| cost(usage, p)),
@@ -425,7 +455,9 @@ fn parse_retry_after(v: &str) -> Option<Duration> {
 }
 
 /// The cost in micro-USD, rounded up so that many small calls do not count as 0.
-fn cost(u: Usage, p: Price) -> u64 {
+/// The cost of `u` at price `p` in micro-USD, rounded up. It saturates at
+/// `u64::MAX`, which no budget holds.
+pub fn cost(u: Usage, p: Price) -> u64 {
     // Each product fits in u128 (64 + 64 bits). Only the sum can overflow.
     let total = (u.input_tokens as u128 * p.input_micro_usd_per_mtok as u128)
         .saturating_add(u.output_tokens as u128 * p.output_micro_usd_per_mtok as u128);
@@ -464,6 +496,7 @@ mod tests {
             input_tokens: i,
             output_tokens: o,
             cost_micro_usd: None,
+            known: true,
         };
         assert_eq!(cost(u(0, 0), p), 0);
         assert_eq!(cost(u(1, 0), p), 1);
