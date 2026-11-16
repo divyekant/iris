@@ -613,10 +613,22 @@ Linux.
 Release 1 exception: release 1 has no socket. The release 1 verbs (`status`,
 `search`, `show`, `mirror sync`, `mirror verify`, `backup` and `account add`)
 open the data folder directly, as the OS user that owns it, and they do not
-need a running engine. They call the same read functions as the local API, so
-they give the same data. Release 1 has no write verb, so no request can skip
-the policy. The socket comes with the first verb that adds an action
-(release 2). Then each verb goes through the socket.
+need a running engine. `status`, `search` and `show` call the same read
+functions as the local API, so they give the same data. Some release 1 verbs
+write to the local store, but none of them changes the mailbox:
+
+| Verb | Local writes | Rules |
+|---|---|---|
+| `account add` | The account row and the sealed sign-in | Specification 1, section 4.9 |
+| `mirror sync` | Messages, content files and the sync log | Specification 1, sections 4.2 to 4.7 |
+| `mirror verify` | Repairs of the mirror, and the sync log | Specification 1, section 4.8 |
+| `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
+
+The policy governs mailbox actions (sections 4 to 6). The writes in
+the table are not mailbox actions, so they do not go through the policy.
+Release 1 has no verb that adds an action, so no request can skip the policy.
+The socket comes with the first verb that adds an action (release 2). Then
+each verb goes through the socket.
 
 | Mode | When | Socket | Who |
 |---|---|---|---|
