@@ -104,6 +104,14 @@ A message with no `internal_date` sorts as the oldest.
 `iris_understand::batch::run(store, model, &Limits, now) -> Report` does
 these steps:
 
+One run at a time: the runner first takes the run lock, an OS file lock on
+the file `understand.lock` in the data folder (`File::try_lock`, the same
+kind of lock as the backup lock of `iris-store`). A second runner, in this
+process or in another, gets the error "a run is in progress" and makes no
+call. The OS releases the lock when the process ends, also after a crash, so
+no stale lock stays. So two runners never pay for the same message, and the
+cost limit of the one run covers all calls.
+
 0. Once at the start of each run, also with no pending message: in one
    write, call `iris_senders::refresh` and apply its kind changes (below).
    This catches the sender changes that a sync made, for example a gone
@@ -177,8 +185,10 @@ CREATE TABLE understand_run (
 ```
 
 - `cost_micro_usd` is NULL when the model has no price (a local model).
-- `unknown_calls` counts the calls with an unknown result (a time-out, a lost
-  response, HTTP 5xx). The provider can charge for such a call. Each one
+- `unknown_calls` counts each call that the provider can charge for but
+  whose usage Iris does not know: a time-out, a lost response, HTTP 5xx, and
+  an HTTP 200 answer with no usage or a usage that does not parse
+  (`BadAnswer`). A call with usage counts its usage, not a worst case. Each one
   adds its worst case to `unknown_cost_micro_usd`: the data budget as input
   tokens (one token for each byte, `MAX_DATA` plus `PROMPT_TOKENS`) and
   `max_tokens` as output tokens, at the price of the model.
@@ -248,11 +258,13 @@ No parser or protocol code is new. The model client is `iris-model`.
 | Input or event | Failure mode | Result | Test |
 |---|---|---|---|
 | A crash during a message | The model call ended, write 3 did not commit | The message stays pending. The next run calls the model for it again: the cost of one message. The run row keeps `stop` NULL. | Fake model, stop after the call, run again: one more call. |
-| A crash between the message and its count write | The items are saved, the count is not | The run row misses the tokens of one message. | Documented limit. |
+| A crash between the message and its count write | The items are saved, the count is not | The run row misses the tokens of one message. A limit issue records it. | Documented limit. |
 | A second run | All messages understood | Zero calls, zero cost. | Counting fake model, two runs. |
 | A sync during a run | A message changes between two writes | `store::understand` gives `changed`. The message stays pending for the next batch. | Existing tests of the store step. |
 | A refused key (401, 403) | No call can work | The run stops with `stop = model`. No try counts. | Fake model error. |
 | A time-out, a lost response, 5xx | Result not known; the provider can charge | The run stops with `stop = model`. The message stays pending. `unknown_calls` and `unknown_cost_micro_usd` grow by one worst case. | Fake model error: the run row has the worst case. |
+| HTTP 200 with no usage or a body that does not parse | The provider can charge, Iris has no count | The call counts in `unknown_calls` with its worst case, also when the try counts as a bad answer. The cost check includes it. | Fake model reply with no usage. |
+| A second `iris understand` while a run goes on | Two runs pay twice | The second run gets "a run is in progress" and makes no call. | Two runners on one store: one gets the error, the fake model sees each message once. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
 | A `SPAM` label comes or goes on an understood message | The hostile mark is stale | The label write resets the message, so the next run checks it again. | Store test. |
