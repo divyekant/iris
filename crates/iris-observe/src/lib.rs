@@ -104,15 +104,20 @@ impl Rule {
 /// The count of messages of each rule, in the order of [`Rule::ALL`].
 pub fn counts(store: &Store, account: i64) -> iris_store::Result<Vec<(Rule, u64)>> {
     store.read(|c| {
-        Rule::ALL
-            .iter()
-            .map(|&rule| {
-                let sql = format!("SELECT count(*) FROM ({})", rule.query());
-                let n: i64 = c.query_row(&sql, [account], |r| r.get(0))?;
-                Ok((rule, n as u64))
-            })
-            .collect()
+        let tx = c.unchecked_transaction()?;
+        count_in(&tx, account)
     })
+}
+
+fn count_in(c: &rusqlite::Connection, account: i64) -> iris_store::Result<Vec<(Rule, u64)>> {
+    Rule::ALL
+        .iter()
+        .map(|&rule| {
+            let sql = format!("SELECT count(*) FROM ({})", rule.query());
+            let n: i64 = c.query_row(&sql, [account], |r| r.get(0))?;
+            Ok((rule, n as u64))
+        })
+        .collect()
 }
 
 /// Write the triage changeset as JSON (specification 2, section 5.1).
@@ -126,9 +131,13 @@ pub fn write_changeset(
     created: &str,
     out: &mut impl Write,
 ) -> iris_store::Result<()> {
-    let counts = counts(store, account)?;
-    let total: u64 = counts.iter().map(|(_, n)| n).sum();
     store.read(|c| {
+        // One read transaction, so the counts and each ID list come from one
+        // snapshot, also when the sync writes at the same time.
+        let tx = c.unchecked_transaction()?;
+        let c = &*tx;
+        let counts = count_in(c, account)?;
+        let total: u64 = counts.iter().map(|(_, n)| n).sum();
         write!(
             out,
             r#"{{"model":"iris/0","id":"cs-0","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
