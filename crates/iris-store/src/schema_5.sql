@@ -71,7 +71,8 @@ CREATE TABLE changeset_action (
   policy INTEGER REFERENCES policy_version(version),
   reason TEXT,
   decided_at INTEGER,
-  -- SHA-256 (hex) of resolved and args at submit (section 5.5).
+  -- SHA-256 (hex) of the verb, the targets text, the args text and the
+  -- resolved message IDs, from submit (sections 5.1 and 5.5).
   hash TEXT,
   -- The submit of the revision of this action. Expiry counts from it.
   submitted_at INTEGER,
