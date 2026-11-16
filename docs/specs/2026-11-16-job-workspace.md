@@ -21,12 +21,13 @@ job does not need gives the agent mail that the person did not give it.
 ## Goal
 
 1. The store holds the scope of each job: the threads and the items that the
-   person gives to the job. Only the person or the engine adds to the scope.
-   An agent cannot add to the scope of its own job.
+   person gives to the job. Only the person or the engine adds to the scope
+   or revokes a part of it. An agent cannot change the scope of its own job.
 2. One function builds the workspace folder of a job from the store and the
    scope. The folder holds the job file, the threads, the commitments, the
    records and the people of the scope, and nothing more from the mailbox.
-3. Hostile mail, drafts, gone mail and signals never go into a workspace.
+3. Hostile mail, drafts, gone mail and signals never go into a file that the
+   build writes.
 4. A build again (before each session) brings the mail files up to date and
    keeps the files that the agent writes: `drafts/` and `notes.md`.
 5. A file in the folder that the agent made, for example a symbolic link,
@@ -61,23 +62,37 @@ this one takes the next free number.
 | `item_id` | INTEGER | An item of the scope, or NULL. |
 | `by` | TEXT NOT NULL | `person` or `engine`. |
 | `at` | INTEGER NOT NULL | Milliseconds. |
+| `revoked_by` | TEXT | `person` or `engine` after a revoke, else NULL. |
+| `revoked_at` | INTEGER | Milliseconds of the revoke, else NULL. |
 
-Exactly one of `thread_id` and `item_id` is set. The pair (`job_id`, ref) is
-unique, so the same thread is in the scope once. No foreign key to `thread`
+Exactly one of `thread_id` and `item_id` is set. `revoked_by` and
+`revoked_at` are both NULL or both set. A row with `revoked_at` NULL is
+active. The pair (`job_id`, ref) is unique among the active rows, so the
+same thread is in the active scope once. A ref that was revoked can be added
+again as a new row. No foreign key to `thread`
 or `item`: the cleanup of gone mail can delete a row, and the build skips a
 missing row.
 
 Triggers:
 
 - An insert needs a job that is not `done`.
-- A row does not change and is never deleted (the scope is part of the
-  audit trail of the job).
-- `by` is `person` or `engine`. No `agent` value exists, so no path in the
-  store can record an agent that widens its own scope.
+- A row is never deleted (the scope is part of the audit trail of the job).
+- The only change to a row is the revoke: `revoked_by` and `revoked_at` go
+  from NULL to a value, once. No other column changes.
+- `by` and `revoked_by` are `person` or `engine`. No `agent` value exists,
+  so no path in the store can record an agent that changes its own scope.
 
 `iris_job::add_scope(store, job, Ref, By, now)` with `Ref::Thread(row)` or
 `Ref::Item(row)`. It refuses `By::Agent`. An add of a ref that is in the
-scope already does nothing. `iris_job::scope(store, job)` gives the refs.
+active scope already does nothing.
+
+`iris_job::revoke_scope(store, job, Ref, By, now)` revokes the active row of
+the ref. It refuses `By::Agent`. A revoke of a ref that is not in the active
+scope does nothing. A revoke is allowed in each state of the job.
+
+`iris_job::scope(store, job)` gives the refs of the active rows. The next
+build writes each owned file again from the active scope, so the mail of a
+revoked ref leaves the files that the build owns.
 
 ### What the scope grants
 
@@ -155,6 +170,14 @@ The build owns `JOB.md`, `job.json`, `threads/`, `commitments/`, `records/`
 and `people/`. It writes them new on each build. The agent owns `drafts/` and
 `notes.md`: the build makes them when they are not there, and never changes
 or reads them. The build does not touch other paths.
+
+The rules of the grant apply to the files that the build owns. An agent can
+copy granted text into its own files. If the grant of that text ends later
+(a revoke, or the message becomes hostile mail or gone), the copy stays in
+the agent files: the build does not read them, so it cannot find the copy,
+and a delete would lose the work of the agent. The agent saw the text while
+it was granted. This is a known limit, with a GitHub issue. The person can
+delete the workspace folder to remove the agent files.
 
 `threads/t-<id>.md`:
 
@@ -265,13 +288,16 @@ Markdown and JSON with `serde_json`.
 | A thread whose first message is hostile mail | The heading comes from the first message in the file | Unit test |
 | A person with mail outside the scope | The person file counts only the scope messages | Unit test |
 | An add to the scope by an agent, or to a `done` job | Refused | Unit test, and raw SQL |
-| A change or a delete of a scope row | Refused by the trigger | Unit test |
+| A change or a delete of a scope row, other than one revoke | Refused by the trigger | Unit test |
+| A revoke of a thread or an item of the scope | The next build has no file of its mail. The row stays, with `revoked_by` and `revoked_at` | Unit test |
+| A revoke by an agent | Refused | Unit test, and raw SQL |
+| An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
 | An unknown job | `Error::NotFound` | Unit test |
 
 ## Impact
 
 - `crates/iris-store/src/schema_15.sql` and the migration list.
-- `crates/iris-job`: `Ref`, `add_scope`, `scope`.
+- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`.
 - `crates/iris-talk`: the clean messages of a thread become public, so the
   build uses the same rule of hostile mail as the conversation.
 - New crate `crates/iris-workspace`.
@@ -305,16 +331,18 @@ None.
    if a file of mail outside the scope is in the folder, or if a person file
    counts a message outside the scope.
 2. Hostile mail, a draft, a signal and the source message of a signal of
-   the scope threads are in no file,
-   and no item with such a source is in the folder. Red if their text is in
-   any file of the folder.
+   the scope threads are in no file that the build writes, and no item with
+   such a source is in the folder. Red if their text is in such a file.
 3. An item of the scope grants only its source messages. Red if another
    message of its thread is in the folder.
 4. A second build after a new message in a scope thread has the new message,
    and keeps `drafts/` and `notes.md`. Red if the agent files change.
 5. A link that the agent made does not make the build change a file outside
    the folder. Red if the target changes.
-6. An agent cannot add to a scope. Red if the store takes the row.
+6. An agent cannot add to a scope or revoke a part of it. Red if the store
+   takes the row or the change.
+7. A build after a revoke has no file of the revoked mail. Red if its text
+   is in a file that the build owns.
 
 ## Verify
 
