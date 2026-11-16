@@ -70,8 +70,8 @@ not have the label `SPAM` or `TRASH`.
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `correct` | any item | field, value | none (Iris state) | set the old value (below) | 2 |
-| `draft` | thread, or none for new mail | file with the text | a later specification (section 7.5) | a later specification | 3 |
-| `send` | a draft | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
+| `draft` | one thread (a reply) or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` (section 7.5) | none: Iris never deletes a draft. The change of a draft and its undo come in a later card | 3 |
+| `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
 | `ask` | none | question, options | none | not applicable | 5 |
@@ -197,11 +197,11 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `state` | `draft` (the newest revision is not submitted), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
-| `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
-| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. Each other verb: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
+| `actions[].targets` | What the author named: `threads`, `messages` or `items`. The write verbs of release 3 also name `accounts` (`a-N`, a new mail) or `drafts` (`d-N`), with exactly one target (`docs/specs/2026-11-16-send.md`, section 4). |
+| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. `draft`: `to`, `cc`, `subject` and `body` (a reply has no `subject`; `docs/specs/2026-11-16-send.md`, section 1). Each other verb, `send` too: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
-| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
+| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. Each of the three texts has its length in bytes first (8 bytes, big-endian). Then each message ID follows, in the order of the store row IDs, with a comma after it. For an action with a draft target (release 3), the content hash of the draft follows (`docs/specs/2026-11-16-send.md`, section 5). An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
@@ -214,7 +214,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `proposed` | Submitted, and the policy did not decide it, or the mode is `observe`. | `approved`, `in_review`, `denied`, `expired`, `cancelled`, `replaced` |
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
 | `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
-| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` |
+| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled`, `denied` (by `engine`: the draft changed or is gone, `docs/specs/2026-11-16-send.md`) |
 | `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
 | `denied` | The policy, a hard limit or a person refused it. `reason` says why. | none |
@@ -325,7 +325,7 @@ section 5.1) keep other users out.
 |---|---|---|
 | A text that is not an ID, a sender ID, IDs of two groups in one action (threads, messages and items), or one target two times | The action names nothing that it can change | `add_action` refuses it. Nothing is written. The items of all forms are one group: a `correct` action can name a commitment and a record. |
 | An ID that is not in the mirror, a gone message, or a target of the wrong kind for the verb | Apply changes the wrong object | Submit gives the action `denied`, by `engine`, with the reason. |
-| No target, or mailbox verb targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. A state verb changes its items, so an item with no origin message is a valid target. |
+| No target, or mailbox verb targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. A state verb changes its items, so an item with no origin message is a valid target. A write verb (`draft`, `send`, release 3) writes mail, so it needs no message: an account target (`a-N`) gives no message, a draft target (`d-N`) gives the messages of the thread of the draft, for the checks only, and the thread target of a `draft` gives one message, the parent of the reply (`docs/specs/2026-11-16-send.md`, section 3). |
 | Targets in two or more accounts | One approval changes two mailboxes, and the apply has no one account | Submit gives the action `denied`. One action changes one account. |
 | Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4). |
 | A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
@@ -421,7 +421,7 @@ added = 2026-11-10
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
 | `effect` | yes | `allow`, `review` or `deny` (actions); `hide` or `bundle` (attention). |
-| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4. |
+| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `draft` and `send`: a rule with these verbs is refused until R3-03 (`docs/specs/2026-11-16-send.md`). |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
 | `added` | yes | The date. |
@@ -617,8 +617,8 @@ or with a change of Iris state:
 | `id` | `l-` and a number. |
 | `action` | The action that the entry applies. One entry for each action. The changeset, the revision, the verb, the author and the decision (`rule` with its ID and the policy version of section 6.3, or `person`) come from the action row. That row does not change after the submit, and an applied action keeps the decision that approved it. |
 | `account` | The mailbox of the provider calls. None for a state verb. |
-| `ops` | The provider operations, as JSON: the call (`batchModify` or `trash`), the labels to add and remove, and the number of calls. For a state verb, the field. |
-| `pre`, `post` | For a state verb only: the old and the new values. |
+| `ops` | The provider operations, as JSON: the call (`batchModify` or `trash`), the labels to add and remove, and the number of calls. For a state verb, the field. For `draft` and `send` (release 3): the call (`drafts.create` or `drafts.send`), the `Message-ID`, the `Date`, the content hash and, for a send, the Gmail draft ID (`docs/specs/2026-11-16-send.md`). |
+| `pre`, `post` | For a state verb: the old and the new values. For `draft`: `post` only, the content with its reply headers. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |
 | `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
 | `error` | The refusal of the provider, or why the engine could not confirm each message. |
@@ -784,7 +784,8 @@ An undo of an undo is a new action, not a delete of the record.
 ### 7.5 Release 3: draft, send and the held outbox
 
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
-held outbox. That specification must meet these constraints:
+held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
+and the release step. That specification must meet these constraints:
 
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
@@ -794,7 +795,8 @@ held outbox. That specification must meet these constraints:
 - The approval of a send binds to a hash of the draft content: the
   recipients, the subject, the body and the attachments. Before the release,
   the engine reads the draft at Gmail again. If the hash is different, the
-  send goes back to review. No `draft` action can change a draft that has an
+  engine denies the send, and a new send action of the draft goes to
+  review. No `draft` action can change a draft that has an
   approved or a held send.
 - The flags of a draft (section 5.3) come from the content of the draft, at
   submit and again at the release.
@@ -804,8 +806,10 @@ held outbox. That specification must meet these constraints:
   known, the engine searches at Gmail, not in the mirror. Until it finds the
   sent message or a set time passes, the send has a state that blocks a new
   send of the same draft.
-- The undo of a `draft` action restores the old content of the draft. It
-  never deletes a draft of the person.
+- The undo of a `draft` action that changes a draft restores the old
+  content of the draft. It never deletes a draft of the person. So a
+  draft create has no undo, and no `draft` action can change a draft
+  until its undo exists (R3-01 makes only creates).
 - Each verb records its result in the ledger and has a crash test.
 
 ## 8. The iris command
