@@ -1861,6 +1861,11 @@ fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversati
         0,
     );
     assert_eq!(doc["counterparty"]["sender"], format!("p-{kai}"));
+    // A party that becomes the owner names no sender row.
+    let rid = format!("r-{row}");
+    assert!(b.items()[0]["issuer"]["sender"].is_string());
+    let doc = correct(&b.store, &rid, "issuer.kind", json!("self"), NOW).unwrap();
+    assert!(doc["issuer"].get("sender").is_none(), "{}", doc["issuer"]);
 
     // A conversation: the summary, yes; a field of the conversation rule, no.
     let v: i64 = b.col(

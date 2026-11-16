@@ -304,7 +304,8 @@ impl Draft {
 
 /// Set the `p-` ID of each sender party of the item `v` from its address:
 /// the one rule that links a party to its sender row, for a new item and
-/// for a correction. A sender party with no address gets no ID.
+/// for a correction. A party that is not of the kind `sender`, or that has
+/// no address, gets no ID.
 pub fn set_senders(v: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) {
     for key in ["owner", "counterparty", "issuer", "publisher"] {
         if let Some(p) = v.get_mut(key) {
@@ -329,7 +330,9 @@ pub struct Ids {
 /// Add the `p-` ID to a `sender` party with an address.
 fn set_sender(p: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) {
     let Some(o) = p.as_object_mut() else { return };
+    // Only a `sender` party names a sender row.
     if o.get("kind").and_then(Value::as_str) != Some("sender") {
+        o.remove("sender");
         return;
     }
     // A sender ID that no address supports goes.

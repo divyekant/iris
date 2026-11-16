@@ -955,6 +955,15 @@ no item, and the message stays not understood.
 - A correction refers to its item by the item ID (`item_id`). A change of
   the status of an item by a person, or by an applied action of
   specification 2, is also a correction.
+- A correction cannot change a field that the engine makes from the store
+  on each change: the common fields (section 6.1, see specification 2,
+  section 4), the `sender` ID of a party, and the fields of a conversation
+  that the conversation rule makes (`thread`, `participants`, `role`,
+  `latest`, `messages`, `new` and `your_turn`). The engine makes these
+  fields again at the next message, so a correction of one would disagree
+  with the store. The `sender` ID of a party follows its `address`: a
+  correction of the address sets the ID of the sender row of the new
+  address.
 - An item is pinned when it has one or more corrections, or when an open
   changeset or a ledger entry of specification 2 refers to it. A rebuild
   never deletes a pinned item and never changes its ID, so each correction
