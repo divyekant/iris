@@ -49,7 +49,7 @@ const RECORD_TYPES: [&str; 7] = [
 const DAY_MS: i64 = 86_400_000;
 
 /// A limit must be 1 to [`MAX_LIMIT`].
-fn check_limit(limit: u32) -> Result<()> {
+pub(crate) fn check_limit(limit: u32) -> Result<()> {
     if (1..=MAX_LIMIT).contains(&limit) {
         Ok(())
     } else {

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_job::{
-    answer, ask, create, events, finish, format_job_id, get, list, parse_job_id, wait, wake,
+    answer, ask, create, events, finish, format_job_id, get, list, page, parse_job_id, wait, wake,
     write_document, By, End, Error, State, Wait,
 };
 use iris_store::Store;
@@ -491,4 +491,59 @@ fn a_bad_event_gives_no_partial_document() {
         Err(Error::Store(_))
     ));
     assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}
+
+/// Generated input: for each mix of states, each limit and each start, the
+/// pages hold each job of the states once, newest first, and no other job.
+#[test]
+fn the_pages_hold_each_job_of_the_states_once() {
+    let dir = TempDir::new("page");
+    let store = Store::open(&dir.0).unwrap();
+    let mut all = Vec::new();
+    for i in 0..12i64 {
+        let job = create(&store, "A goal.", None, NOW + i).unwrap();
+        match i % 4 {
+            1 => ask(&store, job, "Which?", None, NOW + i).unwrap(),
+            2 => wait(
+                &store,
+                job,
+                Wait {
+                    thread: None,
+                    until_ms: NOW + DAY,
+                },
+                None,
+                NOW + i,
+            )
+            .unwrap(),
+            3 => finish(&store, job, By::Person, End::Cancel, None, NOW + i).unwrap(),
+            _ => {}
+        }
+        all.push((job, get(&store, job).unwrap().state));
+    }
+    let states = [State::Working, State::NeedsYou, State::Waiting, State::Done];
+    for mask in 1u32..16 {
+        let pick: Vec<State> = (0..4)
+            .filter(|b| mask & (1 << b) != 0)
+            .map(|b| states[b])
+            .collect();
+        let want: Vec<i64> = all
+            .iter()
+            .rev()
+            .filter(|(_, s)| pick.contains(s))
+            .map(|(j, _)| *j)
+            .collect();
+        for limit in 1..=5u32 {
+            let mut got = Vec::new();
+            let mut before = None;
+            loop {
+                let jobs = page(&store, &pick, limit, before).unwrap();
+                assert!(jobs.len() <= limit as usize);
+                let Some(last) = jobs.last() else { break };
+                before = Some(last.id);
+                got.extend(jobs.iter().map(|j| j.id));
+            }
+            assert_eq!(got, want, "states {pick:?}, limit {limit}");
+        }
+    }
+    assert!(page(&store, &[], 5, None).unwrap().is_empty());
 }

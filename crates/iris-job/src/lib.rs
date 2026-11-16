@@ -387,6 +387,24 @@ pub fn list(store: &Store, state: State) -> Result<Vec<Job>> {
     })?)
 }
 
+/// One page of the jobs in `states`, newest first: at most `limit` jobs
+/// whose row ID is below `before` (all jobs with `None`).
+pub fn page(store: &Store, states: &[State], limit: u32, before: Option<i64>) -> Result<Vec<Job>> {
+    let names: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
+    let names = serde_json::to_string(&names).map_err(std::io::Error::other)?;
+    Ok(store.read(|c| {
+        let mut q = c.prepare_cached(&format!(
+            "SELECT {JOB_COLUMNS} FROM job
+             WHERE state IN (SELECT value FROM json_each(?1)) AND id < ?2
+             ORDER BY id DESC LIMIT ?3"
+        ))?;
+        let jobs = q
+            .query_map(params![names, before.unwrap_or(i64::MAX), limit], job_of)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(jobs)
+    })?)
+}
+
 /// Call `f` for each event of `job`, in order.
 fn each_event(c: &Connection, job: i64, mut f: impl FnMut(Event) -> Result<()>) -> Result<()> {
     let mut q = c.prepare(
@@ -477,16 +495,12 @@ pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<(
     read(store, |c| write_in(c, job, out))
 }
 
-fn write_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
-    let j = job_in(c, job)?;
-    // Read each event once before the first byte (issue #303): a row that
-    // does not parse gives an error and no partial document. The same read
-    // transaction gives the same rows to the second pass.
-    each_event(c, job, |_| Ok(()))?;
+/// The fields of the job document without `events`: the summary of a job.
+pub fn job_json(j: &Job) -> Value {
     let mut m = Map::new();
     m.insert("model".into(), "iris/0".into());
     m.insert("id".into(), format_job_id(j.id).into());
-    m.insert("goal".into(), j.goal.into());
+    m.insert("goal".into(), j.goal.as_str().into());
     if let Some(due) = j.due_ms {
         m.insert("due".into(), time(due));
     }
@@ -496,13 +510,22 @@ fn write_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
     if let Some(w) = j.wait {
         m.insert("wait".into(), wait_json(w));
     }
-    if let Some(q) = j.question {
-        m.insert("question".into(), q.into());
+    if let Some(q) = &j.question {
+        m.insert("question".into(), q.as_str().into());
     }
     if let Some(end) = j.end {
         m.insert("end".into(), end.as_str().into());
     }
-    let head = serde_json::to_string(&Value::Object(m)).map_err(std::io::Error::other)?;
+    Value::Object(m)
+}
+
+fn write_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
+    let j = job_in(c, job)?;
+    // Read each event once before the first byte (issue #303): a row that
+    // does not parse gives an error and no partial document. The same read
+    // transaction gives the same rows to the second pass.
+    each_event(c, job, |_| Ok(()))?;
+    let head = serde_json::to_string(&job_json(&j)).map_err(std::io::Error::other)?;
     // The head without its closing brace, then the events.
     out.write_all(&head.as_bytes()[..head.len() - 1])?;
     out.write_all(b",\"events\":[")?;

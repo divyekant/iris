@@ -26,6 +26,7 @@ use serde::Deserialize;
 mod auth;
 mod export;
 pub mod gate;
+mod jobs;
 pub mod policy;
 mod read;
 mod review;
@@ -33,6 +34,7 @@ mod verbs;
 mod watch;
 pub use auth::{Auth, SIGN_IN};
 pub use export::{export, Exported};
+pub use jobs::*;
 pub use read::*;
 pub use review::*;
 pub use verbs::*;
@@ -119,6 +121,8 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/policy/discard", post(post_discard))
         .route("/api/policy/mode", post(post_mode))
         .route("/api/policy/remove", post(post_remove))
+        .route("/api/jobs", get(get_jobs))
+        .route("/api/jobs/{id}", get(get_job))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
@@ -508,6 +512,30 @@ async fn post_remove(
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
     Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+#[derive(Deserialize)]
+struct JobsQuery {
+    state: Option<String>,
+    limit: Option<u32>,
+    after: Option<String>,
+}
+
+async fn get_jobs(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<JobsQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let state = q.state.as_deref().unwrap_or("open");
+    let page = jobs(&s, state, q.limit.unwrap_or(50), q.after.as_deref())?;
+    Ok(Json(page).into_response())
+}
+
+async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
 async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {
