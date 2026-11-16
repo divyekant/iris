@@ -190,6 +190,8 @@ fn a_draft_that_the_person_changed_does_not_read_back() {
         ("To: ", "X-Other: 1\r\nTo: "),
         ("To: ", "To: spy@x.org\r\nTo: "),
         ("Content-Type: text/plain", "Content-Type: text/html"),
+        ("To: ", "References: <z@x.org>\r\nTo: "),
+        ("To: ", "In-Reply-To: \r\nTo: "),
     ] {
         let changed = raw.replacen(from, to, 1);
         assert_ne!(changed, raw);
@@ -242,6 +244,7 @@ fn a_sent_copy_reads_back_with_transport_headers() {
         ("To: ", "Bcc: spy@x.org\r\nTo: "),
         ("To: ", "Reply-To: spy@x.org\r\nTo: "),
         ("To: ", "Resent-To: spy@x.org\r\nTo: "),
+        ("To: ", "References: <z@x.org>\r\nTo: "),
     ] {
         let changed = sent.replacen(from, to, 1);
         assert_ne!(changed, sent);
@@ -260,6 +263,9 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
         "To: spy@x.org\r\n",
         "Cc: spy@x.org\r\n",
         "Reply-To: spy@x.org\r\n",
+        "References: <z.9@x.org>\r\n",
+        "In-Reply-To: <z.9@x.org>\r\n",
+        "In-Reply-To: \r\n",
         "Content-Type: text/html\r\n",
         "\r\n",
         " folded\r\n",
@@ -278,10 +284,13 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
     .check()
     .unwrap();
     let reply = references("<p.1@x.org>", &["r.0@x.org".into()], None);
-    let base = compose(ME, "iris.7@example.com", &c, Some(&reply), 1_800_000_000);
+    let bases = [
+        compose(ME, "iris.7@example.com", &c, Some(&reply), 1_800_000_000),
+        compose(ME, "iris.8@example.com", &c, None, 1_800_000_000),
+    ];
     let mut some = 0;
-    for _ in 0..4000 {
-        let mut raw = base.clone();
+    for i in 0..6000 {
+        let mut raw = bases[i % 2].clone();
         for _ in 0..1 + g.below(3) {
             let at = g.below(raw.len() + 1);
             match g.below(3) {
@@ -323,6 +332,28 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
             };
             assert_eq!(seen(m.to()), back.content.to);
             assert_eq!(seen(m.cc()), back.content.cc);
+            // The thread headers are all in the content, so in the hash.
+            let ids = |l: Option<mail_parser::TextList<'_>>| -> Vec<String> {
+                l.map(|l| {
+                    (0..l.len())
+                        .filter_map(|i| l.get(i))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+            };
+            let header = |n: &str| {
+                m.headers()
+                    .iter()
+                    .any(|h| h.raw_name().eq_ignore_ascii_case(n))
+            };
+            match &back.reply {
+                None => assert!(!header("in-reply-to") && !header("references")),
+                Some(r) => {
+                    assert_eq!(ids(m.in_reply_to()), std::slice::from_ref(&r.in_reply_to));
+                    assert_eq!(ids(m.references()), r.references);
+                }
+            }
         }
     }
     assert!(some > 100, "only {some} read back");

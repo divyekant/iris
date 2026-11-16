@@ -346,12 +346,20 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         // Mail has CRLF line ends; the content has LF (Content::check).
         body: line_ends(&m.body_text(0)?),
     };
+    // Each thread header of the message is in the content hash, or the
+    // message gives no content: a header that the read drops (for example
+    // References with no In-Reply-To) must not keep the approved hash.
     let in_reply_to = ids(m.in_reply_to());
-    let reply = match in_reply_to.as_slice() {
-        [] => None,
-        [one] => Some(Reply {
+    let references = ids(m.references());
+    let reply = match (
+        in_reply_to.as_slice(),
+        names.contains("in-reply-to"),
+        names.contains("references"),
+    ) {
+        ([], false, false) => None,
+        ([one], true, has_references) if has_references != references.is_empty() => Some(Reply {
             in_reply_to: one.clone(),
-            references: ids(m.references()),
+            references,
         }),
         _ => return None,
     };
