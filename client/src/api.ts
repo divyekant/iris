@@ -75,8 +75,8 @@ export type Status = {
   messages: { total: number; fetched: number; understood: number; gone: number };
 };
 
-// `next` is the ID before which the next page starts, or an offset for a section of the brief.
-export type Page = { items: Item[]; next: string | number | null; duplicates?: Record<string, string[]> };
+// `next` is the item ID where the next page starts (`before=` for a form list, `after=` for a brief section), or null.
+export type Page = { items: Item[]; next: string | null; duplicates?: Record<string, string[]> };
 
 export type Summary = {
   id: string;

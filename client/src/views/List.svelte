@@ -4,8 +4,8 @@
   import Line from "./Line.svelte";
 
   // `more` is the API path of the list. `cursor` names the parameter that takes `next`:
-  // `before` (an ID) for the lists of a form, `offset` for the sections of the brief.
-  let { title, page, more = "", cursor = "before" }: { title: string; page: Page; more?: string; cursor?: "before" | "offset" } = $props();
+  // `before` for the lists of a form, `after` for the sections of the brief. Both take an item ID.
+  let { title, page, more = "", cursor = "before" }: { title: string; page: Page; more?: string; cursor?: "before" | "after" } = $props();
 
   // svelte-ignore state_referenced_locally
   let items = $state(page.items);

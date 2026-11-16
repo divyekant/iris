@@ -65,8 +65,8 @@
       {#await Promise.all([get<BriefData>("brief"), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}<p role="alert">{error.message}</p>{/await}
     {:else if route.view === "section"}
       {@const key = route.key}
-      {#await get<Page>(`brief/${key}?limit=50&offset=0`) then page}
-        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="offset" />
+      {#await get<Page>(`brief/${key}?limit=50`) then page}
+        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" />
       {:catch error}<p role="alert">{error.message}</p>{/await}
     {:else if route.view === "list"}
       {@const form = route.form}

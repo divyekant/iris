@@ -113,7 +113,7 @@ test("feed counts show only when the API gave every feed item, and the full feed
 
 test("a full section list keeps the possible duplicates", async () => {
   const page = { items: [item("c-311")], next: null, duplicates: { "c-311": ["c-400"] } };
-  const t = text(await render("/src/views/List.svelte", { title: "You owe", page, more: "brief/you_owe?limit=50", cursor: "offset" }));
+  const t = text(await render("/src/views/List.svelte", { title: "You owe", page, more: "brief/you_owe?limit=50", cursor: "after" }));
   assert.match(t, /Maybe the same as c-400/);
 });
 
