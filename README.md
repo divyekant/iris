@@ -115,6 +115,18 @@ object, and JSON Lines for a list.
 | `iris mirror sync` | One sync of each account now |
 | `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
 
+## Changesets from the terminal
+
+These commands talk to the running engine through the socket `iris.sock` in
+the data folder. They do not read the store. Start the engine with
+`iris serve` first. With no engine, they exit with code 4.
+
+| Command | Does |
+|---|---|
+| `iris changeset <cs-id>` | Shows a changeset and the state of each action. Add `--json` for the document. |
+| `iris changeset --drafts` | Lists your draft changesets, newest first. |
+| `iris withdraw <cs-id>` | Withdraws a changeset that the command made. Applied actions stay. |
+
 The sync stores the raw messages only. After each sync, `iris serve` and
 `iris mirror sync` run the understanding step, so words and the `from:` and
 `to:` filters find the new mail. The free steps run with no model. Paid model

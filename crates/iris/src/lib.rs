@@ -11,6 +11,7 @@ macro_rules! say {
 
 pub mod cost;
 pub mod engine;
+pub mod socket;
 pub mod verbs;
 
 use std::io::BufRead;
@@ -101,6 +102,28 @@ pub enum Command {
     Model {
         #[command(subcommand)]
         command: ModelCommand,
+    },
+    /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
+    #[command(arg_required_else_help = true)]
+    Changeset {
+        /// The changeset ID, for example cs-12.
+        #[arg(required_unless_present = "drafts", conflicts_with = "drafts")]
+        id: Option<String>,
+        /// List the drafts of the author `local`, the newest first.
+        #[arg(long)]
+        drafts: bool,
+        /// Print the changeset document (specification 2, section 5.1).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Withdraw a changeset that this command made. Applied actions stay.
+    /// Needs the engine.
+    Withdraw {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// Print the changeset document after the withdraw.
+        #[arg(long)]
+        json: bool,
     },
     /// Understand the mail: an estimate, the approval of a budget, or a run.
     Understand {
@@ -247,8 +270,86 @@ pub fn version_line() -> String {
     format!("iris {VERSION}")
 }
 
-/// Run one command. Gives the error text for standard error.
-pub fn run(cli: Cli) -> Result<(), String> {
+/// Run one command. Gives the exit code (specification 2, section 8.4) and
+/// the error text for standard error.
+pub fn run(cli: Cli) -> Result<(), socket::Failure> {
+    // The verbs that change changesets go through the engine socket, never
+    // through the store (specification 2, section 8.1).
+    let data = engine::data_dir(cli.data.clone())
+        .map_err(|e| socket::Failure { code: socket::code::ERROR, error: e.to_string() });
+    let text = match &cli.command {
+        Command::Changeset { id, drafts, json } => {
+            let dir = data?;
+            if *drafts {
+                let r = socket::request(&dir, "drafts", serde_json::json!({}))?;
+                Some(drafts_text(&r, *json))
+            } else {
+                let id = id.as_deref().unwrap_or_default();
+                let r = socket::request(&dir, "show", serde_json::json!({ "changeset": id }))?;
+                Some(changeset_text(&r, *json))
+            }
+        }
+        Command::Withdraw { id, json } => {
+            let r = socket::request(&data?, "withdraw", serde_json::json!({ "changeset": id }))?;
+            Some(changeset_text(&r, *json))
+        }
+        _ => None,
+    };
+    if let Some(text) = text {
+        print!("{text}");
+        return Ok(());
+    }
+    run_store(cli).map_err(|error| socket::Failure {
+        code: socket::code::ERROR,
+        error,
+    })
+}
+
+/// `iris changeset --drafts`: one changeset ID on each line.
+fn drafts_text(r: &serde_json::Value, json: bool) -> String {
+    let ids = r["changesets"].as_array().cloned().unwrap_or_default();
+    if json {
+        return ids.iter().map(|i| format!("{i}\n")).collect();
+    }
+    if ids.is_empty() {
+        return "No draft.\n".into();
+    }
+    ids.iter()
+        .map(|i| format!("{}\n", i.as_str().unwrap_or_default()))
+        .collect()
+}
+
+/// A changeset as text (specification 2, section 8.3): a label line for the
+/// changeset, then one line for each action, which starts with
+/// `<revision>.<n>`.
+pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
+    if json {
+        return format!("{doc}\n");
+    }
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let mut out = format!(
+        "ID: {}\nState: {}\nRevision: {}\n",
+        s(&doc["id"]),
+        s(&doc["state"]),
+        doc["revision"]
+    );
+    if let Some(why) = doc["why"].as_str() {
+        out.push_str(&format!("Why: {}\n", verbs::field(why)));
+    }
+    for a in doc["actions"].as_array().into_iter().flatten() {
+        let state = a["decision"]["state"].as_str().unwrap_or("draft");
+        let mut line = format!("{}.{} {} {state}", a["revision"], a["n"], s(&a["verb"]));
+        if let Some(reason) = a["decision"]["reason"].as_str() {
+            line.push_str(&format!(": {}", verbs::field(reason)));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Run one command that uses the store. Gives the error text for standard error.
+fn run_store(cli: Cli) -> Result<(), String> {
     let data = || engine::data_dir(cli.data.clone()).map_err(|e| e.to_string());
     let open =
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
@@ -318,6 +419,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             };
             println!("{text}");
             Ok(())
+        }
+        Command::Changeset { .. } | Command::Withdraw { .. } => {
+            unreachable!("run() sends these verbs to the socket")
         }
         Command::Understand {
             estimate,
@@ -608,6 +712,8 @@ fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     check_loopback(addr)?;
     let gmail = gmail_config().map_err(std::io::Error::other)?;
+    // The engine lock and the socket come first: a second engine stops here.
+    let bound = socket::bind(store.dir())?;
     let api_store = store.clone();
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
@@ -615,8 +721,10 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         .spawn(move || sync.run())?;
 
     // One thread: the lightest memory footprint has priority.
+    // The time driver: the socket waits at most READ_WAIT for a request.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
+        .enable_time()
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -624,15 +732,27 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         // The API checks the Host against the bound address.
         let auth = Arc::new(iris_api::Auth::new(local)?);
         say!("iris: serving on http://{local}");
+        say!("iris: commands connect to {}", bound.path.display());
+        let socket_store = api_store.clone();
+        let commands = async {
+            if let Err(e) = socket::serve(&bound, socket_store).await {
+                say!("iris: socket: {e}");
+            }
+            std::future::pending::<()>().await
+        };
         // The one-time code of the API sign-in (specification 2, section 8.6).
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }
-        axum::serve(listener, app(api_store, auth))
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
+        let web = axum::serve(listener, app(api_store, auth)).with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        });
+        // The web server ends at Ctrl-C. Then `bound` drops: the socket file
+        // goes, and the lock is released.
+        tokio::select! {
+            r = web => r,
+            () = commands => Ok(()),
+        }
     })
 }
 

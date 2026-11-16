@@ -33,7 +33,7 @@ iris-web = { version = "0.0.0", path = "../iris-web" }
 rusqlite = "=0.43.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal", "io-util", "time", "sync"] }
 
 [dev-dependencies]
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
