@@ -923,6 +923,11 @@ async fn brief_follows_the_queries_of_section_8() {
         get(&store, "/api/brief/you_owe?offset=x").await.0,
         StatusCode::BAD_REQUEST
     );
+    // An offset above the integer range of SQLite is a 400, not a 500.
+    assert_eq!(
+        get(&store, "/api/brief/you_owe?offset=9223372036854775808").await.0,
+        StatusCode::BAD_REQUEST
+    );
 
     // The kind of the sender of a message.
     assert_eq!(
