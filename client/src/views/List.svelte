@@ -11,6 +11,8 @@
   let items = $state(page.items);
   // svelte-ignore state_referenced_locally
   let next = $state(page.next);
+  // svelte-ignore state_referenced_locally
+  let duplicates = $state(page.duplicates ?? {});
   let error = $state("");
   let busy = $state(false);
 
@@ -20,6 +22,7 @@
     try {
       const nextPage = await get<Page>(`${more}&${cursor}=${encodeURIComponent(String(next ?? ""))}`);
       items = [...items, ...nextPage.items];
+      duplicates = { ...duplicates, ...nextPage.duplicates };
       next = nextPage.next;
     } catch (e) {
       error = (e as Error).message;
@@ -34,7 +37,7 @@
   <p class="empty">Nothing here now. New items show here after the next sync.</p>
 {:else}
   <ul>
-    {#each items as item (item.id)}<Line {item} />{/each}
+    {#each items as item (item.id)}<Line {item} twins={duplicates[item.id]} />{/each}
   </ul>
 {/if}
 {#if next && more}<button type="button" onclick={loadMore} disabled={busy}>{busy ? "Loading" : "Show more"}</button>{/if}

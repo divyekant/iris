@@ -22,7 +22,13 @@ export const SECTIONS: Record<SectionKey, string> = {
 };
 
 export function parse(hash: string): Route {
-  const [name = "", id = ""] = hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  let name = "";
+  let id = "";
+  try {
+    [name = "", id = ""] = hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  } catch {
+    return { view: "home" }; // A bad escape such as "%" in the hash.
+  }
   if (name in LISTS) return { view: "list", form: LISTS[name as keyof typeof LISTS] };
   if ((name === "item" || name === "mail") && id) return { view: name, id };
   if (name === "brief" && id in SECTIONS) return { view: "section", key: id as SectionKey };

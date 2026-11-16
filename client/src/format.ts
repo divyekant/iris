@@ -126,11 +126,12 @@ export function greeting(now = new Date()): string {
 
 /** The first lines of the brief: what needs you, in words. */
 export function summary(brief: Brief): string {
-  const turns = brief.conversations.items.filter((c) => c.your_turn).length;
+  // Use the section counts, not the items: the API gives at most 200 items of a section.
+  const talks = brief.conversations.count;
   const parts = [];
   if (brief.you_owe.count) parts.push(`You owe ${count(brief.you_owe.count, "thing", "things")}.`);
   if (brief.owed_to_you.count) parts.push(`${capital(count(brief.owed_to_you.count, "thing is", "things are"))} owed to you.`);
-  if (turns) parts.push(`${capital(count(turns, "conversation waits", "conversations wait"))} for your reply.`);
+  if (talks) parts.push(`${capital(count(talks, "conversation waits", "conversations wait"))} for you.`);
   return parts.length ? parts.join(" ") : "Nothing needs you now.";
 }
 

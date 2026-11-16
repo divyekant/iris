@@ -11,7 +11,7 @@ const NOW = new Date("2026-11-16T09:05:00Z");
 
 test("the brief opens with what needs you, in words", async () => {
   const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW }));
-  assert.match(t, /You owe two things\. One thing is owed to you\. One conversation waits for your reply\./);
+  assert.match(t, /You owe two things\. One thing is owed to you\. One conversation waits for you\./);
   const empty = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 0, items: [] } };
   assert.match(text(await render("/src/views/Brief.svelte", { brief: empty, now: NOW })), /Nothing needs you now\./);
 });
@@ -59,6 +59,24 @@ test("the brief groups the feed by sender, not by name, and shows at most 7 send
   const html = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, feed: { count: 10, items: ten } }, now: NOW });
   assert.equal((html.match(/Sender \d/g) ?? []).length, 7);
   assert.match(html, /href="#\/brief\/feed"[^>]*>All 10</);
+});
+
+test("the opening counts the whole conversation section, not only the items that the API gave", async () => {
+  const brief = { ...fx.brief, you_owe: { count: 0, items: [] }, owed_to_you: { count: 0, items: [] }, conversations: { count: 230, items: [] } };
+  assert.match(text(await render("/src/views/Brief.svelte", { brief, now: NOW })), /230 conversations wait for you\./);
+});
+
+test("feed counts show only when the API gave every feed item, and the full feed stays one step away", async () => {
+  const feed = Array.from({ length: 3 }, (_, n) => ({ ...item("f-5001"), id: `f-${n}` }));
+  const html = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, feed: { count: 250, items: feed } }, now: NOW });
+  assert.match(text(html), /Mail Weekly All 250/);
+  assert.match(html, /href="#\/brief\/feed"[^>]*>All 250</);
+});
+
+test("a full section list keeps the possible duplicates", async () => {
+  const page = { items: [item("c-311")], next: null, duplicates: { "c-311": ["c-400"] } };
+  const t = text(await render("/src/views/List.svelte", { title: "You owe", page, more: "brief/you_owe?limit=50", cursor: "offset" }));
+  assert.match(t, /Maybe the same as c-400/);
 });
 
 test("the brief shows a possible duplicate pair as one line", async () => {
@@ -242,6 +260,7 @@ test("routes in the hash give the view", async () => {
   assert.deepEqual(parse("#/records/receipt"), { view: "records", type: "receipt" });
   assert.deepEqual(parse("#/brief/strangers"), { view: "section", key: "strangers" });
   assert.deepEqual(parse("#/brief/nothing"), { view: "brief" });
+  assert.deepEqual(parse("#/mail/%"), { view: "home" });
 });
 
 test("the fixture API answers the endpoints of the local API", () => {

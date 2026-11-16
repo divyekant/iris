@@ -48,6 +48,8 @@
     }
     return [...groups].sort((a, b) => b[1].items.length - a[1].items.length);
   });
+  // Counts for each sender are exact only when the API gave every feed item.
+  let feedComplete = $derived(brief.feed.items.length >= brief.feed.count);
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
   let copying = $derived(status && !status.accounts.some((a) => a.mirror_ready_at) ? status.messages : null);
   let day = $derived(now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }));
@@ -102,8 +104,10 @@
     {#if publishers.length}
       <p class="label">To read when you choose</p>
       <ul class="chips">
-        {#each publishers.slice(0, SHOWN) as [key, group] (key)}<li><a href="#/feed">{group.name} <span>{group.items.length}</span></a></li>{/each}
-        {#if publishers.length > SHOWN}<li><a href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
+        {#each publishers.slice(0, SHOWN) as [key, group] (key)}
+          <li><a href="#/brief/feed">{group.name}{#if feedComplete} <span>{group.items.length}</span>{/if}</a></li>
+        {/each}
+        {#if publishers.length > SHOWN || !feedComplete}<li><a href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
       </ul>
     {/if}
     {#if records.length}
