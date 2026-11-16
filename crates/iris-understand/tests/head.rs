@@ -4,10 +4,6 @@
 use iris_understand::head::{addresses, date};
 use iris_understand::{Auth, Head};
 
-fn inv(raw: &[u8]) -> bool {
-    Head::parse(raw).invitation
-}
-
 #[test]
 fn addresses_split_and_lowercase() {
     let a = addresses(r#""Lee, Ana" <Ana@Example.COM>, bob@example.org (Bob, B), <c@x.example>"#);
@@ -52,25 +48,6 @@ fn dates() {
 }
 
 #[test]
-fn a_quoted_printable_calendar_request_is_found() {
-    let raw = b"Content-Type: multipart/mixed; boundary=z\r\n\r\n--z\r\nContent-Type: text/calendar\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD=3AREQUEST\r\nEND:VCALENDAR\r\n--z--\r\n";
-    assert!(inv(raw));
-    let cancel = String::from_utf8_lossy(raw).replace("REQUEST", "CANCEL");
-    assert!(!inv(cancel.as_bytes()));
-    // A soft line break inside the method line.
-    let split = String::from_utf8_lossy(raw).replace("METHOD=3AREQUEST", "METHOD:RE=\r\nQUEST");
-    assert!(inv(split.as_bytes()));
-}
-
-#[test]
-fn a_huge_content_type_stays_bounded() {
-    let long = "x".repeat(4 * 256 * 1024);
-    let raw = format!("Content-Type: text/calendar; a={long}\r\n {long}\r\n\r\nMETHOD:REQUEST\r\n");
-    // The scan ends and still reads the body.
-    assert!(inv(raw.as_bytes()));
-}
-
-#[test]
 fn groups_comments_and_parent_dkim_domains() {
     let h = Head::parse(b"From: a@mail.example.org\r\nTo: Friends: alice@example.org, Bob <BOB@example.org>;\r\nPrecedence: bulk (list mail)\r\n\r\nx");
     assert_eq!(h.to, vec!["alice@example.org", "bob@example.org"]);
@@ -87,46 +64,8 @@ fn groups_comments_and_parent_dkim_domains() {
 }
 
 #[test]
-fn invitation_needs_calendar_and_request() {
-    assert!(inv(b"Content-Type: text/calendar; method=REQUEST\r\n"));
-    assert!(!inv(b"Content-Type: text/calendar; method=CANCEL\r\n"));
-    assert!(!inv(b"METHOD:REQUEST in plain text"));
-    assert!(!inv(
-        b"Subject: x\r\n\r\nContent-Type: text/calendar; method=REQUEST\r\nMETHOD:REQUEST\r\n"
-    ));
-    let mixed = b"Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\n\
-Content-Type: text/plain\r\n\r\nMETHOD:REQUEST\r\n--b\r\n\
-Content-Type: text/calendar;\r\n charset=utf-8\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\n--b--\r\n";
-    assert!(!inv(mixed));
-    let ok = String::from_utf8_lossy(mixed).replace("METHOD:CANCEL", "METHOD:REQUEST");
-    assert!(inv(ok.as_bytes()));
+fn a_huge_year_gives_no_date() {
     assert_eq!(date("1 Jan 9223372036854775807 00:00 +0000"), None);
-}
-
-#[test]
-fn a_base64_calendar_request_is_found() {
-    // "METHOD:REQUEST" in base64, over two lines.
-    let raw = b"Content-Type: multipart/mixed; boundary=z\r\n\r\n--z\r\nContent-Type: text/calendar\r\nContent-Transfer-Encoding: base64\r\n\r\nTUVUSE9EOlJF\r\nUVVFU1Q=\r\n--z--\r\n";
-    assert!(inv(raw));
-}
-
-#[test]
-fn a_folded_part_header_is_unfolded_like_the_top_header() {
-    let raw = b"Content-Type: multipart/mixed; boundary=z\r\n\r\n--z\r\nContent-Type:\r\n text/calendar;\r\n method=REQUEST\r\nContent-Transfer-Encoding:\r\n base64\r\n\r\nTUVUSE9EOlJFUVVFU1Q=\r\n--z--\r\n";
-    assert!(inv(raw));
-    let top = b"Content-Type: text/calendar\r\nContent-Transfer-Encoding:\r\n base64\r\n\r\nTUVUSE9EOlJFUVVFU1Q=\r\n";
-    assert!(inv(top));
-}
-
-#[test]
-fn the_calendar_type_and_method_parameter_match_whole_tokens() {
-    let other =
-        b"Content-Type: application/x-text/calendar; method=REQUEST\r\n\r\nMETHOD:REQUEST\r\n";
-    assert!(!inv(other));
-    let x = b"Content-Type: text/calendar; x-method=REQUEST\r\n\r\nMETHOD:CANCEL\r\n";
-    assert!(!inv(x));
-    let quoted = b"Content-Type: Text/Calendar; charset=utf-8; Method=\"REQUEST\"\r\n\r\nx\r\n";
-    assert!(inv(quoted));
 }
 
 #[test]

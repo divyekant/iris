@@ -108,6 +108,8 @@ pub struct Text {
     pub attachment_text: Vec<(String, String)>,
     /// `iris-clean` cut the clean text at its limit.
     pub cut: bool,
+    /// A `text/calendar` part with the method `REQUEST` (from `iris-clean`).
+    pub invitation: bool,
 }
 
 impl Text {
@@ -127,6 +129,7 @@ impl Text {
             attachments,
             attachment_text,
             cut: c.cut,
+            invitation: c.invitation,
         }
     }
 }

@@ -77,7 +77,15 @@ pub struct Clean {
     /// True if text went out because of a limit. Then `text` ends with [`CUT_MARK`].
     pub cut: bool,
     pub attachments: Vec<Attachment>,
+    /// True if a `text/calendar` part of the top message is a request
+    /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
+    /// first [`CALENDAR_LIMIT`] decoded bytes have a `METHOD:REQUEST` line.
+    pub invitation: bool,
 }
+
+/// The most decoded bytes of one calendar part that the invitation check
+/// reads. The METHOD line comes near the start of a calendar.
+pub const CALENDAR_LIMIT: usize = 64 * 1024;
 
 /// One attachment: a name, a type and a size, and the text if there is one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +110,7 @@ pub fn clean(raw: &[u8]) -> Clean {
             text: CUT_MARK.to_string(),
             cut: true,
             attachments: Vec::new(),
+            invitation: false,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -110,9 +119,11 @@ pub fn clean(raw: &[u8]) -> Clean {
             text: String::new(),
             cut: false,
             attachments: Vec::new(),
+            invitation: false,
         };
     };
-    let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
+    let mut invitation = false;
+    let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts, &mut invitation);
     let mut attachments = Vec::new();
     for f in files {
         attachment(f, &mut parts, &mut attach_left, &mut attachments);
@@ -122,6 +133,7 @@ pub fn clean(raw: &[u8]) -> Clean {
         text,
         cut,
         attachments,
+        invitation,
     }
 }
 
@@ -253,6 +265,7 @@ fn message<'a>(
     m: MessageRef<'a>,
     depth: usize,
     parts: &mut usize,
+    invitation: &mut bool,
 ) -> (String, String, bool, Vec<File<'a>>) {
     let root = m.root_part();
     let subject = field(root, HeaderName::Subject).map_or(String::new(), |raw| {
@@ -276,9 +289,11 @@ fn message<'a>(
         dropped: 0,
         files: Vec::new(),
         is_reply,
+        invitation: false,
     };
     w.entity(root, depth);
     *parts = w.parts;
+    *invitation |= w.invitation;
     let mut text = w.texts.join("\n\n");
     if w.cut {
         text.push_str(CUT_MARK);
@@ -313,6 +328,9 @@ struct Walker<'a> {
     files: Vec<File<'a>>,
     /// True if the message is a reply. Quoted history then goes out.
     is_reply: bool,
+    /// True if a calendar part is a request. A version of an alternative
+    /// that the text does not use still counts.
+    invitation: bool,
 }
 
 impl<'a> Walker<'a> {
@@ -375,6 +393,15 @@ impl<'a> Walker<'a> {
                 }
             }
             return;
+        }
+        if mime_type == "text/calendar" && !self.invitation {
+            let method = ct.as_ref().and_then(|c| c.attribute("method"));
+            self.invitation = method.is_some_and(|m| m.trim().eq_ignore_ascii_case("request")) || {
+                let (bytes, _) = decode_capped(part.raw_body(), enc, CALENDAR_LIMIT);
+                bytes
+                    .split(|&c| c == b'\n')
+                    .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
+            };
         }
         let is_text = mime_type == "text/plain" || mime_type == "text/html";
         if is_text && !attachment && name.is_none() {
@@ -504,7 +531,9 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
             });
             return;
         };
-        let (subject, mut t, inner_cut, files) = message(parsed.root(), f.depth + 1, parts);
+        // A calendar in an attached message is not an invitation to the user.
+        let (subject, mut t, inner_cut, files) =
+            message(parsed.root(), f.depth + 1, parts, &mut false);
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {
