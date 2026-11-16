@@ -103,7 +103,23 @@ transaction:
 - A `correction` row with `by` set to the changeset ID (specification 1,
   section 5.5). So the item is pinned, and a rebuild keeps the change.
 - A ledger row with the state `applied`, the old values as `pre` and the new
-  values as `post` (section 7.1).
+  values as `post` (section 7.1). `pre` and `post` map each item ID to its
+  fields, for example `{"c-7": {"status": "open"}}`.
+
+The engine applies each approved action of a state verb at the next tick,
+with no provider call. These rules apply:
+
+- A state verb changes no mailbox. So, in the mode `observe`, an action that
+  a person approved applies, as an undo does. An action that a rule approved
+  waits in the mode `observe`.
+- An action that a rule approved goes to review first, as a mailbox verb
+  does, until the engine evaluates the rule again before the apply (issue
+  #168).
+- `close`, `decline` and `defer` change only a commitment with the status
+  `open` or `deferred` (specification 1, section 6.8). `close` and `decline`
+  remove `deferred_until`. If an item does not agree (for example,
+  understanding closed it after the submit), the ledger row is `failed` with
+  the reason and the undo `none`, and no item changes.
 
 The undo of the action sets the old values and deletes the correction row, in
 one transaction, with its own ledger row. If the current value is not the
@@ -563,7 +579,7 @@ in the file.
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
-| Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4). |
+| Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4) and a state verb that the person approved (section 4). |
 | A permanent delete. | No verb exists. |
 
 The hard limits treat `local` and `triage` as agents.

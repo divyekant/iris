@@ -1,6 +1,6 @@
 [package]
 name = "iris-apply"
-description = "The apply of approved changeset actions to Gmail, and the update of the mirror."
+description = "The apply of approved changeset actions: to Gmail with the mirror update, and of the state verbs to the items."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,8 @@ iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
+iris-talk = { version = "0.0.0", path = "../iris-talk" }
+iris-understand = { version = "0.0.0", path = "../iris-understand" }
 rusqlite = "=0.43.0"
 serde_json = "1"
 unicase = "=2.8.1"

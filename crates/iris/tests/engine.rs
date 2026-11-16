@@ -573,3 +573,60 @@ fn the_engine_stores_the_triage_proposal() {
     e.tick().unwrap();
     assert_eq!(count(&s.store, triage), 1);
 }
+
+/// The tick applies a state action that the person approved (R2-10).
+#[test]
+fn a_tick_applies_an_approved_close() {
+    let store = Arc::new(Store::open(&data_dir("close")).unwrap());
+    // No token: the tick starts no sync worker.
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', ?1, 'open', '{\"id\":\"c-1\",\"status\":\"open\"}', 0, 0)",
+                [account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let args = serde_json::json!({ "reason": "Done." });
+    let cs = iris_changeset::create(&store, &person, 1).unwrap();
+    let verb = iris_changeset::Verb::Close;
+    iris_changeset::add_action(
+        &store,
+        cs,
+        &person,
+        verb,
+        &["c-1"],
+        args.as_object().unwrap(),
+        None,
+    )
+    .unwrap();
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    iris_changeset::submit(&store, cs, &person, "Done.", t).unwrap();
+    let hash: String = store
+        .read(|c| Ok(c.query_row("SELECT hash FROM changeset_action", [], |r| r.get(0))?))
+        .unwrap();
+    let action = iris_changeset::ActionId {
+        changeset: cs,
+        revision: 1,
+        n: 1,
+    };
+    iris_changeset::approve(&store, action, &hash, t).unwrap();
+    let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
+    assert!(e.tick().unwrap().is_empty());
+    let status: String = store
+        .read(|c| Ok(c.query_row("SELECT status FROM item", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(status, "done");
+}
