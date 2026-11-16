@@ -624,6 +624,12 @@ impl Doc {
     }
 
     fn add_map(&mut self, num: u32, data: &[u8]) {
+        // Each map costs its own size and a tree node from the budget.
+        let cost = std::mem::size_of::<CMap>() + 64;
+        if self.map_left < cost {
+            return;
+        }
+        self.map_left -= cost;
         let map = CMap::parse(data, &mut self.map_left);
         self.maps.insert(num, map);
     }
