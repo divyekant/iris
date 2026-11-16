@@ -305,7 +305,7 @@ fn marks_json(marks: &[Mark], phishing: bool) -> String {
 
 fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<()> {
     let h = &a.head;
-    let list = |v: &[String]| (!v.is_empty()).then(|| v.join(", "));
+    let list = |v: &[String]| (!v.is_empty()).then(|| v.join(","));
     let subject = Some(a.text.subject.clone()).filter(|s| !s.is_empty());
     tx.prepare_cached(
         "INSERT INTO header(message_id, date, from_addr, from_name, to_addrs, cc_addrs, subject,

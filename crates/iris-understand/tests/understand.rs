@@ -315,6 +315,7 @@ fn a_draft_makes_no_item() {
 
 const ASK: &str = "From: Bo Ren <bo@example.org>
 To: owner@example.com
+Cc: \"Lee, Ana\" <Ana@Example.org>, kai@example.net
 Subject: The lease
 Date: Wed, 31 Dec 2025 09:00:00 +0000
 
@@ -348,6 +349,9 @@ fn the_model_gives_a_commitment_and_the_mail_stays_in_the_data() {
         item["sources"][0]["quote"],
         "Can you send me the signed lease by Friday?"
     );
+    // Bare lowercase addresses joined by "," (the format of iris-senders).
+    let cc: String = b.col("SELECT cc_addrs FROM header WHERE message_id = ?1", m);
+    assert_eq!(cc, "ana@example.org,kai@example.net");
     let calls = fake.calls.borrow();
     // The instruction is fixed text: no mail text goes into it.
     assert_eq!(calls[0].0, INSTRUCTION);
