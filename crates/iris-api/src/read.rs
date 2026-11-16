@@ -653,6 +653,9 @@ pub fn brief_section(
     offset: u64,
 ) -> Result<Option<SectionPage>> {
     check_limit(limit)?;
+    if offset > i64::MAX as u64 {
+        return Err(Error::Query(format!("offset must be {} or less", i64::MAX)));
+    }
     let Some(index) = SECTIONS.iter().position(|n| *n == name) else {
         return Ok(None);
     };
