@@ -291,7 +291,7 @@ test("withdraw asks once, then cancels each change that Iris did not make", asyn
     // "Keep it" closes the question and sends nothing.
     control().click();
     view.flushSync();
-    assert.match(text(view.target.querySelector(".question")), /Withdraw this request\? Iris cancels the 2 changes that it did not make\. The change that Iris made stays\. You cannot undo a withdraw\./);
+    assert.match(text(view.target.querySelector(".question")), /Withdraw this request\? Iris cancels each change of this request that it did not start\. A change that Iris made or started stays in your mailbox, also the part of a failed change that Iris made before it failed\. You cannot undo a withdraw\./);
     view.target.querySelector(".question button.quiet").click();
     view.flushSync();
     assert.equal(view.target.querySelector(".question"), null);
@@ -300,12 +300,56 @@ test("withdraw asks once, then cancels each change that Iris did not make", asyn
     control().click();
     view.flushSync();
     view.target.querySelector(".question button.outline").click();
-    await until(() => text(view.target).includes("This request is withdrawn."));
+    await until(() => text(view.target).includes("You withdrew this request. Iris cancelled 2 changes."));
+    assert.doesNotMatch(text(view.target), /started|This request is withdrawn/);
     assert.deepEqual(asked.filter((x) => Array.isArray(x)).map(([p]) => p), ["changesets/cs-9/withdraw"]);
     assert.equal(control(), undefined, "a withdrawn request has no control");
     assert.match(text(view.target), /Nothing waits for your review\./);
     assert.equal(view.target.querySelectorAll(".decided li").length, 3);
     assert.match(text(view.target.querySelector(".decided")), /Withdrawn.*Withdrawn.*Done/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a withdraw counts from the states that the store gives back: a started change goes on", async () => {
+  // Iris started change 2 (applying), so the store keeps it approved. Change 3 failed.
+  const before = changeset([
+    act({ n: 1 }),
+    act({ n: 2, decision: { state: "approved", by: "person" } }),
+    act({ n: 3, decision: { state: "failed", by: "person" } }),
+  ]);
+  const after = { ...before, state: "withdrawn", actions: before.actions.map((a) => (a.n === 1 ? { ...a, decision: { state: "cancelled", by: "author" } } : a)) };
+  serve({ "changesets/cs-9/withdraw": [200, after] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw").click();
+    view.flushSync();
+    // The question promises no count: the page cannot see which approved change Iris started.
+    assert.doesNotMatch(text(view.target.querySelector(".question")), /\d/);
+    assert.match(text(view.target.querySelector(".question")), /the part of a failed change that Iris made before it failed/);
+    view.target.querySelector(".question button.outline").click();
+    await until(() => text(view.target).includes("You withdrew this request."));
+    assert.match(text(view.target), /Iris cancelled one change\. Iris started one change before the withdraw, and it goes on to the end\./);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a withdraw keeps each change that it cancelled in view, also one of an older revision", async () => {
+  // Revision 2 came while change 1 of revision 1 was approved: it stays open (spec 2 section 5.5).
+  const before = { ...changeset([act({ n: 1, revision: 1, decision: { state: "approved", by: "person" } }), act({ n: 1, revision: 2, verb: "read" })]), revision: 2 };
+  const after = { ...before, state: "withdrawn", actions: before.actions.map((a) => ({ ...a, decision: { state: "cancelled", by: "author" } })) };
+  serve({ "changesets/cs-9/withdraw": [200, after] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw").click();
+    view.flushSync();
+    view.target.querySelector(".question button.outline").click();
+    await until(() => text(view.target).includes("Iris cancelled 2 changes."));
+    const rows = [...view.target.querySelectorAll(".decided li")].map(text);
+    assert.equal(rows.length, 2, "the change of revision 1 stays in view");
+    for (const row of rows) assert.match(row, /Withdrawn/);
   } finally {
     view.destroy();
   }

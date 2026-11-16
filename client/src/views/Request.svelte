@@ -93,20 +93,26 @@
 
   // One request for each decision: the engine approves the ticked changes, with the hash that
   // this screen showed, and denies the others. If one is refused, it writes nothing (409).
-  // Spec 2 section 5.5: the person can withdraw an open request. Each change that Iris did not
-  // finish becomes cancelled, and changes that Iris made stay. A withdraw cannot be undone,
-  // so the page asks once.
-  // The states that the withdraw cancels (trigger changeset_withdraw of the store).
-  let unfinished = $derived(actions.filter((a) => ["proposed", "in_review", "approved"].includes(a.decision?.state ?? "")));
-  let made = $derived(actions.filter((a) => a.decision?.state === "applied").length);
+  // Spec 2 section 5.5: the person can withdraw an open request. The store cancels each change
+  // that Iris did not start; a change that Iris started goes on to its end. The page cannot see
+  // which approved changes Iris started, so the question promises no count, and the result
+  // counts from the states that the store gives back. A withdraw cannot be undone: the page asks once.
   let asking = $state(false);
   async function withdraw() {
     if (busy || stale) return;
     busy = true;
     problem = saved = "";
+    const before = new Set(c.actions.filter((a) => a.decision?.state === "cancelled").map(key));
     try {
-      onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {}));
+      const after = await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {});
+      onchange(after);
       asking = false;
+      const gone = after.actions.filter((a) => a.decision?.state === "cancelled" && !before.has(key(a))).length;
+      const going = after.actions.filter((a) => a.decision?.state === "approved").length;
+      saved = [
+        `You withdrew this request. Iris cancelled ${gone === 1 ? "one change" : `${gone} changes`}.`,
+        going ? `Iris started ${going === 1 ? "one change" : `${going} changes`} before the withdraw, and ${going === 1 ? "it goes" : "they go"} on to the end.` : "",
+      ].join(" ").trim();
     } catch (e) {
       const status = (e as { status?: number }).status;
       asking = false;
@@ -170,9 +176,8 @@
   <div class="question" role="group" aria-labelledby={`${c.id}-ask`}>
     <p id={`${c.id}-ask`}><b>Withdraw this request?</b></p>
     <p>
-      Iris cancels {unfinished.length === 1 ? "the one change" : `the ${unfinished.length} changes`} that it did not make.
-      {made ? `${made === 1 ? "The change" : `The ${made} changes`} that Iris made stay${made === 1 ? "s" : ""}.` : ""}
-      You cannot undo a withdraw.
+      Iris cancels each change of this request that it did not start. A change that Iris made or started stays in your
+      mailbox, also the part of a failed change that Iris made before it failed. You cannot undo a withdraw.
     </p>
     <div class="answers">
       <button type="button" class="outline" disabled={busy} onclick={withdraw}>Withdraw the request</button>
@@ -224,7 +229,7 @@
       {#if missing.length && !problem}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
     </div>
   {/if}
-  {#if c.state === "withdrawn"}<p class="saved">This request is withdrawn. Iris cancelled each change that it did not make.</p>{/if}
+  {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}
