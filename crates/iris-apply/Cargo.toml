@@ -14,6 +14,7 @@ iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
 rusqlite = "=0.43.0"
+unicase = "=2.8.1"
 
 [dev-dependencies]
 iris-spec = { version = "0.0.0", path = "../iris-spec" }

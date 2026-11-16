@@ -748,6 +748,7 @@ dependencies = [
  "iris-synth",
  "rusqlite",
  "serde_json",
+ "unicase",
 ]
 
 [[package]]
@@ -804,6 +805,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "tokio",
+ "unicase",
 ]
 
 [[package]]
