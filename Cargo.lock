@@ -905,6 +905,7 @@ dependencies = [
  "iris-eval",
  "iris-store",
  "iris-synth",
+ "psl",
  "rusqlite",
 ]
 
@@ -987,7 +988,6 @@ dependencies = [
  "iris-synth",
  "iris-talk",
  "jsonschema",
- "psl",
  "rusqlite",
  "serde_json",
  "url",
