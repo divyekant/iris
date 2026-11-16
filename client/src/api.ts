@@ -107,6 +107,7 @@ export type Message = Summary & {
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
 export const NOT_COPIED = "Iris has not copied the original of this mail yet. Try again after the copy of the mailbox.";
+export const SIGN_IN_RETRY = "The engine of Iris could not sign you in. Load this page again to try again.";
 export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris serve, then open the sign-in address that it prints.";
 
 /** The text that a view shows for an error: "" when App.svelte shows it already as the access state. */
@@ -178,7 +179,8 @@ export function signIn(
       body: JSON.stringify({ code }),
     }).catch(() => fail(UNREACHABLE));
     // The engine answered: it used the code or refused it. After a server error, keep it for a reload.
-    if (response.status < 500) quiet(() => store?.removeItem(CODE));
+    if (response.status >= 500) fail(SIGN_IN_RETRY);
+    quiet(() => store?.removeItem(CODE));
     const body = await response.json().catch(() => null);
     if (!response.ok || typeof body?.token !== "string") fail(SIGN_IN_FAILED);
     token = body.token;
