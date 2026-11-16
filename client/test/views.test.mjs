@@ -525,3 +525,23 @@ test("the setup flow shows an account that needs sign-in, with the step to fix i
   assert.match(t, /Google stopped the sign-in of/);
   assert.match(t, /iris account add client\.json/);
 });
+
+test("a sign-in address with a bad escape gives the sign-in error, not a crash", async () => {
+  const { signIn, SIGN_IN_FAILED } = await load("/src/api.ts");
+  const urls = [];
+  let result;
+  assert.doesNotThrow(() => (result = signIn({ hash: "#code=%", pathname: "/", search: "" }, { replaceState: (_s, _t, u) => urls.push(u) }, undefined)));
+  await assert.rejects(result, { message: SIGN_IN_FAILED });
+  assert.deepEqual(urls, ["/#/"]);
+});
+
+test("only the newest request of a view applies its answer (A, then B, then A)", async () => {
+  const { newest } = await load("/src/api.ts");
+  const ticket = newest();
+  const a1 = ticket();
+  const b = ticket();
+  const a2 = ticket();
+  assert.equal(a1(), false);
+  assert.equal(b(), false);
+  assert.equal(a2(), true);
+});
