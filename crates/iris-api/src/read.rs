@@ -1107,7 +1107,7 @@ fn empty_summary() -> MessageSummary {
 
 /// The document of an item row (id, form, status, doc). The row is the true
 /// copy of the ID and the status, so they replace the values of the document.
-fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let id: i64 = r.get(0)?;
     let form: String = r.get(1)?;
     let text: String = r.get(3)?;
