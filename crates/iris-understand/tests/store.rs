@@ -856,6 +856,45 @@ Lease Office, 12 High Street
 }
 
 #[test]
+fn an_earlier_text_of_the_sender_with_a_spam_label_shapes_nothing() {
+    let b = store("repeated-spam");
+    let first = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: The lease
+
+Here is the plan.
+
+Bo Ren
+Lease Office, 12 High Street
+";
+    let second = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: Re: The lease
+
+Can you call me today?
+
+Bo Ren
+Lease Office, 12 High Street
+";
+    let a = b.add_in("1", "t1", NOW - 3 * DAY, first, &["INBOX"]);
+    let s = b.add_in("2", "t1", NOW - 2 * DAY, second, &["INBOX"]);
+    understand(&b.store, a, &Fake::default(), NOW).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [a],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    understand(&b.store, s, &Fake::default(), NOW).unwrap();
+    let text: String = b.col("SELECT text FROM body WHERE message_id = ?1", s);
+    assert!(text.contains("12 High Street"), "{text}");
+}
+
+#[test]
 fn a_rerun_that_stops_after_the_first_write_is_not_understood() {
     let b = store("rerun-stop");
     let m = b.add("1", ASK, &["INBOX"]);
@@ -968,8 +1007,11 @@ fn a_change_during_the_model_call_saves_nothing() {
         // person at another address: the spoof check must run again.
         "INSERT INTO sender(address, name, kind, decided_by)
          SELECT 'bo@other.example', 'Bo Ren', 'person', 'person' WHERE ?1 = ?1",
+        // A known party in Cc that the model got turned hostile.
+        "UPDATE sender SET kind = 'hostile' WHERE address = 'ana@example.org' AND ?1 = ?1",
     ] {
         let b = store("changed");
+        b.kind("ana@example.org", "Ana Lee", "person");
         let m = b.add("1", ASK, &["INBOX"]);
         let model = Changer {
             store: &b.store,

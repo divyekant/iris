@@ -139,24 +139,22 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let head = crate::Head::parse(&raw);
     // The spoof check needs this lookup: a read error stops understanding
     // before any model call.
-    let known_list = match &head.from_name {
-        Some(n) => store.read(|c| Ok(known_person(c, n)?))?,
-        None => Vec::new(),
-    };
-    let known = |_: &str| known_list.clone();
-    let existing = pinned(store, message)?;
-    let earlier = store.read(|c| Ok(thread_context(c, message, row.thread, row.internal_date)?))?;
-    let from_addr = head.from_addr.clone();
-    let same_now = |c: &rusqlite::Connection| {
-        same_sender(
+    let (from_name, from_addr) = (head.from_name.clone(), head.from_addr.clone());
+    // All store inputs of the run, read with one function. Write 1 and
+    // write 3 read them again and compare.
+    let inputs_now = |c: &rusqlite::Connection| {
+        inputs(
             c,
             message,
             row.thread,
             row.internal_date,
+            from_name.as_deref(),
             from_addr.as_deref(),
         )
     };
-    let same = store.read(|c| Ok(same_now(c)?))?;
+    let first = store.read(|c| Ok(inputs_now(c)?))?;
+    let known = |_: &str| first.known.clone();
+    let existing = pinned(store, message)?;
     // Steps 1 and 2 do not use the sender kind or the known parties. Write
     // 1 decides them (step 3).
     let cx = Context {
@@ -167,8 +165,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         now_ms,
         known_person: &known,
         existing: &existing,
-        thread: &earlier,
-        same_sender: &same,
+        thread: &first.context,
+        same_sender: &first.same,
         known: &[],
     };
     let mut a = analyze(&raw, &cx);
@@ -195,18 +193,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         text: a.text.text.clone(),
     };
     let mut decided = None;
-    let mut parties = Vec::new();
-    let mut known_after = Vec::new();
+    let mut after = Inputs::default();
     let seen = store.write(|tx| {
-        // Each input of steps 1 to 3 that comes from the store: the state
-        // of the message, and the known persons of the spoof check.
-        let name = a.head.from_name.as_deref();
-        let known_now = name
-            .map(|n| known_person(tx, n))
-            .transpose()?
-            .unwrap_or_default();
-        // The earlier texts of the sender shape the clean text (section 7.2).
-        if state(tx, message, true)? != start || known_now != known_list || same_now(tx)? != same {
+        // Steps 1 and 2 used the state of the message and `first`.
+        if state(tx, message, true)? != start || inputs_now(tx)? != first {
             return Ok(None);
         }
         put_header(tx, message, &a)?;
@@ -227,12 +217,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         // draft keeps no item.
         drop_old_items(tx, message)?;
         iris_talk::update(tx, row.thread, None, now_ms)?;
-        // After the header row and the sender kinds of this message.
-        parties = known_parties(tx, row.thread)?;
-        known_after = name
-            .map(|n| known_person(tx, n))
-            .transpose()?
-            .unwrap_or_default();
+        // After the header row and the sender kinds of this message: the
+        // inputs of the model call, which write 3 checks.
+        after = inputs_now(tx)?;
         Ok(Some(state(tx, message, true)?))
     })?;
     drop(raw);
@@ -244,9 +231,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let kind_read = decided.map_or(Kind::Stranger, |d| Kind::parse(d.kind.name()));
     let from = a.head.from_addr.clone();
     let sent = kind_read == Kind::SelfOwner;
+    let known = |_: &str| after.known.clone();
     let cx = Context {
         kind: kind_read,
-        known: &parties,
+        known_person: &known,
+        thread: &after.context,
+        known: &after.parties,
         ..cx
     };
     let Some(seen) = seen else {
@@ -309,20 +299,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             Some(f) if !sent => sender_kind_in(tx, f)?,
             _ => kind_read,
         };
-        // The model saw this thread context: it must still be the context
-        // now, for example with no later SPAM label on an earlier message.
-        let context_now = thread_context(tx, message, row.thread, row.internal_date)?;
-        let name = a.head.from_name.as_deref();
-        let known_now = name
-            .map(|n| known_person(tx, n))
-            .transpose()?
-            .unwrap_or_default();
-        if state(tx, message, true)? != seen
-            || kind_now != kind_read
-            || context_now != earlier
-            || known_now != known_after
-            || same_now(tx)? != same
-        {
+        // The model saw `after`: each input must still be the same now, for
+        // example with no later SPAM label on an earlier message.
+        if state(tx, message, true)? != seen || kind_now != kind_read || inputs_now(tx)? != after {
             changed = true;
             return Ok(Vec::new());
         }
@@ -489,6 +468,57 @@ fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind
     Ok(kind.flatten().map_or(Kind::Stranger, |k| Kind::parse(&k)))
 }
 
+/// The store inputs of one run besides the state of the message. A run
+/// reads them with `inputs` only, and each checked write compares them.
+#[derive(Default, PartialEq)]
+struct Inputs {
+    /// The known persons with the display name of the sender (spoof check).
+    known: Vec<String>,
+    /// The clean texts of the earlier messages of the sender (section 7.2).
+    same: Vec<String>,
+    /// The earlier messages of the thread for the model (section 7.4).
+    context: Vec<String>,
+    /// The known persons in the headers of the thread (section 7.4).
+    parties: Vec<String>,
+}
+
+fn inputs(
+    c: &rusqlite::Connection,
+    message: i64,
+    thread: i64,
+    date: Option<i64>,
+    from_name: Option<&str>,
+    from_addr: Option<&str>,
+) -> rusqlite::Result<Inputs> {
+    Ok(Inputs {
+        known: from_name
+            .map(|n| known_person(c, n))
+            .transpose()?
+            .unwrap_or_default(),
+        same: same_sender(c, message, thread, date, from_addr)?,
+        context: thread_context(c, message, thread, date)?,
+        parties: known_parties(c, thread)?,
+    })
+}
+
+/// The SQL condition on an earlier message `m` that may shape this run:
+/// one rule for the thread context and the texts of the same sender.
+/// Hostile mail never goes to a model, also as context. Only a message that
+/// understanding judged has its marks, and a SPAM label counts now, also one
+/// that came later. A draft is not mail of the thread yet.
+macro_rules! earlier_ok {
+    () => {
+        "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
+         AND m.internal_date < ?3
+         AND m.understood_at IS NOT NULL
+         AND coalesce(m.hostile, '[]') = '[]'
+         AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                         WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'DRAFT'))
+         AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender s ON s.address = hh.from_addr
+                         WHERE hh.message_id = m.id AND s.kind = 'hostile')"
+    };
+}
+
 /// The most known parties that the model gets.
 const KNOWN_PARTIES: i64 = crate::prompt::MAX_KNOWN as i64;
 
@@ -546,13 +576,12 @@ fn same_sender(
         return Ok(Vec::new());
     };
     {
-        let mut st = c.prepare_cached(
+        let mut st = c.prepare_cached(concat!(
             "SELECT b.text FROM message m JOIN body b ON b.message_id = m.id
-             JOIN header h ON h.message_id = m.id
-             WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
-               AND m.internal_date < ?3 AND h.from_addr = ?4
-             ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5",
-        )?;
+             JOIN header h ON h.message_id = m.id WHERE h.from_addr = ?4 AND ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5"
+        ))?;
         let v = st
             .query_map(
                 params![thread, message, date, from, SAME_SENDER_MESSAGES],
@@ -582,24 +611,12 @@ fn thread_context(
         return Ok(Vec::new());
     };
     let mut v: Vec<String> = {
-        let mut st = c.prepare_cached(
+        let mut st = c.prepare_cached(concat!(
             "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
-             WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
-               AND m.internal_date < ?3
-               -- Hostile mail never goes to a model, also as context. Only
-               -- a message that understanding judged has its marks, and a
-               -- SPAM label counts now, also one that came later. A draft
-               -- is not mail of the thread yet.
-               AND m.understood_at IS NOT NULL
-               AND coalesce(m.hostile, '[]') = '[]'
-               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                               WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
-               AND NOT EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
-                               WHERE h.message_id = m.id AND s.kind = 'hostile')
-               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                               WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
-             ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4",
-        )?;
+             WHERE ",
+            earlier_ok!(),
+            " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
+        ))?;
         let v = st
             .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
                 let (from, subject, text): (String, String, String) =
