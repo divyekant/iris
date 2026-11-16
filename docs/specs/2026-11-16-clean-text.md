@@ -36,7 +36,7 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment> }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
 pub const TEXT_LIMIT: usize = 32_000;           // characters of `text`
@@ -114,6 +114,25 @@ Each budget only goes down. No step gives budget back.
   the cut mark. The same check applies to an attached message before its
   parse. The scan reads lines only, so a body line that looks like a MIME
   field counts too: the check can refuse more, never less.
+
+### Invitation
+
+`Clean.invitation` gives the input of the fixed invitation rule
+(specification 1, section 7.3). It is true if a `text/calendar` part of the
+top message is a request:
+
+- its `method` parameter is `REQUEST` (any case), or
+- its decoded body has a line that is `METHOD:REQUEST` (any case, with white
+  space around it and nothing else).
+
+The check walks every part of the MIME tree of the top message, in any
+order. It does not depend on the `multipart/alternative` version that gives
+the text. It reads the media type and the parameter names of the parsed
+`Content-Type` as whole tokens. It decodes the whole calendar body in chunks
+of about 64 KiB, with a line matcher that keeps at most 14 bytes, so the
+memory stays bounded for a calendar of any size. The check stays inside
+`MAX_PARTS` and `MAX_DEPTH`. It does not go into an attached message: a
+calendar in an attached message is not an invitation to the user.
 
 ### A reply
 
@@ -413,6 +432,26 @@ client. They are not defects of this design:
 
 `Clean.cut` is true exactly when the crate adds `CUT_MARK` to the end of
 `Clean.text`.
+
+## Failure list
+
+The input is a raw RFC 5322 message from any sender. The supported input is
+a message that `mail-parser` 1.0.1 parses, inside the limits of
+[Limits and the cut](#limits-and-the-cut). The one safe result for all other
+input: no panic, bounded memory and time, and a `Clean` with less text (and
+`CUT_MARK` when text went out), never text from outside the message.
+
+| Input class | Failure mode | Result | Test |
+|---|---|---|---|
+| Bytes that are not mail | Parse fails | Empty `Clean`, no panic | `bytes_that_are_not_mail_do_not_panic` |
+| MIME fields over 16 KiB each or 1 MiB in all | Parse memory grows | Not parsed: text is `CUT_MARK`, `cut` and no invitation | `a_mime_field_past_the_value_limit_is_not_parsed`, `a_huge_content_type_stays_bounded` |
+| More than `MAX_PARTS` parts or `MAX_DEPTH` levels | Time and memory grow | Later parts are not read, with `CUT_MARK` | `alternatives_past_the_part_limit_mark_the_cut`, `deep_nesting_stops_at_the_limit` |
+| A large body part, HTML or attachment | Decode memory grows | The decode stops at its cap, with `CUT_MARK` | `memory_and_time_stay_bounded`, `long_text_is_cut_and_marked` |
+| A header block over 256 KiB, a value over 16 KiB | Header memory grows | The rest is not read | `a_header_after_the_header_limit_does_not_count`, `a_subject_past_the_value_limit_is_cut` |
+| Hostile HTML or CSS (hidden text, many elements) | Hidden text stays, or time grows | Hidden text of the closed list goes out; time stays linear | `many_elements_with_one_class_stay_fast` |
+| A hostile PDF | Panic or memory | No panic; a PDF over `PDF_LIMIT` gives no text | `a_simple_pdf_attachment_gives_text` |
+| A calendar part | False or missed invitation | Only a parsed `text/calendar` part with `method=REQUEST` or a `METHOD:REQUEST` line counts, at any size and in any order | `crates/iris-clean/tests/invitation.rs` |
+| Text that reads as an instruction | The model follows it | The text stays data; the code never runs it | Specification 1, section 7.4 |
 
 ## Options not chosen
 

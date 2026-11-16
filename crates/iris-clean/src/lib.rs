@@ -79,13 +79,9 @@ pub struct Clean {
     pub attachments: Vec<Attachment>,
     /// True if a `text/calendar` part of the top message is a request
     /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
-    /// first [`CALENDAR_LIMIT`] decoded bytes have a `METHOD:REQUEST` line.
+    /// decoded body has a `METHOD:REQUEST` line.
     pub invitation: bool,
 }
-
-/// The most decoded bytes of one calendar part that the invitation check
-/// reads. The METHOD line comes near the start of a calendar.
-pub const CALENDAR_LIMIT: usize = 64 * 1024;
 
 /// One attachment: a name, a type and a size, and the text if there is one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,10 +331,56 @@ fn calendar_request(part: MessagePart<'_>, depth: usize, seen: &mut usize) -> bo
         Some("quoted-printable") => Encoding::QuotedPrintable,
         _ => Encoding::None,
     };
-    let (bytes, _) = decode_capped(part.raw_body(), enc, CALENDAR_LIMIT);
-    bytes
-        .split(|&c| c == b'\n')
-        .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
+    // The whole body, decoded in chunks of about 64 KiB, through a matcher
+    // of constant memory.
+    let mut m = MethodLine::default();
+    let body = part.raw_body();
+    match enc {
+        Encoding::Base64 => base64_chunks(body, |b| m.feed(b)),
+        Encoding::QuotedPrintable => qp_chunks(body, |b| {
+            m.feed(b);
+            !m.found
+        }),
+        Encoding::None => m.feed(body),
+    }
+    m.feed(b"\n");
+    m.found
+}
+
+/// Finds a line that is `METHOD:REQUEST` (any case, white space around it)
+/// in bytes that come in parts. It keeps at most 14 bytes of a line.
+#[derive(Default)]
+struct MethodLine {
+    /// The bytes of the line after its leading white space.
+    line: Vec<u8>,
+    /// The line has white space after its first word.
+    space: bool,
+    /// The line can no longer match.
+    over: bool,
+    found: bool,
+}
+
+impl MethodLine {
+    const WORD: &'static [u8] = b"METHOD:REQUEST";
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.found {
+                return;
+            }
+            if b == b'\n' {
+                self.found = !self.over && self.line.eq_ignore_ascii_case(Self::WORD);
+                (self.space, self.over) = (false, false);
+                self.line.clear();
+            } else if b.is_ascii_whitespace() {
+                self.space |= !self.line.is_empty();
+            } else if self.space || self.line.len() == Self::WORD.len() {
+                self.over = true;
+            } else {
+                self.line.push(b);
+            }
+        }
+    }
 }
 
 /// An attachment that step 1 found. Step 2 reads it.

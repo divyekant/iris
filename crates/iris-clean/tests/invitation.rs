@@ -99,3 +99,46 @@ Content-Type: text/calendar; charset=utf-8\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQU
 Content-Type: text/plain\r\n\r\nYou are invited.\r\n--a--\r\n";
     assert!(inv(raw));
 }
+
+#[test]
+fn a_method_line_after_64_kib_counts_in_each_encoding() {
+    let pad = "DESCRIPTION:x\r\n".repeat(10_000);
+    let cal = format!("BEGIN:VCALENDAR\r\n{pad}  method:request \r\nEND:VCALENDAR\r\n");
+    let plain = format!("Content-Type: text/calendar\r\n\r\n{cal}");
+    assert!(inv(plain.as_bytes()));
+    let b64 = base64_lines(cal.as_bytes());
+    let raw =
+        format!("Content-Type: text/calendar\r\nContent-Transfer-Encoding: base64\r\n\r\n{b64}");
+    assert!(inv(raw.as_bytes()));
+    let qp = format!(
+        "Content-Type: text/calendar\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n{pad}METHOD=3AREQ=\r\nUEST\r\n"
+    );
+    assert!(inv(qp.as_bytes()));
+    // A longer line or a second word does not count.
+    for bad in ["METHOD:REQUESTX", "METHOD:REQUEST X", "X METHOD:REQUEST"] {
+        let raw = format!("Content-Type: text/calendar\r\n\r\n{pad}{bad}\r\n");
+        assert!(!inv(raw.as_bytes()), "{bad}");
+    }
+}
+
+/// Base64 in lines of 76 characters.
+fn base64_lines(data: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out.as_bytes()
+        .chunks(76)
+        .map(|l| format!("{}\r\n", std::str::from_utf8(l).unwrap()))
+        .collect()
+}
