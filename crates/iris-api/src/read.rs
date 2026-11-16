@@ -259,15 +259,21 @@ pub fn status(store: &Store) -> Result<Status> {
 pub fn search(store: &Store, text: &str, limit: u32) -> Result<Vec<MessageSummary>> {
     check_limit(limit)?;
     let ids = store.search(text, limit)?;
-    Ok(store.read(|c| {
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some((summary, _)) = message_row(c, id)? {
+    Ok(store.read(|c| Ok(summaries(c, &ids)?))?)
+}
+
+/// The summaries of the messages `ids`, in order. A message that the sync
+/// marked gone after the search is left out.
+fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary>> {
+    let mut out = Vec::with_capacity(ids.len());
+    for &id in ids {
+        if let Some((summary, more)) = message_row(c, id)? {
+            if !more.gone {
                 out.push(summary);
             }
         }
-        Ok(out)
-    })?)
+    }
+    Ok(out)
 }
 
 /// One message by its `m-` ID, also when it is gone.
@@ -443,10 +449,12 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         "created_at, id".to_string(),
     );
     let conversations = (
-        // A conversation with a stranger is also in `strangers`.
-        "form = 'conversation' AND status = 'active'
-         AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)"
-            .to_string(),
+        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16).
+        format!(
+            "form = 'conversation' AND status = 'active'
+             AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
+             AND NOT {stranger_participant}"
+        ),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );
     // Group by the address of the sender row of the publisher (the address of
@@ -589,23 +597,24 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
 /// The triage proposal of specification 1, section 8, in the changeset
 /// format of specification 2: `{"changesets": [...]}`, one changeset for each
 /// account, with the message IDs of each action. Each action is `proposed`.
-/// Nothing is applied or stored. The value is JSON text, so the ID lists are
-/// not held twice.
-pub fn proposal(store: &Store, now: i64) -> Result<Vec<u8>> {
+/// Nothing is applied or stored. Each changeset streams to `out` from one
+/// read snapshot (specification 2, section 9), so no ID list is in memory.
+pub fn write_proposal(store: &Store, now: i64, out: &mut impl std::io::Write) -> Result<()> {
     let accounts: Vec<i64> = store.read(|c| {
         let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
         let ids = st.query_map([], |r| r.get(0))?;
         Ok(ids.collect::<rusqlite::Result<_>>()?)
     })?;
-    let mut out = b"{\"changesets\":[".to_vec();
+    let io = |e: std::io::Error| Error::Store(e.into());
+    out.write_all(b"{\"changesets\":[").map_err(io)?;
     for (i, account) in accounts.into_iter().enumerate() {
         if i > 0 {
-            out.push(b',');
+            out.write_all(b",").map_err(io)?;
         }
-        iris_observe::write_changeset(store, account, &rfc3339(now), &mut out)?;
+        iris_observe::write_changeset(store, account, &rfc3339(now), out)?;
     }
-    out.extend_from_slice(b"]}");
-    Ok(out)
+    out.write_all(b"]}").map_err(io)?;
+    Ok(())
 }
 
 /// The summary of message `row`, and the other fields of [`Message`]
@@ -735,6 +744,28 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summaries_leave_out_a_message_that_became_gone() {
+        let dir = std::env::temp_dir().join(format!("iris-api-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let acc = store.add_account("gmail", "owner@example.com").unwrap();
+        let msg = |id: &str| iris_store::NewMessage {
+            provider_id: id.into(),
+            thread_provider_id: "t".into(),
+            ..Default::default()
+        };
+        let ids = store.put_messages(acc, &[msg("a"), msg("b")]).unwrap();
+        // As if the sync marked `a` gone between the search and the read.
+        store
+            .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [ids[0]])?))
+            .unwrap();
+        let got = store.read(|c| Ok(summaries(c, &ids)?)).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, format_id(Kind::Message, ids[1]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn rfc3339_gives_utc_dates() {

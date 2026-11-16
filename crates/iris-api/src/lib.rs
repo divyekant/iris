@@ -108,9 +108,61 @@ async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(brief(&s, now_ms())?).into_response())
 }
 
-async fn get_proposal(State(s): State<Arc<Store>>) -> Result<Response> {
-    let body = proposal(&s, now_ms())?;
-    Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+async fn get_proposal(State(s): State<Arc<Store>>) -> Response {
+    // The changeset streams from a blocking thread through a channel of a
+    // few parts, so memory stays flat for a large proposal.
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let now = now_ms();
+    tokio::task::spawn_blocking(move || {
+        let mut w = ChanWriter {
+            buf: Vec::with_capacity(CHUNK),
+            tx,
+        };
+        let res = write_proposal(&s, now, &mut w)
+            .and_then(|()| std::io::Write::flush(&mut w).map_err(|e| Error::Store(e.into())));
+        if let Err(e) = res {
+            // The status is sent; an error ends the body, so the JSON is cut.
+            let _ =
+                w.tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+        }
+    });
+    let parts = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|part| (part, rx))
+    });
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        Body::from_stream(parts),
+    )
+        .into_response()
+}
+
+/// The size of one part of a streamed answer.
+const CHUNK: usize = 64 * 1024;
+
+/// A writer that sends parts of [`CHUNK`] bytes to a channel.
+struct ChanWriter {
+    buf: Vec<u8>,
+    tx: tokio::sync::mpsc::Sender<std::io::Result<Bytes>>,
+}
+
+impl std::io::Write for ChanWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= CHUNK {
+            self.flush()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let part = Bytes::from(std::mem::replace(&mut self.buf, Vec::with_capacity(CHUNK)));
+        self.tx
+            .blocking_send(Ok(part))
+            .map_err(|_| std::io::Error::other("the client closed the connection"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -223,16 +275,15 @@ fn is_local(headers: &HeaderMap) -> bool {
     if !local_host(host) {
         return false;
     }
+    // The server speaks plain HTTP, so its own origin is `http://` and the
+    // Host, with the same port.
     match headers.get(header::ORIGIN) {
         None => true,
         Some(v) => v
             .to_str()
             .ok()
-            .and_then(|o| {
-                o.strip_prefix("http://")
-                    .or_else(|| o.strip_prefix("https://"))
-            })
-            .is_some_and(local_host),
+            .and_then(|o| o.strip_prefix("http://"))
+            .is_some_and(|o| o.eq_ignore_ascii_case(host)),
     }
 }
 
@@ -256,6 +307,37 @@ fn local_host(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chan_writer_sends_parts_of_chunk_size() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let data: Vec<u8> = (0..CHUNK * 3 + 100).map(|i| i as u8).collect();
+        std::thread::spawn(move || {
+            let mut w = ChanWriter {
+                buf: Vec::new(),
+                tx,
+            };
+            for part in data.chunks(1000) {
+                std::io::Write::write_all(&mut w, part).unwrap();
+            }
+            std::io::Write::flush(&mut w).unwrap();
+        })
+        .join()
+        .unwrap();
+        let mut got = Vec::new();
+        let mut parts = 0;
+        while let Ok(part) = rx.try_recv() {
+            let part = part.unwrap();
+            assert!(part.len() < CHUNK + 1000);
+            got.extend_from_slice(&part);
+            parts += 1;
+        }
+        assert!(parts >= 3, "{parts}");
+        assert_eq!(
+            got,
+            (0..CHUNK * 3 + 100).map(|i| i as u8).collect::<Vec<u8>>()
+        );
+    }
 
     #[test]
     fn local_host_accepts_only_loopback_names() {

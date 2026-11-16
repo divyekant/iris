@@ -833,7 +833,7 @@ status is `gone`.
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. A conversation with a `stranger` participant is only in Strangers. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |

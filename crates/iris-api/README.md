@@ -27,7 +27,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 |---|---|
 | `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
-| `/api/proposal` | `{"changesets": [...]}`: the triage proposal of the brief, one changeset for each account, in the format of specification 2, section 5.1. Each action has its message IDs and the state `proposed`. Nothing is applied or stored. |
+| `/api/proposal` | `{"changesets": [...]}`: the triage proposal of the brief, one changeset for each account, in the format of specification 2, section 5.1. The answer streams in parts of 64 KiB. Each action has its message IDs and the state `proposed`. Nothing is applied or stored. |
 | `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first, by the date of the origin message. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
 | `/api/items/{id}` | One item (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone. |
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
@@ -48,7 +48,7 @@ The text of a message is data. Show it as text, never as markup.
 |---|---|
 | `you_owe` | Open commitments with the direction `you_owe`, where the counterparty is a `person` or a `service`. Order: by `due`, an item with no `due` last, then by created. |
 | `owed_to_you` | Open commitments with the direction `owed_to_you`, where the owner is a `person` or a `service`. Oldest first. |
-| `conversations` | Active conversations with `new` greater than 0 or `your_turn` true. A conversation with a stranger is also in `strangers`. Newest `latest.at` first. |
+| `conversations` | Active conversations with `new` greater than 0 or `your_turn` true, and with no stranger participant. A conversation with a stranger is only in `strangers`. Newest `latest.at` first. |
 | `records` | The count of each record type that is not gone, for example `{"receipt": 3}`. |
 | `feed` | Feed items with the status `new`, in the order of the publisher address, then newest first. |
 | `signals` | Active signals whose `expires` time is later than now. The time that expires first comes first. |
@@ -93,7 +93,8 @@ For a new code, start `iris serve` again.
 
 The API also refuses each request whose
 `Host` is not `127.0.0.1`, `localhost` or `[::1]` (with an optional port), and
-each request with an `Origin` that does not have one of these hosts. A web page
+each request with an `Origin` that is not `http://` and the same `Host`
+(same name and port). A web page
 on another site cannot read the API through DNS rebinding. A request with no
 `Origin` header is allowed. Each answer, also a refusal, has `X-Content-Type-Options: nosniff`
 and `Cache-Control: no-store`.

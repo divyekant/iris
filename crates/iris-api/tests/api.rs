@@ -207,11 +207,34 @@ fn ids(list: &Value) -> Vec<&str> {
 async fn refuses_a_host_or_origin_that_is_not_local() {
     let dir = temp("host");
     let store = Arc::new(Store::open(&dir.0).unwrap());
-    let cases: [(&[(&str, &str)], StatusCode); 6] = [
+    let cases: [(&[(&str, &str)], StatusCode); 9] = [
         (&[("host", "localhost:4800")], StatusCode::OK),
+        // The dev server of the client sends its own Host and Origin.
         (
-            &[("host", "[::1]:4800"), ("origin", "http://localhost:5173")],
+            &[
+                ("host", "localhost:5173"),
+                ("origin", "http://localhost:5173"),
+            ],
             StatusCode::OK,
+        ),
+        // Another port, another scheme or another local name is another origin.
+        (
+            &[
+                ("host", "localhost:4800"),
+                ("origin", "http://localhost:5173"),
+            ],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            &[
+                ("host", "localhost:4800"),
+                ("origin", "https://localhost:4800"),
+            ],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            &[("host", "[::1]:4800"), ("origin", "http://127.0.0.1:4800")],
+            StatusCode::FORBIDDEN,
         ),
         (&[("host", "evil.example")], StatusCode::FORBIDDEN),
         (
@@ -808,10 +831,7 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["you_owe"]["count"], 4);
     assert_eq!(b["you_owe"]["duplicates"], json!({ c(late): [c(dup)] }));
     assert_eq!(ids(&b["owed_to_you"]["items"]), [c(old_owed), c(new_owed)]);
-    assert_eq!(
-        ids(&b["conversations"]["items"]),
-        [v(c_stranger), v(c_turn), v(c_new)]
-    );
+    assert_eq!(ids(&b["conversations"]["items"]), [v(c_turn), v(c_new)]);
     assert_eq!(b["records"], json!({"booking": 1, "receipt": 2}));
     let f = |n: i64| format!("f-{n}");
     assert_eq!(
