@@ -398,7 +398,14 @@ fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow
     };
     let input = &body[..body.len().min(max_in)];
     let mut bytes = mime::transfer_decode(input, cte);
-    let truncated = input.len() < body.len() || bytes.len() > cap;
+    // Only data after the input is a cut: base64 padding and line ends are not.
+    let rest = &body[input.len()..];
+    let more = if cte == "base64" {
+        mime::has_base64(rest)
+    } else {
+        !rest.is_empty()
+    };
+    let truncated = more || bytes.len() > cap;
     if bytes.len() > cap {
         bytes.to_mut().truncate(cap);
     }
@@ -444,6 +451,20 @@ fn tidy(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_at_the_cap_with_white_space_after_is_not_cut() {
+        // 12 characters of data, then padding and line ends.
+        let body = b"QUJDREVGR0hJ\r\n\r\n  \r\n";
+        for cap in [9, 10, 12] {
+            let (bytes, cut) = decode_capped(body, "base64", cap);
+            assert_eq!((&bytes[..], cut), (&b"ABCDEFGHI"[..], false), "cap {cap}");
+        }
+        let (bytes, cut) = decode_capped(body, "base64", 8);
+        assert_eq!((&bytes[..], cut), (&b"ABCDEFGH"[..], true));
+        let pad = b"QUJDRA==\r\n";
+        assert!(!decode_capped(pad, "base64", 4).1);
+    }
 
     #[test]
     fn tidy_lines() {

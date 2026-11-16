@@ -1127,6 +1127,10 @@ mod tests {
         let n = MAX_STACK * 9 + 10;
         let deep = format!("{}deep{}after", "<span>".repeat(n), "</span>".repeat(n));
         assert_eq!(md(&deep), "after");
+        // Past the stack, an element closes only at the end tag with its name.
+        let divs = "<div>".repeat(MAX_STACK + 1);
+        assert_eq!(md(&format!("{divs}</span>hidden")), "");
+        assert_eq!(md(&format!("{divs}</div>shown")), "shown");
         // A long run of line ends in `pre` does not pass the limit.
         let pre = format!("<pre>a{}b</pre>", "\n".repeat(OUT_LIMIT + 10));
         let (pre_out, pre_full) = to_markdown(&pre, false);

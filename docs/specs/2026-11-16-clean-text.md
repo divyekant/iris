@@ -112,8 +112,11 @@ hidden HTML) makes no cut.
 
 - The converter is a tokenizer with an element stack of at most 512 levels.
   The content of an element deeper than 512 levels goes out. The converter
-  counts the start tags past that depth. Each end tag closes one of them, so
-  the text after the deep elements shows again.
+  keeps the names of at most 4,096 elements past that depth. Such an
+  element closes at the end tag with its name, as on the stack. Another end
+  tag changes nothing. Past those 4,096 names, the converter only counts
+  the start tags, and each end tag closes one of them. After the deep
+  elements close, the text shows again.
 - Implied end tags: a block closes an open `p`, an `li` closes the `li`
   before it, a `td` or `th` closes the cell before it, a `tr` closes the row
   before it, and `body` closes an open `head`.

@@ -103,6 +103,11 @@ pub fn base64_prefix(body: &[u8], chars: usize) -> usize {
     body.len()
 }
 
+/// True if the bytes hold a base64 character (padding and white space do not count).
+pub fn has_base64(body: &[u8]) -> bool {
+    body.iter().any(|&b| b64(b).is_some())
+}
+
 /// A structured header value such as `text/plain; charset=utf-8`.
 pub struct Value {
     /// The value before the first `;`, in lowercase.
