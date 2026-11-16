@@ -697,6 +697,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-senders"
+version = "0.0.0"
+dependencies = [
+ "iris-eval",
+ "iris-store",
+ "iris-synth",
+ "rusqlite",
+]
+
+[[package]]
 name = "iris-spec"
 version = "0.0.0"
 dependencies = [

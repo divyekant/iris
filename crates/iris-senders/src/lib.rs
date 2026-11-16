@@ -1,0 +1,397 @@
+//! The sender axis of specification 1 section 6.7. [`decide`] gives the kind
+//! of the sender of one message, and keeps the `sender` row of the address
+//! current.
+//!
+//! Fixed rules decide each kind. The specification makes `stranger` the
+//! result when no rule matches, so this crate calls no model. The model part
+//! of the sender axis is the `phishing` mark, which the understanding step
+//! sets. The hostile marks of one message (`dmarc`, `spoof`, `spam`,
+//! `phishing`) are the work of the understanding step, not of this crate.
+//!
+//! Mail text is data: this crate only compares header bytes.
+
+use rusqlite::{params, Connection, OptionalExtension};
+
+mod head;
+use head::Head;
+
+/// The kind of a sender. The kind is a property of the address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// You: the message has the label `SENT` or `DRAFT`, or comes from the
+    /// address of the account. No `sender` row.
+    SelfOwner,
+    Person,
+    Service,
+    Stranger,
+    Hostile,
+}
+
+impl Kind {
+    /// The name in the `sender.kind` column. `SelfOwner` gives `self`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::SelfOwner => "self",
+            Kind::Person => "person",
+            Kind::Service => "service",
+            Kind::Stranger => "stranger",
+            Kind::Hostile => "hostile",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Kind> {
+        [Kind::Person, Kind::Service, Kind::Stranger, Kind::Hostile]
+            .into_iter()
+            .find(|k| k.name() == s)
+    }
+}
+
+/// The result of [`decide`] for one message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decision {
+    pub kind: Kind,
+    /// The ID of the `sender` row (the `p-` ID). `None` for `SelfOwner`, and
+    /// for a message with no `From` address.
+    pub sender: Option<i64>,
+    /// The rule that matched, as in the `basis` column.
+    pub basis: String,
+    /// The kind of the row before this call. If the kind becomes `hostile`
+    /// or stops being `hostile`, the caller runs understanding again on each
+    /// message from the address (spec 1 section 6.7).
+    pub previous: Option<Kind>,
+}
+
+/// Decide the sender kind of the stored message `message`, with its raw
+/// bytes `raw`, and write the kind to the `sender` row of the address.
+///
+/// Call it for each message, also for a message with the label `SENT`: a
+/// sent message makes each of its `To` and `Cc` addresses a `person`.
+///
+/// Rows are keyed on the lowercase address. A row with `decided_by` =
+/// `person` never changes. The function reads the `header`, `message`,
+/// `message_label` and `sender` tables, so call it after the `header` row
+/// of each earlier message is saved. `now_ms` goes to `decided_at`.
+pub fn decide(
+    conn: &Connection,
+    message: i64,
+    raw: &[u8],
+    now_ms: i64,
+) -> rusqlite::Result<Decision> {
+    let head = Head::parse(raw);
+    let (thread, date, account): (i64, Option<i64>, String) = conn.query_row(
+        "SELECT m.thread_id, m.internal_date, a.address FROM message m
+           JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let labels: Vec<String> = conn
+        .prepare_cached(
+            "SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+              WHERE ml.message_id = ?1",
+        )?
+        .query_map([message], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let has = |l: &str| labels.iter().any(|x| x == l);
+    let from = head.from();
+    let from_self = from
+        .as_ref()
+        .is_some_and(|(a, _)| a.eq_ignore_ascii_case(&account));
+
+    if has("DRAFT") {
+        // A draft does not count for the `person` rule.
+        return Ok(own(if has("SENT") { "sent" } else { "draft" }));
+    }
+    if has("SENT") || from_self {
+        let known = known_domains(conn, "")?;
+        for to in head.recipients() {
+            if to.eq_ignore_ascii_case(&account) {
+                continue;
+            }
+            // The `hostile` rule comes before the `person` rule.
+            match near(&to, &known) {
+                Some(k) => upsert(
+                    conn,
+                    &to,
+                    None,
+                    Kind::Hostile,
+                    &format!("near copy of {k}"),
+                    now_ms,
+                )?,
+                None => upsert(conn, &to, None, Kind::Person, "sent", now_ms)?,
+            };
+        }
+        return Ok(own(if has("SENT") { "sent" } else { "account" }));
+    }
+
+    let Some((addr, name)) = from else {
+        return Ok(Decision {
+            kind: Kind::Stranger,
+            sender: None,
+            basis: "no from address".into(),
+            previous: None,
+        });
+    };
+    let row: Option<(i64, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT id, kind, decided_by FROM sender WHERE address = ?1",
+            [&addr],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let previous = row
+        .as_ref()
+        .and_then(|r| r.1.as_deref())
+        .and_then(Kind::parse);
+    if let Some((id, Some(kind), Some(by))) = &row {
+        if by == "person" {
+            if let Some(kind) = Kind::parse(kind) {
+                return Ok(Decision {
+                    kind,
+                    sender: Some(*id),
+                    basis: "set by a person".into(),
+                    previous,
+                });
+            }
+        }
+    }
+
+    let (kind, basis) = rules(conn, &head, &addr, thread, date, previous)?;
+    let id = upsert(conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
+    Ok(Decision {
+        kind,
+        sender: Some(id),
+        basis,
+        previous,
+    })
+}
+
+fn own(basis: &str) -> Decision {
+    Decision {
+        kind: Kind::SelfOwner,
+        sender: None,
+        basis: basis.into(),
+        previous: None,
+    }
+}
+
+/// The engine rules in the order of spec 1 section 6.7: `hostile`, then
+/// `person`, then `service`, else `stranger`.
+fn rules(
+    conn: &Connection,
+    head: &Head,
+    addr: &str,
+    thread: i64,
+    date: Option<i64>,
+    previous: Option<Kind>,
+) -> rusqlite::Result<(Kind, String)> {
+    let domain = domain_of(addr);
+    if let Some(k) = near(addr, &known_domains(conn, addr)?) {
+        return Ok((Kind::Hostile, format!("near copy of {k}")));
+    }
+
+    // The `sent` rule: a sent message to the address made the row `person`.
+    if previous == Some(Kind::Person) {
+        return Ok((Kind::Person, "sent".into()));
+    }
+    // shortcut: this query reads each message from the address, so its cost
+    // grows with the history of the address (1.7 ms for each message on the
+    // 100,000-message synthetic mailbox, release build). Keep a "replied"
+    // flag in the store if a large mailbox makes it slow.
+    let replied: bool = conn.query_row(
+        "SELECT EXISTS (
+           SELECT 1 FROM header h JOIN message m ON m.id = h.message_id
+             JOIN message s ON s.thread_id = m.thread_id
+             JOIN message_label ml ON ml.message_id = s.id
+             JOIN label l ON l.id = ml.label_id AND l.provider_id = 'SENT'
+            WHERE h.from_addr = ?1
+              AND NOT EXISTS (SELECT 1 FROM message_label d JOIN label dl ON dl.id = d.label_id
+                               WHERE d.message_id = s.id AND dl.provider_id = 'DRAFT'))
+         OR EXISTS (
+           SELECT 1 FROM message s JOIN message_label ml ON ml.message_id = s.id
+             JOIN label l ON l.id = ml.label_id AND l.provider_id = 'SENT'
+            WHERE s.thread_id = ?2
+              AND NOT EXISTS (SELECT 1 FROM message_label d JOIN label dl ON dl.id = d.label_id
+                               WHERE d.message_id = s.id AND dl.provider_id = 'DRAFT'))",
+        params![addr, thread],
+        |r| r.get(0),
+    )?;
+    if replied {
+        return Ok((Kind::Person, "replied".into()));
+    }
+
+    if head.automated() && head.dkim_pass(domain) {
+        let earlier: i64 = conn.query_row(
+            "SELECT count(*) FROM (SELECT 1 FROM header h JOIN message m ON m.id = h.message_id
+              WHERE h.from_addr = ?1 AND m.internal_date < ?2 LIMIT 2)",
+            params![addr, date.unwrap_or(i64::MIN)],
+            |r| r.get(0),
+        )?;
+        if earlier >= 2 {
+            return Ok((Kind::Service, "automated, dkim pass, 2 earlier".into()));
+        }
+    }
+    Ok((Kind::Stranger, "no rule matched".into()))
+}
+
+/// Write the engine kind of `addr`, and give the row ID. A row that a person
+/// decided keeps its kind. A row that another crate made (kind NULL) gets
+/// the kind, and keeps its name.
+fn upsert(
+    conn: &Connection,
+    addr: &str,
+    name: Option<&str>,
+    kind: Kind,
+    basis: &str,
+    now_ms: i64,
+) -> rusqlite::Result<i64> {
+    conn.prepare_cached(
+        "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
+              VALUES (?1, ?2, ?3, ?4, 'engine', ?5)
+         ON CONFLICT(address) DO UPDATE SET
+              name = coalesce(sender.name, excluded.name), kind = excluded.kind,
+              basis = excluded.basis, decided_by = 'engine', decided_at = excluded.decided_at
+         WHERE sender.decided_by IS NOT 'person'",
+    )?
+    .execute(params![addr, name, kind.name(), basis, now_ms])?;
+    conn.query_row("SELECT id FROM sender WHERE address = ?1", [addr], |r| {
+        r.get(0)
+    })
+}
+
+/// The domains of the known senders (kind `person` or `service`), except
+/// the address `but`.
+fn known_domains(conn: &Connection, but: &str) -> rusqlite::Result<Vec<String>> {
+    conn.prepare_cached(
+        "SELECT DISTINCT substr(address, instr(address, '@') + 1) FROM sender
+          WHERE kind IN ('person', 'service') AND address != ?1",
+    )?
+    .query_map([but], |r| r.get(0))?
+    .collect()
+}
+
+/// The known domain that the domain of `addr` is a near copy of.
+fn near<'a>(addr: &str, known: &'a [String]) -> Option<&'a String> {
+    known.iter().find(|k| near_copy(domain_of(addr), k))
+}
+
+fn domain_of(addr: &str) -> &str {
+    addr.rsplit_once('@').map_or("", |(_, d)| d)
+}
+
+/// Labels that many unrelated domains share, so a match on them proves
+/// nothing.
+const COMMON: [&str; 26] = [
+    "www", "web", "app", "api", "dev", "pay", "net", "com", "org", "new", "top", "the", "mail",
+    "email", "info", "news", "smtp", "mailer", "accounts", "account", "support", "secure", "login",
+    "service", "online", "notify",
+];
+
+/// True when `domain` is a near copy of the known domain `known`: a domain
+/// that another party registered to look like it. Two rules:
+/// - A label of `domain` has hyphen parts, and one part is a label of `known`
+///   (`shop-secure.example.net` from `shop.example.com`).
+/// - The name labels (the label before the top-level domain, 6 characters
+///   or more, so that short real names such as `gmail` and `email` do not
+///   match) differ by one edit, or only by look-alike characters (`paypa1`
+///   from `paypal`).
+///
+/// Domains with the same last two labels have one owner, so they are never
+/// near copies. Neither are equal labels under another top-level domain
+/// (`shop.de` and `shop.com`).
+pub fn near_copy(domain: &str, known: &str) -> bool {
+    // shortcut: "the last two labels" stands in for the registrable domain,
+    // with no public suffix list; add the list if co.uk-style domains give
+    // wrong results.
+    fn base(d: &str) -> Vec<&str> {
+        d.rsplitn(3, '.').take(2).collect()
+    }
+    if domain == known || base(domain) == base(known) {
+        return false;
+    }
+    let labels = |d: &str| {
+        let mut l: Vec<&str> = d.split('.').collect();
+        l.pop();
+        l.into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    let (mine, theirs) = (labels(domain), labels(known));
+    let telling: Vec<&String> = theirs
+        .iter()
+        .filter(|l| l.len() >= 3 && !COMMON.contains(&l.as_str()))
+        .collect();
+    for l in &mine {
+        if l.contains('-') && l.split('-').any(|part| telling.iter().any(|t| *t == part)) {
+            return true;
+        }
+    }
+    match (mine.last(), theirs.last()) {
+        (Some(a), Some(b)) if a != b && a.len() >= 6 && b.len() >= 6 => {
+            fold(a) == fold(b) || one_edit(a, b)
+        }
+        _ => false,
+    }
+}
+
+/// Map look-alike characters to one form.
+fn fold(s: &str) -> String {
+    s.replace("rn", "m")
+        .replace("vv", "w")
+        .chars()
+        .map(|c| match c {
+            '0' => 'o',
+            '1' | 'i' => 'l',
+            '5' => 's',
+            _ => c,
+        })
+        .collect()
+}
+
+/// True when `a` and `b` differ by one insert, delete, change, or swap of
+/// two characters next to each other.
+fn one_edit(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let (ra, rb) = (&a[pre..], &b[pre..]);
+    match ra.len().abs_diff(rb.len()) {
+        0 if ra.len() >= 2 && ra[0] == rb[1] && ra[1] == rb[0] => ra[2..] == rb[2..],
+        0 => !ra.is_empty() && ra[1..] == rb[1..],
+        1 if ra.len() > rb.len() => ra[1..] == *rb,
+        1 => rb[1..] == *ra,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn near_copies() {
+        let yes = [
+            ("shop-secure.example.net", "shop.example.com"),
+            ("paypal-verify.com", "accounts.paypal.com"),
+            ("dhl-parcel.example.net", "dhl.example.com"),
+            ("paypa1.com", "paypal.com"),
+            ("paypall.com", "paypal.com"),
+            ("pyapal.com", "paypal.com"),
+            ("rnicrosoft.com", "microsoft.com"),
+        ];
+        for (d, k) in yes {
+            assert!(near_copy(d, k), "{d} {k}");
+        }
+        let no = [
+            ("shop.example.com", "shop.example.com"),
+            ("mail2.shop.com", "mail.shop.com"),
+            ("shop.de", "shop.com"),
+            ("example.net", "example.org"),
+            ("word.example.net", "shop.example.com"),
+            ("mail-secure.other.net", "mail.example.com"),
+            ("my-app.example.net", "app.example.com"),
+            ("gmail.com", "email.com"),
+            ("abc.com", "abd.com"),
+            ("github.com", "gitlab.com"),
+        ];
+        for (d, k) in no {
+            assert!(!near_copy(d, k), "{d} {k}");
+        }
+    }
+}
