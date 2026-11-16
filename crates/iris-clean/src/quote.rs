@@ -27,8 +27,8 @@ const MOBILE: [&str; 4] = [
 ];
 
 /// Remove quoted history. The history starts at the first of these lines:
-/// an "On ... wrote:" line, an "-----Original Message-----" line, or (in a
-/// reply) an Outlook block of `From:`, `Sent:` and `Subject:` lines. In a
+/// an "On ... wrote:" line, or (in a reply) an "-----Original Message-----"
+/// line or an Outlook block of `From:`, `Sent:` and `Subject:` lines. In a
 /// reply, each line that starts with `>` goes out too. A forwarded message
 /// stays: the search stops at a "Forwarded message" line.
 pub fn strip_quotes(text: &str, is_reply: bool) -> String {
@@ -42,7 +42,9 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
             forward = i;
             break;
         }
-        if is_original_marker(t) || (is_reply && is_header_block(&lines[i..])) {
+        // Outlook also puts the marker above a forwarded message, so the
+        // marker is history only in a reply.
+        if is_reply && (is_original_marker(t) || is_header_block(&lines[i..])) {
             end = i;
             break;
         }
@@ -186,7 +188,9 @@ mod tests {
         let t = "Yes, Friday.\n\nOn Mon, 3 Feb 2025 at 10:00, Ana Bel <ana@example.org>\nwrote:\n> Can you?\n> Thanks";
         assert_eq!(strip_quotes(t, true), "Yes, Friday.");
         let t = "Fine.\n\n-----Original Message-----\nFrom: Ana\nold";
-        assert_eq!(strip_quotes(t, false), "Fine.");
+        assert_eq!(strip_quotes(t, true), "Fine.");
+        // Outlook forwards with the same marker, and a forward stays.
+        assert_eq!(strip_quotes(t, false), t);
         let t = "Fine.\n________________________________\nFrom: Ana Bel\nSent: Monday\nTo: Avel\nSubject: Plan\n\nold";
         assert_eq!(strip_quotes(t, true), "Fine.");
         // Inline answers stay, the quoted lines go.

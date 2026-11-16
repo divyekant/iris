@@ -454,3 +454,25 @@ Notes.
     assert_eq!(c.text, "Plain words.");
     assert!(c.attachments.is_empty());
 }
+
+#[test]
+fn an_outlook_forward_keeps_the_forwarded_message() {
+    let raw = crlf(
+        "Subject: FW: Plan
+Content-Type: text/plain
+
+FYI
+
+-----Original Message-----
+From: Ana Bel
+Sent: Monday
+To: Avel
+Subject: Plan
+
+The plan is ready.
+",
+    );
+    let c = clean(&raw);
+    assert!(c.text.starts_with("FYI"), "{}", c.text);
+    assert!(c.text.contains("The plan is ready."), "{}", c.text);
+}

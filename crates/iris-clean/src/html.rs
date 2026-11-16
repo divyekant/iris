@@ -421,31 +421,53 @@ const MAX_CSS_NAMES: usize = 256;
 
 impl Css {
     fn read(&mut self, style: &str) {
-        for rule in style.split('}') {
-            let Some((selectors, body)) = rule.split_once('{') else {
-                continue;
-            };
-            // A rule inside `@media` applies only on some screens.
-            if selectors.contains('@') || body.contains('{') || !css_hidden(body) {
-                continue;
-            }
-            for sel in selectors.split(',') {
-                let sel = sel.trim();
-                if sel.is_empty()
-                    || sel.contains(|c: char| c.is_whitespace() || ">+~:[*".contains(c))
-                {
-                    continue;
+        // Only top-level rules count. A rule inside `@media` (a nested block)
+        // applies only on some screens, so the whole block goes out.
+        let (mut depth, mut start, mut open) = (0usize, 0, 0);
+        for (i, c) in style.bytes().enumerate() {
+            match c {
+                b'{' => {
+                    if depth == 0 {
+                        open = i;
+                    }
+                    depth += 1;
                 }
-                if self.classes.len() + self.ids.len() >= MAX_CSS_NAMES {
-                    return;
+                b'}' if depth == 0 => start = i + 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let selectors = style[start..open].rsplit(';').next().unwrap_or("");
+                        if !self.rule(selectors, &style[open + 1..i]) {
+                            return;
+                        }
+                        start = i + 1;
+                    }
                 }
-                if let Some(id) = sel.strip_prefix('#') {
-                    self.ids.push(id.to_string());
-                } else if let Some((_, class)) = sel.rsplit_once('.') {
-                    self.classes.push(class.to_string());
-                }
+                _ => {}
             }
         }
+    }
+
+    /// Read one top-level rule. False when the name limit is reached.
+    fn rule(&mut self, selectors: &str, body: &str) -> bool {
+        if selectors.contains('@') || body.contains('{') || !css_hidden(body) {
+            return true;
+        }
+        for sel in selectors.split(',') {
+            let sel = sel.trim();
+            if sel.is_empty() || sel.contains(|c: char| c.is_whitespace() || ">+~:[*".contains(c)) {
+                continue;
+            }
+            if self.classes.len() + self.ids.len() >= MAX_CSS_NAMES {
+                return false;
+            }
+            if let Some(id) = sel.strip_prefix('#') {
+                self.ids.push(id.to_string());
+            } else if let Some((_, class)) = sel.rsplit_once('.') {
+                self.classes.push(class.to_string());
+            }
+        }
+        true
     }
 
     fn hides(&self, tag: &Tag) -> bool {
@@ -870,6 +892,12 @@ mod tests {
         assert_eq!(
             md("<div class=h>secret</div>ok<style>.h{display:none}</style>"),
             "ok"
+        );
+        // Two rules inside a print block: neither one hides text on a screen.
+        assert_eq!(
+            md("<style>@media print { .a {display:none} .b {display:none} } .c{display:none}</style>\
+                <p class=a>A</p><p class=b>B</p><p class=c>C</p>"),
+            "A\n\nB"
         );
     }
 
