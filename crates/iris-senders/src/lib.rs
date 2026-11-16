@@ -447,10 +447,10 @@ const COMMON: [&str; 26] = [
 /// that another party registered to look like it. Two rules:
 /// - A label of `domain` has hyphen parts, and one part is a label of `known`
 ///   (`shop-secure.example.net` from `shop.example.com`).
-/// - The name labels (the label before the top-level domain, 6 characters
-///   or more, so that short real names such as `gmail` and `email` do not
-///   match) differ by one edit, or only by look-alike characters (`paypa1`
-///   from `paypal`).
+/// - The name labels (the label before the public suffix) differ only by
+///   look-alike characters (`paypa1` from `paypal`, `dh1` from `dhl`), or,
+///   at 6 characters or more, by one edit (short real names such as
+///   `gmail` and `email` must not match).
 ///
 /// Domains with the same last two labels have one owner, so they are never
 /// near copies. Neither are equal labels under another top-level domain
@@ -470,9 +470,9 @@ pub fn near_copy(domain: &str, known: &str) -> bool {
         }
     }
     match (mine.last(), theirs.last()) {
-        (Some(a), Some(b)) if a != b && a.len() >= 6 && b.len() >= 6 => {
-            fold(a) == fold(b) || one_edit(a, b)
-        }
+        // Look-alike characters count at each length (`dh1` from `dhl`).
+        (Some(a), Some(b)) if a != b && fold(a) == fold(b) => true,
+        (Some(a), Some(b)) if a != b && a.len() >= 6 && b.len() >= 6 => one_edit(a, b),
         _ => false,
     }
 }
