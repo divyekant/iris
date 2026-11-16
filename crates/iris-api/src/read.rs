@@ -59,6 +59,9 @@ fn check_limit(limit: u32) -> Result<()> {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Status {
+    /// The policy mode (specification 2). Release 1 applies nothing, so
+    /// the mode is always `observe`.
+    pub mode: &'static str,
     pub accounts: Vec<Account>,
     pub messages: Counts,
 }
@@ -230,7 +233,13 @@ pub fn status(store: &Store) -> Result<Status> {
                 })
             },
         )?;
-        Ok(Status { accounts, messages })
+        // shortcut: release 1 has no policy file to read; read its mode when
+        // release 2 adds the policy.
+        Ok(Status {
+            mode: "observe",
+            accounts,
+            messages,
+        })
     })?)
 }
 
@@ -335,7 +344,17 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     }
     check_limit(limit)?;
     let before = match filter.before {
-        Some(id) => Some(parse_id(id).ok_or_else(|| bad_id(id))?.1),
+        // The cursor is an item ID of the form of the filter.
+        Some(id) => match parse_id(id) {
+            Some((kind, row))
+                if FORMS
+                    .iter()
+                    .any(|(f, k)| *k == kind && filter.form.is_none_or(|form| form == *f)) =>
+            {
+                Some(row)
+            }
+            _ => return Err(bad_id(id)),
+        },
         None => None,
     };
     let items = store.read(|c| {
@@ -402,18 +421,20 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         "created_at, id".to_string(),
     );
     let conversations = (
-        format!(
-            "form = 'conversation' AND status = 'active'
-             AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-             AND NOT {stranger_participant}"
-        ),
+        // A conversation with a stranger is also in `strangers`.
+        "form = 'conversation' AND status = 'active'
+         AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)"
+            .to_string(),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );
-    // Group by the sender row of the publisher, then by its address.
+    // Group by the address of the sender row of the publisher (the address of
+    // the document when there is no row), then by the sender ID.
     let feed = (
         "form = 'feed' AND status = 'new'".to_string(),
-        "CAST(substr(json_extract(doc, '$.publisher.sender'), 3) AS INTEGER),
-         json_extract(doc, '$.publisher.address'),
+        "coalesce((SELECT address FROM sender WHERE id =
+            CAST(substr(json_extract(doc, '$.publisher.sender'), 3) AS INTEGER)),
+            json_extract(doc, '$.publisher.address')),
+         json_extract(doc, '$.publisher.sender'),
          unixepoch(json_extract(doc, '$.published'), 'subsec') DESC, id DESC"
             .to_string(),
     );

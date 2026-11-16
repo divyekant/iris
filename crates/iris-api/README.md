@@ -22,9 +22,9 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 
 | Endpoint | Gives |
 |---|---|
-| `/api/status` | `{"accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
+| `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
-| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
+| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
 | `/api/items/{id}` | One item (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone. |
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
@@ -44,7 +44,7 @@ The text of a message is data. Show it as text, never as markup.
 |---|---|
 | `you_owe` | Open commitments with the direction `you_owe`, where the counterparty is a `person` or a `service`. Order: by `due`, an item with no `due` last, then by created. |
 | `owed_to_you` | Open commitments with the direction `owed_to_you`, where the owner is a `person` or a `service`. Oldest first. |
-| `conversations` | Active conversations with `new` greater than 0 or `your_turn` true, and with no stranger participant. Newest `latest.at` first. |
+| `conversations` | Active conversations with `new` greater than 0 or `your_turn` true. A conversation with a stranger is also in `strangers`. Newest `latest.at` first. |
 | `records` | The count of each record type that is not gone, for example `{"receipt": 3}`. |
 | `feed` | Feed items with the status `new`, in the order of the publisher address, then newest first. |
 | `signals` | Active signals whose `expires` time is later than now. The time that expires first comes first. |
@@ -58,8 +58,8 @@ holds at most 200 items. Times sort as instants, not as text, so a time
 offset does not change the order. A list field can also have `duplicates`:
 for an item in `items`, the IDs of the newer items whose `duplicate_of` is that
 item (specification 1, section 7.5). The brief shows such a pair once, so the
-newer item is not in `items` and not in `count`. The feed sorts by the sender
-row of the publisher, so the items of one publisher stay together. A sender with no sender row, or with no kind yet, is
+newer item is not in `items` and not in `count`. The feed sorts by the address of
+the sender row of the publisher, so the items of one publisher stay together. A sender with no sender row, or with no kind yet, is
 a stranger.
 
 ## Errors

@@ -229,6 +229,7 @@ async fn status_with_no_account_and_with_a_sync() {
     let (code, v) = get(&store, "/api/status").await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(v["accounts"], json!([]));
+    assert_eq!(v["mode"], "observe");
     assert_eq!(v["messages"]["total"], 0);
 
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
@@ -449,6 +450,8 @@ async fn items_by_id_and_by_page() {
         "/api/items?form=record&status=open",
         "/api/items?form=record&type=reciept",
         "/api/items?limit=0",
+        "/api/items?before=m-2",
+        "/api/items?form=record&before=c-2",
         "/api/items?limit=201",
         "/api/search?q=a&limit=0",
     ] {
@@ -621,6 +624,16 @@ async fn brief_follows_the_queries_of_section_8() {
         3,
         json!({"publisher": party(&service), "published": "2026-11-05T00:00:00Z"}),
     );
+    // A publisher with a later sender row, but the first address.
+    let first = sender(&store, "aaa@first.example", Some("service"));
+    let f_first = add_item(
+        &store,
+        "feed",
+        "new",
+        13,
+        5,
+        json!({"publisher": party(&first), "published": "2026-11-01T00:00:00Z"}),
+    );
     let f_other = add_item(
         &store,
         "feed",
@@ -731,10 +744,16 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["you_owe"]["count"], 4);
     assert_eq!(b["you_owe"]["duplicates"], json!({ c(late): [c(dup)] }));
     assert_eq!(ids(&b["owed_to_you"]["items"]), [c(old_owed), c(new_owed)]);
-    assert_eq!(ids(&b["conversations"]["items"]), [v(c_turn), v(c_new)]);
+    assert_eq!(
+        ids(&b["conversations"]["items"]),
+        [v(c_stranger), v(c_turn), v(c_new)]
+    );
     assert_eq!(b["records"], json!({"booking": 1, "receipt": 2}));
     let f = |n: i64| format!("f-{n}");
-    assert_eq!(ids(&b["feed"]["items"]), [f(f_newer), f(f_new), f(f_other)]);
+    assert_eq!(
+        ids(&b["feed"]["items"]),
+        [f(f_first), f(f_newer), f(f_new), f(f_other)]
+    );
     assert_eq!(ids(&b["signals"]["items"]), [format!("s-{s_live}")]);
     assert_eq!(
         ids(&b["strangers"]["items"]),
