@@ -55,6 +55,7 @@ mod cost {
     pub const MESSAGES_SEND: u32 = 100;
     pub const MESSAGES_BATCH_MODIFY: u32 = 50;
     pub const MESSAGES_TRASH: u32 = 5;
+    pub const MESSAGES_UNTRASH: u32 = 5;
     pub const LABELS_CREATE: u32 = 5;
 }
 
@@ -672,6 +673,22 @@ impl Gmail {
         read_all(response)
             .and_then(|b| parse(&b))
             .map_err(|e| Error::Transport(format!("answer of an accepted trash: {e}")))
+    }
+
+    /// `users.messages.untrash`. Gives the labels of the message after the
+    /// call. A write call, as [`Gmail::send`].
+    pub fn untrash(&self, token: &str, id: &str) -> Result<Minimal> {
+        let response = self.call(
+            token,
+            Method::Post(b"{}"),
+            &format!("messages/{}/untrash", segment(id)),
+            &[],
+            cost::MESSAGES_UNTRASH,
+        )?;
+        // Gmail accepted the call, so a bad answer leaves the result unknown.
+        read_all(response)
+            .and_then(|b| parse(&b))
+            .map_err(|e| Error::Transport(format!("answer of an accepted untrash: {e}")))
     }
 
     /// `users.labels.create` of a user label with the name `name`. A write
