@@ -742,9 +742,13 @@ applies it.
    `bulk` do not apply to an undo. Only Stop (release 4) holds it.
 3. The apply reads the labels at Gmail as in step 2 of section 7.2. The
    inverse changes only the messages that still have the `post` state of
-   the entry. A message that changed after the entry (for example, the
-   person moved it in Gmail) stays as it is. The result counts these
-   messages as unchanged.
+   the entry, and that no later ledger entry changed (`done`, or listed
+   `unknown`), except the actions of the undos of the same entry. A
+   message that changed after the entry (for example, the person moved it
+   in Gmail, or a later action of Iris changed it) stays as it is. The
+   result counts these messages as unchanged. Known limit (issue #225):
+   a change in Gmail outside Iris that puts the message back in the `post`
+   state is not detected, and the undo reverses it.
 4. For `trash`, the undo changeset has two actions, and each one is an
    ordinary action with its own ledger entry and recovery:
    1. `messages.untrash` for each message that still has `TRASH`. Only an
@@ -752,19 +756,22 @@ applies it.
       `untrash` with no link. Its `post` is "no `TRASH`".
    2. `archive` of each message whose `pre` in the entry has no `INBOX`
       (for example an archived message that `messages.untrash` put in the
-      inbox). It changes only the messages that action 1 changed (`done`),
-      and that have `INBOX` now. Until action 1 ends, the apply of action 2
-      waits.
+      inbox). It changes only the messages that an `untrash` of an undo of
+      the entry changed (`done`), and that have `INBOX` now. Until action 1
+      ends, the apply of action 2 waits.
 
    The undo never sets a full label set, so a label that the person added
    while the message was in the trash stays. If the engine stops between the
    two actions, action 2 is still `approved`, and it applies after the start
    (section 7.2, step 2 reads the labels again).
-5. The undo gets its own ledger entry. When the entry of action 1 becomes
-   `applied`, the same transaction sets `undone_by` of the first entry, and
-   the trigger `ledger_state` moves its action to `undone`. If the undo
-   fails, the first entry keeps its state, and the person can undo it
-   again: the next undo skips each message that this undo changed.
+5. Each action of the undo gets its own ledger entry. When the last action
+   of the undo becomes `applied`, and each action of the undo is
+   `applied`, the same transaction sets `undone_by` of the first entry to
+   the entry of action 1, and the trigger `ledger_state` moves its action
+   to `undone`. If an action of the undo fails, the first entry keeps its
+   state, and the person can undo it again: the next undo skips each
+   message that is back, and its action 2 archives each message that an
+   earlier `untrash` changed.
 
 An undo of an undo is a new action, not a delete of the record.
 
@@ -775,11 +782,12 @@ An undo of an undo is a new action, not a delete of the record.
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
 | A second undo while an undo of the entry is open | Two undos change the same messages | `undo` refuses it. The trigger refuses a second open link of the same step. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
-| A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message. |
+| A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
+| A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message with a later `ledger_message` row with `done` or `unknown`, except the rows of the undos of the same entry. |
 | A gone message, or HTTP 404 | A call on a message that does not exist | `undo` leaves a gone message out of the targets. The apply lists a message that Gmail does not have as gone. |
 | The mode `observe` | The person cannot reverse a change while Iris observes | The mode does not hold an undo. The apply checks the link of migration 12. |
 | Action 2 of the undo of `trash` before action 1 ends | An `archive` of a message that is still in the trash, or that `untrash` did not change | The apply of action 2 waits. Action 2 changes only the messages with `done` in the entry of action 1. |
-| A failed undo, or an unknown result | Some messages are back, others are not | The undo entry is `failed`, with its recovery. The first entry keeps its state, and a new undo skips each message that is back. |
+| A failed undo, or an unknown result, in action 1 or action 2 | Some messages are back, others are not, and the entry shows `undone` | The undo entry is `failed`, with its recovery. The first entry becomes `undone` only when each action of the undo is `applied`. Else it keeps its state, and a new undo skips each message that is back. |
 | A write of `undone_by` with an entry that is not its undo | The ledger shows a wrong undo | The trigger `ledger_undone_by` refuses it: only the entry of action 1 of its own undo makes an entry `undone`. |
 | A `label` undo of an `unlabel` whose label Gmail deleted | No label to add | The apply makes the label as for each `label` action (section 7.2, step 1). |
 

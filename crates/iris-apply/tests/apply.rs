@@ -1344,6 +1344,8 @@ fn the_undo_of_trash_archives_what_was_archived() {
     assert_eq!(b.apply(actions[1]).unwrap(), Outcome::Waiting);
     let c = applied(b.apply(actions[0]));
     assert_eq!(c.changed, 3);
+    // The undo is not complete before step 2.
+    assert_eq!(b.state(a).0, "applied");
     let c = applied(b.apply(actions[1]));
     assert_eq!((c.changed, c.unchanged), (1, 0));
     for (i, &m) in ms.iter().enumerate() {
@@ -1418,5 +1420,51 @@ fn a_failed_undo_keeps_the_entry() {
         other => panic!("{other:?}"),
     };
     assert_eq!((c.changed, c.unchanged), (1, 1));
+    assert_eq!(b.entry_state(entry).0, "undone");
+}
+
+/// A later entry of Iris that changed a message: an undo of an older entry
+/// leaves the message as the later entry left it.
+#[test]
+fn an_old_undo_keeps_a_later_change() {
+    let b = setup("undo-later", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let first = b.approved("archive", &ms, PERSON);
+    applied(b.apply(first));
+    applied(b.apply(b.approved("inbox", &ms[..1], PERSON)));
+    applied(b.apply(b.approved("archive", &ms[..1], PERSON)));
+    let c = match &b.undo(first)[..] {
+        [Outcome::Applied(c)] => c.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((c.changed, c.unchanged), (1, 1));
+    assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
+}
+
+/// A refusal of step 2 of the undo of `trash` keeps the entry, and a new
+/// undo archives the message that is still in the inbox.
+#[test]
+fn a_failed_second_step_keeps_the_trash_entry() {
+    let b = setup("undo-step2", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    let before: Vec<Vec<String>> = ms.iter().map(|&m| b.gmail_labels(m)).collect();
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    let actions = iris_apply::undo(&b.store, entry, now()).unwrap();
+    applied(b.apply(actions[0]));
+    b.fake.fail_next_write(&[400], false);
+    assert!(matches!(b.apply(actions[1]), Ok(Outcome::Failed { .. })));
+    assert_eq!(b.entry_state(entry), ("applied".into(), None));
+    let outcomes = b.undo(a);
+    assert!(
+        outcomes.iter().all(|o| matches!(o, Outcome::Applied(_))),
+        "{outcomes:?}"
+    );
+    for (i, &m) in ms.iter().enumerate() {
+        assert_eq!(b.gmail_labels(m), before[i]);
+    }
     assert_eq!(b.entry_state(entry).0, "undone");
 }

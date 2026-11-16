@@ -436,17 +436,31 @@ pub fn apply(
     })?;
     let mut after = 0;
     loop {
-        // A gone message has no provider ID here. Step 2 of the undo of a
-        // `trash` changes only the messages that step 1 changed.
+        // A gone message has no provider ID here. An undo of the entry `o`
+        // changes a message only if `o` changed it, and no later entry
+        // changed it, except the actions of the undos of `o`. Step 2 of the
+        // undo of a `trash` changes only a message that an `untrash` of an
+        // undo of `o` changed (section 7.4).
         let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
             let mut st = c.prepare_cached(
                 "SELECT am.message_id, m.provider_id,
-                   NOT EXISTS (SELECT 1 FROM undo_pair WHERE second = ?1)
-                   OR EXISTS (SELECT 1 FROM undo_pair p JOIN ledger l ON l.action_id = p.first
-                              JOIN ledger_message lm ON lm.ledger_id = l.id
-                              WHERE p.second = ?1 AND lm.message_id = am.message_id
-                                AND lm.done = 1)
+                   u.ledger_id IS NULL
+                   OR (EXISTS (SELECT 1 FROM ledger_message lm
+                               WHERE lm.ledger_id = u.ledger_id
+                                 AND lm.message_id = am.message_id AND lm.done = 1)
+                       AND NOT EXISTS (
+                         SELECT 1 FROM ledger_message lm JOIN ledger l ON l.id = lm.ledger_id
+                         WHERE lm.message_id = am.message_id AND l.id > u.ledger_id
+                           AND (lm.done = 1 OR lm.listed = 'unknown')
+                           AND l.action_id NOT IN (SELECT action_id FROM ledger_undo
+                                                   WHERE ledger_id = u.ledger_id))
+                       AND (u.step = 1 OR EXISTS (
+                         SELECT 1 FROM ledger_undo f JOIN ledger l ON l.action_id = f.action_id
+                         JOIN ledger_message lm ON lm.ledger_id = l.id
+                         WHERE f.ledger_id = u.ledger_id AND f.step = 1
+                           AND lm.message_id = am.message_id AND lm.done = 1)))
                  FROM action_message am
+                 LEFT JOIN ledger_undo u ON u.action_id = am.action_id
                  LEFT JOIN message m ON m.id = am.message_id AND m.gone_at IS NULL
                  WHERE am.action_id = ?1 AND am.message_id > ?2
                  ORDER BY am.message_id LIMIT ?3",
@@ -777,17 +791,27 @@ impl<'a, 'b> Run<'a, 'b> {
                  WHERE id = ?1 AND state = 'writing'",
                 params![ledger, state, error, history],
             )?;
-            // An applied step 1 of an undo makes its entry `undone` (section
-            // 7.4). After a failed undo, the entry keeps its state, and the
-            // person can undo it again: the next undo skips each message
-            // that this one changed.
+            // An undo whose actions are each `applied` makes its entry
+            // `undone`, with the entry of step 1 (section 7.4). After a failed
+            // action of the undo, the entry keeps its state, and the person
+            // can undo it again: the next undo skips each message that is
+            // back.
             if state == "applied" {
                 tx.execute(
-                    "UPDATE ledger SET state = 'undone', undone_by = ?1
+                    "UPDATE ledger SET state = 'undone', undone_by = (
+                       SELECT l1.id FROM ledger n
+                       JOIN changeset_action a ON a.id = n.action_id
+                       JOIN changeset_action a1 ON a1.changeset_id = a.changeset_id
+                       JOIN ledger_undo u1 ON u1.action_id = a1.id AND u1.step = 1
+                       JOIN ledger l1 ON l1.action_id = a1.id
+                       WHERE n.id = ?1)
                      WHERE id = (SELECT u.ledger_id FROM ledger_undo u
-                                 JOIN ledger n ON n.action_id = u.action_id
-                                 WHERE n.id = ?1 AND u.step = 1)
-                       AND state IN ('applied', 'failed')",
+                                 JOIN ledger n ON n.action_id = u.action_id WHERE n.id = ?1)
+                       AND state IN ('applied', 'failed')
+                       AND NOT EXISTS (
+                         SELECT 1 FROM ledger n JOIN changeset_action a ON a.id = n.action_id
+                         JOIN changeset_action x ON x.changeset_id = a.changeset_id
+                         WHERE n.id = ?1 AND x.state IS NOT 'applied')",
                     [ledger],
                 )?;
             }
