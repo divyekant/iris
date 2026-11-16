@@ -99,8 +99,9 @@ thread. So a thread that waits for the budget does not stop the free steps
 of later threads.
 
 A sender rerun in this run can make a message of a visited thread pending
-again. After the last thread, the runner makes one more pass over the
-threads with such a message. In that pass, a message can get its second
+again. After the last thread, if a rerun reset mail in this run, the
+runner makes one more pass over all threads in the same order (it keeps
+no list of threads, so the memory stays bounded). In that pass, a message can get its second
 call of `store::understand` in this run, never a third. Reruns that this
 pass makes stay pending for the next run. So a run always ends, and a run
 with no limit and no model error leaves no message pending that it could
