@@ -197,11 +197,16 @@ WHEN new.id IS NOT old.id OR new.action_id IS NOT old.action_id
       AND (new.call IS NOT old.call OR new.error IS NOT old.error
            OR new.history_id IS NOT old.history_id))
   OR new.call < old.call
-  -- The undo of an entry names the entry of the undo. A failed entry has an
-  -- undo only for the messages that the provider changed (section 5.2).
+  -- The undo of an entry names the entry of the undo: a later entry that
+  -- ended, and that undoes no other entry. A final entry (undo 'none') has
+  -- no undo. A failed entry has an undo only for the messages that the
+  -- provider changed (section 5.2).
   OR (new.undone_by IS NOT old.undone_by
-      AND (new.state IS NOT 'undone' OR old.state = 'undone' OR new.undone_by = old.id
-           OR NOT EXISTS (SELECT 1 FROM ledger WHERE id = new.undone_by)))
+      AND (new.state IS NOT 'undone' OR old.state = 'undone' OR old.undo IS NOT 'inverse'
+           OR new.undone_by <= old.id
+           OR coalesce((SELECT state FROM ledger WHERE id = new.undone_by), '')
+                NOT IN ('applied', 'failed')
+           OR EXISTS (SELECT 1 FROM ledger WHERE undone_by = new.undone_by)))
   OR (new.state = 'undone' AND old.state = 'failed'
       AND NOT EXISTS (SELECT 1 FROM ledger_message WHERE ledger_id = old.id AND done = 1))
 BEGIN

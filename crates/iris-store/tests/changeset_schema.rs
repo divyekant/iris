@@ -1008,6 +1008,21 @@ fn the_ledger_moves_the_action() {
         Ok(())
     })
     .unwrap();
+    // An undo entry undoes one entry only.
+    refused(
+        &s,
+        "UPDATE changeset SET revision = 3, submitted_at = NULL;
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 3, 1, 'archive', '{}', '{}');
+         UPDATE changeset_action SET hash = 'h' WHERE id = 3;
+         UPDATE changeset SET submitted_at = 2;
+         UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+           decided_at = 5 WHERE id = 3;
+         INSERT INTO ledger(action_id, ops, state, undo, at)
+         VALUES (3, '{}', 'writing', 'inverse', 7);
+         UPDATE ledger SET state = 'applied' WHERE id = 3;
+         UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 3",
+    );
     let undone: String = s
         .read(|c| {
             Ok(
@@ -1120,6 +1135,22 @@ fn migration_10_keeps_the_rule_of_migration_9() {
             (3, "failed".into(), some("failed"), some("none")),
             (4, "failed".into(), some("failed"), some("none")),
         ]
+    );
+    // A final entry has no undo, also with a later entry that ended.
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO ledger(action_id, ops, state, undo, at)
+             VALUES (1, '{}', 'writing', 'inverse', 7);
+             UPDATE ledger SET state = 'applied' WHERE action_id = 1;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    refused(
+        &s,
+        "UPDATE ledger SET state = 'undone',
+           undone_by = (SELECT id FROM ledger WHERE action_id = 1)
+         WHERE action_id = 2",
     );
 }
 
