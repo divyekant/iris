@@ -154,13 +154,8 @@ pub fn run(cli: Cli) -> Result<(), String> {
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
     match &cli.command {
         Command::Serve { addr } => {
-            // The API has no TLS, so only this machine may connect
-            // (specification 2, section 8.2).
-            if !addr.ip().is_loopback() {
-                return Err(format!(
-                    "{addr} is not a loopback address: use 127.0.0.1 or [::1]"
-                ));
-            }
+            // Check before the store opens, so a refused address makes no data folder.
+            check_loopback(*addr).map_err(|e| e.to_string())?;
             serve(Arc::new(open()?), *addr).map_err(|e| e.to_string())
         }
         Command::Account {
@@ -342,9 +337,22 @@ pub fn app(store: Arc<Store>, auth: Arc<iris_api::Auth>) -> axum::Router {
     iris_api::router(store, auth).merge(iris_web::router())
 }
 
+/// The API has no TLS, so only this machine may connect (specification 2,
+/// section 8.2).
+fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "{addr} is not a loopback address: use 127.0.0.1 or [::1]"
+        )))
+    }
+}
+
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
+    check_loopback(addr)?;
     let gmail = gmail_config().map_err(std::io::Error::other)?;
     let api_store = store.clone();
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
@@ -400,6 +408,19 @@ mod tests {
                 panic!("not service");
             };
             assert_eq!(matches!(action, ServiceAction::Install), install);
+        }
+    }
+
+    #[test]
+    fn serve_refuses_an_address_that_is_not_loopback() {
+        let dir = std::env::temp_dir().join(format!("iris-serve-open-{}", std::process::id()));
+        let store = Arc::new(Store::open(&dir).unwrap());
+        for addr in ["0.0.0.0:0", "192.0.2.1:4800", "[::]:0"] {
+            let err = serve(store.clone(), addr.parse().unwrap()).unwrap_err();
+            assert!(
+                err.to_string().contains("not a loopback address"),
+                "{addr}: {err}"
+            );
         }
     }
 
