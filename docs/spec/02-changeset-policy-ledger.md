@@ -420,7 +420,7 @@ added = 2026-11-10
 |---|---|---|
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
-| `effect` | yes | `allow`, `review` or `deny` (actions); `hide` or `bundle` (attention). |
+| `effect` | yes | `allow`, `review` or `deny` (actions); `hide`, `bundle` or `notify` (attention). |
 | `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `draft` and `send`: a rule with these verbs is refused until R3-03 (`docs/specs/2026-11-16-send.md`). |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
@@ -468,7 +468,7 @@ valid when:
   cannot make a rule wider than the person wrote it.
 - A value is not one of the values above, or two rules have the same `id`.
 - `when` has no condition, or a `name` has more than one line.
-- A `hide` or a `bundle` rule has `verbs`, `author` or `job`. An item has no
+- A `hide`, a `bundle` or a `notify` rule has `verbs`, `author` or `job`. An item has no
   author and no job, so such a rule could never match.
 - The file is larger than 256 KiB, or has more than 1,000 rules (section 9).
 
@@ -560,6 +560,13 @@ rule that matches and has the lowest `id`. With no match, the item is `shown`. T
 records the rule in its `attention` field (specification 1, section 6.1).
 Hidden is never deleted: a `hide` rule changes only what the brief shows.
 
+A `notify` rule does not change the attention of an item. It gives one
+notice for each new mail that it matches, in the web client and in the
+system (`docs/specs/2026-11-16-notices.md`). It matches with the reading of
+a `review` rule: an item condition matches when one or more items of the
+message have the value. With no `notify` rule that matches, no notice
+appears.
+
 The engine evaluates the attention of an item again at these times:
 
 - When the active policy changes, for each item, in the same transaction.
@@ -590,6 +597,7 @@ in the file.
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
 | Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4) and a state verb that the person approved (section 4). |
 | A permanent delete. | No verb exists. |
+| Hostile mail: a message with a hostile mark, or from a `hostile` sender. | No notice, even if a `notify` rule matches. |
 
 The hard limits treat `local` and `triage` as agents.
 
