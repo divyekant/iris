@@ -40,7 +40,7 @@
     align-items: center;
     gap: var(--space-2) var(--space-6);
     padding: var(--space-4) var(--space-6);
-    border: 1px solid var(--color-accent-border);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
     background: var(--color-background-elevated);
   }
