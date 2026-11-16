@@ -650,6 +650,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-api"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "getrandom 0.4.3",
+ "iris-observe",
+ "iris-store",
+ "iris-synth",
+ "iris-web",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "iris-auth"
 version = "0.0.0"
 dependencies = [
