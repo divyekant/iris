@@ -214,7 +214,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `proposed` | Submitted, and the policy did not decide it, or the mode is `observe`. | `approved`, `in_review`, `denied`, `expired`, `cancelled`, `replaced` |
 | `in_review` | Waits for a person. | `approved`, `denied`, `expired`, `cancelled`, `replaced` |
 | `approved` | An `allow` rule (`decision.by` `rule`) or a person approved it. The engine applies it next. | `applied`, `failed`, `held`, `in_review`, `denied`, `expired`, `cancelled` |
-| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled` |
+| `held` | A send in the held outbox (release 3). | `applied`, `failed`, `cancelled`, `denied` (by `engine`: the draft changed or is gone, `docs/specs/2026-11-16-send.md`) |
 | `applied` | The provider accepted the change. The ledger has the entry. | `undone` |
 | `failed` | The provider refused it, or recovery could not confirm each message. The ledger lists the messages that changed. | `undone`, only when the ledger lists one or more changed messages |
 | `denied` | The policy, a hard limit or a person refused it. `reason` says why. | none |
@@ -420,7 +420,7 @@ added = 2026-11-10
 | `id` | yes | A positive integer, unique in the file. |
 | `name` | yes | One line that the brief and the ledger show. |
 | `effect` | yes | `allow`, `review` or `deny` (actions); `hide` or `bundle` (attention). |
-| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4. |
+| `verbs` | for `allow`, `review` and `deny` | The verbs of section 4, except `draft` and `send`: a rule with these verbs is refused until R3-03 (`docs/specs/2026-11-16-send.md`). |
 | `when` | yes | The conditions. Each condition must match. |
 | `by` | yes | `person` (written by the person) or `proposal` (proposed by Iris and accepted by the person). |
 | `added` | yes | The date. |
@@ -794,7 +794,8 @@ and the release step. That specification must meet these constraints:
 - The approval of a send binds to a hash of the draft content: the
   recipients, the subject, the body and the attachments. Before the release,
   the engine reads the draft at Gmail again. If the hash is different, the
-  send goes back to review. No `draft` action can change a draft that has an
+  engine denies the send, and a new send action of the draft goes to
+  review. No `draft` action can change a draft that has an
   approved or a held send.
 - The flags of a draft (section 5.3) come from the content of the draft, at
   submit and again at the release.
