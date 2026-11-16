@@ -1985,4 +1985,43 @@ mod tests {
             Some("The begincmap report")
         );
     }
+
+    #[test]
+    fn a_deep_page_does_not_hide_the_resources_of_a_shallow_page() {
+        // Node 100 has the resources. Nodes 101 to 140 are a chain of parents.
+        let mut objs: Vec<(u32, String, Option<&[u8]>)> = vec![(
+            100,
+            "<< /Type /Pages /Resources << /Font << /F1 5 0 R >> >> >>".into(),
+            None,
+        )];
+        for n in 101..=140 {
+            objs.push((n, format!("<< /Type /Pages /Parent {} 0 R >>", n - 1), None));
+        }
+        // The deep page is first: it is past the step limit.
+        objs.push((
+            2,
+            "<< /Type /Page /Parent 140 0 R /Contents 3 0 R >>".into(),
+            None,
+        ));
+        objs.push((3, "<< >>".into(), Some(b"BT (Plain words) Tj ET")));
+        objs.push((
+            7,
+            "<< /Type /Page /Parent 112 0 R /Contents 8 0 R >>".into(),
+            None,
+        ));
+        objs.push((8, "<< >>".into(), Some(CODES)));
+        objs.push((5, TYPE0.into(), None));
+        objs.push((6, "<< >>".into(), Some(CMAP)));
+        let objs: Vec<(u32, &str, Option<&[u8]>)> =
+            objs.iter().map(|(n, d, b)| (*n, d.as_str(), *b)).collect();
+        let pdf = build(&objs, false);
+        // The deep page sets no font, so give it one: it reads the font of the shallow page.
+        let pdf = String::from_utf8(pdf)
+            .unwrap()
+            .replace("BT (Plain words)", "BT /F1 1 Tf (Plain words)");
+        assert_eq!(
+            text(pdf.as_bytes(), 1000).as_deref(),
+            Some("Plain words\nHello World")
+        );
+    }
 }
