@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 iris-store = { version = "0.0.0", path = "../iris-store" }
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
 rusqlite = "=0.43.0"
 
 [dev-dependencies]

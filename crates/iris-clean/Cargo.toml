@@ -10,7 +10,9 @@ publish.workspace = true
 [dependencies]
 encoding_rs = "0.8"
 miniz_oxide = "0.9"
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
 
 [dev-dependencies]
 miniz_oxide = "0.9"
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
 iris-synth = { path = "../iris-synth" }
