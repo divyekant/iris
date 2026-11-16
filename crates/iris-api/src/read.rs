@@ -150,12 +150,51 @@ pub struct Section {
     pub duplicates: serde_json::Map<String, Value>,
 }
 
-/// The count of the proposed actions, in total and for each verb.
+/// A count of messages, in total and for each verb of their actions.
 #[derive(Debug, Serialize, PartialEq, Default)]
 pub struct Proposal {
     pub count: i64,
     pub verbs: serde_json::Map<String, Value>,
 }
+
+/// The work that Iris did without the person: the items that a `hide` rule
+/// leaves out of the brief, and the messages of the actions that an `allow`
+/// rule approved (specification 2, sections 5.4 and 6.4).
+#[derive(Debug, Serialize, PartialEq, Default)]
+pub struct Handled {
+    /// `hidden` and the messages of `verbs` together.
+    pub count: i64,
+    /// The count of messages of each verb.
+    pub verbs: serde_json::Map<String, Value>,
+}
+
+/// The message counts of each verb of the actions that `filter` selects
+/// (columns of `changeset_action a` and `changeset c`).
+fn verb_counts(c: &Connection, filter: &str) -> rusqlite::Result<Proposal> {
+    let mut out = Proposal::default();
+    let mut st = c.prepare_cached(&format!(
+        "SELECT a.verb, count(*) FROM changeset_action a
+         JOIN changeset c ON c.id = a.changeset_id
+         JOIN action_message m ON m.action_id = a.id
+         WHERE {filter} GROUP BY 1 ORDER BY 1"
+    ))?;
+    for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (verb, n) = row?;
+        out.count += n;
+        out.verbs.insert(verb, n.into());
+    }
+    Ok(out)
+}
+
+/// The triage actions that wait for a person: `proposed` or `in_review` in
+/// the open triage changesets.
+const TRIAGE_OPEN: &str =
+    "c.author_kind = 'triage' AND c.state = 'open' AND a.state IN ('proposed', 'in_review')";
+
+/// The actions that an `allow` rule approved. The apply keeps the decision
+/// of the rule on `applied` (schema 7, trigger `action_state`).
+pub(crate) const BY_RULE: &str =
+    "a.decided_by = 'rule' AND a.state IN ('approved', 'held', 'applied')";
 
 /// The first brief (specification 1, section 8).
 #[derive(Debug, Serialize, PartialEq, Default)]
@@ -175,10 +214,11 @@ pub struct Brief {
     /// The date of the oldest fetched message that is not gone: the brief
     /// covers the mail from this date (specification 1, section 4.2).
     pub oldest_fetched: Option<String>,
-    /// The triage proposal of specification 1, section 8: the mailbox
-    /// changes that observe mode would propose, with nothing applied.
-    /// Computed from `iris_observe::counts` for each account; not stored.
+    /// The triage proposal: the messages of the actions of the stored
+    /// triage changesets that wait for a person (specification 2, section 5.4).
     pub proposal: Option<Proposal>,
+    /// What Iris did without the person.
+    pub handled: Handled,
     /// The items of each `bundle` rule (specification 2, section 6.4), by
     /// rule ID. A bundled item is in no other section and in no count.
     pub bundles: Vec<Bundle>,
@@ -526,6 +566,21 @@ fn bundle_sql(now: i64, rule: u32) -> (String, String) {
     )
 }
 
+/// The section name of the items that a `hide` rule leaves out of the brief.
+pub const HIDDEN: &str = "hidden";
+
+/// The filter and the order of the hidden items: newest first. Each item
+/// has the rule and the reason in its `attention` field.
+fn hidden_sql(now: i64) -> (String, String) {
+    (
+        format!(
+            "({}) AND json_extract(doc, '$.attention.state') = 'hidden'",
+            heads(now)
+        ),
+        "created_at DESC, id DESC".to_string(),
+    )
+}
+
 /// The rule of a bundle section name: `bundle-3` is rule 3.
 fn bundle_rule(name: &str) -> Option<u32> {
     let n = name.strip_prefix("bundle-")?;
@@ -798,23 +853,8 @@ pub fn records(store: &Store) -> Result<serde_json::Map<String, Value>> {
 
 pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     let [you_owe, owed, conversations, feed, signals, strangers] = section_sql(now);
-    // Outside the read of the brief: a nested read can wait for the
-    // connection that this thread holds.
-    let accounts: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
-        let ids = st.query_map([], |r| r.get(0))?;
-        Ok(ids.collect::<rusqlite::Result<_>>()?)
-    })?;
-    let mut proposal = Proposal::default();
-    for account in accounts {
-        for (rule, n) in iris_observe::counts(store, account)? {
-            proposal.count += n as i64;
-            let verb = proposal.verbs.entry(rule.verb()).or_insert(0.into());
-            *verb = (verb.as_i64().unwrap_or(0) + n as i64).into();
-        }
-    }
     let tails = tails(now);
-    let mut brief = store.read(|c| {
+    let brief = store.read(|c| {
         let section =
             |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
         let records = count_records(c, SHOWN)?;
@@ -842,11 +882,9 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             )?
             .map(rfc3339);
         let all = heads(now);
+        // The same filter as the list of `/api/brief/hidden`.
         let hidden = c.query_row(
-            &format!(
-                "SELECT count(*) FROM item
-                 WHERE ({all}) AND json_extract(doc, '$.attention.state') = 'hidden'"
-            ),
+            &format!("SELECT count(*) FROM item WHERE {}", hidden_sql(now).0),
             [],
             |r| r.get(0),
         )?;
@@ -874,6 +912,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
                 section,
             });
         }
+        let by_rule = verb_counts(c, BY_RULE)?;
         Ok(Brief {
             you_owe: section(&you_owe)?,
             owed_to_you: section(&owed)?,
@@ -885,13 +924,16 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             hostile,
             not_understood,
             oldest_fetched,
-            proposal: None,
+            proposal: Some(verb_counts(c, TRIAGE_OPEN)?),
+            handled: Handled {
+                count: hidden + by_rule.count,
+                verbs: by_rule.verbs,
+            },
             bundles,
             hidden,
             review: crate::review::review_counts(c)?,
         })
     })?;
-    brief.proposal = Some(proposal);
     Ok(brief)
 }
 
@@ -921,6 +963,7 @@ pub fn brief_section(
     let sql = &match (SECTIONS.iter().position(|n| *n == name), bundle_rule(name)) {
         (Some(index), _) => section_sql(now)[index].clone(),
         (None, Some(rule)) => bundle_sql(now, rule),
+        (None, None) if name == HIDDEN => hidden_sql(now),
         (None, None) => return Ok(None),
     };
     let after = after
@@ -962,29 +1005,6 @@ pub fn brief_section(
         .then(|| page_keys.last().map(|k| encode_cursor(name, k)))
         .flatten();
     Ok(Some(SectionPage { section, next }))
-}
-
-/// The triage proposal of specification 1, section 8, in the changeset
-/// format of specification 2: `{"changesets": [...]}`, one changeset for each
-/// account, with the message IDs of each action. Each action is `proposed`.
-/// Nothing is applied or stored. Each changeset streams to `out` from one
-/// read snapshot (specification 2, section 9), so no ID list is in memory.
-pub fn write_proposal(store: &Store, now: i64, out: &mut impl std::io::Write) -> Result<()> {
-    let accounts: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
-        let ids = st.query_map([], |r| r.get(0))?;
-        Ok(ids.collect::<rusqlite::Result<_>>()?)
-    })?;
-    let io = |e: std::io::Error| Error::Store(e.into());
-    out.write_all(b"{\"changesets\":[").map_err(io)?;
-    for (i, account) in accounts.into_iter().enumerate() {
-        if i > 0 {
-            out.write_all(b",").map_err(io)?;
-        }
-        iris_observe::write_changeset(store, account, &rfc3339(now), out)?;
-    }
-    out.write_all(b"]}").map_err(io)?;
-    Ok(())
 }
 
 /// The kind of the sender row of `address`, or `stranger` with no row or no

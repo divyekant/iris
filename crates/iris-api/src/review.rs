@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use iris_store::{format_id, parse_id, Kind, Store};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -296,4 +296,94 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// One action that an `allow` rule approved: a change that Iris made, or
+/// makes, without the person (specification 2, section 5.4).
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HandledAction {
+    pub changeset: String,
+    pub revision: i64,
+    pub n: i64,
+    pub verb: String,
+    /// The count of messages of the action.
+    pub messages: i64,
+    /// `approved`, `held` or `applied`.
+    pub state: String,
+    /// The rule and the confirmed policy version that approved it.
+    pub rule: i64,
+    pub policy: i64,
+    /// The reason of the author, and the reason of the decision.
+    pub why: Option<String>,
+    pub reason: Option<String>,
+    /// The time of the decision.
+    pub at: Option<String>,
+}
+
+/// One page of [`handled`].
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HandledPage {
+    pub actions: Vec<HandledAction>,
+    /// The `after` value of the next page, or `None` on the last page.
+    pub next: Option<String>,
+}
+
+/// The actions that an `allow` rule approved, newest first. `after` is the
+/// `next` value of the page before. Keyset on the row ID: a row ID never
+/// changes, so a page does not repeat or skip an action.
+pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<HandledPage> {
+    if !(1..=crate::MAX_LIMIT).contains(&limit) {
+        return Err(Error::Query(format!(
+            "limit must be 1 to {}",
+            crate::MAX_LIMIT
+        )));
+    }
+    let before = match after {
+        None => i64::MAX,
+        Some(t) => t
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0 && n.to_string() == t)
+            .ok_or_else(|| Error::Query(format!("after {t} is not the next value of a page")))?,
+    };
+    let mut rows: Vec<(i64, HandledAction)> = store.read(|c| {
+        let mut st = c.prepare_cached(&format!(
+            "SELECT a.id, a.changeset_id, a.revision, a.n, a.verb,
+                    (SELECT count(*) FROM action_message m WHERE m.action_id = a.id),
+                    a.state, a.rule, a.policy, a.why, a.reason, a.decided_at
+             FROM changeset_action a
+             WHERE {} AND a.id < ?1 ORDER BY a.id DESC LIMIT ?2",
+            crate::read::BY_RULE
+        ))?;
+        let rows = st
+            .query_map(params![before, limit + 1], |r| {
+                Ok((
+                    r.get(0)?,
+                    HandledAction {
+                        changeset: iris_changeset::format_changeset_id(r.get(1)?),
+                        revision: r.get(2)?,
+                        n: r.get(3)?,
+                        verb: r.get(4)?,
+                        messages: r.get(5)?,
+                        state: r.get(6)?,
+                        rule: r.get(7)?,
+                        policy: r.get(8)?,
+                        why: r.get(9)?,
+                        reason: r.get(10)?,
+                        at: r.get::<_, Option<i64>>(11)?.map(crate::rfc3339),
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    })?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next = more
+        .then(|| rows.last().map(|(id, _)| id.to_string()))
+        .flatten();
+    Ok(HandledPage {
+        actions: rows.into_iter().map(|(_, a)| a).collect(),
+        next,
+    })
 }

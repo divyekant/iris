@@ -867,33 +867,26 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["not_understood"], 1);
     // Message 21 got the date 0 above: it is the oldest fetched message.
     assert_eq!(b["oldest_fetched"], "1970-01-01T00:00:00Z");
-    // The triage proposal of observe mode, computed when the brief opens.
+    // The triage proposal: the stored triage changeset, not a count of the
+    // brief. Before the first triage run, nothing waits.
+    assert_eq!(b["proposal"], json!({"count": 0, "verbs": {}}));
+    iris_triage::run(&store, 1, NOW).unwrap();
     let want: u64 = iris_observe::counts(&store, 1)
         .unwrap()
         .iter()
         .map(|(_, n)| n)
         .sum();
     assert!(want > 0);
+    let (_, after_run) = get(&store, "/api/brief").await;
     assert_eq!(
-        b["proposal"],
+        after_run["proposal"],
         json!({"count": want, "verbs": {"archive": want}})
     );
-    // The full proposal: a changeset with the message IDs of each action.
-    let (code, p) = get(&store, "/api/proposal").await;
-    assert_eq!(code, StatusCode::OK);
-    let cs = &p["changesets"].as_array().unwrap()[0];
-    assert!(cs["id"].as_str().unwrap().starts_with("cs-"));
-    let actions = cs["actions"].as_array().unwrap();
-    let targets: usize = actions
-        .iter()
-        .map(|a| {
-            assert_eq!(a["decision"]["state"], "proposed");
-            let ids = a["targets"]["messages"].as_array().unwrap();
-            assert!(ids.iter().all(|m| m.as_str().unwrap().starts_with("m-")));
-            ids.len()
-        })
-        .sum();
-    assert_eq!(targets as u64, want);
+    // Observe mode: no rule decided an action, so Iris handled nothing.
+    assert_eq!(after_run["handled"], json!({"count": 0, "verbs": {}}));
+    // The old in-memory proposal is gone: the review lists the stored one.
+    let (code, _) = get(&store, "/api/proposal").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
 
     // Pages of one section: the same items in the same order as the brief.
     let mut paged = Vec::new();
@@ -1119,17 +1112,6 @@ async fn needs_the_token_of_the_one_time_sign_in() {
     let res = send("POST", "/api/session", &[], &body).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     assert_eq!(auth.sign_in_url(), None);
-}
-
-#[tokio::test]
-async fn a_proposal_that_fails_before_its_first_part_is_a_500() {
-    let dir = temp("proposal-error");
-    let (store, _) = filled(&dir);
-    // The store cannot read the items, so the triage counts fail.
-    exec(&store, "DROP TABLE item_source", []);
-    let (code, v) = get(&store, "/api/proposal").await;
-    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(v["error"].is_string());
 }
 
 #[tokio::test]
@@ -1361,6 +1343,35 @@ async fn each_item_of_the_brief_is_shown_bundled_or_hidden_once() {
         let mut sorted = rules.clone();
         sorted.sort();
         assert_eq!(rules, sorted, "bundles in the order of the rule IDs");
+        // The list of hidden items, page by page, has each hidden item once,
+        // with its rule and reason. With no action, the count of what Iris
+        // handled is the hidden count.
+        let mut hidden = Vec::new();
+        let mut after = String::new();
+        loop {
+            let (code, p) = get(&store, &format!("/api/brief/hidden?limit=5{after}")).await;
+            assert_eq!(code, StatusCode::OK);
+            assert_eq!(p["count"], b["hidden"]);
+            for item in p["items"].as_array().unwrap() {
+                assert_eq!(item["attention"]["state"], "hidden");
+                assert_eq!(item["attention"]["reason"], "r");
+                hidden.push(item["id"].as_str().unwrap().to_string());
+            }
+            match p["next"].as_str() {
+                Some(n) => after = format!("&after={n}"),
+                None => break,
+            }
+        }
+        let mut unique = hidden.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), hidden.len(), "seed {seed}");
+        assert_eq!(
+            hidden.len() as i64,
+            b["hidden"].as_i64().unwrap(),
+            "seed {seed}"
+        );
+        assert_eq!(b["handled"], json!({"count": b["hidden"], "verbs": {}}));
         // No policy: a bundle page is there only while the brief lists it.
         for rule in 1..=9u64 {
             let (code, _) = get(&store, &format!("/api/brief/bundle-{rule}")).await;

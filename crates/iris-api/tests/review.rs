@@ -7,7 +7,9 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use iris_api::Auth;
-use iris_changeset::{add_action, create, revise, submit, Author, AuthorKind, Verb};
+use iris_changeset::{
+    add_action, create, decide, revise, submit, ActionId, Author, AuthorKind, By, State, Verb,
+};
 use iris_store::{Header, NewMessage, Store};
 use serde_json::{json, Map, Value};
 use tower::ServiceExt;
@@ -445,4 +447,87 @@ async fn refuses_a_decision_that_is_not_valid() {
     );
     // A decision needs a POST.
     assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+/// What Iris handled without the person: each action that an `allow` rule
+/// approved, with the message count and the reason, and no other action.
+/// The brief count and the full list agree, page by page.
+#[tokio::test]
+async fn lists_the_actions_that_a_rule_approved() {
+    let dir = temp("handled");
+    let s = store(&dir);
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('a', 'h1', 0);
+             INSERT INTO policy_rule_id(id) VALUES (1), (2);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let rule = By::Rule { id: 2, policy: 1 };
+    let at = |changeset, n| ActionId {
+        changeset,
+        revision: 1,
+        n,
+    };
+    // Five changesets: actions 1 approved by the rule, 2 waits, 3 in review.
+    let mut want = Vec::new();
+    for i in 0..5 {
+        let cs = changeset(
+            &s,
+            "Old mail.",
+            &[&["m-1", "m-2"], &["m-3"], &["m-3"]],
+            NOW + i,
+        );
+        decide(
+            &s,
+            at(cs, 1),
+            State::Approved,
+            rule,
+            Some("Rule 2 allows it."),
+            NOW + i,
+        )
+        .unwrap();
+        decide(
+            &s,
+            at(cs, 3),
+            State::InReview,
+            By::Policy,
+            Some("No rule."),
+            NOW + i,
+        )
+        .unwrap();
+        want.insert(0, format!("cs-{cs}"));
+    }
+    let (_, b) = get(&s, "/api/brief").await;
+    assert_eq!(b["handled"], json!({"count": 10, "verbs": {"archive": 10}}));
+    let mut got = Vec::new();
+    let mut after = String::new();
+    loop {
+        let (code, p) = get(&s, &format!("/api/handled?limit=2{after}")).await;
+        assert_eq!(code, StatusCode::OK);
+        for a in p["actions"].as_array().unwrap() {
+            assert_eq!(a["n"], 1);
+            assert_eq!(a["verb"], "archive");
+            assert_eq!(a["messages"], 2);
+            assert_eq!(a["state"], "approved");
+            assert_eq!(a["rule"], 2);
+            assert_eq!(a["policy"], 1);
+            assert_eq!(a["why"], "Old mail.");
+            assert_eq!(a["reason"], "Rule 2 allows it.");
+            got.push(a["changeset"].as_str().unwrap().to_string());
+        }
+        match p["next"].as_str() {
+            Some(n) => after = format!("&after={n}"),
+            None => break,
+        }
+    }
+    assert_eq!(got, want);
+    for bad in [
+        "/api/handled?after=x",
+        "/api/handled?after=01",
+        "/api/handled?limit=0",
+    ] {
+        assert_eq!(get(&s, bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
 }
