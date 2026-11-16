@@ -313,6 +313,63 @@ fn a_person_without_sent_mail_is_decided_again() {
     assert_eq!((d.kind, d.previous), (Kind::Stranger, Some(Kind::Person)));
 }
 
+#[test]
+fn a_person_whose_sent_message_is_gone_or_changed_is_decided_again() {
+    let mut c = Case::new("gone");
+    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    let head = "From: Bo <bo@example.net>\r\nTo: owner@example.com";
+    // The sent message now names another recipient, and keeps SENT.
+    c.store
+        .write(|tx| {
+            tx.execute("UPDATE header SET to_addrs = 'zed@example.net' WHERE message_id = 1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(c.put("t2", &["INBOX"], head).kind, Kind::Stranger);
+
+    c.put("t3", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    assert_eq!(c.put("t4", &["INBOX"], head).kind, Kind::Person);
+    // The sent message of the basis is deleted from the store.
+    c.store
+        .write(|tx| {
+            tx.execute("DELETE FROM message WHERE id = 3", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(c.put("t5", &["INBOX"], head).kind, Kind::Stranger);
+}
+
+#[test]
+fn a_sent_message_reports_each_hostile_change_of_a_recipient() {
+    let mut c = Case::new("rerun");
+    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"));
+    let id = |c: &Case| -> i64 {
+        c.store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT id FROM sender WHERE address = 'alerts@shop-secure.example.net'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    for t in ["t2", "t3", "t4"] {
+        c.put(t, &[], &service_mail());
+    }
+    // The service is known now, so the next sent message makes the
+    // recipient hostile. The caller must run understanding again on its mail.
+    let d = c.put("t5", &["SENT"], &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"));
+    assert_eq!(d.kind, Kind::SelfOwner);
+    assert_eq!(d.rerun, vec![id(&c)]);
+    // No change: nothing to run again.
+    let d = c.put("t6", &["SENT"], &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"));
+    assert!(d.rerun.is_empty());
+    // The From row reports its change too.
+    let d = c.put("t7", &[], "From: <alerts@shop-secure.example.net>");
+    assert!(d.rerun.is_empty());
+}
+
 fn answer(kind: Kind) -> Sender {
     match kind {
         Kind::SelfOwner => Sender::Owner,
