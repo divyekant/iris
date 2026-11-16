@@ -1025,7 +1025,7 @@ changeset format of specification 2, with each action in the state
 `proposed`. The brief gives only the totals of the proposal: the count of
 actions, and the count for each verb. The local API gives the full list
 separately. Release 1 does not store it. From release 2, triage stores it as
-a changeset in the mode `observe`.
+a changeset, in the mode of the active policy (see below).
 
 The triage proposal of release 1 (crate `iris-observe`) has these rules:
 
@@ -1040,6 +1040,42 @@ The triage proposal of release 1 (crate `iris-observe`) has these rules:
   IDs of each rule. So the ID names the content: the same content gives the
   same ID, also at a later time, and a different content gives a different
   ID. A client must not use this ID as the ID of a stored changeset.
+
+From release 2, the crate `iris-triage` stores the same proposal as a
+changeset (specification 2, section 5.4):
+
+- The author is `triage`, with the name `Iris` and the session
+  `account-<row ID>`. Each account has its own changeset, because one action
+  changes one account.
+- Each rule gives one action for each 500 of its messages, with the reason of
+  the rule. The changeset has its own reason. Nothing applies without a rule
+  or an approval.
+- A run uses the open triage changeset of the account. It submits a new
+  revision only when the count, the verb, the reason or the targets of the
+  actions that wait for a decision (`proposed` or `in_review`) changed. So an action in review does not change while the mailbox
+  does not change.
+- One run is one write transaction. It reads the IDs of one action at a time.
+- A decision holds. A message that a triage action of the account named
+  does not come back in a later proposal while that action is decided or
+  approved (each state except `proposed`, `in_review` and `replaced`), also
+  when its changeset is closed.
+- In the policy mode `apply`, the active policy decides each `proposed`
+  action of the new revision in the same transaction (specification 2,
+  section 5.4, step 5), and the action keeps the reason of the decision. In
+  the mode `observe`, each action stays `proposed`.
+
+Failure list of a triage run. Supported input: the account row ID and the
+forms, labels and senders in the store.
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A crash, an error or a refusal in a run | A draft revision that blocks each approval (spec 2, section 5.5), or half a proposal | The transaction rolls back. No changeset, revision or action of the run stays. |
+| Two runs for one account at the same time, in one process or in two | Two open triage changesets for one account | Each run reads and writes in one transaction. In one process, the write lock of the store puts the runs in order. Across processes, SQLite refuses the write of the run whose snapshot is old, and that run gives an error. |
+| A proposal with no action, while a triage changeset is open | A revision with no action | The run writes nothing. The open actions stay until withdraw and expiry are built (R2-01 part 3). |
+| A proposal with no action, and no open changeset | An empty changeset | The run writes nothing. |
+| A large inbox | Memory that grows with the mailbox | The run keeps the IDs of one action (500 at most) in memory. |
+| A message that leaves the inbox between the run and an apply | The apply changes a message that triage did not propose | Submit resolves the targets in the run. The apply (R2-02) checks each message again. |
+| All other input | | The run gives an error and writes nothing. |
 
 ## 9. Memory
 

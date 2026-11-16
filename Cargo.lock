@@ -915,6 +915,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-triage"
+version = "0.0.0"
+dependencies = [
+ "iris-changeset",
+ "iris-observe",
+ "iris-policy",
+ "iris-store",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-understand"
 version = "0.0.0"
 dependencies = [

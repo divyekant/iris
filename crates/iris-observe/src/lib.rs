@@ -92,7 +92,8 @@ impl Rule {
     }
 
     /// The message row IDs of the rule, minus the messages of earlier rules.
-    fn query(self) -> String {
+    /// Read the rules in one transaction, so no message is in two rules.
+    pub fn query(self) -> String {
         let mut q = self.select().to_string();
         for earlier in Rule::ALL.iter().take_while(|r| **r != self) {
             q.push_str(" EXCEPT ");
