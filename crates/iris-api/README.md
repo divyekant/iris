@@ -74,8 +74,9 @@ An error is `{"error": "<reason>"}`:
 | Status | Cause |
 |---|---|
 | 400 | The search text, an ID or a filter is not valid. |
-| 401 | The request has no sign-in cookie, or a wrong one. |
-| 403 | The `Host` or the `Origin` of the request is not local, or the sign-in code is not valid or was used. |
+| 401 | The request has no `Authorization: Bearer` token of the sign-in, or a wrong one. |
+| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
+| 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
 | 500 | The store failed. |
 
