@@ -8,6 +8,7 @@
 //! in the web client (`change`, `discard`), and keeps its comments.
 
 mod active;
+mod attention;
 mod edit;
 mod eval;
 
