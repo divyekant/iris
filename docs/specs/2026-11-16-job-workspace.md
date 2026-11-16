@@ -201,6 +201,13 @@ these rules:
   the apply. A message outside the grant at `submit` makes the submit fail
   with no change. A message that left the grant before the apply makes the
   action refused, with the reason, and nothing changes in the mailbox.
+- Each item that an action of a session targets (a state action such as
+  `close`, `defer`, `decline` or `correct`, or an item target of a mailbox
+  action) must be an item of the workspace now: a commitment or a record,
+  not gone, with each source message granted. The engine checks this at
+  `submit` and again just before the apply, with the same results as for
+  a message. A feed, signal or conversation item is never a target in a
+  session, so `correct` on one is refused.
 - `iris draft` and `iris send` target an account and a draft, which are not
   in the grant. The engine refuses them in session mode until a card
   defines the grant of the account and of a job draft (R4-03).
