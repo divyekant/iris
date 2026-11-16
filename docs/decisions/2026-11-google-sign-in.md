@@ -113,7 +113,8 @@ Limits:
   verification, not to "Publish app". So the page does not say if an
   unverified app needs a domain that the user owns. In 2026, rclone users
   reported a refusal for `github.com`, and other users published with no
-  verification [14]. Evidence: pending. See "Domain test" below.
+  verification [14]. Evidence: the domain test of 2026-11-16 passed with a
+  domain that the account did not verify. See "Domain test" below.
 - Google gives no API and no `gcloud` command to make a standard OAuth client
   or the Branding and Audience settings [14]. `gcloud` can create the project
   and enable the Gmail API. The other steps stay manual in the browser.
@@ -148,6 +149,27 @@ Domain test (R1-02 does it first, before other sign-in work):
 5. If step 4 also fails, or the total time goes far over 10 minutes, path A
    fails the test. Then the lead asks dk to choose again, with path C as the
    next option.
+
+Result (2026-11-16): the test passed at step 3.
+
+- Account: the owner's Google account. New project `iris-domain-test`,
+  Gmail API on, user type "External".
+- Branding: home page `https://divyekant.github.io/iris/`, privacy page
+  `https://divyekant.github.io/iris/privacy.html`, authorized domain
+  `divyekant.github.io`. Google showed no error on Save. The page said
+  "Branding changes saved".
+- Data Access: Google put `gmail.readonly` under "Your restricted scopes".
+- "Publish app", then "Confirm": the status changed to "In production".
+  Google showed this banner: "Your app requires verification. When you have
+  finished configuring your information, please submit your app for
+  review." The banner did not stop the publish. The user cap shows
+  "0 users / 100 user cap".
+- The account did not verify `divyekant.github.io` in Search Console for
+  this test. The test did not check other Google accounts.
+- Not covered by this test: the "unverified app" screen at sign-in, the
+  token response, and the 8-day refresh. These need a client and a real
+  sign-in on the owner's Mac (open questions 2 and 3).
+- The project was shut down after the test.
 
 Risks:
 
@@ -292,7 +314,8 @@ these paths.
 
 ## Open questions for R1-02
 
-1. Does the domain test of path A pass, and at which step?
+1. Does the domain test of path A pass, and at which step? Answer: yes, at
+   step 3 (see "Domain test").
 2. Does a token from an unverified "In production" client with
    `gmail.readonly` still work after 8 days?
 3. How long does a real setup take on dk's Mac, from the start of setup to
