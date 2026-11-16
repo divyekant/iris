@@ -100,7 +100,7 @@ encrypted with the `key` file of the data folder.
 CAUTION: The backup folder holds the key and your mail. Keep it private.
 
 `iris serve` prints the sign-in address of the local API, with a one-time
-code. The web client does not use this address yet (tracker item R1-18). A
+code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
 program can exchange the code for a token with `POST /api/session`
 (`crates/iris-api/README.md`).
 
