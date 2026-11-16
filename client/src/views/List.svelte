@@ -28,7 +28,8 @@
   let error = $state("");
   let busy = $state(false);
   let shown = $derived(expiring ? unexpired(items, now) : items);
-  let until = $derived(expiring ? nextExpiry(items, now) : undefined);
+  // Keep the time left of each signal line fresh until the last expiry.
+  let until = $derived(nextExpiry(items, now));
   $effect(() => (until ? watch(until, (d) => (now = d)) : undefined));
 
   async function loadMore() {
@@ -52,7 +53,7 @@
   <p class="empty">Nothing here now. New items show here after the next sync.</p>
 {:else}
   <ul>
-    {#each shown as item (item.id)}<Line {item} twins={duplicates[item.id]} />{/each}
+    {#each shown as item (item.id)}<Line {item} {now} twins={duplicates[item.id]} />{/each}
   </ul>
 {/if}
 {#if next && more}<button type="button" onclick={loadMore} disabled={busy}>{busy ? "Loading" : "Show more"}</button>{/if}

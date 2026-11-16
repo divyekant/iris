@@ -676,6 +676,8 @@ test("the brief and setup say that the copy stopped for an account that needs si
   const b = text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 }));
   assert.doesNotMatch(b, /still copies|copy continues/);
   assert.match(b, /Iris copied 20,000 of 84,212 messages, then Google stopped the sign-in\. This brief covers the mail since/);
+  const early = text(await render("/src/views/Brief.svelte", { brief: { ...brief, oldest_fetched: null }, status, now: NOW, poll: 0 }));
+  assert.doesNotMatch(early, /copy continues/);
   const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
   assert.doesNotMatch(t, /Iris copies|copy continues/);
   assert.match(t, /The copy of b@example\.com stopped at 20,000 of 84,212 messages\./);

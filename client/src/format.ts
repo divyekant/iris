@@ -182,9 +182,14 @@ export function summary(brief: Brief): string {
   return parts.length ? parts.join(" ") : "Nothing needs you now.";
 }
 
-/** The accounts that are still in their first sync (spec 1 section 4.2). One such account is enough to show the copy. */
-export function copying(status: Status | null): Account[] {
+/** The accounts whose first sync is not complete (spec 1 section 4.2): the brief then covers only the mail fetched so far. */
+export function unfinished(status: Status | null): Account[] {
   return status ? status.accounts.filter((a) => !a.mirror_ready_at) : [];
+}
+
+/** The accounts that still copy in their first sync. A refused sign-in stops the sync (spec 1 section 4.7). */
+export function copying(status: Status | null): Account[] {
+  return unfinished(status).filter((a) => a.state !== "needs_sign_in");
 }
 
 /** The home view: the setup flow until there is something to show, then the brief. */

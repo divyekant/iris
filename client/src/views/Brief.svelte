@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, loadBrief, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { copying, greeting, nextDay, party, partyKey, signals, summary, when } from "../format";
+  import { copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
@@ -77,7 +77,8 @@
   // Counts for each sender are exact only when the API gave every feed item.
   let feedComplete = $derived(brief.feed.items.length >= brief.feed.count);
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
-  let progress = $derived(status && copying(status).length ? status.messages : null);
+  let progress = $derived(status && unfinished(status).length ? status.messages : null);
+  let stopped = $derived(copying(status).length === 0);
   let day = $derived(now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }));
 </script>
 
@@ -90,8 +91,12 @@
 {#if progress}
   <div class="copying" role="status">
     <p>
-      Iris still copies your mailbox: {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages.
-      {brief.oldest_fetched ? `This brief covers the mail since ${when(brief.oldest_fetched)}.` : "The brief grows as the copy continues."}
+      {#if stopped}
+        Iris copied {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages, then Google stopped the sign-in.
+      {:else}
+        Iris still copies your mailbox: {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages.
+      {/if}
+      {brief.oldest_fetched ? `This brief covers the mail since ${when(brief.oldest_fetched)}.` : stopped ? "This brief covers the mail that Iris copied." : "The brief grows as the copy continues."}
     </p>
     <progress max={progress.total || 1} value={progress.fetched} aria-label="Messages copied"></progress>
   </div>

@@ -5,7 +5,7 @@
 <script lang="ts">
   import { get, type Status } from "../api";
   import { poll as every } from "../clock";
-  import { copying } from "../format";
+  import { copying, unfinished } from "../format";
 
   let { status: initial, poll = 2000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
@@ -15,7 +15,8 @@
   $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
 
   // The account that still copies comes first: with two accounts, one can be ready while the other copies.
-  let account = $derived(copying(status)[0] ?? status.accounts[0]);
+  let account = $derived(copying(status)[0] ?? unfinished(status)[0] ?? status.accounts[0]);
+  let stopped = $derived(account?.state === "needs_sign_in");
   let m = $derived(status.messages);
   let stage = $derived(!account ? 0 : account.mirror_ready_at ? 2 : 1);
   const number = (n: number) => n.toLocaleString("en-US");
@@ -50,6 +51,13 @@
         </li>
       </ol>
       <p class="quiet">This page goes to the next step when the account is connected.</p>
+    </section>
+  {:else if stage === 1 && stopped}
+    <section>
+      <h1>The copy stopped</h1>
+      <p class="big">The copy of {account.address} stopped at {number(m.fetched)} of {m.total ? number(m.total) : "all"} messages.</p>
+      <p class="quiet">Iris continues the copy after you sign in again. Nothing in your mailbox changed.</p>
+      {#if m.understood > 0}<a class="go" href="#/brief">Open the brief</a>{/if}
     </section>
   {:else if stage === 1}
     <section>
