@@ -226,3 +226,70 @@ async fn gives_the_summary_of_each_message_id_in_order() {
         200
     );
 }
+
+/// The ID of a message in the text, by the rule of specification 1,
+/// section 5.7, written apart from the code under test.
+fn oracle(segment: &str) -> Option<String> {
+    let digits = segment.strip_prefix("m-")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let row: u128 = digits.parse().ok()?;
+    (row > 0 && row <= i64::MAX as u128).then(|| format!("m-{row}"))
+}
+
+/// Property: for any ID text, the answer is a 400 unless each part is a
+/// message ID and there are 200 parts or fewer. Else it has one entry for
+/// each part, in order, with the normal form of the ID.
+#[test]
+fn the_ids_parser_accepts_only_message_ids_and_keeps_their_order() {
+    let dir = temp("ids-property");
+    let s = store(&dir);
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |n: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % n
+    };
+    const PARTS: [&str; 14] = [
+        "m-1",
+        "m-2",
+        "m-3",
+        "m-007",
+        "m-99",
+        "m-0",
+        "m-",
+        "t-1",
+        "c-1",
+        "",
+        " m-1",
+        "m-+1",
+        "m-١",
+        "m-99999999999999999999",
+    ];
+    for _ in 0..3000 {
+        let count = if next(10) == 0 {
+            195 + next(10)
+        } else {
+            1 + next(6)
+        };
+        let parts: Vec<String> = (0..count)
+            .map(|_| match next(4) {
+                0 => format!("m-{}", next(1_000_000)),
+                _ => PARTS[next(PARTS.len() as u64) as usize].to_string(),
+            })
+            .collect();
+        let text = parts.join(",");
+        let expected: Option<Vec<String>> = parts.iter().map(|p| oracle(p)).collect();
+        let expected = expected.filter(|e| e.len() <= 200);
+        match (iris_api::messages_by_id(&s, &text), expected) {
+            (Ok(got), Some(want)) => {
+                let got: Vec<&str> = got.iter().map(|m| m["id"].as_str().unwrap()).collect();
+                assert_eq!(got, want, "{text:?}");
+            }
+            (Err(iris_api::Error::Query(_)), None) => {}
+            (got, want) => panic!("{text:?}: {got:?} but expected {want:?}"),
+        }
+    }
+}

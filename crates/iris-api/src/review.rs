@@ -49,25 +49,43 @@ fn io(e: std::io::Error) -> Error {
     Error::Store(e.into())
 }
 
-/// `{"changesets": [...]}`: each open changeset, the newest submit first.
-/// Each document streams to `out` (section 9).
+/// The count of changeset IDs that the list reads in one query.
+const PAGE: i64 = 64;
+
+/// `{"changesets": [...]}`: each open changeset, the newest first. Each
+/// document streams to `out`, and the IDs come in pages of [`PAGE`], so
+/// memory does not grow with the count of open changesets (section 9).
 pub fn write_open_changesets(store: &Store, out: &mut impl Write) -> Result<()> {
-    let ids: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare(
-            "SELECT id FROM changeset WHERE state = 'open' ORDER BY submitted_at DESC, id DESC",
-        )?;
-        let ids = st
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
-    })?;
+    write_open_paged(store, out, PAGE)
+}
+
+fn write_open_paged(store: &Store, out: &mut impl Write, page: i64) -> Result<()> {
     out.write_all(b"{\"changesets\":[").map_err(io)?;
-    for (i, id) in ids.into_iter().enumerate() {
-        if i > 0 {
-            out.write_all(b",").map_err(io)?;
+    let mut first = true;
+    // Keyset on the row ID: an ID never changes, so a changeset that a new
+    // revision moves in time is not listed twice or left out.
+    let mut before = i64::MAX;
+    loop {
+        let ids: Vec<i64> = store.read(|c| {
+            let mut st = c.prepare_cached(
+                "SELECT id FROM changeset WHERE state = 'open' AND id < ?1
+                 ORDER BY id DESC LIMIT ?2",
+            )?;
+            let ids = st
+                .query_map([before, page], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(ids)
+        })?;
+        let Some(&last) = ids.last() else { break };
+        for id in ids {
+            if !first {
+                out.write_all(b",").map_err(io)?;
+            }
+            first = false;
+            // A changeset row is never deleted, so each listed ID has its document.
+            iris_changeset::write_document(store, id, out).map_err(changeset_error)?;
         }
-        // A changeset row is never deleted, so each ID of the list has its document.
-        iris_changeset::write_document(store, id, out).map_err(changeset_error)?;
+        before = last;
     }
     out.write_all(b"]}").map_err(io)
 }
@@ -116,4 +134,58 @@ pub fn messages_by_id(store: &Store, ids: &str) -> Result<Vec<Value>> {
         }
         Ok(out)
     })?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The list reads the IDs in pages, and each page continues after the
+    /// last ID of the page before: no changeset twice, none left out.
+    #[test]
+    fn the_list_pages_through_each_open_changeset() {
+        let dir = std::env::temp_dir().join(format!("iris-api-pages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "owner@example.com").unwrap();
+        let message = iris_store::NewMessage {
+            provider_id: "g1".into(),
+            thread_provider_id: "gt1".into(),
+            ..Default::default()
+        };
+        store.put_messages(account, &[message]).unwrap();
+        let author = iris_changeset::Author {
+            kind: iris_changeset::AuthorKind::Agent,
+            name: Some("Claude Code".into()),
+            session: None,
+            job: None,
+        };
+        let none = serde_json::Map::new();
+        for i in 1..=7 {
+            let cs = iris_changeset::create(&store, &author, i).unwrap();
+            let verb = iris_changeset::Verb::Archive;
+            iris_changeset::add_action(&store, cs, &author, verb, &["m-1"], &none, None).unwrap();
+            // Changeset 4 stays a draft, so it is not open.
+            if i != 4 {
+                iris_changeset::submit(&store, cs, &author, "Tidy up.", i).unwrap();
+            }
+        }
+        for page in [1, 2, 3, 6, 7, 64] {
+            let mut out = Vec::new();
+            write_open_paged(&store, &mut out, page).unwrap();
+            let v: Value = serde_json::from_slice(&out).unwrap();
+            let ids: Vec<&str> = v["changesets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                ids,
+                ["cs-7", "cs-6", "cs-5", "cs-3", "cs-2", "cs-1"],
+                "page {page}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
