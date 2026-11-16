@@ -1,6 +1,7 @@
 <!-- A full list, 50 items for each page: all items of one form, or one section of the brief. -->
 <script lang="ts">
   import { get, type Page } from "../api";
+  import { addPage } from "../format";
   import Line from "./Line.svelte";
 
   // `more` is the API path of the list. `cursor` names the parameter that takes `next`:
@@ -21,7 +22,7 @@
     error = "";
     try {
       const nextPage = await get<Page>(`${more}&${cursor}=${encodeURIComponent(String(next ?? ""))}`);
-      items = [...items, ...nextPage.items];
+      items = addPage(items, nextPage.items);
       duplicates = { ...duplicates, ...nextPage.duplicates };
       next = nextPage.next;
     } catch (e) {

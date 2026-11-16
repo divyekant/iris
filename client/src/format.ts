@@ -165,3 +165,9 @@ export function home(status: Status): "setup" | "brief" {
   // Spec 1 section 4.2: the first brief shows during the first sync, from the mail fetched so far.
   return ready || status.messages.understood > 0 ? "brief" : "setup";
 }
+
+/** Add a next page to a list. Keyset paging can repeat an item, and a keyed list must not show an ID twice. */
+export function addPage(items: Item[], more: Item[]): Item[] {
+  const seen = new Set(items.map((i) => i.id));
+  return [...items, ...more.filter((i) => !seen.has(i.id))];
+}

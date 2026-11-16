@@ -1,6 +1,7 @@
 <!-- Records: one table for each type, 50 records at a time, with "Show more" for the next page. -->
 <script lang="ts">
   import { get, type Page } from "../api";
+  import { addPage } from "../format";
   import RecordTable from "./RecordTable.svelte";
 
   let { counts, type = "", page = null }: { counts: Record<string, number>; type?: string; page?: Page | null } = $props();
@@ -23,7 +24,7 @@
     try {
       const result = await get<Page>(`items?form=record&type=${encodeURIComponent(name)}&limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`);
       if (name !== selected) return;
-      items = before ? [...items, ...result.items] : result.items;
+      items = before ? addPage(items, result.items) : result.items;
       next = result.next;
       loaded = name;
     } catch (e) {
