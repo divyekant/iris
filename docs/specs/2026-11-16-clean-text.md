@@ -286,8 +286,9 @@ its first 1 KiB holds `%PDF`.
 - Font of a string: the name of the last `Tf`, also from the stream before.
   The reader finds the font in the `/Resources` of the stream dictionary
   (a form), else in the `/Resources` of the page (`/Type /Page`) whose
-  `/Contents` holds the stream, else in a `/Parent` of the page (at most
-  32 steps). A resources dictionary, its `/Font` dictionary and the font
+  `/Contents` holds the stream, else in the nearest `/Parent` of the page
+  that has them. A loop of parents ends at the first node that comes
+  again. A resources dictionary, its `/Font` dictionary and the font
   can each be direct or a reference. At most 4,096 fonts (a stream and a
   name) for each PDF. The strings of more fonts read as Windows-1252.
 - Decode: a font with a `/ToUnicode` map reads codes through the map. The

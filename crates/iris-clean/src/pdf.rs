@@ -771,7 +771,7 @@ impl Doc {
 
     /// The resources of a content stream: its own, or the resources of its
     /// page or of a parent of the page. `memo` keeps the result of each page
-    /// and parent, so each one is read once.
+    /// and parent, so each one is read once for all content streams.
     fn resources<'a>(
         &'a self,
         pages: &BTreeMap<u32, u32>,
@@ -783,11 +783,16 @@ impl Doc {
         }
         let mut node = *pages.get(&content)?;
         let mut path = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let mut found = None;
-        // A loop of parents ends after 32 steps.
-        for _ in 0..32 {
+        // Each page and parent is read once. A loop of parents ends at the
+        // first node that comes again, without resources.
+        loop {
             if let Some(&r) = memo.get(&node) {
                 found = r;
+                break;
+            }
+            if !seen.insert(node) {
                 break;
             }
             path.push(node);
@@ -1997,13 +2002,13 @@ mod tests {
         for n in 101..=140 {
             objs.push((n, format!("<< /Type /Pages /Parent {} 0 R >>", n - 1), None));
         }
-        // The deep page is first: it is past the step limit.
+        // The deep page comes first and walks the whole chain.
         objs.push((
             2,
             "<< /Type /Page /Parent 140 0 R /Contents 3 0 R >>".into(),
             None,
         ));
-        objs.push((3, "<< >>".into(), Some(b"BT (Plain words) Tj ET")));
+        objs.push((3, "<< >>".into(), Some(CODES)));
         objs.push((
             7,
             "<< /Type /Page /Parent 112 0 R /Contents 8 0 R >>".into(),
@@ -2014,14 +2019,9 @@ mod tests {
         objs.push((6, "<< >>".into(), Some(CMAP)));
         let objs: Vec<(u32, &str, Option<&[u8]>)> =
             objs.iter().map(|(n, d, b)| (*n, d.as_str(), *b)).collect();
-        let pdf = build(&objs, false);
-        // The deep page sets no font, so give it one: it reads the font of the shallow page.
-        let pdf = String::from_utf8(pdf)
-            .unwrap()
-            .replace("BT (Plain words)", "BT /F1 1 Tf (Plain words)");
         assert_eq!(
-            text(pdf.as_bytes(), 1000).as_deref(),
-            Some("Plain words\nHello World")
+            text(&build(&objs, false), 1000).as_deref(),
+            Some("Hello World\nHello World")
         );
     }
 }
