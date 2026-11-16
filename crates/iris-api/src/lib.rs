@@ -175,7 +175,7 @@ impl std::io::Write for ChanWriter {
 #[derive(Deserialize)]
 struct PageQuery {
     limit: Option<u32>,
-    offset: Option<u64>,
+    after: Option<String>,
 }
 
 async fn get_brief_section(
@@ -189,7 +189,7 @@ async fn get_brief_section(
         now_ms(),
         &section,
         q.limit.unwrap_or(50),
-        q.offset.unwrap_or(0),
+        q.after.as_deref().filter(|a| !a.is_empty()),
     )?;
     Ok(page.map_or_else(not_found, |p| Json(p).into_response()))
 }

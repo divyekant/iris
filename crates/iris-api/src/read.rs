@@ -428,6 +428,16 @@ fn kind_sql(doc: &str, path: &str) -> String {
 
 /// The first brief at the time `now` (milliseconds since the Unix epoch).
 /// The names of the list sections of the brief, as in [`Brief`].
+/// The forms of the items of each section of [`SECTIONS`].
+const SECTION_FORMS: [&[&str]; 6] = [
+    &["commitment"],
+    &["commitment"],
+    &["conversation"],
+    &["feed"],
+    &["signal"],
+    &["commitment", "conversation"],
+];
+
 pub const SECTIONS: [&str; 6] = [
     "you_owe",
     "owed_to_you",
@@ -504,13 +514,13 @@ fn section_sql(now: i64) -> [(String, String); 6] {
     [you_owe, owed, conversations, feed, signals, strangers]
 }
 
-/// One page of a list section of the brief: `limit` items from `offset`, in
-/// the order of the brief.
+/// One page of a list section of the brief: `limit` items after the item row
+/// `after` (from the start with `None`), in the order of the brief.
 fn read_section(
     c: &Connection,
     (filter, order): &(String, String),
     limit: u32,
-    offset: u64,
+    after: Option<i64>,
 ) -> iris_store::Result<Section> {
     // A possible duplicate whose original is in the same section
     // shows with the original, not as a line of its own. The inner
@@ -524,11 +534,17 @@ fn read_section(
         [],
         |r| r.get(0),
     )?;
+    // The cursor item takes its place in the order also when it left the
+    // section, so an item that leaves between two pages moves no other item.
     let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc FROM item WHERE {shown} ORDER BY {order} LIMIT {limit} OFFSET {offset}"
-        ))?;
+        "WITH s AS (SELECT id, form, status, doc, row_number() OVER (ORDER BY {order}) AS n
+                    FROM item WHERE ({shown}) OR id IS ?1)
+         SELECT id, form, status, doc FROM s
+         WHERE id IS NOT ?1 AND n > coalesce((SELECT n FROM s WHERE id IS ?1), 0)
+         ORDER BY n LIMIT {limit}"
+    ))?;
     let items = st
-        .query_map([], doc_of)?
+        .query_map([after], doc_of)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut duplicates = serde_json::Map::new();
     // Only a duplicate that this section would show is part of the pair.
@@ -576,7 +592,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         }
     }
     let mut brief = store.read(|c| {
-        let section = |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, 0);
+        let section = |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, None);
         let mut records = serde_json::Map::new();
         let mut st = c.prepare(
             "SELECT json_extract(doc, '$.type'), count(*) FROM item
@@ -638,31 +654,76 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
 pub struct SectionPage {
     #[serde(flatten)]
     pub section: Section,
-    /// The `offset` of the next page, or `None` on the last page.
-    pub next: Option<u64>,
+    /// The `after` value of the next page (the ID of the last item), or
+    /// `None` on the last page.
+    pub next: Option<String>,
 }
 
 /// One page of the list section `name` (one of [`SECTIONS`]) of the brief at
-/// the time `now`, with the same filter and order as [`brief`]. An offset
-/// keeps the order of the section: an ID cannot page an order by date.
+/// the time `now`, with the same filter and order as [`brief`]. `after` is
+/// the ID of the last item of the page before. The page starts after the
+/// place of that item in the order, also when the item left the section.
 pub fn brief_section(
     store: &Store,
     now: i64,
     name: &str,
     limit: u32,
-    offset: u64,
+    after: Option<&str>,
 ) -> Result<Option<SectionPage>> {
     check_limit(limit)?;
-    if offset > i64::MAX as u64 {
-        return Err(Error::Query(format!("offset must be {} or less", i64::MAX)));
-    }
     let Some(index) = SECTIONS.iter().position(|n| *n == name) else {
         return Ok(None);
     };
     let sql = &section_sql(now)[index];
-    let section = store.read(|c| read_section(c, sql, limit, offset))?;
-    let end = offset.saturating_add(section.items.len() as u64);
-    let next = (end < section.count as u64 && !section.items.is_empty()).then_some(end);
+    let forms = SECTION_FORMS[index];
+    let (section, more) = store
+        .read(|c| {
+            // The cursor is an item of a form that the section can show.
+            let after = match after {
+                None => None,
+                Some(id) => {
+                    let row = parse_id(id).and_then(|(kind, row)| {
+                        let form: Option<String> = c
+                            .query_row("SELECT form FROM item WHERE id = ?1", [row], |r| r.get(0))
+                            .optional()
+                            .ok()
+                            .flatten();
+                        form.filter(|f| {
+                            forms.contains(&f.as_str()) && item_id(row, f).is_some_and(|i| i == id)
+                        })
+                        .map(|_| (kind, row))
+                    });
+                    match row {
+                        Some((_, row)) => Some(row),
+                        None => return Ok(Err(bad_id(id))),
+                    }
+                }
+            };
+            let section = read_section(c, sql, limit + 1, after)?;
+            Ok(Ok(section))
+        })?
+        .map(|mut section| {
+            let more = section.items.len() > limit as usize;
+            section.items.truncate(limit as usize);
+            let shown: Vec<&str> = section
+                .items
+                .iter()
+                .filter_map(|d| d["id"].as_str())
+                .collect();
+            section
+                .duplicates
+                .retain(|k, _| shown.contains(&k.as_str()));
+            (section, more)
+        })?;
+    let next = more
+        .then(|| {
+            section
+                .items
+                .last()
+                .and_then(|d| d["id"].as_str())
+                .map(str::to_string)
+        })
+        .flatten();
     Ok(Some(SectionPage { section, next }))
 }
 

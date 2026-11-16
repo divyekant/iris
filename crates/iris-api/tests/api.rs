@@ -890,18 +890,14 @@ async fn brief_follows_the_queries_of_section_8() {
 
     // Pages of one section: the same items in the same order as the brief.
     let mut paged = Vec::new();
-    let mut offset = 0;
+    let mut after = String::new();
     loop {
-        let (code, p) = get(
-            &store,
-            &format!("/api/brief/you_owe?limit=3&offset={offset}"),
-        )
-        .await;
+        let (code, p) = get(&store, &format!("/api/brief/you_owe?limit=3&after={after}")).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(p["count"], 4);
         paged.extend(ids(&p["items"]).into_iter().map(str::to_string));
-        match p["next"].as_u64() {
-            Some(n) => offset = n,
+        match p["next"].as_str() {
+            Some(n) => after = n.to_string(),
             None => break,
         }
     }
@@ -909,8 +905,32 @@ async fn brief_follows_the_queries_of_section_8() {
     // A page has the duplicates of its own items only.
     let (_, p) = get(&store, "/api/brief/you_owe?limit=1").await;
     assert_eq!(p["duplicates"], Value::Null);
-    let (_, p) = get(&store, "/api/brief/you_owe?limit=1&offset=2").await;
+    assert_eq!(p["next"], c(sooner));
+    let (_, p) = get(
+        &store,
+        &format!("/api/brief/you_owe?limit=1&after={}", c(soon)),
+    )
+    .await;
     assert_eq!(p["duplicates"], json!({ c(late): [c(dup)] }));
+    // An item that leaves the section between two pages does not move the
+    // next page: the page after it starts after its place in the order.
+    exec(
+        &store,
+        "UPDATE item SET status = 'done' WHERE id = ?1",
+        [sooner],
+    );
+    let (code, p) = get(
+        &store,
+        &format!("/api/brief/you_owe?limit=1&after={}", c(sooner)),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(ids(&p["items"]), [c(soon)]);
+    exec(
+        &store,
+        "UPDATE item SET status = 'open' WHERE id = ?1",
+        [sooner],
+    );
     assert_eq!(
         get(&store, "/api/brief/records").await.0,
         StatusCode::NOT_FOUND
@@ -919,17 +939,16 @@ async fn brief_follows_the_queries_of_section_8() {
         get(&store, "/api/brief/you_owe?limit=0").await.0,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        get(&store, "/api/brief/you_owe?offset=x").await.0,
-        StatusCode::BAD_REQUEST
-    );
-    // An offset above the integer range of SQLite is a 400, not a 500.
-    assert_eq!(
-        get(&store, "/api/brief/you_owe?offset=9223372036854775808")
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
+    // The cursor must be the ID of an item of a form of the section.
+    for bad in ["x", "m-1", "c-999999", &v(1)] {
+        assert_eq!(
+            get(&store, &format!("/api/brief/you_owe?after={bad}"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
 
     // The kind of the sender of a message.
     assert_eq!(
@@ -944,6 +963,12 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(
         get(&store, "/api/messages/m-24").await.1["sender_kind"],
         "person"
+    );
+    // Two sender rows whose addresses differ only in case: hostile wins.
+    sender(&store, "Dana@Contoso.example", Some("hostile"));
+    assert_eq!(
+        get(&store, "/api/messages/m-24").await.1["sender_kind"],
+        "hostile"
     );
     exec(
         &store,
