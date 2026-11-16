@@ -664,6 +664,12 @@ The person gives one answer for each sender:
 | Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
 | Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
+The engine and the local API give the gate first (card R5-03, part 1). The
+view of the gate in the web client is a separate change (part 2), because
+each view gets its own change and the owner picks its layout first. Until
+part 2 merges, the web client shows the strangers section as a list of
+items, as in release 1, and the person cannot answer the gate from it.
+
 A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
 "stranger"` (specification 2, section 6.2) takes the items of strangers out of
 the gate, as it does for each section. A rule never accepts a sender: only the
