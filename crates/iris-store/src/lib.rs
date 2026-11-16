@@ -5,6 +5,7 @@
 //! the folder, applies the schema migrations, and gives the read and write
 //! paths that the engine uses.
 
+mod backup;
 mod content;
 mod id;
 mod search;
@@ -19,6 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, Transaction};
 
+pub use backup::{BackupLock, Cleaned, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
@@ -49,6 +51,10 @@ pub enum Error {
     Key(&'static str),
     /// The search text is not valid.
     Query(String),
+    /// A message refers to a content file that is not in the content folder:
+    /// the content cleanup deleted it, or the write of the file did not end.
+    /// Fetch the message again.
+    MissingContent(String),
 }
 
 impl fmt::Display for Error {
@@ -63,6 +69,7 @@ impl fmt::Display for Error {
             ),
             Error::Key(why) => write!(f, "secret: {why}"),
             Error::Query(why) => write!(f, "search: {why}"),
+            Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
         }
     }
 }
@@ -258,6 +265,10 @@ impl Store {
     /// its `understood_at` is cleared, so understanding runs on it again
     /// (specification 1, section 4.4). A message with a new `content_sha256`
     /// loses its old clean text and its `understood_at`. Gives the row ID of each message.
+    ///
+    /// Write each content file before the message that refers to it. If a
+    /// content file is not there, nothing of the batch is written, and the
+    /// result is [`Error::MissingContent`].
     pub fn put_messages(&self, account: i64, batch: &[NewMessage]) -> Result<Vec<i64>> {
         self.write(|tx| {
             let mut thread = tx.prepare_cached(
@@ -315,6 +326,15 @@ impl Store {
                     ],
                     |r| r.get(0),
                 )?;
+                // The check runs after the first write of the transaction,
+                // so it holds the write lock. The content cleanup deletes a
+                // file only while it holds the same lock, so a file that is
+                // here now stays until the commit.
+                if let Some(sha) = &m.content_sha256 {
+                    if !self.content_path(sha).is_some_and(|p| p.exists()) {
+                        return Err(Error::MissingContent(sha.clone()));
+                    }
+                }
                 clear_labels.execute([id])?;
                 // A label that the store does not have adds no row
                 // (specification 1, section 4.3).

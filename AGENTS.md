@@ -214,6 +214,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-auth/` | Google sign-in: the client file of the user, the loopback redirect with PKCE, the token exchange and the token refresh. The access token stays in memory. | `engine` |
 | `crates/iris-eval/` | Test set: scores an understanding function against the truth of the synthetic mailbox (precision and recall). | `engine` |
 | `crates/iris-store/` | The store: the data folder, SQLite with full-text search, raw message files and encrypted secrets. | `engine` |
+| `crates/iris-sync/` | The first sync of the mirror: a full copy of a Gmail mailbox into the store, with resume after a stop. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
