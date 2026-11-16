@@ -408,6 +408,14 @@ pub fn apply(
         None => None,
     };
     if let Some(id) = undo_label {
+        // A label that the person deleted at Gmail stays deleted: the undo
+        // is denied, with no write call.
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        if !labels.iter().any(|l| l.id == id) {
+            let reason = "The label of the entry is not at Gmail now.";
+            decide(store, action, "denied", reason)?;
+            return Ok(Outcome::Denied(reason.into()));
+        }
         match verb.as_str() {
             "label" => change.add.push(id),
             _ => change.remove.push(id),

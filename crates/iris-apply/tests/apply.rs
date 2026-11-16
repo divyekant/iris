@@ -1722,3 +1722,23 @@ fn an_open_second_step_blocks_a_new_undo() {
     applied(b.apply(actions[1]));
     assert_eq!(b.state(a).0, "undone");
 }
+
+/// The undo of `unlabel` after the person deleted the label at Gmail: the
+/// label stays deleted, and the undo is denied with no write call.
+#[test]
+fn the_undo_keeps_a_deleted_label_deleted() {
+    let b = setup("undo-deleted", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    applied(b.apply(b.labelled("label", "Undo/Gone", &ms)));
+    let a = b.labelled("unlabel", "Undo/Gone", &ms);
+    applied(b.apply(a));
+    let id = label_id(&b, "Undo/Gone").unwrap();
+    assert!(b.fake.delete_label(&id));
+    let writes = b.calls("");
+    match &b.undo(a)[..] {
+        [Outcome::Denied(_)] => {}
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.calls(""), writes, "no write call");
+    assert_eq!(b.state(a).0, "applied");
+}
