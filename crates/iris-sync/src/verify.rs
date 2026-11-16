@@ -98,18 +98,26 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
         }
         Err(e) => format!("error: {e}"),
     };
-    let logged = log(store, account, "verify", started, &text);
-    let report = result?;
-    logged?;
-    if report.differences.iter().any(Difference::is_sync) {
-        store.write(|tx| {
+    let resync = result
+        .as_ref()
+        .is_ok_and(|r| r.differences.iter().any(Difference::is_sync));
+    // One transaction: a logged sync difference always has its resync.
+    let saved = store.write(|tx| {
+        tx.execute(
+            "INSERT INTO sync_log(account_id, kind, started_at, ended_at, result)
+             VALUES (?1, 'verify', ?2, ?3, ?4)",
+            params![account, started, now_ms(), text],
+        )?;
+        if resync {
             tx.execute(
                 "UPDATE account SET sync_kind = ?2, sync_start = NULL, sync_step = NULL WHERE id = ?1",
                 params![account, KIND_RESYNC],
             )?;
-            Ok(())
-        })?;
-    }
+        }
+        Ok(())
+    });
+    let report = result?;
+    saved?;
     Ok(report)
 }
 
