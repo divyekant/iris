@@ -91,8 +91,9 @@ gives 2 for a request that is not valid (an unknown verb, a target that is not
 an ID, a changeset of another author) and 1 for an error in the store.
 
 For `submit`, the command computes the code from the decision of each action
-in the document (`decision.state` and `decision.by`), in the order of
-section 8.4:
+of the revision that it just submitted (`decision.state` and `decision.by`),
+in the order of section 8.4. The document also has the actions of older
+revisions: the command prints them, but they do not change the code.
 
 | Decision | Code |
 |---|---|
@@ -203,6 +204,8 @@ All other input: code 2 and no write.
 - `crates/iris/src/socket.rs` (new): the listener, the protocol and the work.
 - `crates/iris-triage/src/lib.rs`: step 5 moves to the shared function. In
   the mode `observe`, a hard limit that denies now denies a triage action.
+- `docs/spec/01-mirror-store-forms.md`, section 8: the triage rule in the
+  mode `observe`.
 - `docs/spec/02-changeset-policy-ledger.md`: section 8.1 (the read verbs keep
   the store; the engine lock) and section 5.4 (step 5 in the mode
   `observe`).
