@@ -902,3 +902,24 @@ fn a_system_label_name_is_denied() {
         0
     );
 }
+
+/// One Unicode case folding in submit, the apply and the fake: a name that
+/// differs only in case finds the label of Gmail, also where a lower case
+/// does not equate the pair (`Σ` and final `ς`). No label is made.
+#[test]
+fn a_label_name_matches_with_case_folding() {
+    let b = setup("label-fold", 60, Some(APPLY_POLICY));
+    let id = b.fake.create_label("Σ");
+    let ms = b.messages(IN_INBOX, 2);
+    for name in ["ς", "σ", "Σ"] {
+        let a = b.labelled("label", name, &ms);
+        applied(b.apply(a));
+        for &m in &ms {
+            assert!(b.gmail_labels(m).contains(&id), "{name}");
+        }
+        let a = b.labelled("unlabel", name, &ms);
+        let c = applied(b.apply(a));
+        assert_eq!(c.changed, 2, "{name}");
+    }
+    assert_eq!(b.calls("/labels"), 0, "no label is made");
+}

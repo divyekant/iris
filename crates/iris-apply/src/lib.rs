@@ -30,6 +30,7 @@ use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
+use unicase::UniCase;
 
 #[derive(Debug)]
 pub enum Error {
@@ -155,23 +156,24 @@ impl Change {
 
 /// The user label of the name `name` in `labels` (the labels of Gmail).
 /// Gmail refuses two labels whose names differ only in case, so the match
-/// has no regard to case. `Err` gives the reason of a denial: the name is
-/// the name or the ID of a system label.
+/// has no regard to case, with the Unicode case folding of submit
+/// (`unicase`, as `iris-changeset`). `Err` gives the reason of a denial:
+/// the name is the name or the ID of a system label.
 fn find_label<'l>(
     labels: &'l [iris_gmail::Label],
     name: &str,
 ) -> std::result::Result<Option<&'l iris_gmail::Label>, String> {
-    let name = name.to_lowercase();
+    let name = UniCase::new(name);
     let mut found = None;
     for l in labels {
-        let same = l.name.to_lowercase() == name || l.id.to_lowercase() == name;
-        if same && l.kind == "system" {
+        let same_name = UniCase::new(l.name.as_str()) == name;
+        if (same_name || UniCase::new(l.id.as_str()) == name) && l.kind == "system" {
             return Err(format!(
                 "{} is a system label at Gmail: use its own verb.",
                 l.name
             ));
         }
-        if same && l.name.to_lowercase() == name {
+        if same_name {
             found = Some(l);
         }
     }

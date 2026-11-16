@@ -647,7 +647,7 @@ struct CreateLabelBody {
 }
 
 /// `labels.create`. As Gmail, a name that a label has already, with no
-/// regard to case, gives HTTP 409.
+/// regard to case (Unicode case folding), gives HTTP 409.
 async fn create_label(
     State(s): State<Shared>,
     Path(user): Path<String>,
@@ -661,11 +661,12 @@ async fn create_label(
         return error(StatusCode::BAD_REQUEST, "Invalid JSON payload received.");
     };
     let mut s = s.lock().unwrap();
-    let name = body.name.to_lowercase();
-    if s.labels
-        .iter()
-        .any(|l| l.name.to_lowercase() == name || l.id.to_lowercase() == name)
-    {
+    // Unicode case folding, as the changeset store and the apply.
+    let name = unicase::UniCase::new(body.name.as_str());
+    if s.labels.iter().any(|l| {
+        unicase::UniCase::new(l.name.as_str()) == name
+            || unicase::UniCase::new(l.id.as_str()) == name
+    }) {
         return error(StatusCode::CONFLICT, "Label name exists or conflicts");
     }
     let id = format!("Label_{}", s.next_label);
