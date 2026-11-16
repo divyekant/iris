@@ -90,10 +90,40 @@ fn one_changed_byte_is_one_difference_and_a_new_fetch() {
     let mut bad = good.clone();
     bad[10] ^= 1;
     std::fs::write(&path, &bad).unwrap();
+    // An understood message, with a parsed header.
+    let understood = |store: &Store| -> (Option<String>, Option<i64>) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT h.subject, m.understood_at FROM message m
+                     LEFT JOIN header h ON h.message_id = m.id WHERE m.provider_id = ?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = 4 WHERE provider_id = ?1",
+                [&id],
+            )?;
+            tx.execute(
+                "INSERT INTO header(message_id, subject) SELECT id, 'Parsed' FROM message
+                 WHERE provider_id = ?1
+                 ON CONFLICT(message_id) DO UPDATE SET subject = excluded.subject",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 
     let r = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
     assert_eq!(r.differences, vec![Difference::Content(id.clone())]);
     assert_eq!(std::fs::read(&path).unwrap(), good, "repaired");
+    // The repair keeps the parsed header and the understanding.
+    assert_eq!(understood(&store), (Some("Parsed".into()), Some(4)));
     assert_eq!(
         sync_state(&store).0,
         None,
