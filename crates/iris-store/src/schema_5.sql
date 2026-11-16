@@ -16,8 +16,9 @@ CREATE TABLE changeset (
   why TEXT,
   created_at INTEGER NOT NULL,
   submitted_at INTEGER,
-  -- The first submit sets 'open'. Then the trigger action_closes keeps
-  -- 'open' and 'closed' current.
+  -- 'draft' until an action of the changeset has a state. Then 'open'
+  -- while an action is open, else 'closed'. The trigger action_closes keeps
+  -- it current, and changeset_state refuses any other value.
   state TEXT NOT NULL DEFAULT 'draft'
     CHECK (state IN ('draft', 'open', 'closed', 'withdrawn')),
   -- coalesce: a CHECK that gives NULL passes.
@@ -59,6 +60,12 @@ CREATE TABLE changeset_action (
   CHECK (json_valid(targets) AND json_valid(args) AND json_valid(flags)),
   -- An allow rule or a person approves (section 5.2).
   CHECK (state IS NOT 'approved' OR coalesce(decided_by, '') IN ('rule', 'person')),
+  -- A draft or proposed action has no decision. Each other state names who
+  -- decided.
+  CHECK (CASE WHEN coalesce(state, 'proposed') = 'proposed'
+              THEN decided_by IS NULL AND rule IS NULL AND policy IS NULL
+                   AND reason IS NULL AND decided_at IS NULL
+              ELSE decided_by IS NOT NULL END),
   -- A person approves or denies, but does not send an action to review.
   CHECK (state IS NOT 'in_review' OR coalesce(decided_by, '') IN ('rule', 'policy', 'limit',
     'engine')),
@@ -129,10 +136,9 @@ END;
 
 -- An action enters only the draft revision of its changeset, with no state.
 -- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, so no insert
--- replaces an action. A draft action has no decision.
+-- replaces an action.
 CREATE TRIGGER action_insert BEFORE INSERT ON changeset_action
-WHEN new.state IS NOT NULL OR new.decided_by IS NOT NULL OR new.rule IS NOT NULL
-  OR new.policy IS NOT NULL OR new.reason IS NOT NULL OR new.decided_at IS NOT NULL
+WHEN new.state IS NOT NULL
   OR EXISTS (SELECT 1 FROM changeset_action WHERE id = new.id
              OR (changeset_id = new.changeset_id AND revision = new.revision
                  AND n = new.n))
@@ -154,10 +160,6 @@ END;
 CREATE TRIGGER action_state BEFORE UPDATE OF state ON changeset_action
 WHEN NOT EXISTS (SELECT 1 FROM action_transition
                  WHERE from_state IS old.state AND to_state = new.state)
-  -- Submit proposes an action with no decision.
-  OR (new.state = 'proposed'
-      AND (new.decided_by IS NOT NULL OR new.rule IS NOT NULL OR new.policy IS NOT NULL
-           OR new.reason IS NOT NULL OR new.decided_at IS NOT NULL))
   -- A withdrawn changeset applies nothing more (section 5.5).
   OR (new.state IN ('in_review', 'approved', 'applied', 'failed')
       AND (SELECT state FROM changeset WHERE id = new.changeset_id) = 'withdrawn')
@@ -212,15 +214,34 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: a withdrawn changeset stays withdrawn');
 END;
 
--- A changeset is 'open' while one or more actions are open, else 'closed'.
+-- A changeset is 'draft' until an action has a state, then 'open' while one
+-- or more actions are open, else 'closed'. changeset_state checks the same.
 CREATE TRIGGER action_closes AFTER UPDATE OF state ON changeset_action
 BEGIN
-  UPDATE changeset SET state = CASE WHEN EXISTS (
-      SELECT 1 FROM changeset_action
-      WHERE changeset_id = new.changeset_id
-        AND state IN ('proposed', 'in_review', 'approved', 'held'))
-    THEN 'open' ELSE 'closed' END
-  WHERE id = new.changeset_id AND state IN ('open', 'closed');
+  UPDATE changeset SET state =
+    CASE WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.changeset_id
+                      AND state IN ('proposed', 'in_review', 'approved', 'held'))
+           THEN 'open'
+         WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.changeset_id
+                      AND state IS NOT NULL)
+           THEN 'closed'
+         ELSE 'draft' END
+  WHERE id = new.changeset_id AND state <> 'withdrawn';
+END;
+
+-- The state of a changeset comes from its actions. Only a withdraw writes
+-- another value.
+CREATE TRIGGER changeset_state BEFORE UPDATE OF state ON changeset
+WHEN new.state <> 'withdrawn' AND new.state IS NOT (
+  CASE WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
+                    AND state IN ('proposed', 'in_review', 'approved', 'held'))
+         THEN 'open'
+       WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
+                    AND state IS NOT NULL)
+         THEN 'closed'
+       ELSE 'draft' END)
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the state of a changeset comes from its actions');
 END;
 
 -- A submitted action does not change: its approval hash covers the targets,

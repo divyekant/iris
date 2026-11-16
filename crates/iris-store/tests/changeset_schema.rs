@@ -110,7 +110,7 @@ fn draft(c: &Connection) -> rusqlite::Result<i64> {
 /// The submit of the changeset, as `iris-changeset` writes it.
 fn submit(c: &Connection, cs: i64) -> rusqlite::Result<()> {
     c.execute(
-        "UPDATE changeset SET why = 'w', submitted_at = 0, state = 'open' WHERE id = ?1",
+        "UPDATE changeset SET why = 'w', submitted_at = 0 WHERE id = ?1",
         [cs],
     )?;
     c.execute(
@@ -151,8 +151,12 @@ fn only_the_moves_of_section_5_2() {
                 )?;
                 tx.execute_batch("DROP TRIGGER action_state")?;
                 tx.execute(
-                    "UPDATE changeset_action SET state = ?1, decided_by = 'rule', rule = 1,
-                       policy = 1, reason = 'r', decided_at = 1209600000,
+                    "UPDATE changeset_action SET state = ?1,
+                       decided_by = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 'rule'),
+                       rule = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 1),
+                       policy = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 1),
+                       reason = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 'r'),
+                       decided_at = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 1209600000),
                        hash = iif(?1 IS NULL, NULL, 'h'),
                        submitted_at = iif(?1 IS NULL, NULL, 0)",
                     [from],
@@ -398,13 +402,20 @@ fn a_draft_has_no_decision() {
                  VALUES (last_insert_rowid(), 1, 1, 'archive', '{{}}', '{{}}', {value});"
             ),
         );
-        // A decision written into the draft, then the submit.
+        // A decision written into the draft, or into a proposed action.
+        s.dry_write(|tx| Ok(draft(tx)?)).unwrap();
         let r = s.dry_write(|tx| {
             let cs = draft(tx)?;
             tx.execute(&format!("UPDATE changeset_action SET {column}"), [])?;
-            Ok(submit(tx, cs).is_ok())
+            Ok(())
         });
-        assert!(!r.unwrap(), "{column}");
+        assert!(r.is_err(), "{column}");
+        let r = s.dry_write(|tx| {
+            submit(tx, draft(tx)?)?;
+            tx.execute(&format!("UPDATE changeset_action SET {column}"), [])?;
+            Ok(())
+        });
+        assert!(r.is_err(), "{column}");
     }
     works(
         &s,
@@ -412,8 +423,17 @@ fn a_draft_has_no_decision() {
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
          VALUES (last_insert_rowid(), 1, 1, 'archive', '{}', '{}');",
     );
-    // A person does not send an action to review.
+    // A person does not send an action to review. Each decided state names
+    // who decided.
     s.write(|tx| Ok(submit(tx, draft(tx)?)?)).unwrap();
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'denied', reason = 'No.'",
+    );
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'expired', decided_at = submitted_at + 1209600000",
+    );
     fails(
         &s,
         "UPDATE changeset_action SET state = 'in_review', decided_by = 'person'",
@@ -422,6 +442,22 @@ fn a_draft_has_no_decision() {
         &s,
         "UPDATE changeset_action SET state = 'in_review', decided_by = 'policy'",
     );
+}
+
+/// The state of a changeset comes from its actions.
+#[test]
+fn the_changeset_state_comes_from_its_actions() {
+    let dir = TempDir::new("csstate");
+    let s = store(&dir);
+    s.write(|tx| Ok(draft(tx)?)).unwrap();
+    fails(&s, "UPDATE changeset SET state = 'open'");
+    fails(&s, "UPDATE changeset SET state = 'closed'");
+    s.write(|tx| Ok(submit(tx, 1)?)).unwrap();
+    for state in ["draft", "closed"] {
+        fails(&s, &format!("UPDATE changeset SET state = '{state}'"));
+    }
+    works(&s, "UPDATE changeset SET state = 'open'");
+    works(&s, "UPDATE changeset SET state = 'withdrawn'");
 }
 
 /// A rule decision names a rule ID of the active policy.
