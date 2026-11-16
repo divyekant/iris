@@ -668,6 +668,21 @@ test("the brief and setup show the first sync while any account still copies", a
   assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief, status: done, now: NOW, poll: 0 })), /Iris still copies/);
 });
 
+test("the brief and setup say that the copy stopped for an account that needs sign-in", async () => {
+  // Spec 1 section 4.7: a refused sign-in stops the sync of the account.
+  const stopped = { ...fx.status.accounts[0], address: "b@example.com", mirror_ready_at: null, state: "needs_sign_in" };
+  const status = { accounts: [stopped], messages: { total: 84212, fetched: 20000, understood: 500, gone: 0 } };
+  const brief = { ...fx.brief, oldest_fetched: "2026-09-01T00:00:00Z" };
+  const b = text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 }));
+  assert.doesNotMatch(b, /still copies|copy continues/);
+  assert.match(b, /Iris copied 20,000 of 84,212 messages, then Google stopped the sign-in\. This brief covers the mail since/);
+  const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
+  assert.doesNotMatch(t, /Iris copies|copy continues/);
+  assert.match(t, /The copy of b@example\.com stopped at 20,000 of 84,212 messages\./);
+  const { copying } = await load("/src/format.ts");
+  assert.deepEqual(copying(status), []);
+});
+
 test("an old 401 that ends after a new sign-in keeps the new token", async () => {
   const { get, signIn } = await load("/src/api.ts");
   const saved = globalThis.fetch;
@@ -781,4 +796,7 @@ test("the full Signals section leaves out a signal after its expiry, and wakes a
   // A list of a form keeps its items: it shows the history of the form.
   const form = text(await render("/src/views/List.svelte", { title: "Signals", page, now: new Date(Date.parse(code.expires) + 1000) }));
   assert.match(form, /Login code for Example Bank/);
+  // The time left of each line follows the clock of the list.
+  const soon = text(await render("/src/views/List.svelte", { title: "Signals", page: { items: [later], next: null }, now: new Date(Date.parse(later.expires) - 5 * 60_000) }));
+  assert.match(soon, /in 5 minutes/);
 });
