@@ -64,7 +64,7 @@ export type Account = {
   provider: string;
   state: string | null;
   mirror_ready_at: string | null;
-  sync: { kind: string; step: number } | null;
+  sync: { kind: string; step: number | null } | null;
   last_sync: { kind: string; started: string; ended: string | null; result: string | null } | null;
 };
 
@@ -78,18 +78,21 @@ export type Status = {
 // `next` goes back unchanged as `before=` (a form list) or `after=` (a brief section, an opaque cursor). Null on the last page.
 export type Page = { items: Item[]; next: string | null; duplicates?: Record<string, string[]> };
 
+export type Address = { name?: string | null; address?: string | null };
+
 export type Summary = {
   id: string;
   thread: string;
-  date: string;
-  from: { name?: string; address: string };
-  subject: string;
+  date: string | null;
+  from: Address;
+  subject: string | null;
   labels: string[];
 };
 
 export type Message = Summary & {
-  to: { name?: string; address: string }[];
-  cc: { name?: string; address: string }[];
+  /** The To and Cc headers as text, or null. */
+  to: string | null;
+  cc: string | null;
   /** Clean text. Null when the engine removed the content of a gone mail (spec 1 section 4.5). */
   text: string | null;
   gone: boolean;

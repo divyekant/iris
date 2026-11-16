@@ -55,8 +55,8 @@ export function message(id: string): Message | undefined {
     from: { name: "Example Sender", address: "sender@example.com" },
     subject: item.title,
     labels: ["INBOX"],
-    to: [{ address: "you@example.com" }],
-    cc: [],
+    to: "you@example.com",
+    cc: null,
     text: `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
     gone: false,
     hostile: [],
@@ -70,9 +70,9 @@ export function raw(id: string): string | undefined {
   if (!m) return undefined;
   return [
     `From: ${m.from.name} <${m.from.address}>`,
-    `To: ${m.to.map((t) => t.address).join(", ")}`,
+    `To: ${m.to ?? ""}`,
     `Subject: ${m.subject}`,
-    `Date: ${new Date(m.date).toUTCString()}`,
+    `Date: ${new Date(m.date ?? 0).toUTCString()}`,
     `Message-ID: <${id}@fixtures.example>`,
     "Content-Type: text/plain; charset=utf-8",
     "",

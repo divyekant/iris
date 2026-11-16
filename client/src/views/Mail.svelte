@@ -3,7 +3,7 @@
   client never renders the HTML of a mail. Each open adds 1 to the open count (R1-22).
 -->
 <script lang="ts">
-  import { download, type Message } from "../api";
+  import { download, type Address, type Message } from "../api";
   import { initials, when } from "../format";
   import { countOpen } from "../opens";
   import { href } from "../route";
@@ -16,7 +16,7 @@
 
   let failed = $state("");
   const original = () => download(message.id).then(() => (failed = ""), (e: Error) => (failed = e.message));
-  const address = (a: { name?: string; address: string }) => (a.name ? `${a.name} <${a.address}>` : a.address);
+  const address = (a: Address) => (a.name && a.address ? `${a.name} <${a.address}>` : a.name || a.address || "Unknown sender");
 </script>
 
 <article>
@@ -30,19 +30,21 @@
   {/if}
   {#if message.gone && message.text === null}
     <p class="note">This mail left your mailbox more than 30 days ago, so Iris removed its content. The items that cite it stay.</p>
+  {:else if message.text === null}
+    <p class="note">Iris has not read this mail yet. Download the original to read it now.</p>
   {:else if message.gone}
     <p class="note">This mail is no longer in your mailbox. Iris keeps its content for 30 days after it left.</p>
   {/if}
 
   <header>
-    <span class="mark" aria-hidden="true">{initials({ kind: "sender", ...message.from })}</span>
+    <span class="mark" aria-hidden="true">{initials({ kind: "sender", name: message.from.name ?? undefined, address: message.from.address ?? undefined })}</span>
     <div>
       <p class="from">{address(message.from)}</p>
       <p class="to">
-        To {message.to.map(address).join(", ") || "no one"}{#if message.cc.length}, copy to {message.cc.map(address).join(", ")}{/if}
+        To {message.to || "no one"}{#if message.cc}, copy to {message.cc}{/if}
       </p>
     </div>
-    <time datetime={message.date}>{when(message.date)}</time>
+    {#if message.date}<time datetime={message.date}>{when(message.date)}</time>{/if}
   </header>
 
   {#if message.text !== null}<pre>{message.text}</pre>{/if}
@@ -52,7 +54,7 @@
       <span>Items from this mail:</span>
       {#each message.items as id (id)}<a href={href.item(id)}>{id}</a>{/each}
     {/if}
-    {#if message.text !== null}
+    {#if !(message.gone && message.text === null)}
       <button type="button" class="raw" onclick={original}>Download the original</button>
       {#if failed}<p class="note" role="alert">{failed}</p>{/if}
     {/if}

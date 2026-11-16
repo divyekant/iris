@@ -471,7 +471,7 @@ test("a mail renders the engine shape: header text for To and Cc, and fields tha
   const t = text(await render("/src/views/Mail.svelte", { message }));
   assert.match(t, /No subject/);
   assert.match(t, /a@example\.com/);
-  assert.match(t, /To Sam Ortiz <sam@example\.com>, b@example\.com/);
+  assert.match(t, /To Sam Ortiz &lt;sam@example\.com>, b@example\.com/);
   assert.doesNotMatch(t, /copy to/);
   const both = text(await render("/src/views/Mail.svelte", { message: { ...message, to: null, cc: "c@example.com" } }));
   assert.match(both, /To no one, copy to c@example\.com/);
