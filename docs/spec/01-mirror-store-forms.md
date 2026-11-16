@@ -248,10 +248,24 @@ content:
    that the history is too old.
 7. Compare the message IDs, the thread IDs, the label sets and the label list
    with the mirror. Compare only the messages of the mirror that are not gone.
+   A message that is not fetched (section 4.7) has no label set yet, so its
+   labels are not compared. Step 8 fetches it. A list can miss a message
+   when a delete moves the list pages. For each mirror message that the list
+   does not have, call `messages.get` (`format=raw`). Only HTTP 404 makes it
+   a difference. Otherwise, compare its thread ID and its labels from that
+   answer. A label list can also miss a message when a delete moves its
+   pages. Before you report a label difference, get the labels of the
+   message (`format=minimal`). Report it only if those labels are not the
+   labels of the mirror.
 8. For each message that is not gone, read its content file and compute the
    SHA-256 hash. A missing file, or a hash that is not `content_sha256`, is a
-   difference.
+   difference. Fetch the message again to repair the file. If a fetch gets
+   an error that stops each fetch (for example HTTP 401), start no more
+   fetches. Save the result, then give the error to the caller.
 9. Print each difference, and the total. Save the result in the sync log.
+
+If an error ends the compare, save the differences found before the error,
+and start a full resync if one of them is a difference of step 7.
 
 However verify ends (a result, an error or a crash), the engine starts the
 sync of the account again. After a crash, the next start does this. A
