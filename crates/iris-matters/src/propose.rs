@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use iris_model::Stop;
 use iris_store::{format_id, parse_id, Kind, Store};
 use iris_understand::batch::{self, Connect};
 use iris_understand::budget::{model_row, Budgeted};
@@ -47,6 +48,8 @@ pub enum Skip {
     Few,
     /// The same fingerprint as the last call with an answer.
     Same,
+    /// The budget refused the call: no call went out.
+    Budget,
 }
 
 /// The result of one step.
@@ -133,7 +136,7 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
         out.skip = Some(Skip::Few);
         return Ok(out);
     }
-    let run = write(store, |tx| {
+    let attempt = write(store, |tx| {
         let last: Option<String> = tx
             .query_row("SELECT candidates FROM matter_run WHERE id = 1", [], |r| {
                 r.get(0)
@@ -143,6 +146,12 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
         if last.as_deref() == Some(print.as_str()) {
             return Ok(None);
         }
+        let before: Option<i64> = tx
+            .query_row("SELECT tried_at FROM matter_run WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
         // The attempt counts before the call: a time-out or a crash too.
         tx.execute(
             "INSERT INTO matter_run(id, tried_at) VALUES (1, ?1)
@@ -155,31 +164,38 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
              VALUES (?1, ?2, ?3, ?4, ?4)",
             params![now, row.model, PROMPT, row.price.is_some().then_some(0)],
         )?;
-        Ok(Some(tx.last_insert_rowid()))
+        Ok(Some((tx.last_insert_rowid(), before)))
     })?;
-    let Some(run) = run else {
+    let Some((run, before)) = attempt else {
         out.skip = Some(Skip::Same);
         return Ok(out);
     };
     let model = Budgeted::new(inner.as_ref(), store, run, Some(&row));
     let reply = model.ask(INSTRUCTION, &data);
     let state = model.state();
-    let failed = state.key_refused || state.server_failed || state.unknown || state.store_failed;
+    // The outcome of the call decides each write below:
+    // - no call went out (the budget refused it): undo the attempt;
+    // - a call with no usable answer, or an unknown result: the wait;
+    // - an answer: the fingerprint, and proposals only from a complete one.
+    let refused = matches!(reply, Err(iris_model::Error::Budget(_))) && !state.store_failed;
+    let failed = !refused
+        && (reply.is_err()
+            || state.key_refused
+            || state.server_failed
+            || state.unknown
+            || state.store_failed);
     let name = model.name().to_string();
     let (proposed, dropped) = write(store, |tx| {
+        if refused {
+            tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
+            tx.execute("UPDATE matter_run SET tried_at = ?1 WHERE id = 1", [before])?;
+            return Ok((0, 0));
+        }
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![
-                run,
-                now,
-                match (failed, state.refused) {
-                    (true, _) => "model",
-                    (_, true) => "budget",
-                    _ => "done",
-                }
-            ],
+            params![run, now, if failed { "model" } else { "done" }],
         )?;
-        batch::update_wait(tx, failed, !failed && !state.refused, now)?;
+        batch::update_wait(tx, failed, !failed, now)?;
         let Ok(reply) = &reply else {
             return Ok((0, 0));
         };
@@ -187,13 +203,19 @@ pub fn propose(store: &Store, connect: Connect, gate: Gate, now: i64) -> Result<
             "UPDATE matter_run SET candidates = ?1 WHERE id = 1",
             [&print],
         )?;
+        // A refused or cut answer is not a grouping. The same set gives the
+        // same answer, so the fingerprint stays.
+        if reply.stop != Stop::End {
+            return Ok((0, 0));
+        }
         let answer = reply.json().unwrap_or(Value::Null);
         save(tx, &answer, &sent, &name, run, now)
     })?;
     if let Some(e) = model.take_error() {
         return Err(Error::Store(e));
     }
-    out.failed = reply.is_err();
+    out.skip = refused.then_some(Skip::Budget);
+    out.failed = failed;
     out.proposed = proposed;
     out.dropped = dropped;
     Ok(out)

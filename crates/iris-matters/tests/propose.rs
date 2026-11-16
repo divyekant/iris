@@ -32,6 +32,8 @@ struct Fake {
     data: RefCell<Vec<String>>,
     /// SQL to run on the store during the call (a change by another writer).
     during: Option<(std::path::PathBuf, String)>,
+    /// The stop of each answer.
+    stop: Stop,
 }
 
 struct Shared(Rc<Fake>);
@@ -62,7 +64,7 @@ impl Model for Shared {
                 cost_micro_usd: None,
                 known: true,
             },
-            stop: Stop::End,
+            stop: f.stop,
         })
     }
 }
@@ -79,6 +81,7 @@ fn fake_during(
         answers: RefCell::new(answers.into()),
         data: RefCell::new(Vec::new()),
         during,
+        stop: Stop::End,
     })
 }
 
@@ -393,4 +396,63 @@ fn random_answers_keep_the_rules() {
         total > 0,
         "no random answer passed: the test proves nothing"
     );
+}
+
+/// The outcome of the call decides the writes: a call that the budget
+/// refuses leaves no attempt, a bad answer starts the wait, and only a
+/// complete answer makes proposals.
+#[test]
+fn the_outcome_of_the_call_decides_the_writes() {
+    // A paid model with no approved budget: no call goes out.
+    let b = setup("budget", 2, &titles(2), &["record"]);
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE model_setting SET provider = 'anthropic', price_in = 1, price_out = 1",
+                [],
+            )?)
+        })
+        .unwrap();
+    let good = || answer(json!([{"title": "T", "items": ["r-1", "r-2"]}]));
+    let f = fake(vec![good()]);
+    let o = run(&b, &f, Gate::Hourly, NOW);
+    assert_eq!((o.skip, o.failed), (Some(Skip::Budget), false));
+    assert!(f.data.borrow().is_empty());
+    assert_eq!(
+        col(
+            &b,
+            "SELECT count(*) FROM matter_run WHERE tried_at IS NOT NULL"
+        ),
+        0
+    );
+    assert_eq!(col(&b, "SELECT count(*) FROM understand_run"), 0);
+    // The person approves a budget: the hourly step calls at once.
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?))
+        .unwrap();
+    let o = run(&b, &f, Gate::Hourly, NOW + 1);
+    assert_eq!((o.skip, o.proposed), (None, 1));
+
+    // A malformed answer of a local model starts the wait.
+    let b = setup("bad", 2, &titles(2), &["record"]);
+    let f = fake(vec![Err(ModelError::BadAnswer("no content".into()))]);
+    assert!(run(&b, &f, Gate::Now, NOW).failed);
+    assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, Some(Skip::Wait));
+    assert_eq!(f.data.borrow().len(), 1);
+
+    // Valid JSON with a refused or cut stop makes no proposal.
+    for stop in [Stop::Refused, Stop::Truncated] {
+        let b = setup("stop", 2, &titles(2), &["record"]);
+        let f = Rc::new(Fake {
+            answers: RefCell::new(vec![good()].into()),
+            data: RefCell::new(Vec::new()),
+            during: None,
+            stop,
+        });
+        let o = run(&b, &f, Gate::Now, NOW);
+        assert_eq!((o.proposed, o.failed), (0, false), "{stop:?}");
+        assert_eq!(col(&b, "SELECT count(*) FROM matter"), 0);
+        // The same set does not repeat the call.
+        assert_eq!(run(&b, &f, Gate::Now, NOW + 1).skip, Some(Skip::Same));
+    }
 }
