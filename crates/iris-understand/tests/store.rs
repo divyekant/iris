@@ -369,7 +369,7 @@ fn a_model_error_changes_nothing_of_step_8() {
         .borrow_mut()
         .push_back(Err(ModelError::Server(529)));
     match understand(&b.store, m, &fake, NOW) {
-        Err(Error::Model(e)) => assert!(e.is_retryable()),
+        Err(Error::Model(e, _)) => assert!(e.is_retryable()),
         other => panic!("{other:?}"),
     }
     assert_eq!(
@@ -1197,4 +1197,53 @@ fn an_earlier_message_with_a_later_spam_label_is_not_context() {
         !data.contains("Early words") && !data.contains("Unjudged"),
         "{data}"
     );
+}
+
+#[test]
+fn a_later_spam_label_on_the_context_during_the_model_call_saves_nothing() {
+    let b = store("context-change");
+    let first = "From: x@example.net\nTo: owner@example.com\nSubject: S\n\nEarly words.\n";
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, first, &["INBOX"]);
+    understand(&b.store, m1, &Fake::default(), NOW).unwrap();
+    let m2 = b.add_in("2", "t", NOW - DAY, ASK, &["INBOX"]);
+    let model = Changer {
+        store: &b.store,
+        sql: "INSERT INTO message_label(message_id, label_id)
+              SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+        message: m1,
+    };
+    let out = understand(&b.store, m2, &model, NOW).unwrap();
+    assert!(out.changed);
+    assert!(b.items().is_empty());
+}
+
+#[test]
+fn a_gone_message_leaves_the_conversation() {
+    let b = store("gone-talk");
+    let first =
+        "From: Bo Ren <bo@example.org>\nTo: owner@example.com\nSubject: Hi\n\nHello there.\n";
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, first, &["INBOX"]);
+    let m2 = b.add_in("2", "t", NOW - DAY, ASK, &["INBOX"]);
+    for m in [m1, m2] {
+        understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    }
+    let count = || -> i64 {
+        b.col(
+            "SELECT json_extract(doc, '$.messages') FROM item WHERE form = 'conversation' AND ?1 = ?1",
+            0,
+        )
+    };
+    assert_eq!(count(), 2);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m2])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        understand(&b.store, m2, &Fake::default(), NOW)
+            .unwrap()
+            .gone
+    );
+    assert_eq!(count(), 1);
 }

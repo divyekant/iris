@@ -27,8 +27,9 @@ pub const MAX_TRIES: i64 = 3;
 pub enum Error {
     Store(iris_store::Error),
     /// The model call failed. The message stays not understood, with no
-    /// added try. If `is_retryable()`, try again later.
-    Model(iris_model::Error),
+    /// added try. If `is_retryable()`, try again later. The `Vec` holds the
+    /// sender rows of [`Outcome::rerun`]: write 1 committed their change.
+    Model(iris_model::Error, Vec<i64>),
     /// The message is not in the store, or it has no content file.
     NoMessage(i64),
     /// A finished item is not valid: a defect of the engine. Nothing of
@@ -40,7 +41,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
-            Error::Model(e) => write!(f, "model: {e}"),
+            Error::Model(e, _) => write!(f, "model: {e}"),
             Error::NoMessage(id) => write!(f, "message {id} is not in the store or has no content"),
             Error::Invalid(e) => write!(f, "item not valid: {e}"),
         }
@@ -118,6 +119,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let start = store.read(|c| Ok(state(c, message, false)?))?;
     let row = read_row(store, message)?;
     if row.gone {
+        // A gone message leaves the conversation of its thread (section 4.5).
+        store.write(|tx| Ok(iris_talk::update(tx, row.thread, None, now_ms)?))?;
         return Ok(Outcome {
             gone: true,
             ..Outcome::default()
@@ -140,7 +143,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let known = |_: &str| known_list.clone();
     let existing = pinned(store, message)?;
-    let earlier = thread_context(store, message, row.thread, row.internal_date)?;
+    let earlier = store.read(|c| Ok(thread_context(c, message, row.thread, row.internal_date)?))?;
     let same = same_sender(store, message, row.thread, row.internal_date, &head)?;
     // Steps 1 and 2 do not use the sender kind or the known parties. Write
     // 1 decides them (step 3).
@@ -239,7 +242,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // fixed rules always run. Only the model call waits for `retry_at` and
     // stops after MAX_TRIES failed tries.
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
-    let d = decide(&a, &cx, (!held).then_some(model)).map_err(Error::Model)?;
+    let d =
+        decide(&a, &cx, (!held).then_some(model)).map_err(|e| Error::Model(e, rerun.clone()))?;
     if d.waiting {
         // No rule supports the old items now, and the model cannot run.
         let same = store.write(|tx| {
@@ -279,7 +283,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             Some(f) if !sent => sender_kind_in(tx, f)?,
             _ => kind_read,
         };
-        if state(tx, message, true)? != seen || kind_now != kind_read {
+        // The model saw this thread context: it must still be the context
+        // now, for example with no later SPAM label on an earlier message.
+        let context_now = thread_context(tx, message, row.thread, row.internal_date)?;
+        if state(tx, message, true)? != seen || kind_now != kind_read || context_now != earlier {
             changed = true;
             return Ok(Vec::new());
         }
@@ -518,15 +525,15 @@ const THREAD_CHARS: usize = 2_000;
 /// once has its clean text in the store, so the run order is oldest first.
 /// Hostile mail and drafts are not context.
 fn thread_context(
-    store: &Store,
+    c: &rusqlite::Connection,
     message: i64,
     thread: i64,
     internal_date: Option<i64>,
-) -> Result<Vec<String>> {
+) -> rusqlite::Result<Vec<String>> {
     let Some(date) = internal_date else {
         return Ok(Vec::new());
     };
-    let mut v: Vec<String> = store.read(|c| {
+    let mut v: Vec<String> = {
         let mut st = c.prepare_cached(
             "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
              WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
@@ -555,8 +562,8 @@ fn thread_context(
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(v)
-    })?;
+        v
+    };
     v.reverse();
     Ok(v)
 }
