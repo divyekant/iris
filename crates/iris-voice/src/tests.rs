@@ -604,3 +604,28 @@ fn the_newest_message_names_the_recipient_and_only_six_texts_go_in() {
         "{data}"
     );
 }
+
+/// The snapshot of a long thread holds counts and 6 messages only.
+#[test]
+fn a_long_thread_gives_a_bounded_snapshot() {
+    let (b, t) = mailbox("long");
+    let batch: Vec<NewMessage> = (0..1000)
+        .map(|i| {
+            let text = format!("N{i}");
+            msg(
+                &format!("n{i}"),
+                "t1",
+                1000 + i,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some(&text),
+            )
+        })
+        .collect();
+    b.store.put_messages(1, &batch).unwrap();
+    let s = b.store.read(|c| Ok(snapshot(c, t)?)).unwrap();
+    assert_eq!((s.count, s.not_ready, s.hostile), (1001, 1000, 0));
+    let texts: Vec<_> = s.newest.iter().map(|m| m.text.clone().unwrap()).collect();
+    assert_eq!(texts, ["N994", "N995", "N996", "N997", "N998", "N999"]);
+}
