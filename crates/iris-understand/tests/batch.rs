@@ -593,3 +593,65 @@ fn the_estimate_rounds_each_call_like_the_budget() {
     let one = (tokens * 250_000).div_ceil(1_000_000);
     assert_eq!(e.cost_micro_usd, Some(2 * one));
 }
+
+#[test]
+fn a_hostile_from_after_64_kib_of_header_does_not_wait() {
+    let b = store("longhead");
+    b.model(true, None);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, name, kind, decided_by)
+                 VALUES ('bad@evil.example', 'Bad', 'hostile', 'person')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let older = b.add("1", "a", 2, &["INBOX"]);
+    let filler: String = (0..1500)
+        .map(|i| format!("X-Filler-{i}: {}\n", "a".repeat(60)))
+        .collect();
+    assert!(filler.len() > 64 * 1024 && filler.len() < 200 * 1024);
+    let raw = format!(
+        "{filler}From: Bad <bad@evil.example>\nTo: owner@example.com\nSubject: Hi\n\nClick.\n"
+    );
+    let bad = b.add_raw("2", "a", 1, &raw, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert!(!b.understood(older));
+    assert!(b.understood(bad));
+}
+
+#[test]
+fn the_sender_refresh_runs_before_the_model_is_made() {
+    let b = store("refresh-first");
+    b.model(false, None);
+    let ana = b.add_raw(
+        "1",
+        "x",
+        1,
+        "From: Ana <ana@examp1e.org>\nTo: owner@example.com\nSubject: Hi\n\nCall me.\n",
+        &["INBOX"],
+    );
+    b.run(&Limits::default()).unwrap();
+    assert!(b.understood(ana));
+    // Evidence that bo@example.org is a person, with no run since: the
+    // refresh makes example.org known, so Ana becomes hostile.
+    let raw = "From: owner@example.com\nTo: bo@example.org\nSubject: Hi\n\nSee you.\n"
+        .replace('\n', "\r\n");
+    let sent = b.add_raw("2", "y", 3, &raw, &["SENT"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender_evidence(message_id, address, rule, content_sha256)
+                 SELECT id, 'bo@example.org', 'sent', content_sha256 FROM message WHERE id = ?1",
+                [sent],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let r = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    assert!(matches!(r, Err(Error::Connect(_))));
+    assert!(!b.understood(ana), "the refresh reset the mail of Ana");
+}

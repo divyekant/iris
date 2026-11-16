@@ -255,6 +255,10 @@ fn run_messages(
     limits: &Limits,
     now_ms: i64,
 ) -> Result<Stop, Error> {
+    // Step 2 before step 3: the refresh needs no model, so a model that
+    // cannot be made does not keep stale items of a changed sender. Its
+    // resets come before the main pass, which sees them.
+    refresh_senders(store, now_ms)?;
     let inner: Box<dyn Model> = match row {
         Some(r) => connect(r).map_err(Error::Connect)?,
         None => Box::new(NoModel),
@@ -270,7 +274,6 @@ fn run_messages(
         since_refresh: 0,
         rerun: false,
     };
-    r.refresh()?;
     // Main pass, then one more pass if a sender rerun reset mail. Reruns of
     // the second pass wait for the next run, so a message gets at most 2
     // calls of `store::understand` in one run.
@@ -304,6 +307,15 @@ fn run_messages(
     })
 }
 
+/// Step 2: the sender refresh and its reruns, in one write. Gives the
+/// count of reset messages.
+fn refresh_senders(store: &Store, now_ms: i64) -> Result<u64, Error> {
+    Ok(store.write(|tx| {
+        let rows = iris_senders::refresh(tx, now_ms)?;
+        rerun_senders(tx, &rows, now_ms)
+    })?)
+}
+
 struct Runner<'a> {
     store: &'a Store,
     model: &'a Budgeted<'a>,
@@ -317,13 +329,9 @@ struct Runner<'a> {
 }
 
 impl Runner<'_> {
-    /// Step 2: the sender refresh and its reruns, in one write.
+    /// Step 5: step 2 again after a batch of messages.
     fn refresh(&mut self) -> Result<(), Error> {
-        let now = self.now_ms;
-        let reset = self.store.write(|tx| {
-            let rows = iris_senders::refresh(tx, now)?;
-            rerun_senders(tx, &rows, now)
-        })?;
+        let reset = refresh_senders(self.store, self.now_ms)?;
         self.since_refresh = 0;
         self.rerun |= reset > 0;
         Ok(())
@@ -435,9 +443,6 @@ fn threads_after(
     rows.collect()
 }
 
-/// The bytes of the content file that the `From` check reads.
-const HEAD_BYTES: u64 = 64 * 1024;
-
 /// The oldest pending message of `thread` that is not in `skip`. A message
 /// that the thread rule holds still runs when it is hostile mail: `SPAM`,
 /// or a `From` sender of the kind `hostile`. Sync saves no header row, so
@@ -497,7 +502,7 @@ fn from_of(path: &std::path::Path) -> Option<String> {
     let mut raw = Vec::new();
     std::fs::File::open(path)
         .ok()?
-        .take(HEAD_BYTES)
+        .take(crate::head::HEAD_LIMIT as u64)
         .read_to_end(&mut raw)
         .ok()?;
     crate::Head::parse(&raw).from_addr

@@ -3,7 +3,7 @@
 
 /// The most bytes of the header block that the parser reads (the same limit
 /// as `iris-clean`).
-const HEAD_LIMIT: usize = 256 * 1024;
+pub const HEAD_LIMIT: usize = 256 * 1024;
 /// The authserv-id of the `Authentication-Results` header that Gmail adds.
 pub const GMAIL_AUTHSERV: &str = "mx.google.com";
 
