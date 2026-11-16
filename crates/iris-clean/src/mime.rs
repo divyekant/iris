@@ -216,6 +216,16 @@ fn hex(c: &u8) -> Option<u8> {
 /// is one of these, or there is no label, and the bytes are valid UTF-8, the
 /// bytes are read as UTF-8. Bytes without a label that are not UTF-8 are read
 /// as Windows-1252, the superset of Latin-1.
+/// The most source bytes for one byte of decoded text: 2 for UTF-16, else 1.
+pub fn bytes_per_byte(label: Option<&str>) -> usize {
+    let enc = label.and_then(|l| Encoding::for_label(l.trim().as_bytes()));
+    if enc == Some(encoding_rs::UTF_16LE) || enc == Some(encoding_rs::UTF_16BE) {
+        2
+    } else {
+        1
+    }
+}
+
 pub fn decode(bytes: &[u8], label: Option<&str>) -> String {
     let enc = label.and_then(|l| Encoding::for_label(l.trim().as_bytes()));
     if enc.is_none() || enc == Some(UTF_8) || enc == Some(WINDOWS_1252) {

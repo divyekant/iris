@@ -331,7 +331,9 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         // A spent budget gives no text, as for the other types.
         text = had_budget.then_some(t);
     } else if f.mime_type == "text/plain" && *attach_left > 0 {
-        let (bytes, truncated) = decode_capped(f.body, &f.cte, *attach_left);
+        // UTF-16 gives one byte of text for two source bytes of ASCII.
+        let wide = mime::bytes_per_byte(f.charset.as_deref());
+        let (bytes, truncated) = decode_capped(f.body, &f.cte, *attach_left * wide);
         let mut t = mime::decode(&bytes, f.charset.as_deref());
         cut = truncated;
         // A charset can make the text longer than its bytes.

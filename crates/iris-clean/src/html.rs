@@ -96,10 +96,16 @@ impl Writer {
     }
 
     fn push(&mut self, c: char) {
-        // The most bytes that one call writes: the pending line ends, the
-        // quote marks, a space and one character.
-        let most = self.breaks + 2 * MAX_QUOTE + 1 + 4;
-        if self.out.len() + most > OUT_LIMIT {
+        // The bytes that this call writes: the pending line ends, the quote
+        // marks at a line start or a space, and the character.
+        let breaks = if self.out.is_empty() { 0 } else { self.breaks };
+        let start = self.line_start || breaks > 0 || self.out.is_empty();
+        let lead = if start {
+            2 * self.quote.min(MAX_QUOTE)
+        } else {
+            usize::from(self.space)
+        };
+        if self.out.len() + breaks + lead + c.len_utf8() > OUT_LIMIT {
             self.full = true;
             return;
         }
@@ -1110,6 +1116,12 @@ mod tests {
         let (out, full) = to_markdown(&h, false);
         assert!(full);
         assert!(out.len() <= OUT_LIMIT, "{}", out.len());
+        // Output that fits the limit stays whole, also after quoted lines.
+        let head = md("<blockquote>q<br>r</blockquote>a");
+        let fill = "a".repeat(OUT_LIMIT - head.len() + 1);
+        let (exact, exact_full) =
+            to_markdown(&format!("<blockquote>q<br>r</blockquote>{fill}"), false);
+        assert!(!exact_full && exact.len() == OUT_LIMIT && exact.ends_with("aaa"));
         // After more elements than the stack and the name list hold, the
         // text after them shows again.
         let n = MAX_STACK * 9 + 10;

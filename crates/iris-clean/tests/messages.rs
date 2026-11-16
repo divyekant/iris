@@ -798,3 +798,23 @@ fn many_elements_with_one_class_stay_fast() {
         start.elapsed()
     );
 }
+
+#[test]
+fn a_utf16_attachment_uses_the_budget_by_its_decoded_text() {
+    let n = 600_000;
+    let mut raw = b"Subject: Wide\nContent-Type: multipart/mixed; boundary=m\n\n--m\n\
+        Content-Type: text/plain\n\nBody.\n--m\n\
+        Content-Type: text/plain; charset=utf-16le\nContent-Disposition: attachment; filename=w.txt\n\n"
+        .to_vec();
+    raw.extend("a".repeat(n).encode_utf16().flat_map(u16::to_le_bytes));
+    raw.extend_from_slice(
+        b"\n--m\nContent-Type: text/plain\nContent-Disposition: attachment; filename=n.txt\n\nnext\n--m--\n",
+    );
+    let c = clean(&raw);
+    let wide = c.attachments[0].text.as_deref().unwrap();
+    assert_eq!(wide.trim_end(), "a".repeat(n));
+    assert_eq!(
+        c.attachments[1].text.as_deref().map(str::trim),
+        Some("next")
+    );
+}

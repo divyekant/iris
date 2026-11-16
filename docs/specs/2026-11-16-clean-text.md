@@ -55,6 +55,8 @@ is data: the code never runs or follows text from a message.
    text uses one budget of `ATTACHMENT_TEXT_LIMIT` bytes, in this order. An
    attached message (`message/rfc822`) gets step 1 for its own text. Its text
    uses the budget first, then its own attachments follow it in the list.
+   The budget counts bytes of decoded text. For a UTF-16 text attachment,
+   the reader reads two source bytes for each byte of budget.
 
 Each budget only goes down. No step gives budget back.
 
@@ -90,8 +92,9 @@ decoded subject starts with one of `Re`, `Aw`, `Sv`, `Vs`, `Antw` or `Réf`
 The steps, in order:
 
 1. Decode at most `PART_LIMIT` (2 MiB) bytes. If bytes stay, the text is cut.
-2. HTML to Markdown (see [HTML](#html)). The output has at most 512 KiB. If
-   the output is full, the text is cut.
+2. HTML to Markdown (see [HTML](#html)). The output has at most 512 KiB. Output
+   that fits in 512 KiB stays whole. If more output does not fit, the text
+   is cut.
 3. Keep at most `MAX_LINES` lines. If lines stay, the text is cut. Then
    remove quoted history (see [Quoted history](#quoted-history)).
 4. Remove the signature (see [Signatures](#signatures)).
