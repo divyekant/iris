@@ -386,8 +386,10 @@ pub fn submit(
         }
         // Pass 2: the hash and the flags of each action. The flags need the
         // count of the changeset (section 5.3): the valid actions of this
-        // revision (a denied one has no message row), and the open and
-        // applied actions of older revisions. Each action counts its own
+        // revision (a denied one has no message row), and the approved, held
+        // and applied actions of older revisions. The submit replaces the
+        // older proposed and in_review actions, so they do not count. Each
+        // action counts its own
         // messages: ten actions on the same 100 messages count 1,000
         // (section 10).
         let total: i64 = c.query_row(
@@ -395,7 +397,7 @@ pub fn submit(
              JOIN changeset_action a ON a.id = m.action_id
              WHERE a.changeset_id = ?1
                AND (a.state IS NULL
-                    OR a.state IN ('proposed', 'in_review', 'approved', 'held', 'applied'))
+                    OR a.state IN ('approved', 'held', 'applied'))
                AND a.verb NOT IN ('close', 'defer', 'decline', 'correct')",
             [changeset],
             |r| r.get(0),

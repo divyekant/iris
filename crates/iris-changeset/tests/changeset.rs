@@ -390,18 +390,23 @@ fn bulk_flag() {
     }
 
     // An approved action of revision 1 (300 messages) counts, so revision 2
-    // (201 more) is over the limit. A denied one does not count.
+    // (201 more) is over the limit. A denied one does not count. A proposed
+    // or in_review one does not count: the submit of revision 2 replaces it.
     for (end, bulk) in [
         ("state = 'approved', decided_by = 'person'", true),
         (
             "state = 'denied', decided_by = 'person', reason = 'No.'",
             false,
         ),
+        ("", false),
+        ("state = 'in_review', decided_by = 'policy'", false),
     ] {
         let two = create(&s, &agent(), NOW).unwrap();
         add_action(&s, two, &agent(), Verb::Archive, &[&t3], &Map::new(), None).unwrap();
         submit(&s, two, &agent(), "Archive.", NOW).unwrap();
-        decided(&s, two, end);
+        if !end.is_empty() {
+            decided(&s, two, end);
+        }
         revise(&s, two, &agent()).unwrap();
         add_action(&s, two, &agent(), Verb::Archive, &[&t4], &Map::new(), None).unwrap();
         submit(&s, two, &agent(), "And more.", NOW).unwrap();
