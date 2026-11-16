@@ -878,8 +878,11 @@ dependencies = [
  "iris-eval",
  "iris-model",
  "iris-senders",
+ "iris-store",
  "iris-synth",
+ "iris-talk",
  "jsonschema",
+ "rusqlite",
  "serde_json",
 ]
 
