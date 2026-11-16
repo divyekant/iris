@@ -13,6 +13,7 @@ getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
 iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
+iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
