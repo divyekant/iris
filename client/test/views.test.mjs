@@ -600,3 +600,27 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     access.locked = [];
   }
 });
+
+test("a sign-in address opened in a tab that shows Iris already signs in, then loads the page again", async () => {
+  // A paste of the address in the same tab changes only the hash, so the page does not load again by itself.
+  const { followSignIn } = await load("/src/api.ts");
+  const saved = globalThis.fetch;
+  let reloads = 0;
+  const hist = { replaceState: () => {} };
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ token: "t-5" }));
+    assert.equal(await followSignIn({ hash: "#code=k", pathname: "/", search: "" }, hist, undefined, () => reloads++), true);
+    assert.equal(reloads, 1);
+    // A refused code does not load the page again: the access state shows the reason.
+    globalThis.fetch = async () => new Response("{}", { status: 403 });
+    assert.equal(await followSignIn({ hash: "#code=k", pathname: "/", search: "" }, hist, undefined, () => reloads++), false);
+    // No engine: no reload, so the page does not load again and again.
+    globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+    assert.equal(await followSignIn({ hash: "#code=k", pathname: "/", search: "" }, hist, undefined, () => reloads++), false);
+    // Another hash is not a sign-in.
+    assert.equal(await followSignIn({ hash: "#/brief", pathname: "/", search: "" }, hist, undefined, () => reloads++), false);
+    assert.equal(reloads, 1);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
