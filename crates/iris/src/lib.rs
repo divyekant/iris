@@ -86,6 +86,12 @@ pub enum Command {
         /// The backup folder. It must not exist, or must be empty.
         path: PathBuf,
     },
+    /// Write each item as JSON Lines, and copy each raw message. The export
+    /// holds no secret.
+    Export {
+        /// The export folder. It must not exist, or must be empty.
+        path: PathBuf,
+    },
     /// Install or remove the background service that runs `iris serve`.
     Service {
         #[command(subcommand)]
@@ -267,6 +273,17 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
+            Ok(())
+        }
+        Command::Export { path } => {
+            let n = iris_api::export(&open()?, path).map_err(|e| format!("export: {e}"))?;
+            println!(
+                "iris: export in {} ({} items, {} messages, {} raw messages)",
+                path.display(),
+                n.items,
+                n.messages,
+                n.files
+            );
             Ok(())
         }
         Command::Service { action } => {
@@ -660,5 +677,7 @@ mod tests {
     fn cli_parses_the_data_folder_after_the_command() {
         let cli = Cli::try_parse_from(["iris", "backup", "/tmp/b", "--data", "/tmp/d"]).unwrap();
         assert_eq!(cli.data, Some(PathBuf::from("/tmp/d")));
+        let cli = Cli::try_parse_from(["iris", "export", "/tmp/e"]).unwrap();
+        assert!(matches!(cli.command, Command::Export { path } if path.as_os_str() == "/tmp/e"));
     }
 }

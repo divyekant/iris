@@ -9,6 +9,7 @@ This folder holds the specifications of Iris and the open model.
 | [schema/](schema/) | Version 0 of the open model as JSON Schema (draft 2020-12), with sample documents | 1 |
 | [schema/changeset.schema.json](schema/changeset.schema.json) | The changeset document of specification 2, section 5.1, as JSON Schema, with sample documents | 2 |
 | [schema/policy.schema.json](schema/policy.schema.json) | The policy file of specification 2, section 6.2, as JSON Schema for its TOML data, with sample files | 2 |
+| [schema/job.schema.json](schema/job.schema.json) | The job document of the job store spec (`docs/specs/2026-11-16-job-store.md`), as JSON Schema, with sample documents | 4 |
 
 ## Status
 

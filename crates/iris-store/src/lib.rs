@@ -553,6 +553,19 @@ fn lock(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Make the folder `dest` of a copy of mail (a backup or an export) with
+/// mode 0700. `dest` must not exist, or must be an empty folder, so that a
+/// copy never mixes with other files.
+pub fn new_private_dir(dest: &Path) -> Result<()> {
+    if dest.exists() && fs::read_dir(dest)?.next().is_some() {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the folder is not empty",
+        )));
+    }
+    Ok(make_private_dir(dest)?)
+}
+
 /// Make a folder with mode 0700, or set mode 0700 on a folder that exists.
 /// An existing folder with a wider mode can let other users read the mail.
 fn make_private_dir(dir: &Path) -> io::Result<()> {

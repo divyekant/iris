@@ -1059,6 +1059,15 @@ is exact. An item whose stranger the person declined, with no other stranger,
 is in no section. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
+The web client opens the brief with Due soon, after the live login codes
+(card R3-08). Due soon holds each item of You owe that is due in 2 days or
+less, or that is late, in the local day of the viewer. The engine does not
+know that day (it has no time zone of the owner), so the client makes this
+split from the You owe items, and the API keeps one You owe section. The
+client shows You owe with the rest of its items, and with the engine count
+less the Due soon items. The "All" link of You owe, and the link of Due soon,
+give the engine count, because the full list holds both.
+
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
 applied.") is a list that the engine computes when the brief opens, in the
