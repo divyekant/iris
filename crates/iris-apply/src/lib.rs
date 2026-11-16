@@ -1,14 +1,16 @@
 //! The apply of one approved changeset action to Gmail, with its ledger
 //! entry (specification 2, sections 7.1 to 7.3), for the verbs `archive`,
-//! `inbox`, `read`, `unread` and `trash`.
+//! `inbox`, `read`, `unread`, `trash`, `label` and `unlabel`.
 //!
 //! The steps of [`apply`]:
 //!
 //! 1. Expire an action 14 days after its submit. Wait while the active
 //!    policy has the mode `observe`. Send an action that a rule approved
 //!    to review (issue #168). Deny an action whose hash does not agree with
-//!    its rows. Run the recovery of each ledger row of the account in
-//!    `writing`.
+//!    its rows. Before these checks, run the recovery of each ledger row
+//!    of the account in `writing`. For `label` and `unlabel`, find the
+//!    user label of the name at Gmail, and make it for `label` if Gmail
+//!    does not have it (no ledger entry: the label stays after an undo).
 //! 2. Read the labels of each message at Gmail (`format=minimal`). Skip a
 //!    gone message and a message that already has the target state.
 //! 3. In one transaction, claim the action: the ledger row in `writing`,
@@ -28,6 +30,7 @@ use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
+use unicase::UniCase;
 
 #[derive(Debug)]
 pub enum Error {
@@ -117,15 +120,16 @@ pub enum Outcome {
 /// An open action expires 14 days after its submit (section 5.5).
 const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
-/// The label change of a verb.
+/// The label change of an action, with Gmail label IDs.
 struct Change {
-    add: &'static [&'static str],
-    remove: &'static [&'static str],
+    add: Vec<String>,
+    remove: Vec<String>,
     /// `messages.trash` for each message, not `batchModify`.
     trash: bool,
 }
 
 impl Change {
+    /// The change of a verb with no label argument.
     fn of(verb: &str) -> Option<Change> {
         let (add, remove, trash): (&[&str], &[&str], bool) = match verb {
             "archive" => (&[], &["INBOX"], false),
@@ -135,22 +139,51 @@ impl Change {
             "trash" => (&["TRASH"], &[], true),
             _ => return None,
         };
-        Some(Change { add, remove, trash })
+        let own = |v: &[&str]| v.iter().map(|l| l.to_string()).collect();
+        Some(Change {
+            add: own(add),
+            remove: own(remove),
+            trash,
+        })
+    }
+
+    /// The change that a ledger row recorded in `ops` (see [`Change::ops`]).
+    /// The recovery uses it: the label IDs of `label` and `unlabel` are
+    /// known only at the claim.
+    fn of_ledger(c: &Connection, ledger: i64) -> rusqlite::Result<Change> {
+        let trash: bool = c.query_row(
+            "SELECT json_extract(ops, '$.call') = 'trash' FROM ledger WHERE id = ?1",
+            [ledger],
+            |r| r.get(0),
+        )?;
+        let list = |key: &str| -> rusqlite::Result<Vec<String>> {
+            let mut st = c.prepare(&format!(
+                "SELECT value FROM ledger, json_each(ledger.ops, '$.{key}')
+                 WHERE ledger.id = ?1 ORDER BY key"
+            ))?;
+            let rows = st.query_map([ledger], |r| r.get(0))?;
+            rows.collect()
+        };
+        Ok(Change {
+            add: list("add")?,
+            remove: list("remove")?,
+            trash,
+        })
     }
 
     /// The labels that the action changes, that a message with `labels`
     /// has before the action, as a JSON array. For `trash`, also `INBOX`
     /// (section 7.1).
     fn pre(&self, labels: &[String]) -> String {
-        let watched: Vec<&str> = self
+        let inbox = ["INBOX".to_string()];
+        let watched: Vec<&String> = self
             .add
             .iter()
-            .chain(self.remove)
-            .chain(if self.trash { &["INBOX"][..] } else { &[] })
-            .copied()
-            .filter(|w| labels.iter().any(|l| l == w))
+            .chain(&self.remove)
+            .chain(if self.trash { &inbox[..] } else { &[] })
+            .filter(|w| labels.contains(w))
             .collect();
-        labels_json(&watched)
+        labels_json(watched)
     }
 
     /// The `ops` of the ledger row: the call, the labels to add and remove,
@@ -159,16 +192,42 @@ impl Change {
         format!(
             r#"{{"call":"{}","add":{},"remove":{},"calls":{calls}}}"#,
             if self.trash { "trash" } else { "batchModify" },
-            labels_json(self.add),
-            labels_json(self.remove),
+            labels_json(&self.add),
+            labels_json(&self.remove),
         )
     }
 
     /// True if a message with `labels` does not have the target state.
     fn needed(&self, labels: &[String]) -> bool {
-        let has = |l: &str| labels.iter().any(|x| x == l);
-        self.add.iter().any(|l| !has(l)) || self.remove.iter().any(|l| has(l))
+        self.add.iter().any(|l| !labels.contains(l))
+            || self.remove.iter().any(|l| labels.contains(l))
     }
+}
+
+/// The user label of the name `name` in `labels` (the labels of Gmail).
+/// Gmail refuses two labels whose names differ only in case, so the match
+/// has no regard to case, with the Unicode case folding of submit
+/// (`unicase`, as `iris-changeset`). `Err` gives the reason of a denial:
+/// the name is the name or the ID of a system label.
+fn find_label<'l>(
+    labels: &'l [iris_gmail::Label],
+    name: &str,
+) -> std::result::Result<Option<&'l iris_gmail::Label>, String> {
+    let name = UniCase::new(name);
+    let mut found = None;
+    for l in labels {
+        let same_name = UniCase::new(l.name.as_str()) == name;
+        if (same_name || UniCase::new(l.id.as_str()) == name) && l.kind == "system" {
+            return Err(format!(
+                "{} is a system label at Gmail: use its own verb.",
+                l.name
+            ));
+        }
+        if same_name {
+            found = Some(l);
+        }
+    }
+    Ok(found)
 }
 
 /// True if `token` is a token of the mailbox `address` (Gmail profile).
@@ -254,7 +313,25 @@ pub fn apply(
         })?;
     let (verb, approved_hash, decided_by, writing, writing_account) =
         head.ok_or(Error::NotApproved(action))?;
-    let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
+    // The label name of `label` and `unlabel`; submit checked the argument.
+    let label: Option<String> = match verb.as_str() {
+        "label" | "unlabel" => store.read(|c| {
+            Ok(c.query_row(
+                "SELECT json_extract(args, '$.label') FROM changeset_action WHERE id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })?,
+        _ => None,
+    };
+    let mut change = match (verb.as_str(), &label) {
+        ("label" | "unlabel", Some(_)) => Change {
+            add: Vec::new(),
+            remove: Vec::new(),
+            trash: false,
+        },
+        _ => Change::of(&verb).ok_or(Error::Verb(verb.clone()))?,
+    };
     if let Some(ledger) = writing {
         // The Gmail IDs of the row are of its own mailbox.
         if writing_account != Some(account) {
@@ -264,12 +341,56 @@ pub fn apply(
         run.mailbox()?;
         return run.recover(ledger);
     }
+    // The rows in `writing` of the account end before any outcome of this
+    // action, also when this action waits or is refused (section 7.3).
+    let mut run = None;
+    if writing_rows(store, account)? {
+        let mut r = Run::new(store, gmail, token, account)?;
+        r.mailbox()?;
+        r.recover_account()?;
+        run = Some(r);
+    }
     if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
         return Ok(o);
     }
-    let mut run = Run::new(store, gmail, token, account)?;
-    run.mailbox()?;
-    run.recover_account()?;
+    let mut run = match run {
+        Some(r) => r,
+        None => {
+            let mut r = Run::new(store, gmail, token, account)?;
+            r.mailbox()?;
+            r
+        }
+    };
+    // Step 1: the user label of `label` and `unlabel`. A label that Gmail
+    // does not have is made now, with no ledger entry: it stays after an
+    // undo (section 7.2).
+    if let Some(name) = &label {
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let id = match find_label(&labels, name) {
+            Err(reason) => {
+                decide(store, action, "denied", &reason)?;
+                return Ok(Outcome::Denied(reason));
+            }
+            Ok(Some(l)) => {
+                // The mirror needs the label row to show the change.
+                store.put_labels(account, &[(&l.id, &l.name, "user")])?;
+                Some(l.id.clone())
+            }
+            Ok(None) if verb == "label" => match run.create_label(name)? {
+                Ok(id) => Some(id),
+                // The create was a write call: the action ends, with its
+                // ledger entry and no message (section 7.2, step 1).
+                Err(error) => return run.fail_unclaimed(action, &change, error),
+            },
+            Ok(None) => None,
+        };
+        match (verb.as_str(), id) {
+            ("label", Some(id)) => change.add.push(id),
+            (_, Some(id)) => change.remove.push(id),
+            // No message has a label that Gmail does not have.
+            (_, None) => {}
+        }
+    }
 
     // Step 2: the labels at Gmail. The mirror gets the labels of each
     // message as Gmail gave them. The messages to change wait in a table
@@ -483,7 +604,7 @@ impl<'a, 'b> Run<'a, 'b> {
                  SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
                  FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
                        FROM temp.apply_todo)",
-                params![ledger, change.trash, BATCH_LIMIT as i64, labels_json(change.add)],
+                params![ledger, change.trash, BATCH_LIMIT as i64, labels_json(&change.add)],
             )?;
             tx.execute("DELETE FROM temp.apply_todo", [])?;
             Ok(Ok(Some(ledger)))
@@ -543,7 +664,9 @@ impl<'a, 'b> Run<'a, 'b> {
                     .map(|m| vec![(*id, m.label_ids)])
             } else {
                 let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
-                self.call(|g, t| g.batch_modify(t, &ids, change.add, change.remove))
+                let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
+                let remove: Vec<&str> = change.remove.iter().map(String::as_str).collect();
+                self.call(|g, t| g.batch_modify(t, &ids, &add, &remove))
                     .map(|()| Vec::new())
             };
             match result {
@@ -653,15 +776,13 @@ impl<'a, 'b> Run<'a, 'b> {
     /// never started is read again for its `pre`. Then the calls that never
     /// started continue.
     fn recover(&mut self, ledger: i64) -> Result<Outcome> {
-        let (call, verb): (i64, String) = self.store.read(|c| {
-            Ok(c.query_row(
-                "SELECT l.call, a.verb FROM ledger l JOIN changeset_action a ON a.id = l.action_id
-                 WHERE l.id = ?1",
-                [ledger],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?)
+        let (call, change) = self.store.read(|c| {
+            let call: i64 =
+                c.query_row("SELECT call FROM ledger WHERE id = ?1", [ledger], |r| {
+                    r.get(0)
+                })?;
+            Ok((call, Change::of_ledger(c, ledger)?))
         })?;
-        let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
         let mut after = 0;
         loop {
             let page: Vec<(i64, Option<String>, i64)> = self.store.read(|c| {
@@ -759,6 +880,63 @@ impl<'a, 'b> Run<'a, 'b> {
     }
 }
 
+impl Run<'_, '_> {
+    /// Make the user label `name` at Gmail, and save it in the store.
+    /// Gives its ID. After each error (for example HTTP 409: a label with
+    /// the name exists now, or an unknown result), the apply reads the
+    /// labels: the user label of the name is the label to use. Else the
+    /// action stays as it was, and no message changed (section 7.2, step 1).
+    fn create_label(&mut self, name: &str) -> Result<std::result::Result<String, String>> {
+        let label = match self.call(|g, t| g.create_label(t, name)) {
+            Ok(l) => l,
+            Err(e) => {
+                let labels = self.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+                match find_label(&labels, name) {
+                    Ok(Some(l)) => l.clone(),
+                    _ => {
+                        return Ok(Err(format!(
+                            "Gmail did not make the label, and has no user label of the name: {e}"
+                        )))
+                    }
+                }
+            }
+        };
+        // A store error loses only the mirror rows: the next sync writes them.
+        let _ = self
+            .store
+            .put_labels(self.account, &[(&label.id, &label.name, "user")]);
+        Ok(Ok(label.id))
+    }
+
+    /// End an action as `failed` with a ledger entry of no message, after
+    /// a write call before its claim (the label create).
+    fn fail_unclaimed(&mut self, action: i64, change: &Change, error: String) -> Result<Outcome> {
+        let account = self.account;
+        let ok = self.store.write(|tx| {
+            let n = tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 SELECT ?1, ?2, ?3, 'writing', 'inverse', ?4
+                 WHERE EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = 'approved')",
+                params![action, account, change.ops(0), now()],
+            )?;
+            if n == 1 {
+                tx.execute(
+                    "UPDATE ledger SET state = 'failed', error = ?2 WHERE id = ?1",
+                    params![tx.last_insert_rowid(), error],
+                )?;
+            }
+            Ok(n == 1)
+        })?;
+        if !ok {
+            return Err(Error::NotApproved(action));
+        }
+        Ok(Outcome::Failed {
+            counts: self.counts.clone(),
+            error,
+        })
+    }
+}
+
 fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_store::Result<()> {
     tx.execute(
         "UPDATE ledger_message SET listed = ?3 WHERE ledger_id = ?1 AND message_id = ?2",
@@ -774,11 +952,40 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// A JSON array of label IDs. The labels are the fixed system labels of
-/// [`Change`], so they need no escape.
-fn labels_json(labels: &[&str]) -> String {
-    let quoted: Vec<String> = labels.iter().map(|l| format!("\"{l}\"")).collect();
+/// A JSON array of label IDs, each as a JSON string.
+fn labels_json<S: AsRef<str>>(labels: impl IntoIterator<Item = S>) -> String {
+    let quoted: Vec<String> = labels
+        .into_iter()
+        .map(|l| json_string(l.as_ref()))
+        .collect();
     format!("[{}]", quoted.join(","))
+}
+
+/// A JSON string: Gmail gives the user label IDs, so the text is escaped.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// True if the account has a ledger row in `writing`.
+fn writing_rows(store: &Store, account: i64) -> Result<bool> {
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ledger WHERE state = 'writing' AND account_id = ?1)",
+            [account],
+            |r| r.get(0),
+        )?)
+    })?)
 }
 
 /// The expiry and the mode, in the transaction of the caller: `expired`
@@ -911,10 +1118,10 @@ fn mirror_change(store: &Store, account: i64, messages: &[i64], change: &Change)
              SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
         )?;
         for id in messages {
-            for l in change.remove {
+            for l in &change.remove {
                 remove.execute(params![id, account, l])?;
             }
-            for l in change.add {
+            for l in &change.add {
                 add.execute(params![id, account, l])?;
             }
         }

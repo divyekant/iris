@@ -615,9 +615,10 @@ The `ledger_message` table has one row for each message of the entry:
 
 ### 7.2 Apply
 
-1. If the action adds a user label that the mirror does not have, call
-   `labels.create`. If Gmail answers that the label exists, or the result is
-   not known, call `labels.list` and use the user label with that name. If
+1. If the action adds a user label that Gmail does not have (`labels.list`),
+   call `labels.create`. If Gmail answers with an error (for example, the
+   label exists) or the result is not known, call `labels.list` again and use
+   the user label with that name. If
    no label of kind `user` has that name, the action is `failed`. The label
    stays after an undo, so this step has no ledger entry.
 2. Read the labels of each message of the action at Gmail (`format=minimal`).
@@ -656,10 +657,10 @@ action that has a message of that row. The other action waits.
 #### Failure list of the apply and the ledger
 
 The crate `iris-apply` applies the verbs `archive`, `inbox`, `read`,
-`unread` and `trash`, with the ledger (migration 11). No provider call of
-an action is made two times. The ledger row in `writing` is the claim of
-the action: the transaction that adds it checks the expiry and the mode
-again.
+`unread`, `trash`, `label` and `unlabel`, with the ledger (migration 11).
+No provider call of an action is made two times. The ledger row in
+`writing` is the claim of the action: the transaction that adds it checks
+the expiry and the mode again.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
@@ -676,13 +677,18 @@ again.
 | An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call, and the person can reverse the change before a call again | The recovery of section 7.3 runs at once. It reads each message of the call: the `post` state gives `done`, each other state gives `unknown`, and no call is made again for the message. One or more `unknown` messages make the row `failed`. |
 | A stop of the engine after the claim | The result of a call is not known | The row stays in `writing`. The next apply of the action, or of another action of the account, or `iris_apply::recover` at start, runs the recovery. |
 | Two applies at the same time, in one process or in two | Two applies send the same call, or one fails the action of the other | Each apply holds the file lock `apply.lock` of the data folder. A second apply gets `Busy` and changes nothing. While the lock is held, a row in `writing` is the row of an apply that stopped. The ledger allows one entry for each action, and only an approved action gets one. |
-| A row in `writing` of another action with the same messages | Two applies change one message, and the recovery of the first row reads the change of the second | Before its claim, the apply runs the recovery of each row of the account in `writing`. The trigger `ledger_message_insert` refuses a message that a row in `writing` has. |
+| A row in `writing` of another action with the same messages | Two applies change one message, and the recovery of the first row reads the change of the second | Before its own checks (the expiry, the mode, the rule and the hash), the apply runs the recovery of each row of the account in `writing`, so such a row ends also when the action waits or is refused. The trigger `ledger_message_insert` refuses a message that a row in `writing` has. |
 | A sync of the account during the apply | The apply writes to the mirror labels that it read before the sync saved newer labels | The apply also holds the sync lock of the account (specification 1, section 4.2). While a sync runs, the apply gets `Busy` and changes nothing. |
 | A clear refusal (HTTP 400, another 4xx) | The rest of the action is not valid | The row becomes `failed`, with the error. The messages of the earlier calls keep the change and `done`. No later call is made. |
 | A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | A withdraw keeps an action with a row in `writing` `approved`, and it cancels an action with no row. Such an action can only become `applied` or `failed`, as its row ends (section 5.5). |
 | A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of each read of step 2 and of the recovery. After a `batchModify` call, the mirror gets the change of the call; after a `trash` call, the labels of the answer. The apply changes only the label rows that differ, so the triggers on the labels of a message (the model wait, the attention) see only real changes. |
 | A store error after a provider call | The ledger does not have `done`, or the mirror does not have the new labels | The row stays in `writing` at the number of the call, and the recovery reads the messages of the call. The next sync writes the labels from the history of Gmail. |
 | An action applied before the ledger (migration 9) | An applied action with no entry, or a marked action whose calls are not known | Migration 11 adds an entry with no messages and the undo `none`. An action with the mark `applying` becomes `failed`, with no call. |
+| The label name of `label` or `unlabel` | The mirror can be one sync interval behind Gmail, and Gmail refuses two labels whose names differ only in case | Before step 2, the apply reads `labels.list` and finds the label of the name, with no regard to case (the Unicode case folding of submit). The mirror gets the label row. |
+| A label name that is the name or the ID of a system label at Gmail | A `label` action changes a system label | Submit refuses the name. If Gmail has a system label that submit does not know, the engine denies the action, by `engine`, with no call. |
+| A `label` action of a label that Gmail does not have | No label to add | Before step 2, the apply calls `labels.create` one time, with no ledger entry: the label stays after an undo (step 1). After an error or an unknown result, it reads `labels.list` and uses the user label of the name. With no such label, the action is `failed`, with a ledger entry of no message. |
+| An `unlabel` action of a label that Gmail does not have | A call that changes nothing | Each message has the target state. The action is `applied` with no write call. |
+| A label deleted at Gmail between `labels.list` and `batchModify` | Gmail refuses the call (HTTP 400) | A clear refusal: the row is `failed`. |
 
 ### 7.3 Recovery
 
