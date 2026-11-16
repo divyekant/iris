@@ -29,9 +29,9 @@ pub use search::Query;
 /// Migrations go forward only. Never change a migration after it merged: add one.
 const MIGRATIONS: &[&str] = &[include_str!("schema_1.sql")];
 
-/// The SQLite settings of specification 1, section 5.2, for each connection.
+/// The SQLite settings of specification 1, section 5.2, for each connection,
+/// after `journal_mode` (see [`settings`]).
 const PRAGMAS: &str = "
-PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 PRAGMA cache_size = -2048;
@@ -187,7 +187,7 @@ impl Store {
         let key = secret::load_or_make_key(&key_path)?;
 
         let mut writer = Connection::open(&db)?;
-        writer.execute_batch(PRAGMAS)?;
+        settings(&writer)?;
         migrate(&mut writer, &db)?;
 
         let reader = || -> Result<Mutex<Connection>> {
@@ -195,7 +195,7 @@ impl Store {
                 &db,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
-            c.execute_batch(PRAGMAS)?;
+            settings(&c)?;
             Ok(Mutex::new(c))
         };
         Ok(Store {
@@ -428,6 +428,29 @@ fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
            subject = excluded.subject, sender = excluded.sender, text = excluded.text",
     )?
     .execute(params![message, subject, sender, text])?;
+    Ok(())
+}
+
+/// Apply the settings of specification 1, section 5.2, to one connection.
+///
+/// The change to WAL needs an exclusive lock. When two connections open a
+/// new database at the same time, SQLite gives `SQLITE_BUSY` at once and
+/// does not call the busy handler, because a wait could deadlock. So this
+/// tries again for up to 5 seconds, the same as `busy_timeout`.
+pub(crate) fn settings(conn: &Connection) -> Result<()> {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())) {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < end =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => break r?,
+        }
+    }
+    conn.execute_batch(PRAGMAS)?;
     Ok(())
 }
 

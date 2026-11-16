@@ -7,7 +7,7 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
-use crate::{content, lock, make_private_dir, sync_dir, Error, Result, Store, PRAGMAS};
+use crate::{content, lock, make_private_dir, settings, sync_dir, Error, Result, Store};
 
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -87,7 +87,7 @@ impl Store {
                 self.dir.join("iris.db"),
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )?;
-            src.execute_batch(PRAGMAS)?;
+            settings(&src)?;
             src.execute("VACUUM INTO ?1", [db_copy_str])?;
         }
         sync_file(&db_copy)?;
