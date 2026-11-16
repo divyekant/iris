@@ -650,3 +650,34 @@ fn a_name_from_the_person_wins_over_a_name_you_gave() {
     assert_eq!(cy.name.as_deref(), Some(r#"Moss, "Cy", Jr"#));
     assert_eq!(all.len(), 2, "{all:?}");
 }
+
+#[test]
+fn a_sender_after_your_last_message_is_not_known() {
+    let mut h = Hand::new("order");
+    h.add("t1", "SENT", "me@example.com", "Me", "ana@example.org");
+    // Bo writes in the thread after your message, and you do not reply.
+    h.add(
+        "t1",
+        "INBOX",
+        "bo@example.org",
+        "Bo Hart",
+        "me@example.com, ana@example.org",
+    );
+    let found: Vec<String> = h
+        .people()
+        .iter()
+        .flat_map(addrs)
+        .map(String::from)
+        .collect();
+    assert_eq!(found, ["ana@example.org"]);
+    // After your reply, Bo is known.
+    h.add("t1", "SENT", "me@example.com", "Me", "ana@example.org");
+    let mut found: Vec<String> = h
+        .people()
+        .iter()
+        .flat_map(addrs)
+        .map(String::from)
+        .collect();
+    found.sort();
+    assert_eq!(found, ["ana@example.org", "bo@example.org"]);
+}
