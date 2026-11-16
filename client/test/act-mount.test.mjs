@@ -192,6 +192,8 @@ test("a refusal says why, and no answer says Iris does not know", async () => {
   for (const [answer, want] of [
     [() => [409, { error: "c-311 is done: close changes an open or deferred commitment" }], /did not record it: c-311 is done/],
     [() => { throw new TypeError("network"); }, /does not know if it recorded the change/],
+    // An engine that restarted refuses the old token: nothing was written.
+    [() => [401, { error: "Sign in again." }], /did not record it/],
   ]) {
     serve(answer);
     const view = await mount("/src/views/Act.svelte", { item: commitment(), clock: () => NOW, delay: 10, onchange: () => {} });

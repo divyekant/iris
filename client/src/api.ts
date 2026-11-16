@@ -220,9 +220,10 @@ export function own(error: unknown): string {
 }
 
 /** Set the access state that App.svelte shows above each view, and throw it. */
-function fail(problem: string): never {
+// `status`: the HTTP status when the engine answered, so that a caller can tell a refusal from no answer.
+function fail(problem: string, status?: number): never {
   access.problem = problem;
-  throw new Error(problem);
+  throw Object.assign(new Error(problem), status ? { status } : {});
 }
 
 // Spec 2 section 8.6 and crates/iris-api/README.md: the API gives a token one
@@ -343,7 +344,7 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
       quiet(() => session()?.removeItem(KEY));
     }
     if (token) return call(path, accept, body);
-    fail(signInError?.message ?? SIGN_IN);
+    fail(signInError?.message ?? SIGN_IN, 401);
   }
   access.problem = "";
   return response;
