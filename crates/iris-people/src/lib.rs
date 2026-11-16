@@ -579,7 +579,7 @@ fn one_address(part: &str) -> Option<String> {
     let a = match (part.rfind('<'), part.rfind('>')) {
         (Some(s), Some(e)) if s < e => &part[s + 1..e],
         // A group such as `team: a@example.com` starts with its name.
-        _ => part.rsplit(':').next().unwrap_or(part),
+        _ => group_colon(part).map_or(part, |c| &part[c + 1..]),
     };
     let a = a.trim().to_lowercase();
     let bad = |t: &str| t.contains(|c: char| c.is_whitespace() || "\"<>(),;:@".contains(c));
