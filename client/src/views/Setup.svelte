@@ -5,6 +5,7 @@
 <script lang="ts">
   import { get, type Status } from "../api";
   import { poll as every } from "../clock";
+  import { copying } from "../format";
 
   let { status: initial, poll = 2000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
@@ -13,7 +14,8 @@
   // Ask the local engine for progress while this page is open.
   $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
 
-  let account = $derived(status.accounts[0]);
+  // The account that still copies comes first: with two accounts, one can be ready while the other copies.
+  let account = $derived(copying(status)[0] ?? status.accounts[0]);
   let m = $derived(status.messages);
   let stage = $derived(!account ? 0 : account.mirror_ready_at ? 2 : 1);
   const number = (n: number) => n.toLocaleString("en-US");

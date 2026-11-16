@@ -1,4 +1,4 @@
-import type { Brief, Item, Money, Party, Status } from "./api";
+import type { Account, Brief, Item, Money, Party, Status } from "./api";
 
 export function party(p: Party | undefined): string {
   if (!p) return "";
@@ -156,6 +156,11 @@ export function summary(brief: Brief): string {
   const odd = brief.strangers.count;
   if (odd) parts.push(`${capital(count(odd, "item is from a sender", "items are from senders"))} you do not know.`);
   return parts.length ? parts.join(" ") : "Nothing needs you now.";
+}
+
+/** The accounts that are still in their first sync (spec 1 section 4.2). One such account is enough to show the copy. */
+export function copying(status: Status | null): Account[] {
+  return status ? status.accounts.filter((a) => !a.mirror_ready_at) : [];
 }
 
 /** The home view: the setup flow until there is something to show, then the brief. */

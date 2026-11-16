@@ -31,7 +31,7 @@
   {#if message.gone && message.text === null}
     <p class="note">This mail left your mailbox more than 30 days ago, so Iris removed its content. The items that cite it stay.</p>
   {:else if message.text === null}
-    <p class="note">Iris has not read this mail yet. Download the original to read it now.</p>
+    <p class="note">Iris has not read this mail yet. If Iris copied the original, you can download it.</p>
   {:else if message.gone}
     <p class="note">This mail is no longer in your mailbox. Iris keeps its content for 30 days after it left.</p>
   {/if}

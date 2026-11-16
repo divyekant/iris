@@ -105,6 +105,7 @@ export type Message = Summary & {
 
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
+export const NOT_COPIED = "Iris has not copied the original of this mail yet. Try again after the copy of the mailbox.";
 export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris serve, then open the sign-in address that it prints.";
 
 /** The text that a view shows for an error: "" when App.svelte shows it already as the access state. */
@@ -220,12 +221,17 @@ async function call(path: string, accept: string): Promise<Response> {
   // A failed sign-in does not stop a token that this page has from an earlier sign-in.
   const signInError = await ready.then(() => null, (e: Error) => e);
   const headers: Record<string, string> = { accept };
-  if (token) headers.authorization = `Bearer ${token}`;
+  const sent = token;
+  if (sent) headers.authorization = `Bearer ${sent}`;
   const response = await fetch(`/api/${path}`, { headers }).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
-    token = null;
-    quiet(() => session()?.removeItem(KEY));
+    // A sign-in during the request gave a new token: keep that one.
+    if (sent === token) {
+      token = null;
+      quiet(() => session()?.removeItem(KEY));
+    }
+    if (token) return call(path, accept);
     fail(signInError?.message ?? SIGN_IN);
   }
   access.problem = "";
@@ -252,6 +258,8 @@ function save(blob: Blob, name: string) {
 /** Download the original (RFC 5322) of a message. A link cannot send the token, so fetch it and save the blob. */
 export async function download(id: string, keep: (blob: Blob, name: string) => void = save): Promise<void> {
   const response = await call(`messages/${encodeURIComponent(id)}/raw`, "message/rfc822");
+  // The page hides the download of a removed mail, so a 404 here is a mail that the first copy has not fetched.
+  if (response.status === 404) throw new Error(NOT_COPIED);
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     throw new Error(body?.error ?? `The engine answered ${response.status}.`);
