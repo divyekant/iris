@@ -16,7 +16,7 @@ use iris_store::{Body, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 
-use crate::{analyze, decide, validate, Analysis, Context, Ids, Kind, Mark, Model, Usage};
+use crate::{analyze_cut, decide, validate, Analysis, Context, Ids, Kind, Mark, Model, Usage};
 
 /// The wait after a failed try of the model (section 7.4).
 pub const RETRY_MS: i64 = 86_400_000;
@@ -185,7 +185,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let mut a = analyze(&raw, &cx);
+    let mut a = analyze_cut(&raw, raw_cut, &cx);
     a.text.cut |= raw_cut;
     // The mark phishing stays until a rebuild (section 6.7).
     if row.phishing {

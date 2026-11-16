@@ -409,13 +409,14 @@ fn open_effect(tag: &Tag, w: &mut Writer) {
         }
         "a" => {
             w.close_link();
-            let href = tag.attr("href").unwrap_or("").trim();
+            // The href as a browser reads it: `https:x.com` is a web link.
+            let href = crate::browser_href(tag.attr("href").unwrap_or(""));
             let lower = href.to_ascii_lowercase();
-            if ["http://", "https://", "mailto:"]
+            if ["http:", "https:", "mailto:"]
                 .iter()
                 .any(|p| lower.starts_with(p))
             {
-                w.link = Some((href.to_string(), w.out.len()));
+                w.link = Some((href, w.out.len()));
             }
         }
         "img" => {
@@ -1067,7 +1068,7 @@ mod tests {
         );
         assert_eq!(
             md("<a href=\"https://bank.example.com&#9;@evil.example.net/x y\u{a0}z\">Bank</a>"),
-            "[Bank](https://bank.example.com%09@evil.example.net/x%20y%C2%A0z)"
+            "[Bank](https://bank.example.com@evil.example.net/x%20y%C2%A0z)"
         );
         assert_eq!(md("<a href=\"javascript:run()\">Click</a>"), "Click");
         assert_eq!(

@@ -111,13 +111,9 @@ enum Target {
 }
 
 fn target_host(href: &str) -> Target {
-    // The URL standard drops control characters and spaces at both ends,
-    // and each tab and line end inside.
-    let target: String = href
-        .trim_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
+    // The steps of the URL standard before the parse: one rule with the
+    // link list of iris-clean.
+    let target = iris_clean::browser_href(href);
     let target = target.as_str();
     let lower = target.to_ascii_lowercase();
     let web = lower.starts_with("http:") || lower.starts_with("https:");

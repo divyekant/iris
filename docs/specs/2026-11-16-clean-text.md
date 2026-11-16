@@ -186,7 +186,10 @@ not used makes no cut in either case.
 - These elements go out with their content, as raw text: `script`, `style`,
   `title`, `template`, `textarea`, `xmp`, `noembed`, `noframes`, `iframe`.
   These go out with their content: `head`, `svg`, `math`.
-- Links: `[text](href)` for an `http`, `https` or `mailto` target. If the
+- Links: `[text](href)` for an `http`, `https` or `mailto` target. The
+  href is read as a browser reads it first (`browser_href`): no control
+  character or space at the ends, and no tab or line end inside. So
+  `https:x.example` and ` ht<tab>tps://x.example` are web targets. If the
   text is the target, only the text shows. If the text has more than one
   line, the form is `text (<href>)`. In the target, `(`, `)`, `<`, `>` and
   each white space or control character become percent codes of their
@@ -201,8 +204,12 @@ not used makes no cut in either case.
   `multipart/alternative` that the text does not use, because a mail client
   can show it. A hidden link has no text, so it is not in the list. The
   texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
-  true when links went out: past `LINK_BYTES`, or past the output limit of
-  an HTML part. The links of an attached message are not in the list.
+  true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
+  its output limit or past `PART_LIMIT`; `MAX_PARTS`, `MAX_DEPTH` or a
+  parser limit; a message that Iris cannot parse. `clean_cut(raw, true)`
+  reads the first bytes of a longer message: `links_cut` is also true when
+  an HTML part reaches the end of `raw`, or when no body part ends before
+  it. The links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.

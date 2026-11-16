@@ -141,7 +141,13 @@ pub struct Text {
 
 impl Text {
     pub fn of(raw: &[u8]) -> Text {
-        let c = iris_clean::clean(raw);
+        Text::of_cut(raw, false)
+    }
+
+    /// [`Text::of`] for the first bytes of a message: `raw_cut` is true
+    /// when `raw` is a prefix of a longer message (`iris_clean::clean_cut`).
+    pub fn of_cut(raw: &[u8], raw_cut: bool) -> Text {
+        let c = iris_clean::clean_cut(raw, raw_cut);
         let mut attachment_text = Vec::new();
         let mut attachments = Vec::with_capacity(c.attachments.len());
         for a in c.attachments {
@@ -183,8 +189,15 @@ impl Analysis {
 /// Steps 1 to 3: parse the headers, make the clean text, compute the hostile
 /// marks `dmarc`, `spoof`, `link` and `spam`.
 pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
+    analyze_cut(raw, false, cx)
+}
+
+/// [`analyze`] for the first bytes of a message: `raw_cut` is true when
+/// `raw` is a prefix of a longer message. A link past the cut can be
+/// missing, so the mark `link` reads the cut too.
+pub fn analyze_cut(raw: &[u8], raw_cut: bool, cx: &Context) -> Analysis {
     let head = Head::parse(raw);
-    let mut text = Text::of(raw);
+    let mut text = Text::of_cut(raw, raw_cut);
     if !cx.same_sender.is_empty() {
         // The cut mark is not part of the text: it stays at the end.
         let strip = |t: &str| {

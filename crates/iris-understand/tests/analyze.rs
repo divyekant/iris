@@ -278,6 +278,9 @@ fn a_link_that_shows_a_brand_and_goes_elsewhere_is_a_mark() {
         "https://192.0.2.7/v",
         "https://www.shop.com&#9;@evil.example.net/v",
         "https://www.shop.com&#10;@evil.example.net/v",
+        "https:www.shop.com.evil.example.net/v",
+        "https:\\\\evil.example.net\\@www.shop.com/v",
+        " ht&#9;tps://www.shop.com@evil.example.net/v",
     ] {
         assert_eq!(
             run(&html_link(target), &[], &[], &[]),

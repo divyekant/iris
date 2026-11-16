@@ -95,8 +95,18 @@ pub struct Clean {
 pub struct Link {
     /// The link text as the clean text shows it, trimmed. It can have lines.
     pub text: String,
-    /// The `href` as the HTML gives it, with its entities decoded.
+    /// The `href` as the HTML gives it, with its entities decoded, after
+    /// [`browser_href`].
     pub href: String,
+}
+
+/// An href as the URL standard reads it before the parse: no control
+/// characters or spaces at the ends, and no tab or line end inside.
+pub fn browser_href(href: &str) -> String {
+    href.trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect()
 }
 
 /// The most bytes of link texts and hrefs in [`Clean::links`].
@@ -117,6 +127,14 @@ pub struct Attachment {
 
 /// Make the clean text of one raw RFC 5322 message.
 pub fn clean(raw: &[u8]) -> Clean {
+    clean_cut(raw, false)
+}
+
+/// [`clean`] for the first bytes of a message: `raw_cut` is true when
+/// `raw` is a prefix of a longer message. Then the link list is cut
+/// (`links_cut`) when an HTML body part reaches the end of `raw`, or when
+/// no body part ends before it.
+pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
     let mut parts = 0;
     let mut attach_left = ATTACHMENT_TEXT_LIMIT;
     if !mime_fields_fit(raw) {
@@ -126,8 +144,9 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: true,
             attachments: Vec::new(),
             invitation: false,
+            // Iris could not read the message, so it cannot check its links.
             links: Vec::new(),
-            links_cut: false,
+            links_cut: true,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -137,12 +156,14 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: false,
             attachments: Vec::new(),
             invitation: false,
+            // Iris could not read the message, so it cannot check its links.
             links: Vec::new(),
-            links_cut: false,
+            links_cut: true,
         };
     };
     let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
-    let (subject, text, cut, files, links) = message(parsed.root(), 0, &mut parts);
+    let at_end = raw_cut.then_some(raw.len());
+    let (subject, text, cut, files, links) = message(parsed.root(), 0, &mut parts, at_end);
     let mut attachments = Vec::new();
     for f in files {
         attachment(f, &mut parts, &mut attach_left, &mut attachments);
@@ -308,6 +329,7 @@ fn message<'a>(
     m: MessageRef<'a>,
     depth: usize,
     parts: &mut usize,
+    at_end: Option<usize>,
 ) -> (String, String, bool, Vec<File<'a>>, Links) {
     let root = m.root_part();
     let subject = field(root, HeaderName::Subject).map_or(String::new(), |raw| {
@@ -332,9 +354,15 @@ fn message<'a>(
         files: Vec::new(),
         is_reply,
         links: Links::default(),
+        at_end,
+        body_seen: false,
     };
     w.entity(root, depth);
     *parts = w.parts;
+    // A cut message with no whole body part: its body is past the cut.
+    if at_end.is_some() && !w.body_seen {
+        w.links.cut = true;
+    }
     let mut text = w.texts.join("\n\n");
     if w.cut {
         text.push_str(CUT_MARK);
@@ -460,17 +488,25 @@ struct Walker<'a> {
     is_reply: bool,
     /// The links of each HTML part that the walker reads.
     links: Links,
+    /// The length of the raw message when it is a prefix of a longer
+    /// message ([`clean_cut`]).
+    at_end: Option<usize>,
+    /// True when a body part ends before `at_end`.
+    body_seen: bool,
 }
 
 impl<'a> Walker<'a> {
     fn entity(&mut self, part: MessagePart<'a>, depth: usize) {
         self.parts += 1;
+        // Each limit that skips bytes of the message can skip a link too.
         if self.parts > MAX_PARTS || depth > MAX_DEPTH {
             self.cut = true;
+            self.links.cut = true;
             return;
         }
         if part.flags().contains(PartFlags::LIMIT_REACHED) {
             self.cut = true;
+            self.links.cut = true;
         }
         let ct_field =
             field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
@@ -514,6 +550,7 @@ impl<'a> Walker<'a> {
             let max = MAX_PARTS.saturating_sub(self.parts) + 1;
             let list: Vec<MessagePart<'a>> = part.children().take(max).collect();
             self.cut |= part.children().len() > max;
+            self.links.cut |= part.children().len() > max;
             if sub == "alternative" {
                 self.alternative(list, depth);
             } else {
@@ -572,6 +609,13 @@ impl<'a> Walker<'a> {
         // a later part with clean text makes a cut.
         let (bytes, truncated) = decode_capped(part.raw_body(), enc, PART_LIMIT);
         self.cut |= truncated;
+        let reaches_end = self
+            .at_end
+            .is_some_and(|end| part.offset_end() as usize >= end);
+        self.body_seen |= !reaches_end;
+        if html && (truncated || reaches_end) {
+            self.links.cut = true;
+        }
         let text = mime::decode(&bytes, charset);
         drop(bytes);
         let text = if html {
@@ -656,7 +700,8 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         };
         // shortcut: the links of an attached message do not count; count
         // them if phishing comes as an attached message.
-        let (subject, mut t, inner_cut, files, _) = message(parsed.root(), f.depth + 1, parts);
+        let (subject, mut t, inner_cut, files, _) =
+            message(parsed.root(), f.depth + 1, parts, None);
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {

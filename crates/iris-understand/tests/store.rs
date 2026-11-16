@@ -1562,6 +1562,29 @@ fn a_message_over_the_read_limit_is_cut_text_for_the_model() {
     // The fixed code rule does not fire on cut text: the model reads it.
     assert_eq!((out.calls, fake.calls.borrow().len()), (1, 1));
     assert!(fake.calls.borrow()[0].1.contains("Your code: 482913"));
+    // The body ends before the cut: the link list is whole, no mark.
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, "[]");
+}
+
+#[test]
+fn an_html_body_past_the_read_limit_is_a_link_mark() {
+    let b = store("large-link");
+    // The attachment comes first, so the HTML body (with its link) is past
+    // the read limit. A mail client still shows it.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <alerts@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b\nContent-Type: text/html\n\n<a href=\"https://evil.example.net/\">bank.example</a>\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(
+        fake.calls.borrow().is_empty(),
+        "hostile mail never reaches the model"
+    );
 }
 
 #[test]
