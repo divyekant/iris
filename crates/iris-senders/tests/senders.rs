@@ -230,6 +230,7 @@ fn a_near_copy_of_a_known_domain_is_hostile() {
     );
     assert_eq!(d.kind, Kind::Hostile);
     assert_eq!(d.basis, "near copy of shop.example.com");
+    assert_eq!(d.rerun, vec![d.sender.unwrap()]);
     // The engine checks `hostile` before `person`: a sent message does not help.
     c.put(
         "t4",
@@ -316,18 +317,29 @@ fn a_person_without_sent_mail_is_decided_again() {
 #[test]
 fn a_person_whose_sent_message_is_gone_or_changed_is_decided_again() {
     let mut c = Case::new("gone");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: bo@example.net"),
+    );
     let head = "From: Bo <bo@example.net>\r\nTo: owner@example.com";
     // The sent message now names another recipient, and keeps SENT.
     c.store
         .write(|tx| {
-            tx.execute("UPDATE header SET to_addrs = 'zed@example.net' WHERE message_id = 1", [])?;
+            tx.execute(
+                "UPDATE header SET to_addrs = 'zed@example.net' WHERE message_id = 1",
+                [],
+            )?;
             Ok(())
         })
         .unwrap();
     assert_eq!(c.put("t2", &["INBOX"], head).kind, Kind::Stranger);
 
-    c.put("t3", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    c.put(
+        "t3",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: bo@example.net"),
+    );
     assert_eq!(c.put("t4", &["INBOX"], head).kind, Kind::Person);
     // The sent message of the basis is deleted from the store.
     c.store
@@ -342,7 +354,11 @@ fn a_person_whose_sent_message_is_gone_or_changed_is_decided_again() {
 #[test]
 fn a_sent_message_reports_each_hostile_change_of_a_recipient() {
     let mut c = Case::new("rerun");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"),
+    );
     let id = |c: &Case| -> i64 {
         c.store
             .read(|db| {
@@ -359,11 +375,19 @@ fn a_sent_message_reports_each_hostile_change_of_a_recipient() {
     }
     // The service is known now, so the next sent message makes the
     // recipient hostile. The caller must run understanding again on its mail.
-    let d = c.put("t5", &["SENT"], &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"));
+    let d = c.put(
+        "t5",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"),
+    );
     assert_eq!(d.kind, Kind::SelfOwner);
     assert_eq!(d.rerun, vec![id(&c)]);
     // No change: nothing to run again.
-    let d = c.put("t6", &["SENT"], &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"));
+    let d = c.put(
+        "t6",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"),
+    );
     assert!(d.rerun.is_empty());
     // The From row reports its change too.
     let d = c.put("t7", &[], "From: <alerts@shop-secure.example.net>");

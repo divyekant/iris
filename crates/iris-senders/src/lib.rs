@@ -56,10 +56,13 @@ pub struct Decision {
     pub sender: Option<i64>,
     /// The rule that matched, as in the `basis` column.
     pub basis: String,
-    /// The kind of the row before this call. If the kind becomes `hostile`
-    /// or stops being `hostile`, the caller runs understanding again on each
-    /// message from the address (spec 1 section 6.7).
+    /// The kind of the `From` row before this call.
     pub previous: Option<Kind>,
+    /// The `sender` rows whose kind became `hostile` or stopped being
+    /// `hostile` in this call: the `From` row, or a recipient of a sent
+    /// message. The caller runs understanding again on each message from
+    /// these addresses (spec 1 section 6.7).
+    pub rerun: Vec<i64>,
 }
 
 /// Decide the sender kind of the stored message `message`, with its raw
@@ -111,6 +114,7 @@ pub fn decide(
     }
     if has("SENT") {
         let known = known_domains(conn, "")?;
+        let mut rerun = Vec::new();
         for to in head.recipients() {
             if to.eq_ignore_ascii_case(&account) {
                 continue;
@@ -118,6 +122,7 @@ pub fn decide(
             // The `hostile` rule comes before the `person` rule.
             match near(&to, &known) {
                 Some(k) => upsert(
+                    &mut rerun,
                     conn,
                     &to,
                     None,
@@ -125,10 +130,21 @@ pub fn decide(
                     &format!("near copy of {k}"),
                     now_ms,
                 )?,
-                None => upsert(conn, &to, None, Kind::Person, &sent_basis(message), now_ms)?,
+                None => upsert(
+                    &mut rerun,
+                    conn,
+                    &to,
+                    None,
+                    Kind::Person,
+                    &sent_basis(message),
+                    now_ms,
+                )?,
             };
         }
-        return Ok(own("sent"));
+        return Ok(Decision {
+            rerun,
+            ..own("sent")
+        });
     }
 
     let Some((addr, name)) = from else {
@@ -137,6 +153,7 @@ pub fn decide(
             sender: None,
             basis: "no from address".into(),
             previous: None,
+            rerun: Vec::new(),
         });
     };
     // (id, kind, decided_by, basis)
@@ -160,6 +177,7 @@ pub fn decide(
                     sender: Some(*id),
                     basis: "set by a person".into(),
                     previous,
+                    rerun: Vec::new(),
                 });
             }
         }
@@ -167,8 +185,18 @@ pub fn decide(
 
     let old_basis = row.as_ref().and_then(|r| r.3.as_deref());
     let (kind, basis) = rules(conn, &head, &addr, thread, date, previous, old_basis)?;
-    let id = upsert(conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
+    let mut rerun = Vec::new();
+    let id = upsert(
+        &mut rerun,
+        conn,
+        &addr,
+        name.as_deref(),
+        kind,
+        &basis,
+        now_ms,
+    )?;
     Ok(Decision {
+        rerun,
         kind,
         sender: Some(id),
         basis,
@@ -183,6 +211,15 @@ const SENT_NOT_DRAFT: &str =
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
+/// True when the header `h` names the address `?2` in `To` or `Cc`.
+const TO_ADDR: &str =
+    "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
+           ',' || ?2 || ',') > 0";
+/// [`TO_ADDR`] for the address `?1`.
+const TO_ADDR_1: &str =
+    "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
+           ',' || ?1 || ',') > 0";
+
 fn sent_basis(message: i64) -> String {
     format!("sent: {}", format_id(IdKind::Message, message))
 }
@@ -193,6 +230,7 @@ fn own(basis: &str) -> Decision {
         sender: None,
         basis: basis.into(),
         previous: None,
+        rerun: Vec::new(),
     }
 }
 
@@ -223,9 +261,14 @@ fn rules(
             .filter(|(k, _)| *k == IdKind::Message)
             .map(|(_, row)| row);
         if let Some(m) = named {
+            // A deleted message, or one that no longer names the address, is
+            // no evidence.
             let still: bool = conn.query_row(
-                &format!("SELECT {SENT_NOT_DRAFT} FROM message s WHERE s.id = ?1"),
-                [m],
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM message s JOIN header h ON h.message_id = s.id
+                      WHERE s.id = ?1 AND {TO_ADDR} AND {SENT_NOT_DRAFT})"
+                ),
+                params![m, addr],
                 |r| r.get(0),
             )?;
             if still {
@@ -236,9 +279,7 @@ fn rules(
             .query_row(
                 &format!(
                     "SELECT s.id FROM message s JOIN header h ON h.message_id = s.id
-                      WHERE instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
-                                  ',' || ?1 || ',') > 0
-                        AND {SENT_NOT_DRAFT} LIMIT 1"
+                      WHERE {TO_ADDR_1} AND {SENT_NOT_DRAFT} LIMIT 1"
                 ),
                 [addr],
                 |r| r.get(0),
@@ -291,7 +332,9 @@ fn rules(
 /// Write the engine kind of `addr`, and give the row ID. A row that a person
 /// decided keeps its kind. A row that another crate made (kind NULL) gets
 /// the kind, and keeps its name.
+#[allow(clippy::too_many_arguments)]
 fn upsert(
+    rerun: &mut Vec<i64>,
     conn: &Connection,
     addr: &str,
     name: Option<&str>,
@@ -299,6 +342,11 @@ fn upsert(
     basis: &str,
     now_ms: i64,
 ) -> rusqlite::Result<i64> {
+    let before: Option<Option<String>> = conn
+        .query_row("SELECT kind FROM sender WHERE address = ?1", [addr], |r| {
+            r.get(0)
+        })
+        .optional()?;
     conn.prepare_cached(
         "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
               VALUES (?1, ?2, ?3, ?4, 'engine', ?5)
@@ -308,9 +356,17 @@ fn upsert(
          WHERE sender.decided_by IS NOT 'person'",
     )?
     .execute(params![addr, name, kind.name(), basis, now_ms])?;
-    conn.query_row("SELECT id FROM sender WHERE address = ?1", [addr], |r| {
-        r.get(0)
-    })
+    let (id, after): (i64, Option<String>) = conn.query_row(
+        "SELECT id, kind FROM sender WHERE address = ?1",
+        [addr],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    // A missing row or a NULL kind counts as not hostile.
+    let hostile = |k: Option<&str>| k == Some(Kind::Hostile.name());
+    if hostile(before.flatten().as_deref()) != hostile(after.as_deref()) {
+        rerun.push(id);
+    }
+    Ok(id)
 }
 
 /// The domains of the known senders (kind `person` or `service`), except
