@@ -346,6 +346,24 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
     assert_eq!(c["owner"], json!({"kind": "self"}));
     assert_eq!(c["counterparty"]["address"], "bo@example.org");
     assert!(m.calls.borrow()[0].1.contains("Bcc: bo@example.org\n"));
+    // The model can choose among the recipients. Another address becomes
+    // the first recipient, in both directions.
+    let two = "From: owner@example.com\nTo: ana@example.org, cy@example.org\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {
+        for (pick, want) in [
+            ("cy@example.org", "cy@example.org"),
+            ("bo@evil.example", "ana@example.org"),
+        ] {
+            let mut p = promise.clone();
+            p[0]["direction"] = json!(dir);
+            p[0][key] = json!({"address": pick});
+            let m = Fake::with(vec![answer(p)]);
+            let d = run(two, Kind::SelfOwner, &["SENT"], &[], Some(&m))
+                .1
+                .unwrap();
+            assert_eq!(d.drafts[0].item[key]["address"], want, "{dir} {pick}");
+        }
+    }
     // With no recipient at all, only the parties of the model count.
     let none = "From: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
     let mut named = promise;

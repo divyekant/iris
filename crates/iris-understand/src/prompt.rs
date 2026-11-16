@@ -316,7 +316,26 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     }
     let mut item = Value::Object(m);
     parties(&mut item, cx.me)?;
+    if form == "commitment" && cx.kind == crate::Kind::SelfOwner {
+        recipients_only(&mut item, a);
+    }
     Some(Draft::model(item, &quote))
+}
+
+/// In sent mail with recipients, the other party of a commitment is one of
+/// them: the model can choose among the recipients, and another address
+/// becomes the first recipient (section 7.4).
+fn recipients_only(item: &mut Value, a: &Analysis) {
+    let h = &a.head;
+    let all: Vec<&String> = h.to.iter().chain(&h.cc).chain(&h.bcc).collect();
+    let Some(first) = all.first() else { return };
+    for key in ["owner", "counterparty"] {
+        let Some(p) = item.get_mut(key) else { continue };
+        let ad = p.get("address").and_then(Value::as_str);
+        if ad.is_some_and(|ad| !all.iter().any(|r| r.as_str() == ad)) {
+            *p = json!({"kind": "sender", "address": first});
+        }
+    }
 }
 
 /// The quote occurs in the subject, the clean text or the attachment text,
