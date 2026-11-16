@@ -142,8 +142,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let existing = pinned(store, message)?;
     let earlier = thread_context(store, message, row.thread, row.internal_date)?;
     let same = same_sender(store, message, row.thread, row.internal_date, &head)?;
-    let parties = known_parties(store, row.thread)?;
-    // Steps 1 and 2 do not use the sender kind. Write 1 decides it (step 3).
+    // Steps 1 and 2 do not use the sender kind or the known parties. Write
+    // 1 decides them (step 3).
     let cx = Context {
         me: &row.me,
         kind: Kind::Stranger,
@@ -154,7 +154,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         existing: &existing,
         thread: &earlier,
         same_sender: &same,
-        known: &parties,
+        known: &[],
     };
     let mut a = analyze(&raw, &cx);
     // The mark phishing stays until a rebuild (section 6.7).
@@ -179,6 +179,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         text: a.text.text.clone(),
     };
     let mut decided = None;
+    let mut parties = Vec::new();
     let seen = store.write(|tx| {
         if state(tx, message, false)? != start {
             return Ok(None);
@@ -195,11 +196,14 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             "UPDATE message SET hostile = ?2, understood_at = NULL WHERE id = ?1",
             params![message, marks_json(&marks, false)],
         )?;
-        // The engine does not understand a draft: no item stays.
-        if draft {
-            drop_old_items(tx, message)?;
-            iris_talk::update(tx, row.thread, None, now_ms)?;
-        }
+        // A new run first deletes the items of the last run that are not
+        // pinned, and computes the conversation without the message (section
+        // 7.1), so a model error after this write leaves no stale item. A
+        // draft keeps no item.
+        drop_old_items(tx, message)?;
+        iris_talk::update(tx, row.thread, None, now_ms)?;
+        // After the header row and the sender kinds of this message.
+        parties = known_parties(tx, row.thread)?;
         Ok(Some(state(tx, message, true)?))
     })?;
     drop(raw);
@@ -213,6 +217,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let sent = kind_read == Kind::SelfOwner;
     let cx = Context {
         kind: kind_read,
+        known: &parties,
         ..cx
     };
     let Some(seen) = seen else {
@@ -345,7 +350,8 @@ fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result
               SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
               WHERE ml.message_id = m.id ORDER BY l.provider_id)), '') ||
            CASE WHEN ?2 THEN '|' || coalesce(m.hostile, '') || '|' ||
-                coalesce(m.understood_at, '') ELSE '' END
+                coalesce(m.understood_at, '') || '|' || m.tries || '|' ||
+                coalesce(m.retry_at, '') ELSE '' END
          FROM message m WHERE m.id = ?1",
         params![message, full],
         |r| r.get(0),
@@ -430,10 +436,11 @@ fn sender_kind_in(c: &rusqlite::Connection, from: &str) -> rusqlite::Result<Kind
 /// The most known parties that the model gets.
 const KNOWN_PARTIES: i64 = crate::prompt::MAX_KNOWN as i64;
 
-/// The known persons in the headers (From, To, Cc) of the earlier messages
-/// of the thread, as `Name <address>`, for the model (section 7.4).
-fn known_parties(store: &Store, thread: i64) -> Result<Vec<String>> {
-    Ok(store.read(|c| {
+/// The known persons in the headers (From, To, Cc) of the messages of the
+/// thread, also the current one, as `Name <address>`, for the model
+/// (section 7.4).
+fn known_parties(c: &rusqlite::Connection, thread: i64) -> rusqlite::Result<Vec<String>> {
+    {
         let mut st = c.prepare_cached(
             "SELECT DISTINCT s.name, s.address FROM message m
              JOIN header h ON h.message_id = m.id
@@ -453,7 +460,7 @@ fn known_parties(store: &Store, thread: i64) -> Result<Vec<String>> {
             })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(v)
-    })?)
+    }
 }
 
 /// The addresses of the known persons with this display name.
@@ -524,9 +531,14 @@ fn thread_context(
             "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
              WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
                AND m.internal_date < ?3
-               -- Hostile mail never goes to a model, also as context. A
-               -- draft is not mail of the thread yet.
+               -- Hostile mail never goes to a model, also as context. Only
+               -- a message that understanding judged has its marks, and a
+               -- SPAM label counts now, also one that came later. A draft
+               -- is not mail of the thread yet.
+               AND m.understood_at IS NOT NULL
                AND coalesce(m.hostile, '[]') = '[]'
+               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                               WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
                AND NOT EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
                                WHERE h.message_id = m.id AND s.kind = 'hostile')
                AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id

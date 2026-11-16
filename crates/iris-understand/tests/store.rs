@@ -962,6 +962,8 @@ fn a_change_during_the_model_call_saves_nothing() {
         "UPDATE message SET gone_at = 1 WHERE id = ?1",
         "INSERT INTO message_label(message_id, label_id)
          SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+        // A second run failed its try while this run waited for the model.
+        "UPDATE message SET tries = tries + 1, retry_at = 5 WHERE id = ?1",
     ] {
         let b = store("changed");
         let m = b.add("1", ASK, &["INBOX"]);
@@ -1106,7 +1108,10 @@ fn understanding_keeps_the_conversation_and_the_sender_kind_current() {
     let fake = Fake::with(&[COMMITMENT]);
     understand(&b.store, m, &fake, NOW).unwrap();
     let data = fake.calls.borrow()[0].1.clone();
-    assert!(data.contains("Known party: <bo@example.org>\n"), "{data}");
+    assert!(
+        data.contains("Known party: Bo Ren <bo@example.org>\n"),
+        "{data}"
+    );
     let n: i64 = b.col(
         "SELECT count(*) FROM item WHERE form = 'conversation' AND ?1 = ?1",
         0,
@@ -1125,4 +1130,71 @@ fn understanding_keeps_the_conversation_and_the_sender_kind_current() {
         0,
     );
     assert!(!doc.contains(&format!("m-{m}\"")), "{doc}");
+}
+
+#[test]
+fn a_rerun_drops_old_items_before_the_model_and_gives_the_known_parties() {
+    let b = store("rerun-error");
+    // Ana, in Cc of the first message of the thread, is a known person.
+    b.kind("ana@example.org", "Ana Lee", "person");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let fake = Fake::with(&[COMMITMENT]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let data = fake.calls.borrow()[0].1.clone();
+    assert!(
+        data.contains("Known party: Ana Lee <ana@example.org>\n"),
+        "{data}"
+    );
+    assert_eq!(b.items().len(), 1);
+    // A new run with a model error leaves no item of the last run.
+    let fake = Fake::default();
+    fake.answers
+        .borrow_mut()
+        .push_back(Err(ModelError::Server(529)));
+    assert!(understand(&b.store, m, &fake, NOW).is_err());
+    assert!(b.items().is_empty());
+    // The conversation no longer counts the message: it is gone.
+    let status: String = b.col(
+        "SELECT status FROM item WHERE form = 'conversation' AND ?1 = ?1",
+        0,
+    );
+    assert_eq!(status, "gone");
+}
+
+#[test]
+fn an_earlier_message_with_a_later_spam_label_is_not_context() {
+    let b = store("late-spam");
+    let first = "From: x@example.net\nTo: owner@example.com\nSubject: S\n\nEarly words.\n";
+    let m1 = b.add_in("1", "t", NOW - 2 * DAY, first, &["INBOX"]);
+    understand(&b.store, m1, &Fake::default(), NOW).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [m1],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // A body that sync saved, with no understanding: not context either.
+    let m2 = b.add_in("2", "t", NOW - 2 * DAY + 1, first, &["INBOX"]);
+    b.store
+        .put_body(
+            m2,
+            &iris_store::Body {
+                subject: "S".into(),
+                sender: "y".into(),
+                text: "Unjudged words.".into(),
+            },
+        )
+        .unwrap();
+    let m3 = b.add_in("3", "t", NOW - DAY, ASK, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m3, &fake, NOW).unwrap();
+    let data = fake.calls.borrow()[0].1.clone();
+    assert!(
+        !data.contains("Early words") && !data.contains("Unjudged"),
+        "{data}"
+    );
 }
