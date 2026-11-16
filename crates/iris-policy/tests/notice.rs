@@ -27,7 +27,8 @@ fn store(name: &str) -> (Dir, Store) {
                  INSERT INTO thread(account_id, provider_id) VALUES (1, 't');
                  INSERT INTO label(id, account_id, provider_id, name, kind) VALUES
                    (1, 1, 'INBOX', 'INBOX', 'system'), (2, 1, 'Label_1', 'Work', 'user'),
-                   (3, 1, 'SENT', 'Sent', 'system');
+                   (3, 1, 'SENT', 'Sent', 'system'), (4, 1, 'SPAM', 'Spam', 'system'),
+                   (5, 1, 'TRASH', 'Trash', 'system');
                  INSERT INTO sender(address, kind) VALUES ('ann@friends.example', 'person'),
                    ('news@shop.example', 'service'), ('x@far.example', 'hostile');",
             )?;
@@ -159,7 +160,8 @@ fn kind_of(m: &Mail) -> &'static str {
 fn expected(m: &Mail, rules: &[Cond]) -> Option<u32> {
     let kind = kind_of(m);
     let fresh = m.fetched_ago <= 60 && m.date_before_fetch <= 60;
-    if !fresh || !m.body || m.gone || kind == "hostile" || kind == "self" {
+    let junk = m.labels.contains(&4) || m.labels.contains(&5);
+    if !fresh || !m.body || m.gone || junk || kind == "hostile" || kind == "self" {
         return None;
     }
     rules
@@ -172,7 +174,7 @@ fn expected(m: &Mail, rules: &[Cond]) -> Option<u32> {
             }) && r.kind.is_none_or(|k| k == kind)
                 && r.form.is_none_or(|f| m.forms.contains(&f))
                 && r.label.is_none_or(|l| {
-                    m.labels.iter().any(|&i| ["INBOX", "Work", "Sent"][i as usize - 1] == l)
+                    m.labels.iter().any(|&i| ["INBOX", "Work", "Sent", "Spam", "Trash"][i as usize - 1] == l)
                 })
         })
         .map(|r| r.id)
@@ -229,7 +231,7 @@ fn no_notice_without_a_rule_that_matches() {
                 body: rng.next() % 5 != 0,
                 gone: rng.next() % 9 == 0,
                 hostile: rng.next() % 7 == 0,
-                labels: [1, 2, 3].into_iter().filter(|_| rng.next() % 3 == 0).collect(),
+                labels: [1, 2, 3, 4, 5].into_iter().filter(|_| rng.next() % 4 == 0).collect(),
                 forms: (0..rng.next() % 3).map(|_| rng.pick(&FORMS)).collect(),
                 subject: format!("Mail {n}"),
             };
@@ -331,4 +333,32 @@ fn a_notify_rule_needs_no_verbs_and_decides_no_action() {
     assert_eq!(p.rules[0].effect, Effect::Notify);
     let bad = ANN.replace("effect = \"notify\"", "effect = \"notify\"\nverbs = [\"archive\"]");
     assert!(parse(&bad).is_err());
+}
+
+#[test]
+fn a_spam_label_after_the_body_stops_the_notice() {
+    let (_d, s) = store("spam");
+    activate(&s, ANN);
+    let id = put(&s, &mail(), 0);
+    s.write(|tx| {
+        tx.execute("INSERT INTO message_label(message_id, label_id) VALUES (?1, 4)", [id])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notice::refresh(&s, NOW).unwrap().is_empty());
+}
+
+#[test]
+fn a_notice_keeps_the_rule_of_its_time() {
+    let (_d, s) = store("keep");
+    activate(&s, ANN);
+    put(&s, &mail(), 0);
+    let new = notice::refresh(&s, NOW).unwrap();
+    activate(&s, "version = 0\nmode = \"observe\"\n");
+    let list = s.read(|c| notice::list(c)).unwrap();
+    assert_eq!(list, new);
+    let version: i64 = s
+        .read(|c| Ok(c.query_row("SELECT policy_version FROM notice", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(version, 1);
 }
