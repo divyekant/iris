@@ -539,3 +539,27 @@ Content-Type: text/html
     assert_eq!(c.attachments.len(), 1);
     assert_eq!(c.attachments[0].name, "page.mht");
 }
+
+#[test]
+fn a_capped_attachment_text_shows_the_cut() {
+    let big = "w".repeat(1_200_000);
+    let raw = crlf(&format!(
+        "Subject: Big\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\nHi\n\
+         --m\nContent-Type: text/plain; name=big.txt\n\n{big}\n--m--\n"
+    ));
+    let c = clean(&raw);
+    let t = c.attachments[0].text.as_deref().unwrap_or_default();
+    assert!(
+        t.ends_with("[Iris cut the text here.]"),
+        "{}",
+        &t[t.len() - 40..]
+    );
+}
+
+#[test]
+fn an_uppercase_url_scheme_loses_its_tracking() {
+    let raw = crlf(
+        "Subject: Link\nContent-Type: text/html\n\n<a href=\"HTTPS://example.org/?utm_source=mail\">Shop</a>\n",
+    );
+    assert_eq!(clean(&raw).text, "[Shop](HTTPS://example.org/)");
+}

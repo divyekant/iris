@@ -83,16 +83,13 @@ pub fn clean_urls(text: &str) -> String {
 }
 
 fn find_url(s: &str) -> Option<usize> {
-    let mut from = 0;
-    while let Some(j) = s[from..].find("http") {
-        let i = from + j;
-        let t = &s[i..];
-        if t.starts_with("http://") || t.starts_with("https://") {
-            return Some(i);
-        }
-        from = i + 4;
-    }
-    None
+    // A URL scheme has no case: `HTTPS://` is a URL too.
+    let b = s.as_bytes();
+    (0..b.len()).find(|&i| {
+        let t = &b[i..];
+        let starts = |p: &[u8]| t.len() >= p.len() && t[..p.len()].eq_ignore_ascii_case(p);
+        starts(b"http://") || starts(b"https://")
+    })
 }
 
 #[cfg(test)]

@@ -226,7 +226,7 @@ impl Walker {
         }
         let is_text = mime_type == "text/plain" || mime_type == "text/html";
         if is_text && disp.main != "attachment" && name.is_none() {
-            let bytes = self.take(body, &cte, BudgetKind::Body);
+            let bytes = self.take(body, &cte);
             let text = mime::decode(&bytes, charset.as_deref());
             if mime_type != "text/html" {
                 return vec![text];
@@ -253,6 +253,8 @@ impl Walker {
         let at = self.attachments.len();
         let mut name = name.unwrap_or_default();
         let mut text = None;
+        // True if the attachment text is not complete.
+        let mut cut = false;
         if mime_type == "message/rfc822" && self.attach_left > 0 {
             let (inner, clipped) = decode_capped(body, cte, INNER_LIMIT);
             // The attached message has its own body budget and cut state, so
@@ -298,18 +300,23 @@ impl Walker {
             }
             text = Some(t);
         } else if mime_type == "text/plain" && self.attach_left > 0 {
-            let bytes = self.take(body, cte, BudgetKind::Attachment);
+            let (bytes, truncated) = decode_capped(body, cte, self.attach_left);
             text = Some(mime::decode(&bytes, charset.as_deref()));
+            cut = truncated;
         } else if mime_type == "application/pdf" && self.attach_left > 0 && size <= PDF_LIMIT {
             // Check the marker first, so that a file that is not a PDF costs no memory.
             if pdf::is_pdf(&decode_capped(body, cte, 1024).0) {
                 let (bytes, _) = decode_capped(body, cte, PDF_LIMIT as usize);
-                text = pdf::text(&bytes, self.attach_left);
+                // One byte more than the budget, so that a cut shows below.
+                text = pdf::text(&bytes, self.attach_left + 1);
             }
         }
         if let Some(t) = text.as_mut() {
             if t.len() > self.attach_left {
                 t.truncate(floor_char(t, self.attach_left));
+                cut = true;
+            }
+            if cut {
                 t.push_str(CUT_MARK);
             }
             self.attach_left = self.attach_left.saturating_sub(t.len());
@@ -330,17 +337,11 @@ impl Walker {
         );
     }
 
-    /// Decode at most the bytes that are left in a budget, and use them.
-    fn take(&mut self, body: &[u8], cte: &str, kind: BudgetKind) -> Vec<u8> {
-        let left = match kind {
-            BudgetKind::Body => self.body_left,
-            BudgetKind::Attachment => self.attach_left,
-        };
-        let (bytes, truncated) = decode_capped(body, cte, left);
-        if kind == BudgetKind::Body {
-            self.cut |= truncated;
-            self.body_left -= bytes.len();
-        }
+    /// Decode at most the bytes that are left in the body budget, and use them.
+    fn take(&mut self, body: &[u8], cte: &str) -> Vec<u8> {
+        let (bytes, truncated) = decode_capped(body, cte, self.body_left);
+        self.cut |= truncated;
+        self.body_left -= bytes.len();
         bytes.into_owned()
     }
 }
@@ -368,12 +369,6 @@ fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow
         bytes.to_mut().truncate(cap);
     }
     (bytes, truncated)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BudgetKind {
-    Body,
-    Attachment,
 }
 
 use mime::floor_char;

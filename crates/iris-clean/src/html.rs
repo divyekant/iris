@@ -499,11 +499,13 @@ impl Css {
             if sel.is_empty() || sel.contains(|c: char| c.is_whitespace() || ">+~:[*".contains(c)) {
                 continue;
             }
-            let key = match (sel.strip_prefix('#'), sel.rsplit_once('.')) {
-                (Some(id), _) => format!("#{id}"),
-                (None, Some((_, class))) => format!(".{class}"),
-                _ => continue,
-            };
+            // Only a single class or ID: a compound selector (`.a.b`, `p.x`)
+            // matches fewer elements than its last name.
+            let name = &sel[1..];
+            if !sel.starts_with(['.', '#']) || name.is_empty() || name.contains(['.', '#']) {
+                continue;
+            }
+            let key = sel.to_string();
             let at = match self.rules.iter().position(|(k, _)| *k == key) {
                 Some(at) => at,
                 None if self.rules.len() >= MAX_CSS_NAMES => return false,
@@ -994,7 +996,7 @@ mod tests {
 
     #[test]
     fn style_rules_hide_classes_and_ids() {
-        let h = "<style>.hidden{display:none} #pre, p.x { font-size: 0 } @media (max-width:1px) { .m{display:none} }\
+        let h = "<style>.hidden{display:none} #pre, .x { font-size: 0 } @media (max-width:1px) { .m{display:none} }\
                  .shown{color:red}</style><div class=\"a hidden\">secret</div><span id=pre>pre</span>\
                  <p class=x>tiny</p><div class=m>m</div><div class=shown>ok</div>";
         assert_eq!(md(h), "m\nok");
@@ -1016,6 +1018,11 @@ mod tests {
             md("<div style=\"visibility:hidden\">no <span style=\"visibility:visible\">Shown</span> no</div>\
                 <style>.v{visibility:hidden}</style><p class=v>gone</p>"),
             "Shown"
+        );
+        // A compound selector does not hide an element with only one of its names.
+        assert_eq!(
+            md("<style>.a.b{display:none} p.c{display:none}</style><div class=b>Visible</div><p class=c>too</p>"),
+            "Visible\n\ntoo"
         );
         // A later rule for the same name wins.
         assert_eq!(
