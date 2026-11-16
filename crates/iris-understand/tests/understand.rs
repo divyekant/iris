@@ -1001,7 +1001,11 @@ fn a_message_that_becomes_a_draft_loses_its_items() {
     understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
     assert_eq!(b.items().len(), 1);
     b.add("1", ASK, &["DRAFT"]);
-    assert!(understand(&b.store, m, &Fake::default(), NOW).unwrap().draft);
+    assert!(
+        understand(&b.store, m, &Fake::default(), NOW)
+            .unwrap()
+            .draft
+    );
     assert!(b.items().is_empty());
     let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
     assert!(at.is_none());
@@ -1009,7 +1013,10 @@ fn a_message_that_becomes_a_draft_loses_its_items() {
 
 #[test]
 fn phishing_with_bad_items_still_gives_the_mark() {
-    for answer in [r#"{"phishing": true}"#, r#"{"phishing": true, "items": [{"form": 3}]}"#] {
+    for answer in [
+        r#"{"phishing": true}"#,
+        r#"{"phishing": true, "items": [{"form": 3}]}"#,
+    ] {
         let b = store("phishing-bad");
         let m = b.add("1", ASK, &["INBOX"]);
         let fake = Fake::with(&[answer]);
@@ -1019,4 +1026,29 @@ fn phishing_with_bad_items_still_gives_the_mark() {
         let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
         assert_eq!(marks, r#"["phishing"]"#);
     }
+}
+
+#[test]
+fn a_held_message_that_no_rule_matches_now_loses_its_rule_item() {
+    let b = store("held-rule");
+    b.kind("news@notes.example.com", "Daily Notes", "service");
+    let m = b.add("1", FEED, &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    assert_eq!(b.items().len(), 1);
+    // The sender is a stranger now: the feed rule does not apply.
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE sender SET kind = 'stranger'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let out = understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    assert!(out.waiting);
+    assert!(b.items().is_empty());
 }

@@ -2,6 +2,7 @@
 //!
 //! Three writes:
 //! 1. Steps 1 to 3: the header row, the clean text and the hostile marks.
+//!    It also sets `understood_at` to NULL.
 //! 2. No write while the model works, so the model never holds the write lock.
 //! 3. Step 8: the items, their sources and `understood_at`, in one
 //!    transaction. A crash before the commit leaves the message not
@@ -161,10 +162,16 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // Write 1: steps 1 to 3.
     store.write(|tx| {
         put_header(tx, message, &a)?;
+        // The message is not understood until write 3 commits, so a stop
+        // between the writes leaves it for the next run (section 7.1).
         tx.execute(
-            "UPDATE message SET hostile = ?2 WHERE id = ?1",
+            "UPDATE message SET hostile = ?2, understood_at = NULL WHERE id = ?1",
             params![message, marks_json(&marks, false)],
         )?;
+        // The engine does not understand a draft: no item stays.
+        if draft {
+            drop_old_items(tx, message)?;
+        }
         Ok(())
     })?;
     let sender = match (&a.head.from_name, &a.head.from_addr) {
@@ -195,6 +202,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
     let d = decide(&a, &cx, (!held).then_some(model)).map_err(Error::Model)?;
     if d.waiting {
+        // No rule supports the old items now, and the model cannot run.
+        store.write(|tx| Ok(drop_old_items(tx, message)?))?;
         return Ok(Outcome {
             waiting: true,
             ..Outcome::default()

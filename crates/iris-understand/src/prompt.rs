@@ -84,6 +84,10 @@ pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, b
         None => false,
         Some(v) => v.as_bool()?,
     };
+    // Phishing gives no item, so the items do not need to be valid.
+    if phishing {
+        return Some((Vec::new(), true));
+    }
     let items = answer.get("items")?.as_array()?;
     if items.len() > MAX_ITEMS {
         return None;
@@ -98,7 +102,7 @@ pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, b
         }
         out.push(item(it, a, cx)?);
     }
-    Some((out, phishing))
+    Some((out, false))
 }
 
 fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
