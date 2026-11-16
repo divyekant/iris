@@ -436,6 +436,17 @@ fn a_cut_text_or_a_calendar_file_goes_to_the_model() {
 }
 
 #[test]
+fn a_booking_in_a_list_message_goes_to_the_model() {
+    let raw = LIST
+        .replace("This week in mail standards", "Flight itinerary")
+        .replace("Read the news.", "Reservation ABC123 for 12 Dec.");
+    assert!(drafts(&raw, Kind::Service, &[]).is_none());
+    // An invitation to a meeting is still an invitation.
+    let meeting = INVITE.replace("Planning", "Team meeting");
+    assert_eq!(one(&meeting, Kind::Person, &[]).item["kind"], "invitation");
+}
+
+#[test]
 fn an_invoice_with_a_code_goes_to_the_model() {
     let raw = "From: Shop <billing@shop.example>\nSubject: Your invoice\n\nVerification code: 482913\nTotal: 12.50 USD\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());

@@ -24,8 +24,11 @@ const RECORD_WORDS: [&str; 8] = [
     "order #",
     "total:",
 ];
-/// Whole words of a request to pay or to act: the model reads the message.
-const ACTION_WORDS: [&str; 9] = [
+/// Whole words of a request to pay or to act, or of a contract: the model
+/// reads the message. A word of a sign-in ("sign", "confirm") is not here:
+/// sign-in mail uses it.
+const MODEL_WORDS: [&str; 16] = [
+    // Payments and requests.
     "pay",
     "payment",
     "due",
@@ -35,6 +38,38 @@ const ACTION_WORDS: [&str; 9] = [
     "renew",
     "renewal",
     "action required",
+    "deadline",
+    "approve",
+    "approval",
+    // Contracts.
+    "contract",
+    "agreement",
+    "lease",
+    "policy",
+];
+/// Whole words of a booking, a ticket or an event (spec 1, section 6.4).
+/// An invitation uses them too, so they count after the invitation rule.
+const BOOKING_WORDS: [&str; 20] = [
+    "booking",
+    "booked",
+    "reservation",
+    "itinerary",
+    "flight",
+    "hotel",
+    "boarding",
+    "check-in",
+    "ticket",
+    "tickets",
+    "e-ticket",
+    "confirmed",
+    "event",
+    "events",
+    "rsvp",
+    "registration",
+    "registered",
+    "appointment",
+    "webinar",
+    "meeting",
 ];
 /// Whole words of a sign-in. A code counts only in a message with one.
 const LOGIN_WORDS: [&str; 12] = [
@@ -122,9 +157,9 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         });
         return Some(vec![Draft::rule(item, "invitation", quote)]);
     }
-    // Any other calendar request: the model decides, not the code or the
-    // list rule.
-    if a.text.invitation {
+    // Any other calendar request, and a booking, a ticket or an event: the
+    // model decides, not the code or the list rule.
+    if a.text.invitation || !words(&full_text(a), &BOOKING_WORDS).is_empty() {
         return None;
     }
     if cx.kind == Kind::Service {
@@ -183,16 +218,22 @@ fn or_none(s: &str) -> &str {
     }
 }
 
-fn looks_like_record(a: &Analysis) -> bool {
-    // The whole clean text and the attachment text: both are bounded, and a
-    // receipt can come late or only in an attached PDF.
+/// The subject, the clean text and the attachment text, one per line.
+fn full_text(a: &Analysis) -> String {
     let mut hay = format!("{}\n{}", a.text.subject, a.text.text);
     for (_, t) in &a.text.attachment_text {
         hay.push('\n');
         hay.push_str(t);
     }
+    hay
+}
+
+fn looks_like_record(a: &Analysis) -> bool {
+    // The whole clean text and the attachment text: both are bounded, and a
+    // receipt can come late or only in an attached PDF.
+    let hay = full_text(a);
     let low = hay.to_lowercase();
-    RECORD_WORDS.iter().any(|w| low.contains(w)) || !words(&hay, &ACTION_WORDS).is_empty()
+    RECORD_WORDS.iter().any(|w| low.contains(w)) || !words(&hay, &MODEL_WORDS).is_empty()
 }
 
 /// The message is about a sign-in: a code in it can be a sign-in code
