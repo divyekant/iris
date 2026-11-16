@@ -749,8 +749,10 @@ applies it.
    result counts these messages as unchanged. Known limit (issue #225):
    a change in Gmail outside Iris that puts the message back in the `post`
    state is not detected, and the undo reverses it.
-4. For `trash`, the undo changeset has two actions, and each one is an
-   ordinary action with its own ledger entry and recovery:
+4. For `trash`, the undo changeset has one or two actions, and each one is
+   an ordinary action with its own ledger entry and recovery. Action 2
+   exists only if one or more messages of action 1 had no `INBOX` in `pre`
+   of the entry:
    1. `messages.untrash` for each message that still has `TRASH`. Only an
       undo makes this action, with the verb `untrash`: submit denies
       `untrash` with no link. Its `post` is "no `TRASH`".
@@ -783,7 +785,7 @@ An undo of an undo is a new action, not a delete of the record.
 |---|---|---|
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
 | A second undo while an undo of the entry is open | Two undos change the same messages | `undo` refuses it until each action of the open undo ended. The trigger refuses a second open link of the same step. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
-| A link of an action whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. Submit denies `untrash` unless the action is step 1 of the undo of a `trash` entry, also when a writer changes the verb of a linked draft. |
+| A link of an action whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
 | A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
 | A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message with a later `ledger_message` row with `done` or `unknown`, except the rows of the undos of the same entry. |

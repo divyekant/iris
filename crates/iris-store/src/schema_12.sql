@@ -74,3 +74,14 @@ CREATE VIEW undo_pair AS
   JOIN changeset_action a1 ON a1.changeset_id = a2.changeset_id
   JOIN ledger_undo u1 ON u1.action_id = a1.id AND u1.step = 1
   WHERE u2.step = 2;
+
+-- The link checks the verb and the arguments of the action. They do not
+-- change after the link, also in a draft, so the check stays true.
+CREATE TRIGGER ledger_undo_action BEFORE UPDATE OF verb, targets, args, changeset_id
+ON changeset_action
+WHEN EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = old.id)
+  AND (new.verb IS NOT old.verb OR new.targets IS NOT old.targets
+       OR new.args IS NOT old.args OR new.changeset_id IS NOT old.changeset_id)
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the action of an undo link does not change');
+END;

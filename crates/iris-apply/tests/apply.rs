@@ -1507,10 +1507,10 @@ fn a_failed_untrash_lets_the_undo_end() {
     assert_eq!(b.entry_state(entry).0, "undone");
 }
 
-/// Submit denies an `untrash` that is not step 1 of the undo of a `trash`,
-/// also when a writer changes the verb of a linked draft.
+/// A linked draft keeps its verb, arguments and targets, so the check of
+/// the link stays true (migration 12).
 #[test]
-fn only_the_undo_of_trash_makes_untrash() {
+fn a_linked_action_does_not_change() {
     let b = setup("undo-untrash", 60, Some(APPLY_POLICY));
     let ms = b.messages(IN_INBOX, 1);
     let a = b.approved("archive", &ms, PERSON);
@@ -1534,31 +1534,29 @@ fn only_the_undo_of_trash_makes_untrash() {
         None,
     )
     .unwrap();
-    let changed = b.store.write(|tx| {
-        tx.execute(
-            "INSERT INTO ledger_undo(action_id, ledger_id, step)
-             SELECT id, ?2, 1 FROM changeset_action WHERE changeset_id = ?1",
-            params![cs, entry],
-        )?;
-        Ok(tx.execute(
-            "UPDATE changeset_action SET verb = 'untrash' WHERE changeset_id = ?1",
-            [cs],
-        )?)
-    });
-    assert!(changed.is_ok(), "a draft can change: {changed:?}");
-    {
-        iris_changeset::submit(&b.store, cs, &person, "u", now()).unwrap();
-        let state: String = b
-            .store
-            .read(|c| {
-                Ok(c.query_row(
-                    "SELECT state FROM changeset_action WHERE changeset_id = ?1",
-                    [cs],
-                    |r| r.get(0),
-                )?)
-            })
-            .unwrap();
-        assert_eq!(state, "denied");
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO ledger_undo(action_id, ledger_id, step)
+                 SELECT id, ?2, 1 FROM changeset_action WHERE changeset_id = ?1",
+                params![cs, entry],
+            )?)
+        })
+        .unwrap();
+    // The action of a link does not change, also in a draft.
+    for edit in [
+        "verb = 'untrash'",
+        "verb = 'trash'",
+        "args = '{\"label\":\"x\"}'",
+        "targets = '{\"messages\":[\"m-999999\"]}'",
+    ] {
+        let r = b.store.write(|tx| {
+            Ok(tx.execute(
+                &format!("UPDATE changeset_action SET {edit} WHERE changeset_id = ?1"),
+                [cs],
+            )?)
+        });
+        assert!(r.unwrap_err().to_string().contains("iris:"), "{edit}");
     }
 }
 
