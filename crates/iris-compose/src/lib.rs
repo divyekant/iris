@@ -354,7 +354,7 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
     let addresses = |l: Option<mail_parser::AddressList<'_>>| -> Option<Vec<String>> {
         let Some(l) = l else { return Some(Vec::new()) };
         l.mailboxes()
-            .map(|b| b.address().map(str::to_ascii_lowercase))
+            .map(|b| b.address().map(str::to_string))
             .collect()
     };
     let ids = |l: Option<mail_parser::TextList<'_>>| -> Vec<String> {
@@ -372,11 +372,14 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         subject: spaces(m.subject().unwrap_or("")),
         // Mail has CRLF line ends; the content has LF (Content::check).
         body: line_ends(&m.body_text(0)?),
+    };
+    // The content must be in the normal form of Content::check: a change
+    // that the check refuses (too many recipients, a large body) or erases
+    // (a duplicate address, an upper case address) is not in the hash, so
+    // it gives no content.
+    if content.clone().check().ok()? != content {
+        return None;
     }
-    // A content that the person changed at Gmail keeps the limits of a
-    // new draft (too many recipients, a large body), or gives no content.
-    .check()
-    .ok()?;
     // Each thread header of the message is in the content hash, or the
     // message gives no content: a header that the read drops (for example
     // References with no In-Reply-To) must not keep the approved hash.

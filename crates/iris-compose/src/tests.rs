@@ -334,6 +334,7 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
                 })
                 .unwrap_or_default()
             };
+            assert_eq!(back.content.clone().check(), Ok(back.content.clone()));
             assert_eq!(seen(m.to()), back.content.to);
             assert_eq!(seen(m.cc()), back.content.cc);
             // The thread headers are all in the content, so in the hash.
@@ -447,5 +448,16 @@ fn a_changed_draft_keeps_the_limits() {
     assert!(read_sent(crowded.as_bytes(), ME).is_none());
     let large = format!("{raw}{}\r\n", "x".repeat(MAX_BODY));
     assert!(read(large.as_bytes(), ME).is_none());
+    // A duplicate or upper case address that the check would erase.
+    for (from, to) in [
+        ("To: <p@x.org>", "To: <p@x.org>\r\nCc: <p@x.org>"),
+        ("To: <p@x.org>", "To: <p@x.org>, <p@x.org>"),
+        ("To: <p@x.org>", "To: <P@x.org>"),
+    ] {
+        let changed = raw.replacen(from, to, 1).replacen("Body", "Other", 1);
+        assert_ne!(changed, raw);
+        assert!(read(changed.as_bytes(), ME).is_none(), "{changed}");
+        assert!(read_sent(changed.as_bytes(), ME).is_none(), "{changed}");
+    }
     assert!(read(raw.as_bytes(), ME).is_some());
 }
