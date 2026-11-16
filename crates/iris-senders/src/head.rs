@@ -204,6 +204,23 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_in_a_comment_does_not_start_a_quoted_string() {
+        let h = Head::parse(
+            b"To: alice@example.org (said \"hello), bob@example.org\r\nCc: (a \"b\") cy@example.net, dee@example.net\r\n\r\n",
+        );
+        let to: Vec<String> = h.recipients().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(
+            to,
+            [
+                "alice@example.org",
+                "bob@example.org",
+                "cy@example.net",
+                "dee@example.net"
+            ]
+        );
+    }
+
+    #[test]
     fn reads_group_syntax() {
         let h = Head::parse(
             b"To: Friends: Ana <ana@example.org>, bob@example.org;, cy@example.net\r\nCc: Empty:;\r\n\r\n",
