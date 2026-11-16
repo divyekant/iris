@@ -216,6 +216,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-store/` | The store: the data folder, SQLite with full-text search, raw message files and encrypted secrets. | `engine` |
 | `crates/iris-sync/` | The first sync of the mirror: a full copy of a Gmail mailbox into the store, with resume after a stop. | `engine` |
 | `crates/iris-clean/` | The clean text of one message: MIME, charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
+| `crates/iris-understand/` | Understanding: one message to items of the five forms. Headers, hostile marks, fixed rules, then the model, and a schema check of each item. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
