@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, Brief, Changeset, HandledPage, Item, Message, Policy, Rule, Status, Target } from "../src/api";
+import type { Action, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Message, Policy, Rule, Status, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -31,6 +31,35 @@ export const status: Status = {
   messages: { total: 84212, fetched: 84212, understood: 84212, gone: 0 },
 };
 
+const stranger = (id: string, name: string | null, address: string) => ({ kind: "sender" as const, sender: id, ...(name ? { name } : {}), address });
+const ask = (id: string, title: string, who: ReturnType<typeof stranger>, due: string | null, message: string, quote: string): Item =>
+  ({ ...youOwe, id, title, counterparty: who, due: due ? { date: due, strict: false } : undefined, sources: [{ message, thread: `t-${message.slice(2)}`, role: "origin", quote }] }) as unknown as Item;
+const maria = stranger("p-71", "Maria Ruiz", "maria@brightpath.example");
+const leo = stranger("p-72", "Leo Park", "leo@quartzlabs.example");
+const vendor = stranger("p-73", null, "billing@vendorhub.example");
+/** The items of the stranger gate (spec 1 section 6.7): three senders that you do not know. */
+export const strangers: Item[] = [
+  ask("c-401", "Review the pitch deck before Friday", maria, "2026-11-20", "m-60101", "Could you look at our pitch deck before Friday?"),
+  { ...(conversation as unknown as Item), id: "v-402", title: "Intro from Sam Ortiz", participants: [{ kind: "self" }, maria], latest: { at: "2026-11-16T07:55:00Z", from: maria, snippet: "Sam said that you two worked on the same team." } },
+  ask("c-403", "Speak at the March meetup", leo, null, "m-60102", "Would you speak at our March meetup?"),
+  ask("c-404", "Confirm the address for the invoice", vendor, "2026-11-18", "m-60103", "Please confirm the billing address for the invoice."),
+];
+export const gate: GatePage = {
+  count: 3,
+  next: null,
+  senders: [
+    { id: "p-71", name: "Maria Ruiz", address: "maria@brightpath.example", count: 2, items: [strangers[1], strangers[0]] },
+    { id: "p-72", name: "Leo Park", address: "leo@quartzlabs.example", count: 1, items: [strangers[2]] },
+    { id: "p-73", name: null, address: "billing@vendorhub.example", count: 1, items: [strangers[3]] },
+  ],
+};
+/** One sender that you ignored at the gate. */
+export const ignored: GatePage = {
+  count: 1,
+  next: null,
+  senders: [{ id: "p-74", name: "Dana Brooks", address: "dana@leadgen.example", count: 1, items: [ask("c-405", "Book a call about your Q1 plans", stranger("p-74", "Dana Brooks", "dana@leadgen.example"), null, "m-60001", "Do you have 15 minutes this week?")] }],
+};
+
 export const brief: Brief = {
   you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe")),
   owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you")),
@@ -39,7 +68,9 @@ export const brief: Brief = {
   // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
   feed: of([]),
   signals: of(byForm("signal")),
-  strangers: of([]),
+  strangers: of(strangers),
+  gate,
+  declined: ignored.count,
   hostile: 2,
   not_understood: 1,
   oldest_fetched: null,
@@ -271,12 +302,13 @@ export function answer(path: string): unknown {
   if (name === "records") return { receipt: 1, booking: 1 };
   if (name === "brief" && id === "hidden") return { count: hidden.length, items: hidden, next: null };
   if (name === "handled") return handled;
+  if (name === "gate") return id === "declined" ? ignored : gate;
   if (name === "brief" && id) {
     const section = brief[id as "you_owe"];
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
   }
   if (name === "brief") return brief;
-  if (name === "items" && id) return [...items, ...hidden].find((i) => i.id === id);
+  if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
   }
@@ -287,4 +319,12 @@ export function answer(path: string): unknown {
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
   return undefined;
+}
+
+/** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
+export function answerSender(id: string, answer: string): GateAnswer | undefined {
+  const sender = [...gate.senders, ...ignored.senders].find((s) => s.id === id);
+  if (!sender || !["accept", "decline", "reopen"].includes(answer)) return undefined;
+  const accepted = answer === "accept";
+  return { id, address: sender.address, name: sender.name, kind: accepted ? "person" : "stranger", decided_by: accepted ? "person" : "engine", declined: answer === "decline" };
 }

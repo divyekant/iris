@@ -10,6 +10,7 @@
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
+  import Gate from "./Gate.svelte";
 
   let {
     brief: firstBrief,
@@ -40,6 +41,8 @@
   });
 
   const SHOWN = 7;
+  // After an answer at the gate, the items of the sender move: load the brief again.
+  const reload = () => void loadBrief().then((b) => (brief = b)).catch(() => {});
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
@@ -138,7 +141,14 @@
 {/if}
 
 {#each parts as part (part.key)}
-  {#if part.count > 0}
+  {#if part.key === "strangers" && brief.gate}
+    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0}
+      <section aria-labelledby="strangers">
+        <h2 id="strangers"><span>{part.title}</span> <span class="count">{brief.gate.count}</span></h2>
+        <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />
+      </section>
+    {/if}
+  {:else if part.count > 0}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
