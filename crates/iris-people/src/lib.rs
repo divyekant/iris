@@ -420,11 +420,121 @@ fn mailbox(part: &str) -> Option<(String, Option<String>)> {
     let address = one_address(&part)?;
     let name = part
         .rfind('<')
-        .map(|i| part[..i].trim().trim_matches('"').trim().to_string())
+        .map(|i| {
+            let mut n = &part[..i];
+            // A group such as `Team: Ana <a@example.org>` starts with its name.
+            if let Some(c) = group_colon(n) {
+                n = &n[c + 1..];
+            }
+            decode_words(n.trim().trim_matches('"').trim())
+        })
         .filter(|n| !n.is_empty())
         // The old form `a@example.org (Name)` puts the name in a comment.
         .or(comment);
     Some((address, name))
+}
+
+/// The position of the `:` that ends a group name, outside quoted text.
+fn group_colon(text: &str) -> Option<usize> {
+    let mut quoted = false;
+    for (i, c) in text.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ':' if !quoted => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Decode the RFC 2047 encoded words of a display name, such as
+/// `=?UTF-8?Q?Bo_H=C3=A4rt?=`. A word with another charset than UTF-8,
+/// US-ASCII or ISO-8859-1, or with a bad encoding, stays as it is.
+// shortcut: own small decoder, use iris_clean's decoder when PR #15 (iris-clean) merges.
+fn decode_words(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    let mut after_word = false;
+    while let Some(start) = rest.find("=?") {
+        let (before, word) = rest.split_at(start);
+        let decoded = word.get(2..).and_then(|w| {
+            let mut it = w.splitn(3, '?');
+            let (charset, enc, tail) = (it.next()?, it.next()?, it.next()?);
+            let end = tail.find("?=")?;
+            let bytes = match enc {
+                "Q" | "q" => q_decode(&tail[..end])?,
+                "B" | "b" => b_decode(&tail[..end])?,
+                _ => return None,
+            };
+            let text = match charset.to_ascii_lowercase().as_str() {
+                "utf-8" | "us-ascii" => String::from_utf8(bytes).ok()?,
+                "iso-8859-1" | "latin1" => bytes.iter().map(|&b| b as char).collect(),
+                _ => return None,
+            };
+            Some((text, 2 + charset.len() + enc.len() + 2 + end + 2))
+        });
+        match decoded {
+            Some((t, len)) => {
+                // Space between two encoded words is not part of the name.
+                if !(after_word && before.trim().is_empty()) {
+                    out.push_str(before);
+                }
+                out.push_str(&t);
+                rest = &word[len..];
+                after_word = true;
+            }
+            None => {
+                out.push_str(before);
+                out.push_str("=?");
+                rest = &word[2..];
+                after_word = false;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn q_decode(text: &str) -> Option<Vec<u8>> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'_' => out.push(b' '),
+            b'=' => {
+                let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 2;
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
+fn b_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// Remove the RFC 5322 comments, such as `(Name)`, outside quoted text.
@@ -596,6 +706,28 @@ mod tests {
             [
                 ("ana@example.org".to_string(), Some("Lind, Ana".to_string())),
                 ("bo@example.org".to_string(), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn encoded_words() {
+        assert_eq!(decode_words("=?UTF-8?Q?Bo_H=C3=A4rt?="), "Bo Härt");
+        assert_eq!(decode_words("=?utf-8?B?Qm8gSMOkcnQ=?="), "Bo Härt");
+        assert_eq!(
+            decode_words("=?UTF-8?Q?Bo?= =?UTF-8?Q?_H=C3=A4rt?="),
+            "Bo Härt"
+        );
+        assert_eq!(
+            decode_words("Dr =?ISO-8859-1?Q?J=F6rg?= Moss"),
+            "Dr Jörg Moss"
+        );
+        assert_eq!(decode_words("=?KOI8-R?Q?x?= =?bad"), "=?KOI8-R?Q?x?= =?bad");
+        assert_eq!(
+            mailboxes(r#"Team: Ana Lind <a@example.org>, "x: y" <b@example.org>;"#),
+            [
+                ("a@example.org".to_string(), Some("Ana Lind".to_string())),
+                ("b@example.org".to_string(), Some("x: y".to_string()))
             ]
         );
     }
