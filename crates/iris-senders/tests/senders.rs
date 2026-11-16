@@ -736,6 +736,25 @@ fn a_sent_message_at_the_same_time_is_not_a_reply() {
 }
 
 #[test]
+fn a_changed_sent_message_compares_new_recipients_after_the_old_ones_go() {
+    let mut c = Case::new("swap");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: bob@paypal.com"),
+    );
+    // A new fetch of the same message names Alice in place of Bob. Bob was
+    // the only known sender of paypal.com.
+    let raw = format!("From: {OWNER}\r\nTo: alice@paypa1.com\r\nSubject: x\r\n\r\nBody text.\r\n");
+    let mut m = new_message("m1", "t1", 1000, &["SENT"], raw.as_bytes());
+    m.content_sha256 = Some(c.store.put_content(raw.as_bytes()).unwrap());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    again(&c, 1, &raw);
+    assert_eq!(c.row("bob@paypal.com").1.as_deref(), Some("stranger"));
+    assert_eq!(c.row("alice@paypa1.com").1.as_deref(), Some("person"));
+}
+
+#[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
     // Messages 3 and 4 each have 2 earlier messages.
