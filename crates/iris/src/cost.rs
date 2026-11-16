@@ -525,23 +525,14 @@ pub enum AfterSync {
 
 /// The run after a sync (R1-28), in `iris serve` and `iris mirror sync`:
 /// the batch runner with no limit but the budget. An idle run leaves no
-/// row. After a run that stopped on a model error, the wait of
-/// [`batch::retry_after`] holds for every process: runs make no call until
-/// it ends, and then the marks `waits_model` of that time are cleared.
+/// row. After a run that stopped on a model error, the runner honors the
+/// wait of [`batch::retry_after`] for that model version, under its lock
+/// (`Limits::wait_after_error`).
 pub fn after_sync(store: &Store, now_ms: i64) -> Result<AfterSync, String> {
-    let wait = batch::retry_after(store).map_err(|e| e.to_string())?;
-    let calls = wait.is_none_or(|t| now_ms >= t);
-    if calls && wait.is_some() {
-        store
-            .write(|tx| Ok(batch::clear_waiting(tx)?))
-            .map_err(|e| e.to_string())?;
-    }
     let connect = |row: &ModelRow| connect(store, row);
-    // The first run after a wait keeps its row, also when idle: the row
-    // ends the wait for `retry_after`.
     let limits = Limits {
-        keep_idle: calls && wait.is_some(),
-        calls,
+        keep_idle: false,
+        wait_after_error: true,
         ..Limits::default()
     };
     match batch::run(store, &connect, &limits, now_ms) {

@@ -39,3 +39,9 @@ CREATE TRIGGER waits_model_setting AFTER UPDATE OF version ON model_setting
 BEGIN
   UPDATE message SET waits_model = 0 WHERE waits_model = 1;
 END;
+
+-- The model version of a run that could call the model (NULL for a run
+-- with no model, or a run that waited after a model error). The wait after
+-- a model error counts only the runs of the current version, so a new
+-- model has no wait.
+ALTER TABLE understand_run ADD COLUMN model_version INTEGER;

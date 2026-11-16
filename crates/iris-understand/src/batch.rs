@@ -121,11 +121,13 @@ pub struct Limits {
     /// False for the run after a sync: a run that read no message and made
     /// no call deletes its row, so a run each minute adds no row.
     pub keep_idle: bool,
-    /// False: no model call. Each refused message gets the mark
-    /// `waits_model`, as with no model. The run after a sync uses it while
-    /// it waits after a model error, then clears the marks with
-    /// [`clear_waiting`].
-    pub calls: bool,
+    /// True for the run after a sync: honor the wait after a model error
+    /// of [`retry_after`]. During the wait the run makes no model call, and
+    /// each refused message gets the mark `waits_model`, as with no model.
+    /// The first run after the wait clears the marks and keeps its row, so
+    /// its stop ends or extends the wait. The run takes these decisions
+    /// under its lock, for the model version of the row.
+    pub wait_after_error: bool,
 }
 
 impl Default for Limits {
@@ -135,7 +137,7 @@ impl Default for Limits {
             max_messages: None,
             max_cost_micro_usd: None,
             keep_idle: true,
-            calls: true,
+            wait_after_error: false,
         }
     }
 }
@@ -237,25 +239,37 @@ pub type Connect<'a> = &'a dyn Fn(&ModelRow) -> Result<Box<dyn Model>, String>;
 /// caller.
 pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Result<Report, Error> {
     let _lock = lock(store)?;
-    let row = store.read(|c| Ok(model_row(c)?))?;
-    let priced = row.as_ref().is_some_and(|r| r.price.is_some());
-    // A run with no model call has no model: `retry_after` skips it.
-    let name = row
-        .as_ref()
-        .filter(|_| limits.calls)
-        .map_or("", |r| r.model.as_str());
-    let run = store.write(|tx| {
+    // The row, the wait and the clear of the marks, in one write under the
+    // lock: no other run can mark or clear between them.
+    let (row, calls, waited, run) = store.write(|tx| {
+        let row = model_row(tx)?;
+        let wait = match &row {
+            Some(r) if limits.wait_after_error => retry_after(tx, r.version)?,
+            _ => None,
+        };
+        let calls = wait.is_none_or(|t| now_ms >= t);
+        if calls && wait.is_some() {
+            clear_waiting(tx)?;
+        }
+        // A run with no model call records no model: `retry_after` skips it.
+        let model = row.as_ref().filter(|_| calls);
         tx.execute(
-            "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
-                                        unknown_cost_micro_usd)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![now_ms, name, PROMPT, priced.then_some(0)],
+            "INSERT INTO understand_run(started_at, model, model_version, prompt,
+                                        cost_micro_usd, unknown_cost_micro_usd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                now_ms,
+                model.map_or("", |r| r.model.as_str()),
+                model.map(|r| r.version),
+                PROMPT,
+                row.as_ref().is_some_and(|r| r.price.is_some()).then_some(0)
+            ],
         )?;
-        Ok(tx.last_insert_rowid())
+        Ok((row, calls, wait.is_some(), tx.last_insert_rowid()))
     })?;
-    let result = run_messages(store, connect, row.as_ref(), run, limits, now_ms);
+    let result = run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms);
     let stop = result.as_ref().map_or(Stop::Error, |s| *s);
-    let keep_idle = limits.keep_idle || result.is_err();
+    let keep_idle = limits.keep_idle || waited || result.is_err();
     let report = store.write(|tx| {
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
@@ -281,6 +295,7 @@ fn run_messages(
     store: &Store,
     connect: Connect,
     row: Option<&ModelRow>,
+    calls: bool,
     run: i64,
     limits: &Limits,
     now_ms: i64,
@@ -290,7 +305,7 @@ fn run_messages(
     // resets come before the main pass, which sees them.
     refresh_senders(store, now_ms)?;
     let inner: Box<dyn Model> = match row {
-        Some(r) if limits.calls => connect(r).map_err(Error::Connect)?,
+        Some(r) if calls => connect(r).map_err(Error::Connect)?,
         _ => Box::new(NoModel),
     };
     let model = Budgeted::new(inner.as_ref(), store, run, row);
@@ -568,28 +583,29 @@ pub const RETRY_FIRST_MS: i64 = 60_000;
 /// The longest wait, in milliseconds.
 pub const RETRY_MAX_MS: i64 = 3_600_000;
 
-/// The end of the wait after model errors, read from the run rows, so each
-/// process sees the same wait. Only the runs that could call a model count
-/// (`model` is not empty: not a run with `Limits::calls` false or with no
-/// model). `None` if the last of them did not stop on `model`, `unknown`
-/// or `error`, so the first run after the wait ends it.
-pub fn retry_after(store: &Store) -> Result<Option<i64>, Error> {
-    Ok(store.read(|c| {
-        let mut st = c.prepare_cached(
-            "SELECT stop IN ('model', 'unknown', 'error'), coalesce(ended_at, started_at)
-             FROM understand_run
-             WHERE model <> '' AND ended_at IS NOT NULL
-             ORDER BY id DESC LIMIT 7",
-        )?;
-        let rows = st
-            .query_map([], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let failed = rows.iter().take_while(|(f, _)| *f).count();
-        Ok(rows.first().filter(|_| failed > 0).map(|(_, at)| {
-            let wait = RETRY_FIRST_MS.saturating_mul(1 << (failed - 1).min(6));
-            at.saturating_add(wait.min(RETRY_MAX_MS))
-        }))
-    })?)
+/// The end of the wait after model errors of the model `version`, read
+/// from the run rows, so each process sees the same wait. Only the runs
+/// that could call that model count (`model_version` is set only on a run
+/// that could call; a new model version has no wait). `None` if the last
+/// of them did not stop on `model`, `unknown` or `error`, so the first run
+/// after the wait ends it.
+pub fn retry_after(c: &Connection, version: i64) -> rusqlite::Result<Option<i64>> {
+    let mut st = c.prepare_cached(
+        "SELECT stop IN ('model', 'unknown', 'error'), ended_at
+         FROM understand_run
+         WHERE model_version = ?1 AND ended_at IS NOT NULL
+         ORDER BY id DESC LIMIT 7",
+    )?;
+    let rows = st
+        .query_map([version], |r| {
+            Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let failed = rows.iter().take_while(|(f, _)| *f).count();
+    Ok(rows.first().filter(|_| failed > 0).map(|(_, at)| {
+        let wait = RETRY_FIRST_MS.saturating_mul(1 << (failed - 1).min(6));
+        at.saturating_add(wait.min(RETRY_MAX_MS))
+    }))
 }
 
 /// The size of the work before a run (spec "Estimate").

@@ -50,13 +50,16 @@ pending state that the store gives. Each one has an issue:
   understanding thread apart from the sync threads, each 10 seconds. A run
   with nothing pending reads nothing and leaves no row
   (`Limits::keep_idle`). A run that stopped on `model`, `unknown` or
-  `error` starts a wait that doubles from 60 seconds to 1 hour. The store
-  holds the wait: `batch::retry_after` reads it from the `understand_run`
-  rows, so `iris serve` and each `iris mirror sync` command see the same
-  wait. During the wait, runs make no call (`Limits::calls`) and record no
-  model, and the mail that needs the model gets `waits_model`. The first
-  run after the wait clears the marks in a write, calls the model and keeps
-  its row, so its stop ends or extends the wait.
+  `error` starts a wait that doubles from 60 seconds to 1 hour, for that
+  model version only (`understand_run.model_version`, schema 5). The store
+  holds the wait: `batch::retry_after` reads it from the run rows, so
+  `iris serve` and each `iris mirror sync` command see the same wait. The
+  runner decides under its lock, in the write that starts the run
+  (`Limits::wait_after_error`). During the wait, runs make no call and
+  record no model version, and the mail that needs the model gets
+  `waits_model`. The first run after the wait clears the marks in that
+  write, calls the model and keeps its row, so its stop ends or extends
+  the wait. A new model version has no wait.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 

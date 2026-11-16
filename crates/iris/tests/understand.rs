@@ -438,6 +438,45 @@ fn the_run_after_a_sync_tries_again_after_a_model_error() {
     assert_eq!(run(after + 1_000), iris::cost::AfterSync::Idle);
 }
 
+/// The wait after a model error belongs to the model version that failed,
+/// and only a run that holds the lock clears the marks of that wait.
+#[test]
+fn the_wait_after_a_model_error_is_for_that_model_and_under_the_lock() {
+    use iris::cost::AfterSync;
+    let (store, _fake) = synced("retry-scope");
+    let (url, calls) = flaky_model_server(1);
+    let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
+    assert!(ok, "{err}");
+    let waits = "SELECT count(*) FROM message WHERE waits_model = 1";
+    let now = iris::engine::now_ms();
+    let run = |at: i64| iris::cost::after_sync(&store, at).unwrap();
+    assert!(matches!(run(now), AfterSync::Ran { retry: true, .. }));
+    // In the wait: the mail that needs the model gets the mark.
+    run(now + 1_000);
+    let marked = col(&store, waits).unwrap();
+    assert!(marked > 0);
+    // The wait has ended, but another run holds the lock: this run clears
+    // no mark, so a mark set by the other run stays.
+    let after = now + iris_understand::batch::RETRY_FIRST_MS + 1_000;
+    let held = iris_understand::batch::lock(&store).unwrap();
+    assert_eq!(run(after), AfterSync::Busy);
+    assert_eq!(col(&store, waits), Some(marked));
+    drop(held);
+    // A new model in the wait: the next run calls it at once.
+    let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-2"]);
+    assert!(ok, "{err}");
+    let before = calls.load(Ordering::SeqCst);
+    assert!(matches!(
+        run(now + 2_000),
+        AfterSync::Ran { retry: false, .. }
+    ));
+    assert!(
+        calls.load(Ordering::SeqCst) > before,
+        "the new model is called"
+    );
+    assert_eq!(col(&store, waits), Some(0));
+}
+
 #[test]
 fn mail_refused_for_the_budget_waits_until_an_approval() {
     let (store, _fake) = synced("budget-wait");
