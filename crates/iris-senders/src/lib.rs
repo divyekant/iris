@@ -19,8 +19,9 @@ use head::Head;
 /// The kind of a sender. The kind is a property of the address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// You: the message has the label `SENT` or `DRAFT`, or comes from the
-    /// address of the account. No `sender` row.
+    /// You: the message has the label `SENT` or `DRAFT`. A `From` with the
+    /// address of the account is not enough, because anyone can write it.
+    /// No `sender` row.
     SelfOwner,
     Person,
     Service,
@@ -549,6 +550,7 @@ mod tests {
             ("paypall.com", "paypal.com"),
             ("pyapal.com", "paypal.com"),
             ("rnicrosoft.com", "microsoft.com"),
+            ("dh1.com", "dhl.com"),
             ("paypall.co.uk", "paypal.co.uk"),
             ("paypal-verify.co.uk", "paypal.co.uk"),
         ];
