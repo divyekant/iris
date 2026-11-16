@@ -9,6 +9,11 @@ publish.workspace = true
 
 [dependencies]
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
+iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-senders = { version = "0.0.0", path = "../iris-senders" }
 jsonschema = { version = "=0.61.2", default-features = false }
 serde_json = "1"
+
+[dev-dependencies]
+iris-eval = { version = "0.0.0", path = "../iris-eval" }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }
