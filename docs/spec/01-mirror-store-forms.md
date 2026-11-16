@@ -676,6 +676,10 @@ The `hostile` column of the message holds each mark that applies:
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
+A message with the label `SENT` is your mail. It never gets the marks `dmarc`
+and `spoof`, because these marks test the `From` header of mail that you
+receive.
+
 The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding

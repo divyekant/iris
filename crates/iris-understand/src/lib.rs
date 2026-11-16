@@ -199,10 +199,13 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
                 .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
         })
         .and_then(|a| a.dmarc.as_deref());
-    if dmarc == Some("fail") {
+    // Mail with the label SENT is yours (spec 1 section 6.7): its own
+    // `From` header cannot make it a spoof or a DMARC fail.
+    let sent = cx.labels.iter().any(|l| l == "SENT");
+    if dmarc == Some("fail") && !sent {
         marks.push(Mark::Dmarc);
     }
-    if let Some(name) = &head.from_name {
+    if let Some(name) = head.from_name.as_ref().filter(|_| !sent) {
         let known = (cx.known_person)(name);
         if !known.is_empty() {
             let pass = dmarc == Some("pass")

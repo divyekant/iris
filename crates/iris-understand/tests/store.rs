@@ -964,6 +964,26 @@ Pay this.
 }
 
 #[test]
+fn your_sent_mail_with_the_name_of_a_known_person_is_not_a_spoof() {
+    let b = store("sent-shared-name");
+    b.kind("ana@example.org", "Ana Lee", "person");
+    let raw = "From: Ana Lee <owner@example.com>
+To: Bo Ren <bo@example.org>
+Subject: Re: The lease
+Authentication-Results: mx.google.com; dmarc=fail header.from=example.com
+
+I will send you the signed lease by Friday.
+";
+    let m = b.add("1", raw, &["SENT"]);
+    let fake = Fake::default();
+    let out = understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(!out.hostile);
+    assert!(!fake.calls.borrow().is_empty());
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, "[]");
+}
+
+#[test]
 fn a_rerun_that_stops_after_the_first_write_is_not_understood() {
     let b = store("rerun-stop");
     let m = b.add("1", ASK, &["INBOX"]);
