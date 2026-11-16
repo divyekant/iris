@@ -339,6 +339,7 @@ iris/
       3fa1...c9.eml
   policy.toml        the policy file (specification 2)
   iris.sock          the socket of the iris command (specification 2)
+  workspaces/        the workspace of each agent job (docs/specs/2026-11-16-job-workspace.md)
 ```
 
 To back up Iris, stop the engine and copy the folder. `iris backup <path>`
@@ -368,6 +369,14 @@ is never lost.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
+
+The backup does not copy `workspaces/`. The build makes the files of a
+workspace again from the store, before each session. The files of the agent
+(`drafts/` and `notes.md`) are not in a backup: after a restore, the next
+build makes them empty. A draft that the agent submits is in the store
+(specification 2), so only work that the agent did not submit is lost. This
+is a known limit, with a GitHub issue, until the notes between sessions
+(R5-06) move into the store.
 
 ### 5.2 SQLite settings
 

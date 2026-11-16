@@ -155,6 +155,9 @@ this rule:
   and the items of the workspace. A search never adds a thread to the
   workspace.
 - `iris brief` is a host verb only: the brief covers the whole mailbox.
+- Each read verb in a session goes through the session socket, and the
+  engine applies the current grant. The direct store path of the read
+  verbs is for host mode only (spec 2 section 8.1).
 - `iris status` in a session shows only the job and the counts of the
   workspace: no account, sync or mailbox count.
 
@@ -340,8 +343,11 @@ Markdown and JSON with `serde_json`.
 - `crates/iris-talk`: the clean messages of a thread become public, so the
   build uses the same rule of hostile mail as the conversation.
 - New crate `crates/iris-workspace`.
-- `docs/spec/02-changeset-policy-ledger.md` section 8.2: the session read
-  verbs see only the grant of the job, and `iris brief` is a host verb.
+- `docs/spec/02-changeset-policy-ledger.md` sections 8.1 and 8.2: the
+  session read verbs go through the session socket and see only the grant
+  of the job, and `iris brief` is a host verb.
+- `docs/spec/01-mirror-store-forms.md` section 5.1: the data folder has
+  `workspaces/`, and the backup does not copy it (known limit).
 - No change to a screen, the API or the command.
 
 ## Assumptions
