@@ -1,0 +1,239 @@
+//! Tests of the changes from the web client (spec 2 section 6.3): the engine
+//! writes `policy.toml`, keeps the other text and comments, and makes the
+//! new text active in one step.
+
+use iris_policy::*;
+use iris_store::Store;
+use std::path::PathBuf;
+
+struct Dir(PathBuf);
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn store(name: &str) -> (Dir, Store) {
+    let dir = std::env::temp_dir().join(format!("iris-edit-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    (Dir(dir), store)
+}
+
+fn disk(store: &Store) -> String {
+    std::fs::read_to_string(store.dir().join(FILE)).unwrap()
+}
+
+fn rule(id: u32) -> String {
+    format!("[[rule]]\nid = {id}\nname = \"r{id}\"\neffect = \"hide\"\nwhen = {{ form = \"feed\" }}\nby = \"person\"\nadded = 2026-11-10\n")
+}
+
+/// The rules without their lines, so that two policies compare by content.
+fn rules(p: &Policy) -> Vec<Rule> {
+    p.rules
+        .iter()
+        .map(|r| Rule {
+            line: 0,
+            ..r.clone()
+        })
+        .collect()
+}
+
+/// A small deterministic random source, so that a failure repeats.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+}
+
+/// A valid policy text with comments and blank lines in random places.
+/// Each comment names the rule that follows it, or says "all" when it is
+/// separated from that rule by a blank line.
+fn random_file(rng: &mut Rng, n: u32) -> String {
+    let mut s = "# head\nversion = 0\nmode = \"apply\" # the mode\n".to_string();
+    for id in 1..=n {
+        if rng.next(2) == 0 {
+            s += &format!("\n# all before {id}\n\n");
+        }
+        if rng.next(2) == 0 {
+            s += "\n";
+        }
+        if rng.next(2) == 0 {
+            s += &format!("# about {id}\n");
+        }
+        s += &rule(id).replace("name =", &format!("# inside {id}\nname ="));
+    }
+    if rng.next(2) == 0 {
+        s += "\n# tail\n";
+    }
+    s
+}
+
+#[test]
+fn the_default_text_is_the_policy_of_the_first_start() {
+    assert_eq!(parse(DEFAULT_TEXT).unwrap(), Policy::default());
+}
+
+#[test]
+fn a_removal_keeps_each_other_rule_and_each_comment_of_the_others() {
+    // Invariant: a removal changes only the removed rule and the comments
+    // directly above it. Each other rule and each other comment stays.
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    for case in 0..300 {
+        let n = 1 + rng.next(5) as u32;
+        let text = random_file(&mut rng, n);
+        let before = parse(&text).unwrap();
+        let id = 1 + rng.next(n as usize) as u32;
+        let out = edit_text(&text, Change::Remove(id)).unwrap().unwrap();
+        let after = parse(&out).unwrap_or_else(|e| panic!("case {case}: {e}\n{out}"));
+        let mut want = rules(&before);
+        want.retain(|r| r.id != id);
+        assert_eq!(rules(&after), want, "case {case}\n{text}\n---\n{out}");
+        assert_eq!(after.mode, before.mode);
+        for line in text.lines().filter(|l| l.starts_with('#')) {
+            let gone = *line == format!("# about {id}") || *line == format!("# inside {id}");
+            assert_eq!(
+                out.contains(line),
+                !gone,
+                "case {case}: {line}\n{text}\n---\n{out}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_mode_change_keeps_each_comment_and_each_rule() {
+    let mut rng = Rng(7);
+    for _ in 0..50 {
+        let n = rng.next(4) as u32;
+        let text = random_file(&mut rng, n);
+        let out = edit_text(&text, Change::Mode(Mode::Observe))
+            .unwrap()
+            .unwrap();
+        assert_eq!(out, text.replace("mode = \"apply\"", "mode = \"observe\""));
+        assert_eq!(parse(&out).unwrap().mode, Mode::Observe);
+    }
+}
+
+#[test]
+fn a_removal_of_an_unknown_id_changes_nothing() {
+    assert_eq!(edit_text(&rule(1), Change::Remove(2)), Ok(None));
+    assert_eq!(edit_text(DEFAULT_TEXT, Change::Remove(1)), Ok(None));
+}
+
+#[test]
+fn a_change_at_the_first_start_writes_the_file_and_makes_it_active() {
+    let (_d, s) = store("first");
+    let got = change(&s, None, Change::Mode(Mode::Apply), 10).unwrap();
+    let Edited::Done { version, policy } = got else {
+        panic!("{got:?}")
+    };
+    assert_eq!((version, policy.mode), (1, Mode::Apply));
+    assert_eq!(disk(&s), DEFAULT_TEXT.replace("\"observe\"", "\"apply\""));
+    assert_eq!(file_state(&s).unwrap(), FileState::Same);
+    let a = s.read(active).unwrap();
+    assert_eq!((a.version, a.policy.mode), (Some(1), Mode::Apply));
+}
+
+#[test]
+fn a_removed_rule_leaves_the_file_and_its_id_is_never_used_again() {
+    let (_d, s) = store("remove");
+    let text = format!("version = 0\nmode = \"apply\"\n{}{}", rule(1), rule(2));
+    std::fs::write(s.dir().join(FILE), &text).unwrap();
+    assert!(matches!(
+        confirm(&s, &sha256_hex(&text), 1).unwrap(),
+        Confirm::Done { version: 1, .. }
+    ));
+
+    let got = change(&s, Some(1), Change::Remove(1), 2).unwrap();
+    let Edited::Done { version: 2, policy } = got else {
+        panic!("{got:?}")
+    };
+    assert_eq!(policy.rules.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+    assert_eq!(file_state(&s).unwrap(), FileState::Same);
+
+    // A file that brings the ID back cannot be confirmed.
+    let back = format!("{}{}", disk(&s), rule(1));
+    std::fs::write(s.dir().join(FILE), &back).unwrap();
+    assert!(matches!(file_state(&s).unwrap(), FileState::Invalid(_)));
+}
+
+#[test]
+fn a_change_needs_the_active_version_that_the_person_saw() {
+    let (_d, s) = store("stale");
+    assert!(matches!(
+        change(&s, None, Change::Mode(Mode::Apply), 1).unwrap(),
+        Edited::Done { .. }
+    ));
+    // The person saw the policy of the first start, and version 1 is active now.
+    assert_eq!(
+        change(&s, None, Change::Mode(Mode::Observe), 2).unwrap(),
+        Edited::Stale
+    );
+    assert_eq!(
+        change(&s, Some(1), Change::Remove(9), 2).unwrap(),
+        Edited::NoRule
+    );
+    assert_eq!(s.read(active).unwrap().version, Some(1));
+}
+
+#[test]
+fn a_change_waits_while_the_file_is_not_the_active_policy() {
+    // Spec 2 section 6.3: the person first confirms or discards the file.
+    let (_d, s) = store("waits");
+    let path = s.dir().join(FILE);
+    for text in [
+        format!("version = 0\nmode = \"apply\"\n{}", rule(1)),
+        "mode = ".to_string(),
+    ] {
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(
+            change(&s, None, Change::Mode(Mode::Apply), 1).unwrap(),
+            Edited::FileChanged
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(s.read(active).unwrap().version, None);
+    }
+}
+
+#[test]
+fn a_discard_keeps_a_copy_and_writes_the_active_text() {
+    let (_d, s) = store("discard");
+    let path = s.dir().join(FILE);
+    // Nothing to discard at the first start with no file.
+    assert!(!discard(&s).unwrap());
+    assert!(!path.exists());
+
+    // A file at the first start: the discard writes the default text.
+    let edit = format!("version = 0\nmode = \"apply\"\n{}", rule(1));
+    std::fs::write(&path, &edit).unwrap();
+    assert!(discard(&s).unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_TEXT);
+    assert_eq!(
+        std::fs::read_to_string(s.dir().join(DISCARDED)).unwrap(),
+        edit
+    );
+    assert_eq!(s.read(active).unwrap().version, None);
+
+    // A file that is not valid, after a confirmation: the discard writes the active text.
+    let text = format!("version = 0\nmode = \"apply\"\n{}", rule(2));
+    std::fs::write(&path, &text).unwrap();
+    assert!(matches!(
+        confirm(&s, &sha256_hex(&text), 1).unwrap(),
+        Confirm::Done { .. }
+    ));
+    std::fs::write(&path, "mode = ").unwrap();
+    assert!(discard(&s).unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(file_state(&s).unwrap(), FileState::Same);
+    assert!(!discard(&s).unwrap());
+
+    // A missing file comes back.
+    std::fs::remove_file(&path).unwrap();
+    assert!(discard(&s).unwrap());
+    assert_eq!(file_state(&s).unwrap(), FileState::Same);
+}
