@@ -476,3 +476,27 @@ The plan is ready.
     assert!(c.text.starts_with("FYI"), "{}", c.text);
     assert!(c.text.contains("The plan is ready."), "{}", c.text);
 }
+
+#[test]
+fn an_attached_message_keeps_its_body_before_its_attachment_text() {
+    let notes = "n".repeat(1_000_000);
+    let raw = crlf(&format!(
+        "Subject: Fwd\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\nSee below.\n\
+         --m\nContent-Type: message/rfc822\n\nSubject: Inner\nContent-Type: multipart/mixed; boundary=i\n\n\
+         --i\nContent-Type: text/plain\n\nThe inner body.\n--i\nContent-Type: text/plain; name=notes.txt\n\n{notes}\n--i--\n--m--\n"
+    ));
+    let c = clean(&raw);
+    let inner = c.attachments[0].text.as_deref().unwrap_or_default();
+    assert!(inner.starts_with("The inner body."), "{inner:.80}");
+    let total: usize = c
+        .attachments
+        .iter()
+        .filter_map(|a| a.text.as_ref())
+        .map(String::len)
+        .sum();
+    assert!(total <= iris_clean::ATTACHMENT_TEXT_LIMIT + 64, "{total}");
+    assert!(c.attachments[1]
+        .text
+        .as_deref()
+        .is_some_and(|t| t.ends_with("[Iris cut the text here.]")));
+}

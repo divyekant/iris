@@ -268,6 +268,28 @@ impl Walker {
                 t.push_str(CUT_MARK);
             }
             (self.body_left, self.cut) = outer;
+            // The body of the attached message has priority over the text of
+            // its own attachments: take budget back from them, last first.
+            let mut need = t.len().saturating_sub(self.attach_left);
+            for a in self.attachments[at..].iter_mut().rev() {
+                if need == 0 {
+                    break;
+                }
+                let Some(inner_text) = a.text.as_mut() else {
+                    continue;
+                };
+                let keep = inner_text.len().saturating_sub(need + CUT_MARK.len());
+                let freed = if keep == 0 {
+                    a.text.take().map_or(0, |x| x.len())
+                } else {
+                    let before = inner_text.len();
+                    inner_text.truncate(floor_char(inner_text, keep));
+                    inner_text.push_str(CUT_MARK);
+                    before - inner_text.len()
+                };
+                self.attach_left += freed;
+                need = need.saturating_sub(freed);
+            }
             if name.is_empty() {
                 name = subject;
             }
