@@ -840,12 +840,6 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "iris-clean",
- "iris-eval",
- "iris-model",
- "iris-store",
- "iris-synth",
- "jsonschema",
- "rusqlite",
  "serde_json",
 ]
 

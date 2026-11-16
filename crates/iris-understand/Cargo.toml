@@ -10,13 +10,4 @@ publish.workspace = true
 [dependencies]
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
-iris-model = { version = "0.0.0", path = "../iris-model" }
-iris-store = { version = "0.0.0", path = "../iris-store" }
-jsonschema = { version = "=0.61.2", default-features = false }
-rusqlite = "=0.43.0"
 serde_json = "1"
-
-[dev-dependencies]
-iris-eval = { version = "0.0.0", path = "../iris-eval" }
-iris-synth = { version = "0.0.0", path = "../iris-synth" }
-rusqlite = "=0.43.0"
