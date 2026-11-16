@@ -254,8 +254,9 @@ history go out.
 A PDF gives text only if its decoded size is at most `PDF_LIMIT` (10 MiB) and
 its first 1 KiB holds `%PDF`.
 
-- Streams: the reader reads the PDF once from the start, outside strings
-  and comments, and finds each `stream` keyword. Its dictionary is the text
+- Streams: the reader reads the PDF once from the start, outside strings,
+  comments and names (`/stream` is a name), and finds each `stream` keyword.
+  The `<<` of a dictionary is not the start of a hex string. Its dictionary is the text
   after the last object header (`<number> <number> obj`) before it. A
   dictionary longer than 4 KiB is not read. The data ends at the direct
   `/Length` key (not `/Length1` or another key that starts with `/Length`)

@@ -202,12 +202,21 @@ fn next_item(pdf: &[u8], mut at: usize) -> Option<Item> {
         match pdf[at] {
             b'(' => at = skip_string(pdf, at),
             b'%' => at = skip_comment(pdf, at),
-            b'<' if pdf.get(at + 1) != Some(&b'<') => {
+            // A dictionary start is two bytes: its second `<` is not a hex string.
+            b'<' if pdf.get(at + 1) == Some(&b'<') => at += 2,
+            b'<' => {
                 // A hex string.
                 at = pdf[at..]
                     .iter()
                     .position(|&c| c == b'>')
                     .map_or(pdf.len(), |n| at + n + 1);
+            }
+            b'/' => {
+                // A name is one token: `/endobj` is not a keyword.
+                at = pdf[at + 1..]
+                    .iter()
+                    .position(|&c| delimiter(c))
+                    .map_or(pdf.len(), |n| at + 1 + n);
             }
             c if !delimiter(c) => {
                 let end = pdf[at..]
@@ -2064,6 +2073,14 @@ mod tests {
     fn a_name_like_a_keyword_does_not_end_an_object() {
         let pdf = doc(&[
             (2, "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> /endobj 0 /obj 1 /stream 2 /Contents 3 0 R >>", None),
+            (3, "<< >>", Some(CODES)),
+            (5, TYPE0, None),
+            (6, "<< >>", Some(CMAP)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
+        // A `>` in a string of a dictionary is not the end of a hex string.
+        let pdf = doc(&[
+            (2, "<< /Type /Page /T (a>b endobj) /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>", None),
             (3, "<< >>", Some(CODES)),
             (5, TYPE0, None),
             (6, "<< >>", Some(CMAP)),
