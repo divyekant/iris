@@ -4,7 +4,7 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import { copying, greeting, nextDay, party, partyKey, signals, summary, when } from "../format";
   import Code from "./Code.svelte";
@@ -32,7 +32,7 @@
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([get<Brief>("brief"), get<Status>("status")]),
+      () => Promise.all([loadBrief(), get<Status>("status")]),
       ([b, s]) => ((brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );

@@ -1,4 +1,5 @@
 import { access } from "./access.svelte.ts";
+import { addPage } from "./format";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads.
 
@@ -265,4 +266,23 @@ export async function download(id: string, keep: (blob: Blob, name: string) => v
     throw new Error(body?.error ?? `The engine answered ${response.status}.`);
   }
   keep(await response.blob(), `${id}.eml`);
+}
+
+/**
+ * The brief, with all of Signals. The API gives at most 200 items of a section and sorts
+ * signals by expiry, so a live login code can be after the cut. Signals are few: load the
+ * rest of the pages. Other sections show 7 lines and link their full list.
+ */
+export async function loadBrief(): Promise<Brief> {
+  const brief = await get<Brief>("brief");
+  if (brief.signals.items.length >= brief.signals.count) return brief;
+  let items: Item[] = [];
+  let next: string | null = null;
+  do {
+    const page: Page = await get<Page>(`brief/signals?limit=200${next ? `&after=${encodeURIComponent(next)}` : ""}`);
+    items = addPage(items, page.items);
+    next = page.next;
+  } while (next);
+  // A signal that came in between the calls makes the pages longer than the first count.
+  return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
 }

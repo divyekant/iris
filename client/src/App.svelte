@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -66,12 +66,12 @@
         {#if route.view === "setup" || home(status) === "setup"}
           <Setup {status} />
         {:else}
-          {#await get<BriefData>("brief") then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
+          {#await loadBrief() then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
         {/if}
       {:catch error}{@render failed(error)}
       {/await}
     {:else if route.view === "brief"}
-      {#await Promise.all([get<BriefData>("brief"), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
+      {#await Promise.all([loadBrief(), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "section"}
       {@const key = route.key}
       {#await get<Page>(`brief/${key}?limit=50`) then page}
