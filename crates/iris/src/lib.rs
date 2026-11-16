@@ -400,11 +400,42 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             }
         }
     }
+    // Understanding gives the words and the senders that search finds
+    // (spec 1 section 5.6). It also runs if one account failed. If another
+    // run holds the lock, it can be past the new mail: wait, then run.
+    if matches!(command, MirrorCommand::Sync) {
+        let mut said = false;
+        loop {
+            match cost::after_sync(&store, engine::now_ms()) {
+                Ok(cost::AfterSync::Ran { report, .. }) => {
+                    print!("{}", prefix_lines("understand: ", &report))
+                }
+                Ok(cost::AfterSync::Idle) => println!("understand: no message to read"),
+                Ok(cost::AfterSync::Busy) => {
+                    if !said {
+                        println!("understand: waits for another run to end");
+                        said = true;
+                    }
+                    std::thread::sleep(engine::BUSY_RETRY);
+                    continue;
+                }
+                Err(e) => {
+                    failed = true;
+                    say!("iris: understand: {e}");
+                }
+            }
+            break;
+        }
+    }
     if failed {
-        Err("one or more accounts failed".into())
+        Err("one or more accounts, or the understanding run, failed".into())
     } else {
         Ok(())
     }
+}
+
+fn prefix_lines(prefix: &str, text: &str) -> String {
+    text.lines().map(|l| format!("{prefix}{l}\n")).collect()
 }
 
 fn print(out: verbs::Output) -> Result<(), String> {

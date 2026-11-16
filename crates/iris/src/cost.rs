@@ -404,6 +404,9 @@ pub fn approve(store: &Store, code: &str, budget: u64, now_ms: i64) -> Result<()
                 [budget as i64],
             )?;
             tx.execute("DELETE FROM understand_estimate WHERE code = ?1", [code])?;
+            // The approval is the new input of each call that the budget
+            // refused.
+            batch::clear_waiting(tx)?;
             Ok(true)
         })
         .map_err(|e| e.to_string())?;
@@ -504,11 +507,51 @@ pub fn connect(store: &Store, row: &ModelRow) -> Result<Box<dyn iris_understand:
 pub fn run(store: &Store, limits: &Limits, now_ms: i64) -> Result<String, String> {
     let connect = |row: &ModelRow| connect(store, row);
     let r = batch::run(store, &connect, limits, now_ms).map_err(|e| e.to_string())?;
+    report_of(store, &r)
+}
+
+/// The result of [`after_sync`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum AfterSync {
+    /// The report of a run that read a message or made a call. `retry` is
+    /// true if the run stopped on a model, unknown-cost or store error, so
+    /// the same pending mail can need a later run.
+    Ran { report: String, retry: bool },
+    /// Nothing to do: the run deleted its row.
+    Idle,
+    /// Another run holds the lock. Run again after it.
+    Busy,
+}
+
+/// The run after a sync (R1-28), in `iris serve` and `iris mirror sync`:
+/// the batch runner with no limit but the budget. An idle run leaves no
+/// row. After a run that stopped on a model error, the runner honors the
+/// wait of [`batch::retry_after`] for that model version, under its lock
+/// (`Limits::wait_after_error`).
+pub fn after_sync(store: &Store, now_ms: i64) -> Result<AfterSync, String> {
+    let connect = |row: &ModelRow| connect(store, row);
+    let limits = Limits {
+        keep_idle: false,
+        wait_after_error: true,
+        ..Limits::default()
+    };
+    match batch::run(store, &connect, &limits, now_ms) {
+        Ok(r) if r.is_idle() => Ok(AfterSync::Idle),
+        Ok(r) => Ok(AfterSync::Ran {
+            retry: matches!(r.stop.as_deref(), Some("model" | "unknown" | "error")),
+            report: report_of(store, &r)?,
+        }),
+        Err(batch::Error::Busy) => Ok(AfterSync::Busy),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn report_of(store: &Store, r: &Report) -> Result<String, String> {
     let left = store
         .read(|c| Ok(model_row(c)?))
         .map_err(|e| e.to_string())?
         .and_then(|m| m.price.and(Some(m.budget_micro_usd)));
-    Ok(report_text(&r, left))
+    Ok(report_text(r, left))
 }
 
 fn report_text(r: &Report, left: Option<Option<i64>>) -> String {

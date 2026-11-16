@@ -673,7 +673,7 @@ write to the local store, but none of them changes the mailbox:
 | Verb | Local writes | Rules |
 |---|---|---|
 | `account add` | The account row and the sealed sign-in | Specification 1, section 4.9 |
-| `mirror sync` | Messages, content files and the sync log | Specification 1, sections 4.2 to 4.7 |
+| `mirror sync` | Messages, content files and the sync log. Then one run of understanding: headers, bodies, items, senders, the run row, and the cost of model calls from the approved budget | Specification 1, sections 4.2 to 4.7; `docs/specs/2026-11-16-cost-control.md` |
 | `mirror verify` | Repairs of the mirror, and the sync log | Specification 1, section 4.8 |
 | `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
 | `model set` | The model setting and its sealed key | `docs/specs/2026-11-16-cost-control.md` |
@@ -717,7 +717,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
 | `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
 | `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
-| `iris mirror sync` | Runs an incremental sync now. | host | 1 |
+| `iris mirror sync` | Runs an incremental sync now, then one run of understanding inside the approved budget. If another run holds the run lock, it waits for that run to end. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
 | `iris model set`, `iris model show` | Sets the model of understanding and its key (read from standard input), or shows the settings without the key (`docs/specs/2026-11-16-cost-control.md`). | host | 1 |
