@@ -58,6 +58,7 @@ fn status_json_is_the_api_status() {
     assert!(ok);
     assert!(out.contains("owner@example.com"), "{out}");
     assert!(out.contains("Messages: 40"), "{out}");
+    assert!(out.contains("Mode: observe"), "{out}");
 }
 
 #[test]
@@ -65,8 +66,14 @@ fn search_json_is_the_api_search() {
     let (store, _fake) = synced("search");
     let api = iris_api::search(&store, "label:INBOX", 50).unwrap();
     assert!(!api.is_empty());
-    let verb = json(&store, &["search", "label:INBOX", "--json"]);
-    assert_eq!(verb, serde_json::json!({ "messages": value(&api) }));
+    // A list is JSON Lines (specification 2, section 8.3): one summary each line.
+    let (ok, out, err) = iris(&store, &["search", "label:INBOX", "--json"]);
+    assert!(ok, "{err}");
+    let lines: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines, api.iter().map(value).collect::<Vec<_>>());
     let (ok, out, _) = iris(&store, &["search", "label:INBOX", "--limit", "3"]);
     assert!(ok);
     assert_eq!(out.lines().count(), 3, "{out}");
@@ -161,4 +168,18 @@ fn serve_answers_the_api_before_the_web_client() {
         "{session}\n{response}"
     );
     assert!(response.contains("owner@example.com"), "{response}");
+}
+
+#[test]
+fn serve_refuses_an_address_that_is_not_loopback() {
+    let dir = data_dir("serve-open");
+    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .args(["serve", "--addr", "0.0.0.0:0", "--data"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not a loopback address"), "{err}");
+    assert!(!dir.exists(), "the engine opened the store");
 }

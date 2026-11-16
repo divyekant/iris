@@ -6,7 +6,6 @@
 use std::fmt::Write as _;
 
 use iris_store::Store;
-use serde_json::json;
 
 /// The text that a verb prints, or the error text.
 pub type Output = Result<String, String>;
@@ -48,6 +47,7 @@ pub fn status(store: &Store, as_json: bool) -> Output {
             );
         }
     }
+    let _ = writeln!(out, "Mode: {}", s.mode);
     let m = &s.messages;
     let _ = writeln!(
         out,
@@ -60,7 +60,13 @@ pub fn status(store: &Store, as_json: bool) -> Output {
 pub fn search(store: &Store, text: &str, limit: u32, as_json: bool) -> Output {
     let found = iris_api::search(store, text, limit).map_err(|e| e.to_string())?;
     if as_json {
-        return to_json(&json!({ "messages": found }));
+        // A list is JSON Lines (specification 2, section 8.3).
+        let mut out = String::new();
+        for m in &found {
+            out.push_str(&serde_json::to_string(m).map_err(|e| e.to_string())?);
+            out.push('\n');
+        }
+        return Ok(out);
     }
     let mut out = String::new();
     for m in &found {

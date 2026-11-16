@@ -113,7 +113,16 @@ pub fn run(cli: Cli) -> Result<(), String> {
     let open =
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
     match &cli.command {
-        Command::Serve { addr } => serve(Arc::new(open()?), *addr).map_err(|e| e.to_string()),
+        Command::Serve { addr } => {
+            // The API has no TLS, so only this machine may connect
+            // (specification 2, section 8.2).
+            if !addr.ip().is_loopback() {
+                return Err(format!(
+                    "{addr} is not a loopback address: use 127.0.0.1 or [::1]"
+                ));
+            }
+            serve(Arc::new(open()?), *addr).map_err(|e| e.to_string())
+        }
         Command::Account {
             command: AccountCommand::Add { client, paste },
         } => account_add(&open()?, client, *paste),
@@ -303,9 +312,9 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         // The API checks the Host against the bound address.
         let auth = Arc::new(iris_api::Auth::new(local)?);
         eprintln!("iris: serving on http://{local}");
-        // The one-time code signs in one browser (specification 2, section 8.6).
+        // The one-time code of the API sign-in (specification 2, section 8.6).
         if let Some(url) = auth.sign_in_url() {
-            eprintln!("iris: open the web client: {url}");
+            eprintln!("iris: sign-in address of the local API: {url}");
         }
         axum::serve(listener, app(api_store, auth))
             .with_graceful_shutdown(async {

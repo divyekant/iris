@@ -99,12 +99,15 @@ encrypted with the `key` file of the data folder.
 
 CAUTION: The backup folder holds the key and your mail. Keep it private.
 
-`iris serve` prints the address of the web client with a one-time code.
-Open that address to sign in the browser.
+`iris serve` prints the sign-in address of the local API, with a one-time
+code. The web client does not use this address yet (tracker item R1-18). A
+program can exchange the code for a token with `POST /api/session`
+(`crates/iris-api/README.md`).
 
 ## Read the mirror
 
-These commands read the store. Add `--json` to get the JSON of the local API.
+These commands read the store. Add `--json` to get the JSON of the local API: one JSON document for one
+object, and JSON Lines for a list.
 
 | Command | Gives |
 |---|---|
