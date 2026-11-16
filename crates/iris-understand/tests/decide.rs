@@ -163,19 +163,30 @@ fn phishing_is_hostile_with_no_item() {
 }
 
 #[test]
-fn a_model_error_or_a_refusal_is_an_error() {
-    let m = Fake::with(vec![Err(ModelError::Transport("lost".into()))]);
-    assert!(matches!(
-        run(ASK, Kind::Person, &[], &[], Some(&m)).1,
-        Err(ModelError::Transport(_))
-    ));
+fn a_model_error_is_an_error_and_a_refusal_fails_the_try() {
+    // An error that a new try can fix, or a refused key: no try counts.
+    for e in [
+        ModelError::Transport("lost".into()),
+        ModelError::Rejected {
+            status: 401,
+            message: "key".into(),
+        },
+    ] {
+        let m = Fake::with(vec![Err(e)]);
+        assert!(run(ASK, Kind::Person, &[], &[], Some(&m)).1.is_err());
+    }
+    // A refusal, or a call refused for this data: a failed try, one call.
     let mut no = text("");
     no.stop = Stop::Refused;
-    let m = Fake::with(vec![Ok(no)]);
-    assert!(matches!(
-        run(ASK, Kind::Person, &[], &[], Some(&m)).1,
-        Err(ModelError::Rejected { .. })
-    ));
+    let big = Err(ModelError::Rejected {
+        status: 413,
+        message: "large".into(),
+    });
+    for r in [Ok(no), big] {
+        let m = Fake::with(vec![r, answer(task())]);
+        let d = run(ASK, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+        assert_eq!((d.calls, d.drafts.len(), d.failed), (1, 0, true));
+    }
 }
 
 #[test]
@@ -359,6 +370,14 @@ fn the_model_data_stays_within_its_budget() {
     let data = prompt::data(&a, &cx);
     assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
     assert!(data.contains(&body));
+    // The escape of the model client adds nothing, also for text with `<<<`.
+    a.text.attachment_text = vec![("x.txt".into(), "<<<".repeat(300_000))];
+    let data = prompt::data(&a, &cx);
+    assert_eq!(
+        iris_model::data_block(&data).len(),
+        data.len() + 2 + iris_model::DATA_START.len() + iris_model::DATA_END.len()
+    );
+    assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
     // Attachment text comes before the thread.
     assert!(data.contains("[cut]") && !data.contains("Earlier message"));
     // Without attachment text, the newest earlier messages fill the rest.

@@ -307,8 +307,9 @@ pub struct Decision {
 
 /// Steps 5 to 7: hostile mail gives nothing, then the fixed rules, then the
 /// model, with one more try after an answer that is not valid. A model
-/// error that a new try can fix, or a refused call, is an `Err`: the message
-/// stays not understood, and no try counts.
+/// error that a new try can fix, or a refused key, is an `Err`: the message
+/// stays not understood, and no try counts. A refusal, or a call that the
+/// server refuses for this data, gives `failed` with no second call.
 ///
 /// `model` is `None` when the retry state holds the model call (section
 /// 7.4). The hostile check and the fixed rules run in all cases.
@@ -351,19 +352,22 @@ pub fn decide(
                 d.calls += 1;
                 continue;
             }
+            // A call that the server refuses for this data (HTTP 400, 413,
+            // 422, ...) fails the same way again: a try counts. A refused key
+            // (401, 403) stops the batch.
+            Err(iris_model::Error::Rejected { status, .. }) if status != 401 && status != 403 => {
+                d.calls += 1;
+                break;
+            }
             Err(e) => return Err(e),
         };
         d.calls += 1;
         add(&mut d.usage, reply.usage);
         match reply.stop {
             iris_model::Stop::End => {}
-            // A refusal is not an answer that is not valid: no try counts.
-            iris_model::Stop::Refused => {
-                return Err(iris_model::Error::Rejected {
-                    status: 200,
-                    message: "the model refused to answer".into(),
-                })
-            }
+            // The model refuses this mail: a new try gets the same answer,
+            // so the try counts and the message waits a day (section 7.4).
+            iris_model::Stop::Refused => break,
             iris_model::Stop::Truncated => continue,
         }
         let Some((drafts, phishing)) = reply.json().ok().and_then(|j| prompt::read(&j, a, cx))

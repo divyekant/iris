@@ -96,7 +96,7 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     // An existing item that does not fit is left out: the model can then
     // find it again, and the store keeps the pinned item (section 7.5).
     for item in cx.existing {
-        let line = format!("Existing item: {item}\n");
+        let line = escape(&format!("Existing item: {item}\n"));
         if line.len() <= left {
             left -= line.len();
             d.push_str(&line);
@@ -131,23 +131,35 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     d
 }
 
-/// Push `text` to `out`, cut to at most `max` bytes with the cut mark.
-/// Gives the count of bytes pushed.
+/// Push `text` to `out`, escaped as `iris_model::data_block` does and cut
+/// to at most `max` bytes with the cut mark, so that the block that the
+/// model client sends stays in the budget. Gives the count of bytes pushed.
 fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
-    if text.len() <= max {
-        out.push_str(text);
-        return text.len();
+    // The escape only makes text longer: `max` bytes of the source are enough.
+    let mut src = max.min(text.len());
+    while !text.is_char_boundary(src) {
+        src -= 1;
+    }
+    let escaped = escape(&text[..src]);
+    if src == text.len() && escaped.len() <= max {
+        out.push_str(&escaped);
+        return escaped.len();
     }
     if max < CUT_MARK.len() {
         return 0;
     }
-    let mut end = max.saturating_sub(CUT_MARK.len());
-    while !text.is_char_boundary(end) {
+    let mut end = (max - CUT_MARK.len()).min(escaped.len());
+    while !escaped.is_char_boundary(end) {
         end -= 1;
     }
-    out.push_str(&text[..end]);
+    out.push_str(&escaped[..end]);
     out.push_str(CUT_MARK);
     end + CUT_MARK.len()
+}
+
+/// `<<<` as `‹‹‹`, the escape of `iris_model::data_block`.
+fn escape(s: &str) -> String {
+    s.replace("<<<", "‹‹‹")
 }
 
 /// The model answer as drafts, or `None` if the answer does not have the

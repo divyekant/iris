@@ -879,6 +879,26 @@ The conversation rule runs for each message that is not hostile mail:
 - If `phishing` is true, the engine sets the hostile mark `phishing` on the
   message, saves no item from it, and gives it the treatment of hostile mail
   (section 7.1, step 7).
+- The budget counts the data after the escape of the data delimiter, so
+  that the block that the client sends stays in the budget.
+
+#### Failure list of the model step
+
+The model answer and the model server are input that Iris does not
+control. The safe result for each case that the engine cannot settle is:
+no item, and the message stays not understood.
+
+| Input | Failure mode | Result |
+|---|---|---|
+| One JSON document with a boolean `phishing` and valid items with quotes from the mail | | The engine saves the items. |
+| `phishing` is true | The mail tries a trick | The hostile mark `phishing`, no item. |
+| No JSON, a cut answer, no `phishing`, more than 20 items, a quote not in the mail, a party with no address, an item that fails the schemas | An answer that is not valid | One more try. A second answer that is not valid: no item, 1 more try in `tries`, `retry_at` 1 day later, a stop after 3 tries. |
+| The model refuses to answer | A new try gets the same refusal | No item and no second call. The try counts as above. |
+| The server refuses the call for this data (HTTP 400, 413, 422 and other 4xx, but not 401, 403 or 429) | A new call fails the same way | No item and no second call. The try counts as above. |
+| A time-out, a lost response, HTTP 429 or 5xx, a refused key (401, 403) | The result is not known, or no call can work now | No item. No try counts. The message stays not understood, and a later run reads it again. A refused key stops the batch. |
+| Data larger than the budget | A local model refuses a long message | The budget cuts the data (above). |
+| All other answers | | Not valid, as above. |
+
 - The worst result of a prompt injection is a wrong item. No item can start an
   action in release 1. In release 2, an item from mail can only become a
   proposal in a changeset (specification 2).
