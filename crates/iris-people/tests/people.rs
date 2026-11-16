@@ -277,6 +277,51 @@ fn the_person_rule() {
     assert_eq!(bo.name.as_deref(), Some("Bo Hart"));
     // Newest first: Ana (6000), then the list and Bo.
     assert_eq!(addrs(&all[0]), ["ana@example.org"]);
+    // The new sender rows record the person rule (specification 1, section 6.7).
+    let rows: Vec<(String, String, String, String)> = h
+        .store
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT address, kind, basis, decided_by FROM sender
+                 WHERE decided_at > 0 ORDER BY address",
+            )?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let row = |a: &str, basis: &str| (a.into(), "person".into(), basis.into(), "engine".into());
+    assert_eq!(
+        rows,
+        [
+            row("ana@example.org", "sent"),
+            row("bo@example.org", "replied"),
+            row("list@example.org", "sent")
+        ]
+    );
+}
+
+#[test]
+fn an_encoded_from_name_joins_the_decoded_name() {
+    let mut h = Hand::new("enc-from");
+    h.add(
+        "t1",
+        "INBOX",
+        "bo@a.example.org",
+        "=?UTF-8?Q?Bo_H=C3=A4rt?=",
+        "me@example.com",
+    );
+    h.add("t1", "SENT", "me@example.com", "Me", "bo@a.example.org");
+    h.add(
+        "t2",
+        "INBOX",
+        "bo@b.example.org",
+        "Bo Härt",
+        "me@example.com",
+    );
+    h.add("t2", "SENT", "me@example.com", "Me", "bo@b.example.org");
+    let all = h.people();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].names, ["Bo Härt"]);
 }
 
 #[test]
