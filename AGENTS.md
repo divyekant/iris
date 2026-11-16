@@ -253,7 +253,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-people/` | People: one profile for each known person (names, addresses, first and last contact, counts, threads), from the mail history in the store. | `engine` |
 | `crates/iris-talk/` | Conversations: the conversation of each mail thread, from the store, as an item of the open model. | `engine` |
 | `crates/iris-sync/` | The first sync of the mirror: a full copy of a Gmail mailbox into the store, with resume after a stop. | `engine` |
-| `crates/iris-clean/` | The clean text of one message: MIME, charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
+| `crates/iris-clean/` | The clean text of one message: MIME (through `mail-parser`), charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
 | `crates/iris-understand/` | Understanding: one message to items of the five forms. Headers, hostile marks, fixed rules, then the model, and a schema check of each item. | `engine` |
 | `crates/iris-api/` | The local API: read-only JSON from the store for the web client and the read verbs. It refuses requests that are not local. | `engine` |
 | `crates/iris-observe/` | Observe mode: the triage changeset from the forms, with a count of each rule. It applies nothing. | `engine` |
