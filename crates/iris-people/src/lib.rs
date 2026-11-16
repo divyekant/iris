@@ -377,13 +377,15 @@ pub fn addresses(list: &str) -> Vec<String> {
 /// display name if it has one.
 pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    let (mut quoted, mut angle, mut start) = (false, false, 0);
+    let (mut quoted, mut angle, mut depth, mut start) = (false, false, 0u32, 0);
     for (i, c) in list.char_indices() {
         match c {
-            '"' if !angle => quoted = !quoted,
-            '<' if !quoted => angle = true,
-            '>' if !quoted => angle = false,
-            ',' | ';' if !quoted && !angle => {
+            '"' if !angle && depth == 0 => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth = depth.saturating_sub(1),
+            '<' if !quoted && depth == 0 => angle = true,
+            '>' if !quoted && depth == 0 => angle = false,
+            ',' | ';' if !quoted && !angle && depth == 0 => {
                 out.extend(mailbox(&list[start..i]));
                 start = i + 1;
             }
@@ -397,12 +399,52 @@ pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
 /// One mailbox such as `"Lind, Ana" <ana@example.org>`: the address and the
 /// display name.
 fn mailbox(part: &str) -> Option<(String, Option<String>)> {
-    let address = one_address(part)?;
+    let (part, comment) = strip_comments(part);
+    let address = one_address(&part)?;
     let name = part
         .rfind('<')
         .map(|i| part[..i].trim().trim_matches('"').trim().to_string())
-        .filter(|n| !n.is_empty());
+        .filter(|n| !n.is_empty())
+        // The old form `a@example.org (Name)` puts the name in a comment.
+        .or(comment);
     Some((address, name))
+}
+
+/// Remove the RFC 5322 comments, such as `(Name)`, outside quoted text.
+/// Gives the text and the last comment that has text.
+fn strip_comments(part: &str) -> (String, Option<String>) {
+    let (mut out, mut comment, mut last) = (String::new(), String::new(), None);
+    let (mut quoted, mut depth) = (false, 0u32);
+    for c in part.chars() {
+        match c {
+            '"' if depth == 0 => {
+                quoted = !quoted;
+                out.push(c);
+            }
+            '(' if !quoted => {
+                if depth > 0 {
+                    comment.push(c);
+                }
+                depth += 1;
+            }
+            ')' if !quoted && depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let t = comment.trim();
+                    if !t.is_empty() {
+                        last = Some(t.to_string());
+                    }
+                    comment.clear();
+                    out.push(' ');
+                } else {
+                    comment.push(c);
+                }
+            }
+            _ if depth > 0 => comment.push(c),
+            _ => out.push(c),
+        }
+    }
+    (out, last)
 }
 
 /// The address of one mailbox such as `"Name" <a@example.com>`, in lower case.
@@ -454,6 +496,16 @@ mod tests {
                 r#""john.doe"@example.org"#,
                 r#""a, b"@example.org"#,
                 r#""j o"@example.org"#
+            ]
+        );
+        assert_eq!(
+            mailboxes(
+                "bob@example.org (Bob Smith), cy@example.org (x, (y)), \"(no)\" <d@example.org>"
+            ),
+            [
+                ("bob@example.org".to_string(), Some("Bob Smith".to_string())),
+                ("cy@example.org".to_string(), Some("x, (y)".to_string())),
+                ("d@example.org".to_string(), Some("(no)".to_string()))
             ]
         );
         assert_eq!(
