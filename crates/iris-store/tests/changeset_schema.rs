@@ -989,33 +989,58 @@ fn the_ledger_moves_the_action() {
     refused(&s, "UPDATE ledger SET state = 'undone', undone_by = 99");
     refused(&s, "UPDATE ledger SET history_id = '5'");
     refused(&s, "UPDATE ledger SET state = 'undone', undone_by = 1");
-    // The undo is an action of its own, with its own entry.
-    s.write(|tx| {
-        tx.execute_batch(
-            "UPDATE changeset SET revision = 2, submitted_at = NULL;
+    // The undo is an action of its own, with its own entry, in a changeset
+    // of the person (migration 12). An action with no link is not an undo.
+    const UNDO: &str = "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 6);
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-         VALUES (1, 2, 1, 'inbox', '{}', '{}');
-         INSERT INTO action_message(action_id, message_id) VALUES (2, 1);
+         VALUES (2, 1, 1, 'inbox', '{}', '{}');";
+    const UNDO_APPLIED: &str = "INSERT INTO action_message(action_id, message_id) VALUES (2, 1);
          UPDATE changeset_action SET hash = 'h' WHERE id = 2;
-         UPDATE changeset SET submitted_at = 1;
+         UPDATE changeset SET why = 'u', submitted_at = 6 WHERE id = 2;
          UPDATE changeset_action SET state = 'approved', decided_by = 'person',
-           decided_at = 5 WHERE id = 2;
+           decided_at = 6 WHERE id = 2;
          INSERT INTO ledger(action_id, ops, state, undo, at)
          VALUES (2, '{}', 'writing', 'inverse', 7);
-         UPDATE ledger SET state = 'applied' WHERE id = 2;
-         UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 1;",
-        )?;
+         UPDATE ledger SET state = 'applied' WHERE id = 2;";
+    refused(
+        &s,
+        &format!(
+            "{UNDO} {UNDO_APPLIED} UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 1"
+        ),
+    );
+    // The link: a draft of the person, step 1 or 2, one open undo of each
+    // step, and no change after.
+    for bad in [
+        "INSERT INTO ledger_undo VALUES (2, 1, 3)",
+        "INSERT INTO ledger_undo VALUES (2, 2, 1)",
+        "UPDATE changeset SET author_kind = 'agent' WHERE id = 2;
+         INSERT INTO ledger_undo VALUES (2, 1, 1)",
+        "INSERT INTO ledger_undo VALUES (1, 1, 1)",
+        "INSERT INTO ledger_undo VALUES (2, 1, 1);
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (2, 1, 2, 'inbox', '{}', '{}');
+         INSERT INTO ledger_undo VALUES (3, 1, 1)",
+        "INSERT INTO ledger_undo VALUES (2, 1, 1); UPDATE ledger_undo SET step = 2",
+        "INSERT INTO ledger_undo VALUES (2, 1, 1); DELETE FROM ledger_undo",
+    ] {
+        refused(&s, &format!("{UNDO} {bad}"));
+    }
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "{UNDO} INSERT INTO ledger_undo VALUES (2, 1, 1); {UNDO_APPLIED}
+             UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 1;"
+        ))?;
         Ok(())
     })
     .unwrap();
     // An undo entry undoes one entry only.
     refused(
         &s,
-        "UPDATE changeset SET revision = 3, submitted_at = NULL;
+        "UPDATE changeset SET revision = 2, submitted_at = NULL WHERE id = 1;
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-         VALUES (1, 3, 1, 'archive', '{}', '{}');
+         VALUES (1, 2, 1, 'archive', '{}', '{}');
          UPDATE changeset_action SET hash = 'h' WHERE id = 3;
-         UPDATE changeset SET submitted_at = 2;
+         UPDATE changeset SET submitted_at = 2 WHERE id = 1;
          UPDATE changeset_action SET state = 'approved', decided_by = 'person',
            decided_at = 5 WHERE id = 3;
          INSERT INTO ledger(action_id, ops, state, undo, at)

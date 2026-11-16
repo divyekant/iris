@@ -523,7 +523,7 @@ pub fn submit_in(
         let verb = Verb::parse(&verb).expect("the CHECK of the table");
         // Only the targets give the rows: drop rows of another writer.
         clear(c, id)?;
-        let mut denial = match supported(c, verb, &args)? {
+        let mut denial = match supported(c, id, verb, &args)? {
             Err(why) => Some(why),
             Ok(()) => resolve(c, id, verb, &targets)?,
         };
@@ -639,9 +639,14 @@ const SYSTEM_LABELS: [&str; 9] = [
     "CHAT",
 ];
 
-/// The argument checks of each verb (section 4). Gives the reason of the
-/// denial for an action that is not valid.
-fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Result<(), String>> {
+/// The argument checks of each verb (section 4), for the action row
+/// `action`. Gives the reason of the denial for an action that is not valid.
+fn supported(
+    c: &Connection,
+    action: i64,
+    verb: Verb,
+    args: &str,
+) -> Result<std::result::Result<(), String>> {
     // add_action writes an object. Another writer of the table may not.
     let Ok(args) = serde_json::from_str::<Map<String, Value>>(args) else {
         return Ok(Err("the arguments are not a JSON object".into()));
@@ -670,8 +675,20 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
             (Some(Value::String(f)), Some(_), 2) if !f.is_empty() => Ok(()),
             _ => Err("correct needs {\"field\": \"...\", \"value\": ...}".into()),
         },
-        // The undo of a trash (R2-03, section 7.4) makes its own changeset.
-        Verb::Untrash => Err("only the undo of a trash makes untrash".into()),
+        // Only the undo of a trash makes untrash (section 7.4): its action
+        // has the link of migration 12.
+        Verb::Untrash => {
+            let undo: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
+                [action],
+                |r| r.get(0),
+            )?;
+            match (undo, args.is_empty()) {
+                (true, true) => Ok(()),
+                (true, false) => Err("untrash takes no arguments".into()),
+                (false, _) => Err("only the undo of a trash makes untrash".into()),
+            }
+        }
     })
 }
 
