@@ -30,7 +30,7 @@ pub struct AskSource {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct AskAnswer {
-    /// The answer with a mark `[n]` after each fact, or `null` when the mail
+    /// The answer with one or more marks `[n]` in each sentence, or `null` when the mail
     /// does not answer the question.
     pub answer: Option<String>,
     pub sources: Vec<AskSource>,

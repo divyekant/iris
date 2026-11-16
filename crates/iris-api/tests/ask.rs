@@ -48,14 +48,14 @@ fn store(name: &str, budget: Option<i64>) -> Arc<Store> {
         internal_date: Some(1_794_000_000_000),
         header: Header {
             date: Some(1_794_000_000_000),
-            from_addr: Some("noreply@flytap.com".into()),
-            from_name: Some("TAP Air Portugal".into()),
+            from_addr: Some("noreply@airline.example".into()),
+            from_name: Some("Example Air".into()),
             subject: Some("Your booking confirmation".into()),
             ..Default::default()
         },
         body: Some(Text {
             subject: "Your booking confirmation".into(),
-            sender: "noreply@flytap.com".into(),
+            sender: "noreply@airline.example".into(),
             text: "Departure 07:40, flight TP 1351 to Lisbon.".into(),
         }),
         ..Default::default()
@@ -132,7 +132,7 @@ async fn answers_with_the_summary_of_each_source() {
                     "id": "m-1",
                     "thread": "t-1",
                     "date": "2026-11-06T21:20:00Z",
-                    "from": {"name": "TAP Air Portugal", "address": "noreply@flytap.com"},
+                    "from": {"name": "Example Air", "address": "noreply@airline.example"},
                     "subject": "Your booking confirmation",
                     "labels": []
                 }
@@ -176,7 +176,7 @@ async fn refuses_a_bad_request_no_model_and_no_budget() {
     // The router with no model client.
     let s = store("noclient", Some(1_000_000));
     let (code, v) = ask(&s, None, r#"{"question": "flight"}"#, true).await;
-    assert_eq!(code, StatusCode::BAD_GATEWAY, "{v}");
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     // A model answer that is not JSON.
     let (code, _) = ask(&s, fake("no"), r#"{"question": "flight"}"#, true).await;
     assert_eq!(code, StatusCode::BAD_GATEWAY);

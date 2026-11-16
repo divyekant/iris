@@ -213,7 +213,7 @@ model as data, and answers with the messages that the answer comes from.
 
 | Field | Content |
 |---|---|
-| `answer` | The answer, with a mark `[n]` after each fact, or `null` when the mail does not answer the question. |
+| `answer` | The answer, or `null` when the mail does not answer the question. Each sentence has one or more marks `[n]`: the sources of its facts. The engine drops a sentence with no mark that names a message of the data. |
 | `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
 | `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
 | `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |

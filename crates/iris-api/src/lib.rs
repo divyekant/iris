@@ -99,8 +99,7 @@ fn not_found() -> Response {
 /// The routes of the API, under `/api`, with no model: `POST /api/ask`
 /// answers 503. See [`router_with_model`].
 pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
-    let connect: Connect = Arc::new(|_| Err("This engine has no model client.".into()));
-    router_with_model(store, auth, connect)
+    routes(store, auth, None)
 }
 
 /// The routes of the API, under `/api`. Merge them before the fallback of
@@ -108,6 +107,10 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
 /// of `auth` (see [`Auth`]). `connect` makes the model client of
 /// `POST /api/ask`.
 pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -> Router {
+    routes(store, auth, Some(connect))
+}
+
+fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
     let ask = Router::new()
         .route("/api/ask", post(post_ask))
         .with_state((store.clone(), connect));
@@ -234,10 +237,12 @@ struct AskBody {
 /// One question of the person. The model call runs on a blocking thread,
 /// so the other requests go on.
 async fn post_ask(
-    State((s, connect)): State<(Arc<Store>, Connect)>,
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
     b: std::result::Result<Json<AskBody>, JsonRejection>,
 ) -> Result<Response> {
     let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
     let a = tokio::task::spawn_blocking(move || answer(&s, &connect, &b.question, now_ms()))
         .await
         .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;

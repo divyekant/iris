@@ -145,13 +145,13 @@ fn setup(name: &str, budget: Option<i64>, mail: &[Mail]) -> Box_ {
 const MAIL: &[Mail] = &[
     Mail(
         "Your booking confirmation ABC123",
-        "noreply@flytap.com",
+        "noreply@airline.example",
         "Departure: Fri 20 Nov 2026, 07:40, Terminal 2. Flight TP 1351 to Lisbon.",
         &["INBOX"],
     ),
     Mail(
         "Check-in opens soon",
-        "noreply@flytap.com",
+        "noreply@airline.example",
         "Online check-in for your flight opens 36 hours before departure.",
         &["INBOX"],
     ),
