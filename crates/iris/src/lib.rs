@@ -18,7 +18,7 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:4800";
 pub const SIGN_IN_WAIT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Parser)]
-#[command(name = "iris", version, about = "Iris: local, agent-first email.")]
+#[command(name = "iris", version = VERSION, about = "Iris: local, agent-first email.")]
 pub struct Cli {
     /// The data folder. The default is the variable IRIS_DATA, else the
     /// folder of the system (specification 1, section 5.1).
@@ -46,6 +46,11 @@ pub enum Command {
         /// The backup folder. It must not exist, or must be empty.
         path: PathBuf,
     },
+    /// Install or remove the background service that runs `iris serve`.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -62,9 +67,44 @@ pub enum AccountCommand {
     },
 }
 
+#[derive(Clone, Copy, Subcommand)]
+pub enum ServiceAction {
+    /// Install the service for this program and start it now.
+    Install,
+    /// Stop the service and remove its file.
+    Remove,
+}
+
+/// Run `iris service install` or `iris service remove`. Return the message
+/// for the user.
+pub fn service(action: ServiceAction) -> std::io::Result<String> {
+    match action {
+        ServiceAction::Install => {
+            // The service file holds this path, so give the real file, not a link.
+            let program = std::env::current_exe()?.canonicalize()?;
+            let file = iris_service::install(&program)?;
+            Ok(format!(
+                "iris: installed and started the service ({})",
+                file.display()
+            ))
+        }
+        ServiceAction::Remove => Ok(match iris_service::remove()? {
+            Some(file) => format!("iris: stopped the service and removed {}", file.display()),
+            None => "iris: no service is installed".to_string(),
+        }),
+    }
+}
+
+/// The version of the program: the release tag that `deploy.yml` sets in
+/// `IRIS_RELEASE` at build time, or the crate version for other builds.
+pub const VERSION: &str = match option_env!("IRIS_RELEASE") {
+    Some(tag) => tag,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Return the version line that `iris --version` prints.
 pub fn version_line() -> String {
-    format!("iris {}", env!("CARGO_PKG_VERSION"))
+    format!("iris {VERSION}")
 }
 
 /// Run one command. Gives the error text for standard error.
@@ -80,6 +120,10 @@ pub fn run(cli: Cli) -> Result<(), String> {
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
+            Ok(())
+        }
+        Command::Service { action } => {
+            println!("{}", service(*action).map_err(|e| e.to_string())?);
             Ok(())
         }
     }
@@ -211,6 +255,17 @@ mod tests {
             panic!("not serve")
         };
         assert_eq!(addr.to_string(), DEFAULT_ADDR);
+    }
+
+    #[test]
+    fn cli_parses_service_install_and_remove() {
+        for (arg, install) in [("install", true), ("remove", false)] {
+            let cli = Cli::try_parse_from(["iris", "service", arg]).unwrap();
+            let Command::Service { action } = cli.command else {
+                panic!("not service");
+            };
+            assert_eq!(matches!(action, ServiceAction::Install), install);
+        }
     }
 
     #[test]

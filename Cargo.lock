@@ -640,6 +640,7 @@ dependencies = [
  "iris-auth",
  "iris-fakegmail",
  "iris-gmail",
+ "iris-service",
  "iris-store",
  "iris-sync",
  "iris-synth",
@@ -735,6 +736,10 @@ dependencies = [
  "serde_json",
  "sha2",
 ]
+
+[[package]]
+name = "iris-service"
+version = "0.0.0"
 
 [[package]]
 name = "iris-spec"
