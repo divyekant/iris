@@ -563,8 +563,14 @@ pub fn submit_in(
         // The flags of a mailbox verb: a state verb changes no message, and
         // has no target thread.
         let valid = count > 0 && !STATE_VERBS.contains(&verb.as_str());
+        // The flag `bulk` does not apply to an undo (section 7.4).
+        let undo: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
         let mut flags = Vec::new();
-        if valid && (count > BULK || total > BULK) {
+        if valid && !undo && (count > BULK || total > BULK) {
             flags.push("bulk");
         }
         if valid && first_contact(c, id)? {

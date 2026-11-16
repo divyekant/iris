@@ -411,11 +411,13 @@ pub fn apply(
         // A label that the person deleted at Gmail stays deleted: the undo
         // is denied, with no write call.
         let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
-        if !labels.iter().any(|l| l.id == id) {
+        let Some(l) = labels.iter().find(|l| l.id == id) else {
             let reason = "The label of the entry is not at Gmail now.";
             decide(store, action, "denied", reason)?;
             return Ok(Outcome::Denied(reason.into()));
-        }
+        };
+        // The mirror gets the name of now, also after a rename at Gmail.
+        store.put_labels(account, &[(&l.id, &l.name, "user")])?;
         match verb.as_str() {
             "label" => change.add.push(id),
             _ => change.remove.push(id),

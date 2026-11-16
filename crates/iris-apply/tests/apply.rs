@@ -1742,3 +1742,48 @@ fn the_undo_keeps_a_deleted_label_deleted() {
     assert_eq!(b.calls(""), writes, "no write call");
     assert_eq!(b.state(a).0, "applied");
 }
+
+/// An undo of more than 500 messages has no flag `bulk` (section 7.4).
+#[test]
+fn a_large_undo_has_no_bulk_flag() {
+    let b = setup("undo-bulk", 700, Some(APPLY_POLICY));
+    let ms = b.messages("1", 600);
+    assert_eq!(ms.len(), 600);
+    let a = b.approved("unread", &ms, PERSON);
+    let c = applied(b.apply(a));
+    assert!(c.changed > 500, "{}", c.changed);
+    let actions = iris_apply::undo(&b.store, b.entry(a), now()).unwrap();
+    let flags: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT flags FROM changeset_action WHERE id = ?1",
+                [actions[0]],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(!flags.contains("bulk"), "{flags}");
+}
+
+/// The undo of `unlabel` after a rename at Gmail: the mirror gets the name
+/// of now.
+#[test]
+fn the_undo_saves_the_label_name_of_now() {
+    let b = setup("undo-name", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    applied(b.apply(b.labelled("label", "Undo/Old", &ms)));
+    let a = b.labelled("unlabel", "Undo/Old", &ms);
+    applied(b.apply(a));
+    let id = label_id(&b, "Undo/Old").unwrap();
+    assert!(b.fake.rename_label(&id, "Undo/New"));
+    match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => assert_eq!(c.changed, 2),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(label_id(&b, "Undo/New"), Some(id.clone()));
+    assert_eq!(label_id(&b, "Undo/Old"), None);
+    for &m in &ms {
+        assert!(b.mirror_labels(m).contains(&id));
+    }
+}
