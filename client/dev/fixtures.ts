@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Brief, Item, Message, Status } from "../src/api";
+import type { Brief, Item, Message, Policy, Rule, Status } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -81,6 +81,39 @@ export function raw(id: string): string | undefined {
   ].join("\r\n");
 }
 
+const rule = (r: Partial<Rule> & Pick<Rule, "id" | "name" | "effect" | "when">): Rule => ({ verbs: [], by: "person", added: "2026-11-10", job: null, line: 0, ...r });
+
+/** The rules of spec 2 section 6.1, with one change of the file to confirm. */
+const rules: Rule[] = [
+  rule({ id: 1, name: "Archive newsletters after 3 days", effect: "allow", verbs: ["archive", "read"], when: { form: "feed", sender_kind: "service", older_than_days: 3 }, line: 10 }),
+  rule({ id: 2, name: "Hide Acme Deals", effect: "hide", when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-12", line: 19 }),
+  rule({ id: 3, name: "Bundle the feed", effect: "bundle", when: { form: "feed" }, line: 27 }),
+  rule({
+    id: 4,
+    name: "Never touch mail from the bank without review",
+    effect: "review",
+    verbs: ["archive", "inbox", "label", "unlabel", "read", "unread", "trash"],
+    when: { sender: "@bank.example" },
+    line: 35,
+  }),
+];
+
+export const policy: Policy = {
+  mode: "observe",
+  version: 3,
+  rules,
+  error: null,
+  file: {
+    state: "changed",
+    sha256: "0".repeat(64),
+    text: "version = 0\nmode = \"apply\"\n# The rest of the file.\n",
+    mode: "apply",
+    added: [rule({ id: 5, name: "Mark receipts as read", effect: "allow", verbs: ["read"], when: { form: "record", record_type: "receipt" }, added: "2026-11-16", line: 44 })],
+    removed: [],
+    changed: [{ before: rules[0], after: { ...rules[0], name: "Archive newsletters after 5 days", when: { ...rules[0].when, older_than_days: 5 } } }],
+  },
+};
+
 /** The answer for one API path (no `/api/` prefix), or undefined for a 404. */
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
@@ -98,5 +131,6 @@ export function answer(path: string): unknown {
   }
   if (name === "messages" && id) return message(id);
   if (name === "search") return { messages: [] };
+  if (name === "policy") return policy;
   return undefined;
 }

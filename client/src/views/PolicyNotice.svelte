@@ -1,0 +1,37 @@
+<!--
+  Above the brief: the policy file changed and waits for a confirmation, or
+  it has an error (spec 2 section 6.3). Nothing shows while the file is the
+  active policy, or when the API does not answer.
+-->
+<script lang="ts">
+  import { get, type Policy } from "../api";
+
+  let { policy = null }: { policy?: Policy | null } = $props();
+  // svelte-ignore state_referenced_locally
+  let current = $state(policy);
+  $effect(() => {
+    if (!policy) get<Policy>("policy").then((p) => (current = p), () => {});
+  });
+  let file = $derived(current?.file);
+</script>
+
+{#if current?.error}
+  <p class="notice bad">Iris cannot use its rules: line {current.error.line} of the policy has an error. <a href="#/rules">Open the rules</a></p>
+{:else if file?.state === "invalid"}
+  <p class="notice bad">
+    Your policy file has an error{file.error.line ? ` on line ${file.error.line}` : ""}. Iris uses the rules from before. <a href="#/rules">Open the rules</a>
+  </p>
+{:else if file?.state === "changed"}
+  <p class="notice">Your policy file changed. Iris uses it after you confirm the change. <a href="#/rules">Review the change</a></p>
+{/if}
+
+<style>
+  .notice {
+    margin: 0 0 var(--space-8);
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
+  }
+  .notice.bad {
+    border-left-color: var(--color-error);
+  }
+</style>
