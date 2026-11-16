@@ -264,3 +264,58 @@ fn the_changeset_comes_from_one_snapshot_when_the_store_changes() {
         .all(|(_, n)| *n == 0));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The flags of each action, for `feed` feed messages and `records` record
+/// messages, all in the inbox.
+fn flags_for(feed: usize, records: usize) -> Vec<serde_json::Value> {
+    let dir = std::env::temp_dir().join(format!(
+        "iris-observe-bulk-{feed}-{records}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'INBOX', 'INBOX', 'system');
+                 INSERT INTO thread(account_id, provider_id) VALUES (1, 't1');",
+            )?;
+            for i in 0..feed + records {
+                let form = if i < feed { "feed" } else { "record" };
+                tx.execute(
+                    "INSERT INTO message(account_id, thread_id, provider_id) VALUES (1, 1, ?1)",
+                    [format!("x{i}")],
+                )?;
+                tx.execute_batch(&format!(
+                    "INSERT INTO message_label(message_id, label_id) VALUES (last_insert_rowid(), 1);
+                     INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                       VALUES ('{form}', 1, 'new', '{{}}', 0, 0);
+                     INSERT INTO item_source(item_id, message_id, role)
+                       VALUES (last_insert_rowid(), (SELECT max(id) FROM message), 'origin');"
+                ))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut out = Vec::new();
+    write_changeset(&store, account, "2026-11-16T09:00:00Z", &mut out).unwrap();
+    let cs: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    cs["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["flags"].clone())
+        .collect()
+}
+
+#[test]
+fn the_bulk_flag_starts_above_500_messages_in_one_action_or_in_all() {
+    let none = serde_json::json!([]);
+    let bulk = serde_json::json!(["bulk"]);
+    assert_eq!(flags_for(500, 0), vec![none.clone()]);
+    assert_eq!(flags_for(501, 0), vec![bulk.clone()]);
+    assert_eq!(flags_for(250, 250), vec![none.clone(), none]);
+    assert_eq!(flags_for(250, 251), vec![bulk.clone(), bulk]);
+}
