@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use iris_store::{format_id, parse_id, Kind, Store};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -248,6 +248,57 @@ pub fn messages_by_id(store: &Store, ids: &str) -> Result<Vec<Value>> {
 mod tests {
     use super::*;
 
+    /// Generated input: `parse_after` takes back each `next` value that
+    /// `handled` can give, and refuses each other text (signs, zeros in
+    /// front, spaces, other characters, 0, a value out of range).
+    #[test]
+    fn the_cursor_parser_accepts_only_canonical_row_ids() {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let canonical = |t: &str| {
+            !t.is_empty()
+                && t.bytes().all(|b| b.is_ascii_digit())
+                && !t.starts_with('0')
+                && t.parse::<i64>().is_ok()
+        };
+        const PARTS: [&str; 14] = [
+            "0",
+            "1",
+            "7",
+            "9",
+            "42",
+            "+",
+            "-",
+            " ",
+            "x",
+            "\u{e9}",
+            "9223372036854775807",
+            "9223372036854775808",
+            "00",
+            ".",
+        ];
+        for _ in 0..20_000 {
+            // A valid row ID gives its own text, and the text gives it back.
+            let id = (next() >> 1) as i64;
+            if id > 0 {
+                assert_eq!(parse_after(&id.to_string()), Some(id));
+            }
+            // Random text from parts: the parser agrees with the oracle.
+            let t: String = (0..1 + next() % 4)
+                .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+                .collect();
+            let want = canonical(&t).then(|| t.parse::<i64>().unwrap());
+            assert_eq!(parse_after(&t), want, "{t:?}");
+        }
+        assert_eq!(parse_after(""), None);
+        assert_eq!(parse_after("0"), None);
+    }
+
     /// The list reads the IDs in pages, and each page continues after the
     /// last ID of the page before: no changeset twice, none left out.
     #[test]
@@ -296,4 +347,115 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// One action that a rule decided without the person (specification 2,
+/// section 5.4), in its state now.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HandledAction {
+    pub changeset: String,
+    pub revision: i64,
+    pub n: i64,
+    pub verb: String,
+    /// The arguments of the verb, for example the label of `label`.
+    pub args: Value,
+    /// The count of messages of the action.
+    pub messages: i64,
+    /// The state after the rule decision: `approved`, `held`, `applied`,
+    /// `failed`, `undone` or `denied`.
+    pub state: String,
+    /// The rule and the confirmed policy version that approved it.
+    pub rule: i64,
+    pub policy: i64,
+    /// The reason of the author, and the reason of the decision.
+    pub why: Option<String>,
+    pub reason: Option<String>,
+    /// The time of the decision.
+    pub at: Option<String>,
+}
+
+/// One page of [`handled`].
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HandledPage {
+    /// The count of all such actions, not only of this page.
+    pub count: i64,
+    pub actions: Vec<HandledAction>,
+    /// The `after` value of the next page, or `None` on the last page.
+    pub next: Option<String>,
+}
+
+/// The row ID of an `after` value of [`handled`]: only the canonical text
+/// of a positive row ID, as `next` gives it, so one ID has one cursor.
+fn parse_after(t: &str) -> Option<i64> {
+    t.parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0 && n.to_string() == t)
+}
+
+/// The actions that a rule decided without the person, newest first. `after` is the
+/// `next` value of the page before. Keyset on the row ID: a row ID never
+/// changes, so a page does not repeat or skip an action.
+pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<HandledPage> {
+    if !(1..=crate::MAX_LIMIT).contains(&limit) {
+        return Err(Error::Query(format!(
+            "limit must be 1 to {}",
+            crate::MAX_LIMIT
+        )));
+    }
+    let before = match after {
+        None => i64::MAX,
+        Some(t) => parse_after(t)
+            .ok_or_else(|| Error::Query(format!("after {t} is not the next value of a page")))?,
+    };
+    let (count, mut rows): (i64, Vec<(i64, HandledAction)>) = store.read(|c| {
+        let count = c.query_row(
+            &format!(
+                "SELECT count(*) FROM changeset_action a WHERE {}",
+                crate::read::BY_RULE
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        let mut st = c.prepare_cached(&format!(
+            "SELECT a.id, a.changeset_id, a.revision, a.n, a.verb,
+                    (SELECT count(*) FROM action_message m WHERE m.action_id = a.id),
+                    a.state, a.rule, a.policy, a.why, a.reason, a.decided_at, a.args
+             FROM changeset_action a
+             WHERE {} AND a.id < ?1 ORDER BY a.id DESC LIMIT ?2",
+            crate::read::BY_RULE
+        ))?;
+        let rows = st
+            .query_map(params![before, limit + 1], |r| {
+                Ok((
+                    r.get(0)?,
+                    HandledAction {
+                        changeset: iris_changeset::format_changeset_id(r.get(1)?),
+                        revision: r.get(2)?,
+                        n: r.get(3)?,
+                        verb: r.get(4)?,
+                        messages: r.get(5)?,
+                        state: r.get(6)?,
+                        rule: r.get(7)?,
+                        policy: r.get(8)?,
+                        why: r.get(9)?,
+                        reason: r.get(10)?,
+                        at: r.get::<_, Option<i64>>(11)?.map(crate::rfc3339),
+                        // A CHECK of the store keeps `args` valid JSON.
+                        args: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or(Value::Null),
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((count, rows))
+    })?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next = more
+        .then(|| rows.last().map(|(id, _)| id.to_string()))
+        .flatten();
+    Ok(HandledPage {
+        count,
+        actions: rows.into_iter().map(|(_, a)| a).collect(),
+        next,
+    })
 }

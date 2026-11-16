@@ -90,7 +90,7 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
-        .route("/api/proposal", get(get_proposal))
+        .route("/api/handled", get(get_handled))
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
@@ -131,9 +131,13 @@ async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(brief(&s, now_ms())?).into_response())
 }
 
-async fn get_proposal(State(s): State<Arc<Store>>) -> Response {
-    let now = now_ms();
-    stream(move |w| write_proposal(&s, now, w)).await
+async fn get_handled(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = handled(&s, q.limit.unwrap_or(50), q.after.as_deref())?;
+    Ok(Json(page).into_response())
 }
 
 async fn get_changesets(State(s): State<Arc<Store>>) -> Response {

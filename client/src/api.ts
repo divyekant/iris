@@ -17,6 +17,8 @@ export type Item = {
   created: string;
   updated: string;
   derived: { by: string; rule?: string | number; model?: string };
+  /** The effect of the policy on the brief (spec 2 section 6.4), with the reason. */
+  attention?: { state: "shown" | "hidden" | "bundled"; rule?: number; reason?: string };
   confidence?: number;
   // Fields of each form. They are optional here, so one type holds all forms.
   direction?: "you_owe" | "owed_to_you";
@@ -57,8 +59,10 @@ export type Brief = {
   not_understood: number;
   /** While the first sync runs: the brief covers the mail from this date (spec 1 section 4.2). */
   oldest_fetched?: string | null;
-  /** The release 1 triage proposal (spec 1 section 8): computed, not stored, nothing applied. */
+  /** The stored triage proposal: the messages of the triage actions that wait for your review, for each verb. */
   proposal?: { count: number; verbs: Record<string, number> } | null;
+  /** What Iris did without you: `count` is `hidden` and the messages of the actions that a rule approved (`verbs`). */
+  handled?: { count: number; verbs: Record<string, number> };
   /** One entry for each `bundle` rule that bundles items (spec 2 section 6.4): the newest items, at most 20. */
   bundles?: Bundle[];
   /** The count of items that a `hide` rule leaves out of the brief. */
@@ -175,6 +179,27 @@ export type Changeset = {
   state: "draft" | "open" | "closed" | "withdrawn";
   actions: Action[];
 };
+
+/** GET /api/handled: one action that an `allow` rule approved, with the reason. */
+export type HandledAction = {
+  changeset: string;
+  revision: number;
+  n: number;
+  verb: string;
+  args: Record<string, unknown>;
+  /** The count of messages of the action. */
+  messages: number;
+  /** The state after the rule decision. A failed action can have changed some of its messages. */
+  state: "approved" | "held" | "applied" | "failed" | "undone" | "denied";
+  rule: number;
+  policy: number;
+  why: string | null;
+  reason: string | null;
+  at: string | null;
+};
+
+/** `count` is the count of all such actions, not only of this page. */
+export type HandledPage = { count: number; actions: HandledAction[]; next: string | null };
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
