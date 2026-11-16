@@ -1,6 +1,7 @@
 // Words for the review screen (R2-06): a changeset of spec 2 section 5.1 in
 // plain sentences. Pure functions, so the tests need no DOM.
-import type { Action, Changeset } from "./api";
+import type { Action, Changeset, Item, Target } from "./api";
+import { href } from "./route";
 
 const n = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 const arg = (a: Action, key: string) => (typeof a.args[key] === "string" ? (a.args[key] as string) : "");
@@ -45,6 +46,65 @@ export function target(a: Action): string {
   if (items) return n(items, "item", "items");
   const text = n(messages, "message", "messages");
   return threads > 1 ? `${text} in ${n(threads, "thread", "threads")}` : text;
+}
+
+/** The arguments that set the effect of a state verb (spec 2 section 4), in words. */
+export function detail(a: Action): string {
+  const value = a.args.value;
+  switch (a.verb) {
+    case "close":
+    case "decline":
+      return arg(a, "reason") ? `Reason: ${arg(a, "reason")}` : "";
+    case "correct":
+      return value === undefined ? "" : `New value: ${typeof value === "string" ? value : JSON.stringify(value)}`;
+    default:
+      return "";
+  }
+}
+
+/** The key of an action: its number starts at 1 again in each revision. */
+export const key = (a: Action) => `${a.revision}.${a.n}`;
+
+/** One target of an action as the review shows it, or the ID of a target that is gone. */
+export type Row = { id: string; gone: false; href: string; who: string; what: string; when: string | null } | { id: string; gone: true };
+
+const FORMS: Record<string, string> = { commitment: "Commitment", conversation: "Conversation", record: "Record", feed: "Feed", signal: "Signal" };
+
+export const messageRow = (m: Target): Row =>
+  m.gone ? { id: m.id, gone: true } : { id: m.id, gone: false, href: href.mail(m.id), who: m.from.name || m.from.address || "Unknown sender", what: m.subject || "(no subject)", when: m.date };
+
+export const itemRow = (id: string, item: Item | null): Row =>
+  item ? { id, gone: false, href: href.item(id), who: FORMS[item.form] ?? item.form, what: item.title, when: null } : { id, gone: true };
+
+/** The IDs that an action changes: its items, or the messages that submit resolved. */
+export const targets = (a: Action) => (a.targets.items?.length ? a.targets.items : a.resolved.messages);
+
+/**
+ * The pages of rows of each action. One load runs at a time for each key,
+ * and a row shows once, so a load that ends after another one adds nothing twice.
+ */
+export function pages(fetch: (ids: string[], items: boolean) => Promise<Row[]>) {
+  const lists = new Map<string, Row[]>();
+  const pending = new Set<string>();
+  return {
+    async more(a: Action, count: number): Promise<Row[] | undefined> {
+      const k = key(a);
+      if (pending.has(k)) return undefined;
+      const have = lists.get(k) ?? [];
+      const seen = new Set(have.map((r) => r.id));
+      const next = targets(a).filter((id) => !seen.has(id)).slice(0, count);
+      if (!next.length) return have;
+      pending.add(k);
+      try {
+        const got = await fetch(next, !!a.targets.items?.length);
+        const list = [...have, ...got.filter((r) => !seen.has(r.id) && !!seen.add(r.id))];
+        lists.set(k, list);
+        return list;
+      } finally {
+        pending.delete(k);
+      }
+    },
+  };
 }
 
 /** Why a person must look (spec 2 section 5.3), in words. */

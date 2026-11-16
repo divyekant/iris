@@ -1,12 +1,11 @@
 <!--
   One changeset in the review (R2-06, spec 2 section 5.5): who asks, why, and
-  each action with its real messages. Read only: approve and deny come with
-  the decisions of the changeset store (R2-01 part 3).
+  each action with its real targets (messages or items) and the arguments
+  that set its effect. Read only: approve and deny come in the next part.
 -->
 <script lang="ts">
-  import { get, type Changeset, type Target } from "../api";
-    import { href } from "../route";
-  import { author, FLAGS, outcome, short, shown, target, verb, waits } from "../review";
+  import { get, type Changeset, type Item, type Target } from "../api";
+  import { author, detail, FLAGS, itemRow, key, messageRow, outcome, pages, short, shown, target, targets, verb, waits, type Row } from "../review";
 
   let { changeset: c }: { changeset: Changeset } = $props();
 
@@ -19,47 +18,47 @@
   let who = $derived(author(c));
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
-  // The messages of each action, loaded in pages from the IDs of the document.
-  let messages: Record<number, Target[]> = $state({});
+  // The targets of each action, loaded in pages: messages by their summaries, items one by one.
+  const loader = pages(async (ids, items) => {
+    if (!items) return (await get<{ messages: Target[] }>(`messages?ids=${ids.map(encodeURIComponent).join(",")}`)).messages.map(messageRow);
+    return Promise.all(ids.map((id) => get<Item>(`items/${encodeURIComponent(id)}`).then((i) => itemRow(id, i), () => itemRow(id, null))));
+  });
+  let rows: Record<string, Row[]> = $state({});
   let problem = $state("");
-  async function load(n: number, ids: string[], count: number) {
-    const have = messages[n]?.length ?? 0;
-    const next = ids.slice(have, have + count);
-    if (!next.length) return;
-    try {
-      const page = await get<{ messages: Target[] }>(`messages?ids=${next.map(encodeURIComponent).join(",")}`);
-      messages[n] = [...(messages[n] ?? []), ...page.messages];
-    } catch (e) {
-      problem = e instanceof Error ? e.message : String(e);
-    }
+  function load(a: (typeof actions)[number], count: number) {
+    loader.more(a, count).then(
+      (list) => list && (rows[key(a)] = list),
+      (e) => (problem = e instanceof Error ? e.message : String(e)),
+    );
   }
   $effect(() => {
-    for (const a of actions) if (!messages[a.n]) void load(a.n, a.resolved.messages, FIRST);
+    for (const a of actions) if (!(key(a) in rows)) load(a, FIRST);
   });
 </script>
 
 {#snippet lines(a: (typeof actions)[number])}
-  {@const list = messages[a.n] ?? []}
+  {@const list = rows[key(a)] ?? []}
+  {@const all = targets(a).length}
   {#if list.length}
     <ul class="messages">
       {#each list as m (m.id)}
         <li>
           {#if m.gone}
-            <span class="gone">A message that is not in your mailbox any more</span>
+            <span class="gone">{a.targets.items?.length ? `${m.id}: not in Iris any more` : "A message that is not in your mailbox any more"}</span>
           {:else}
-            <a href={href.mail(m.id)}>
-              <span class="from">{m.from.name || m.from.address}</span>
-              <span class="subject">{m.subject || "(no subject)"}</span>
-              <span class="date">{short(m.date)}</span>
+            <a href={m.href}>
+              <span class="from">{m.who}</span>
+              <span class="subject">{m.what}</span>
+              <span class="date">{short(m.when)}</span>
             </a>
           {/if}
         </li>
       {/each}
     </ul>
   {/if}
-  {#if a.resolved.messages.length > list.length && list.length}
-    <button type="button" class="more" onclick={() => load(a.n, a.resolved.messages, PAGE)}>
-      {a.resolved.messages.length - list.length > PAGE ? `Show ${PAGE} more` : `Show all ${a.resolved.messages.length.toLocaleString("en-US")}`}
+  {#if all > list.length && list.length}
+    <button type="button" class="more" onclick={() => load(a, PAGE)}>
+      {all - list.length > PAGE ? `Show ${PAGE} more` : `Show all ${all.toLocaleString("en-US")}`}
     </button>
   {/if}
 {/snippet}
@@ -82,10 +81,11 @@
 
   {#if open.length}
     <ol class="actions">
-      {#each open as a (`${a.revision}-${a.n}`)}
+      {#each open as a (key(a))}
         <li>
           <div class="body">
             <p class="what"><b>{verb(a)}</b> {target(a)}</p>
+            {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
             {#each a.flags as flag (flag)}<p class="flag">{FLAGS[flag] ?? flag}</p>{/each}
             {@render lines(a)}
@@ -93,7 +93,7 @@
         </li>
       {/each}
     </ol>
-    <p class="decide">Nothing changes in your mailbox before you approve. Approve and deny come to this screen in the next update.</p>
+    <p class="decide">Iris makes none of these changes before you approve them. Approve and deny come to this screen in the next update.</p>
   {/if}
   {#if problem}<p role="alert">{problem}</p>{/if}
 
@@ -101,7 +101,7 @@
     <details>
       <summary>{decided.length === 1 ? "One more change has a decision" : `${decided.length} more changes have a decision`}</summary>
       <ul class="decided">
-        {#each decided as a (`${a.revision}-${a.n}`)}
+        {#each decided as a (key(a))}
           <li><span><b>{verb(a)}</b> {target(a)}</span> <span class="outcome">{outcome(a)}</span></li>
         {/each}
       </ul>

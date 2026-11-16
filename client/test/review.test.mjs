@@ -58,7 +58,7 @@ test("the review says who asks and why, and each change with its count and flags
   assert.match(t, /Iris triage .*Archive 612 messages Changes more than 500 messages/);
   // The action that a rule approved is not a question: it shows under the decisions.
   assert.match(t, /One more change has a decision Archive 1 message Approved by rule 1/);
-  assert.match(t, /Nothing changes in your mailbox before you approve\./);
+  assert.match(t, /Iris makes none of these changes before you approve them\./);
 });
 
 test("one request names its author, and a review with nothing to decide says so", async () => {
@@ -77,4 +77,53 @@ test("the brief says how many changes wait for review and links the review", asy
   assert.match(html, /href="#\/review"/);
   const none = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, review: { changesets: 0, actions: 0 } }, now: new Date("2026-11-16T09:05:00Z") });
   assert.doesNotMatch(none, /#\/review|for your review/);
+});
+
+test("a state verb shows its item and the arguments that set its effect", async () => {
+  assert.equal(r.detail(act({ verb: "close", args: { reason: "Paid on Friday." } })), "Reason: Paid on Friday.");
+  assert.equal(r.detail(act({ verb: "correct", args: { field: "due", value: { date: "2026-11-20" } } })), 'New value: {"date":"2026-11-20"}');
+  assert.equal(r.detail(act({ verb: "archive" })), "");
+  const close = act({ verb: "close", targets: { items: ["c-7"] }, args: { reason: "Paid on Friday." } });
+  assert.deepEqual(r.targets(close), ["c-7"]);
+  assert.deepEqual(r.itemRow("c-7", { id: "c-7", form: "commitment", title: "Pay the invoice" }), { id: "c-7", gone: false, href: "#/item/c-7", who: "Commitment", what: "Pay the invoice", when: null });
+  assert.deepEqual(r.itemRow("c-8", null), { id: "c-8", gone: true });
+  const c = { ...fx.changesets[0], actions: [close] };
+  const t = text(await render("/src/views/Review.svelte", { changesets: [c], mode: "apply" }));
+  assert.match(t, /Close 1 item Reason: Paid on Friday\./);
+});
+
+test("the claim about the mailbox covers only the changes that wait for you", async () => {
+  const t = text(await render("/src/views/Review.svelte", { changesets: fx.changesets, mode: "apply" }));
+  assert.match(t, /Iris makes none of these changes before you approve them\./);
+  assert.doesNotMatch(t, /Nothing changes in your mailbox/);
+});
+
+test("the pages of each action are keyed by revision and number, and a slow load adds nothing twice", async () => {
+  const calls = [];
+  const gates = [];
+  const loader = r.pages((ids) => {
+    calls.push(ids);
+    return new Promise((done) => gates.push(() => done(ids.map((id) => ({ id, gone: true })))));
+  });
+  // Two revisions reuse the number 1.
+  const old = act({ n: 1, revision: 1, resolved: { messages: ["m-1", "m-2"] } });
+  const now = act({ n: 1, revision: 2, resolved: { messages: ["m-8", "m-9"] } });
+  const a = loader.more(old, 1);
+  const b = loader.more(now, 1);
+  // A second load of a key while its first load runs starts nothing.
+  assert.equal(await loader.more(old, 1), undefined);
+  assert.equal(calls.length, 2);
+  // The loads end in the other order.
+  gates[1]();
+  gates[0]();
+  assert.deepEqual((await b).map((x) => x.id), ["m-8"]);
+  assert.deepEqual((await a).map((x) => x.id), ["m-1"]);
+  // The next page continues after the rows that each key has.
+  const c = loader.more(now, 5);
+  gates[2]();
+  assert.deepEqual((await c).map((x) => x.id), ["m-8", "m-9"]);
+  assert.deepEqual(calls, [["m-1"], ["m-8"], ["m-9"]]);
+  // With all rows loaded, nothing more is asked.
+  assert.deepEqual((await loader.more(now, 5)).map((x) => x.id), ["m-8", "m-9"]);
+  assert.equal(calls.length, 3);
 });
