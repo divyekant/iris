@@ -122,7 +122,8 @@ valid.
 ### 5.1 Format
 
 A changeset is one JSON document. This is the format of version 0. The JSON
-Schema of the changeset comes with the release 2 code, from this section.
+Schema of the changeset is `schema/changeset.schema.json`, with sample
+documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
@@ -173,6 +174,7 @@ Schema of the changeset comes with the release 2 code, from this section.
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
 | `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
+| `actions[].args` | The arguments of the verb (section 4), as one JSON object. `label` and `unlabel`: `label`. `close` and `decline`: `reason`. `defer`: `date`. `correct`: `field` and `value`. Each other verb: none (`{}`). A `denied` or `cancelled` action, and a draft action, can hold arguments that do not fit the verb, because only submit checks them. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
 | `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
