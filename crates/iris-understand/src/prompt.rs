@@ -190,13 +190,15 @@ fn escape(s: &str) -> String {
 pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, bool)> {
     // The answer must say if the mail is phishing (section 7.4).
     let phishing = answer.get("phishing")?.as_bool()?;
-    // Phishing gives no item, so the items do not need to be valid.
-    if phishing {
-        return Some((Vec::new(), true));
-    }
+    // The envelope holds for each answer, also a phishing answer: a broken
+    // answer must not set a hostile mark.
     let items = answer.get("items")?.as_array()?;
     if items.len() > MAX_ITEMS {
         return None;
+    }
+    // Phishing gives no item, so the items do not need to be valid.
+    if phishing {
+        return Some((Vec::new(), true));
     }
     let mut out = Vec::with_capacity(items.len());
     for it in items {
@@ -414,10 +416,15 @@ fn fix(p: &mut Value, me: &[&str]) -> Option<()> {
         .get("address")
         .and_then(Value::as_str)
         .map(|s| s.trim().to_ascii_lowercase());
-    let is_self = o.get("kind").and_then(Value::as_str) == Some("self")
-        || addr
-            .as_deref()
-            .is_some_and(|ad| me.iter().any(|m| ad.eq_ignore_ascii_case(m)));
+    let owner = addr
+        .as_deref()
+        .is_some_and(|ad| me.iter().any(|m| ad.eq_ignore_ascii_case(m)));
+    let kind_self = o.get("kind").and_then(Value::as_str) == Some("self");
+    // `self` with the address of another person is not clear: not valid.
+    if kind_self && addr.is_some() && !owner {
+        return None;
+    }
+    let is_self = kind_self || owner;
     if is_self {
         *p = json!({"kind": "self"});
         return Some(());

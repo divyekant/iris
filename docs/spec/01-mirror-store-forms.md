@@ -871,8 +871,11 @@ The conversation rule runs for each message that is not hostile mail:
 - The owner addresses are the address of the mailbox and, in sent mail,
   the `From` address (also an alias). A party with an owner address is the
   owner.
-- The answer must have a boolean `phishing`. Each party in the answer must
-  be the owner or have an address. Else the answer is not valid.
+- The answer must have a boolean `phishing` and a list of at most 20
+  items, also when `phishing` is true. Each party in the answer must be
+  the owner or have an address. A party with the kind `self` and an
+  address that is not an owner address is not clear. Else the answer is
+  not valid.
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.

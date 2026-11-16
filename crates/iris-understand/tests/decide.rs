@@ -325,6 +325,23 @@ fn the_model_gets_the_known_parties() {
 }
 
 #[test]
+fn a_broken_phishing_answer_or_a_self_party_with_another_address_gets_one_more_try() {
+    let items: Vec<Value> = (0..21).map(|_| json!({})).collect();
+    let broken = Ok(text(&json!({"items": items, "phishing": true}).to_string()));
+    let m = Fake::with(vec![broken, answer(task())]);
+    let d = run(ASK, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.hostile, d.drafts.len()), (2, false, 1));
+    for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {
+        let mut t = task();
+        t[0]["direction"] = json!(dir);
+        t[0][key] = json!({"kind": "self", "address": "sam@example.org"});
+        let m = Fake::with(vec![answer(t.clone()), answer(t)]);
+        let d = run(ASK, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+        assert_eq!((d.calls, d.drafts.len(), d.failed), (2, 0, true), "{dir}");
+    }
+}
+
+#[test]
 fn a_list_message_gives_the_list_headers_to_the_model() {
     let raw = "From: Ana <ana@shop.example>\nList-Id: <n.shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Hello\n\nHello.\n";
     let m = Fake::with(vec![answer(json!([]))]);
