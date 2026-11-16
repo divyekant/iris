@@ -79,6 +79,7 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/brief", get(get_brief))
+        .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/proposal", get(get_proposal))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
@@ -169,6 +170,28 @@ impl std::io::Write for ChanWriter {
             .blocking_send(Ok(part))
             .map_err(|_| std::io::Error::other("the client closed the connection"))
     }
+}
+
+#[derive(Deserialize)]
+struct PageQuery {
+    limit: Option<u32>,
+    after: Option<String>,
+}
+
+async fn get_brief_section(
+    State(s): State<Arc<Store>>,
+    Path(section): Path<String>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = brief_section(
+        &s,
+        now_ms(),
+        &section,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(page.map_or_else(not_found, |p| Json(p).into_response()))
 }
 
 #[derive(Deserialize)]
