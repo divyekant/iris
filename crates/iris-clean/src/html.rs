@@ -96,7 +96,16 @@ impl Writer {
     }
 
     fn push(&mut self, c: char) {
-        if self.out.len() >= OUT_LIMIT {
+        // The bytes that this call writes: the pending line ends, the quote
+        // marks at a line start or a space, and the character.
+        let breaks = if self.out.is_empty() { 0 } else { self.breaks };
+        let start = self.line_start || breaks > 0 || self.out.is_empty();
+        let lead = if start {
+            2 * self.quote.min(MAX_QUOTE)
+        } else {
+            usize::from(self.space)
+        };
+        if self.out.len() + breaks + lead + c.len_utf8() > OUT_LIMIT {
             self.full = true;
             return;
         }
@@ -154,12 +163,32 @@ impl Writer {
         if text.is_empty() || text == plain {
             return;
         }
+        // Percent-encode the characters that end a link target, so that the
+        // URL step reads the whole target. The URL stays the same URL.
+        let href: String = href
+            .chars()
+            .map(|c| match c {
+                ' ' => "%20".to_string(),
+                '(' => "%28".to_string(),
+                ')' => "%29".to_string(),
+                '<' => "%3C".to_string(),
+                '>' => "%3E".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
         self.out.truncate(start + lead);
         if text.contains('\n') {
-            self.out.push_str(&format!("{text} ({href})"));
+            // A link text with lines is not a Markdown link text. The angle
+            // brackets mark where the target starts and ends.
+            self.out.push_str(&format!("{text} (<{href}>)"));
         } else {
             // Show the real target: a link text that is not its target is a phishing sign.
             self.out.push_str(&format!("[{text}]({href})"));
+        }
+        // A long target must not pass the output limit.
+        if self.out.len() > OUT_LIMIT {
+            self.out.truncate(floor(&self.out, OUT_LIMIT));
+            self.full = true;
         }
     }
 }
@@ -179,9 +208,10 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     let mut hidden = 0usize;
     // Elements past the stack limit. Their content goes out, so that a hidden
     // element deep in the tree cannot show its text.
-    // The names are kept up to a limit. Past it, the content stays hidden to the end.
+    // The names are kept up to a limit.
     let mut overflow: Vec<String> = Vec::new();
-    let mut overflow_lost = false;
+    // Elements past the name limit. Each end tag closes one of them.
+    let mut overflow_lost = 0usize;
     let mut i = 0;
     while i < b.len() && !w.full {
         if b[i] != b'<' {
@@ -216,14 +246,17 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         i = end;
         let name = tag.name.as_str();
         if closing {
-            if !overflow.is_empty() || overflow_lost {
+            if overflow_lost > 0 {
+                overflow_lost -= 1;
+                hidden -= 1;
+                continue;
+            }
+            if !overflow.is_empty() {
                 // Only the matching end tag closes an element past the stack
                 // limit. Other end tags change nothing, so hidden text stays hidden.
-                if !overflow_lost {
-                    if let Some(at) = overflow.iter().rposition(|n| n == name) {
-                        hidden -= overflow.len() - at;
-                        overflow.truncate(at);
-                    }
+                if let Some(at) = overflow.iter().rposition(|n| n == name) {
+                    hidden -= overflow.len() - at;
+                    overflow.truncate(at);
                 }
                 continue;
             }
@@ -247,11 +280,12 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             }
         }
         close_implied(name, &mut stack, &mut hidden, &mut w);
-        let own_hidden = hides(&tag, drop_quotes, &css);
-        let visible = tag
-            .attr("style")
-            .and_then(css_visibility)
-            .or_else(|| css.visibility(&tag))
+        let style = css.style_of(&tag);
+        let own_hidden = hides(&tag, drop_quotes, style.as_ref());
+        // `visibility` is inherited, and a child can set it again.
+        let visible = style
+            .as_ref()
+            .and_then(Decls::visibility)
             .unwrap_or_else(|| stack.last().is_none_or(|o| o.visible));
         let shown = hidden == 0 && !own_hidden && visible;
         if shown {
@@ -264,7 +298,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             if overflow.len() < MAX_STACK * 8 {
                 overflow.push(tag.name.clone());
             } else {
-                overflow_lost = true;
+                overflow_lost += 1;
             }
             hidden += 1;
             continue;
@@ -434,34 +468,33 @@ fn read_styles(html: &str) -> Css {
             i = close.max(i);
         }
     }
-    css.finish();
     css
 }
 
-/// True if a person does not see the content of the element, or if the
-/// content is a signature or (with `drop_quotes`) quoted history.
-///
-/// Known limit: text in the same color as its background stays.
-/// Class and ID names that a style block hides, for example
-/// `.preheader { display: none }`. Only simple selectors count.
+/// The rules of the `<style>` elements that the converter applies. Only a
+/// top-level rule with a single class (`.name`) or a single ID (`#name`) as
+/// its selector counts. Other rules are ignored, so their content shows.
 #[derive(Default)]
 struct Css {
-    /// Each name (`.class` or `#id`) with its declarations in order, so
-    /// that a later rule wins over an earlier one, as in a browser.
-    rules: Vec<(String, String)>,
-    classes: Vec<String>,
-    ids: Vec<String>,
-    /// Each name (`.class` or `#id`) with the visibility that its rules set.
-    visibility: Vec<(String, bool)>,
+    /// The declarations of each rule read, in sheet order.
+    rules: Vec<Decls>,
+    /// The count of selectors read, over all rules.
+    selectors: usize,
+    /// For each selector, the number of the last rule that sets each property.
+    by_selector: std::collections::HashMap<String, Sheet>,
 }
 
-/// The most names that a message can hide with style rules.
-const MAX_CSS_NAMES: usize = 256;
-/// The most bytes of declarations kept for one name. Older ones go first.
+/// The most style rules that the converter keeps for one message.
+const MAX_CSS_RULES: usize = 256;
+const MAX_CSS_SELECTORS: usize = 4096;
+/// The most bytes of declarations that the converter reads from one rule or
+/// one `style` attribute.
 const MAX_CSS_DECLS: usize = 4096;
 
 impl Css {
     fn read(&mut self, style: &str) {
+        // Braces in strings and comments do not open or close a block.
+        let style = &css_plain(style);
         // Only top-level rules count. A rule inside `@media` (a nested block)
         // applies only on some screens, so the whole block goes out.
         let (mut depth, mut start, mut open) = (0usize, 0, 0);
@@ -489,104 +522,211 @@ impl Css {
         }
     }
 
-    /// Read one top-level rule. False when the name limit is reached.
+    /// Read one top-level rule. False when the rule limit is reached.
     fn rule(&mut self, selectors: &str, body: &str) -> bool {
         if selectors.contains('@') || body.contains('{') {
             return true;
         }
-        for sel in selectors.split(',') {
-            let sel = sel.trim();
-            if sel.is_empty() || sel.contains(|c: char| c.is_whitespace() || ">+~:[*".contains(c)) {
-                continue;
-            }
-            // Only a single class or ID: a compound selector (`.a.b`, `p.x`)
-            // matches fewer elements than its last name.
-            let name = &sel[1..];
-            if !sel.starts_with(['.', '#']) || name.is_empty() || name.contains(['.', '#']) {
-                continue;
-            }
-            let key = sel.to_string();
-            let at = match self.rules.iter().position(|(k, _)| *k == key) {
-                Some(at) => at,
-                None if self.rules.len() >= MAX_CSS_NAMES => return false,
-                None => {
-                    self.rules.push((key, String::new()));
-                    self.rules.len() - 1
-                }
-            };
-            let decls = &mut self.rules[at].1;
-            decls.push(';');
-            decls.push_str(&body[..floor(body, MAX_CSS_DECLS)]);
-            if decls.len() > MAX_CSS_DECLS {
-                let from = decls.len() - MAX_CSS_DECLS;
-                let from = (from..decls.len())
-                    .find(|&k| decls.is_char_boundary(k))
-                    .unwrap_or(0);
-                decls.drain(..from);
-            }
-        }
-        true
-    }
-
-    /// Keep the names whose last declarations hide the content.
-    fn finish(&mut self) {
-        for (key, decls) in self.rules.drain(..) {
-            if let Some(v) = css_visibility(&decls) {
-                self.visibility.push((key.clone(), v));
-            }
-            if !css_hidden(&decls) {
-                continue;
-            }
-            match key.split_at(1) {
-                ("#", id) => self.ids.push(id.to_string()),
-                (_, class) => self.classes.push(class.to_string()),
-            }
-        }
-    }
-
-    /// The visibility that the style rules give the element. An ID rule
-    /// wins over a class rule.
-    fn visibility(&self, tag: &Tag) -> Option<bool> {
-        let rule = |key: String| {
-            self.visibility
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| *v)
+        let body = &body[..floor(body, MAX_CSS_DECLS)];
+        // Only a single class or ID: a compound selector (`.a.b`, `p.x`)
+        // or a combinator matches fewer elements than its last name.
+        let simple = |sel: &&str| {
+            let name = sel.get(1..).unwrap_or("");
+            sel.starts_with(['.', '#'])
+                && !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         };
-        let by_id = tag.attr("id").and_then(|id| rule(format!("#{id}")));
-        by_id.or_else(|| {
-            tag.attr("class")?
-                .split_whitespace()
-                .find_map(|c| rule(format!(".{c}")))
-        })
+        let mut sels = selectors
+            .split(',')
+            .map(str::trim)
+            .filter(simple)
+            .peekable();
+        if sels.peek().is_none() {
+            return true;
+        }
+        if self.rules.len() >= MAX_CSS_RULES {
+            return false;
+        }
+        let d = Decls::parse(body);
+        let n = self.rules.len();
+        for sel in sels {
+            if self.selectors >= MAX_CSS_SELECTORS {
+                break;
+            }
+            self.selectors += 1;
+            let sheet = self.by_selector.entry(sel.to_string()).or_default();
+            for k in 0..PROPS.len() {
+                if d.normal[k].is_some() {
+                    sheet.normal[k] = Some(n);
+                }
+                if d.important[k].is_some() {
+                    sheet.important[k] = Some(n);
+                }
+            }
+        }
+        self.rules.push(d);
+        self.selectors < MAX_CSS_SELECTORS
     }
 
-    fn hides(&self, tag: &Tag) -> bool {
-        tag.attr("id")
-            .is_some_and(|id| self.ids.iter().any(|i| i == id))
-            || tag.attr("class").is_some_and(|c| {
-                c.split_whitespace()
-                    .any(|c| self.classes.iter().any(|k| k == c))
-            })
+    /// The properties that apply to an element, in cascade order: the
+    /// `hidden` attribute, then the class rules, then the ID rules (each in
+    /// sheet order), then the `style` attribute. See [`Decls::then`].
+    /// `None` if nothing applies.
+    fn style_of(&self, tag: &Tag) -> Option<Decls> {
+        let (id, class, inline) = (tag.attr("id"), tag.attr("class"), tag.attr("style"));
+        let hidden = tag.attr("hidden").is_some();
+        if !hidden && id.is_none() && class.is_none() && inline.is_none() {
+            return None;
+        }
+        // The `hidden` attribute is a rule of the browser: an author rule wins over it.
+        let mut d = Decls::parse(if hidden { "display:none" } else { "" });
+        if let Some(class) = class {
+            // Over all the classes of the element, the value of the later rule wins.
+            let mut best = Sheet::default();
+            for c in class.split_whitespace() {
+                if let Some(sheet) = self.by_selector.get(&format!(".{c}")) {
+                    best.later(sheet);
+                }
+            }
+            d.then(&best.decls(&self.rules));
+        }
+        if let Some(sheet) = id.and_then(|id| self.by_selector.get(&format!("#{}", id.trim()))) {
+            d.then(&sheet.decls(&self.rules));
+        }
+        if let Some(inline) = inline {
+            d.then(&Decls::parse(&inline[..floor(inline, MAX_CSS_DECLS)]));
+        }
+        Some(d)
     }
 }
 
-/// The largest char boundary at or below `i`.
-fn floor(s: &str, i: usize) -> usize {
-    (0..=i.min(s.len()))
-        .rev()
-        .find(|&k| s.is_char_boundary(k))
-        .unwrap_or(0)
+/// The values of the rules of one selector (or of the classes of one
+/// element), each with the number of the rule that set it.
+#[derive(Clone, Default)]
+struct Sheet {
+    normal: [Option<usize>; 9],
+    important: [Option<usize>; 9],
 }
 
-fn hides(tag: &Tag, drop_quotes: bool, css: &Css) -> bool {
-    if css.hides(tag) {
-        return true;
+impl Sheet {
+    /// Keep, for each property, the value of the later rule.
+    fn later(&mut self, other: &Sheet) {
+        let pick = |a: &mut Option<usize>, b: &Option<usize>| {
+            if b.is_some_and(|n| a.is_none_or(|m| n > m)) {
+                *a = *b;
+            }
+        };
+        for k in 0..PROPS.len() {
+            pick(&mut self.normal[k], &other.normal[k]);
+            pick(&mut self.important[k], &other.important[k]);
+        }
     }
-    if matches!(tag.name.as_str(), "svg" | "math" | "head") || tag.attr("hidden").is_some() {
-        return true;
+
+    fn decls(&self, rules: &[Decls]) -> Decls {
+        Decls {
+            normal: std::array::from_fn(|k| {
+                self.normal[k].and_then(|n| rules[n].normal[k].clone())
+            }),
+            important: std::array::from_fn(|k| {
+                self.important[k].and_then(|n| rules[n].important[k].clone())
+            }),
+        }
     }
-    if tag.attr("style").is_some_and(css_hidden) {
+}
+
+/// The properties that the hidden rules read.
+const PROPS: [&str; 9] = [
+    "display",
+    "visibility",
+    "font-size",
+    "opacity",
+    "overflow",
+    "height",
+    "max-height",
+    "width",
+    "max-width",
+];
+
+/// The values of [`PROPS`] in one declaration list, or in a cascade of
+/// lists: for each property, the last normal value and the last
+/// `!important` value. The important value wins.
+#[derive(Clone, Default)]
+struct Decls {
+    normal: [Option<String>; 9],
+    important: [Option<String>; 9],
+}
+
+impl Decls {
+    fn parse(style: &str) -> Decls {
+        let s = css_decls(style);
+        let mut d = Decls::default();
+        for (k, v) in s.split(';').filter_map(|x| x.split_once(':')) {
+            let Some(at) = PROPS.iter().position(|p| *p == k) else {
+                continue;
+            };
+            match v.strip_suffix("!important") {
+                Some(v) => d.important[at] = Some(v.to_string()),
+                None => d.normal[at] = Some(v.to_string()),
+            }
+        }
+        d
+    }
+
+    /// Add a later list: its values win over the values of the same kind.
+    fn then(&mut self, later: &Decls) {
+        for k in 0..PROPS.len() {
+            if later.normal[k].is_some() {
+                self.normal[k].clone_from(&later.normal[k]);
+            }
+            if later.important[k].is_some() {
+                self.important[k].clone_from(&later.important[k]);
+            }
+        }
+    }
+
+    fn get(&self, p: &str) -> Option<&str> {
+        let k = PROPS.iter().position(|x| *x == p)?;
+        self.important[k].as_deref().or(self.normal[k].as_deref())
+    }
+
+    /// `Some(false)` for `visibility: hidden` (or `collapse`), `Some(true)`
+    /// for `visibility: visible`. A child can show itself again inside a
+    /// parent with `visibility: hidden`.
+    fn visibility(&self) -> Option<bool> {
+        match self.get("visibility")? {
+            "hidden" | "collapse" => Some(false),
+            "visible" => Some(true),
+            _ => None,
+        }
+    }
+
+    /// True if the values hide the element and all its content.
+    fn hidden(&self) -> bool {
+        let zero = |v: &str| {
+            let n: String = v
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            n.parse::<f64>().is_ok_and(|x| x == 0.0)
+        };
+        let clipped = self.get("overflow") == Some("hidden")
+            && ["height", "max-height", "width", "max-width"]
+                .iter()
+                .any(|p| self.get(p).is_some_and(zero));
+        self.get("display") == Some("none")
+            || self.get("font-size").is_some_and(zero)
+            || self.get("opacity").is_some_and(zero)
+            || clipped
+    }
+}
+
+/// True if a person does not see the element and all its content, or if the
+/// content is a signature or (with `drop_quotes`) quoted history. `style` is
+/// the result of [`Css::style_of`].
+fn hides(tag: &Tag, drop_quotes: bool, style: Option<&Decls>) -> bool {
+    if matches!(tag.name.as_str(), "svg" | "math" | "head") || style.is_some_and(Decls::hidden) {
         return true;
     }
     let class = tag.attr("class").unwrap_or("");
@@ -599,57 +739,59 @@ fn hides(tag: &Tag, drop_quotes: bool, css: &Css) -> bool {
             || (tag.name == "blockquote" && tag.attr("type") == Some("cite")))
 }
 
-/// The value of each property in a declaration list, as the cascade picks
-/// it: the last `!important` declaration, else the last declaration.
-fn css_get(decls: &[(&str, &str)], p: &str) -> Option<String> {
-    let all = decls.iter().rev().filter(|(k, _)| *k == p);
-    let important = all.clone().find(|(_, v)| v.ends_with("!important"));
-    important
-        .or_else(|| all.clone().next())
-        .map(|(_, v)| v.trim_end_matches("!important").to_string())
+/// The largest char boundary at or below `i`.
+fn floor(s: &str, i: usize) -> usize {
+    (0..=i.min(s.len()))
+        .rev()
+        .find(|&k| s.is_char_boundary(k))
+        .unwrap_or(0)
+}
+
+/// The CSS text without comments, and with each string made empty (`""`),
+/// so that a `{`, `}`, `;` or `:` in a string or a comment has no effect.
+fn css_plain(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                for d in chars.by_ref() {
+                    if last == '*' && d == '/' {
+                        break;
+                    }
+                    last = d;
+                }
+                out.push(' ');
+            }
+            '"' | '\'' => {
+                while let Some(d) = chars.next() {
+                    match d {
+                        '\\' => {
+                            chars.next();
+                        }
+                        // A line end ends a bad string, as in CSS.
+                        '\n' => break,
+                        _ if d == c => break,
+                        _ => {}
+                    }
+                }
+                out.push(c);
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn css_decls(style: &str) -> String {
-    style
+    css_plain(style)
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
         .to_ascii_lowercase()
-}
-
-/// `Some(false)` if the style sets `visibility: hidden` (or `collapse`),
-/// `Some(true)` if it sets `visibility: visible`. A child can show itself
-/// again inside a parent with `visibility: hidden`.
-fn css_visibility(style: &str) -> Option<bool> {
-    let s = css_decls(style);
-    let decls: Vec<(&str, &str)> = s.split(';').filter_map(|d| d.split_once(':')).collect();
-    match css_get(&decls, "visibility")?.as_str() {
-        "hidden" | "collapse" => Some(false),
-        "visible" => Some(true),
-        _ => None,
-    }
-}
-
-/// True if the style hides the element and all its content.
-fn css_hidden(style: &str) -> bool {
-    let s = css_decls(style);
-    let decls: Vec<(&str, &str)> = s.split(';').filter_map(|d| d.split_once(':')).collect();
-    let get = |p: &str| css_get(&decls, p);
-    let zero = |v: &str| {
-        let n: String = v
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.')
-            .collect();
-        n.parse::<f64>().is_ok_and(|x| x == 0.0)
-    };
-    let clipped = get("overflow").as_deref() == Some("hidden")
-        && ["height", "max-height", "width", "max-width"]
-            .iter()
-            .any(|p| get(p).is_some_and(|v| zero(&v)));
-    get("display").as_deref() == Some("none")
-        || get("font-size").is_some_and(|v| zero(&v))
-        || get("opacity").is_some_and(|v| zero(&v))
-        || clipped
 }
 
 /// Parse a start or end tag from its name. Return the tag and the index after `>`.
@@ -710,9 +852,9 @@ fn parse_tag(s: &str, start: usize) -> (Tag, usize) {
                 }
             }
         }
-        // Keep only the attributes that the converter reads, so that a tag
-        // with very many attributes costs no memory.
-        if USED_ATTRS.contains(&key.as_str()) && attrs.len() < USED_ATTRS.len() * 2 {
+        // Keep only the first of each attribute that the converter reads (as
+        // a browser does), so that a tag with very many attributes costs no memory.
+        if USED_ATTRS.contains(&key.as_str()) && !attrs.iter().any(|(k, _)| *k == key) {
             attrs.push((key, decode_entities(value).into_owned()));
         }
     }
@@ -786,10 +928,14 @@ fn entity(t: &str) -> Option<(char, usize)> {
                 }
             })
             .count();
-        if digits == 0 || digits > 8 {
+        if digits == 0 {
             return None;
         }
-        let n = u32::from_str_radix(&t[start..start + digits], if hex { 16 } else { 10 }).ok()?;
+        // Leading zeros are allowed. A value past Unicode stays past it.
+        let radix = if hex { 16 } else { 10 };
+        let n = t[start..start + digits].chars().fold(0u32, |n, c| {
+            (n * radix + c.to_digit(radix).unwrap_or(0)).min(0x11_0000)
+        });
         let mut len = start + digits;
         if b.get(len) == Some(&b';') {
             len += 1;
@@ -973,7 +1119,37 @@ mod tests {
         let h = format!("{}{}", "<blockquote>".repeat(500), "<br>x".repeat(300_000));
         let (out, full) = to_markdown(&h, false);
         assert!(full);
-        assert!(out.len() <= OUT_LIMIT + 64, "{}", out.len());
+        assert!(out.len() <= OUT_LIMIT, "{}", out.len());
+        // Output that fits the limit stays whole, also after quoted lines.
+        let head = md("<blockquote>q<br>r</blockquote>a");
+        let fill = "a".repeat(OUT_LIMIT - head.len() + 1);
+        let (exact, exact_full) =
+            to_markdown(&format!("<blockquote>q<br>r</blockquote>{fill}"), false);
+        assert!(!exact_full && exact.len() == OUT_LIMIT && exact.ends_with("aaa"));
+        // After more elements than the stack and the name list hold, the
+        // text after them shows again.
+        let n = MAX_STACK * 9 + 10;
+        let deep = format!("{}deep{}after", "<span>".repeat(n), "</span>".repeat(n));
+        assert_eq!(md(&deep), "after");
+        // Past the stack, an element closes only at the end tag with its name.
+        let divs = "<div>".repeat(MAX_STACK + 1);
+        assert_eq!(md(&format!("{divs}</span>hidden")), "");
+        assert_eq!(md(&format!("{divs}</div>shown")), "shown");
+        // A long run of line ends in `pre` does not pass the limit.
+        let pre = format!("<pre>a{}b</pre>", "\n".repeat(OUT_LIMIT + 10));
+        let (pre_out, pre_full) = to_markdown(&pre, false);
+        assert!(pre_full && pre_out.len() <= OUT_LIMIT, "{}", pre_out.len());
+        // A long link target does not pass the limit.
+        let long = format!(
+            "<a href=\"https://example.org/{}\">x</a>",
+            "a".repeat(OUT_LIMIT)
+        );
+        let (link_out, link_full) = to_markdown(&long, false);
+        assert!(
+            link_full && link_out.len() <= OUT_LIMIT,
+            "{}",
+            link_out.len()
+        );
         assert!(out
             .lines()
             .nth(1)
@@ -1019,10 +1195,38 @@ mod tests {
                 <style>.v{visibility:hidden}</style><p class=v>gone</p>"),
             "Shown"
         );
+        // A list of more than 256 selectors is one rule: its last selector counts.
+        let list: Vec<String> = (0..300).map(|i| format!(".s{i}")).collect();
+        assert_eq!(
+            md(&format!(
+                "<style>{}{{display:none}}</style><p class=s299>secret</p>ok",
+                list.join(",")
+            )),
+            "ok"
+        );
+        // Repeated attributes do not push out a later `hidden`.
+        let repeated = format!("<div {}hidden>secret</div>ok", "href=x ".repeat(18));
+        assert_eq!(md(&repeated), "ok");
         // A compound selector does not hide an element with only one of its names.
         assert_eq!(
             md("<style>.a.b{display:none} p.c{display:none}</style><div class=b>Visible</div><p class=c>too</p>"),
             "Visible\n\ntoo"
+        );
+        // The cascade: the style attribute wins over a rule, an ID rule wins
+        // over a class rule, an important rule wins over a normal style
+        // attribute, and an author rule wins over the hidden attribute.
+        assert_eq!(
+            md("<style>.k{display:none} #i{display:block} .c{display:none} .imp{display:none!important}\
+                .shown{display:block}</style>\
+                <p class=k style=\"display:block\">one</p><p class=c id=i>two</p>\
+                <p class=imp style=\"display:block\">gone</p><p hidden class=shown>three</p><p hidden>gone</p>"),
+            "one\n\ntwo\n\nthree"
+        );
+        // Braces, `;` and `:` in a string or a comment change nothing.
+        assert_eq!(
+            md("<style>.x{content:\"{\"}/* } */.hide{display:none}</style><p class=hide>secret</p>\
+                <p style=\"content:'a;display:none'\">shown</p>"),
+            "shown"
         );
         // A later rule for the same name wins.
         assert_eq!(

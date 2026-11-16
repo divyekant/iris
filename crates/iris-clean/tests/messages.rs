@@ -64,6 +64,71 @@ Please sign the lease.
 }
 
 #[test]
+fn outlook_header_with_subject_five_lines_after_sent() {
+    let raw = crlf(
+        "Subject: RE: Lease
+References: <x@example.org>
+
+Done.
+
+From: Ana Bel <ana@example.org>
+Sent: Monday, 3 February 2025 10:00
+To: Bo <bo@example.net>
+Cc: Cy <cy@example.net>
+Cc: Di <di@example.net>
+Cc: Ed <ed@example.net>
+Subject: Lease
+
+Please sign the lease.
+",
+    );
+    assert_eq!(clean(&raw).text, "Done.");
+}
+
+#[test]
+fn outlook_header_with_subject_six_lines_after_sent_stays() {
+    let raw = crlf(
+        "Subject: RE: Lease
+References: <x@example.org>
+
+From: Ana Bel
+Sent: Monday
+a
+b
+c
+d
+e
+Subject: Lease
+",
+    );
+    assert_eq!(
+        clean(&raw).text,
+        "From: Ana Bel\nSent: Monday\na\nb\nc\nd\ne\nSubject: Lease"
+    );
+}
+
+#[test]
+fn reply_header_fields_out_of_order_stay() {
+    let raw = crlf(
+        "Subject: Re: Form
+In-Reply-To: <x@example.org>
+
+Fill in the form like this:
+
+From: your name
+Subject: the course
+Sent: the date you post it
+
+Thanks.
+",
+    );
+    assert_eq!(
+        clean(&raw).text,
+        "Fill in the form like this:\n\nFrom: your name\nSubject: the course\nSent: the date you post it\n\nThanks."
+    );
+}
+
+#[test]
 fn attachments_with_text_and_names() {
     let raw = crlf(
         "Subject: Files
@@ -217,17 +282,34 @@ fn a_simple_pdf_attachment_gives_text() {
     .into_bytes();
     pdf.extend(data);
     pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
-    let mut raw = b"Subject: Invoice\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
-        Content-Type: text/plain\r\n\r\nSee the PDF.\r\n--m\r\n\
-        Content-Type: application/pdf; name=\"i.pdf\"\r\nContent-Transfer-Encoding: binary\r\n\r\n"
-        .to_vec();
-    raw.extend(&pdf);
-    raw.extend_from_slice(b"\r\n--m--\r\n");
-    let c = clean(&raw);
+    let with_notes = |notes: usize| {
+        let mut raw =
+            b"Subject: Invoice\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+            Content-Type: text/plain\r\n\r\nSee the PDF.\r\n--m\r\n"
+                .to_vec();
+        if notes > 0 {
+            raw.extend_from_slice(b"Content-Type: text/plain; name=n.txt\r\n\r\n");
+            raw.extend(std::iter::repeat_n(b'n', notes));
+            raw.extend_from_slice(b"\r\n--m\r\n");
+        }
+        raw.extend_from_slice(
+            b"Content-Type: application/pdf; name=\"i.pdf\"\r\nContent-Transfer-Encoding: binary\r\n\r\n",
+        );
+        raw.extend(&pdf);
+        raw.extend_from_slice(b"\r\n--m--\r\n");
+        clean(&raw)
+    };
+    let c = with_notes(0);
     assert_eq!(c.text, "See the PDF.");
     assert_eq!(
         c.attachments[0].text.as_deref(),
         Some("Invoice 2025-07 for Avel Torun\nTotal: 120.00 EUR")
+    );
+    // With 2 bytes of budget left, the PDF keeps 2 bytes and the cut mark.
+    let c = with_notes(iris_clean::ATTACHMENT_TEXT_LIMIT - 2);
+    assert_eq!(
+        c.attachments[1].text.as_deref(),
+        Some(format!("In{}", iris_clean::CUT_MARK).as_str())
     );
 }
 
@@ -331,7 +413,7 @@ fn an_attached_message_does_not_use_the_budget_of_the_outer_message() {
 
 #[test]
 fn quoted_printable_soft_breaks_do_not_use_the_budget() {
-    let body = format!("{}Visible end.", "=\n".repeat(iris_clean::BODY_LIMIT));
+    let body = format!("{}Visible end.", "=\n".repeat(iris_clean::PART_LIMIT));
     let raw = format!("Subject: QP\nContent-Transfer-Encoding: quoted-printable\n\n{body}");
     let c = clean(raw.as_bytes());
     assert_eq!(c.text, "Visible end.");
@@ -398,7 +480,7 @@ fn a_big_hidden_html_version_gives_its_budget_back() {
         "Subject: Alt\nContent-Type: multipart/alternative; boundary=a\n\n--a\n\
          Content-Type: text/plain\n\nPlain words.\n--a\nContent-Type: text/html\n\n{hidden}\n--a--\n"
     );
-    assert!(hidden.len() > iris_clean::BODY_LIMIT);
+    assert!(hidden.len() > iris_clean::PART_LIMIT);
     let c = clean(raw.as_bytes());
     assert_eq!(c.text, "Plain words.");
     assert!(!c.cut);
@@ -562,4 +644,215 @@ fn an_uppercase_url_scheme_loses_its_tracking() {
         "Subject: Link\nContent-Type: text/html\n\n<a href=\"HTTPS://example.org/?utm_source=mail\">Shop</a>\n",
     );
     assert_eq!(clean(&raw).text, "[Shop](HTTPS://example.org/)");
+}
+
+#[test]
+fn history_past_the_body_budget_leaves_room_for_a_later_part() {
+    let history = "> old line of the thread\n".repeat(100_000);
+    let raw = crlf(&format!(
+        "Subject: Re: Plan\nIn-Reply-To: <a@example.org>\nContent-Type: multipart/mixed; boundary=m\n\n\
+         --m\nContent-Type: text/plain\n\nShort reply.\n\nOn Mon, Ana wrote:\n{history}\
+         --m\nContent-Type: text/plain\n\nThe new part.\n--m--\n"
+    ));
+    // The first part is longer than its decode limit, so the cut mark shows.
+    let c = clean(&raw);
+    assert!(
+        c.text.starts_with("Short reply.\n\nThe new part."),
+        "{}",
+        c.text
+    );
+}
+
+#[test]
+fn a_reply_subject_without_reply_headers_is_a_reply() {
+    let raw = crlf(
+        "Subject: Re: Plan\nContent-Type: text/html\n\n<p>Yes.</p><div class=\"gmail_quote\">On Mon Ana wrote:<blockquote>old</blockquote></div>\n",
+    );
+    assert_eq!(clean(&raw).text, "Yes.");
+    let raw = crlf(
+        "Subject: Fwd: Plan\nContent-Type: text/html\n\n<p>FYI</p><div class=\"gmail_quote\">Forwarded text</div>\n",
+    );
+    assert!(clean(&raw).text.contains("Forwarded text"));
+}
+
+#[test]
+fn a_link_target_keeps_its_last_character() {
+    let raw = crlf("Subject: L\nContent-Type: text/html\n\n<a href=\"https://example.org/p!\">Open</a> See https://example.org/q.\n");
+    assert_eq!(
+        clean(&raw).text,
+        "[Open](https://example.org/p!) See https://example.org/q."
+    );
+    // A link text with lines: the target keeps its last character too.
+    let raw = crlf("Subject: L\nContent-Type: text/html\n\n<a href=\"https://example.org/p!?utm_source=x\"><p>One</p><p>Two</p></a>\n");
+    assert_eq!(clean(&raw).text, "One\n\nTwo (<https://example.org/p!>)");
+}
+
+#[test]
+fn a_spent_budget_still_lists_the_attachments_of_an_attached_message() {
+    let notes = "n".repeat(1_000_000);
+    let raw = crlf(&format!(
+        "Subject: Two\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\nHi\n\
+         --m\nContent-Type: text/plain; name=notes.txt\n\n{notes}\n\
+         --m\nContent-Type: message/rfc822\n\nSubject: Inner\nContent-Type: multipart/mixed; boundary=i\n\n\
+         --i\nContent-Type: text/plain\n\nInner body.\n--i\nContent-Type: application/zip; name=a.zip\n\nPK\n--i--\n--m--\n"
+    ));
+    let c = clean(&raw);
+    let names: Vec<&str> = c.attachments.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["notes.txt", "Inner", "a.zip"]);
+    assert_eq!(c.attachments[1].text, None);
+}
+
+#[test]
+fn the_joined_text_stays_inside_the_limit() {
+    let part = "w ".repeat(10_000);
+    let mut body = String::from("Subject: Many\nContent-Type: multipart/mixed; boundary=m\n\n");
+    for _ in 0..5 {
+        body.push_str(&format!("--m\nContent-Type: text/plain\n\n{part}\n"));
+    }
+    body.push_str("--m--\n");
+    let c = clean(&crlf(&body));
+    let without = c.text.strip_suffix(iris_clean::CUT_MARK).unwrap_or(&c.text);
+    assert!(c.cut);
+    assert_eq!(without.chars().count(), iris_clean::TEXT_LIMIT);
+}
+
+#[test]
+fn an_attached_message_has_one_whole_cut_mark() {
+    // 16 bytes of budget are left for an attached message with the text "x"
+    // and a cut (its parts are nested deeper than the limit).
+    let notes = "n".repeat(iris_clean::ATTACHMENT_TEXT_LIMIT - 16);
+    let mut deep = String::from("Content-Type: text/plain\n\ndeep\n");
+    for k in 0..12 {
+        deep = format!("Content-Type: multipart/mixed; boundary=d{k}\n\n--d{k}\n{deep}--d{k}--\n");
+    }
+    let raw = crlf(&format!(
+        "Subject: Two\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\nHi\n\
+         --m\nContent-Type: text/plain; name=notes.txt\n\n{notes}\n\
+         --m\nContent-Type: message/rfc822\n\nSubject: Inner\nContent-Type: multipart/mixed; boundary=i\n\n\
+         --i\nContent-Type: text/plain\n\nx\n--i\n{deep}--i--\n--m--\n"
+    ));
+    let c = clean(&raw);
+    let t = c.attachments[1].text.as_deref().unwrap_or_default();
+    assert_eq!(t, format!("x{}", iris_clean::CUT_MARK));
+}
+
+#[test]
+fn a_hidden_part_after_a_full_text_is_no_cut() {
+    let part = "w".repeat(iris_clean::TEXT_LIMIT);
+    let raw = crlf(&format!(
+        "Subject: Full\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\n{part}\n\
+         --m\nContent-Type: text/html\n\n<div hidden>secret</div>\n--m--\n"
+    ));
+    let c = clean(&raw);
+    assert!(!c.cut);
+    assert_eq!(c.text, part);
+}
+
+#[test]
+fn a_big_hidden_last_alternative_after_a_full_text_is_no_cut() {
+    let part = "w".repeat(iris_clean::TEXT_LIMIT);
+    // Hidden HTML larger than the part limit: the decode cuts it, but it has no text.
+    let hidden = format!("<div hidden>{}</div>", "s ".repeat(iris_clean::PART_LIMIT));
+    let raw = format!(
+        "Subject: Full\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\n{part}\n\
+         --m\nContent-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\n\n\
+         --a\nContent-Type: text/html\n\n{hidden}\n--a--\n--m--\n"
+    );
+    let c = clean(raw.as_bytes());
+    assert!(!c.cut);
+    assert_eq!(c.text, part);
+}
+
+#[test]
+fn an_attached_message_at_the_depth_limit_is_cut() {
+    let mut part = String::from("Content-Type: message/rfc822\n\nSubject: Deep\n\nToo deep.\n");
+    // The top message is depth 0. Each multipart adds one level.
+    for k in 0..MAX_DEPTH {
+        part = format!("Content-Type: multipart/mixed; boundary=d{k}\n\n--d{k}\n{part}--d{k}--\n");
+    }
+    let raw = crlf(&format!("Subject: Top\n{part}"));
+    let c = clean(&raw);
+    let inner = c
+        .attachments
+        .iter()
+        .find(|a| a.mime_type == "message/rfc822")
+        .expect("listed");
+    assert_eq!(inner.text.as_deref(), Some(CUT_MARK));
+}
+
+#[test]
+fn a_part_with_too_many_lines_is_cut() {
+    let lines = "a\n".repeat(iris_clean::MAX_LINES + 10);
+    let c = clean(&crlf(&format!("Subject: Lines\n\n{lines}")));
+    assert!(c.cut);
+}
+
+#[test]
+fn a_paren_in_a_link_target_does_not_keep_tracking() {
+    let raw = crlf("Subject: L\nContent-Type: text/html\n\n<a href=\"https://example.org/a)b?utm_source=x\">Open</a>\n");
+    assert_eq!(clean(&raw).text, "[Open](https://example.org/a%29b)");
+}
+
+#[test]
+fn many_elements_with_one_class_stay_fast() {
+    let rules: String = (0..256)
+        .map(|_| format!(".c{{{}}}", "color:red;".repeat(400)))
+        .collect();
+    let body = format!(
+        "<style>{rules}</style>{}",
+        "<b class=c>x</b>".repeat(60_000)
+    );
+    let raw = crlf(&format!(
+        "Subject: Css\nContent-Type: text/html\n\n{body}\n"
+    ));
+    let start = std::time::Instant::now();
+    clean(&raw);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_utf16_attachment_uses_the_budget_by_its_decoded_text() {
+    let n = 600_000;
+    let mut raw = b"Subject: Wide\nContent-Type: multipart/mixed; boundary=m\n\n--m\n\
+        Content-Type: text/plain\n\nBody.\n--m\n\
+        Content-Type: text/plain; charset=utf-16le\nContent-Disposition: attachment; filename=w.txt\n\n"
+        .to_vec();
+    raw.extend("a".repeat(n).encode_utf16().flat_map(u16::to_le_bytes));
+    raw.extend_from_slice(
+        b"\n--m\nContent-Type: text/plain\nContent-Disposition: attachment; filename=n.txt\n\nnext\n--m--\n",
+    );
+    let c = clean(&raw);
+    let wide = c.attachments[0].text.as_deref().unwrap();
+    assert_eq!(wide.trim_end(), "a".repeat(n));
+    assert_eq!(
+        c.attachments[1].text.as_deref().map(str::trim),
+        Some("next")
+    );
+}
+
+#[test]
+fn numeric_entities_with_leading_zeros() {
+    let raw = crlf("Subject: E\nContent-Type: text/html\n\n<p>&#00000000065;&#x0000000042; &#99999999999;</p>\n");
+    assert_eq!(clean(&raw).text, "AB \u{fffd}");
+}
+
+#[test]
+fn text_on_the_line_after_max_lines_is_cut() {
+    let over = format!(
+        "Subject: L\n\n{}critical\n",
+        "\n".repeat(iris_clean::MAX_LINES)
+    );
+    let c = clean(over.as_bytes());
+    assert!(c.cut && !c.text.contains("critical"), "{}", c.text);
+    let at = format!(
+        "Subject: L\n\n{}last",
+        "\n".repeat(iris_clean::MAX_LINES - 1)
+    );
+    let c = clean(at.as_bytes());
+    assert!(!c.cut);
+    assert_eq!(c.text, "last");
 }

@@ -7,15 +7,22 @@
 //! The functions are pure: no network, no files, no model. Mail text is data.
 //! This crate never runs or follows text from a message.
 //!
+//! The contract (what goes out, what stays, the limits and the known
+//! limits) is in `docs/specs/2026-11-16-clean-text.md`.
+//!
+//! The work has two steps. Step 1 walks the MIME tree and makes the clean
+//! text of each body part, until the text has [`TEXT_LIMIT`] characters. It
+//! lists the attachments without a decode. Step 2 reads the attachments in
+//! order, with one text budget of [`ATTACHMENT_TEXT_LIMIT`] bytes.
+//!
 //! Bounds for one message, whatever its size:
-//! - The body text parts give at most [`BODY_LIMIT`] decoded bytes.
-//! - The text of attachments has at most [`ATTACHMENT_TEXT_LIMIT`] bytes.
+//! - Each body text part decodes at most [`PART_LIMIT`] bytes.
 //! - An attached message gives at most [`INNER_LIMIT`] decoded bytes to the parser.
 //! - Only a PDF of at most [`PDF_LIMIT`] bytes is decoded for its text.
 //! - The parser reads at most [`MAX_PARTS`] MIME parts, [`MAX_DEPTH`] levels deep.
 //! - The body of an attachment is not decoded to measure its size.
 //!
-//! So the memory use does not grow with the size of attachments, and the
+//! So the memory use does not grow with the size of the message, and the
 //! time is linear in the size of the message. The largest use is a PDF of
 //! 10 MiB with one decompressed stream of at most 4 MiB.
 
@@ -31,10 +38,8 @@ pub use quote::remove_repeated_end;
 pub const TEXT_LIMIT: usize = 32_000;
 /// The most bytes of attachment text for each message.
 pub const ATTACHMENT_TEXT_LIMIT: usize = 1_000_000;
-/// The most decoded bytes of body text parts (plain text or HTML) for each message.
-pub const BODY_LIMIT: usize = 2 * 1024 * 1024;
-/// The most bytes of text that stay after the quote and signature steps, for the URL and tidy steps.
-const STEP_LIMIT: usize = 512 * 1024;
+/// The most decoded bytes of one body text part (plain text or HTML).
+pub const PART_LIMIT: usize = 2 * 1024 * 1024;
 /// The most MIME parts that the parser reads in one message.
 pub const MAX_PARTS: usize = 500;
 /// The most levels of nested MIME parts.
@@ -43,6 +48,12 @@ pub const MAX_DEPTH: usize = 8;
 pub const INNER_LIMIT: usize = 2 * 1024 * 1024;
 /// The largest PDF attachment (decoded bytes) that gives text (spec 1 section 9).
 pub const PDF_LIMIT: u64 = 10 * 1024 * 1024;
+/// The least bytes of PDF text that the quality check reads, whatever the
+/// budget that is left.
+const PDF_CHECK_TEXT: usize = 4096;
+/// The most lines of one body part that the quote and signature steps read.
+/// More lines are cut. 2 MiB of lines of 20 bytes is about 100,000 lines.
+pub const MAX_LINES: usize = 100_000;
 /// The most characters of an attachment name.
 const NAME_LIMIT: usize = 255;
 
@@ -76,89 +87,92 @@ pub struct Attachment {
 
 /// Make the clean text of one raw RFC 5322 message.
 pub fn clean(raw: &[u8]) -> Clean {
-    let mut w = Walker {
-        parts: 0,
-        body_left: BODY_LIMIT,
-        attach_left: ATTACHMENT_TEXT_LIMIT,
-        cut: false,
-        attachments: Vec::new(),
-        is_reply: false,
-    };
-    let (subject, mut text) = w.message(raw, 0);
-    let mut cut = w.cut;
-    if let Some((i, _)) = text.char_indices().nth(TEXT_LIMIT) {
-        text.truncate(i);
-        cut = true;
-    }
-    if cut {
-        text.push_str(CUT_MARK);
+    let mut parts = 0;
+    let mut attach_left = ATTACHMENT_TEXT_LIMIT;
+    let (subject, text, cut, files) = message(raw, 0, &mut parts);
+    let mut attachments = Vec::new();
+    for f in files {
+        attachment(f, &mut parts, &mut attach_left, &mut attachments);
     }
     Clean {
         subject,
         text,
         cut,
-        attachments: w.attachments,
+        attachments,
     }
 }
 
-struct Walker {
+/// Step 1 for one message: the top message, or an attached
+/// `message/rfc822` part. Return the subject, the text (with [`CUT_MARK`]
+/// if it was cut), the cut flag and the attachments, not read yet. `parts`
+/// counts the MIME parts of the whole top message.
+fn message<'a>(
+    raw: &'a [u8],
+    depth: usize,
+    parts: &mut usize,
+) -> (String, String, bool, Vec<File<'a>>) {
+    let h = mime::Headers::parse(mime::split_head(raw).0);
+    let subject = mime::decode_words(h.get("subject").unwrap_or(""))
+        .trim()
+        .to_string();
+    // Some clients send a reply without reply headers: the subject shows it.
+    let re = subject
+        .split_once(':')
+        .is_some_and(|(p, _)| REPLY_PREFIXES.contains(&p.trim().to_lowercase().as_str()));
+    let is_reply = re || h.get("in-reply-to").is_some() || h.get("references").is_some();
+    // Step 1: the body text, and the list of the attachments (not decoded).
+    let mut w = Walker {
+        parts: *parts,
+        texts: Vec::new(),
+        chars: 0,
+        cut: false,
+        dropped: 0,
+        files: Vec::new(),
+        is_reply,
+    };
+    w.entity(raw, depth);
+    *parts = w.parts;
+    let mut text = w.texts.join("\n\n");
+    if w.cut {
+        text.push_str(CUT_MARK);
+    }
+    (subject, text, w.cut, w.files)
+}
+
+/// An attachment that step 1 found. Step 2 reads it.
+struct File<'a> {
+    mime_type: String,
+    name: Option<String>,
+    charset: Option<String>,
+    cte: String,
+    body: &'a [u8],
+    /// The MIME depth of the part. An attached message goes one level deeper.
+    depth: usize,
+}
+
+/// Step 1 of one message: walk the MIME tree, make the text of each body
+/// part, and list the attachments.
+struct Walker<'a> {
     parts: usize,
-    body_left: usize,
-    attach_left: usize,
+    /// The clean text of each body part that has text, in order.
+    texts: Vec<String>,
+    /// The characters in `texts`. At most [`TEXT_LIMIT`].
+    chars: usize,
+    /// True if body text went out because of a limit.
     cut: bool,
-    attachments: Vec<Attachment>,
-    /// True while the walker reads a reply. HTML quote blocks then go out.
+    /// The count of parts with clean text that did not fit in [`TEXT_LIMIT`].
+    dropped: usize,
+    files: Vec<File<'a>>,
+    /// True if the message is a reply. Quoted history then goes out.
     is_reply: bool,
 }
 
-impl Walker {
-    /// The subject and the clean text of a message: the top entity, or an
-    /// attached `message/rfc822` part.
-    fn message(&mut self, raw: &[u8], depth: usize) -> (String, String) {
-        let h = mime::Headers::parse(mime::split_head(raw).0);
-        let subject = mime::decode_words(h.get("subject").unwrap_or(""))
-            .trim()
-            .to_string();
-        let is_reply = h.get("in-reply-to").is_some() || h.get("references").is_some();
-        let outer = std::mem::replace(&mut self.is_reply, is_reply);
-        let bodies = self.entity(raw, depth);
-        self.is_reply = outer;
-        (subject, self.render(bodies, is_reply))
-    }
-
-    fn render(&mut self, bodies: Vec<String>, is_reply: bool) -> String {
-        let mut text = String::new();
-        let mut left = STEP_LIMIT;
-        for t in bodies {
-            // Each part has its own quotes and signature: a cut in one part
-            // must not remove the text of a later part. The body budget
-            // bounds the input, and only the text that stays uses the step
-            // budget, so quoted history cannot use up the room of later parts.
-            let t = t.replace("\r\n", "\n").replace('\r', "\n");
-            let mut t = quote::strip_signature(&quote::strip_quotes(&t, is_reply));
-            if t.trim().is_empty() {
-                continue;
-            }
-            if t.len() > left {
-                t.truncate(floor_char(&t, left));
-                self.cut = true;
-            }
-            left -= t.len();
-            if !text.is_empty() {
-                text.push_str("\n\n");
-            }
-            text.push_str(&t);
-        }
-        tidy(&url::clean_urls(&text))
-    }
-
-    /// Walk one entity. Return its body texts in order. Attachments go to
-    /// `self.attachments`.
-    fn entity(&mut self, raw: &[u8], depth: usize) -> Vec<String> {
+impl<'a> Walker<'a> {
+    fn entity(&mut self, raw: &'a [u8], depth: usize) {
         self.parts += 1;
         if self.parts > MAX_PARTS || depth > MAX_DEPTH {
             self.cut = true;
-            return Vec::new();
+            return;
         }
         let (head, body) = mime::split_head(raw);
         let h = mime::Headers::parse(head);
@@ -183,167 +197,195 @@ impl Walker {
             .filter(|_| disp.main != "attachment" && name.is_none())
         {
             let Some(boundary) = mime::param(&ct.params, "boundary") else {
-                return Vec::new();
+                return;
             };
             // One part more than the limit, so that the walker sees the overflow.
             let max = MAX_PARTS.saturating_sub(self.parts) + 1;
-            let (parts, more) = mime::split_multipart(body, &boundary, max);
+            let (list, more) = mime::split_multipart(body, &boundary, max);
             // Parts past the limit are not read. A last alternative can be one of them.
             self.cut |= more;
             if sub == "alternative" {
-                // RFC 2046: the last version is the richest. A mail client
-                // shows it, so the clean text uses it too. Walk from the end,
-                // so that a version that is not used takes none of the budget.
-                // A version with no visible text (empty or all hidden) is skipped.
-                for part in parts.into_iter().rev() {
-                    let before = (
-                        self.body_left,
-                        self.cut,
-                        self.attach_left,
-                        self.attachments.len(),
-                    );
-                    let bodies = self.entity(part, depth + 1);
-                    // Visible means text that stays after the quote and signature steps.
-                    let visible = bodies.iter().any(|t| {
-                        let t = quote::strip_quotes(&t.replace('\r', ""), self.is_reply);
-                        !quote::strip_signature(&t).trim().is_empty()
-                    });
-                    if visible {
-                        return bodies;
-                    }
-                    // A version with no visible text gives its budgets and attachments back.
-                    let listed;
-                    (self.body_left, self.cut, self.attach_left, listed) = before;
-                    self.attachments.truncate(listed);
+                self.alternative(list, depth);
+            } else {
+                for part in list {
+                    self.entity(part, depth + 1);
                 }
-                return Vec::new();
             }
-            let mut bodies = Vec::new();
-            for part in parts {
-                bodies.extend(self.entity(part, depth + 1));
-            }
-            return bodies;
+            return;
         }
         let is_text = mime_type == "text/plain" || mime_type == "text/html";
         if is_text && disp.main != "attachment" && name.is_none() {
-            let bytes = self.take(body, &cte);
-            let text = mime::decode(&bytes, charset.as_deref());
-            if mime_type != "text/html" {
-                return vec![text];
+            self.body_part(body, &cte, mime_type == "text/html", charset.as_deref());
+            return;
+        }
+        self.files.push(File {
+            mime_type,
+            name,
+            charset,
+            cte,
+            body,
+            depth,
+        });
+    }
+
+    /// RFC 2046: the last version is the richest. A mail client shows it, so
+    /// the clean text uses it too. The walker reads the versions from the
+    /// end and uses the first one with text after the quote and signature
+    /// steps. A version that is not used adds no text, no attachment and no cut.
+    fn alternative(&mut self, list: Vec<&'a [u8]>, depth: usize) {
+        for part in list.into_iter().rev() {
+            let before = (self.texts.len(), self.chars, self.cut, self.files.len());
+            let dropped = self.dropped;
+            self.entity(part, depth + 1);
+            // A version with text is used, also when the text is full and
+            // its text did not fit: its cut stays.
+            if self.texts.len() > before.0 || self.dropped > dropped {
+                return;
             }
+            let texts;
+            (texts, self.chars, self.cut, _) = before;
+            self.texts.truncate(texts);
+            self.files.truncate(before.3);
+        }
+    }
+
+    /// Make the clean text of one body part. Each part has its own quotes
+    /// and signature, so a cut in one part cannot remove a later part.
+    fn body_part(&mut self, body: &[u8], cte: &str, html: bool, charset: Option<&str>) {
+        // Also when the text is full, the part goes through the steps: only
+        // a later part with clean text makes a cut.
+        let (bytes, truncated) = decode_capped(body, cte, PART_LIMIT);
+        self.cut |= truncated;
+        let text = mime::decode(&bytes, charset);
+        drop(bytes);
+        let text = if html {
             let (md, full) = html::to_markdown(&text, self.is_reply);
             self.cut |= full;
-            return vec![md];
+            md
+        } else {
+            text
+        };
+        let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+        // The quote and signature steps keep a list of the lines. Bound it.
+        // The end of line MAX_LINES: a cut only if text follows it.
+        if let Some((i, _)) = text
+            .match_indices('\n')
+            .nth(MAX_LINES - 1)
+            .filter(|&(i, _)| i + 1 < text.len())
+        {
+            text.truncate(i);
+            self.cut = true;
         }
-        self.attachment(mime_type, name, charset, body, &cte, depth);
-        Vec::new()
+        let text = quote::strip_signature(&quote::strip_quotes(&text, self.is_reply));
+        let mut text = tidy(&url::clean_urls(&text));
+        if text.is_empty() {
+            return;
+        }
+        // The texts join with an empty line: two characters.
+        let sep = if self.texts.is_empty() { 0 } else { 2 };
+        let Some(left) = TEXT_LIMIT.checked_sub(self.chars + sep).filter(|&l| l > 0) else {
+            self.chars = TEXT_LIMIT;
+            self.cut = true;
+            self.dropped += 1;
+            return;
+        };
+        if let Some((i, _)) = text.char_indices().nth(left) {
+            text.truncate(i);
+            self.cut = true;
+        }
+        self.chars += sep + text.chars().count();
+        self.texts.push(text);
     }
+}
 
-    fn attachment(
-        &mut self,
-        mime_type: String,
-        name: Option<String>,
-        charset: Option<String>,
-        body: &[u8],
-        cte: &str,
-        depth: usize,
-    ) {
-        let size = mime::decoded_len(body, cte);
-        // An attached message adds its own attachments. This one goes before them.
-        let at = self.attachments.len();
-        let mut name = name.unwrap_or_default();
-        let mut text = None;
-        // True if the attachment text is not complete.
-        let mut cut = false;
-        if mime_type == "message/rfc822" && self.attach_left > 0 {
-            let (inner, clipped) = decode_capped(body, cte, INNER_LIMIT);
-            // The attached message has its own body budget and cut state, so
-            // that it does not take text from the outer message. Its text
-            // cannot be longer than the attachment text that is left.
-            let outer = (self.body_left, self.cut);
-            self.body_left = self.attach_left;
-            self.cut = false;
-            let (subject, mut t) = self.message(&inner, depth + 1);
-            if clipped {
-                // The end of the attached message is not read, so the sizes
-                // of its own attachments are not known. Do not list them.
-                self.attachments.truncate(at);
+/// Step 2 for one attachment: its name, type, size and text. The text uses
+/// `attach_left`, the one budget of the top message, in the order of the
+/// message. So the budget never has to go back. An attached message adds its
+/// own attachments after it: its text uses the budget first.
+fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec<Attachment>) {
+    let size = mime::decoded_len(f.body, &f.cte);
+    let mut name = f.name.unwrap_or_default();
+    let mut text = None;
+    // True if the attachment text is not complete.
+    let mut cut = false;
+    let mut inner_attachments = Vec::new();
+    if f.mime_type == "message/rfc822" {
+        // Also with no budget left, the walk lists the attachments of the
+        // attached message.
+        let had_budget = *attach_left > 0;
+        let (inner, clipped) = decode_capped(f.body, &f.cte, INNER_LIMIT);
+        let (subject, mut t, inner_cut, files) = message(&inner, f.depth + 1, parts);
+        // The cut mark is not part of the budget: take it off, and put one
+        // mark on below.
+        if inner_cut {
+            t.truncate(t.len() - CUT_MARK.len());
+        }
+        cut = inner_cut || clipped;
+        if t.len() > *attach_left {
+            t.truncate(floor_char(&t, *attach_left));
+            cut = true;
+        }
+        *attach_left -= t.len();
+        // The end of a clipped message is not read, so the sizes of its own
+        // attachments are not known. Do not list them.
+        if !clipped {
+            for inner_file in files {
+                attachment(inner_file, parts, attach_left, &mut inner_attachments);
             }
-            if self.cut || clipped {
-                t.push_str(CUT_MARK);
-            }
-            (self.body_left, self.cut) = outer;
-            // The body of the attached message has priority over the text of
-            // its own attachments: take budget back from them, last first.
-            let mut need = t.len().saturating_sub(self.attach_left);
-            for a in self.attachments[at..].iter_mut().rev() {
-                if need == 0 {
-                    break;
+        }
+        if name.is_empty() {
+            name = subject;
+        }
+        // A spent budget gives no text, as for the other types.
+        text = had_budget.then_some(t);
+    } else if f.mime_type == "text/plain" && *attach_left > 0 {
+        // UTF-16 gives one byte of text for two source bytes of ASCII.
+        let wide = mime::bytes_per_byte(f.charset.as_deref());
+        let (bytes, truncated) = decode_capped(f.body, &f.cte, *attach_left * wide);
+        let mut t = mime::decode(&bytes, f.charset.as_deref());
+        cut = truncated;
+        // A charset can make the text longer than its bytes.
+        if t.len() > *attach_left {
+            t.truncate(floor_char(&t, *attach_left));
+            cut = true;
+        }
+        *attach_left -= t.len();
+        text = Some(t);
+    } else if f.mime_type == "application/pdf" && *attach_left > 0 && size <= PDF_LIMIT {
+        // Check the marker first, so that a file that is not a PDF costs no memory.
+        if pdf::is_pdf(&decode_capped(f.body, &f.cte, 1024).0) {
+            let (bytes, _) = decode_capped(f.body, &f.cte, PDF_LIMIT as usize);
+            // The quality check needs some text, also when little budget is
+            // left. One byte more than the budget shows a cut.
+            let (found, stopped) = pdf::text_cut(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
+            if let Some(mut t) = found {
+                cut = stopped;
+                if t.len() > *attach_left {
+                    t.truncate(floor_char(&t, *attach_left));
+                    cut = true;
                 }
-                let Some(inner_text) = a.text.as_mut() else {
-                    continue;
-                };
-                let keep = inner_text.len().saturating_sub(need + CUT_MARK.len());
-                let freed = if keep == 0 {
-                    a.text.take().map_or(0, |x| x.len())
-                } else {
-                    let before = inner_text.len();
-                    inner_text.truncate(floor_char(inner_text, keep));
-                    inner_text.push_str(CUT_MARK);
-                    before - inner_text.len()
-                };
-                self.attach_left += freed;
-                need = need.saturating_sub(freed);
-            }
-            if name.is_empty() {
-                name = subject;
-            }
-            text = Some(t);
-        } else if mime_type == "text/plain" && self.attach_left > 0 {
-            let (bytes, truncated) = decode_capped(body, cte, self.attach_left);
-            text = Some(mime::decode(&bytes, charset.as_deref()));
-            cut = truncated;
-        } else if mime_type == "application/pdf" && self.attach_left > 0 && size <= PDF_LIMIT {
-            // Check the marker first, so that a file that is not a PDF costs no memory.
-            if pdf::is_pdf(&decode_capped(body, cte, 1024).0) {
-                let (bytes, _) = decode_capped(body, cte, PDF_LIMIT as usize);
-                // One byte more than the budget, so that a cut shows below.
-                text = pdf::text(&bytes, self.attach_left + 1);
+                *attach_left -= t.len();
+                text = Some(t);
             }
         }
+    }
+    if cut {
         if let Some(t) = text.as_mut() {
-            if t.len() > self.attach_left {
-                t.truncate(floor_char(t, self.attach_left));
-                cut = true;
-            }
-            if cut {
-                t.push_str(CUT_MARK);
-            }
-            self.attach_left = self.attach_left.saturating_sub(t.len());
+            t.push_str(CUT_MARK);
         }
-        let name: String = name
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(NAME_LIMIT)
-            .collect();
-        self.attachments.insert(
-            at,
-            Attachment {
-                name: name.trim().to_string(),
-                mime_type,
-                size,
-                text,
-            },
-        );
     }
-
-    /// Decode at most the bytes that are left in the body budget, and use them.
-    fn take(&mut self, body: &[u8], cte: &str) -> Vec<u8> {
-        let (bytes, truncated) = decode_capped(body, cte, self.body_left);
-        self.cut |= truncated;
-        self.body_left -= bytes.len();
-        bytes.into_owned()
-    }
+    let name: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(NAME_LIMIT)
+        .collect();
+    out.push(Attachment {
+        name: name.trim().to_string(),
+        mime_type: f.mime_type,
+        size,
+        text,
+    });
+    out.extend(inner_attachments);
 }
 
 /// Decode at most `cap` bytes of a body. Return the bytes and true if bytes
@@ -364,7 +406,14 @@ fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow
     };
     let input = &body[..body.len().min(max_in)];
     let mut bytes = mime::transfer_decode(input, cte);
-    let truncated = input.len() < body.len() || bytes.len() > cap;
+    // Only data after the input is a cut: base64 padding and line ends are not.
+    let rest = &body[input.len()..];
+    let more = if cte == "base64" {
+        mime::has_base64(rest)
+    } else {
+        !rest.is_empty()
+    };
+    let truncated = more || bytes.len() > cap;
     if bytes.len() > cap {
         bytes.to_mut().truncate(cap);
     }
@@ -372,6 +421,10 @@ fn decode_capped<'a>(body: &'a [u8], cte: &str, cap: usize) -> (std::borrow::Cow
 }
 
 use mime::floor_char;
+
+/// The subject prefixes of a reply in common clients and languages. A
+/// forward (`Fwd:`, `WG:`) is not a reply.
+const REPLY_PREFIXES: [&str; 6] = ["re", "aw", "sv", "vs", "antw", "réf"];
 
 /// Characters that a person does not see. Mail uses them to pad a preview.
 const INVISIBLE: [char; 8] = [
@@ -406,6 +459,20 @@ fn tidy(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_at_the_cap_with_white_space_after_is_not_cut() {
+        // 12 characters of data, then padding and line ends.
+        let body = b"QUJDREVGR0hJ\r\n\r\n  \r\n";
+        for cap in [9, 10, 12] {
+            let (bytes, cut) = decode_capped(body, "base64", cap);
+            assert_eq!((&bytes[..], cut), (&b"ABCDEFGHI"[..], false), "cap {cap}");
+        }
+        let (bytes, cut) = decode_capped(body, "base64", 8);
+        assert_eq!((&bytes[..], cut), (&b"ABCDEFGH"[..], true));
+        let pad = b"QUJDRA==\r\n";
+        assert!(!decode_capped(pad, "base64", 4).1);
+    }
 
     #[test]
     fn tidy_lines() {

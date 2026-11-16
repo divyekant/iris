@@ -62,7 +62,7 @@ fn memory_and_time_stay_bounded() {
     eprintln!("peak: {small_peak} bytes (small), {big_peak} bytes (big), time {time:?}");
     assert!(c.cut && c.text.ends_with(iris_clean::CUT_MARK));
     assert_eq!(c.attachments[0].size, 30_000_000 / 57 * 57);
-    // The body budget is 2 MiB. The steps hold a few copies of it at most. Measured: about 4 MiB.
+    // One body part decodes at most 2 MiB. The steps hold a few copies of it at most. Measured: about 5 MiB.
     assert!(big_peak < 8 * 1024 * 1024, "peak {big_peak}");
     // The size of an attachment does not change the memory use.
     assert!(big_peak < small_peak + 12 * 1024 * 1024);
@@ -117,7 +117,9 @@ fn memory_and_time_stay_bounded() {
     raw.extend_from_slice(b"--m--\r\n");
     let (peak, _, c) = peak_of(&raw);
     eprintln!("peak: {peak} bytes (PDF with a raw stream of 9 MiB)");
-    assert_eq!(c.attachments[0].text.as_deref(), Some("Hello raw words"));
+    // The reader stops at the stream limit, so the text shows a cut.
+    let want = format!("Hello raw words{}", iris_clean::CUT_MARK);
+    assert_eq!(c.attachments[0].text.as_deref(), Some(want.as_str()));
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
     // A PDF stream of 4 MiB with many short text lines.
@@ -144,6 +146,34 @@ fn memory_and_time_stay_bounded() {
         t.len()
     );
     assert!(peak < 10 * 1024 * 1024, "peak {peak}");
+
+    // A PDF stream of 4 MiB with many short strings before one operator.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let stream = format!("BT {} Tj ET", "(a) ".repeat(4 * 1024 * 1024 / 4 - 4));
+    let pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+        stream.len()
+    );
+    drop(stream);
+    for chunk in pdf.as_bytes().chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, _) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with many strings before one operator)");
+    assert!(peak < 10 * 1024 * 1024, "peak {peak}");
+
+    // A plain body part of 2 MiB of empty lines and of short quote lines.
+    for line in ["\n", "> a\n", "-- \n"] {
+        let mut raw = b"Subject: Re: Lines\r\nIn-Reply-To: <a@b>\r\n\r\nHi\n".to_vec();
+        raw.extend(line.repeat(2 * 1024 * 1024 / line.len()).bytes());
+        let (peak, _, _) = peak_of(&raw);
+        eprintln!("peak: {peak} bytes (2 MiB of {line:?} lines)");
+        assert!(peak < 12 * 1024 * 1024, "peak {peak}");
+    }
 
     // Base64 with a few characters and very much white space.
     let mut raw = message(1000, 0);

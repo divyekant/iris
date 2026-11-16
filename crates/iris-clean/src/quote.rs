@@ -74,10 +74,14 @@ pub fn strip_quotes(text: &str, is_reply: bool) -> String {
         .filter(|(i, l)| !(*i < stop && is_quote(l) && (is_reply || *i >= tail)))
         .map(|(_, l)| *l)
         .collect();
-    // A rule line or an empty line before the history goes out too.
-    while kept
-        .last()
-        .is_some_and(|l| l.trim().chars().all(|c| "_-=*".contains(c)))
+    // A rule line or an empty line just before the history goes out too:
+    // the history is a marker line or a quote block at the end. Without
+    // history, the text keeps its last lines.
+    let found = end < lines.len() || lines[tail..stop].iter().any(|l| is_quote(l));
+    while found
+        && kept
+            .last()
+            .is_some_and(|l| l.trim().chars().all(|c| "_-=*".contains(c)))
     {
         kept.pop();
     }
@@ -114,18 +118,12 @@ fn is_forward_marker(t: &str) -> bool {
 
 /// An Outlook reply header: `From:`, then `Sent:` or `Date:`, then `Subject:` or `To:`.
 fn is_header_block(lines: &[&str]) -> bool {
-    let starts = |l: &&str, p: &[&str]| p.iter().any(|p| l.trim_start().starts_with(p));
-    starts(&lines[0], &["From:"])
-        && lines
-            .iter()
-            .skip(1)
-            .take(4)
-            .any(|l| starts(l, &["Sent:", "Date:"]))
-        && lines
-            .iter()
-            .skip(1)
-            .take(5)
-            .any(|l| starts(l, &["Subject:", "To:"]))
+    let starts = |l: &str, p: &[&str]| p.iter().any(|p| l.trim_start().starts_with(p));
+    let after = |i: usize, n: usize| lines.iter().skip(i + 1).take(n).copied();
+    starts(lines[0], &["From:"])
+        && after(0, 4)
+            .position(|l| starts(l, &["Sent:", "Date:"]))
+            .is_some_and(|d| after(d + 1, 5).any(|l| starts(l, &["Subject:", "To:"])))
 }
 
 /// Remove the signature: the text after the last `-- ` line (RFC 3676), or
@@ -134,10 +132,12 @@ fn is_header_block(lines: &[&str]) -> bool {
 pub fn strip_signature(text: &str) -> String {
     let mut lines: Vec<&str> = text.split('\n').collect();
     let bare = |l: &str| l.trim_end_matches([' ', '\u{a0}']) == "--";
-    if let Some(i) = lines.iter().rposition(|l| bare(l)) {
-        if lines[i] != "--" || lines.len() - i <= 11 {
-            lines.truncate(i);
-        }
+    // The last separator that counts: a `-- ` line always, a bare `--` line
+    // only with at most 10 lines after it.
+    let n = lines.len();
+    let counts = |(i, l): &(usize, &&str)| bare(l) && (**l != "--" || n - i <= 11);
+    if let Some((i, _)) = lines.iter().enumerate().rfind(counts) {
+        lines.truncate(i);
     }
     while lines.last().is_some_and(|l| {
         let t = l.trim();
@@ -184,6 +184,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_long_bare_rule_after_a_signature_line() {
+        let after = "x\n".repeat(11);
+        let t = format!("Hi\n-- \nSignature\n--\n{after}");
+        assert_eq!(strip_signature(&t), "Hi");
+    }
+
+    #[test]
     fn reply_history_goes_out() {
         let t = "Yes, Friday.\n\nOn Mon, 3 Feb 2025 at 10:00, Ana Bel <ana@example.org>\nwrote:\n> Can you?\n> Thanks";
         assert_eq!(strip_quotes(t, true), "Yes, Friday.");
@@ -213,6 +220,11 @@ mod tests {
             "New answer"
         );
         assert_eq!(strip_quotes("> only a quote", false), "> only a quote");
+        assert_eq!(strip_quotes("Plan\n---", true), "Plan\n---");
+        // An inline quote is not history: the last rule line stays.
+        assert_eq!(strip_quotes("A\n> quoted\n---", true), "A\n---");
+        // A quote block at the end is history: the rule line above it goes.
+        assert_eq!(strip_quotes("A\n---\n> quoted", true), "A");
         let t = "FYI\n\n---------- Forwarded message ---------\nFrom: Ana\nDate: Mon\nSubject: Plan\nTo: Avel\n\nOn Sun Bo wrote:\n> x";
         assert_eq!(strip_quotes(t, true), t);
     }

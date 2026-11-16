@@ -64,6 +64,7 @@ measures two values:
 |---|---|---|
 | Start time | 1 second | From the program start to the first HTTP 200 answer |
 | Resident memory (RSS) | 50 MB | `ps -o rss= -p <pid>`, on macOS and Linux |
+| RSS after a first sync | 50 MB | The same, after `iris serve` syncs 2,000 synthetic messages from the fake Gmail |
 
 If a value is over its limit, the test fails. The limits are the constants
 `MAX_START` and `MAX_RSS_KIB` at the top of the file. `cargo test` runs the

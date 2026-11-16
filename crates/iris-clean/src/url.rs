@@ -39,7 +39,7 @@ pub fn clean_url(url: &str) -> String {
         .split('&')
         .filter(|p| {
             let k = p.split('=').next().unwrap_or("").to_ascii_lowercase();
-            !p.is_empty() && !k.starts_with("utm_") && !TRACKING.contains(&k.as_str())
+            !k.starts_with("utm_") && !TRACKING.contains(&k.as_str())
         })
         .collect();
     let mut out = base.to_string();
@@ -72,7 +72,10 @@ pub fn clean_urls(text: &str) -> String {
                 _ => {}
             }
         }
-        while end > 0 && b".,;:!?".contains(&tail.as_bytes()[end - 1]) {
+        // In a link target, `](...)` or `(<...>)`, each character belongs to
+        // the URL. In prose, an end mark such as `.` or `!` is punctuation.
+        let in_link = out.ends_with("](") || out.ends_with("(<");
+        while !in_link && end > 0 && b".,;:!?".contains(&tail.as_bytes()[end - 1]) {
             end -= 1;
         }
         out.push_str(&clean_url(&tail[..end]));
@@ -111,6 +114,11 @@ mod tests {
         assert_eq!(
             clean_url("https://a.example.com/x"),
             "https://a.example.com/x"
+        );
+        // An empty entry is not a tracking parameter: it stays.
+        assert_eq!(
+            clean_url("https://example.org/?a=1&&b=2&utm_source=x"),
+            "https://example.org/?a=1&&b=2"
         );
     }
 

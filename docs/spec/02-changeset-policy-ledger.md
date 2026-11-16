@@ -610,6 +610,26 @@ read the store. It sends each request to the engine through a Unix domain
 socket, and the engine does the work. Unix domain sockets work on macOS and on
 Linux.
 
+Release 1 exception: release 1 has no socket. The release 1 verbs (`status`,
+`search`, `show`, `mirror sync`, `mirror verify`, `backup` and `account add`)
+open the data folder directly, as the OS user that owns it, and they do not
+need a running engine. `status`, `search` and `show` call the same read
+functions as the local API, so they give the same data. Some release 1 verbs
+write to the local store, but none of them changes the mailbox:
+
+| Verb | Local writes | Rules |
+|---|---|---|
+| `account add` | The account row and the sealed sign-in | Specification 1, section 4.9 |
+| `mirror sync` | Messages, content files and the sync log | Specification 1, sections 4.2 to 4.7 |
+| `mirror verify` | Repairs of the mirror, and the sync log | Specification 1, section 4.8 |
+| `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
+
+The policy governs mailbox actions (sections 4 to 6). The writes in
+the table are not mailbox actions, so they do not go through the policy.
+Release 1 has no verb that adds an action, so no request can skip the policy.
+The socket comes with the first verb that adds an action (release 2). Then
+each verb goes through the socket.
+
 | Mode | When | Socket | Who |
 |---|---|---|---|
 | Host mode | No `.iris/` folder in the current folder or above it. | `iris.sock` in the data folder, mode `0600` | The OS user that runs the engine. |
@@ -632,15 +652,17 @@ and goes through the policy as an agent changeset does. A rule with
 | Command | Does | Mode | Release |
 |---|---|---|---|
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
+| `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
+| `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
 | `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
-| `iris sync` | Runs an incremental sync now. | host | 1 |
+| `iris mirror sync` | Runs an incremental sync now. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | both | 1 |
 | `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it adds the threads that match to `threads/`. | both | 1 |
-| `iris show <id>` | Shows one item, message, thread or sender. | both | 1 |
+| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. | both | 1 |
 | `iris list <form> [filters]` | Lists items of one form. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
@@ -662,8 +684,13 @@ engine before `submit`.
 
 ### 8.3 Output
 
-- The default output is short text for a person or an agent to read. Each
-  line starts with an ID, so the next command can use it.
+- The default output is short text for a person or an agent to read. In a
+  list (for example `iris search`), each line starts with an ID, so the next
+  command can use it. A command that prints one object or a summary (for
+  example `iris show`, `iris status` and `iris mirror`) starts each line with
+  a label: a field name, such as `ID:` or `Mode:`, or `account <ID>` for a
+  line about one account. The text of a message comes after its fields. A
+  program reads these commands with `--json`, where the command has it.
 - `--json` prints the open model documents (specification 1, section 6, and
   section 5.1 here). One JSON document for one object, and JSON Lines for a
   list.
@@ -678,7 +705,7 @@ engine before `submit`.
 | 1 | An error in the engine or at the provider. For `submit`: one or more actions are `failed`. |
 | 2 | The command is not correct (usage). |
 | 3 | The policy or a hard limit denied one or more actions. |
-| 4 | The engine is not reachable. |
+| 4 | The engine is not reachable. Release 1 never gives this code, because its verbs do not use the engine (section 8.1). |
 | 5 | For `submit`: one or more actions are open (`proposed`, `in_review`, `approved` or `held`), or a ledger row is in recovery. Nothing failed and nothing was denied. |
 
 If more than one code applies, the command exits with the first code of this
@@ -701,11 +728,18 @@ agent that does not work in a folder. The rules for the MCP interface:
 The web client is the only place to approve, deny, undo and change the
 policy. The engine protects its web interface:
 
-- At each start, the engine makes a random web secret of 32 bytes. `iris
-  serve` opens a one-time sign-in address in the browser, and prints it. The
-  client exchanges the one-time code for a cookie with `HttpOnly` and
-  `SameSite=Strict`. The engine refuses each request of the web interface
-  without that cookie.
+- At each start, the engine makes a random web secret of 32 bytes and a
+  one-time code. `iris serve` prints a one-time sign-in address:
+  `http://<address>/#code=<code>`. Release 1 does not open the browser,
+  because the engine often runs as a background service with no screen
+  (`iris service install`). The person opens the address. A later release
+  can open the browser when the engine runs in a terminal. The browser does
+  not send the fragment to a server. The client exchanges the code one time
+  (`POST /api/session`) for the web secret, keeps the secret in the storage
+  of its origin, and sends it as `Authorization: Bearer <secret>`. The engine
+  refuses each request of the web interface without that header. The engine
+  does not use a cookie: a browser sends a cookie to each port of the host, so
+  a server of another OS user on another loopback port could get it.
 - The engine refuses a request whose `Host` header is not the bound address,
   and a request whose `Origin` header is another origin. So a web page cannot
   send a request to the engine, also through DNS rebinding.

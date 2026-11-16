@@ -14,6 +14,8 @@
 const STREAM_LIMIT: usize = 4 * 1024 * 1024;
 /// The most bytes of decompressed streams for one PDF.
 const TOTAL_LIMIT: usize = 32 * 1024 * 1024;
+/// The most bytes of one stream dictionary.
+const DICT_LIMIT: usize = 4096;
 
 /// The text of a PDF, at most `limit` bytes. `None` if the file has no text
 /// that this module can read.
@@ -22,26 +24,22 @@ pub fn is_pdf(start: &[u8]) -> bool {
     find(&start[..start.len().min(1024)], b"%PDF").is_some()
 }
 
-pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
+/// The text, and true if the reader stopped at a limit before the end.
+/// Trimmed white space can make the text shorter than the limit.
+pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
     if !is_pdf(pdf) {
-        return None;
+        return (None, false);
     }
+    let mut stopped = false;
     let mut out = String::new();
     let mut total = 0;
     let mut at = 0;
-    while let Some(n) = find(&pdf[at..], b"stream") {
-        let kw = at + n;
-        at = kw + 6;
-        // The keyword `stream` ends with a line end. `endstream` does not match.
-        let start = match &pdf[at..] {
-            [b'\r', b'\n', ..] => at + 2,
-            [b'\n', ..] => at + 1,
-            _ => continue,
-        };
-        if kw >= 3 && &pdf[kw - 3..kw] == b"end" {
-            continue;
-        }
-        let dict = dict_before(pdf, kw);
+    while let Some((kw, start, header_end)) = next_stream(pdf, at) {
+        // The dictionary is the text from the object header to the keyword.
+        // A longer dictionary than 4 KiB is not read.
+        let dict = header_end
+            .filter(|&h| kw - h <= DICT_LIMIT)
+            .map_or(&b""[..], |h| &pdf[h..kw]);
         // A direct `/Length` gives the end, so `endstream` inside the data
         // does not cut the stream. Without it, search for the keyword.
         let len = match declared_len(dict).filter(|&n| ends_at(pdf, start, n)) {
@@ -56,22 +54,30 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         if !is_content(dict) {
             continue;
         }
-        let decoded: std::borrow::Cow<[u8]> = if has(dict, b"/FlateDecode") {
-            match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, STREAM_LIMIT) {
+        // Each stream gets at most the rest of the budget of the PDF.
+        let cap = STREAM_LIMIT.min(TOTAL_LIMIT - total);
+        let decoded: std::borrow::Cow<[u8]> = if only_flate(dict) {
+            match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, cap) {
                 Ok(v) => v.into(),
-                Err(e) => e.output.into(),
+                Err(e) => {
+                    // More output than the limit: text after it is not read.
+                    stopped |= e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput;
+                    e.output.into()
+                }
             }
-        } else if has(dict, b"/Filter") {
+        } else if direct_name(dict, b"/Filter", true).is_some() {
             continue;
         } else {
             // A raw stream is read in place, and only up to the stream limit.
-            data[..data.len().min(STREAM_LIMIT)].into()
+            stopped |= data.len() > cap;
+            data[..data.len().min(cap)].into()
         };
         total += decoded.len();
         if find(&decoded, b"BT").is_some() {
             content_text(&decoded, &mut out, limit);
         }
         if out.len() >= limit || total >= TOTAL_LIMIT {
+            stopped = true;
             break;
         }
     }
@@ -84,12 +90,114 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         text.push_str(l);
     }
     drop(out);
-    readable(&text).then_some(text)
+    (readable(&text).then_some(text), stopped)
+}
+
+/// The position after the literal string that starts at `i` (a `(`), with
+/// nested parentheses and `\` escapes. The end of the input if it does not close.
+fn skip_string(b: &[u8], mut i: usize) -> usize {
+    let mut open = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'(' => open += 1,
+            b')' => {
+                open -= 1;
+                if open == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// The position of the line end after the comment that starts at `i` (a `%`).
+fn skip_comment(b: &[u8], i: usize) -> usize {
+    b[i..]
+        .iter()
+        .position(|&c| matches!(c, b'\r' | b'\n'))
+        .map_or(b.len(), |n| i + n)
+}
+
+/// The next `stream` keyword outside strings and comments, from `at`: the
+/// position of the keyword, the start of its data, and the start of its
+/// dictionary (after the last object header). One forward pass: each byte
+/// is read once.
+fn next_stream(pdf: &[u8], mut at: usize) -> Option<(usize, usize, Option<usize>)> {
+    let delimiter = |b: u8| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(&b);
+    let mut header_end = None;
+    while at < pdf.len() {
+        match pdf[at] {
+            b'(' => at = skip_string(pdf, at),
+            b'%' => at = skip_comment(pdf, at),
+            b'<' if pdf.get(at + 1) != Some(&b'<') => {
+                // A hex string.
+                at = pdf[at..]
+                    .iter()
+                    .position(|&c| c == b'>')
+                    .map_or(pdf.len(), |n| at + n + 1);
+            }
+            c if !delimiter(c) => {
+                let end = pdf[at..]
+                    .iter()
+                    .position(|&c| delimiter(c))
+                    .map_or(pdf.len(), |n| at + n);
+                let word = &pdf[at..end];
+                if word == b"obj" && is_header(&pdf[..at]) {
+                    header_end = Some(end);
+                } else if word == b"stream" {
+                    // The keyword `stream` ends with a line end.
+                    match &pdf[end..] {
+                        [b'\r', b'\n', ..] => return Some((at, end + 2, header_end)),
+                        [b'\n', ..] => return Some((at, end + 1, header_end)),
+                        _ => {}
+                    }
+                }
+                at = end;
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// The position of a name (for example `/Length`) in the outer dictionary.
+/// A name inside a string, a comment or an inner dictionary does not count.
+/// With `exact`, a longer name does not match: `/Length1` is not `/Length`.
+fn direct_name(dict: &[u8], name: &[u8], exact: bool) -> Option<usize> {
+    let key_end = |b: &u8| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(b);
+    let (mut i, mut depth) = (0, 0usize);
+    while i < dict.len() {
+        match dict[i] {
+            b'(' => i = skip_string(dict, i) - 1,
+            b'%' => i = skip_comment(dict, i) - 1,
+            b'<' if dict.get(i + 1) == Some(&b'<') => {
+                depth += 1;
+                i += 1;
+            }
+            b'>' if dict.get(i + 1) == Some(&b'>') => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'/' if depth <= 1
+                && dict[i..].starts_with(name)
+                && (!exact || dict.get(i + name.len()).is_none_or(key_end)) =>
+            {
+                return Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
 fn declared_len(dict: &[u8]) -> Option<usize> {
-    let p = find(dict, b"/Length")?;
+    let p = direct_name(dict, b"/Length", true)?;
     let rest = &dict[p + 7..];
     let digits = rest.iter().skip_while(|b| b.is_ascii_whitespace());
     let num: Vec<u8> = digits
@@ -103,7 +211,7 @@ fn declared_len(dict: &[u8]) -> Option<usize> {
         .filter(|w| !w.is_empty())
         .nth(1)
         .is_some_and(|w| w.starts_with(b"R"));
-    if num.is_empty() || num.len() > 12 || is_ref || rest.first().is_some_and(u8::is_ascii_digit) {
+    if num.is_empty() || num.len() > 12 || is_ref {
         return None;
     }
     std::str::from_utf8(&num).ok()?.parse().ok()
@@ -124,16 +232,26 @@ fn ends_at(pdf: &[u8], start: usize, len: usize) -> bool {
         })
 }
 
-/// The stream dictionary: the bytes from the last `obj` keyword before the
-/// stream, at most 4 KiB back.
-fn dict_before(pdf: &[u8], kw: usize) -> &[u8] {
-    let from = kw.saturating_sub(4096);
-    let window = &pdf[from..kw];
-    let start = window
-        .windows(3)
-        .rposition(|w| w == b"obj")
-        .map_or(0, |p| p + 3);
-    &window[start..]
+/// True if `before` ends with `<number> <number> ` (the start of an object header).
+fn is_header(before: &[u8]) -> bool {
+    let mut rest = before;
+    for _ in 0..2 {
+        let ws = rest
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count();
+        if ws == 0 {
+            return false;
+        }
+        rest = &rest[..rest.len() - ws];
+        let digits = rest.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[..rest.len() - digits];
+    }
+    rest.last().is_none_or(|b| b.is_ascii_whitespace())
 }
 
 /// False for streams that are not page content: images, fonts, metadata,
@@ -150,11 +268,33 @@ fn is_content(dict: &[u8]) -> bool {
         b"/EmbeddedFile",
     ]
     .iter()
-    .any(|k| has(dict, k))
+    .any(|k| direct_name(dict, k, false).is_some())
 }
 
-fn has(hay: &[u8], needle: &[u8]) -> bool {
-    find(hay, needle).is_some()
+/// True if the `/Filter` of the dictionary is `FlateDecode` and nothing
+/// else: `/FlateDecode` or `[/FlateDecode]`.
+fn only_flate(dict: &[u8]) -> bool {
+    let Some(p) = direct_name(dict, b"/Filter", true) else {
+        return false;
+    };
+    let rest = &dict[p + 7..];
+    let rest = &rest[rest.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+    let value = match rest.first() {
+        Some(b'[') => &rest[1..rest.iter().position(|&b| b == b']').unwrap_or(rest.len())],
+        _ => {
+            let end = rest
+                .iter()
+                .skip(1)
+                .position(|&b| b.is_ascii_whitespace() || b"/<>[]()".contains(&b))
+                .map_or(rest.len(), |n| n + 1);
+            &rest[..end]
+        }
+    };
+    let names: Vec<&[u8]> = value
+        .split(|&b| b.is_ascii_whitespace() || b == b'/')
+        .filter(|w| !w.is_empty())
+        .collect();
+    names == [b"FlateDecode"]
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -163,8 +303,15 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Read the text operators of one content stream into `out`.
 fn content_text(c: &[u8], out: &mut String, limit: usize) {
-    let mut strings: Vec<Vec<u8>> = Vec::new();
-    let mut array: Option<Vec<u8>> = None;
+    // The string operands since the last operator, in one buffer. The output
+    // can hold at most `limit` bytes, and each byte gives at least one byte
+    // of text, so more bytes have no use.
+    let mut strings: Vec<u8> = Vec::new();
+    let mut in_array = false;
+    let add = |strings: &mut Vec<u8>, s: &[u8]| {
+        let room = limit.saturating_sub(strings.len());
+        strings.extend_from_slice(&s[..s.len().min(room)]);
+    };
     let mut last_num = 0.0f64;
     // A viewer shows text only inside a text object (`BT` to `ET`).
     let mut in_text = false;
@@ -176,10 +323,7 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
             b'(' => {
                 let (s, n) = literal(&c[i..]);
                 i += n;
-                match array.as_mut() {
-                    Some(a) => a.extend(s),
-                    None => strings.push(s),
-                }
+                add(&mut strings, &s);
             }
             b'<' if c.get(i + 1) == Some(&b'<') => i += 2,
             b'<' => {
@@ -189,17 +333,14 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                     .map_or(c.len(), |n| i + n);
                 let s = hex(&c[i + 1..end]);
                 i = (end + 1).min(c.len());
-                match array.as_mut() {
-                    Some(a) => a.extend(s),
-                    None => strings.push(s),
-                }
+                add(&mut strings, &s);
             }
             b'[' => {
-                array = Some(Vec::new());
+                in_array = true;
                 i += 1;
             }
             b']' => {
-                strings.extend(array.take());
+                in_array = false;
                 i += 1;
             }
             b'%' => {
@@ -219,9 +360,10 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(0.0);
                 // In a `TJ` array, a large negative number moves to the next word.
-                match array.as_mut() {
-                    Some(a) if n < -200.0 => a.push(b' '),
-                    _ => last_num = n,
+                if in_array && n < -200.0 {
+                    add(&mut strings, b" ");
+                } else {
+                    last_num = n;
                 }
             }
             b if b.is_ascii_alphabetic() || b == b'\'' || b == b'"' || b == b'*' => {
@@ -261,12 +403,13 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
 }
 
 /// Add the strings to `out`, which never grows past `limit` bytes.
-fn emit(out: &mut String, strings: &mut Vec<Vec<u8>>, limit: usize) {
-    for s in strings.drain(..) {
-        let t = encoding_rs::WINDOWS_1252.decode_without_bom_handling(&s).0;
-        let room = limit.saturating_sub(out.len());
-        out.push_str(&t[..crate::mime::floor_char(&t, room)]);
-    }
+fn emit(out: &mut String, strings: &mut Vec<u8>, limit: usize) {
+    let t = encoding_rs::WINDOWS_1252
+        .decode_without_bom_handling(strings)
+        .0;
+    let room = limit.saturating_sub(out.len());
+    out.push_str(&t[..crate::mime::floor_char(&t, room)]);
+    strings.clear();
 }
 
 fn newline(out: &mut String) {
@@ -409,6 +552,112 @@ mod tests {
         text(&bad, 1000);
     }
 
+    fn text(pdf: &[u8], limit: usize) -> Option<String> {
+        text_cut(pdf, limit).0
+    }
+
+    #[test]
+    fn a_limit_in_white_space_shows_a_cut() {
+        let t = format!("BT (Hello{}) Tj (later) Tj ET", " ".repeat(200));
+        let (got, cut) = text_cut(&sample(t.as_bytes(), false), 100);
+        assert_eq!(got.as_deref(), Some("Hello"));
+        assert!(cut);
+        assert!(!text_cut(&sample(PAGE, false), 1000).1);
+        // Text after the stream limit is not read: that is a cut too.
+        let big = format!(
+            "BT (Hello world) Tj ET\n{}BT (later) Tj ET",
+            " ".repeat(STREAM_LIMIT)
+        );
+        for flate in [false, true] {
+            let (got, cut) = text_cut(&sample(big.as_bytes(), flate), 1000);
+            assert_eq!(got.as_deref(), Some("Hello world"));
+            assert!(cut, "flate {flate}");
+        }
+    }
+
+    #[test]
+    fn no_text_past_the_inflate_limit_of_the_pdf() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut add = |data: &[u8], n: usize| {
+            pdf.extend(format!("{n} 0 obj\n<< /Length {} >>\nstream\n", data.len()).bytes());
+            pdf.extend_from_slice(data);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        };
+        let pad = vec![b' '; STREAM_LIMIT - 1];
+        for n in 1..=8 {
+            add(&pad, n);
+        }
+        let last = format!("{}BT (Hello world) Tj ET", " ".repeat(64));
+        add(last.as_bytes(), 9);
+        let (got, cut) = text_cut(&pdf, 1000);
+        assert_eq!(got, None);
+        assert!(cut);
+    }
+
+    #[test]
+    fn names_inside_dictionary_strings_do_not_count() {
+        for info in [
+            "/Info (/Filter)",
+            "/Info (/Image /XRef)",
+            "% /Filter /Image\n",
+        ] {
+            let pdf = String::from_utf8(sample(PAGE, false))
+                .unwrap()
+                .replace("<< /Length", &format!("<< {info} /Length"));
+            assert!(text(pdf.as_bytes(), 1000).is_some(), "{info}");
+        }
+        let flate = String::from_utf8_lossy(&sample(PAGE, true)).replace(
+            "/Filter /FlateDecode",
+            "/Info (/Filter /LZWDecode) /Filter /FlateDecode",
+        );
+        assert!(only_flate(flate.as_bytes()));
+        assert!(!is_content(b"<< /Subtype /Image /Length 3 >>"));
+        assert!(!is_content(b"<< /FontFile2 4 0 R >>"));
+    }
+
+    #[test]
+    fn header_and_keyword_text_inside_strings_do_not_count() {
+        let t = b"BT (the endstream report) Tj ET";
+        for info in [
+            "/Info ( 1 0 obj)",
+            "/Info (stream\n)",
+            "/Info <73747265616d>",
+        ] {
+            let pdf = String::from_utf8(sample(t, false))
+                .unwrap()
+                .replace(" >>\nstream", &format!(" {info} >>\nstream"));
+            assert_eq!(
+                text(pdf.as_bytes(), 100).as_deref(),
+                Some("the endstream report"),
+                "{info}"
+            );
+        }
+    }
+
+    #[test]
+    fn many_short_streams_stay_fast() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        while pdf.len() < 9 * 1024 * 1024 {
+            pdf.extend_from_slice(b"stream\nendstream\n");
+        }
+        let begin = std::time::Instant::now();
+        assert_eq!(text(&pdf, 1000), None);
+        let time = begin.elapsed();
+        assert!(time < std::time::Duration::from_secs(3), "time {time:?}");
+    }
+
+    #[test]
+    fn another_length_key_before_length() {
+        let t = b"BT (the endstream report) Tj ET";
+        let pdf = String::from_utf8(sample(t, false))
+            .unwrap()
+            .replace("<< /Length", "<< /LengthX 3 /Info (/Length 3) /Length");
+        assert_eq!(
+            text(pdf.as_bytes(), 100).as_deref(),
+            Some("the endstream report")
+        );
+    }
+
     #[test]
     fn endstream_inside_a_string_does_not_end_the_stream() {
         let t = b"BT (the endstream report) Tj ET";
@@ -417,7 +666,23 @@ mod tests {
             Some("the endstream report")
         );
         assert_eq!(declared_len(b"<< /Length 5 0 R >>"), None);
-        assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), None);
+        assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), Some(31));
+        assert_eq!(declared_len(b"<< /LengthX 9 /Length 31 >>"), Some(31));
+        assert_eq!(declared_len(b"<< /LengthX 9 >>"), None);
+        // A key inside a string, a comment or an inner dictionary does not count.
+        assert_eq!(
+            declared_len(b"<< /Info (/Length 3) /Length 29 >>"),
+            Some(29)
+        );
+        assert_eq!(
+            declared_len(b"<< /Info (a \\\\ \\) (/Length 3)) /Length 29 >>"),
+            Some(29)
+        );
+        assert_eq!(declared_len(b"<< % /Length 3\n/Length 29 >>"), Some(29));
+        assert_eq!(
+            declared_len(b"<< /P << /Length 3 >> /Length 29 >>"),
+            Some(29)
+        );
         assert_eq!(declared_len(b"<< /Length 31 >>"), Some(31));
     }
 
@@ -427,6 +692,49 @@ mod tests {
         assert_eq!(
             text(&sample(t, false), 100).as_deref(),
             Some("Visible words paid")
+        );
+    }
+
+    #[test]
+    fn only_a_single_flate_filter_is_read() {
+        assert!(only_flate(b"<< /Filter /FlateDecode /Length 5 >>"));
+        assert!(only_flate(b"<< /Filter [ /FlateDecode ] >>"));
+        assert!(!only_flate(b"<< /Filter [/FlateDecode /Crypt] >>"));
+        assert!(!only_flate(b"<< /Filter /FlateDecodeX >>"));
+        assert!(!only_flate(b"<< /Length 5 >>"));
+        let data = miniz_oxide::deflate::compress_to_vec_zlib(b"BT (Hidden words) Tj ET", 6);
+        let mut pdf = format!(
+            "%PDF-1.4\n4 0 obj\n<< /Filter [/FlateDecode /Crypt] /Length {} >>\nstream\n",
+            data.len()
+        )
+        .into_bytes();
+        pdf.extend(data);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        assert_eq!(text(&pdf, 100), None);
+    }
+
+    #[test]
+    fn obj_in_a_value_is_not_an_object_header() {
+        let content = b"BT (the endstream report) Tj ET";
+        let mut pdf = format!(
+            "%PDF-1.4\n4 0 obj\n<< /Length {} /Foo (obj) >>\nstream\n",
+            content.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(content);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        assert_eq!(text(&pdf, 100).as_deref(), Some("the endstream report"));
+        assert!(is_header(b"\n12 0 "));
+        assert!(!is_header(b"(1 0 "));
+        assert!(!is_header(b"/Foo ("));
+    }
+
+    #[test]
+    fn a_comment_in_a_content_stream_ends() {
+        let t = b"BT %c\n(After the comment) Tj % last\nET";
+        assert_eq!(
+            text(&sample(t, false), 100).as_deref(),
+            Some("After the comment")
         );
     }
 
