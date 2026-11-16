@@ -91,7 +91,10 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     // The headers take at most about 30,000 bytes. The clean text takes the
     // rest if it needs it: 32,000 characters can be 128,000 bytes.
     let mut current = String::from("\nThe current message:\n");
-    let mut left = MAX_DATA.saturating_sub(d.len() + current.len());
+    // The budget holds the whole block that the client sends: the
+    // delimiter lines and their line breaks too.
+    let wrap = iris_model::DATA_START.len() + iris_model::DATA_END.len() + 2;
+    let mut left = MAX_DATA.saturating_sub(wrap + d.len() + current.len());
     left -= push_cut(&mut current, &a.text.text, left);
     // An existing item that does not fit is left out: the model can then
     // find it again, and the store keeps the pinned item (section 7.5).
@@ -103,7 +106,7 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         }
     }
     for (name, text) in &a.text.attachment_text {
-        let head = format!("\n\nText of the attachment {name}:\n");
+        let head = format!("\n\nText of the attachment {}:\n", escape(name));
         if left <= head.len() + CUT_MARK.len() {
             break;
         }
@@ -128,6 +131,9 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         d.push_str(block);
     }
     d.push_str(&current);
+    // Each text from the mail went through the escape: the client escape
+    // adds nothing, so the block stays in the budget.
+    debug_assert!(!d.contains("<<<"));
     d
 }
 
@@ -179,12 +185,19 @@ pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, b
     let mut out = Vec::with_capacity(items.len());
     for it in items {
         let it = it.as_object()?;
-        // An existing item that the model finds again adds nothing (section 7.5).
-        let same = it.get("same_as").and_then(Value::as_str);
-        if same.is_some_and(|id| cx.existing.iter().any(|e| e["id"].as_str() == Some(id))) {
+        let d = item(it, a, cx)?;
+        // An existing item that the model finds again adds nothing (section
+        // 7.5), but only a valid item of the same form. An unknown ID keeps
+        // the item: a duplicate is safer than a lost item.
+        let id = it.get("same_as").and_then(Value::as_str);
+        if let Some(e) = id.and_then(|id| cx.existing.iter().find(|e| e["id"].as_str() == Some(id)))
+        {
+            if e["form"].as_str() != Some(d.form()) || !crate::schema::valid_draft(&d) {
+                return None;
+            }
             continue;
         }
-        out.push(item(it, a, cx)?);
+        out.push(d);
     }
     Some((out, false))
 }

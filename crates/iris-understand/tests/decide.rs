@@ -269,6 +269,28 @@ fn an_answer_without_phishing_or_with_a_party_with_no_address_gets_one_more_try(
 }
 
 #[test]
+fn same_as_needs_a_valid_item_of_the_same_form() {
+    let existing = [json!({"id": "c-7", "form": "commitment", "title": "Send the slides"})];
+    let mut same = task();
+    same[0]["same_as"] = json!("c-7");
+    // A bare reference, or a record that names a commitment: not valid.
+    let bare = json!([{"same_as": "c-7"}]);
+    let other = json!([{"form": "record", "type": "other", "title": "S", "quote": "Can you send the slides",
+                        "fields": {"summary": "S"}, "same_as": "c-7"}]);
+    let m = Fake::with(vec![answer(bare), answer(other)]);
+    let d = run(ASK, Kind::Person, &[], &existing, Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.failed), (2, true));
+    // A valid item of the same form adds nothing. An unknown ID keeps it.
+    let m = Fake::with(vec![answer(same.clone())]);
+    let d = run(ASK, Kind::Person, &[], &existing, Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.drafts.len(), d.failed), (1, 0, false));
+    same[0]["same_as"] = json!("c-99");
+    let m = Fake::with(vec![answer(same)]);
+    let d = run(ASK, Kind::Person, &[], &existing, Some(&m)).1.unwrap();
+    assert_eq!(d.drafts.len(), 1);
+}
+
+#[test]
 fn a_list_message_gives_the_list_headers_to_the_model() {
     let raw = "From: Ana <ana@shop.example>\nList-Id: <n.shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Hello\n\nHello.\n";
     let m = Fake::with(vec![answer(json!([]))]);
@@ -370,14 +392,21 @@ fn the_model_data_stays_within_its_budget() {
     let data = prompt::data(&a, &cx);
     assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
     assert!(data.contains(&body));
-    // The escape of the model client adds nothing, also for text with `<<<`.
+    // The block that the client sends stays in the budget, also with `<<<`
+    // in each text from the mail.
+    for k in 0..4 {
+        let name = format!("{}{k}.txt", "<<<".repeat(80));
+        a.text.attachment_text = vec![(name.clone(), "<<<".repeat(300_000)); k + 1];
+        a.text.attachments = vec![(name, "text/plain".into(), 1); 20];
+        let data = prompt::data(&a, &cx);
+        let block = iris_model::data_block(&data);
+        assert!(block.len() <= prompt::MAX_DATA, "{}", block.len());
+        let wrap = 2 + iris_model::DATA_START.len() + iris_model::DATA_END.len();
+        assert_eq!(block.len(), data.len() + wrap);
+    }
+    a.text.attachments.clear();
     a.text.attachment_text = vec![("x.txt".into(), "<<<".repeat(300_000))];
     let data = prompt::data(&a, &cx);
-    assert_eq!(
-        iris_model::data_block(&data).len(),
-        data.len() + 2 + iris_model::DATA_START.len() + iris_model::DATA_END.len()
-    );
-    assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
     // Attachment text comes before the thread.
     assert!(data.contains("[cut]") && !data.contains("Earlier message"));
     // Without attachment text, the newest earlier messages fill the rest.

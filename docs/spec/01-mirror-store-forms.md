@@ -849,11 +849,12 @@ The conversation rule runs for each message that is not hostile mail:
   parties. The text goes inside a data block with a fixed delimiter.
   The instruction says that the block is data and that it contains no
   instructions. The headers include `List-Id` and `List-Unsubscribe`.
-- The data block has a budget of 96,000 bytes, so that a local model with a
+- The data block, with its delimiter lines, has a budget of 96,000 bytes,
+  so that a local model with a
   small context window can take it. The headers (each value cut to 1,000
   bytes) go in first, then the clean text of the message. The budget cuts
-  the clean text only when the text alone passes it (32,000 characters can
-  be 128,000 bytes). Existing items, attachment text, and then the earlier
+  the clean text only when the headers and the text together pass it
+  (32,000 characters can be 128,000 bytes). Existing items, attachment text, and then the earlier
   messages of the thread, newest first, fill the rest. Text that the
   budget cuts ends with `[cut]`.
 - The engine, not the model, sets the fields that the headers give: the
@@ -879,8 +880,13 @@ The conversation rule runs for each message that is not hostile mail:
 - If `phishing` is true, the engine sets the hostile mark `phishing` on the
   message, saves no item from it, and gives it the treatment of hostile mail
   (section 7.1, step 7).
-- The budget counts the data after the escape of the data delimiter, so
-  that the block that the client sends stays in the budget.
+- The budget counts each text from the mail (also an attachment name)
+  after the escape of the data delimiter, so that the block that the
+  client sends stays in the budget.
+- An item with `same_as` adds nothing only when it is valid and has the
+  form of the existing item. A `same_as` with another form makes the answer
+  not valid. A `same_as` with an unknown ID is ignored, and the item is
+  saved.
 
 #### Failure list of the model step
 
