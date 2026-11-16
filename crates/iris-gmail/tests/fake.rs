@@ -267,7 +267,7 @@ fn a_draft_is_created_read_and_sent_in_its_thread() {
     assert_eq!(d.message.thread_id, thread);
     let got = gmail.draft_raw(TOKEN, &d.id).unwrap();
     assert_eq!(
-        (got.raw.as_slice(), got.message.thread_id.as_str()),
+        (got.raw.as_deref().unwrap(), got.message.thread_id.as_str()),
         (DRAFT, thread.as_str())
     );
 
@@ -359,8 +359,8 @@ fn the_person_can_edit_and_delete_a_draft_at_the_fake() {
     let d = gmail.create_draft(TOKEN, DRAFT, None).unwrap();
     assert!(fake.edit_draft(&d.id, b"Subject: x\r\n\r\ny\r\n"));
     assert_eq!(
-        gmail.draft_raw(TOKEN, &d.id).unwrap().raw,
-        b"Subject: x\r\n\r\ny\r\n"
+        gmail.draft_raw(TOKEN, &d.id).unwrap().raw.as_deref(),
+        Some(&b"Subject: x\r\n\r\ny\r\n"[..])
     );
     assert!(fake.delete_draft(&d.id));
     assert!(fake.draft_ids().is_empty());
@@ -368,4 +368,26 @@ fn the_person_can_edit_and_delete_a_draft_at_the_fake() {
         gmail.draft_raw(TOKEN, &d.id),
         Err(Error::NotFound)
     ));
+}
+
+/// A draft larger than the answer limit of a JSON call still reads: the
+/// client streams it, and gives no raw for a message over DRAFT_LIMIT.
+#[test]
+fn a_large_draft_reads_with_no_raw() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    let d = gmail.create_draft(TOKEN, DRAFT, None).unwrap();
+    // 13 MiB of attachment text: more than 16 MiB as base64 in the answer.
+    let mut big = b"Subject: x\r\n\r\n".to_vec();
+    big.resize(13 * 1024 * 1024, b'a');
+    assert!(fake.edit_draft(&d.id, &big));
+    let got = gmail.draft_raw(TOKEN, &d.id).unwrap();
+    assert_eq!((got.id.as_str(), got.raw), (d.id.as_str(), None));
+    // At the limit, the raw is kept.
+    big.truncate(iris_gmail::DRAFT_LIMIT);
+    assert!(fake.edit_draft(&d.id, &big));
+    assert_eq!(
+        gmail.draft_raw(TOKEN, &d.id).unwrap().raw.map(|r| r.len()),
+        Some(iris_gmail::DRAFT_LIMIT)
+    );
 }

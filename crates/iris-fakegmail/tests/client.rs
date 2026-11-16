@@ -289,3 +289,100 @@ fn a_small_mailbox_has_an_unread_message() {
         .count();
     assert_eq!(unread, 1);
 }
+
+/// Percent-encode each byte that is not unreserved, as a client does.
+fn encode_query(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// The `q` parser of the fake: for any text, the fake either refuses the
+/// search (HTTP 400) or accepts exactly `rfc822msgid:<id>` with a
+/// non-empty ID and no white space, and then gives only the drafts and
+/// messages of that Message-ID.
+#[test]
+fn a_search_gives_only_its_message_id_or_is_refused() {
+    let gmail = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let raw = |id: &str| {
+        base64::encode_url(
+            format!("From: owner@example.com\r\nMessage-ID: <{id}>\r\nSubject: s\r\n\r\nb\r\n")
+                .as_bytes(),
+        )
+    };
+    for id in ["iris.1@x.org", "iris.2@x.org"] {
+        let (status, _) = call(
+            &gmail,
+            "POST",
+            "drafts",
+            Some(&json!({"message": {"raw": raw(id)}})),
+            true,
+        );
+        assert_eq!(status, 200);
+    }
+    const POOL: &[&str] = &[
+        "rfc822msgid:",
+        "rfc822msgid",
+        "from:",
+        "iris.1@x.org",
+        "<iris.1@x.org>",
+        "iris.2@x.org",
+        "IRIS.2@X.ORG",
+        " ",
+        "\t",
+        "<",
+        ">",
+        "&",
+        "=",
+        "%",
+        "+",
+        "x",
+        "in:sent",
+        "\u{e9}",
+    ];
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..400 {
+        let n = 1 + (next() % 4) as usize;
+        let q: String = (0..n)
+            .map(|_| POOL[(next() % POOL.len() as u64) as usize])
+            .collect();
+        let want = q
+            .trim()
+            .strip_prefix("rfc822msgid:")
+            .filter(|id| !id.trim().is_empty() && !id.contains(char::is_whitespace));
+        for path in ["drafts", "messages"] {
+            let (status, body) = call(
+                &gmail,
+                "GET",
+                &format!("{path}?q={}", encode_query(&q)),
+                None,
+                true,
+            );
+            let Some(id) = want else {
+                assert_eq!(status, 400, "{q:?} {body}");
+                continue;
+            };
+            assert_eq!(status, 200, "{q:?} {body}");
+            let bare = id.trim_matches(['<', '>']).to_ascii_lowercase();
+            let key = if path == "drafts" {
+                "drafts"
+            } else {
+                "messages"
+            };
+            let found = body[key].as_array().map_or(0, Vec::len);
+            let expected = usize::from(bare == "iris.1@x.org" || bare == "iris.2@x.org");
+            assert_eq!(found, expected, "{q:?} {body}");
+        }
+    }
+}

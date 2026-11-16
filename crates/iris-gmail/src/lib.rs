@@ -397,7 +397,35 @@ struct DraftPage {
 pub struct DraftRaw {
     pub id: String,
     pub message: MessageRef,
-    pub raw: Vec<u8>,
+    /// The message, or `None` if it is larger than [`DRAFT_LIMIT`].
+    pub raw: Option<Vec<u8>>,
+}
+
+/// The most bytes of a draft message that [`Gmail::draft_raw`] keeps. A
+/// draft of Iris has a body of at most 256 KiB, so a larger message is
+/// not in the form that Iris writes.
+pub const DRAFT_LIMIT: usize = 4 * 1024 * 1024;
+
+/// A sink that keeps at most [`DRAFT_LIMIT`] bytes, and then only counts.
+#[derive(Default)]
+struct Capped {
+    bytes: Vec<u8>,
+    over: bool,
+}
+
+impl Write for Capped {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if !self.over && self.bytes.len() + data.len() <= DRAFT_LIMIT {
+            self.bytes.extend_from_slice(data);
+        } else if !self.over {
+            self.over = true;
+            self.bytes = Vec::new();
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A token bucket of quota units, filled at the limit for each minute.
@@ -538,43 +566,36 @@ impl Gmail {
     }
 
     /// `users.drafts.get` with `format=raw`. HTTP 404 gives
-    /// [`Error::NotFound`]: the draft is gone, deleted or sent.
+    /// [`Error::NotFound`]: the draft is gone, deleted or sent. The client
+    /// streams the answer, so a large draft (for example with an
+    /// attachment that the person added) does not fail: its `raw` is
+    /// `None` when the message is larger than [`DRAFT_LIMIT`].
     pub fn draft_raw(&self, token: &str, id: &str) -> Result<DraftRaw> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Msg {
-            id: String,
-            thread_id: String,
-            raw: String,
-        }
         #[derive(Deserialize)]
         struct Answer {
             id: String,
-            message: Msg,
+            message: MessageRef,
         }
-        let a: Answer = self.json(
+        let response = self.call(
             token,
+            Method::Get,
             &format!("drafts/{}", segment(id)),
             &[("format", "raw".into())],
             cost::DRAFTS_GET,
         )?;
-        // The base64url text has no quote, so it fits a JSON string as is.
-        if a.message.raw.contains(['"', '\\']) {
-            return Err(Error::Decode("raw is not base64".into()));
-        }
-        let mut raw = Vec::new();
-        raw::split(
-            format!(r#"{{"raw":"{}"}}"#, a.message.raw).as_bytes(),
-            &mut raw,
-        )
-        .map_err(|e| Error::Decode(format!("raw of a draft: {e:?}")))?;
+        let mut sink = Capped::default();
+        let (rest, _) = raw::split_draft(response.into_body().into_reader(), &mut sink).map_err(
+            |e| match e {
+                raw::SplitError::Read(e) => Error::Transport(e.to_string()),
+                raw::SplitError::Write(e) => Error::Sink(e),
+                raw::SplitError::Format(e) => Error::Decode(e.to_string()),
+            },
+        )?;
+        let a: Answer = parse(&rest)?;
         Ok(DraftRaw {
             id: a.id,
-            message: MessageRef {
-                id: a.message.id,
-                thread_id: a.message.thread_id,
-            },
-            raw,
+            message: a.message,
+            raw: (!sink.over).then_some(sink.bytes),
         })
     }
 
