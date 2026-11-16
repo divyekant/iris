@@ -131,9 +131,13 @@ pub fn update(
     if status.as_deref() != Some("muted") {
         status = None;
     }
-    // A conversation needs a message from you, a person or a stranger
-    // (section 7.3). Service mail alone does not keep it.
-    let gone = mails.iter().all(|m| m.service);
+    // The conversation is gone when each of its messages is gone (section
+    // 7.3). It also ends when service mail is all that is left because the
+    // other messages became hostile mail or drafts: service mail alone makes
+    // no conversation. While a message from a party is only gone, the item
+    // keeps its status (section 4.5).
+    let gone =
+        mails.is_empty() || (mails.iter().all(|m| m.service) && !gone_party_source(conn, old.id)?);
     let mut doc = match doc(
         conn,
         thread,
@@ -235,6 +239,20 @@ fn save(
         add.execute(params![id, m.id])?;
     }
     Ok(())
+}
+
+/// True if a source of the item is a gone message from you, a person or a
+/// stranger, that is not hostile mail.
+fn gone_party_source(conn: &Connection, item: i64) -> rusqlite::Result<bool> {
+    conn.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM item_source s JOIN message m ON m.id = s.message_id
+           LEFT JOIN header h ON h.message_id = m.id
+           WHERE s.item_id = ?1 AND m.gone_at IS NOT NULL
+             AND (m.hostile IS NULL OR trim(m.hostile) IN ('', '[]'))
+             AND COALESCE((SELECT kind FROM sender WHERE address = lower(h.from_addr)), '')
+                 NOT IN ('service', 'hostile'))",
+    )?
+    .query_row([item], |r| r.get(0))
 }
 
 /// The update sources of the item whose message is gone, as (time, row).

@@ -777,7 +777,11 @@ The conversation rule runs for each message that is not hostile mail:
   `your_turn` come from these messages.
 - When each message of the conversation is gone, the conversation gets the
   status `gone`. It is not deleted.
-- A thread with only `service` messages has no conversation.
+- A thread with only `service` messages has no conversation. If the
+  messages from you, a person or a stranger become hostile mail, and only
+  `service` messages stay, the conversation also gets the status `gone`.
+  While such a message is only gone, the conversation keeps its status
+  (section 4.5), and the messages that stay give its fields.
 
 `derived.by` is `rule`, and `derived.rule` names the rule.
 
