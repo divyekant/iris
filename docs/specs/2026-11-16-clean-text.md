@@ -234,7 +234,9 @@ history go out.
 A PDF gives text only if its decoded size is at most `PDF_LIMIT` (10 MiB) and
 its first 1 KiB holds `%PDF`.
 
-- Streams: the reader finds each `stream` keyword. The data ends at the
+- Streams: the reader finds each `stream` keyword. Its dictionary is the
+  text after the last object header (`<number> <number> obj`) before it, at
+  most 4 KiB back. The data ends at the
   direct `/Length` of the stream dictionary, if `endstream` follows that
   length. If not, the data ends at the next `endstream`.
 - A stream with no filter is read in place. A stream whose `/Filter` is

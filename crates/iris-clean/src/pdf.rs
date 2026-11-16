@@ -124,16 +124,39 @@ fn ends_at(pdf: &[u8], start: usize, len: usize) -> bool {
         })
 }
 
-/// The stream dictionary: the bytes from the last `obj` keyword before the
-/// stream, at most 4 KiB back.
+/// The stream dictionary: the bytes after the last object header
+/// (`<number> <number> obj`) before the stream, at most 4 KiB back. An
+/// `obj` in a value, for example `(obj)`, is not a header.
 fn dict_before(pdf: &[u8], kw: usize) -> &[u8] {
     let from = kw.saturating_sub(4096);
     let window = &pdf[from..kw];
-    let start = window
-        .windows(3)
-        .rposition(|w| w == b"obj")
+    let start = (0..window.len().saturating_sub(2))
+        .rev()
+        .find(|&p| &window[p..p + 3] == b"obj" && is_header(&window[..p]))
         .map_or(0, |p| p + 3);
     &window[start..]
+}
+
+/// True if `before` ends with `<number> <number> ` (the start of an object header).
+fn is_header(before: &[u8]) -> bool {
+    let mut rest = before;
+    for _ in 0..2 {
+        let ws = rest
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count();
+        if ws == 0 {
+            return false;
+        }
+        rest = &rest[..rest.len() - ws];
+        let digits = rest.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[..rest.len() - digits];
+    }
+    rest.last().is_none_or(|b| b.is_ascii_whitespace())
 }
 
 /// False for streams that are not page content: images, fonts, metadata,
@@ -472,6 +495,22 @@ mod tests {
         pdf.extend(data);
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
         assert_eq!(text(&pdf, 100), None);
+    }
+
+    #[test]
+    fn obj_in_a_value_is_not_an_object_header() {
+        let content = b"BT (the endstream report) Tj ET";
+        let mut pdf = format!(
+            "%PDF-1.4\n4 0 obj\n<< /Length {} /Foo (obj) >>\nstream\n",
+            content.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(content);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        assert_eq!(text(&pdf, 100).as_deref(), Some("the endstream report"));
+        assert!(is_header(b"\n12 0 "));
+        assert!(!is_header(b"(1 0 "));
+        assert!(!is_header(b"/Foo ("));
     }
 
     #[test]
