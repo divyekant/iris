@@ -272,7 +272,7 @@ impl Worker {
                 Ok(_) => {}
                 // Another process syncs the account: not an error.
                 Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
-                Err(e) => eprintln!("iris: account {}: {e}", self.account),
+                Err(e) => say!("iris: account {}: {e}", self.account),
             }
             match sync_accounts(&self.store) {
                 Ok(a) if !a.contains(&self.account) => return,
@@ -336,7 +336,7 @@ impl Engine {
         if self.last_clean.is_none_or(|t| t.elapsed() >= CLEAN_EVERY) {
             self.last_clean = Some(Instant::now());
             if let Err(e) = self.store.clean_gone(now_ms()) {
-                eprintln!("iris: content cleanup: {e}");
+                say!("iris: content cleanup: {e}");
             }
         }
         Ok(started)
@@ -346,7 +346,7 @@ impl Engine {
     pub fn run(mut self) {
         loop {
             if let Err(e) = self.tick() {
-                eprintln!("iris: schedule: {e}");
+                say!("iris: schedule: {e}");
             }
             std::thread::sleep(SYNC_EVERY);
         }
