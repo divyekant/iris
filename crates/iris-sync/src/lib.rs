@@ -131,12 +131,19 @@ pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
 /// token. On [`iris_gmail::Error::Unauthorized`], get a new token and call
 /// again: the sync continues where it stopped.
 ///
-/// An account with a complete first sync gives `Done` with zero counts and
-/// calls Gmail for nothing.
+/// An account at [`STEP_INCREMENTAL`] or with a complete sync gives `Done`
+/// with zero counts and calls Gmail for nothing.
 pub fn first_sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Done> {
     let _lock = lock(store, account)?;
     let s = state(store, account)?;
     match (s.kind.as_deref(), s.start.as_deref(), s.step) {
+        (Some(KIND_FIRST), Some(h0), Some(STEP_INCREMENTAL)) => {
+            return Ok(Done {
+                history_start: parse_history(h0)?,
+                fetched: 0,
+                gone: 0,
+            })
+        }
         (Some(KIND_FIRST), Some(_), Some(_)) => {}
         (Some(_), _, _) => return Err(Error::OtherSync),
         (None, _, _) if s.history_id.is_some() => {
