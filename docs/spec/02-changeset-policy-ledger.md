@@ -315,7 +315,7 @@ section 5.1) keep other users out.
 | A new revision with a new reason | The reason that the person saw for an older revision is lost | The table `changeset_revision` keeps the reason and the submit time of each submitted revision. Its rows do not change. |
 | A withdraw while an action is open | A withdrawn changeset applies an action | The trigger `changeset_withdraw` cancels each open action and each draft action in the same write. A withdrawn changeset stays withdrawn. |
 | A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | Migration 7 has no ledger, so no action has such a row and the apply cannot start. The migration of the ledger (R2-03) changes `changeset_withdraw` and `action_state` in the same migration: the withdraw keeps such an action `approved`, and its recovery can then write `applied` or `failed`. |
-| A move to `applied`, `failed` or `undone` | A state with no ledger entry | Migration 7 has no such move. The ledger migration (R2-03) adds these moves with their ledger entry (section 7.1), and keeps on `applied` and `failed` the decision that approved the action. |
+| A move to `applied`, `failed` or `undone` | A state with no ledger entry, or an apply that changes the decision | Migration 8 (R2-02) adds the moves `approved` to `applied` and `approved` to `failed`, and keeps on them the decision that approved the action. The ledger migration (R2-03) adds the check of the ledger entry to these moves, and the moves to `undone` (section 7.1). |
 | An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
 | Two writers at the same time | Two moves of one action | The engine has one write connection. Each request is one transaction, and the trigger checks the state at the time of the write. |
 | A crash in a submit or a decision, or a failed commit | Half a submit, or a success for a change that is not stored | The transaction rolls back, and the call gives the error. |
@@ -618,6 +618,29 @@ The `ledger_message` table has one row for each message of the entry:
 
 While a ledger row is in the state `writing`, the engine applies no other
 action that has a message of that row. The other action waits.
+
+#### Failure list of the apply before the ledger (R2-02)
+
+The crate `iris-apply` applies the verbs `archive`, `inbox`, `read`,
+`unread` and `trash`. It comes before the ledger (R2-03), so it has no
+`writing` row and no recovery. Each of these verbs is idempotent: a call
+again on a message with the target state changes nothing. Step 2 reads
+the labels at Gmail at each apply. So an apply again after a stop makes
+only the calls that Gmail did not make.
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| The mode is `observe` | An action applies without the mode `apply` | The action stays `approved` and waits. |
+| An action that a rule of an older policy version approved | A rule that the person removed applies the action | The engine sends the action to `in_review`, by `engine`. It does not evaluate the action again (section 5.4) yet. |
+| The hash of the rows does not agree with the hash of the approval | The person approved one action, and another applies | The engine denies the action, by `engine`. |
+| A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |
+| A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. |
+| A message that already has the target state | A call that changes nothing, and an undo that changes the message | The apply skips it, and counts it. |
+| HTTP 401, or a read that fails | Gmail did not run the call | The action stays `approved`. The caller gets a new access token and applies again. |
+| An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call | The action stays `approved`. The next apply reads the labels again (step 2), and changes only the messages that do not have the target state. |
+| A clear refusal (HTTP 400, another 4xx) | The rest of the action is not valid | The action becomes `failed`. The messages of the earlier calls keep the change. The result has the error. |
+| A withdraw during the apply | Gmail changed messages of a cancelled action | The move to `applied` fails, and the result is an error. The ledger migration adds the `writing` exception (section 5.5). |
+| A store error after a provider call | The mirror does not have the new labels | The next sync writes the labels from the history of Gmail. |
 
 ### 7.3 Recovery
 
