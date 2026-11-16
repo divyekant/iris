@@ -63,6 +63,26 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: a decided matter does not change');
 END;
 
+-- Rule 1: a decision is made on a valid proposal only (the view
+-- `matter_valid`), and a confirm keeps 1 or more distinct live members, by
+-- their item row IDs. The CASE stops `json_each` on text that is not JSON.
+CREATE TRIGGER matter_decide BEFORE UPDATE OF status ON matter
+WHEN new.status IS NOT 'proposed' AND (
+  NOT EXISTS (SELECT 1 FROM matter_valid WHERE matter_id = old.id)
+  OR (new.status = 'confirmed' AND NOT CASE
+    WHEN json_valid(new.keep) AND json_type(new.keep) = 'array' THEN
+      json_array_length(new.keep) >= 1
+      AND (SELECT count(DISTINCT value) FROM json_each(new.keep))
+          = json_array_length(new.keep)
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(new.keep)
+        WHERE type IS NOT 'integer' OR value NOT IN (
+          SELECT item_id FROM matter_live WHERE matter_id = old.id))
+    ELSE 0 END))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: not a valid decision');
+END;
+
 CREATE TRIGGER matter_delete BEFORE DELETE ON matter
 WHEN old.status IS NOT 'proposed'
 BEGIN

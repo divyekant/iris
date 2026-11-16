@@ -234,6 +234,65 @@ fn the_triggers_hold_the_member_rules() {
     assert_eq!(rows, 0);
 }
 
+/// A decision by any write path: the store accepts a confirm only with a
+/// `keep` of 1 or more distinct live members, and a decision only on a
+/// valid proposal. Each try runs in a savepoint that rolls back.
+#[test]
+fn a_decision_needs_a_valid_proposal_and_a_live_keep() {
+    // Items 1 to 3 are members (3 is hidden, so not live), 4 is not.
+    let b = setup("decide", 4, &FORMS);
+    let m = propose(&b, &[1, 2, 3]).unwrap();
+    sql(
+        &b,
+        r#"UPDATE item SET doc = '{"attention":{"state":"hidden"}}' WHERE id = 3"#,
+    )
+    .unwrap();
+    let parts = ["1", "2", "3", "4", "\"1\"", "1.5", "null", "[1]"];
+    let mut rng = Rng::new(7);
+    let mut accepted = 0;
+    for round in 0..400 {
+        let n = rng.below(4) as usize;
+        let picked: Vec<&str> = (0..n).map(|_| *rng.pick(&parts)).collect();
+        let keep = match round % 10 {
+            0 => "not json".to_string(),
+            1 => "{\"a\": 1}".to_string(),
+            _ => format!("[{}]", picked.join(",")),
+        };
+        let mut distinct = picked.clone();
+        distinct.sort();
+        distinct.dedup();
+        let good = round % 10 > 1
+            && n > 0
+            && distinct.len() == n
+            && picked.iter().all(|p| *p == "1" || *p == "2");
+        let text = format!(
+            "UPDATE matter SET status = 'confirmed', decided_at = 1, keep = '{keep}' WHERE id = {m}"
+        );
+        let done = b
+            .store
+            .write(|tx| {
+                tx.execute_batch("SAVEPOINT try")?;
+                let r = tx.execute(&text, []);
+                tx.execute_batch("ROLLBACK TO try; RELEASE try")?;
+                Ok(r.is_ok())
+            })
+            .unwrap();
+        assert_eq!(done, good, "keep {keep}");
+        accepted += usize::from(done);
+    }
+    assert!(accepted > 0, "the test made no good confirm");
+    assert_eq!(status(&b, m), "proposed");
+    // A proposal that is not valid takes no decision, also by SQL.
+    sql(&b, "UPDATE item SET status = 'gone' WHERE id = 2").unwrap();
+    for text in [
+        format!("UPDATE matter SET status = 'declined', decided_at = 1 WHERE id = {m}"),
+        format!("UPDATE matter SET status = 'confirmed', decided_at = 1, keep = '[1]' WHERE id = {m}"),
+    ] {
+        assert!(sql(&b, &text).is_err(), "{text}");
+    }
+    assert_eq!(status(&b, m), "proposed");
+}
+
 #[test]
 fn a_proposal_that_loses_a_member_is_deleted_whole() {
     // 3 threads: after the loss, 2 members of 2 threads stay, which would
