@@ -159,3 +159,17 @@ fn a_sync_defect_is_reported_and_starts_a_full_resync() {
         vec![]
     );
 }
+
+#[test]
+fn a_repair_fetch_that_fails_is_reported_as_not_repaired() {
+    let (fake, store, account) = synced("v-unrepaired", 28, 50);
+    let id = FakeGmail::id_of(3);
+    let path = store.content_path(&sha_of(&store, &id).unwrap()).unwrap();
+    std::fs::write(&path, b"bad").unwrap();
+    let at_fake = fake.clone();
+    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || at_fake.fail_next(&[400])));
+
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(r.differences, vec![Difference::Unrepaired(id)]);
+    assert_eq!(std::fs::read(&path).unwrap(), b"bad");
+}
