@@ -97,6 +97,19 @@ pub(crate) fn count_gate(c: &Connection, now: i64, declined: bool) -> rusqlite::
     )
 }
 
+/// The sender row `sender` has an item on the list: at the gate, or (with
+/// `declined`) on the list of declined senders.
+fn on_list(c: &Connection, now: i64, declined: bool, sender: i64) -> rusqlite::Result<bool> {
+    c.query_row(
+        &format!(
+            "WITH {} SELECT EXISTS (SELECT 1 FROM party WHERE sender = ?1)",
+            parties(now, declined)
+        ),
+        [sender],
+        |r| r.get(0),
+    )
+}
+
 /// One page of `limit` senders after the sort keys `after`: newest first by
 /// the newest item of each sender.
 pub(crate) fn read_gate(
@@ -191,41 +204,41 @@ pub fn gate_page(
 
 /// The answer `answer` (`accept`, `decline` or `reopen`) of the person to the
 /// sender `id`. Gives the sender row after the answer, or `None` when no
-/// sender has the ID or the answer is not known. A sender that is not a
-/// stranger now is [`Error::Conflict`].
+/// sender has the ID or the answer is not known. An accept or a decline of a
+/// sender that is not at the gate now (its kind is not `stranger`, or a rule
+/// took its items out) is [`Error::Conflict`].
 ///
 /// The answer and the understanding again of the mail of each sender whose
 /// hostile state changed are one transaction (specification 1, section 6.7).
 pub fn answer(store: &Store, id: &str, answer: &str, now_ms: i64) -> Result<Option<Value>> {
-    type Gate = fn(&Connection, i64, i64) -> rusqlite::Result<Answer>;
-    let f: Gate = match answer {
-        "accept" => gate::accept,
-        "decline" => gate::decline,
-        "reopen" => gate::reopen,
-        _ => return Ok(None),
-    };
+    if !matches!(answer, "accept" | "decline" | "reopen") {
+        return Ok(None);
+    }
     let row = row_of(id, Kind::Sender)?;
     let result = store.write(|tx| {
-        Ok(match f(tx, row, now_ms)? {
+        // A rule decides before the gate: the answer needs the sender on the
+        // list of the gate in the same transaction.
+        let at = |declined| on_list(tx, now_ms, declined, row);
+        let done = match answer {
+            "accept" => gate::accept(tx, row, now_ms, at(false)? || at(true)?)?,
+            "decline" => gate::decline(tx, row, now_ms, at(false)?)?,
+            _ => gate::reopen(tx, row, now_ms)?,
+        };
+        Ok(match done {
             Answer::Done { rerun } => {
                 iris_understand::store::rerun_senders(tx, &rerun, now_ms)?;
                 Ok(Some(sender(tx, row)?))
             }
             Answer::NoSender => Ok(None),
-            Answer::NotStranger(kind) => Err(kind),
+            Answer::NotStranger(Some(iris_senders::Kind::Hostile)) => {
+                Err("Iris marks this sender as hostile. Its mail stays in quarantine.")
+            }
+            Answer::NotStranger(_) | Answer::NotAtGate => {
+                Err("This sender is not at the gate now. Look at the brief again.")
+            }
         })
     })?;
-    result.map_err(|kind| {
-        Error::Conflict(
-            match kind {
-                Some(iris_senders::Kind::Hostile) => {
-                    "Iris marks this sender as hostile. Its mail stays in quarantine."
-                }
-                _ => "This sender is not a stranger now. Look at the brief again.",
-            }
-            .into(),
-        )
-    })
+    result.map_err(|e| Error::Conflict(e.into()))
 }
 
 /// The sender row `row` as the answer of the API.

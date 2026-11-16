@@ -280,6 +280,22 @@ async fn the_gate_is_the_strangers_section_by_sender() {
         senders(&gate),
         vec![(s.ana.clone(), 1, vec![s.ask.clone()])]
     );
+    // Bo is not at the gate now: no answer, and no write.
+    for answer in ["accept", "decline"] {
+        let (code, v) = g.answer(&s.bo, answer).await;
+        assert_eq!(code, StatusCode::CONFLICT, "{answer}");
+        assert!(
+            v["error"].as_str().unwrap().contains("not at the gate"),
+            "{v}"
+        );
+    }
+    assert_eq!(
+        g.one::<String>(&format!(
+            "SELECT decided_by || ' ' || coalesce(declined_at, 'none') FROM sender WHERE id = {}",
+            &s.bo[2..]
+        )),
+        "engine none"
+    );
 }
 
 #[tokio::test]

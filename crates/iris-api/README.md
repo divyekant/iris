@@ -211,7 +211,7 @@ An error is `{"error": "<reason>"}`:
 | 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
-| 409 | A gate answer is for a sender that is not a stranger now. A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
+| 409 | A gate answer is for a sender that is not at the gate now: its kind is not `stranger`, or a rule took its items out. A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
 | 500 | The store failed. |
 
 ## Sign-in

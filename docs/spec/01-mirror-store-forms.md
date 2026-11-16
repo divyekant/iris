@@ -662,7 +662,7 @@ The person gives one answer for each sender:
 |---|---|
 | Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
 | Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
-| Reopen | Removes the accept or the decline. The engine decides the kind again from the evidence in the store. |
+| Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
 A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
 "stranger"` (specification 2, section 6.2) takes the items of strangers out of
@@ -673,8 +673,11 @@ The engine accepts an answer only for a sender at the gate: the stored kind is
 `stranger` (or no kind yet), and, unless a person set the kind, the rules of
 this section give `stranger` for the mail of now. The stored kind can be older
 than the evidence until the next refresh, and a person must never accept a
-sender that is `hostile` now. Else the engine refuses the answer and changes
-nothing.
+sender that is `hostile` now. Also, an item of the sender must wait at the
+gate in the same transaction (for an accept, an item on the list of declined
+senders is enough), because a rule can take the items out after the person
+saw them. A repeated answer is no change. Else the engine refuses the answer
+and changes nothing.
 
 An accept makes the domain of the sender known, and a reopen of an accept can
 make it unknown. So in the same transaction the engine decides again each
