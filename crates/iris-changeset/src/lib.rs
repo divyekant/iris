@@ -910,7 +910,8 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
     )?;
     let mut st = c.prepare(
         "SELECT id, revision, n, verb, targets, args, why, flags, state, decided_by, rule,
-                reason, decided_at, hash, policy
+                reason, decided_at, hash, policy,
+                (SELECT l.id FROM ledger l WHERE l.action_id = changeset_action.id)
          FROM changeset_action WHERE changeset_id = ?1 ORDER BY revision, n",
     )?;
     let mut rows = st.query([changeset])?;
@@ -928,6 +929,7 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
         let at: Option<i64> = r.get(12)?;
         let hash: Option<String> = r.get(13)?;
         let policy: Option<i64> = r.get(14)?;
+        let ledger: Option<i64> = r.get(15)?;
         write!(
             out,
             r#"{{"n":{},"revision":{},"verb":"{}","targets":{},"resolved":{{"messages":["#,
@@ -967,13 +969,15 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
         });
         write!(
             out,
-            r#"]}},"args":{},"why":{},"flags":{},"hash":{},"decision":{}}}"#,
+            r#"]}},"args":{},"why":{},"flags":{},"hash":{},"decision":{}{}}}"#,
             r.get::<_, String>(5)?,
             r.get::<_, Option<String>>(6)?
                 .map_or(Value::Null, Value::String),
             r.get::<_, String>(7)?,
             hash.map_or(Value::Null, Value::String),
             decision,
+            // The ledger entry of the action (section 7.1).
+            ledger.map_or(String::new(), |l| format!(r#","ledger":"l-{l}""#)),
         )?;
     }
     out.write_all(b"]}")?;
