@@ -239,3 +239,25 @@ fn a_watch_matches_the_first_safe_arrival_of_the_search() {
         }
     }
 }
+
+/// The invariant: only `remove_watch` ends a watch. The cleanup of a gone
+/// message keeps the notice of a watch that matched it.
+#[test]
+fn the_cleanup_of_the_gone_message_keeps_the_notice() {
+    let dir = TempDir::new("clean");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("visa", NOW).unwrap();
+    let m = put(&store, acc, msg("v", NOW, &["INBOX"], "Visa", true));
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w, m)]);
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?))
+        .unwrap();
+    store.clean_gone(NOW).unwrap();
+    let gone: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM message", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(gone, 0, "the cleanup deleted the message row");
+    let got = store.watch(w).unwrap().unwrap();
+    assert_eq!((got.message, got.arrived_at), (Some(m), Some(NOW)));
+    assert_eq!(store.check_watches(NOW).unwrap(), [], "no second notice");
+}

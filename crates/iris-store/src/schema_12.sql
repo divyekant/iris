@@ -11,8 +11,10 @@ CREATE TABLE watch (
   -- The largest message row ID at the start. Only a larger row ID is new.
   after_message INTEGER NOT NULL,
   -- The first message that matched, and when the engine found it. Both
-  -- are NULL while the watch waits. The message goes only with its account.
-  message_id INTEGER REFERENCES message(id) ON DELETE CASCADE,
+  -- are NULL while the watch waits. No foreign key: the cleanup of a gone
+  -- message must not delete or reset the notice, and AUTOINCREMENT never
+  -- gives the row ID of a deleted message to a new message.
+  message_id INTEGER,
   arrived_at INTEGER,
   CHECK ((message_id IS NULL) = (arrived_at IS NULL))
 );
