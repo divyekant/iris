@@ -236,6 +236,14 @@ mod tests {
     }
 
     #[test]
+    fn the_first_blank_line_ends_the_head() {
+        let h = Head::parse(b"From: a@example.org\n\nTo: body@example.net\r\n\r\nBody.\r\n");
+        assert!(h.recipients().is_empty());
+        let h = Head::parse(b"From: a@example.org\r\n\r\nTo: body@example.net\n\nBody.\n");
+        assert!(h.recipients().is_empty());
+    }
+
+    #[test]
     fn reads_group_syntax() {
         let h = Head::parse(
             b"To: Friends: Ana <ana@example.org>, bob@example.org;, cy@example.net\r\nCc: Empty:;\r\n\r\n",
