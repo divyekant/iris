@@ -200,7 +200,7 @@ Code: 7731
 }
 
 #[test]
-fn the_first_code_in_the_message_wins() {
+fn a_year_after_the_code_does_not_compete() {
     let raw = "From: Bank <no-reply@bank.example>
 Subject: Your verification code
 

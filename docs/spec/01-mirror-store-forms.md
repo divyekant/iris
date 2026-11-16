@@ -766,8 +766,26 @@ matches gives the result, and the next rules do not run.
 | 1 | Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
 | 2 | The subject or the body matches a receipt or a statement pattern | No fixed rule. The model reads the message, so that the record and the payment commitment (section 6.4) are not lost. This applies also to an invitation, a code and a list message. |
 | 3 | A calendar invitation (`text/calendar` with `METHOD:REQUEST`), not from you | Commitment of kind `invitation`. A request from you is your own invitation: the model reads it. |
-| 4 | A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. A code comes before the list rule: a login code from a list sender is a signal that you need now. A number binds to a code word when at most 3 words and at most 100 bytes are between them. If the line with the code word has more than one bound number, or a weakly bound number next to other numbers, the code is not clear: no fixed rule matches (also not the list rule), and the model reads the message. |
+| 4 | A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. A code comes before the list rule: a login code from a list sender is a signal that you need now. A number binds to a code word when at most 3 words and at most 100 bytes are between them. The message must give one code value. If a line with a code word has more than one bound number, or a weakly bound number next to other numbers, or two lines give different values, the code is not clear: no fixed rule matches (also not the list rule), and the model reads the message. |
 | 5 | `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item. |
+
+#### Failure list of the fixed rules
+
+The fixed rules read mail that Iris does not control. The safe result for
+each case that a rule cannot settle is: no fixed item, and the model reads
+the message. A fixed rule never guesses.
+
+| Input | Failure mode | Result |
+|---|---|---|
+| A message with a hostile mark | A rule acts on text from an attacker | No item and no model call (rule 1). |
+| A receipt or a statement that also has a calendar request, a code or a list header | A fixed item hides the record and the payment | The model reads the message (rule 2). |
+| A calendar request from you | Your own event becomes a commitment that you owe | The model reads the message (rule 3). |
+| A code word with two or more candidate numbers, on one line or on different lines | An account number, an order number or a date becomes the code | The model reads the message (rule 4). |
+| A year (1900 to 2099) weakly bound to a code word | A date becomes the code | The year is not a code (issue #94). |
+| A very long line with many code words and numbers | The search takes too long | Only code words within 100 bytes of a number count, so the search is linear in the length of the line. |
+| A `List-Id` longer than 500 characters | The feed item fails the schema | The feed item has no `list` field. |
+| A rule item that fails the schema | An invalid item goes to the store | The rule gives no item, and the model reads the message. |
+| All other input | | No fixed rule matches, and the model reads the message. |
 
 The conversation rule runs for each message that is not hostile mail:
 

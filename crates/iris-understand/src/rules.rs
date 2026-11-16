@@ -129,18 +129,18 @@ fn looks_like_record(a: &Analysis) -> bool {
     RECORD_WORDS.iter().any(|w| hay.contains(w))
 }
 
-/// The code of the first line in the order of the message that has a code
-/// word and a number bound to it. A code is a run of 4 to 8 digits:
+/// The one code of the message. A code is a run of 4 to 8 digits:
 /// - strong: the code word, then only `:`, `-`, `=`, `#` or `is`, then the
 ///   code;
 /// - weak: at most 3 other words, and at most [`CODE_GAP`] bytes, between the
 ///   code and the code word, before or after it. A weak code that looks like a year (1900 to 2099) does not
 ///   count (shortcut: issue #94).
 ///
-/// The line gives one code only if one number binds, and that number is
+/// A line gives one code only if one number binds, and that number is
 /// strong or is the only number of the line. Another line with a bound
-/// number is not clear: the result is `Some(None)`, and the model reads the
-/// message.
+/// number is not clear. The message gives a code only if each line that
+/// gives a code gives the same value, and no line is unclear. Else the
+/// result is `Some(None)`, and the model reads the message.
 ///
 /// If a line has a code word and no number, the next line continues it: a
 /// number there binds to the code word by the same rules, with the words of
@@ -156,28 +156,40 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<Option<(String, &'a 
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    let pick = lines.iter().enumerate().find_map(|(i, &l)| {
+    // Each cue line gives no code, an unclear code or one code. The message
+    // gives a code only if all cue lines agree on one value.
+    let mut found: Option<(String, &str)> = None;
+    for (i, &l) in lines.iter().enumerate() {
         let cues = cues(l);
         if cues.is_empty() {
-            return None;
+            continue;
         }
         let nums = numbers(l);
-        if !nums.is_empty() {
-            let one = the_code(l, &cues, &nums, 0)?;
-            return Some(one.map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s))));
+        let pick = if !nums.is_empty() {
+            the_code(l, &cues, &nums, 0)
+                .map(|o| o.map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s))))
+        } else if let Some(&next) = lines.get(i + 1) {
+            // The cue line and the next line as one text, with the cues at
+            // their own offsets and the numbers after the line break.
+            let both = format!("{l}\n{next}");
+            let shift = l.len() + 1;
+            the_code(&both, &cues, &numbers(next), shift).map(|o| {
+                o.map(|(s, e)| {
+                    let (s, e) = (s - shift, e - shift);
+                    (next[s..e].to_string(), excerpt(next, s, e - s))
+                })
+            })
+        } else {
+            None
+        };
+        match (pick, &found) {
+            (None, _) => {}
+            (Some(Some(c)), None) => found = Some(c),
+            (Some(Some(c)), Some(f)) if c.0 == f.0 => {}
+            _ => return Some(None),
         }
-        // The cue line and the next line as one text, with the cues at their
-        // own offsets and the numbers after the line break.
-        let next = *lines.get(i + 1)?;
-        let both = format!("{l}\n{next}");
-        let shift = l.len() + 1;
-        let one = the_code(&both, &cues, &numbers(next), shift)?;
-        Some(one.map(|(s, e)| {
-            let (s, e) = (s - shift, e - shift);
-            (next[s..e].to_string(), excerpt(next, s, e - s))
-        }))
-    });
-    pick
+    }
+    found.map(Some)
 }
 
 /// The code among `nums` (moved by `shift` in `text`) for the `cues` of
@@ -335,6 +347,14 @@ mod tests {
         assert!(unclear("Your code is 1234 or 5678"));
         assert!(unclear("Your code is 482913, old code is 123456"));
         assert!(unclear("Account 123456: your code is 482913"));
+        assert_eq!(
+            find_code("Verification for account 123456", "Your code: 482913"),
+            Some(None)
+        );
+        assert_eq!(
+            code("Your code is 482913", "Your code: 482913"),
+            Some("482913".into())
+        );
         assert_eq!(code("Your code is 482913.", ""), Some("482913".into()));
         assert_eq!(
             code("Your verification code is 2026", ""),
