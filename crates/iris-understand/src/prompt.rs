@@ -24,6 +24,7 @@ Answer with one JSON object: {"items": [...], "phishing": false}.
 - Each item has "form", "title" (one short line, at most 200 characters), "quote" (the exact words of the mail that support the item, at most 500 characters) and "confidence" (0 to 1). Give no "id", "sources", "created", "updated", "derived" or "model".
 - A party is {"kind": "self"} for the owner of the mailbox, or {"address": "...", "name": "..."} for another person or service.
 - The data can hold earlier messages of the thread (blocks "Earlier message in the thread:"), oldest first. Use them only to understand the current message. List only the items of the current message, which comes last.
+- The data can list known persons (lines "Known party: Name <address>"). Use the address of a known party that the mail names.
 - The data can list existing items (lines "Existing item:"). If an item that you find is one of them, give "same_as" with the "id" of that existing item.
 - Dates are "YYYY-MM-DD". Times are RFC 3339, for example "2026-11-02T10:00:00Z". Money is {"value": "312.77", "currency": "USD"}: the value is a decimal string, the currency an ISO 4217 code.
 
@@ -47,6 +48,8 @@ pub const RETRY_NOTE: &str =
 /// items, attachment text, then the earlier messages of the thread, newest
 /// first, fill the rest.
 pub const MAX_DATA: usize = 96_000;
+/// The most known parties in the data.
+pub const MAX_KNOWN: usize = 50;
 /// The most bytes of one header value in the data.
 const MAX_FIELD: usize = 1000;
 /// The mark of text that the budget cut.
@@ -103,6 +106,16 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     // find it again, and the store keeps the pinned item (section 7.5).
     for item in cx.existing {
         let line = escape(&format!("Existing item: {item}\n"));
+        if line.len() <= left {
+            left -= line.len();
+            d.push_str(&line);
+        }
+    }
+    // Known persons that the mail can name with no address (section 7.4).
+    for p in cx.known.iter().take(MAX_KNOWN) {
+        let mut line = String::from("Known party: ");
+        push_cut(&mut line, p, MAX_FIELD);
+        line.push('\n');
         if line.len() <= left {
             left -= line.len();
             d.push_str(&line);
@@ -324,7 +337,13 @@ fn commitment_sides(
         .map(str::to_string);
     let h = &a.head;
     let party = if cx.kind == crate::Kind::SelfOwner {
-        let all: Vec<&String> = h.to.iter().chain(&h.cc).chain(&h.bcc).collect();
+        // The owner can be a recipient too, but is never the other side.
+        let all: Vec<&String> =
+            h.to.iter()
+                .chain(&h.cc)
+                .chain(&h.bcc)
+                .filter(|r| !r.eq_ignore_ascii_case(cx.me))
+                .collect();
         match (all.first(), chosen) {
             (Some(_), Some(c)) if all.iter().any(|r| **r == c) => item[other].clone(),
             (Some(first), _) => json!({"kind": "sender", "address": first}),

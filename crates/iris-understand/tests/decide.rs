@@ -86,6 +86,7 @@ fn run(
         existing,
         thread: &[],
         same_sender: &[],
+        known: &[],
     };
     let a = analyze(raw.replace('\n', "\r\n").as_bytes(), &cx);
     let d = decide(&a, &cx, model.map(|m| m as &dyn Model));
@@ -291,6 +292,39 @@ fn same_as_needs_a_valid_item_of_the_same_form() {
 }
 
 #[test]
+fn the_model_gets_the_known_parties() {
+    let raw = "From: Ana <ana@example.org>\nTo: owner@example.com\nSubject: Slides\n\nSam will send you the slides.\n";
+    let known = ["Sam Roe <sam@example.org>".to_string(), "<<<x".to_string()];
+    let none = |_: &str| Vec::new();
+    let cx = Context {
+        me: ME,
+        kind: Kind::Person,
+        labels: &[],
+        internal_date: Some(NOW),
+        now_ms: NOW,
+        known_person: &none,
+        existing: &[],
+        thread: &[],
+        same_sender: &[],
+        known: &known,
+    };
+    let a = analyze(raw.as_bytes(), &cx);
+    let data = prompt::data(&a, &cx);
+    assert!(
+        data.contains("Known party: Sam Roe <sam@example.org>\n"),
+        "{data}"
+    );
+    assert!(!data.contains("<<<"));
+    // The model names the known party: it is the other side.
+    let owed = json!([{"form": "commitment", "title": "Slides", "quote": "Sam will send you the slides.",
+                       "direction": "owed_to_you", "kind": "task", "owner": {"address": "sam@example.org", "name": "Sam Roe"}}]);
+    let m = Fake::with(vec![answer(owed)]);
+    let d = decide(&a, &cx, Some(&m as &dyn Model)).unwrap();
+    assert_eq!(d.drafts[0].item["owner"]["address"], "sam@example.org");
+    assert_eq!(d.drafts[0].item["counterparty"], json!({"kind": "self"}));
+}
+
+#[test]
 fn a_list_message_gives_the_list_headers_to_the_model() {
     let raw = "From: Ana <ana@shop.example>\nList-Id: <n.shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Hello\n\nHello.\n";
     let m = Fake::with(vec![answer(json!([]))]);
@@ -366,6 +400,23 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
             assert_eq!(d.drafts[0].item[key]["address"], want, "{dir} {pick}");
         }
     }
+    // The owner as a recipient is never the other side.
+    let me_too = "From: owner@example.com\nTo: Owner@example.com\nCc: ana@example.org\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    let m = Fake::with(vec![answer(promise.clone())]);
+    let d = run(me_too, Kind::SelfOwner, &["SENT"], &[], Some(&m))
+        .1
+        .unwrap();
+    assert_eq!(
+        d.drafts[0].item["counterparty"]["address"],
+        "ana@example.org"
+    );
+    // Mail to the owner only, with no party from the model: no commitment.
+    let only_me = "From: owner@example.com\nTo: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    let m = Fake::with(vec![answer(promise.clone()), answer(promise.clone())]);
+    let d = run(only_me, Kind::SelfOwner, &["SENT"], &[], Some(&m))
+        .1
+        .unwrap();
+    assert_eq!((d.drafts.len(), d.failed), (0, true));
     // In received mail too, the other side is never the owner: the sender
     // takes the place of a model party with no address.
     for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {
@@ -421,6 +472,7 @@ fn the_model_data_stays_within_its_budget() {
         existing: &existing,
         thread: &thread,
         same_sender: &[],
+        known: &[],
     };
     let mut a = analyze(raw.as_bytes(), &cx);
     // Clean text of the most characters, in 4-byte characters: 128,000 bytes.
@@ -488,6 +540,7 @@ fn read_holds_for_generated_answers() {
         existing: &[],
         thread: &[],
         same_sender: &[],
+        known: &[],
     };
     let a = analyze(ASK.replace('\n', "\r\n").as_bytes(), &cx);
     let keys = [

@@ -151,6 +151,7 @@ fn score(mb: &Mailbox, indices: &[usize], oracle: bool) -> Report {
             existing: &[],
             thread: &[],
             same_sender: &[],
+            known: &[],
         };
         let a = analyze(raw, &cx);
         if oracle {
@@ -289,6 +290,7 @@ fn hand_written_rules() {
             existing: &[],
             thread: &[],
             same_sender: &[],
+            known: &[],
         };
         let a = analyze(raw.as_bytes(), &cx);
         let d = decide(&a, &cx, Some(&none)).unwrap();

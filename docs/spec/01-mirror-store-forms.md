@@ -864,17 +864,20 @@ The conversation rule runs for each message that is not hostile mail:
 - The `direction` of a commitment gives the side of the owner (`owner` for
   `you_owe`, else `counterparty`). The other side is never the owner: it is
   the party of the model if that party has an address, else the sender.
-  In sent mail, the other side is a `To`, `Cc` or `Bcc` recipient (sent
-  mail keeps `Bcc`).
+  In sent mail, the other side is a `To`, `Cc` or `Bcc` recipient other
+  than the owner (sent mail keeps `Bcc`).
   The model can choose among the recipients. If the model gives no party
-  or another address, the engine uses the first recipient. With no
-  recipient, only the parties in the model answer can make a commitment
-  valid.
+  or another address, the engine uses the first recipient that is not the
+  owner. With no such recipient, only the parties in the model answer can
+  make a commitment valid.
 - The answer must have a boolean `phishing`. Each party in the answer must
   be the owner or have an address. Else the answer is not valid.
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.
+  The data lists at most 50 known persons as `Name <address>` (the caller
+  chooses them, most relevant first), in the budget, so that the model can
+  give the address of a person that the mail names only by name.
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row

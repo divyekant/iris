@@ -100,6 +100,11 @@ pub struct Context<'a> {
     /// An end block that the text shares with one of them goes out, for
     /// example a signature without a `-- ` line (section 7.2).
     pub same_sender: &'a [String],
+    /// Known persons that the model can name as parties, as
+    /// `Name <address>` lines, most relevant first: for example the persons
+    /// of the thread. The data holds at most `prompt::MAX_KNOWN` of them,
+    /// in the budget (section 7.4).
+    pub known: &'a [String],
 }
 
 /// The clean text of one message: the only use of `iris-clean`.

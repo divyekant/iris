@@ -19,6 +19,7 @@ fn drafts(raw: &str, kind: Kind, labels: &[&str]) -> Option<Vec<Draft>> {
         existing: &[],
         thread: &[],
         same_sender: &[],
+        known: &[],
     };
     let raw = raw.replace('\n', "\r\n");
     let a = analyze(raw.as_bytes(), &cx);
@@ -130,6 +131,7 @@ fn an_old_code_is_expired() {
         existing: &[],
         thread: &[],
         same_sender: &[],
+        known: &[],
     };
     let a = analyze(raw.replace('\n', "\r\n").as_bytes(), &cx);
     let d = rules::apply(&a, &cx).unwrap().remove(0);

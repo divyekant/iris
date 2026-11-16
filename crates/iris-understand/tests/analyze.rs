@@ -39,6 +39,7 @@ fn analysis(
         existing: &[],
         thread: &[],
         same_sender: &same,
+        known: &[],
     };
     analyze(&crlf(raw), &cx)
 }
@@ -171,6 +172,7 @@ fn the_date_is_internal_date_then_the_header_then_now() {
             existing: &[],
             thread: &[],
             same_sender: &[],
+            known: &[],
         };
         analyze(&crlf(raw), &cx).date(&cx)
     };
