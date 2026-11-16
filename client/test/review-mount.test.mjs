@@ -15,7 +15,8 @@ function serve(routes = {}) {
     const path = String(url).replace(/^\/api\//, "");
     asked.push(init?.body ? [path, JSON.parse(init.body)] : path);
     const route = routes[path];
-    const [status, body] = typeof route === "function" ? route(JSON.parse(init.body)) : (route ?? [200, fx.answer(`/${path}`)]);
+    // A function route can wait, throw (no answer) or answer with the request body.
+    const [status, body] = typeof route === "function" ? await route(init?.body ? JSON.parse(init.body) : undefined) : (route ?? [200, fx.answer(`/${path}`)]);
     return new Response(JSON.stringify(body ?? { error: "Not found." }), { status: body === undefined ? 404 : status, headers: { "content-type": "application/json" } });
   };
   return asked;
@@ -59,7 +60,7 @@ test("only a 404 makes an item gone; another failure shows as a problem", async 
   const down = await mount("/src/views/Request.svelte", { changeset: changeset([act({ verb: "close", targets: { items: [known, "c-down"] } })]) });
   try {
     const alert = await until(() => down.target.querySelector("[role=alert]"));
-    assert.equal(alert.textContent, "The store is busy.");
+    assert.match(alert.textContent, /^The store is busy\. Try again$/);
     assert.doesNotMatch(text(down.target), /not in Iris any more/);
   } finally {
     down.destroy();
@@ -105,6 +106,7 @@ test("each change starts ticked; the button approves the ticked changes and deni
     const button = () => view.target.querySelector("button.primary");
     const boxes = () => [...view.target.querySelectorAll("input[type=checkbox]")];
     assert.match(text(view.target), /Claude Code asks for 3 changes\./);
+    await until(() => !button().disabled);
     assert.ok(boxes().every((b) => b.checked));
     assert.equal(button().textContent, "Approve all 3");
 
@@ -140,17 +142,113 @@ test("all unticked denies all; a request that changed saves nothing and shows th
   serve({ "changesets/cs-9/decide": () => [409, { error: "the hash changed" }], "changesets/cs-9": [200, after] });
   const view = await mount("/src/views/Review.svelte", { changesets: [before] });
   try {
+    await until(() => !view.target.querySelector("button.primary").disabled);
     for (const box of view.target.querySelectorAll("input[type=checkbox]")) box.click();
     view.flushSync();
     assert.equal(view.target.querySelector("button.primary").textContent, "Deny all 3");
     view.target.querySelector("button.primary").click();
     const alert = await until(() => view.target.querySelector("[role=alert]"));
-    assert.match(alert.textContent, /changed after you opened it, so Iris saved nothing/);
+    assert.match(alert.textContent, /Iris did not save this decision, because the request changed after you opened it\./);
     await until(() => text(view.target).includes("without the labels"));
     view.flushSync();
     assert.match(text(view.target), /Claude Code asks for one change\./);
     assert.equal(view.target.querySelector("button.primary").textContent, "Approve the change");
     assert.equal(view.target.querySelector("[role=status]"), null);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("the button waits for the rows of each change, and a failed lookup has a retry", async () => {
+  let messages = () => new Promise(() => {});
+  serve({ "messages?ids=m-1": () => messages() });
+  const one = changeset([act({ resolved: { messages: ["m-1"] } })]);
+  const pending = await mount("/src/views/Request.svelte", { changeset: one });
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    pending.flushSync();
+    assert.equal(pending.target.querySelector("button.primary").disabled, true, "no decision while the rows load");
+  } finally {
+    pending.destroy();
+  }
+
+  messages = () => [500, { error: "The store is busy." }];
+  const view = await mount("/src/views/Request.svelte", { changeset: one });
+  try {
+    const alert = await until(() => view.target.querySelector("[role=alert]"));
+    assert.match(alert.textContent, /The store is busy\./);
+    assert.equal(view.target.querySelector("button.primary").disabled, true, "no decision without the rows");
+    messages = () => [200, fx.answer("/messages?ids=m-1")];
+    alert.querySelector("button").click();
+    await until(() => view.target.querySelectorAll(".messages li").length === 1);
+    view.flushSync();
+    assert.equal(view.target.querySelector("[role=alert]"), null);
+    assert.equal(view.target.querySelector("button.primary").disabled, false);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a request of 500 changes can be decided, and one of 501 says why not", async () => {
+  serve();
+  const many = (count) => changeset(Array.from({ length: count }, (_, i) => act({ n: i + 1 })));
+  const ok = await mount("/src/views/Request.svelte", { changeset: many(500) });
+  try {
+    await until(() => !ok.target.querySelector("button.primary").disabled);
+    assert.equal(ok.target.querySelector("button.primary").textContent, "Approve all 500");
+  } finally {
+    ok.destroy();
+  }
+  const big = await mount("/src/views/Request.svelte", { changeset: many(501) });
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    big.flushSync();
+    assert.equal(big.target.querySelector("button.primary").disabled, true);
+    assert.match(text(big.target), /This request has 501 changes\. Iris can decide at most 500 in one step/);
+  } finally {
+    big.destroy();
+  }
+});
+
+test("after a 409 with a failed refresh, the old request cannot be decided until it loads again", async () => {
+  const before = three();
+  let fresh = () => [500, { error: "The store is busy." }];
+  const asked = serve({ "changesets/cs-9/decide": () => [409, { error: "the hash changed" }], "changesets/cs-9": () => fresh() });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    const alert = await until(() => view.target.querySelector("[role=alert] button"));
+    assert.match(text(view.target.querySelector("[role=alert]")), /Iris did not save this decision.*could not load the request again/);
+    assert.equal(view.target.querySelector("button.primary").disabled, true);
+    fresh = () => [200, { ...before, actions: before.actions.map((a) => ({ ...a, decision: { state: "approved", by: "rule", rule: 2 } })) }];
+    alert.click();
+    await until(() => text(view.target).includes("Nothing waits for your review."));
+    assert.equal(asked.filter((x) => Array.isArray(x)).length, 1, "one decision only");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a decision with no answer loads the request again and does not say that nothing was saved", async () => {
+  const before = three();
+  const after = { ...before, state: "closed", actions: before.actions.map((a) => ({ ...a, decision: { state: "approved", by: "person" } })) };
+  serve({
+    "changesets/cs-9/decide": () => {
+      throw new TypeError("The connection closed.");
+    },
+    "changesets/cs-9": [200, after],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    view.target.querySelector("button.primary").click();
+    const alert = await until(() => view.target.querySelector("[role=alert]"));
+    await until(() => text(view.target).includes("Nothing waits for your review."));
+    assert.match(alert.textContent, /does not know if it saved your decision/);
+    assert.doesNotMatch(text(view.target), /did not save/);
+    assert.equal(view.target.querySelector("[role=status]"), null);
+    assert.equal(view.target.querySelector("button.primary"), null);
   } finally {
     view.destroy();
   }

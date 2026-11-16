@@ -25,6 +25,9 @@
   let more = $derived(open.length ? "more " : "");
   let busy = $state(false);
   let saved = $state("");
+  // True while the screen may not show the request as the store has it: after a decision
+  // with an unknown result, or a 409, until the request loads again.
+  let stale = $state(false);
   let who = $derived(author(c));
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
@@ -57,12 +60,40 @@
   $effect(() => {
     for (const a of actions) if (!(key(a) in rows)) load(a, FIRST);
   });
+  // The person decides only on what the screen shows: the first rows of each waiting change.
+  let missing = $derived(open.filter((a) => !(key(a) in rows)));
+  function retry() {
+    problem = "";
+    for (const a of missing) load(a, FIRST);
+  }
+
+  // The engine takes at most this many decisions in one request (issue 197).
+  const MAX = 500;
+  let blocked = $derived(
+    open.length > MAX
+      ? `This request has ${open.length.toLocaleString("en-US")} changes. Iris can decide at most ${MAX} in one step, so it cannot decide this request yet.`
+      : "",
+  );
+  let ready = $derived(!busy && !stale && !missing.length && !blocked);
+
+  /** Load the request again, so that the screen shows it as the store has it. */
+  async function refresh(why: string) {
+    stale = true;
+    try {
+      onchange(await get<Changeset>(`changesets/${encodeURIComponent(c.id)}`));
+      stale = false;
+      problem = why;
+    } catch {
+      problem = `${why} Iris could not load the request again. Load it again before you decide.`.trim();
+    }
+  }
 
   // One request for each decision: the engine approves the ticked changes, with the hash that
   // this screen showed, and denies the others. If one is refused, it writes nothing (409).
   async function decide() {
     const yes = chosen.length;
     const no = open.length - yes;
+    if (!ready) return;
     busy = true;
     problem = saved = "";
     try {
@@ -70,11 +101,11 @@
       onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, body));
       saved = [yes && `You approved ${yes === 1 ? "one change" : `${yes} changes`}.`, no && `You denied ${no === 1 ? "one change" : `${no} changes`}.`].filter(Boolean).join(" ");
     } catch (e) {
-      if ((e as { status?: number }).status !== 409) problem = e instanceof Error ? e.message : String(e);
-      else {
-        problem = "This request changed after you opened it, so Iris saved nothing. Check it as it is now, then decide again.";
-        await get<Changeset>(`changesets/${encodeURIComponent(c.id)}`).then(onchange, () => {});
-      }
+      const status = (e as { status?: number }).status;
+      // A 409 is a definite refusal: the transaction wrote nothing. With no answer or a 5xx, the result is unknown.
+      if (status === 409) await refresh("Iris did not save this decision, because the request changed after you opened it. Here it is as it is now.");
+      else if (status === undefined || status >= 500) await refresh("Iris does not know if it saved your decision. Here is the request as it is now.");
+      else problem = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
     }
@@ -142,11 +173,17 @@
       {/each}
     </ol>
     <div class="decide">
-      <button type="button" class="primary" class:deny={!chosen.length} disabled={busy} onclick={decide}>{plan(chosen.length, open.length)}</button>
-      <p>Iris makes none of these changes before you approve them.</p>
+      <button type="button" class="primary" class:deny={!chosen.length} disabled={!ready} onclick={decide}>{plan(chosen.length, open.length)}</button>
+      <p>{blocked || "Iris makes none of these changes before you approve them."}</p>
     </div>
   {/if}
-  {#if problem}<p role="alert">{problem}</p>{/if}
+  {#if problem}
+    <p role="alert">
+      {problem}
+      {#if stale}<button type="button" class="more" disabled={busy} onclick={() => refresh("")}>Load it again</button>
+      {:else if missing.length}<button type="button" class="more" onclick={retry}>Try again</button>{/if}
+    </p>
+  {/if}
   {#if saved}<p class="saved" role="status">{saved}</p>{/if}
 
   {#if decided.length}
