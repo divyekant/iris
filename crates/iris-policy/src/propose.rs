@@ -151,10 +151,11 @@ pub struct Mark([i64; 5]);
 /// decisions, the active policy or the hour changed since `last`. Gives the
 /// number of open proposals after a pass, or `None` when no pass ran.
 pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Option<usize>> {
-    store.write(|tx| {
+    let seen = *last;
+    let (mark, n) = store.write(|tx| {
         let mark = mark(tx, now)?;
-        if *last == Some(mark) {
-            return Ok(None);
+        if seen == Some(mark) {
+            return Ok((mark, None));
         }
         let found = pass(tx, now)?;
         let mut keep = BTreeSet::new();
@@ -182,9 +183,11 @@ pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Optio
                 tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
             }
         }
-        *last = Some(mark);
-        Ok(Some(n))
-    })
+        Ok((mark, Some(n)))
+    })?;
+    // Only after the commit: a pass that did not commit runs again.
+    *last = Some(mark);
+    Ok(n)
 }
 
 fn mark(tx: &Connection, now: i64) -> Result<Mark> {
@@ -319,6 +322,7 @@ fn decided(tx: &Connection, now: i64) -> Result<Vec<Decided>> {
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let mut header = tx.prepare_cached("SELECT 1 FROM header WHERE message_id = ?1")?;
     let mut ids =
         tx.prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1")?;
     let mut out = Vec::new();
@@ -335,9 +339,11 @@ fn decided(tx: &Connection, now: i64) -> Result<Vec<Decided>> {
         let mut messages = Vec::with_capacity(msg_ids.len());
         let mut whole = true;
         for m in msg_ids {
+            // The facts are the facts of the decision only while the header
+            // is there: a cleanup of a gone message deletes it (spec 1, 5.5).
             match facts(tx, m, now)? {
-                Some(f) => messages.push(f),
-                None => whole = false,
+                Some(f) if header.exists([m])? => messages.push(f),
+                _ => whole = false,
             }
         }
         if !whole {

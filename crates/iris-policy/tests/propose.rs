@@ -356,3 +356,23 @@ fn bulk_approvals_do_not_count() {
         .unwrap();
     assert!(find(&refresh(&store), "deals@shop.example").is_none());
 }
+
+#[test]
+fn a_refusal_whose_header_is_gone_blocks_its_verb() {
+    let (_dir, store) = store("tombstone");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided(&store, "archive", &[m], "approved");
+    }
+    // Approvals of another sender, so that only the blocked verb stops them.
+    let m = message(&store, "news@shop.example", false);
+    decided(&store, "archive", &[m], "denied");
+    // The cleanup of a gone message keeps the row and deletes the header.
+    store
+        .write(|tx| {
+            tx.execute("DELETE FROM header WHERE message_id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(refresh(&store).is_empty(), "the refusal can be from deals@");
+}
