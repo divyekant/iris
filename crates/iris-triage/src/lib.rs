@@ -172,17 +172,26 @@ fn decide_all(c: &Connection, changeset: i64, revision: i64, now_ms: i64) -> Res
         return Ok(());
     }
     let now = now_ms.div_euclid(1000);
-    // One row for each action (at most one for each CHUNK messages).
-    let actions: Vec<(i64, i64, String, String)> = c
-        .prepare(
+    // One action at a time, by its number, so memory holds one action.
+    let mut last = 0i64;
+    while let Some((id, n, verb, flags)) = c
+        .query_row(
             "SELECT id, n, verb, flags FROM changeset_action
-             WHERE changeset_id = ?1 AND revision = ?2 AND state = 'proposed' ORDER BY n",
-        )?
-        .query_map(params![changeset, revision], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    for (id, n, verb, flags) in actions {
+             WHERE changeset_id = ?1 AND revision = ?2 AND state = 'proposed' AND n > ?3
+             ORDER BY n LIMIT 1",
+            params![changeset, revision, last],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?
+    {
+        last = n;
         let verb = iris_policy::Verb::from_name(&verb).expect("a triage verb");
         let bulk = serde_json::from_str::<Vec<String>>(&flags)
             .map_err(|e| Error::Refused(format!("flags: {e}")))?

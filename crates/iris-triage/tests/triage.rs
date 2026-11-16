@@ -260,9 +260,17 @@ fn large_rule_is_split_and_empty_keeps_open_actions() {
         Ok(())
     })
     .unwrap();
+    // In the mode apply, the policy decides each action: the flag bulk
+    // sends each one to review.
+    apply_policy(&s, &dir, "");
     let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
         panic!("a proposal");
     };
+    let d = decisions(&s, changeset);
+    assert!(
+        d.iter().all(|r| r.0 == "in_review" && r.1 == "limit"),
+        "{d:?}"
+    );
     let rows = actions(&s, changeset);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].5, format!(r#"{{"messages":["m-{}"]}}"#, CHUNK + 1));
