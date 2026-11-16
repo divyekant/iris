@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { get, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
+  import { get, SIGN_IN, SIGN_IN_FAILED, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -55,7 +55,11 @@
           {#await get<BriefData>("brief") then brief}<Brief {brief} {status} />{:catch error}<p role="alert">{error.message}</p>{/await}
         {/if}
       {:catch error}
-        <p role="alert">Iris cannot reach its engine ({error.message}). Start the engine with <code>iris serve</code>, then reload this page.</p>
+        {#if error.message === SIGN_IN || error.message === SIGN_IN_FAILED}
+          <p role="alert">{error.message}</p>
+        {:else}
+          <p role="alert">Iris cannot reach its engine ({error.message}). Start the engine with <code>iris serve</code>, then reload this page.</p>
+        {/if}
       {/await}
     {:else if route.view === "brief"}
       {#await Promise.all([get<BriefData>("brief"), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}<p role="alert">{error.message}</p>{/await}
