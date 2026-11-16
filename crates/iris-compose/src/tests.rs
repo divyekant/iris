@@ -358,3 +358,20 @@ fn a_changed_message_reads_back_only_as_what_it_sends() {
     }
     assert!(some > 100, "only {some} read back");
 }
+
+/// The hash is SHA-256 of the canonical JSON of section 1: fixed vectors,
+/// computed outside the crate (Python `json.dumps(sort_keys=True,
+/// separators=(",", ":"))` and `hashlib.sha256`).
+#[test]
+fn the_hash_is_the_documented_canonical_json() {
+    let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
+    assert_eq!(hash(&c, None), HASH_NEW);
+    let r = Reply {
+        in_reply_to: "p.1@x.org".into(),
+        references: vec!["r.0@x.org".into(), "p.1@x.org".into()],
+    };
+    assert_eq!(hash(&c, Some(&r)), HASH_REPLY);
+}
+
+const HASH_NEW: &str = "5cf35dc73cda62d2c9366a385788df198e432bbcc223a3fb7e20e27683ccfbf6";
+const HASH_REPLY: &str = "5aa550b8080a1ff0861877a81017d207d2448c6b3326cd2e54236a94f4104d8c";

@@ -206,7 +206,10 @@ pub fn hash(content: &Content, reply: Option<&Reply>) -> String {
     struct Canonical<'a> {
         body: &'a str,
         cc: &'a [String],
+        // New mail has no reply fields (spec R3-01, section 1).
+        #[serde(skip_serializing_if = "Option::is_none")]
         in_reply_to: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         references: Option<&'a [String]>,
         subject: &'a str,
         to: &'a [String],
