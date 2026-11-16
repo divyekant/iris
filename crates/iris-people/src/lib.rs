@@ -439,7 +439,8 @@ pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
     }
     let mut out = Vec::new();
     let mut part = Part::default();
-    let (mut quoted, mut angle, mut depth) = (false, false, 0u32);
+    // `literal`: inside a domain literal such as `[IPv6:2001:db8::1]`.
+    let (mut quoted, mut angle, mut depth, mut literal) = (false, false, 0u32, false);
     let mut comment = String::new();
     let mut chars = list.chars();
     let finish = |part: Part, out: &mut Vec<(String, Option<String>)>| {
@@ -495,7 +496,15 @@ pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
                 // The quote stays in the address, not in the name.
                 target(&mut part, &mut comment, 0, angle, "\"", true);
             }
-            _ if quoted => target(
+            '[' if !quoted && depth == 0 => {
+                literal = true;
+                target(&mut part, &mut comment, 0, angle, "[", false);
+            }
+            ']' if literal => {
+                literal = false;
+                target(&mut part, &mut comment, 0, angle, "]", false);
+            }
+            _ if quoted || literal => target(
                 &mut part,
                 &mut comment,
                 0,
@@ -580,7 +589,14 @@ fn valid_address(text: &str) -> Option<String> {
         }
         None => !local.is_empty() && !bad(local),
     };
-    (local_ok && !domain.is_empty() && !bad(domain)).then_some(a)
+    let domain_ok = match domain.strip_prefix('[').and_then(|d| d.strip_suffix(']')) {
+        // A domain literal, such as `[ipv6:2001:db8::1]` or `[192.0.2.1]`.
+        Some(inner) => {
+            !inner.is_empty() && !inner.contains(|c: char| c.is_whitespace() || "[]\\".contains(c))
+        }
+        None => !domain.is_empty() && !bad(domain),
+    };
+    (local_ok && domain_ok).then_some(a)
 }
 
 /// Decode the RFC 2047 encoded words of a display name, such as
