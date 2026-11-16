@@ -111,8 +111,9 @@ one transaction, with its own ledger row. If the current value is not the
 nothing and lists the item. After the undo of a `correct` on a record with no
 correction left, the status of the record goes back to `kept`.
 
-`correct` cannot change `status` or a common field of section 6.1 of
-specification 1. The engine validates the corrected document against the
+`correct` cannot change `status`, a common field of section 6.1 of
+specification 1, or another field that the engine makes from the store
+(specification 1, section 7.5). The engine validates the corrected document against the
 schemas at submit, and denies an action that gives a document that is not
 valid.
 

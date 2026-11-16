@@ -18,8 +18,8 @@
 
 These standards apply to the web client in `client/`. `.kalos.yaml` holds the tokens.
 
-- Primary: #b8960f, Secondary: #d4af37
-- Semantic colors: success=#16A34A, warning=#CA8A04, error=#DC2626, info=#2563EB
+- Palette "Iris": iris violet on cool ink neutrals. Primary: #a394ff (dark), #5b47d6 (light)
+- Semantic colors are set for each palette: dark success=#5fd38d, warning=#f2b84b, error=#f47c7c; light success=#15703a, warning=#b7750c, error=#c0262d; info=primary
 - Font: Inter, system-ui, sans-serif
 - Mono font: 'SF Mono', 'Cascadia Mono', 'Menlo', monospace
 - Type scale: 1.25 from 16px base
@@ -29,10 +29,10 @@ These standards apply to the web client in `client/`. `.kalos.yaml` holds the to
 - All colors must map to design tokens
 - Max 3 font families
 - All spacing must be multiples of base unit
-- Min contrast ratio: 4.5 (WCAG AA)
+- Min contrast ratio: 4.5 (WCAG AA) for text, primary and success; 3 for warning, error and info (lines and dots only)
 - Require alt text on all images
 - Active brand: dark
 - 2 brand palettes configured (dark, light)
 - Transitions: fast=120ms ease, normal=200ms ease
-- Unread indicator uses brand gold (not blue)
+- Unread indicator uses the primary color
 - Priority badges use semantic colors: urgent=error, high=warning, normal=success, low=text_faint

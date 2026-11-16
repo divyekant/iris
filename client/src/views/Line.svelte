@@ -1,6 +1,6 @@
 <!--
   One item on one line. The whole line opens the item. The envelope opens the
-  source mail in one step. A gold dot marks a conversation that waits for you.
+  source mail in one step. An unread dot marks a conversation that waits for you.
 -->
 <script lang="ts">
   import type { Item } from "../api";

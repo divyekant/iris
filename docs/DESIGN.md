@@ -9,18 +9,34 @@ screen. If the product has no UI, write "No UI." below and keep the file.
 `.kalos.yaml` holds the tokens. The web client is in `client/`. Dark is the
 active brand. The light palette follows the viewer.
 
+The palette is "Iris": iris violet on cool ink neutrals (card R1-27,
+decision D4). The violet is the color of the product. It marks the active view,
+focus, the main button, information (`info`) and a conversation that waits
+for you (`unread`). It is never `success`, `warning` or `error`, so it does
+not look like a good or a bad state.
+
 | Token | Dark | Light | Use |
 |---|---|---|---|
-| `primary` | `#d4af37` | `#b8960f` | Buttons, active states, the unread indicator |
-| `secondary` | `#f5d060` | `#d4af37` | Second accent |
-| `background` | `#0a0a0a` | `#FAF9F6` | Page background |
-| `text` | `#e5e5e5` | `#2C2418` | Main text |
-| `success` | `#16A34A` | `#16A34A` | Priority normal |
-| `warning` | `#CA8A04` | `#CA8A04` | Priority high |
-| `error` | `#DC2626` | `#DC2626` | Priority urgent |
-| `info` | `#2563EB` | `#2563EB` | Information |
+| `primary` | `#a394ff` | `#5b47d6` | Buttons, the active view, focus, the Iris mark |
+| `background` | `#0e0f14` | `#f7f7fa` | Page background |
+| `background-elevated` | `#15161d` | `#ffffff` | Raised areas, for example the login code |
+| `background-surface` | `#1c1e27` | `#eeeef4` | Chips, initials, inline code |
+| `text` | `#e7e8ee` | `#1b1c24` | Main text |
+| `text-muted` | `#a4a7b5` | `#555867` | Detail lines |
+| `text-faint` | `#8c8fa0` | `#62657a` | The least important text |
+| `border` | `#2c2e3b` | `#dcdde6` | Lines under headings, boxes |
+| `border-subtle` | `rgba(255,255,255,0.06)` | `rgba(0,0,0,0.06)` | Quiet separators |
+| `success` | `#5fd38d` | `#15703a` | Done, priority normal. It can be text. |
+| `warning` | `#f2b84b` | `#b7750c` | Notices, due soon, priority high. Lines and dots only. |
+| `error` | `#f47c7c` | `#c0262d` | Hostile mail, late, priority urgent. Lines and dots only. |
+| `info` | = `primary` | = `primary` | Information |
+| `unread` | = `primary` | = `primary` | A conversation that waits for you |
+| `on-primary` | = `background` | = `background-elevated` | Text on a `primary` background |
 
-At most 12 unique colors. The unread indicator uses the brand gold, not blue.
+Each palette has 12 unique colors or fewer. `info`, `unread` and `on-primary`
+reuse a color of the palette. The semantic colors are set for each palette,
+because one value cannot have enough contrast on both a dark and a light
+background.
 
 ## Type
 
@@ -39,30 +55,29 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 
 | Part | File | Use |
 |---|---|---|
-| Header | `App.svelte` | The Iris mark (a gold ring), and one link for each view. The active link has a gold line under it. On a phone the links scroll in one row. |
+| Header | `App.svelte` | The Iris mark (a `primary` ring around a dot, like an iris), and one link for each view. The active link has a `primary` line under it. On a phone the links scroll in one row. |
 | Opening | `Brief.svelte` | The greeting and the date in muted text, then one sentence in `font-size-4` that says what needs you. |
-| Line | `Line.svelte` | The round mark with the initials of the other party, the title, and one muted line of detail. The whole line opens the item. The envelope opens the source mail. A gold dot marks a conversation that waits for you. |
+| Line | `Line.svelte` | The round mark with the initials of the other party, the title, and one muted line of detail. The whole line opens the item. The envelope opens the source mail. An `unread` dot marks a conversation that waits for you. |
 | Due tone | `Line.svelte` | A dot after the due date: `warning` for 2 days or less, `error` when late. The words say the same, so color is not the only sign. |
 | Section | `Brief.svelte` | A heading with the count on the right, a line under it, at most 7 lines, and an "All N" link. An empty section does not show. |
 | Code | `Code.svelte` | A login code in mono type, a Copy button, and the time left. It goes away when the code expires. |
-| Quote | `Item.svelte` | The words of the mail that made the item, with a gold line on the left and the link to the mail. |
-| Chips | `Brief.svelte`, `Records.svelte` | Round links or buttons with a count. The chosen chip and a chip under the pointer have a gold border. |
-| Primary button | `Code.svelte`, `Setup.svelte` | A gold background with the `on-primary` text color. One for each screen at most. |
+| Quote | `Item.svelte` | The words of the mail that made the item, with a `primary` line on the left and the link to the mail. |
+| Chips | `Brief.svelte`, `Records.svelte` | Round links or buttons with a count. The chosen chip and a chip under the pointer have a `primary` border. |
+| Primary button | `Code.svelte`, `Setup.svelte` | A `primary` background with the `on-primary` text color. One for each screen at most. |
 | Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail or an error. |
 | Access notice | `App.svelte` | Above every view: why the API cannot answer now (no sign-in, a used sign-in address, or no engine). It goes away at the next good answer. It uses the `warning` border. |
 | Setup link | `App.svelte` | Above each view other than setup and the brief, when Iris has no account: a link to setup. The Brief link opens setup in that case. It uses the `warning` border. |
 | Sign-in notice | `SignInNotice.svelte` | Above every view: the address of each account that needs sign-in, from the last status answer, and the command that signs in again. It uses the `warning` border. |
 
-The token `on-primary` is the text color on gold: `#0a0a0a` in the dark
-palette and `#2C2418` in the light palette. Both are colors of the palette, so
-the count of colors does not change. `test/tokens.test.mjs` checks the contrast.
-
-Gold is never the text color, because light gold on a light background fails
-the contrast rule.
+`client/test/tokens.test.mjs` checks each palette: the count of colors, the
+contrast of each text color, of `primary` and of each semantic color on each
+background, and the contrast of `on-primary` on `primary`. It also checks that
+no view has a color literal.
 
 ## Rules
 
 - Each color comes from a token.
-- Text meets the WCAG 2.1 AA contrast level (Web Content Accessibility Guidelines): a ratio of 4.5 or more.
+- Text meets the WCAG 2.1 AA contrast level (Web Content Accessibility Guidelines): a ratio of 4.5 or more. `primary` and `success` also meet 4.5, so they can be text.
+- A line or a dot that shows a state (`warning`, `error`, `info`) has a ratio of 3 or more (WCAG 1.4.11).
 - Each image has alt text.
 - Motion shows a change of state. It respects the reduced-motion setting.

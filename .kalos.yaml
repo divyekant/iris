@@ -3,14 +3,13 @@ extends: minimal
 
 tokens:
   colors:
-    primary: "#b8960f"
-    secondary: "#d4af37"
-    neutral: "stone"
+    primary: "#a394ff"
+    neutral: "slate"
     semantic:
-      success: "#16A34A"
-      warning: "#CA8A04"
-      error: "#DC2626"
-      info: "#2563EB"
+      success: "#5fd38d"
+      warning: "#f2b84b"
+      error: "#f47c7c"
+      info: "#a394ff"
   typography:
     font_family: "Inter, system-ui, sans-serif"
     mono_font_family: "'SF Mono', 'Cascadia Mono', 'Menlo', monospace"
@@ -44,44 +43,39 @@ brands:
   palettes:
     dark:
       colors:
-        primary: "#d4af37"
-        secondary: "#f5d060"
-        neutral: "neutral"
-        background: "#0a0a0a"
-        background_elevated: "#111111"
-        background_surface: "#1a1a1a"
-        text: "#e5e5e5"
-        text_muted: "#a3a3a3"
-        text_faint: "#848484"
-        border: "rgba(212,175,55,0.15)"
+        primary: "#a394ff"
+        background: "#0e0f14"
+        background_elevated: "#15161d"
+        background_surface: "#1c1e27"
+        text: "#e7e8ee"
+        text_muted: "#a4a7b5"
+        text_faint: "#8c8fa0"
+        border: "#2c2e3b"
         border_subtle: "rgba(255,255,255,0.06)"
-        accent_border: "rgba(212,175,55,0.15)"
-        overlay: "rgba(0,0,0,0.6)"
-        unread: "#d4af37"
+        success: "#5fd38d"
+        warning: "#f2b84b"
+        error: "#f47c7c"
+        info: "#a394ff"
+        unread: "#a394ff"
+        on_primary: "#0e0f14"
       typography:
         font_family: "Inter, system-ui, sans-serif"
     light:
       colors:
-        primary: "#b8960f"
-        secondary: "#d4af37"
-        neutral: "stone"
-        background: "#FAF9F6"
-        background_elevated: "#FFFEF9"
-        background_surface: "#F0EDE6"
-        text: "#2C2418"
-        text_muted: "#655D50"
-        text_faint: "#6E6960"
-        border: "#E8E2D6"
+        primary: "#5b47d6"
+        background: "#f7f7fa"
+        background_elevated: "#ffffff"
+        background_surface: "#eeeef4"
+        text: "#1b1c24"
+        text_muted: "#555867"
+        text_faint: "#62657a"
+        border: "#dcdde6"
         border_subtle: "rgba(0,0,0,0.06)"
-        accent_border: "rgba(184,150,15,0.18)"
-        overlay: "rgba(0,0,0,0.3)"
-        unread: "#b8960f"
+        success: "#15703a"
+        warning: "#b7750c"
+        error: "#c0262d"
+        info: "#5b47d6"
+        unread: "#5b47d6"
+        on_primary: "#ffffff"
       typography:
         font_family: "Inter, system-ui, sans-serif"
-
-transitions:
-  fast: "120ms ease"
-  normal: "200ms ease"
-
-adapters:
-  - tailwind
