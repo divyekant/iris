@@ -135,8 +135,6 @@ fn fields(raw: &[u8]) -> Vec<(String, String)> {
 
 /// The addresses of an address list: `(bare address lowercase, display name)`.
 /// Commas inside quotes, angle brackets and comments do not split.
-// shortcut: RFC 2047 encoded display names stay encoded; decode them when
-// iris-clean makes its decoder public.
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     let mut parts = Vec::new();
     let (mut quote, mut angle, mut paren, mut start) = (false, false, 0u32, 0);
@@ -163,6 +161,16 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+/// Decode RFC 2047 encoded words of a display name with the decoder of
+/// `iris-clean`, which decodes the `Subject` of a message.
+fn decode_name(n: &str) -> String {
+    if !n.contains("=?") {
+        return n.trim().to_string();
+    }
+    let one = n.replace(['\r', '\n'], " ");
+    iris_clean::clean(format!("Subject: {one}\r\n\r\n").as_bytes()).subject
+}
+
 fn one_address(p: &str) -> Option<(String, Option<String>)> {
     let p = p.trim();
     let (addr, name) = match (p.rfind('<'), p.rfind('>')) {
@@ -174,7 +182,7 @@ fn one_address(p: &str) -> Option<(String, Option<String>)> {
         return None;
     }
     let name = name
-        .map(|n| n.trim_matches('"').replace("\\\"", "\"").trim().to_string())
+        .map(|n| decode_name(&n.trim_matches('"').replace("\\\"", "\"")))
         .filter(|n| !n.is_empty());
     Some((addr, name))
 }
@@ -244,17 +252,87 @@ fn strip_comments(v: &str) -> String {
     out
 }
 
-/// True if the message has a `text/calendar` part with the method `REQUEST`:
-/// a `method=REQUEST` parameter or a `METHOD:REQUEST` line.
-// shortcut: a base64 calendar part with no method parameter is not found;
+/// True if the message has a `text/calendar` MIME entity with the method
+/// `REQUEST`: a `method=REQUEST` parameter of its `Content-Type`, or a
+/// `METHOD:REQUEST` line in its body. Only the boundaries that a
+/// `Content-Type` header declares start a new entity, so calendar words in
+/// a plain-text body do not count.
+// shortcut: a base64 calendar body with no method parameter is not found;
 // the model still sees the attachment name and type.
 fn invitation(raw: &[u8]) -> bool {
-    let has = |needle: &[u8]| {
-        raw.windows(needle.len())
-            .any(|w| w.eq_ignore_ascii_case(needle))
+    let mut boundaries: Vec<Vec<u8>> = Vec::new();
+    let (mut in_head, mut cal) = (true, false);
+    // The Content-Type value of the header block that the loop reads now.
+    let mut ct: Option<Vec<u8>> = None;
+    let end_header = |ct: &mut Option<Vec<u8>>, cal: &mut bool, b: &mut Vec<Vec<u8>>| -> bool {
+        let Some(v) = ct.take() else { return false };
+        let low = v.to_ascii_lowercase();
+        if let Some(bd) = param(&low, &v, b"boundary=") {
+            if b.len() < 50 {
+                b.push(bd);
+            }
+        }
+        *cal = contains(&low, b"text/calendar");
+        *cal && param(&low, &v, b"method=").is_some_and(|m| m.eq_ignore_ascii_case(b"request"))
     };
-    has(b"text/calendar")
-        && (has(b"method=request") || has(b"method=\"request\"") || has(b"METHOD:REQUEST"))
+    for line in raw.split(|&c| c == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let is_boundary = line.starts_with(b"--")
+            && boundaries.iter().any(|bd| {
+                let rest = &line[2..];
+                rest.starts_with(bd) && matches!(&rest[bd.len()..], b"" | b"--")
+            });
+        if is_boundary {
+            if end_header(&mut ct, &mut cal, &mut boundaries) {
+                return true;
+            }
+            (in_head, cal) = (true, false);
+            continue;
+        }
+        if in_head {
+            if line.is_empty() {
+                in_head = false;
+                if end_header(&mut ct, &mut cal, &mut boundaries) {
+                    return true;
+                }
+            } else if line.starts_with(b" ") || line.starts_with(b"\t") {
+                if let Some(v) = ct.as_mut() {
+                    v.extend_from_slice(line);
+                }
+            } else {
+                if end_header(&mut ct, &mut cal, &mut boundaries) {
+                    return true;
+                }
+                if line.len() > 13 && line[..13].eq_ignore_ascii_case(b"content-type:") {
+                    ct = Some(line[13..].to_vec());
+                }
+            }
+        } else if cal && line.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST") {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The value of the parameter `name` (lowercase, with `=`) in a header
+/// value, with its case kept. `low` is the value in lowercase.
+fn param(low: &[u8], v: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    let at = low.windows(name.len()).position(|w| w == name)? + name.len();
+    let rest = &v[at..];
+    let val = match rest.strip_prefix(b"\"") {
+        Some(q) => &q[..q.iter().position(|&c| c == b'"').unwrap_or(q.len())],
+        None => {
+            &rest[..rest
+                .iter()
+                .position(|&c| c == b';' || c.is_ascii_whitespace())
+                .unwrap_or(rest.len())]
+        }
+    };
+    (!val.is_empty()).then(|| val.to_vec())
 }
 
 const MONTHS: [&str; 12] = [
@@ -273,6 +351,10 @@ pub fn date(v: &str) -> Option<i64> {
     let mut year: i64 = w.next()?.parse().ok()?;
     if year < 100 {
         year += if year < 50 { 2000 } else { 1900 };
+    }
+    // The header is untrusted: a huge year would overflow the arithmetic.
+    if !(1..=9999).contains(&year) {
+        return None;
     }
     let mut hms = w.next()?.split(':').map(|x| x.parse::<i64>().ok());
     let (h, m) = (hms.next()??, hms.next()??);
@@ -349,5 +431,15 @@ From: a@bank.example\r\n\r\nbody";
             b"Content-Type: text/calendar; method=CANCEL\r\n"
         ));
         assert!(!invitation(b"METHOD:REQUEST in plain text"));
+        assert!(!invitation(
+            b"Subject: x\r\n\r\nContent-Type: text/calendar; method=REQUEST\r\nMETHOD:REQUEST\r\n"
+        ));
+        let mixed = b"Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\n\
+Content-Type: text/plain\r\n\r\nMETHOD:REQUEST\r\n--b\r\n\
+Content-Type: text/calendar;\r\n charset=utf-8\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:CANCEL\r\n--b--\r\n";
+        assert!(!invitation(mixed));
+        let ok = String::from_utf8_lossy(mixed).replace("METHOD:CANCEL", "METHOD:REQUEST");
+        assert!(invitation(ok.as_bytes()));
+        assert_eq!(date("1 Jan 9223372036854775807 00:00 +0000"), None);
     }
 }

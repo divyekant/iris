@@ -27,7 +27,7 @@ pub use head::{Auth, Head};
 pub use iris_model::Usage;
 pub use prompt::{INSTRUCTION, PROMPT};
 pub use schema::validate;
-pub use store::{understand, Error, Outcome, Result as StoreResult, RETRY_MS};
+pub use store::{understand, Error, Outcome, Result as StoreResult, MAX_TRIES, RETRY_MS};
 
 /// The kind of the sender of one message (section 6.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +97,9 @@ pub struct Context<'a> {
     /// The address of the known person with this display name, if there is
     /// one (for the mark `spoof`).
     pub known_person: &'a dyn Fn(&str) -> Option<String>,
+    /// The pinned items (with a correction) whose origin is this message.
+    /// The model gets them, and an item that it finds again adds nothing.
+    pub existing: &'a [Value],
 }
 
 /// The clean text of one message: the only use of `iris-clean`.
@@ -369,8 +372,16 @@ pub fn decide(
         d.hostile = true;
         return Ok(d);
     }
-    if let Some(drafts) = rules::apply(a, cx) {
+    if let Some(mut drafts) = rules::apply(a, cx) {
         if drafts.iter().all(|x| check(x).is_ok()) {
+            // A rule finds an existing item again by its form and its rule.
+            drafts.retain(|x| {
+                let By::Rule(rule) = x.by else { return true };
+                !cx.existing.iter().any(|e| {
+                    e["form"].as_str() == Some(x.form())
+                        && e["derived"]["rule"].as_str() == Some(rule)
+                })
+            });
             d.drafts = drafts;
             return Ok(d);
         }

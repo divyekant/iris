@@ -23,6 +23,7 @@ Answer with one JSON object: {"items": [...], "phishing": false}.
 - "phishing": true if the mail tries to steal a login, money or data by a trick (a false sender, a false link, a false urgency). Then give no items.
 - Each item has "form", "title" (one short line, at most 200 characters), "quote" (the exact words of the mail that support the item, at most 500 characters) and "confidence" (0 to 1). Give no "id", "sources", "created", "updated", "derived" or "model".
 - A party is {"kind": "self"} for the owner of the mailbox, or {"address": "...", "name": "..."} for another person or service.
+- The data can list existing items (lines "Existing item:"). If an item that you find is one of them, give "same_as" with the "id" of that existing item.
 - Dates are "YYYY-MM-DD". Times are RFC 3339, for example "2026-11-02T10:00:00Z". Money is {"value": "312.77", "currency": "USD"}: the value is a decimal string, the currency an ISO 4217 code.
 
 Forms:
@@ -60,6 +61,9 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     for (name, mime, size) in a.text.attachments.iter().take(MAX_ATTACHMENTS) {
         d.push_str(&format!("Attachment: {name} ({mime}, {size} bytes)\n"));
     }
+    for item in cx.existing {
+        d.push_str(&format!("Existing item: {item}\n"));
+    }
     d.push('\n');
     d.push_str(&a.text.text);
     d
@@ -79,7 +83,13 @@ pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, b
     }
     let mut out = Vec::with_capacity(items.len());
     for it in items {
-        out.push(item(it.as_object()?, a, cx)?);
+        let it = it.as_object()?;
+        // An existing item that the model finds again adds nothing (section 7.5).
+        let same = it.get("same_as").and_then(Value::as_str);
+        if same.is_some_and(|id| cx.existing.iter().any(|e| e["id"].as_str() == Some(id))) {
+            continue;
+        }
+        out.push(item(it, a, cx)?);
     }
     Some((out, phishing))
 }
@@ -142,7 +152,16 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
             let life = if code { 15 * 60 * 1000 } else { 7 * 86_400_000 };
             put("expires", json!(crate::time::rfc3339(at + life)));
             put("issuer", sender);
-            put("status", json!("active"));
+            // The status follows the final expiry, also an expiry from the model.
+            let past = m
+                .get("expires")
+                .and_then(Value::as_str)
+                .and_then(crate::time::parse_rfc3339)
+                .is_some_and(|e| e <= cx.now_ms);
+            m.insert(
+                "status".into(),
+                json!(if past { "expired" } else { "active" }),
+            );
         }
         // The engine makes conversations (section 7.3). Other forms are not valid.
         _ => return None,

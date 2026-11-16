@@ -36,6 +36,53 @@ pub fn rfc3339(ms: i64) -> String {
     )
 }
 
+/// An RFC 3339 date-time, for example `2026-11-02T10:00:00Z` or
+/// `2026-11-02T11:00:00.5+01:00`, in milliseconds since the Unix epoch.
+pub fn parse_rfc3339(v: &str) -> Option<i64> {
+    let b = v.as_bytes();
+    let num = |r: std::ops::Range<usize>| -> Option<i64> {
+        let s = v.get(r)?;
+        s.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| s.parse().ok())?
+    };
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b'T' | b't')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 60 {
+        return None;
+    }
+    let mut i = 19;
+    if b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    let off = match b.get(i)? {
+        b'Z' | b'z' if i + 1 == b.len() => 0,
+        c @ (b'+' | b'-') if i + 6 == b.len() && b[i + 3] == b':' => {
+            let m = num(i + 1..i + 3)? * 60 + num(i + 4..i + 6)?;
+            if *c == b'-' {
+                -m
+            } else {
+                m
+            }
+        }
+        _ => return None,
+    };
+    let days = days_from_civil(y, mo, d);
+    Some((days * 86_400 + h * 3600 + mi * 60 + s - off * 60) * 1000)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -44,5 +91,11 @@ mod tests {
         assert_eq!(super::rfc3339(1_725_070_141_000), "2024-08-31T02:09:01Z");
         let d = super::days_from_civil(2024, 2, 29);
         assert_eq!(super::civil(d), (2024, 2, 29));
+        assert_eq!(super::parse_rfc3339("1970-01-01T01:00:00+01:00"), Some(0));
+        assert_eq!(
+            super::parse_rfc3339("2024-08-31T02:09:01.25Z"),
+            Some(1_725_070_141_000)
+        );
+        assert_eq!(super::parse_rfc3339("2024-08-31 02:09:01"), None);
     }
 }

@@ -13,12 +13,12 @@ use iris_store::{Body, Store};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 
-use crate::{
-    analyze, decide, validate, Analysis, Context, Decision, Ids, Kind, Mark, Model, Usage,
-};
+use crate::{analyze, decide, validate, Analysis, Context, Ids, Kind, Mark, Model, Usage};
 
 /// The wait after a failed try of the model (section 7.4).
 pub const RETRY_MS: i64 = 86_400_000;
+/// After this many failed tries, the model gets the message no more.
+pub const MAX_TRIES: i64 = 3;
 
 #[derive(Debug)]
 pub enum Error {
@@ -79,6 +79,9 @@ pub struct Outcome {
     pub gone: bool,
     /// Two answers were not valid: `tries` went up, `retry_at` is set.
     pub failed: bool,
+    /// The message has 3 failed tries, or its `retry_at` is later: nothing
+    /// changed.
+    pub waiting: bool,
     pub calls: u32,
     pub usage: Usage,
 }
@@ -91,6 +94,9 @@ struct Row {
     gone: bool,
     me: String,
     labels: Vec<String>,
+    tries: i64,
+    retry_at: Option<i64>,
+    phishing: bool,
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run
@@ -101,6 +107,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     if row.gone {
         return Ok(Outcome {
             gone: true,
+            ..Outcome::default()
+        });
+    }
+    if row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms) {
+        return Ok(Outcome {
+            waiting: true,
             ..Outcome::default()
         });
     }
@@ -123,6 +135,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         sender_kind(store, from.as_deref())?
     };
     let known = |name: &str| known_person(store, name);
+    let existing = pinned(store, message)?;
     let cx = Context {
         me: &row.me,
         kind,
@@ -130,9 +143,14 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         internal_date: row.internal_date,
         now_ms,
         known_person: &known,
+        existing: &existing,
     };
-    let a = analyze(&raw, &cx);
+    let mut a = analyze(&raw, &cx);
     drop(raw);
+    // The mark phishing stays until a rebuild (section 6.7).
+    if row.phishing {
+        a.marks.push(Mark::Phishing);
+    }
     // A draft is not understood and is not hostile mail (section 6.7).
     let marks = if draft { Vec::new() } else { a.marks.clone() };
 
@@ -159,11 +177,15 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         },
     )?;
 
-    let d = if draft {
-        Decision::default()
-    } else {
-        decide(&a, &cx, model).map_err(Error::Model)?
-    };
+    // The engine does not understand a draft. It stays not understood, so
+    // it runs when it is sent and loses the label DRAFT.
+    if draft {
+        return Ok(Outcome {
+            draft: true,
+            ..Outcome::default()
+        });
+    }
+    let d = decide(&a, &cx, model).map_err(Error::Model)?;
     let ids = Ids {
         message,
         thread: row.thread,
@@ -171,7 +193,6 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let mut out = Outcome {
         hostile: d.hostile,
-        draft,
         failed: d.failed,
         calls: d.calls,
         usage: d.usage,
@@ -226,7 +247,8 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
         let r = c
             .query_row(
                 "SELECT m.account_id, m.thread_id, m.content_sha256, m.internal_date,
-                        m.gone_at IS NOT NULL, a.address
+                        m.gone_at IS NOT NULL, a.address, m.tries, m.retry_at,
+                        EXISTS (SELECT 1 FROM json_each(coalesce(m.hostile, '[]')) WHERE value = 'phishing')
                  FROM message m JOIN account a ON a.id = m.account_id WHERE m.id = ?1",
                 [message],
                 |r| {
@@ -238,6 +260,9 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
                         gone: r.get(4)?,
                         me: r.get::<_, String>(5)?.to_ascii_lowercase(),
                         labels: Vec::new(),
+                        tries: r.get(6)?,
+                        retry_at: r.get(7)?,
+                        phishing: r.get(8)?,
                     })
                 },
             )
@@ -253,6 +278,25 @@ fn read_row(store: &Store, message: i64) -> Result<Row> {
         Ok(Some(row))
     })?;
     row.ok_or(Error::NoMessage(message))
+}
+
+/// The documents of the pinned items whose origin is `message`.
+// shortcut: pinned means "has a correction" only; add the references of
+// open changesets and of the ledger when specification 2 builds them.
+fn pinned(store: &Store, message: i64) -> Result<Vec<Value>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT i.doc FROM item_source s JOIN item i ON i.id = s.item_id
+             WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form <> 'conversation'
+               AND EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)
+             ORDER BY i.id",
+        )?;
+        let docs = st
+            .query_map([message], |r| r.get::<_, String>(0))?
+            .filter_map(|d| d.ok().and_then(|d| serde_json::from_str(&d).ok()))
+            .collect();
+        Ok(docs)
+    })?)
 }
 
 fn iris_from(raw: &[u8]) -> Option<String> {

@@ -150,6 +150,7 @@ fn score(mb: &Mailbox, indices: &[usize], oracle: bool) -> Report {
             internal_date: Some(t.date * 1000),
             now_ms: NOW,
             known_person: &no_known,
+            existing: &[],
         };
         let a = analyze(raw, &cx);
         let d = decide(&a, &cx, &model).unwrap();
@@ -280,6 +281,7 @@ fn hand_written_rules() {
             internal_date: Some(NOW),
             now_ms: NOW,
             known_person: &no_known,
+            existing: &[],
         };
         let a = analyze(raw.as_bytes(), &cx);
         let d = decide(&a, &cx, &none).unwrap();
