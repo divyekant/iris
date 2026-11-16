@@ -688,8 +688,8 @@ fn an_idle_run_keeps_its_row_only_with_keep_idle() {
 
 /// Property: the mark `waits_model` goes away on each change of an input
 /// of a refused call (labels, content, gone state, hostile marks, the model
-/// row, a larger budget), by any write path, and stays when the budget only
-/// gets smaller.
+/// row), by any write path, and stays when only the budget changes (the
+/// runner spends and refunds it; an approval clears in its own write).
 #[test]
 fn the_waits_model_mark_clears_on_each_input_change() {
     let b = store("waits");
@@ -713,17 +713,12 @@ fn the_waits_model_mark_clears_on_each_input_change() {
         (
             "budget up",
             "UPDATE model_setting SET budget_micro_usd = budget_micro_usd + 10",
-            true,
+            false,
         ),
         (
             "budget set",
             "UPDATE model_setting SET budget_micro_usd = NULL",
             false,
-        ),
-        (
-            "approval",
-            "UPDATE model_setting SET budget_micro_usd = 5",
-            true,
         ),
         (
             "new version",

@@ -167,3 +167,56 @@ fn mirror_sync_waits_for_a_run_that_holds_the_lock() {
         .unwrap();
     assert!(headers > 0);
 }
+
+/// A model server on 127.0.0.1 that answers each request with HTTP 500.
+/// Gives the base URL and the count of requests.
+fn failing_model_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", l.local_addr().unwrap());
+    let count = std::sync::Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            c.fetch_add(1, Ordering::SeqCst);
+            let _ = write!(
+                s,
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
+            );
+        }
+    });
+    (url, count)
+}
+
+#[test]
+fn a_second_mirror_sync_after_a_model_error_makes_no_call() {
+    let fake = FakeGmail::start(Mailbox::new(5, 10)).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-retry");
+    let store = Store::open(&dir).unwrap();
+    add_account(&store, &gmail(fake.base_url()));
+    let (url, calls) = failing_model_server();
+    let (ok, _, err) = iris(&dir, &fake, &tokens, &["model", "set", "local", &url, "m"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("Stop: model"), "{out}");
+    let first = calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(first > 0);
+    let (ok, _, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        first,
+        "the wait after a model error holds across commands"
+    );
+}

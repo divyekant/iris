@@ -404,31 +404,42 @@ fn a_receipt_that_gets_old_while_the_prompt_waits_does_not_approve() {
 #[test]
 fn the_run_after_a_sync_tries_again_after_a_model_error() {
     let (store, _fake) = synced("retry");
-    let (url, _calls) = flaky_model_server(1);
+    let (url, calls) = flaky_model_server(1);
     let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
     assert!(ok, "{err}");
     let pending = "SELECT count(*) FROM message WHERE understood_at IS NULL";
     let before = col(&store, pending).unwrap();
-    let mut u = iris::engine::Understander::new(std::time::Duration::ZERO);
+    let now = iris::engine::now_ms();
+    let run = |at: i64| iris::cost::after_sync(&store, at).unwrap();
     // The server fails: the run stops and starts a wait.
-    let r = u.turn(&store).unwrap();
+    let r = run(now);
     assert!(
         matches!(r, iris::cost::AfterSync::Ran { retry: true, .. }),
         "{r:?}"
     );
-    // The mailbox and the model do not change; the wait (0 here) ends, and
-    // the server works again. The next turn calls it, and the mail is read.
-    let r = u.turn(&store).unwrap();
+    let failed = calls.load(Ordering::SeqCst);
+    // During the wait: no call; the mail that needs the model waits.
+    let r = run(now + 1_000);
     assert!(
         matches!(r, iris::cost::AfterSync::Ran { retry: false, .. }),
         "{r:?}"
     );
+    assert_eq!(calls.load(Ordering::SeqCst), failed, "no call in the wait");
+    // After the wait, with no other change, the server is called again,
+    // and the mail is read.
+    let after = now + iris_understand::batch::RETRY_FIRST_MS + 1_000;
+    let r = run(after);
+    assert!(
+        matches!(r, iris::cost::AfterSync::Ran { retry: false, .. }),
+        "{r:?}"
+    );
+    assert!(calls.load(Ordering::SeqCst) > failed);
     assert!(col(&store, pending).unwrap() < before);
-    assert_eq!(u.turn(&store).unwrap(), iris::cost::AfterSync::Idle);
+    assert_eq!(run(after + 1_000), iris::cost::AfterSync::Idle);
 }
 
 #[test]
-fn mail_refused_for_the_budget_waits_until_the_budget_grows() {
+fn mail_refused_for_the_budget_waits_until_an_approval() {
     let (store, _fake) = synced("budget-wait");
     let model = iris::cost::NewModel {
         local: false,
@@ -441,18 +452,20 @@ fn mail_refused_for_the_budget_waits_until_the_budget_grows() {
         timeout_s: 1,
     };
     iris::cost::set_model(&store, &model).unwrap();
-    let mut u = iris::engine::Understander::new(std::time::Duration::from_secs(3600));
+    let now = iris::engine::now_ms();
     // New mail: the free steps run, the paid calls are refused, and the
     // mail waits.
-    let r = u.turn(&store).unwrap();
+    let r = iris::cost::after_sync(&store, now).unwrap();
     assert!(
         matches!(r, iris::cost::AfterSync::Ran { retry: false, .. }),
         "{r:?}"
     );
     assert!(col(&store, "SELECT count(*) FROM message WHERE waits_model = 1").unwrap() > 0);
-    assert_eq!(u.turn(&store).unwrap(), iris::cost::AfterSync::Idle);
+    assert_eq!(
+        iris::cost::after_sync(&store, now).unwrap(),
+        iris::cost::AfterSync::Idle
+    );
     // The estimate counts the mail that waits: the approval pays for it.
-    let now = iris::engine::now_ms();
     let out = iris::cost::estimate(&store, now).unwrap();
     assert!(!out.contains("Messages to understand: 0"), "{out}");
     let code = out
@@ -465,10 +478,10 @@ fn mail_refused_for_the_budget_waits_until_the_budget_grows() {
     assert_eq!(
         col(&store, "SELECT count(*) FROM message WHERE waits_model = 1"),
         Some(0),
-        "a larger budget clears the marks"
+        "the approval clears the marks"
     );
     assert!(matches!(
-        u.turn(&store).unwrap(),
+        iris::cost::after_sync(&store, now).unwrap(),
         iris::cost::AfterSync::Ran { .. }
     ));
 }

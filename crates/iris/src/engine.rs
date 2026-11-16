@@ -289,77 +289,14 @@ pub const BUSY_RETRY: Duration = Duration::from_secs(1);
 /// The time between two turns of the understanding thread.
 pub const UNDERSTAND_EVERY: Duration = Duration::from_secs(10);
 
-/// The longest wait before a new try of a run that stopped on an error.
-pub const RETRY_MAX: Duration = Duration::from_secs(3600);
-
-/// The run of understanding after the syncs (R1-28). Each turn runs the
-/// batch runner; the runner reads only pending mail, and mail that waits
-/// for a model is not pending (`message.waits_model`, schema 5). So a turn
-/// with nothing to do reads no message and leaves no row. A run that
-/// stopped on `model`, `unknown` or `error` starts a wait, from
-/// [`SYNC_EVERY`] doubled up to [`RETRY_MAX`]. During the wait, the turns
-/// run the free steps only, so new mail stays searchable and a failed
-/// server gets no call; the mail that needs the model gets the mark. When
-/// the wait ends, the marks are cleared and the next run calls the model.
-pub struct Understander {
-    not_before: Option<Instant>,
-    wait: Option<Duration>,
-    first_wait: Duration,
-}
-
-impl Default for Understander {
-    fn default() -> Self {
-        Understander::new(SYNC_EVERY)
-    }
-}
-
-impl Understander {
-    /// `first_wait` is the wait after the first error; tests give 0.
-    pub fn new(first_wait: Duration) -> Understander {
-        Understander {
-            not_before: None,
-            wait: None,
-            first_wait,
-        }
-    }
-
-    /// One turn of the runner.
-    pub fn turn(&mut self, store: &Store) -> std::result::Result<crate::cost::AfterSync, String> {
-        let calls = self.not_before.is_none_or(|t| Instant::now() >= t);
-        if calls && self.not_before.is_some() {
-            // The wait ended: the mail that waited during it gets a call.
-            iris_understand::batch::clear_waiting(store).map_err(|e| e.to_string())?;
-        }
-        let r = crate::cost::after_sync(store, calls);
-        match &r {
-            Ok(crate::cost::AfterSync::Busy) => {}
-            Ok(crate::cost::AfterSync::Ran { retry: true, .. }) | Err(_) => {
-                if calls {
-                    let wait = self
-                        .wait
-                        .map_or(self.first_wait, |w| (w * 2).min(RETRY_MAX));
-                    self.wait = Some(wait);
-                    self.not_before = Some(Instant::now() + wait);
-                }
-            }
-            Ok(_) => {
-                if calls {
-                    self.wait = None;
-                    self.not_before = None;
-                }
-            }
-        }
-        r
-    }
-}
-
-/// The understanding thread: one [`Understander`] apart from the sync
-/// threads, so a long run does not stop a sync. It gives the words and the
-/// senders that search finds (spec 1 section 5.6).
+/// The understanding thread (R1-28): the run after a sync
+/// ([`crate::cost::after_sync`]) each [`UNDERSTAND_EVERY`], apart from the
+/// sync threads, so a long run does not stop a sync. It gives the words and
+/// the senders that search finds (spec 1 section 5.6). The runner reads
+/// only pending mail, so a turn with nothing to do reads no message.
 fn understand_loop(store: Arc<Store>) {
-    let mut u = Understander::default();
     loop {
-        match u.turn(&store) {
+        match crate::cost::after_sync(&store, now_ms()) {
             Ok(crate::cost::AfterSync::Busy) => {
                 std::thread::sleep(BUSY_RETRY);
                 continue;

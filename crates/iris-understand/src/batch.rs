@@ -239,7 +239,11 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
     let _lock = lock(store)?;
     let row = store.read(|c| Ok(model_row(c)?))?;
     let priced = row.as_ref().is_some_and(|r| r.price.is_some());
-    let name = row.as_ref().map_or("", |r| r.model.as_str());
+    // A run with no model call has no model: `retry_after` skips it.
+    let name = row
+        .as_ref()
+        .filter(|_| limits.calls)
+        .map_or("", |r| r.model.as_str());
     let run = store.write(|tx| {
         tx.execute(
             "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
@@ -462,7 +466,8 @@ fn threads_after(
            SELECT m.thread_id, coalesce(max(m.internal_date), :no_date) AS newest,
                   CASE WHEN max(m.internal_date) >= :recent THEN 0 ELSE 1 END AS grp
            FROM message m WHERE m.gone_at IS NULL GROUP BY m.thread_id
-           HAVING max(m.understood_at IS NULL AND m.content_sha256 IS NOT NULL) = 1)
+           HAVING max(m.understood_at IS NULL AND m.content_sha256 IS NOT NULL
+                      AND m.waits_model = 0) = 1)
          WHERE (grp, -newest, -thread_id) > (:g, -:n, -:t)
          ORDER BY grp, newest DESC, thread_id DESC LIMIT :page",
     )?;
@@ -550,12 +555,40 @@ fn from_of(path: &std::path::Path) -> Option<String> {
 
 /// Clears the mark `waits_model` of each message, so the next run reads
 /// that mail again. Gives the count of messages.
-pub fn clear_waiting(store: &Store) -> Result<usize, Error> {
-    Ok(store.write(|tx| {
-        Ok(tx.execute(
-            "UPDATE message SET waits_model = 0 WHERE waits_model = 1",
-            [],
-        )?)
+pub fn clear_waiting(tx: &Transaction) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE message SET waits_model = 0 WHERE waits_model = 1",
+        [],
+    )
+}
+
+/// The first wait after a run that stopped on `model`, `unknown` or
+/// `error`, in milliseconds. Each such stop in a row doubles it.
+pub const RETRY_FIRST_MS: i64 = 60_000;
+/// The longest wait, in milliseconds.
+pub const RETRY_MAX_MS: i64 = 3_600_000;
+
+/// The end of the wait after model errors, read from the run rows, so each
+/// process sees the same wait. Only the runs that could call a model count
+/// (`model` is not empty: not a run with `Limits::calls` false or with no
+/// model). `None` if the last of them did not stop on `model`, `unknown`
+/// or `error`, so the first run after the wait ends it.
+pub fn retry_after(store: &Store) -> Result<Option<i64>, Error> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT stop IN ('model', 'unknown', 'error'), coalesce(ended_at, started_at)
+             FROM understand_run
+             WHERE model <> '' AND ended_at IS NOT NULL
+             ORDER BY id DESC LIMIT 7",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let failed = rows.iter().take_while(|(f, _)| *f).count();
+        Ok(rows.first().filter(|_| failed > 0).map(|(_, at)| {
+            let wait = RETRY_FIRST_MS.saturating_mul(1 << (failed - 1).min(6));
+            at.saturating_add(wait.min(RETRY_MAX_MS))
+        }))
     })?)
 }
 
@@ -630,4 +663,36 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
         }
     }
     Ok(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread whose only unread mail waits for a model gives no page, so
+    /// an idle run reads no thread (PR #137 review round 5).
+    #[test]
+    fn a_thread_with_only_waiting_mail_gives_no_page() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE message(id INTEGER PRIMARY KEY, thread_id INTEGER,
+               internal_date INTEGER, gone_at INTEGER, understood_at INTEGER,
+               content_sha256 BLOB, waits_model INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO message VALUES (1, 10, 5, NULL, NULL, x'00', 1);
+             INSERT INTO message VALUES (2, 10, 6, NULL, 7, x'00', 0);
+             INSERT INTO message VALUES (3, 20, 5, NULL, NULL, x'00', 1);
+             INSERT INTO message VALUES (4, 20, 6, NULL, NULL, x'00', 0);",
+        )
+        .unwrap();
+        let start = (-1, 0, 0);
+        let threads: Vec<i64> = threads_after(&c, start, 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(threads, [20]);
+        c.execute("UPDATE message SET waits_model = 1 WHERE id = 4", [])
+            .unwrap();
+        assert!(threads_after(&c, start, 10).unwrap().is_empty());
+    }
 }

@@ -404,6 +404,9 @@ pub fn approve(store: &Store, code: &str, budget: u64, now_ms: i64) -> Result<()
                 [budget as i64],
             )?;
             tx.execute("DELETE FROM understand_estimate WHERE code = ?1", [code])?;
+            // The approval is the new input of each call that the budget
+            // refused.
+            batch::clear_waiting(tx)?;
             Ok(true)
         })
         .map_err(|e| e.to_string())?;
@@ -520,17 +523,28 @@ pub enum AfterSync {
     Busy,
 }
 
-/// The run after a sync (R1-28): the batch runner with no limit but the
-/// budget. An idle run leaves no row.
-/// With `calls` false, only the free steps run (see [`Limits::calls`]).
-pub fn after_sync(store: &Store, calls: bool) -> Result<AfterSync, String> {
+/// The run after a sync (R1-28), in `iris serve` and `iris mirror sync`:
+/// the batch runner with no limit but the budget. An idle run leaves no
+/// row. After a run that stopped on a model error, the wait of
+/// [`batch::retry_after`] holds for every process: runs make no call until
+/// it ends, and then the marks `waits_model` of that time are cleared.
+pub fn after_sync(store: &Store, now_ms: i64) -> Result<AfterSync, String> {
+    let wait = batch::retry_after(store).map_err(|e| e.to_string())?;
+    let calls = wait.is_none_or(|t| now_ms >= t);
+    if calls && wait.is_some() {
+        store
+            .write(|tx| Ok(batch::clear_waiting(tx)?))
+            .map_err(|e| e.to_string())?;
+    }
     let connect = |row: &ModelRow| connect(store, row);
+    // The first run after a wait keeps its row, also when idle: the row
+    // ends the wait for `retry_after`.
     let limits = Limits {
-        keep_idle: false,
+        keep_idle: calls && wait.is_some(),
         calls,
         ..Limits::default()
     };
-    match batch::run(store, &connect, &limits, crate::engine::now_ms()) {
+    match batch::run(store, &connect, &limits, now_ms) {
         Ok(r) if r.is_idle() => Ok(AfterSync::Idle),
         Ok(r) => Ok(AfterSync::Ran {
             retry: matches!(r.stop.as_deref(), Some("model" | "unknown" | "error")),

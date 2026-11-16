@@ -1,7 +1,8 @@
 -- docs/specs/2026-11-16-cost-control.md, "Waits for a model" (R1-28): a
 -- message whose model call was refused (no model, or no budget) is not
 -- pending until an input of that refusal changes. The triggers clear the
--- mark on each such change, so no write path can forget it.
+-- mark on each change of the message or the model row, so no write path
+-- of the mirror can forget it.
 
 ALTER TABLE message ADD COLUMN waits_model INTEGER NOT NULL DEFAULT 0
   CHECK (waits_model IN (0, 1));
@@ -25,16 +26,16 @@ BEGIN
   UPDATE message SET waits_model = 0 WHERE id = OLD.message_id AND waits_model = 1;
 END;
 
--- A new model, a changed model row or a larger budget. Spending makes the
--- budget smaller and clears nothing.
+-- A new model or a changed model row. A budget change clears nothing here:
+-- the runner spends and refunds it. The approval of a budget (`iris
+-- understand --approve`) clears the marks in its own write.
 CREATE TRIGGER waits_model_setting_add AFTER INSERT ON model_setting
 BEGIN
   UPDATE message SET waits_model = 0 WHERE waits_model = 1;
 END;
 
-CREATE TRIGGER waits_model_setting AFTER UPDATE ON model_setting
+CREATE TRIGGER waits_model_setting AFTER UPDATE OF version ON model_setting
   WHEN NEW.version IS NOT OLD.version
-    OR coalesce(NEW.budget_micro_usd, -1) > coalesce(OLD.budget_micro_usd, -1)
 BEGIN
   UPDATE message SET waits_model = 0 WHERE waits_model = 1;
 END;

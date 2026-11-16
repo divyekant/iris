@@ -50,10 +50,13 @@ pending state that the store gives. Each one has an issue:
   understanding thread apart from the sync threads, each 10 seconds. A run
   with nothing pending reads nothing and leaves no row
   (`Limits::keep_idle`). A run that stopped on `model`, `unknown` or
-  `error` starts a wait that doubles from 60 seconds to 1 hour. During the
-  wait, runs make no call (`Limits::calls`); the mail that needs the model
-  gets `waits_model`. When the wait ends, the engine clears the marks, and
-  the next run calls the model.
+  `error` starts a wait that doubles from 60 seconds to 1 hour. The store
+  holds the wait: `batch::retry_after` reads it from the `understand_run`
+  rows, so `iris serve` and each `iris mirror sync` command see the same
+  wait. During the wait, runs make no call (`Limits::calls`) and record no
+  model, and the mail that needs the model gets `waits_model`. The first
+  run after the wait clears the marks in a write, calls the model and keeps
+  its row, so its stop ends or extends the wait.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 
@@ -72,10 +75,13 @@ A message is pending when all of these are true:
   call of the message was refused before it went out (no model, or no
   budget). Triggers of the store set it to 0 on each change of an input of
   that refusal: a label, the content, `gone_at`, `hostile` or `tries` of
-  the message, a new or changed model row, or a larger budget. So no write
-  path can leave the mark after a change, and a run does not read the
-  same waiting mail again. The estimate counts this mail: an approval
-  pays for it. The older-message rule below still counts a message that
+  the message, or a new or changed model row (`version`). A budget change
+  clears nothing, because the runner spends and refunds the budget itself.
+  The approval (`iris understand --approve`) clears the marks in its own
+  write. So no write path can leave the mark after a change of an input,
+  and a run does not read the same waiting mail again. A thread whose only
+  unread mail waits gives no thread page. The estimate counts this mail:
+  an approval pays for it. The older-message rule below still counts a message that
   waits.
 - Each message of its thread that is not gone has `content_sha256` set
   (spec 1 section 7.1).

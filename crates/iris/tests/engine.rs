@@ -443,10 +443,9 @@ fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
 #[test]
 fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
     let s = setup("engine-idle", 5);
-    let mut u = engine::Understander::new(Duration::ZERO);
     s.worker(s.account).sync().unwrap();
     assert!(matches!(
-        u.turn(&s.store).unwrap(),
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
         iris::cost::AfterSync::Ran { .. }
     ));
     let rows = count(&s.store, "SELECT count(*) FROM understand_run");
@@ -458,7 +457,10 @@ fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
     // No change: each turn reads nothing and leaves no row.
     for _ in 0..3 {
         s.worker(s.account).sync().unwrap();
-        assert_eq!(u.turn(&s.store).unwrap(), iris::cost::AfterSync::Idle);
+        assert_eq!(
+            iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+            iris::cost::AfterSync::Idle
+        );
     }
     assert_eq!(count(&s.store, "SELECT count(*) FROM understand_run"), rows);
     // A SPAM label, by any write path, clears the mark: the free steps
@@ -479,10 +481,13 @@ fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
         })
         .unwrap();
     let held = iris_understand::batch::lock(&s.store).unwrap();
-    assert_eq!(u.turn(&s.store).unwrap(), iris::cost::AfterSync::Busy);
+    assert_eq!(
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+        iris::cost::AfterSync::Busy
+    );
     drop(held);
     assert!(matches!(
-        u.turn(&s.store).unwrap(),
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
         iris::cost::AfterSync::Ran { .. }
     ));
     assert_eq!(
@@ -495,5 +500,8 @@ fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
         1,
         "the SPAM mail is read with no model"
     );
-    assert_eq!(u.turn(&s.store).unwrap(), iris::cost::AfterSync::Idle);
+    assert_eq!(
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+        iris::cost::AfterSync::Idle
+    );
 }
