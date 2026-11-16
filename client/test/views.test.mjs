@@ -491,8 +491,8 @@ test("a mail that Iris has not read yet keeps the download of the original", asy
 });
 
 
-test("a sign-in that does not reach the engine keeps the code for a reload", async () => {
-  const { signIn, SIGN_IN_FAILED } = await load("/src/api.ts");
+test("a sign-in that does not reach the engine, or gets a server error, keeps the code for a reload", async () => {
+  const { signIn, SIGN_IN_FAILED, SIGN_IN_RETRY } = await load("/src/api.ts");
   const saved = globalThis.fetch;
   const memory = new Map();
   const store = { getItem: (k) => memory.get(k) ?? null, setItem: (k, v) => memory.set(k, v), removeItem: (k) => memory.delete(k) };
@@ -511,6 +511,11 @@ test("a sign-in that does not reach the engine keeps the code for a reload", asy
     globalThis.fetch = async () => new Response(JSON.stringify({ error: "used" }), { status: 403 });
     await assert.rejects(signIn({ hash: "#code=c-10", pathname: "/", search: "" }, hist, store), { message: SIGN_IN_FAILED });
     assert.equal(memory.has("iris.code"), false);
+    // A server error is not a refusal: keep the code, and tell the person to load the page again, not to restart.
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "store" }), { status: 500 });
+    await assert.rejects(signIn({ hash: "#code=c-11", pathname: "/", search: "" }, hist, store), { message: SIGN_IN_RETRY });
+    assert.equal(memory.get("iris.code"), "c-11");
+    assert.doesNotMatch(SIGN_IN_RETRY, /Start iris serve/);
   } finally {
     globalThis.fetch = saved;
   }
