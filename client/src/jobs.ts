@@ -18,8 +18,9 @@ const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 export function due(job: Job, now = new Date()): { text: string; tone: "late" | "soon" | "" } | null {
   if (!job.due || job.state === "done") return null;
   const days = daysFrom(job.due, now);
-  const late = Date.parse(job.due) <= now.getTime();
-  return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: late ? "late" : days <= 2 ? "soon" : "" };
+  // The words say "late" each time the tone does, so color is not the only sign.
+  if (Date.parse(job.due) <= now.getTime()) return { text: `Was due ${day(job.due)}, ${days < 0 ? relative.format(days, "day") : "earlier today"}`, tone: "late" };
+  return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: days <= 2 ? "soon" : "" };
 }
 
 /**
@@ -112,6 +113,8 @@ function eventStep(e: JobEvent, before: JobEvent | undefined, i: number, threads
 }
 
 function changesetStep(c: JobChangeset): Step {
+  // The newest revision is a draft: its actions are not a request yet (spec 2 section 5), so give no count.
+  if (c.state === "draft") return { at: c.at, key: c.id, who: "agent", text: "The agent asked for changes. It now drafts a new version of the request.", quote: c.why ?? undefined };
   const count = Object.entries(c.actions)
     .filter(([state]) => state !== "replaced")
     .reduce((sum, [, k]) => sum + k, 0);

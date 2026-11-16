@@ -89,6 +89,29 @@ test("a due date has a tone near its day and after it, and an ended job has none
   assert.equal(j.due(fx.jobs["j-15"]), null);
 });
 
+test("generated due dates: the words say late each time the tone is late", () => {
+  const job = { ...fx.jobs["j-12"] };
+  const base = Date.parse("2026-11-20T09:00:00Z");
+  for (let m = -4 * 1440; m <= 4 * 1440; m += 37) {
+    const now = new Date(base + m * 60_000);
+    const d = j.due({ ...job, due: new Date(base).toISOString() }, now);
+    assert.equal(d.tone === "late", d.text.startsWith("Was due"), `${now.toISOString()}: ${d.text}`);
+    assert.equal(d.tone === "late", now.getTime() >= base);
+  }
+  // A deadline earlier on the same day.
+  assert.match(j.due({ ...job, due: "2026-11-20T09:00:00Z" }, new Date("2026-11-20T10:00:00Z")).text, /^Was due .*earlier today$/);
+});
+
+test("a changeset whose newest revision is a draft gives no count and no review link", () => {
+  for (const actions of [{}, { draft: 2 }, { draft: 1, replaced: 3 }]) {
+    const d = structuredClone(fx.jobDetails["j-12"]);
+    d.changesets[1] = { ...d.changesets[1], state: "draft", actions };
+    const step = j.steps(d).find((s) => s.key === "cs-34");
+    assert.equal(step.text, "The agent asked for changes. It now drafts a new version of the request.");
+    assert.equal(step.link, undefined);
+  }
+});
+
 test("a wait on a thread that is gone says so, with no link", () => {
   const d = structuredClone(fx.jobDetails["j-12"]);
   d.threads["t-8841"] = { id: "t-8841", gone: true };
