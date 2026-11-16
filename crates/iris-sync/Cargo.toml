@@ -1,0 +1,17 @@
+[package]
+name = "iris-sync"
+description = "The first sync of the Iris mirror: a full copy of a Gmail mailbox into the store."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+rusqlite = "=0.43.0"
+
+[dev-dependencies]
+iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }

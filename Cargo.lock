@@ -703,6 +703,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-sync"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-synth",
+ "rusqlite",
+]
+
+[[package]]
 name = "iris-synth"
 version = "0.0.0"
 
