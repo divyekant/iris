@@ -666,18 +666,40 @@ fn a_look_alike_recipient_of_the_same_sent_message_is_hostile() {
         &["SENT"],
         &format!("From: {OWNER}\r\nTo: support@paypal.com, alerts@paypa1.com"),
     );
-    // Neither domain was known before. The two domains are near copies of
-    // each other, so the message proves neither one: both are hostile.
+    // Neither domain was known before. The first recipient becomes a known
+    // person, so the second one is a near copy of a known sender.
+    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("person"));
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
-    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("hostile"));
-    // Mail from one of them is decided with the known domains only. The
-    // other row is hostile, so it is not known, and the sent message counts.
-    let d = c.put("t2", &[], "From: support@paypal.com");
-    assert_eq!(d.kind, Kind::Person);
     assert_eq!(
-        c.put("t3", &[], "From: alerts@paypa1.com").kind,
+        c.put("t2", &[], "From: alerts@paypa1.com").kind,
         Kind::Hostile
     );
+}
+
+#[test]
+fn a_recipient_whose_only_sent_message_loses_it_is_decided_again() {
+    let mut c = Case::new("recheck");
+    let head = format!("From: {OWNER}\r\nTo: bo@example.net");
+    c.put("t1", &["SENT"], &head);
+    assert_eq!(c.row("bo@example.net").1.as_deref(), Some("person"));
+    // The message loses SENT (the mirror stores it again), and its decision
+    // runs again. Bo has no mail of his own to decide.
+    let raw = format!("{head}\r\nSubject: x\r\n\r\nBody text.\r\n");
+    let m = new_message("m1", "t1", 1000, &["INBOX"], raw.as_bytes());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    again(&c, 1, &raw);
+    assert_eq!(c.row("bo@example.net").1.as_deref(), Some("stranger"));
+    // A sent message with another recipient does the same.
+    let mut c = Case::new("recheck-to");
+    c.put("t1", &["SENT"], &head);
+    let other = format!("From: {OWNER}\r\nTo: cy@example.net\r\nSubject: x\r\n\r\nBody text.\r\n");
+    let mut m = new_message("m1", "t1", 1000, &["SENT"], other.as_bytes());
+    m.content_sha256 = Some(c.store.put_content(other.as_bytes()).unwrap());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    let d = again(&c, 1, &other);
+    assert_eq!(c.row("bo@example.net").1.as_deref(), Some("stranger"));
+    assert_eq!(c.row("cy@example.net").1.as_deref(), Some("person"));
+    assert!(d.rerun.is_empty());
 }
 
 #[test]
