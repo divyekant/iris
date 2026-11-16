@@ -726,6 +726,7 @@ dependencies = [
  "iris-policy",
  "iris-store",
  "iris-synth",
+ "iris-triage",
  "iris-web",
  "rusqlite",
  "serde",
