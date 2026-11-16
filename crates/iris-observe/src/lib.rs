@@ -15,6 +15,7 @@
 use std::io::Write;
 
 use iris_store::{format_id, Kind, Store};
+use sha2::{Digest, Sha256};
 
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one changeset (specification 2, section 5.3).
@@ -122,8 +123,8 @@ fn count_in(c: &rusqlite::Connection, account: i64) -> iris_store::Result<Vec<(R
 
 /// Write the triage changeset as JSON (specification 2, section 5.1).
 ///
-/// `created` is the time in RFC 3339. Each call gives a new ID (see
-/// [`next_id`]). A rule with no message gives no action. Each action has the
+/// `created` is the time in RFC 3339. The ID comes from the content of the
+/// proposal (see `changeset_number`). A rule with no message gives no action. Each action has the
 /// state `proposed`.
 pub fn write_changeset(
     store: &Store,
@@ -141,7 +142,7 @@ pub fn write_changeset(
         write!(
             out,
             r#"{{"model":"iris/0","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
-            id = next_id(),
+            id = changeset_number(c, account)?,
             state = if total == 0 { "closed" } else { "open" },
         )?;
         let mut n = 0;
@@ -167,25 +168,33 @@ pub fn write_changeset(
     })
 }
 
-/// A changeset number that no other call gives: the time in microseconds at
-/// the first call, plus one for each later call in the process.
-// shortcut: unique only while the clock does not go back; release 2 stores
-// changesets and uses the row ID.
-fn next_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(1, |d| d.as_micros() as u64);
-    // Never below the clock, so a new process does not give an old number.
-    let mut cur = NEXT.load(Ordering::Relaxed);
-    loop {
-        let id = cur.max(now) + 1;
-        match NEXT.compare_exchange(cur, id, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return id,
-            Err(seen) => cur = seen,
-        }
+/// The changeset number of a snapshot: the first 63 bits of the SHA-256 of
+/// the account and the message IDs of each rule. Release 1 does not store the
+/// proposal, so the number names its content: a different proposal gives a
+/// different number in each process and after a restart, and the same
+/// proposal gives the same number. Not 0, so it is never the row ID 0.
+fn changeset_number(c: &rusqlite::Connection, account: i64) -> iris_store::Result<u64> {
+    let mut hash = Hasher(Sha256::new());
+    write!(hash, "{account}")?;
+    for rule in Rule::ALL {
+        write!(hash, ";{rule:?}:")?;
+        write_ids(c, rule, account, &mut hash)?;
+    }
+    let digest = hash.0.finalize();
+    let n = u64::from_be_bytes(digest[..8].try_into().expect("8 bytes")) >> 1;
+    Ok(n.max(1))
+}
+
+struct Hasher(Sha256);
+
+impl Write for Hasher {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
