@@ -464,3 +464,17 @@ fn a_changed_draft_keeps_the_limits() {
     }
     assert!(read(raw.as_bytes(), ME).is_some());
 }
+
+/// A change of the white space in the subject at Gmail gives no content,
+/// although the checks would collapse it back to the approved subject.
+#[test]
+fn a_subject_with_changed_spaces_does_not_read_back() {
+    let c = content(&["p@x.org"], "Hi there", "Body").check().unwrap();
+    let raw =
+        String::from_utf8(compose(ME, "iris.8@example.com", &c, None, 1_800_000_000)).unwrap();
+    assert!(read(raw.as_bytes(), ME).is_some());
+    let changed = raw.replacen("Subject: Hi there", "Subject: Hi  there", 1);
+    assert_ne!(changed, raw);
+    assert!(read(changed.as_bytes(), ME).is_none());
+    assert!(read_sent(changed.as_bytes(), ME).is_none());
+}
