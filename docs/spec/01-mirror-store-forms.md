@@ -758,13 +758,54 @@ rebuild uses the same order.
 ### 7.3 Fixed rules
 
 Fixed rules run before the model. They are fast, free and the same each time.
+The engine tries the rules in the order of the table. The first rule that
+matches gives the result, and the next rules do not run.
 
-| Rule | Result |
-|---|---|
-| `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item, unless the subject or the body matches a receipt or a statement pattern. |
-| A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. |
-| A calendar invitation (`text/calendar` with `METHOD:REQUEST`) | Commitment of kind `invitation`. |
-| Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+| Order | Rule | Result |
+|---|---|---|
+| 1 | Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+| 2 | Any sign that the message can hold other content: the clean text is cut at its limit (section 7.2); the message has an attachment; it has a calendar request (`text/calendar` with `METHOD:REQUEST`); it has `List-Id` or `List-Unsubscribe`; or the subject or the body matches a receipt or a statement pattern, or has a word of a request to pay or to act, of a contract, of a booking, of a ticket or of an event (for example "pay", "due", "contract", "reservation", "ticket", "event") | No fixed rule. The model reads the message, so that no record, request, invitation or feed item is lost. |
+| 3 | A message from a `service` with a sign-in word (for example "sign in", "login", "verify", "passcode") | If the message has no promotion word (for example "discount", "coupon", "promo", "sale") and one clear code: signal of kind `code`. Else no fixed rule, and the model reads the message. |
+
+Release 1 has no fixed list rule (issue #96) and no fixed invitation rule
+(issue #97): list mail and invitations go to the model.
+
+A code is a run of 4 to 8 digits bound to a code word ("code",
+"verification", "one-time", "passcode"):
+
+- After the code word, with only `:`, `-`, `=`, `#` or "is" between them:
+  "Your code: 482913", "Your code is 482913".
+- Before the code word, with only "is", "your", "the" or "a" between them:
+  "482913 is your code".
+- On the next line, if the line with the code word has no number and the
+  next line has no code word: "Your code:" then "482913".
+
+The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a code word, or on a line with a bound number, has that value ("Your old code was 5678" makes the code not clear).
+Two values, or no bound number, give no clear code. A number with other
+words between it and the code word is not bound.
+
+#### Failure list of the fixed rules
+
+The fixed rules read mail that Iris does not control. The safe result for
+each case that a rule cannot settle is: no fixed item, and the model reads
+the message. A fixed rule never guesses.
+
+| Input | Failure mode | Result |
+|---|---|---|
+| A message with a hostile mark | A rule acts on text from an attacker | No item and no model call (rule 1). |
+| A receipt, a statement, a payment request, a contract, a booking, a ticket or an event, also with a code | A code signal hides the record or the request | The model reads the message (rule 2). |
+| A message with an attachment | A code signal hides a record in the file | The model reads the message (rule 2). |
+| A message with a clean text cut at its limit | A code signal hides a record after the cut | The model reads the message (rule 2). |
+| A calendar request | An invitation is lost | The model reads the message (rule 2, issue #97). |
+| A list message (`List-Id` or `List-Unsubscribe`) | A code signal or a feed item hides other content | The model reads the message (rule 2, issue #96). |
+| Sign-in mail with two code values (an account number, an old code, "1234 5678" on one line) | The wrong number becomes the code | No clear code: the model reads the message (rule 3). |
+| Sign-in mail with an account number, a duration, a year or another number on a line with a code word ("Account: 123456 - code expires", "Your old code was 5678") | Another number becomes the code, or the wrong code is kept | No clear code: the model reads the message (rule 3). |
+| Sign-in mail with the code in a form that the binding does not know ("Use 482913 to sign in") | The code is missed | No clear code: the model reads the message (rule 3). |
+| A promotion code, or sign-in mail with a promotion word | A promotion becomes a sign-in code signal | The model reads the message (rule 3). |
+| A request in words that the built-in word lists do not have, or in another language | A code signal hides the request | Known limit: the lists are short and in English (issue #95). |
+| A very long line with many code words and numbers | The search takes too long | Only code words within 100 bytes of a number count, so the search is linear in the length of the line. |
+| A rule item that fails the schema | An invalid item goes to the store | The rule gives no item, and the model reads the message. |
+| All other input | | No fixed rule matches, and the model reads the message. |
 
 The conversation rule runs for each message that is not hostile mail:
 

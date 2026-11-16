@@ -1,18 +1,23 @@
 //! Understanding: from one mail message to items of the five forms
 //! (specification 1, section 7).
 //!
-//! This part gives steps 1 to 3: [`analyze`] reads the raw bytes of one
-//! message and gives its headers, its clean text and its hostile marks.
-//! The fixed rules, the model and the store writes come in later parts.
+//! Steps 1 to 3: [`analyze`] reads the raw bytes of one message and gives
+//! its headers, its clean text and its hostile marks. Step 6:
+//! [`rules::apply`] gives the items of the fixed rules. Step 8:
+//! [`validate`] checks an item against the open model schema. The model and
+//! the store writes come in later parts.
 //!
 //! Mail text is data, never instructions. Code only compares the text.
 
 pub mod head;
+pub mod rules;
+mod schema;
 pub mod time;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub use head::{Auth, Head};
+pub use schema::validate;
 
 /// The kind of the sender of one message (section 6.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,4 +207,57 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
         marks.push(Mark::Spam);
     }
     Analysis { head, text, marks }
+}
+
+/// Who made a draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum By {
+    /// A fixed rule, with its name.
+    Rule(&'static str),
+    Model,
+}
+
+/// An item before the engine gives it an ID, sources, times and `derived`.
+/// The party of a sender has its address, and no `p-` ID yet.
+#[derive(Clone, Debug)]
+pub struct Draft {
+    pub item: Value,
+    /// The words of the message that support the item, at most 500
+    /// characters.
+    pub quote: String,
+    pub by: By,
+}
+
+impl Draft {
+    fn rule(item: Value, rule: &'static str, quote: &str) -> Draft {
+        Draft {
+            item,
+            quote: cut(quote, 500),
+            by: By::Rule(rule),
+        }
+    }
+
+    pub fn form(&self) -> &str {
+        self.item["form"].as_str().unwrap_or("")
+    }
+}
+
+/// The party of the sender of the message.
+fn party_sender(a: &Analysis) -> Value {
+    let mut p = json!({"kind": "sender"});
+    if let Some(ad) = &a.head.from_addr {
+        p["address"] = json!(ad);
+    }
+    if let Some(n) = &a.head.from_name {
+        p["name"] = json!(cut(n, 200));
+    }
+    p
+}
+
+/// `s` with at most `n` characters.
+fn cut(s: &str, n: usize) -> String {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => s[..i].to_string(),
+        None => s.to_string(),
+    }
 }
