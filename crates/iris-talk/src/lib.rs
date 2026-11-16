@@ -131,14 +131,21 @@ pub fn update(
     // A conversation needs a message from you, a person or a stranger
     // (section 7.3). Service mail alone does not keep it.
     if mails.iter().all(|m| m.service) {
-        if old.status != "gone" {
+        // The sync can set the status column to gone first (section 4.5),
+        // so the document can still give the old status.
+        if old.status != "gone" || old.doc["status"] != "gone" {
+            let before = if old.status == "gone" {
+                old.before_gone
+            } else {
+                Some(old.status)
+            };
             let mut doc = old.doc;
             doc["status"] = json!("gone");
             doc["updated"] = json!(rfc3339(now));
             conn.execute(
                 "UPDATE item SET status = 'gone', status_before_gone = ?2, doc = ?3, updated_at = ?4
                  WHERE id = ?1",
-                params![old.id, old.status, doc.to_string(), now],
+                params![old.id, before, doc.to_string(), now],
             )?;
         }
         return Ok(Some(old.id));
@@ -281,8 +288,9 @@ fn mails(
         let draft: bool = r.get(11)?;
         let from = r
             .get::<_, Option<String>>(2)?
-            .unwrap_or_default()
-            .to_lowercase();
+            .and_then(|f| addresses(&f).into_iter().next())
+            // A From that is not an address gives no party.
+            .unwrap_or_default();
         let mine = sent || (!from.is_empty() && from == me);
         let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
         let mail = Mail {
@@ -528,8 +536,11 @@ pub fn rfc3339(ms: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
+    // Always 3 digits of milliseconds: the order of two messages in one
+    // second stays, and the text sorts in the order of time.
+    let frac = format!(".{:03}", ms.rem_euclid(1000));
     format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}{frac}Z",
         s / 3600,
         s % 3600 / 60,
         s % 60
@@ -542,10 +553,15 @@ mod tests {
 
     #[test]
     fn dates() {
-        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
-        assert_eq!(rfc3339(1_767_225_600_000), "2026-01-01T00:00:00Z");
-        assert_eq!(rfc3339(951_782_400_000 + 3_723_000), "2000-02-29T01:02:03Z");
-        assert_eq!(rfc3339(-1000), "1969-12-31T23:59:59Z");
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339(1_767_225_600_000), "2026-01-01T00:00:00.000Z");
+        assert_eq!(
+            rfc3339(951_782_400_000 + 3_723_000),
+            "2000-02-29T01:02:03.000Z"
+        );
+        assert_eq!(rfc3339(-1000), "1969-12-31T23:59:59.000Z");
+        assert_eq!(rfc3339(100), "1970-01-01T00:00:00.100Z");
+        assert_eq!(rfc3339(-1), "1969-12-31T23:59:59.999Z");
     }
 
     #[test]
