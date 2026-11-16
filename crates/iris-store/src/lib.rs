@@ -27,7 +27,11 @@ pub use search::Query;
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
 /// Migrations go forward only. Never change a migration after it merged: add one.
-const MIGRATIONS: &[&str] = &[include_str!("schema_1.sql"), include_str!("schema_2.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("schema_1.sql"),
+    include_str!("schema_2.sql"),
+    include_str!("schema_3.sql"),
+];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
 /// after `journal_mode` (see [`settings`]).
@@ -242,6 +246,16 @@ impl Store {
         let out = f(&tx)?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// Run `f` in a write transaction, then roll it back: nothing of `f` is
+    /// written. For a read that needs the result of writes, for example an
+    /// estimate.
+    pub fn dry_write<T>(&self, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction()?;
+        f(&tx)
+        // The drop of `tx` rolls it back.
     }
 
     /// Run `f` on a read connection. The connection sees one snapshot for
