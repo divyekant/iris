@@ -23,6 +23,24 @@ fn civil(days: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
+/// True if the date and the time exist: the day is inside its month (with
+/// leap years), the hour, the minute and the second (60 for a leap second)
+/// are inside their range.
+pub fn valid(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64) -> bool {
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&d)
+        && (0..=23).contains(&h)
+        && (0..=59).contains(&mi)
+        && (0..=60).contains(&s)
+}
+
 /// RFC 3339 in UTC, for example `2026-11-02T10:00:00Z`, with milliseconds
 /// when they are not zero (`2026-11-02T10:00:00.250Z`).
 pub fn rfc3339(ms: i64) -> String {
@@ -62,7 +80,7 @@ pub fn parse_rfc3339(v: &str) -> Option<i64> {
     }
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 60 {
+    if !valid(y, mo, d, h, mi, s) {
         return None;
     }
     let mut i = 19;
@@ -88,7 +106,11 @@ pub fn parse_rfc3339(v: &str) -> Option<i64> {
     let off = match b.get(i)? {
         b'Z' | b'z' if i + 1 == b.len() => 0,
         c @ (b'+' | b'-') if i + 6 == b.len() && b[i + 3] == b':' => {
-            let m = num(i + 1..i + 3)? * 60 + num(i + 4..i + 6)?;
+            let (oh, om) = (num(i + 1..i + 3)?, num(i + 4..i + 6)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            let m = oh * 60 + om;
             if *c == b'-' {
                 -m
             } else {
@@ -120,6 +142,11 @@ mod tests {
         );
         assert_eq!(super::parse_rfc3339("2024-08-31T02:09:01.Z"), None);
         assert_eq!(super::parse_rfc3339("2024-08-31 02:09:01"), None);
+        assert_eq!(super::parse_rfc3339("2025-02-31T00:00:00Z"), None);
+        assert_eq!(super::parse_rfc3339("2023-02-29T00:00:00Z"), None);
+        assert!(super::parse_rfc3339("2024-02-29T00:00:00Z").is_some());
+        assert_eq!(super::parse_rfc3339("2025-01-01T00:00:00+24:00"), None);
+        assert_eq!(super::parse_rfc3339("2025-01-01T00:00:00+01:60"), None);
     }
 
     /// Each time in milliseconds goes to text and back with no change.
@@ -133,6 +160,21 @@ mod tests {
             // Years 1 to 9999.
             let ms = (x % 315_537_897_600_000) as i64 - 62_135_596_800_000;
             assert_eq!(super::parse_rfc3339(&super::rfc3339(ms)), Some(ms), "{ms}");
+        }
+    }
+
+    /// Each day number that `valid` accepts maps back to the same date, and
+    /// no impossible day is accepted.
+    #[test]
+    fn valid_agrees_with_the_calendar() {
+        for y in [1900, 2000, 2023, 2024, 2100] {
+            for m in 1..=12 {
+                for d in 1..=31 {
+                    let ok = super::valid(y, m, d, 0, 0, 0);
+                    let back = super::civil(super::days_from_civil(y, m, d)) == (y, m, d);
+                    assert_eq!(ok, back, "{y}-{m}-{d}");
+                }
+            }
         }
     }
 }

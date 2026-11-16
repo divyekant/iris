@@ -242,7 +242,8 @@ fn invitation(raw: &[u8]) -> bool {
     // `quoted-printable`.
     let (mut b64_head, mut b64) = (false, false);
     let (mut qp_head, mut qp) = (false, false);
-    // The base64 text of a calendar body, at most CALENDAR_B64 bytes.
+    // The encoded text of a calendar body (base64 or quoted-printable, with
+    // the soft line breaks joined), at most CALENDAR_B64 bytes.
     let mut buf: Vec<u8> = Vec::new();
     let end_header = |ct: &mut Option<Vec<u8>>, cal: &mut bool, b: &mut Vec<Vec<u8>>| -> bool {
         let Some(v) = ct.take() else { return false };
@@ -255,9 +256,13 @@ fn invitation(raw: &[u8]) -> bool {
         *cal = contains(&low, b"text/calendar");
         *cal && param(&low, &v, b"method=").is_some_and(|m| m.eq_ignore_ascii_case(b"request"))
     };
-    let request = |buf: &[u8]| {
-        base64(buf)
-            .split(|&c| c == b'\n')
+    let request = |buf: &[u8], qp: bool| {
+        let text = if qp {
+            quoted_printable(buf)
+        } else {
+            base64(buf)
+        };
+        text.split(|&c| c == b'\n')
             .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
     };
     for line in raw.split(|&c| c == b'\n') {
@@ -268,7 +273,7 @@ fn invitation(raw: &[u8]) -> bool {
                 rest.starts_with(bd) && matches!(&rest[bd.len()..], b"" | b"--")
             });
         if is_boundary {
-            if end_header(&mut ct, &mut cal, &mut boundaries) || request(&buf) {
+            if end_header(&mut ct, &mut cal, &mut boundaries) || request(&buf, qp) {
                 return true;
             }
             (in_head, cal, b64_head, b64) = (true, false, false, false);
@@ -308,25 +313,30 @@ fn invitation(raw: &[u8]) -> bool {
                 buf.extend_from_slice(line.trim_ascii());
             }
         } else if qp {
-            if quoted_printable(line)
-                .trim_ascii()
-                .eq_ignore_ascii_case(b"METHOD:REQUEST")
-            {
-                return true;
+            // A line that ends with `=` goes on in the next line.
+            let (part, soft) = match line.strip_suffix(b"=") {
+                Some(p) => (p, true),
+                None => (line, false),
+            };
+            if buf.len() + part.len() < CALENDAR_B64 {
+                buf.extend_from_slice(part);
+                if !soft {
+                    buf.push(b'\n');
+                }
             }
         } else if cal && line.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST") {
             return true;
         }
     }
-    request(&buf)
+    request(&buf, qp)
 }
 
-/// The most base64 bytes of one calendar body that the scan decodes. The
+/// The most encoded bytes of one calendar body that the scan decodes. The
 /// METHOD line comes near the start of a calendar.
 const CALENDAR_B64: usize = 64 * 1024;
 
-/// Decode one quoted-printable line (`=3A` to `:`). A short calendar line
-/// such as `METHOD:REQUEST` is not folded with a soft line break.
+/// Decode quoted-printable text with its soft line breaks already joined
+/// (`=3A` to `:`).
 fn quoted_printable(line: &[u8]) -> Vec<u8> {
     let hex = |c: Option<&u8>| c.and_then(|&c| (c as char).to_digit(16));
     let mut out = Vec::with_capacity(line.len());
@@ -412,8 +422,11 @@ pub fn date(v: &str) -> Option<i64> {
     let s = hms.next().flatten().unwrap_or(0);
     let zone = w.next().unwrap_or("+0000");
     let off = match zone.as_bytes().first() {
-        Some(b'+' | b'-') if zone.len() == 5 => {
+        Some(b'+' | b'-') if zone.len() == 5 && zone[1..].bytes().all(|c| c.is_ascii_digit()) => {
             let n: i64 = zone[1..].parse().ok()?;
+            if n / 100 > 23 || n % 100 > 59 {
+                return None;
+            }
             let mins = n / 100 * 60 + n % 100;
             if zone.starts_with('-') {
                 -mins
@@ -423,7 +436,7 @@ pub fn date(v: &str) -> Option<i64> {
         }
         _ => 0,
     };
-    if !(1..=31).contains(&day) || h > 23 || m > 59 || s > 60 {
+    if !crate::time::valid(year, month, day, h, m, s) {
         return None;
     }
     let days = crate::time::days_from_civil(year, month, day);
@@ -471,6 +484,11 @@ From: a@bank.example\r\n\r\nbody";
             Some(1_725_070_141_000)
         );
         assert_eq!(date("not a date"), None);
+        assert_eq!(date("31 Feb 2025 00:00:00 +0000"), None);
+        assert_eq!(date("29 Feb 2023 00:00:00 +0000"), None);
+        assert!(date("29 Feb 2024 00:00:00 +0000").is_some());
+        assert_eq!(date("1 Jan 2025 00:00:00 +2400"), None);
+        assert_eq!(date("1 Jan 2025 00:00:00 +0160"), None);
     }
 
     #[test]
@@ -479,6 +497,9 @@ From: a@bank.example\r\n\r\nbody";
         assert!(super::invitation(raw));
         let cancel = String::from_utf8_lossy(raw).replace("REQUEST", "CANCEL");
         assert!(!super::invitation(cancel.as_bytes()));
+        // A soft line break inside the method line.
+        let split = String::from_utf8_lossy(raw).replace("METHOD=3AREQUEST", "METHOD:RE=\r\nQUEST");
+        assert!(super::invitation(split.as_bytes()));
     }
 
     #[test]
