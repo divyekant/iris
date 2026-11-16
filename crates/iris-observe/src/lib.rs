@@ -170,9 +170,10 @@ pub fn write_changeset(
 
 /// The changeset number of a snapshot: the first 63 bits of the SHA-256 of
 /// the account and the message IDs of each rule. Release 1 does not store the
-/// proposal, so the number names its content: a different proposal gives a
-/// different number in each process and after a restart, and the same
-/// proposal gives the same number. Not 0, so it is never the row ID 0.
+/// proposal, so the number names its content (specification 1, section 8): a
+/// different proposal gives a different number in each process and after a
+/// restart, and the same proposal gives the same number, also at a later
+/// time. Not 0, so it is never the row ID 0.
 fn changeset_number(c: &rusqlite::Connection, account: i64) -> iris_store::Result<u64> {
     let mut hash = Hasher(Sha256::new());
     write!(hash, "{account}")?;
