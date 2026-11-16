@@ -2,6 +2,7 @@
   import { access } from "./access.svelte.ts";
   import { followSignIn, get, loadBrief, own, type Changeset, type HandledPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
+  import { count, type Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
   import Brief from "./views/Brief.svelte";
@@ -26,6 +27,7 @@
       if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
       scrollTo(0, 0);
+      void count("use");
     };
     addEventListener("hashchange", update);
     return () => removeEventListener("hashchange", update);
@@ -34,6 +36,8 @@
   // Read the status one time at start, so a view opened from a link also shows an account that needs sign-in.
   // svelte-ignore state_referenced_locally
   if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
+  // A day on which the person opens Iris is a day of use (the measures page). A tab that stays open counts again at the next view of a new day.
+  if (typeof location !== "undefined") void count("use");
 
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
@@ -103,7 +107,7 @@
     {:else if route.view === "mail"}
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "measures"}
-      <Measures />
+      {#await get<MeasuresData>("measures") then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "review"}
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />

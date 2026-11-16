@@ -404,27 +404,86 @@ test("the fixture server gives the original of a mail", () => {
   assert.equal(fx.raw("m-0"), undefined);
 });
 
-test("the measures page shows the open count", async () => {
-  const t = text(await render("/src/views/Measures.svelte", { opens: { count: 3, since: "2026-11-16T09:00:00Z" } }));
-  assert.match(t, /3 Source mail opened/);
-  assert.match(t, /Nothing leaves the machine/);
+test("the measures page opens with a sentence, the bars of 14 days and one line for each measure", async () => {
+  const now = new Date(2026, 10, 16, 9, 5);
+  const t = text(await render("/src/views/Measures.svelte", { measures: fx.measures, now }));
+  assert.match(t, /You opened 2 source mails today\. One measure misses its target: Days you used Iris\./);
+  assert.match(t, /Nothing leaves it/);
+  assert.match(t, /Days you used Iris 12 of 14/);
+  assert.match(t, /Time to the first brief 6 min From the connect step on 3 Nov/);
+  assert.match(t, /Differences from Gmail 0 Last check on 16 Nov/);
+  assert.match(t, /Memory of the engine 31 MB With 18,402 messages/);
+  assert.match(t, /Changes you approved as proposed 47 of 50 94%/);
+  assert.match(t, /Changes that you undid 1 of 48 2%/);
+  assert.match(t, /Sends without review after hostile mail Not yet/);
+  assert.match(t, /1\.8 a day on the 12 days that you used Iris/);
+  const html = await render("/src/views/Measures.svelte", { measures: fx.measures, now });
+  // 14 bars: 12 days of use and 2 dotted days with no use. Today is the primary bar.
+  assert.equal((html.match(/<span class="[^"]*\boff\b/g) ?? []).length, 2);
+  assert.equal((html.match(/<span class="[^"]*\btoday\b/g) ?? []).length, 1);
+  assert.match(html, /aria-label="Source mail opened each day: 3 Nov, 4; [^"]*6 Nov, no use;[^"]*16 Nov, 2\."/);
 });
 
-test("each open of a mail adds one to the count, and refused storage does not stop the page", async () => {
-  const { countOpen, readOpens } = await load("/src/opens.ts");
-  const data = new Map();
-  const storage = () => ({ getItem: (k) => data.get(k) ?? null, setItem: (k, v) => data.set(k, v) });
-  assert.deepEqual(readOpens(storage), { count: 0, since: null });
-  countOpen(storage, new Date("2026-11-16T09:00:00Z"));
-  assert.deepEqual(countOpen(storage), { count: 2, since: "2026-11-16T09:00:00.000Z" });
-  data.set("iris.opens", "{bad");
-  assert.equal(readOpens(storage).count, 0);
-  const full = () => ({ getItem: () => null, setItem: () => { throw new Error("quota"); } });
-  assert.equal(countOpen(full).count, 1);
-  // A browser that blocks storage throws in the getter of localStorage itself.
-  const denied = () => { throw new DOMException("denied", "SecurityError"); };
-  assert.deepEqual(readOpens(denied), { count: 0, since: null });
-  assert.equal(countOpen(denied).count, 1);
+test("each measure says when it has no data, and the sentence names a missed target", async () => {
+  const { rows, lead, bars, localDay } = await load("/src/measures.ts");
+  const now = new Date(2026, 10, 16, 23, 59);
+  const empty = { days: [], first_brief: null, mirror: [], memory: { rss_kib: null, messages: 0 }, approvals: { decided: 0, approved: 0 }, undo: { applied: 0, undone: 0 } };
+  assert.deepEqual(rows(empty, now).map((r) => r.tone), ["none", "none", "none", "none", "none", "none", "none"]);
+  assert.deepEqual(lead(empty, now), { opens: 0, text: "" });
+  assert.equal(localDay(now), "2026-11-16");
+  assert.equal(bars(empty, now)[0].day, "2026-11-03");
+
+  // Iris started 3 days ago: the days before do not count as days without use.
+  const young = { ...empty, days: [{ day: "2026-11-16", opens: 1 }, { day: "2026-11-14", opens: 0 }] };
+  assert.deepEqual(rows(young, now)[0], { name: "Days you used Iris", value: "2 of 3", detail: "In the last 3 days. Target: each day.", tone: "missed" });
+  assert.equal(lead(young, now).text, "One measure misses its target: Days you used Iris.");
+
+  const slow = { ...empty, first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:10:01Z", seconds: 601 }, memory: { rss_kib: 51_201, messages: 9 } };
+  const r = rows(slow, now);
+  assert.equal(r[1].value, "11 min");
+  assert.equal(r[1].tone, "missed");
+  assert.equal(r[3].tone, "missed");
+  assert.equal(lead(slow, now).text, "2 measures miss their target.");
+  const fast = { ...empty, first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:10:00Z", seconds: 600 }, memory: { rss_kib: 51_200, messages: 1 } };
+  assert.deepEqual(rows(fast, now).slice(1, 4).map((x) => x.tone), ["met", "none", "met"]);
+
+  // A check with differences misses; a check that stopped early cannot meet the target.
+  const check = (differences, complete) => ({ ...empty, mirror: [{ account: "a@example.com", checked: "2026-11-16T07:00:00Z", differences, complete }] });
+  assert.equal(rows(check(3, true), now)[2].tone, "missed");
+  assert.equal(rows(check(0, false), now)[2].tone, "flat");
+  assert.equal(rows(check(null, true), now)[2].tone, "flat");
+  assert.equal(rows(check(0, true), now)[2].tone, "met");
+});
+
+test("a use counts once a day, and an open counts each time, on the local day", async () => {
+  const { count } = await load("/src/measures.ts");
+  const saved = globalThis.fetch;
+  const sent = [];
+  let fail = false;
+  globalThis.fetch = async (url, init) => {
+    sent.push([url, init?.body]);
+    return new Response(fail ? '{"error":"x"}' : "{}", { status: fail ? 500 : 200 });
+  };
+  try {
+    const day = new Date(2026, 10, 16, 23, 30);
+    fail = true;
+    await count("use", day);
+    fail = false;
+    await count("use", day);
+    await count("use", day);
+    await count("open", day);
+    await count("open", day);
+    await count("use", new Date(2026, 10, 17, 0, 10));
+    assert.deepEqual(sent, [
+      ["/api/measures/use", '{"day":"2026-11-16"}'],
+      ["/api/measures/use", '{"day":"2026-11-16"}'],
+      ["/api/measures/open", '{"day":"2026-11-16"}'],
+      ["/api/measures/open", '{"day":"2026-11-16"}'],
+      ["/api/measures/use", '{"day":"2026-11-17"}'],
+    ]);
+  } finally {
+    globalThis.fetch = saved;
+  }
 });
 
 test("due dates read as words, with a tone for soon and late", async () => {

@@ -23,6 +23,11 @@ export default defineConfig(({ mode }) => {
             res.end(source);
             return;
           }
+          if (/^\/measures\/(use|open)$/.test(url) && req.method === "POST") {
+            res.setHeader("content-type", "application/json");
+            res.end("{}");
+            return;
+          }
           const decision = url.match(/^\/changesets\/([^/?]+)\/(decide|withdraw)$/);
           if (decision && req.method === "POST") {
             let text = "";
