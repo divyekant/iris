@@ -236,7 +236,10 @@ pub fn run(cli: Cli) -> Result<(), String> {
     ) {
         let attention = open().and_then(|s| {
             iris_policy::refresh_attention(&s, engine::now_ms().div_euclid(1000))
-                .map_err(|e| format!("attention: {e}"))
+                .map_err(|e| format!("attention: {e}"))?;
+            // The measure "time to the first brief" ends at the first brief with content.
+            iris_api::measures::check_brief(&s, engine::now_ms())
+                .map_err(|e| format!("measures: {e}"))
         });
         if let Err(e) = attention {
             return Err(match result {

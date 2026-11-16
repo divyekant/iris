@@ -13,9 +13,9 @@ CREATE TABLE use_day (
 
 -- The two times of the measure "time from install to the first brief"
 -- (specification 1, M4): `connect`, when the first account is added (the
--- connect step), and `brief`, when the API first gives a brief with content
--- (crates/iris-api, GET /api/brief). Each time is written once. A time
--- never changes after that.
+-- connect step), and `brief`, when the brief first has content
+-- (iris_api::measures::check_brief, every 10 seconds in iris serve). Each
+-- time is written once. A time never changes after that.
 CREATE TABLE measure_time (
   name TEXT PRIMARY KEY CHECK (name IN ('connect', 'brief')),
   at INTEGER NOT NULL

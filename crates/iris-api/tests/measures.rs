@@ -278,6 +278,7 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
 
     // An empty brief, then a brief with only an expired code: no content.
     brief(&s).await;
+    iris_api::measures::check_brief(&s, now()).unwrap();
     put_item(
         &s,
         a,
@@ -286,6 +287,7 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
         json!({"id": "s-1", "expires": "2020-01-01T00:00:00Z"}),
     );
     assert_eq!(brief(&s).await["signals"]["count"], 0);
+    iris_api::measures::check_brief(&s, now()).unwrap();
     assert_eq!(times(&s).len(), 1);
     assert_eq!(get(&s).await["first_brief"], Value::Null);
 
@@ -298,6 +300,9 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
         2,
         json!({"id": "f-2", "status": "new", "attention": {"state": "shown"}}),
     );
+    // The engine finds the content with no visit of the brief.
+    iris_api::measures::check_brief(&s, now()).unwrap();
+    assert_eq!(times(&s).len(), 2);
     assert_eq!(brief(&s).await["feed"]["count"], 1);
     let first = times(&s);
     // In the order of the names: brief, then connect.

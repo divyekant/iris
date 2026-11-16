@@ -503,6 +503,35 @@ test("a use counts once a day, and an open counts each time, on the local day", 
   }
 });
 
+test("a failed open goes again with the next count, and a refused one does not", async () => {
+  const { count, written } = await load("/src/measures.ts");
+  const saved = globalThis.fetch;
+  const sent = [];
+  let status = 500;
+  globalThis.fetch = async (url, init) => {
+    sent.push([url, init?.body]);
+    return new Response(status === 200 ? "{}" : '{"error":"x"}', { status });
+  };
+  try {
+    const day = new Date(2026, 10, 18, 9, 0);
+    await count("open", day);
+    status = 200;
+    await count("open", day);
+    await written();
+    // The first open, its second try, and the second open: two opens counted.
+    const opens = sent.filter(([u]) => u === "/api/measures/open");
+    assert.equal(opens.length, 3);
+    status = 400;
+    sent.length = 0;
+    await count("open", day);
+    status = 200;
+    await written();
+    assert.equal(sent.length, 1);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
 test("due dates read as words, with a tone for soon and late", async () => {
   const { due } = await load("/src/format.ts");
   const at = (date) => ({ ...item("c-311"), due: { date } });

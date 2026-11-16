@@ -30,30 +30,46 @@ export function localDay(now = new Date()): string {
 
 let use: { day: string; done: Promise<void> } | null = null;
 const pending = new Set<Promise<void>>();
+// The days of opens that got no answer of success. A 400 is a definite refusal (for
+// example a day that is too old now), so it is not kept.
+const failed: string[] = [];
 
-/**
- * Count one use of the web client on the local day, or one source mail opened.
- * A use counts once for each day in this page: a second call of the same day gives
- * the promise of the first. A failed count does not stop the page, and the next use
- * tries again.
- */
-export function count(event: "use" | "open", now = new Date()): Promise<void> {
-  const day = localDay(now);
-  if (event === "use" && use?.day === day) return use.done;
+function send(event: "use" | "open", day: string): Promise<void> {
   const done: Promise<void> = post(`measures/${event}`, { day }).then(
     () => {},
-    () => {
+    (e: { status?: number }) => {
+      if (event === "open" && e?.status !== 400) failed.push(day);
       if (use?.done === done) use = null;
     },
   );
-  if (event === "use") use = { day, done };
   pending.add(done);
   void done.then(() => pending.delete(done));
   return done;
 }
 
-/** Wait until each count that this page started has its answer, so a read of the measures includes it. */
+/** Send each open again that got no answer of success. */
+function resend() {
+  for (const day of failed.splice(0)) void send("open", day);
+}
+
+/**
+ * Count one use of the web client on the local day, or one source mail opened.
+ * A use counts once for each day in this page: a second call of the same day gives
+ * the promise of the first. A failed count does not stop the page. The next use tries
+ * again, and each failed open goes again with the next count.
+ */
+export function count(event: "use" | "open", now = new Date()): Promise<void> {
+  const day = localDay(now);
+  resend();
+  if (event === "use" && use?.day === day) return use.done;
+  const done = send(event, day);
+  if (event === "use") use = { day, done };
+  return done;
+}
+
+/** Send the failed opens again, then wait until each count of this page has its answer, so a read of the measures includes them. */
 export async function written(): Promise<void> {
+  resend();
   while (pending.size > 0) await Promise.all([...pending]);
 }
 

@@ -157,6 +157,28 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
     })?)
 }
 
+/// Write the time of the first brief with content, if the brief has
+/// content at `now_ms` and no time is written. The engine calls it every
+/// 10 seconds (the attention thread of `iris serve`) and after `iris
+/// mirror` and `iris understand`, so the time does not wait for a person
+/// to open the brief.
+pub fn check_brief(store: &Store, now_ms: i64) -> Result<()> {
+    if known_brief(store)? {
+        return Ok(());
+    }
+    mark_brief(store, &crate::brief(store, now_ms)?, now_ms)
+}
+
+fn known_brief(store: &Store) -> Result<bool> {
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM measure_time WHERE name = 'brief')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?)
+    })?)
+}
+
 /// Write the time of the first brief with content, once. `brief` is the
 /// answer of GET /api/brief at `now_ms`: content is an item of a section
 /// (the brief leaves out expired signals and hidden items), a record or a
@@ -176,14 +198,7 @@ pub fn mark_brief(store: &Store, brief: &crate::Brief, now_ms: i64) -> Result<()
     if !content {
         return Ok(());
     }
-    let known = store.read(|c| {
-        Ok(c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM measure_time WHERE name = 'brief')",
-            [],
-            |r| r.get::<_, bool>(0),
-        )?)
-    })?;
-    if !known {
+    if !known_brief(store)? {
         store.write(|tx| {
             tx.execute(
                 "INSERT INTO measure_time(name, at) SELECT 'brief', ?1
