@@ -79,8 +79,8 @@ pub struct Outcome {
     pub gone: bool,
     /// Two answers were not valid: `tries` went up, `retry_at` is set.
     pub failed: bool,
-    /// The message has 3 failed tries, or its `retry_at` is later: nothing
-    /// changed.
+    /// No fixed rule matched, and the message has 3 failed tries or a later
+    /// `retry_at`: no model call, and step 8 wrote nothing.
     pub waiting: bool,
     pub calls: u32,
     pub usage: Usage,
@@ -130,6 +130,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let known = |name: &str| known_person(store, name);
     let existing = pinned(store, message)?;
+    let earlier = thread_context(store, message, row.thread, row.internal_date)?;
     let cx = Context {
         me: &row.me,
         kind,
@@ -138,6 +139,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         now_ms,
         known_person: &known,
         existing: &existing,
+        thread: &earlier,
     };
     let mut a = analyze(&raw, &cx);
     drop(raw);
@@ -179,16 +181,17 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             ..Outcome::default()
         });
     }
-    // The retry gate holds only the model call: steps 1 to 3 ran, so a new
-    // label set or mark is saved, and hostile mail still drops its items.
-    let hostile = !a.marks.is_empty() || cx.kind == Kind::Hostile;
-    if !hostile && (row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms)) {
+    // One rule for the retry state (section 7.4): the hostile check and the
+    // fixed rules always run. Only the model call waits for `retry_at` and
+    // stops after MAX_TRIES failed tries.
+    let held = row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms);
+    let d = decide(&a, &cx, (!held).then_some(model)).map_err(Error::Model)?;
+    if d.waiting {
         return Ok(Outcome {
             waiting: true,
             ..Outcome::default()
         });
     }
-    let d = decide(&a, &cx, model).map_err(Error::Model)?;
     let ids = Ids {
         message,
         thread: row.thread,
@@ -206,10 +209,12 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let mut invalid = None;
     let written = store.write(|tx| {
         if d.failed {
-            // The old items are not supported by this run: remove them.
+            // The old items are not supported by this run: remove them. The
+            // message is not understood until a run succeeds.
             drop_old_items(tx, message)?;
             tx.execute(
-                "UPDATE message SET tries = tries + 1, retry_at = ?2 WHERE id = ?1",
+                "UPDATE message SET tries = tries + 1, retry_at = ?2, understood_at = NULL
+                 WHERE id = ?1",
                 params![message, now_ms + RETRY_MS],
             )?;
             return Ok(Vec::new());
@@ -327,21 +332,68 @@ fn sender_kind(store: &Store, from: Option<&str>) -> Result<Kind> {
     Ok(kind.flatten().map_or(Kind::Stranger, |k| Kind::parse(&k)))
 }
 
-/// The address of the known person with this display name. A read error
+/// The addresses of the known persons with this display name. A read error
 /// gives no match.
-fn known_person(store: &Store, name: &str) -> Option<String> {
+fn known_person(store: &Store, name: &str) -> Vec<String> {
     store
         .read(|c| {
-            Ok(c.query_row(
-                "SELECT address FROM sender WHERE kind = 'person' AND name = ?1 COLLATE NOCASE
-                 ORDER BY id LIMIT 1",
-                [name],
-                |r| r.get(0),
-            )
-            .optional()?)
+            let mut st = c.prepare_cached(
+                "SELECT address FROM sender WHERE kind = 'person' AND name = ?1 COLLATE NOCASE",
+            )?;
+            let v = st
+                .query_map([name], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(v)
         })
-        .ok()
-        .flatten()
+        .unwrap_or_default()
+}
+
+/// The most earlier messages of the thread that the model gets.
+const THREAD_MESSAGES: i64 = 3;
+/// The most characters of the text of one earlier message.
+const THREAD_CHARS: usize = 2_000;
+
+/// The clean text of the earlier messages of the thread (before
+/// `internal_date`), oldest first. Only a message that understanding read
+/// once has its clean text in the store, so the run order is oldest first.
+/// Hostile mail and drafts are not context.
+fn thread_context(
+    store: &Store,
+    message: i64,
+    thread: i64,
+    internal_date: Option<i64>,
+) -> Result<Vec<String>> {
+    let Some(date) = internal_date else {
+        return Ok(Vec::new());
+    };
+    let mut v: Vec<String> = store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
+             WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
+               AND m.internal_date < ?3
+               -- Hostile mail never goes to a model, also as context. A
+               -- draft is not mail of the thread yet.
+               AND coalesce(m.hostile, '[]') = '[]'
+               AND NOT EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
+                               WHERE h.message_id = m.id AND s.kind = 'hostile')
+               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                               WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
+             ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4",
+        )?;
+        let v = st
+            .query_map(params![thread, message, date, THREAD_MESSAGES], |r| {
+                let (from, subject, text): (String, String, String) =
+                    (r.get(0)?, r.get(1)?, r.get(2)?);
+                Ok(format!(
+                    "From: {from}\nSubject: {subject}\n{}",
+                    crate::cut(&text, THREAD_CHARS)
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(v)
+    })?;
+    v.reverse();
+    Ok(v)
 }
 
 fn marks_json(marks: &[Mark], phishing: bool) -> String {

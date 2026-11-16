@@ -131,7 +131,7 @@ fn score(mb: &Mailbox, indices: &[usize], oracle: bool) -> Report {
     let model = Oracle {
         next: Cell::new(None),
     };
-    let no_known = |_: &str| None;
+    let no_known = |_: &str| Vec::new();
     run(mb, indices, |raw| {
         let i = *next.next().unwrap();
         let t = mb.truth(i);
@@ -151,9 +151,10 @@ fn score(mb: &Mailbox, indices: &[usize], oracle: bool) -> Report {
             now_ms: NOW,
             known_person: &no_known,
             existing: &[],
+            thread: &[],
         };
         let a = analyze(raw, &cx);
-        let d = decide(&a, &cx, &model).unwrap();
+        let d = decide(&a, &cx, Some(&model)).unwrap();
         answer(&d, &a)
     })
 }
@@ -262,7 +263,7 @@ const HAND: &[(&str, &str, Kind, &str, Option<&str>)] = &[
 
 #[test]
 fn hand_written_rules() {
-    let no_known = |_: &str| None;
+    let no_known = |_: &str| Vec::new();
     let none = Oracle {
         next: Cell::new(None),
     };
@@ -282,9 +283,10 @@ fn hand_written_rules() {
             now_ms: NOW,
             known_person: &no_known,
             existing: &[],
+            thread: &[],
         };
         let a = analyze(raw.as_bytes(), &cx);
-        let d = decide(&a, &cx, &none).unwrap();
+        let d = decide(&a, &cx, Some(&none)).unwrap();
         let got = if d.hostile {
             Some("hostile".to_string())
         } else if d.calls > 0 {

@@ -94,12 +94,15 @@ pub struct Context<'a> {
     /// `internalDate` of the message, in milliseconds. Item dates use it.
     pub internal_date: Option<i64>,
     pub now_ms: i64,
-    /// The address of the known person with this display name, if there is
-    /// one (for the mark `spoof`).
-    pub known_person: &'a dyn Fn(&str) -> Option<String>,
+    /// The addresses of the known persons with this display name (for the
+    /// mark `spoof`). Two persons can have the same name.
+    pub known_person: &'a dyn Fn(&str) -> Vec<String>,
     /// The pinned items (with a correction) whose origin is this message.
     /// The model gets them, and an item that it finds again adds nothing.
     pub existing: &'a [Value],
+    /// The earlier messages of the thread, oldest first, as short text
+    /// blocks. The model gets them as context (section 7.4).
+    pub thread: &'a [String],
 }
 
 /// The clean text of one message: the only use of `iris-clean`.
@@ -180,12 +183,13 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
         }
     }
     if let Some(name) = &head.from_name {
-        if let Some(known) = (cx.known_person)(name) {
+        let known = (cx.known_person)(name);
+        if !known.is_empty() {
             let pass = head
                 .auth
                 .as_ref()
                 .is_some_and(|a| a.dkim_pass(from_domain) && a.dmarc.as_deref() == Some("pass"));
-            if !known.eq_ignore_ascii_case(from) && !pass {
+            if !known.iter().any(|k| k.eq_ignore_ascii_case(from)) && !pass {
                 marks.push(Mark::Spoof);
             }
         }
@@ -376,18 +380,33 @@ pub struct Decision {
     pub phishing: bool,
     /// Two model answers in a row were not valid: no item, one more try.
     pub failed: bool,
+    /// No rule matched and the retry state holds the model call: nothing
+    /// to save.
+    pub waiting: bool,
     pub calls: u32,
     pub usage: Usage,
+}
+
+/// The status of a new feed item: the engine changes a feed to `read` when
+/// its message loses the label `UNREAD` (section 6.8).
+fn feed_status(cx: &Context) -> &'static str {
+    if cx.labels.iter().any(|l| l == "UNREAD") {
+        "new"
+    } else {
+        "read"
+    }
 }
 
 /// Steps 5 to 7: hostile mail gives nothing, then the fixed rules, then the
 /// model, with one more try after an answer that is not valid. A model
 /// error that a new try can fix, or a refused call, is an `Err`: the message
 /// stays not understood, and no try counts.
+/// `model` is `None` when the retry state holds the model call (section
+/// 7.4). The hostile check and the fixed rules run in all cases.
 pub fn decide(
     a: &Analysis,
     cx: &Context,
-    model: &dyn Model,
+    model: Option<&dyn Model>,
 ) -> std::result::Result<Decision, iris_model::Error> {
     let mut d = Decision::default();
     if !a.marks.is_empty() || cx.kind == Kind::Hostile {
@@ -408,6 +427,10 @@ pub fn decide(
             return Ok(d);
         }
     }
+    let Some(model) = model else {
+        d.waiting = true;
+        return Ok(d);
+    };
     let data = prompt::data(a, cx);
     for attempt in 0..2 {
         let instruction = if attempt == 0 {

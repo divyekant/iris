@@ -65,7 +65,7 @@ pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         if (a.head.list_id.is_some() || a.head.list_unsubscribe) && !looks_like_record(a) {
             let mut item = json!({
                 "form": "feed",
-                "status": "new",
+                "status": crate::feed_status(cx),
                 "title": cut(or_none(subject), 200),
                 "publisher": party_sender(a),
                 "published": crate::time::rfc3339(a.date(cx)),

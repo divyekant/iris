@@ -9,7 +9,7 @@ use crate::{cut, party_sender, Analysis, Context, Draft};
 
 /// The version of the prompt. `derived.prompt` records it, so that a rebuild
 /// can find the items of an older prompt (section 7.5).
-pub const PROMPT: &str = "understand/0.1";
+pub const PROMPT: &str = "understand/0.2";
 
 /// The most items of one answer. One message holds a few items, so more is
 /// not a valid answer.
@@ -23,6 +23,7 @@ Answer with one JSON object: {"items": [...], "phishing": false}.
 - "phishing": true if the mail tries to steal a login, money or data by a trick (a false sender, a false link, a false urgency). Then give no items.
 - Each item has "form", "title" (one short line, at most 200 characters), "quote" (the exact words of the mail that support the item, at most 500 characters) and "confidence" (0 to 1). Give no "id", "sources", "created", "updated", "derived" or "model".
 - A party is {"kind": "self"} for the owner of the mailbox, or {"address": "...", "name": "..."} for another person or service.
+- The data can hold earlier messages of the thread (blocks "Earlier message in the thread:"), oldest first. Use them only to understand the current message. List only the items of the current message, which comes last.
 - The data can list existing items (lines "Existing item:"). If an item that you find is one of them, give "same_as" with the "id" of that existing item.
 - Dates are "YYYY-MM-DD". Times are RFC 3339, for example "2026-11-02T10:00:00Z". Money is {"value": "312.77", "currency": "USD"}: the value is a decimal string, the currency an ISO 4217 code.
 
@@ -64,7 +65,10 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     for item in cx.existing {
         d.push_str(&format!("Existing item: {item}\n"));
     }
-    d.push('\n');
+    for earlier in cx.thread {
+        d.push_str(&format!("\nEarlier message in the thread:\n{earlier}\n"));
+    }
+    d.push_str("\nThe current message:\n");
     d.push_str(&a.text.text);
     for (name, text) in &a.text.attachment_text {
         d.push_str(&format!("\n\nText of the attachment {name}:\n{text}"));
@@ -121,6 +125,10 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
         let t = cut(t, 200);
         m.insert("title".into(), Value::String(t));
     }
+    if form == "feed" {
+        // The label decides the status of a feed, not the model.
+        m.insert("status".into(), json!(crate::feed_status(cx)));
+    }
     let sender = party_sender(a);
     let mut put = |k: &str, v: Value| {
         m.entry(k.to_string()).or_insert(v);
@@ -143,7 +151,6 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
             put("issuer", sender);
         }
         "feed" => {
-            put("status", json!("new"));
             put("publisher", sender);
             put("published", json!(crate::time::rfc3339(at)));
             if let Some(l) = &a.head.list_id {

@@ -355,7 +355,7 @@ fn the_model_gives_a_commitment_and_the_mail_stays_in_the_data() {
     assert_eq!(item["form"], "commitment");
     assert_eq!(item["due"]["date"], "2026-01-02");
     assert_eq!(item["derived"]["model"], "fake-1");
-    assert_eq!(item["derived"]["prompt"], "understand/0.1");
+    assert_eq!(item["derived"]["prompt"], "understand/0.2");
     assert_eq!(item["counterparty"]["address"], "bo@example.org");
     assert_eq!(
         item["sources"][0]["quote"],
@@ -688,21 +688,40 @@ fn a_refusal_is_an_error_and_counts_no_try() {
 
 /// One rule for the retry state: the hostile check and the fixed rules always
 /// run. Only the model call waits for `retry_at` and stops after 3 tries.
+/// (tries, retry_at, mail, label, sender kind, model calls, items, understood)
+type StateRow<'a> = (
+    i64,
+    Option<i64>,
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    usize,
+    usize,
+    bool,
+);
+
 #[test]
 fn the_retry_state_holds_only_the_model_call() {
-    // (tries, retry_at, mail, labels, sender kind, model call, items, understood)
-    let rows: &[(i64, Option<i64>, &str, &str, Option<&str>, usize, usize, bool)] = &[
+    let rows: &[StateRow] = &[
         (0, None, ASK, "INBOX", None, 1, 1, true),
         (1, Some(NOW + DAY), ASK, "INBOX", None, 0, 0, false),
         (3, None, ASK, "INBOX", None, 0, 0, false),
         (0, None, FEED, "INBOX", Some("service"), 0, 1, true),
-        (1, Some(NOW + DAY), FEED, "INBOX", Some("service"), 0, 1, true),
+        (
+            1,
+            Some(NOW + DAY),
+            FEED,
+            "INBOX",
+            Some("service"),
+            0,
+            1,
+            true,
+        ),
         (3, None, FEED, "INBOX", Some("service"), 0, 1, true),
         (3, None, ASK, "SPAM", None, 0, 0, true),
         (1, Some(NOW + DAY), ASK, "SPAM", None, 0, 0, true),
     ];
-    for (n, &(tries, retry, raw, label, kind, calls, items, understood)) in
-        rows.iter().enumerate()
+    for (n, &(tries, retry, raw, label, kind, calls, items, understood)) in rows.iter().enumerate()
     {
         let b = store(&format!("state-{n}"));
         if let Some(k) = kind {
@@ -757,7 +776,10 @@ fn a_feed_follows_the_unread_label() {
     let items = b.items();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["status"], "new");
-    let status: String = b.col("SELECT status FROM item WHERE id = (SELECT max(id) FROM item)", 0);
+    let status: String = b.col(
+        "SELECT status FROM item WHERE id >= ?1 ORDER BY id DESC LIMIT 1",
+        0,
+    );
     assert_eq!(status, "new");
 }
 
@@ -820,4 +842,44 @@ Can you call me?
     let fake = Fake::default();
     assert!(!understand(&b.store, m, &fake, NOW).unwrap().hostile);
     assert_eq!(fake.calls.borrow().len(), 1);
+}
+
+#[test]
+fn hostile_mail_and_drafts_are_not_thread_context() {
+    let b = store("thread-hostile");
+    b.kind("bad@evil.example", "Bad", "hostile");
+    let spam = "From: x@example.net\nTo: owner@example.com\nSubject: S\n\nSpam words.\n";
+    let bad = "From: bad@evil.example\nTo: owner@example.com\nSubject: B\n\nHostile words.\n";
+    let draft = "From: owner@example.com\nTo: bo@example.org\nSubject: D\n\nDraft words.\n";
+    let ok = "From: bo@example.org\nTo: owner@example.com\nSubject: K\n\nGood words.\n";
+    let now = "From: bo@example.org\nTo: owner@example.com\nSubject: N\n\nCan you call?\n";
+    let fake = Fake::default();
+    for (i, (raw, label)) in [
+        (spam, "SPAM"),
+        (bad, "INBOX"),
+        (draft, "DRAFT"),
+        (ok, "INBOX"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let m = b.add_in(
+            &i.to_string(),
+            "t1",
+            NOW - 5 * DAY + i as i64,
+            raw,
+            &[label],
+        );
+        understand(&b.store, m, &fake, NOW).unwrap();
+    }
+    let calls_before = fake.calls.borrow().len();
+    let m = b.add_in("9", "t1", NOW - DAY, now, &["INBOX"]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let calls = fake.calls.borrow();
+    assert_eq!(calls.len(), calls_before + 1);
+    let data = &calls[calls_before].1;
+    assert!(data.contains("Good words"), "{data}");
+    for w in ["Spam words", "Hostile words", "Draft words"] {
+        assert!(!data.contains(w), "{w}: {data}");
+    }
 }
