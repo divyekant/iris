@@ -299,3 +299,35 @@ fn the_schema_and_the_parser_agree_on_generated_policies() {
     // Both verdicts occur, so the property tests both sides.
     assert!(ok > 500 && refused > 500, "ok {ok}, refused {refused}");
 }
+
+/// The JSON form of a TOML date and of a text in quotes is the same, so the
+/// schema cannot refuse `added = "2026-11-10"`. Specification 2, section 6.1
+/// names this difference. If the schema or the parser changes here, this test
+/// goes red, and the specification must change too.
+#[test]
+fn a_quoted_added_date_is_a_known_difference_of_the_schema() {
+    let schema = validator("policy");
+    let text = "version = 0\nmode = \"apply\"\n\n[[rule]]\nid = 1\nname = \"Hide the feed\"\n\
+                effect = \"hide\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = \"2026-11-10\"\n";
+    assert!(schema_accepts(&schema, text));
+    assert!(iris_policy::parse(text).is_err());
+    let date = text.replace("\"2026-11-10\"", "2026-11-10");
+    assert!(schema_accepts(&schema, &date));
+    assert!(iris_policy::parse(&date).is_ok());
+}
+
+/// A TOML float with no fraction has the same JSON form as an integer, and
+/// JSON Schema counts `1.0` as an integer. Specification 2, section 6.1 names
+/// this difference too.
+#[test]
+fn a_float_with_no_fraction_is_a_known_difference_of_the_schema() {
+    let schema = validator("policy");
+    for text in [
+        "version = 0.0\nmode = \"apply\"\n",
+        "version = 0\nmode = \"apply\"\n[[rule]]\nid = 1.0\nname = \"x\"\neffect = \"hide\"\n\
+         when = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    ] {
+        assert!(schema_accepts(&schema, text), "{text}");
+        assert!(iris_policy::parse(text).is_err(), "{text}");
+    }
+}

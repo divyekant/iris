@@ -333,9 +333,15 @@ format that a person can read and edit, and comments in the file stay.
 `schema/policy.schema.json` is the JSON Schema of the file, with sample
 files in `schema/examples/` (files `policy*.toml`). A TOML editor that reads
 JSON Schema can use it. The schema reads the TOML data as JSON, with each
-TOML date as a text `YYYY-MM-DD`. The engine refuses two more cases that the
-schema does not see: two rules with the same `id`, and a file larger than
-256 KiB.
+TOML date as a text `YYYY-MM-DD`. The engine refuses three more cases that
+the schema does not see:
+
+- Two rules with the same `id`.
+- A file larger than 256 KiB.
+- A value of a TOML type that has the same JSON form as the type that the
+  field needs: an `added` text in quotes (`added = "2026-11-10"`) in place
+  of a TOML date, and a float with no fraction (`id = 1.0`) in place of an
+  integer.
 
 ```toml
 # Iris policy. Version 0 (draft).
