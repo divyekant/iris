@@ -380,38 +380,31 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
     assert_eq!(c["owner"], json!({"kind": "self"}));
     assert_eq!(c["counterparty"]["address"], "bo@example.org");
     assert!(m.calls.borrow()[0].1.contains("Bcc: bo@example.org\n"));
-    // The model can choose among the recipients. Another address becomes
-    // the first recipient, in both directions.
-    let two = "From: owner@example.com\nTo: ana@example.org, cy@example.org\nSubject: Slides\n\nI will send the slides by Friday.\n";
-    for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {
-        let picks = [
-            (json!({"address": "cy@example.org"}), "cy@example.org"),
-            (json!({"address": "bo@evil.example"}), "ana@example.org"),
-            (json!({"kind": "self"}), "ana@example.org"),
-        ];
-        for (pick, want) in picks {
-            let mut p = promise.clone();
-            p[0]["direction"] = json!(dir);
-            p[0][key] = pick.clone();
-            let m = Fake::with(vec![answer(p)]);
-            let d = run(two, Kind::SelfOwner, &["SENT"], &[], Some(&m))
-                .1
-                .unwrap();
-            assert_eq!(d.drafts[0].item[key]["address"], want, "{dir} {pick}");
-        }
+    // The model chooses the other side, also a person who is not a
+    // recipient. The engine fills it only when the model gives none: the
+    // first recipient that is not an owner address (the alias in From too).
+    let alias = "From: me@alias.example\nTo: me@alias.example, Owner@example.com, ana@example.org\nSubject: Slides\n\nAlice will send the report.\n";
+    let base = json!([{"form": "commitment", "title": "Report", "quote": "Alice will send the report.",
+                       "direction": "owed_to_you", "kind": "task"}]);
+    let cases = [
+        (json!({"address": "alice@example.net"}), "alice@example.net"),
+        (json!({"address": "ana@example.org"}), "ana@example.org"),
+        (json!({"kind": "self"}), "ana@example.org"),
+        (json!({"address": "me@alias.example"}), "ana@example.org"),
+    ];
+    for (pick, want) in cases {
+        let mut p = base.clone();
+        p[0]["owner"] = pick.clone();
+        let m = Fake::with(vec![answer(p)]);
+        let d = run(alias, Kind::SelfOwner, &["SENT"], &[], Some(&m))
+            .1
+            .unwrap();
+        let c = &d.drafts[0].item;
+        assert_eq!(c["owner"]["address"], want, "{pick}");
+        assert_eq!(c["counterparty"], json!({"kind": "self"}));
     }
-    // The owner as a recipient is never the other side.
-    let me_too = "From: owner@example.com\nTo: Owner@example.com\nCc: ana@example.org\nSubject: Slides\n\nI will send the slides by Friday.\n";
-    let m = Fake::with(vec![answer(promise.clone())]);
-    let d = run(me_too, Kind::SelfOwner, &["SENT"], &[], Some(&m))
-        .1
-        .unwrap();
-    assert_eq!(
-        d.drafts[0].item["counterparty"]["address"],
-        "ana@example.org"
-    );
-    // Mail to the owner only, with no party from the model: no commitment.
-    let only_me = "From: owner@example.com\nTo: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    // Mail to owner addresses only, with no party from the model: no item.
+    let only_me = "From: me@alias.example\nTo: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
     let m = Fake::with(vec![answer(promise.clone()), answer(promise.clone())]);
     let d = run(only_me, Kind::SelfOwner, &["SENT"], &[], Some(&m))
         .1

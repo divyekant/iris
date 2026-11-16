@@ -862,14 +862,15 @@ The conversation rule runs for each message that is not hostile mail:
   `list` of a feed. In sent mail, the party of the sender is the
   owner, also when `From` is an alias.
 - The `direction` of a commitment gives the side of the owner (`owner` for
-  `you_owe`, else `counterparty`). The other side is never the owner: it is
-  the party of the model if that party has an address, else the sender.
-  In sent mail, the other side is a `To`, `Cc` or `Bcc` recipient other
-  than the owner (sent mail keeps `Bcc`).
-  The model can choose among the recipients. If the model gives no party
-  or another address, the engine uses the first recipient that is not the
-  owner. With no such recipient, only the parties in the model answer can
-  make a commitment valid.
+  `you_owe`, else `counterparty`). The model chooses the other side, also
+  a person who is not in the headers. The engine fills the other side only
+  when the model gives no party with an address: with the sender, or in
+  sent mail with the first `To`, `Cc` or `Bcc` recipient that is not an
+  owner address (sent mail keeps `Bcc`). With no such party, the
+  commitment is not valid. The other side is never the owner.
+- The owner addresses are the address of the mailbox and, in sent mail,
+  the `From` address (also an alias). A party with an owner address is the
+  owner.
 - The answer must have a boolean `phishing`. Each party in the answer must
   be the owner or have an address. Else the answer is not valid.
 - The model has no tools. It returns one JSON document: a list of items

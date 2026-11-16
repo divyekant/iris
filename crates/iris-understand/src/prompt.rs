@@ -305,19 +305,19 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
         _ => return None,
     }
     let mut item = Value::Object(m);
-    parties(&mut item, cx.me)?;
+    parties(&mut item, &owner_addresses(a, cx))?;
     if form == "commitment" {
         commitment_sides(&mut item, src, a, cx)?;
     }
     Some(Draft::model(item, &quote))
 }
 
-/// The two sides of a commitment (section 7.4): the direction gives the
-/// side of the owner of the mailbox, and the other side is never the owner.
-/// The other side is the party of the model if it has an address, else the
-/// sender. In sent mail with recipients, it must be a `To`, `Cc` or `Bcc`
-/// recipient: any other party becomes the first recipient. `None` if no
-/// other party has an address.
+/// The two sides of a commitment (section 7.4). The direction gives the
+/// side of the owner of the mailbox. The model chooses the other side; the
+/// engine fills it only when the model gives no party with an address: the
+/// sender, or in sent mail the first recipient that is not an owner
+/// address. The other side is never the owner. `None` if no other party
+/// has an address.
 fn commitment_sides(
     item: &mut Value,
     src: &Map<String, Value>,
@@ -330,35 +330,38 @@ fn commitment_sides(
     } else {
         ("counterparty", "owner")
     };
-    let chosen = item
-        .get(other)
-        .and_then(|p| p.get("address"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let h = &a.head;
-    let party = if cx.kind == crate::Kind::SelfOwner {
-        // The owner can be a recipient too, but is never the other side.
-        let all: Vec<&String> =
-            h.to.iter()
-                .chain(&h.cc)
-                .chain(&h.bcc)
-                .filter(|r| !r.eq_ignore_ascii_case(cx.me))
-                .collect();
-        match (all.first(), chosen) {
-            (Some(_), Some(c)) if all.iter().any(|r| **r == c) => item[other].clone(),
-            (Some(first), _) => json!({"kind": "sender", "address": first}),
-            (None, Some(_)) => item[other].clone(),
-            (None, None) => return None,
+    // After the party check, a party with an address is not an owner address.
+    let chosen = item.get(other).filter(|p| p.get("address").is_some());
+    let party = match chosen {
+        Some(p) => p.clone(),
+        None if cx.kind == crate::Kind::SelfOwner => {
+            let h = &a.head;
+            let owners = owner_addresses(a, cx);
+            let first =
+                h.to.iter()
+                    .chain(&h.cc)
+                    .chain(&h.bcc)
+                    .find(|r| !owners.iter().any(|o| o.eq_ignore_ascii_case(r)))?;
+            json!({"kind": "sender", "address": first})
         }
-    } else if chosen.is_some() {
-        item[other].clone()
-    } else {
-        h.from_addr.as_ref()?;
-        party_sender(a)
+        None => {
+            a.head.from_addr.as_ref()?;
+            party_sender(a)
+        }
     };
     item[mine] = json!({"kind": "self"});
     item[other] = party;
     Some(())
+}
+
+/// The addresses of the owner: `cx.me`, and in sent mail the `From`
+/// address, also an alias (section 6.7).
+fn owner_addresses<'a>(a: &'a Analysis, cx: &'a Context) -> Vec<&'a str> {
+    let mut v = vec![cx.me];
+    if cx.kind == crate::Kind::SelfOwner {
+        v.extend(a.head.from_addr.as_deref());
+    }
+    v
 }
 
 /// The quote occurs in the subject, the clean text or the attachment text,
@@ -382,12 +385,12 @@ fn squash(s: &str) -> String {
         .to_lowercase()
 }
 
-/// Make each model party a party of the open model: the owner of the mailbox
+/// Make each model party a party of the open model: an owner address (`me`)
 /// becomes `{"kind": "self"}`, each other address a `sender` party. The
 /// `p-` ID is added later, from the sender row.
 /// `None` if a party is neither the owner nor has an address: the store
 /// finds the sender row of a party only by its address.
-fn parties(item: &mut Value, me: &str) -> Option<()> {
+fn parties(item: &mut Value, me: &[&str]) -> Option<()> {
     for key in ["owner", "counterparty", "issuer", "publisher"] {
         if let Some(p) = item.get_mut(key) {
             fix(p, me)?;
@@ -401,7 +404,7 @@ fn parties(item: &mut Value, me: &str) -> Option<()> {
     Some(())
 }
 
-fn fix(p: &mut Value, me: &str) -> Option<()> {
+fn fix(p: &mut Value, me: &[&str]) -> Option<()> {
     let o = p.as_object()?;
     let addr = o
         .get("address")
@@ -410,7 +413,7 @@ fn fix(p: &mut Value, me: &str) -> Option<()> {
     let is_self = o.get("kind").and_then(Value::as_str) == Some("self")
         || addr
             .as_deref()
-            .is_some_and(|ad| ad.eq_ignore_ascii_case(me));
+            .is_some_and(|ad| me.iter().any(|m| ad.eq_ignore_ascii_case(m)));
     if is_self {
         *p = json!({"kind": "self"});
         return Some(());
