@@ -269,7 +269,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
             let now = engine::now_ms();
             let text = match (estimate, approve, budget) {
                 (true, _, _) => cost::estimate(&store, now)?,
-                (_, Some(code), Some(budget)) => cost::approve_command(&store, code, budget, now)?,
+                (_, Some(code), Some(budget)) => cost::approve_command(&store, code, budget)?,
                 _ => {
                     let limits = iris_understand::batch::Limits {
                         max_messages: *max_messages,

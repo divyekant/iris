@@ -312,3 +312,50 @@ fn model_set_fails_while_a_run_holds_the_lock() {
         .0
     );
 }
+
+#[test]
+fn a_receipt_that_gets_old_while_the_prompt_waits_does_not_approve() {
+    let (store, _fake) = synced("expire");
+    let model = iris::cost::NewModel {
+        local: false,
+        base_url: "https://api.anthropic.com".into(),
+        model: "m".into(),
+        price: Some((1_000_000, 1_000_000)),
+        api_key: Some(KEY.into()),
+        max_tokens: 100,
+        timeout_s: 10,
+    };
+    iris::cost::set_model(&store, &model).unwrap();
+    let t0 = iris::engine::now_ms();
+    let out = iris::cost::estimate(&store, t0).unwrap();
+    let code = out
+        .split("--approve ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .unwrap()
+        .to_string();
+    // The first clock read is at the prompt; the second is after the input.
+    let reads = std::cell::Cell::new(0);
+    let clock = || {
+        reads.set(reads.get() + 1);
+        if reads.get() == 1 {
+            t0 + iris::cost::RECEIPT_MS - 1
+        } else {
+            t0 + iris::cost::RECEIPT_MS + 1
+        }
+    };
+    let mut sink = Vec::new();
+    let r = iris::cost::confirm(&store, &code, "5", &mut "5\n".as_bytes(), &mut sink, &clock);
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(
+        col(&store, "SELECT budget_micro_usd FROM model_setting"),
+        None
+    );
+    // With the same clock at both reads, the same input approves.
+    let r = iris::cost::confirm(&store, &code, "5", &mut "5\n".as_bytes(), &mut sink, &|| t0);
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(
+        col(&store, "SELECT budget_micro_usd FROM model_setting"),
+        Some(5_000_000)
+    );
+}

@@ -3,7 +3,7 @@
 //! with the estimate, the approval of a budget and the run.
 
 use std::io::{BufRead, IsTerminal, Read, Write};
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use iris_store::Store;
@@ -129,11 +129,25 @@ fn pin_local_url(url: &str) -> Result<String, String> {
             u.host
         ));
     }
-    let ip = match addrs[0].ip() {
+    let ip = match reachable(&addrs).ip() {
         IpAddr::V4(v4) => v4.to_string(),
         IpAddr::V6(v6) => format!("[{v6}]"),
     };
     Ok(format!("http://{ip}:{}{}", u.port, u.path))
+}
+
+/// The first address of the checked loopback set that accepts a TCP
+/// connection, else the first address. `localhost` can give `::1` and
+/// `127.0.0.1`, and a server can listen on one of them only.
+fn reachable(addrs: &[SocketAddr]) -> SocketAddr {
+    if addrs.len() == 1 {
+        return addrs[0]; // An IP literal: no probe connection.
+    }
+    addrs
+        .iter()
+        .find(|a| TcpStream::connect_timeout(a, Duration::from_secs(1)).is_ok())
+        .unwrap_or(&addrs[0])
+        .to_owned()
 }
 
 /// What `iris model set` writes.
@@ -402,22 +416,38 @@ pub fn approve(store: &Store, code: &str, budget: u64, now_ms: i64) -> Result<()
 
 /// `iris understand --approve`: needs a terminal, shows the receipt and the
 /// budget left, and asks for the budget again.
-pub fn approve_command(
-    store: &Store,
-    code: &str,
-    budget: &str,
-    now_ms: i64,
-) -> Result<String, String> {
+pub fn approve_command(store: &Store, code: &str, budget: &str) -> Result<String, String> {
     if !std::io::stdin().is_terminal() {
         return Err(
             "the approval of a budget needs a terminal: standard input is not a TTY".into(),
         );
     }
+    let stdin = std::io::stdin();
+    confirm(
+        store,
+        code,
+        budget,
+        &mut stdin.lock(),
+        &mut std::io::stderr(),
+        &crate::engine::now_ms,
+    )
+}
+
+/// The confirmation of `approve_command`, with its input, output and clock.
+/// The final check reads the clock again after the input, so a receipt
+/// that gets too old while the prompt waits does not approve.
+pub fn confirm(
+    store: &Store,
+    code: &str,
+    budget: &str,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+    clock: &dyn Fn() -> i64,
+) -> Result<String, String> {
     let new = parse_usd(budget, MAX_BUDGET_USD)?;
-    let r = check_receipt(store, code, now_ms)?;
-    let mut err = std::io::stderr();
+    let r = check_receipt(store, code, clock())?;
     let _ = writeln!(
-        err,
+        out,
         "Estimate: {} messages, about {} USD.\nBudget left now: {}\nNew budget: {} USD\n{PRICE_NOTE}\nType the new budget again to approve:",
         r.messages,
         usd(r.cost_micro_usd),
@@ -425,14 +455,11 @@ pub fn approve_command(
         usd(new as i64),
     );
     let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
+    input.read_line(&mut line).map_err(|e| e.to_string())?;
     if parse_usd(line.trim(), MAX_BUDGET_USD) != Ok(new) {
         return Err("the two budgets are not the same: nothing changed".into());
     }
-    approve(store, code, new, now_ms)?;
+    approve(store, code, new, clock())?;
     Ok(format!("Budget approved: {} USD.", usd(new as i64)))
 }
 
@@ -735,5 +762,18 @@ mod tests {
                 assert_eq!(parse_usd(&usd(v as i64), 1000), Ok(v), "{s}");
             }
         }
+    }
+
+    #[test]
+    fn the_pinned_address_is_one_that_listens() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        // 127.0.0.2 is loopback too, and nothing listens there on this port.
+        let dead: SocketAddr = format!("127.0.0.2:{port}").parse().unwrap();
+        let live: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        assert_eq!(reachable(&[dead, live]), live);
+        assert_eq!(reachable(&[live, dead]), live);
+        drop(l);
+        assert_eq!(reachable(&[dead, live]), dead, "none listens: the first");
     }
 }
