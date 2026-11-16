@@ -1,7 +1,7 @@
 # Spec: cost control for understanding
 
 - Date: 2026-11-16
-- Card: R1-15
+- Card: R1-30 (this spec). The build: R1-31 (batch runner), R1-15 (commands).
 - Status: Draft
 
 ## Problem
@@ -243,7 +243,10 @@ Stop conditions, checked before each message:
 - `Limits::max_messages` messages are done: `stop = messages`. The next run
   goes on in the same thread.
 - After a model refusal of the call (HTTP 401, 403 or 429): `stop = model`.
-  The message stays pending.
+  The message stays pending. Such a refusal is a definite rejection with no
+  charge: the provider did not run the model. The settle write gives back
+  the whole reservation, and the call counts in `calls` with zero tokens,
+  not in `unknown_calls`. This holds also when the answer has no usage.
 - After a call with an unknown result or unknown usage (a time-out, a lost
   response, HTTP 5xx, an answer with no usage): `stop = unknown`.
 - Another error: `stop = error`, and the error goes to the caller.
@@ -416,7 +419,7 @@ more calls.
 | Automatic runs after each sync | Each run spends again | All runs take from one budget. | Batch test: two runs, one budget. |
 | A changed model row after the approval | The approval of another price | `iris model set` clears the budget; the runner makes its own model from the row. | Batch test. |
 | A second runner | Two runs pay twice | "a run is in progress", no call. | Two runners on one store. |
-| HTTP 401, 403, 429 | No call can work now | `stop = model`, the message stays pending. | Fake model error. |
+| HTTP 401, 403, 429 (with or without usage) | No call can work now; no charge | `stop = model`, the message stays pending, the whole reservation goes back, zero tokens. | Fake model error. |
 | A time-out, a lost response, 5xx, an answer with no usage | Unknown charge | Worst case in `unknown_cost_micro_usd`, `stop = unknown`. | Fake model error and a reply with no usage. |
 | A bad first answer, a good second one | The first call loses its usage | Both calls count. | Fake model. |
 | An older message fails in this run | A later reply runs without its context | The later reply waits. | Batch test. |
@@ -488,9 +491,9 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-1. PR 1: this spec.
-2. PR 2: `schema_3.sql`, the usage status, the `batch` module.
-3. PR 3: `iris model` and `iris understand`.
+1. R1-30: this spec.
+2. R1-31: `schema_3.sql`, the usage status, the `batch` module.
+3. R1-15: `iris model` and `iris understand`.
 
 ## Risks
 
@@ -501,9 +504,11 @@ scripts/local-ci/run.sh
 
 ## Plan
 
-1. R1-15 PR 1: this spec.
-2. R1-15 PR 2: batch runner, counts, estimate.
-3. R1-15 PR 3: commands.
+One PR for each card:
+
+1. R1-30: this spec.
+2. R1-31 (depends on R1-30): batch runner, counts, estimate.
+3. R1-15 (depends on R1-31): commands.
 
 ## Test plan
 
