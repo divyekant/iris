@@ -66,6 +66,23 @@ pub fn run(mut c: Command, wait: Duration) -> Result<(), String> {
     }
 }
 
+/// The most notices that wait for their system notice. More are dropped:
+/// the web client still shows them.
+pub const QUEUE: usize = 100;
+
+/// Starts the thread that shows each notice that it gets with `show`, one
+/// at a time. The sender never waits: a slow command must not hold the
+/// attention thread (spec: the pass runs each 10 seconds).
+pub fn spawn(
+    show: fn(&iris_policy::notice::Notice),
+) -> std::sync::mpsc::SyncSender<iris_policy::notice::Notice> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<iris_policy::notice::Notice>(QUEUE);
+    let _ = std::thread::Builder::new()
+        .name("notices".into())
+        .spawn(move || rx.iter().for_each(|n| show(&n)));
+    tx
+}
+
 /// True after the first failure, so that a server with no desktop writes
 /// one log line, not one for each notice.
 static FAILED: AtomicBool = AtomicBool::new(false);
@@ -111,6 +128,33 @@ mod tests {
         assert_eq!(mac.get_program(), "/usr/bin/osascript");
         assert_eq!(args(&command("linux", "t", "x").unwrap())[1], "--");
         assert!(command("windows", "t", "x").is_none());
+    }
+
+    fn notice(id: i64) -> iris_policy::notice::Notice {
+        iris_policy::notice::Notice {
+            id,
+            message_id: id,
+            rule: 1,
+            rule_name: "r".into(),
+            title: "t".into(),
+            text: "x".into(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn slow_system_notices_never_hold_the_sender() {
+        // Each notice takes 1 second to show. The sends still end at once.
+        let tx = spawn(|_| std::thread::sleep(Duration::from_secs(1)));
+        let t = Instant::now();
+        for id in 0..(QUEUE as i64 + 20) {
+            let _ = tx.try_send(notice(id));
+        }
+        assert!(
+            t.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t.elapsed()
+        );
     }
 
     #[test]
