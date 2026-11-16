@@ -267,11 +267,77 @@ fn correct_changes_one_field() {
     assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
     assert_eq!(b.doc()["due"]["date"], json!("2026-11-20"));
     let (_, _, pre, post) = b.entry(a);
-    assert_eq!(pre, json!({ "c-1": { "due.date": "2026-11-17" } }));
-    assert_eq!(post, json!({ "c-1": { "due.date": "2026-11-20" } }));
+    assert_eq!(
+        pre,
+        json!({ "c-1": { "due.date": "2026-11-17", "status": "open" } })
+    );
+    assert_eq!(
+        post,
+        json!({ "c-1": { "due.date": "2026-11-20", "status": "open" } })
+    );
     assert_eq!(
         b.one("SELECT by FROM correction WHERE field = 'due.date'"),
         json!("cs-1")
+    );
+
+    // A correction of a record changes its status to `corrected`: the
+    // entry holds that change too, so the undo can set it back.
+    let mut doc = iris_spec::read_json(
+        &iris_spec::schema_dir()
+            .join("examples")
+            .join("record-receipt.json"),
+    );
+    doc["id"] = json!("r-2");
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('record', 1, 'kept', ?1, 0, 0)",
+                [doc.to_string()],
+            )?)
+        })
+        .unwrap();
+    let author = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let args = json!({ "field": "fields.order", "value": "EB-1" });
+    let s = &b.store;
+    let cs = iris_changeset::create(s, &author, now()).unwrap();
+    let verb = Verb::Correct;
+    iris_changeset::add_action(
+        s,
+        cs,
+        &author,
+        verb,
+        &["r-2"],
+        args.as_object().unwrap(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(s, cs, &author, "Fix the order.", now()).unwrap();
+    let a = b
+        .one("SELECT max(id) FROM changeset_action")
+        .as_i64()
+        .unwrap();
+    let hash = b.one(&format!("SELECT hash FROM changeset_action WHERE id = {a}"));
+    let action = ActionId {
+        changeset: cs,
+        revision: 1,
+        n: 1,
+    };
+    iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
+    assert!(matches!(apply_state(s, a), Ok(Outcome::Applied(_))));
+    let (_, _, pre, post) = b.entry(a);
+    assert_eq!(
+        pre,
+        json!({ "r-2": { "fields.order": "EB-20931", "status": "kept" } })
+    );
+    assert_eq!(
+        post,
+        json!({ "r-2": { "fields.order": "EB-1", "status": "corrected" } })
     );
 }
 

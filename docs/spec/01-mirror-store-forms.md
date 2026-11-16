@@ -712,6 +712,7 @@ mail" is a message with a hostile mark, or a message from a `hostile` sender.
 |---|---|---|
 | Each form | To `gone`, and back | The engine (section 4.5). |
 | Commitment | `open` to `done`, `declined`, `deferred` or `cancelled` | A person, through a changeset (release 2). Understanding sets `done` or `cancelled` when a later message of the thread says so. |
+| Commitment | `deferred` to `done`, `declined`, or `deferred` with a new date | A person, through a changeset (release 2): `close`, `decline` and `defer` (specification 2, section 4). |
 | Commitment | `deferred` to `open` | The engine, on the `deferred_until` date (UTC). The engine checks once each minute. |
 | Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
 | Conversation | `muted` | Reserved. A later release adds the verb. |

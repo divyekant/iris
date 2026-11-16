@@ -128,26 +128,39 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     // Submit wrote the arguments, and checked them.
     let args: Map<String, Value> = serde_json::from_str(&args).unwrap_or_default();
     let fields: Vec<String> = match verb.as_str() {
-        "correct" => vec![args["field"].as_str().unwrap_or("").into()],
+        // A correction can change the status too (a record becomes
+        // `corrected`, a signal follows `expires`).
+        "correct" => vec![args["field"].as_str().unwrap_or("").into(), "status".into()],
         // `close` and `decline` remove `deferred_until`: the undo needs it.
         _ => vec!["status".into(), "deferred_until".into()],
     };
-    let plan = plan(tx, action, &verb, &args, &fields, now_ms)?;
-    let (pre, post) = match &plan {
-        Ok(items) => (
-            Some(Value::Object(
-                items
-                    .iter()
-                    .map(|i| (i.id.clone(), i.pre.clone()))
-                    .collect(),
-            )),
-            Some(Value::Object(
-                items
-                    .iter()
-                    .map(|i| (i.id.clone(), i.post.clone()))
-                    .collect(),
-            )),
-        ),
+    let by = format_changeset_id(changeset);
+    // The writes first, in a savepoint: a refusal leaves no item write of
+    // the action. Then the entry, with `pre` and `post` read from the
+    // documents before and after, so the entry holds each changed value.
+    tx.execute_batch("SAVEPOINT state_write")?;
+    let result = match plan(tx, action, &verb, &args, &fields, now_ms)? {
+        Ok(items) => match write(tx, &verb, &args, &items, &by, now_ms)? {
+            Ok(()) => {
+                let mut pre = Map::new();
+                let mut post = Map::new();
+                for i in items {
+                    let doc = item_doc(tx, i.item)?.unwrap_or(Value::Null);
+                    post.insert(i.id.clone(), values(&doc, &fields));
+                    pre.insert(i.id, i.pre);
+                }
+                Ok((Value::Object(pre), Value::Object(post)))
+            }
+            Err(e) => Err(e),
+        },
+        Err(e) => Err(e),
+    };
+    if result.is_err() {
+        tx.execute_batch("ROLLBACK TO state_write")?;
+    }
+    tx.execute_batch("RELEASE state_write")?;
+    let (pre, post) = match &result {
+        Ok((pre, post)) => (Some(pre.to_string()), Some(post.to_string())),
         Err(_) => (None, None),
     };
     // The entry claims the action. `pre` and `post` do not change after it.
@@ -157,27 +170,16 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         params![
             action,
             json!({ "fields": fields }).to_string(),
-            pre.map(|v| v.to_string()),
-            post.map(|v| v.to_string()),
+            pre,
+            post,
             // A failed entry changed nothing, so it has no undo.
-            if plan.is_ok() { "inverse" } else { "none" },
+            if result.is_ok() { "inverse" } else { "none" },
             now_ms
         ],
     )?;
     let ledger = tx.last_insert_rowid();
-    let by = format_changeset_id(changeset);
-    // A refusal in the write leaves no item write of the action.
-    tx.execute_batch("SAVEPOINT state_write")?;
-    let result = match plan {
-        Ok(items) => write(tx, &verb, &args, &items, &by, now_ms)?,
-        Err(error) => Err(error),
-    };
-    if result.is_err() {
-        tx.execute_batch("ROLLBACK TO state_write")?;
-    }
-    tx.execute_batch("RELEASE state_write")?;
     Ok(match result {
-        Ok(()) => {
+        Ok(_) => {
             // The trigger ledger_state moves the action to `applied`.
             tx.execute(
                 "UPDATE ledger SET state = 'applied' WHERE id = ?1",
@@ -198,8 +200,31 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     })
 }
 
-/// One item of the action: its row, its ID, and the old and new values of
-/// each field.
+/// The document of an item row, or `None` if the row or its JSON is gone.
+fn item_doc(tx: &Transaction, item: i64) -> rusqlite::Result<Option<Value>> {
+    let doc: Option<String> = tx
+        .query_row("SELECT doc FROM item WHERE id = ?1", [item], |r| r.get(0))
+        .optional()?;
+    Ok(doc.and_then(|d| serde_json::from_str(&d).ok()))
+}
+
+/// The value of each field of a document, `null` for a field it has not.
+fn values(doc: &Value, fields: &[String]) -> Value {
+    Value::Object(
+        fields
+            .iter()
+            .map(|f| {
+                (
+                    f.clone(),
+                    doc.pointer(&pointer(f)).cloned().unwrap_or(Value::Null),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// One item of the action: its row, its ID, the old values of each field,
+/// and the values that the verb sets.
 struct Planned {
     item: i64,
     id: String,
@@ -236,8 +261,7 @@ fn plan(
             return Ok(Err(format!("item {item} is not in the store")));
         };
         let id = doc["id"].as_str().unwrap_or_default().to_string();
-        let old = |f: &str| doc.pointer(&pointer(f)).cloned().unwrap_or(Value::Null);
-        let pre: Map<String, Value> = fields.iter().map(|f| (f.clone(), old(f))).collect();
+        let pre = values(&doc, fields);
         let post: Map<String, Value> = match verb {
             "correct" => {
                 let field = &fields[0];
@@ -273,7 +297,7 @@ fn plan(
         out.push(Planned {
             item,
             id,
-            pre: Value::Object(pre),
+            pre,
             post: Value::Object(post),
         });
     }
