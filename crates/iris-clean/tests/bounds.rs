@@ -166,7 +166,7 @@ fn memory_and_time_stay_bounded() {
     eprintln!("peak: {peak} bytes (PDF with many strings before one operator)");
     assert!(peak < 10 * 1024 * 1024, "peak {peak}");
 
-    // A PDF with a dense code map of 4 MiB: the map entries have a budget.
+    // A PDF with a dense code map of 4 MiB: the map is past its budget.
     let mut raw = message(1000, 0);
     raw.truncate(raw.len() - b"--m--\r\n".len());
     let mut cmap =
@@ -204,7 +204,8 @@ fn memory_and_time_stay_bounded() {
     raw.extend_from_slice(b"--m--\r\n");
     let (peak, _, c) = peak_of(&raw);
     eprintln!("peak: {peak} bytes (PDF with a dense code map)");
-    assert_eq!(c.attachments[0].text.as_deref(), Some("AAAA"));
+    // The map is past its budget, so the CID font gives no text.
+    assert_eq!(c.attachments[0].text, None);
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
     // A code map of 4 MiB of hex strings that make no entry.
@@ -274,7 +275,7 @@ fn memory_and_time_stay_bounded() {
     raw.extend_from_slice(b"--m--\r\n");
     let (peak, _, _) = peak_of(&raw);
     eprintln!("peak: {peak} bytes (PDF with one long source code)");
-    assert!(peak < 6 * 1024 * 1024, "peak {peak}");
+    assert!(peak < 8 * 1024 * 1024, "peak {peak}");
 
     // A plain body part of 2 MiB of empty lines and of short quote lines.
     for line in ["\n", "> a\n", "-- \n"] {

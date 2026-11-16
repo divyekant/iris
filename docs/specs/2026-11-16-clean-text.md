@@ -281,7 +281,8 @@ its first 1 KiB holds `%PDF`.
   `beginbfchar` and `beginbfrange` entries, with a direct destination or an
   array of destinations (at most 255 items). Each map costs 136 bytes (on a 64-bit system), each
   entry 16 bytes and each UTF-16 unit 2 bytes of a budget of 1 MiB for
-  each PDF. A map past the budget is not kept. A replaced map gives its
+  each PDF. A map that does not fit in the rest of the budget is not
+  kept, also not in part, and gives its cost back. A replaced map gives its
   cost back. A
   destination has at most 64 units. The keyword `begincmap` counts only
   outside the strings and comments of the stream.

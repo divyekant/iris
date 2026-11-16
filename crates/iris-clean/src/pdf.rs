@@ -643,8 +643,13 @@ impl Doc {
         }
         let before = self.map_left;
         self.map_left -= cost;
-        let map = CMap::parse(data, &mut self.map_left);
-        self.maps.insert(num, (map, before - self.map_left));
+        match CMap::parse(data, &mut self.map_left) {
+            Some(map) => {
+                self.maps.insert(num, (map, before - self.map_left));
+            }
+            // A map past the budget gives its cost back and is not kept.
+            None => self.map_left = before,
+        }
     }
 
     /// Add `b` to the string buffer, or mark the buffer full.
@@ -942,9 +947,22 @@ struct Entry {
 const ENTRY_COST: usize = std::mem::size_of::<Entry>();
 
 /// The length and the value of a code of 1 to 4 bytes in hex.
+/// It reads the digits in place, so a long token costs no memory.
 fn code(h: &[u8]) -> Option<(usize, u32)> {
-    let b = hex(h);
-    (1..=4).contains(&b.len()).then(|| (b.len(), be(&b)))
+    let (mut v, mut digits) = (0u32, 0usize);
+    for d in h.iter().filter_map(|&c| (c as char).to_digit(16)) {
+        if digits == 8 {
+            return None;
+        }
+        v = (v << 4) | d;
+        digits += 1;
+    }
+    // An odd last digit is the high half of a byte, as in `hex`.
+    if digits % 2 == 1 {
+        v <<= 4;
+        digits += 1;
+    }
+    (digits > 0).then_some((digits / 2, v))
 }
 
 /// The big-endian value of at most 4 bytes.
@@ -976,7 +994,8 @@ impl CMap {
 
     /// Read the code space and the `bfchar` and `bfrange` entries. Each entry
     /// and each UTF-16 unit takes its bytes from `left`.
-    fn parse(data: &[u8], left: &mut usize) -> CMap {
+    /// `None` if the map does not fit in `left`.
+    fn parse(data: &[u8], left: &mut usize) -> Option<CMap> {
         enum Op<'a> {
             Hex(&'a [u8]),
             List(Vec<&'a [u8]>),
@@ -989,7 +1008,7 @@ impl CMap {
         let mut lx = Lexer::new(data);
         while let Some(t) = lx.next() {
             if *left < ENTRY_COST || m.units.len() >= u32::MAX as usize - 65_536 {
-                break;
+                return None;
             }
             match t {
                 Tok::Hex(h) => ops.push(Op::Hex(h)),
@@ -1065,7 +1084,7 @@ impl CMap {
             ops.clear();
         }
         m.entries.sort_unstable_by_key(|e| (e.len, e.lo));
-        m
+        Some(m)
     }
 
     /// The length of the code at the start of `b`, at least 1.
@@ -1923,11 +1942,11 @@ mod tests {
         many.extend_from_slice(b"ET");
         let pdf = doc(&[(3, "<< >>", Some(&many))]);
         assert_eq!(text(&pdf, 100_000).map(|t| t.len()), Some(FONT_LIMIT + 100));
-        // One range for all four-byte codes, and a map past its budget.
+        // One range for all four-byte codes.
         let mut cmap =
             b"begincmap 1 beginbfrange <00000000> <FFFFFFFF> <0041> endbfrange 1 beginbfchar"
                 .to_vec();
-        for _ in 0..MAP_BUDGET {
+        for _ in 0..1000 {
             cmap.extend_from_slice(b" <01> <0042>");
         }
         let pdf = doc(&[
