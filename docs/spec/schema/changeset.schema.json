@@ -84,22 +84,19 @@
       }
     },
     {
-      "$comment": "A submitted changeset has a submit time and a reason (section 5.1).",
+      "$comment": "A submit needs a reason, and the reason stays after the submit, also after a withdraw (section 5.1).",
       "if": {
+        "required": [
+          "submitted"
+        ],
         "properties": {
-          "state": {
-            "enum": [
-              "open",
-              "closed"
-            ]
+          "submitted": {
+            "type": "string"
           }
         }
       },
       "then": {
         "properties": {
-          "submitted": {
-            "type": "string"
-          },
           "why": {
             "type": "string",
             "pattern": "\\S"
@@ -108,13 +105,14 @@
       }
     },
     {
-      "$comment": "Each action of a submitted changeset has a state. Open while an action is open, closed when none is (sections 5.1 and 5.2).",
+      "$comment": "Only the actions of a draft revision have no decision. A submit gives each action a state, and a withdraw cancels each draft action (sections 5.4 and 5.5).",
       "if": {
         "properties": {
           "state": {
             "enum": [
               "open",
-              "closed"
+              "closed",
+              "withdrawn"
             ]
           }
         }
@@ -129,6 +127,25 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "open",
+              "closed"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "submitted": {
+            "type": "string"
           }
         }
       }
@@ -307,6 +324,102 @@
                     }
                   }
                 ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A withdraw cancels each proposed and in_review action (section 5.5).",
+      "if": {
+        "properties": {
+          "state": {
+            "const": "withdrawn"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "not": {
+                "type": "object",
+                "required": [
+                  "decision"
+                ],
+                "properties": {
+                  "decision": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "proposed",
+                          "in_review"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A stored changeset has a hash for each submitted action, and a submit needs one or more actions (section 5.4, migration 7). Only the triage proposal of release 1, which the engine does not store, can have no action and no hash. A cancelled action can be a draft action of a withdrawn changeset, with no hash.",
+      "if": {
+        "required": [
+          "submitted",
+          "author"
+        ],
+        "properties": {
+          "submitted": {
+            "type": "string"
+          },
+          "author": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "const": "triage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "minItems": 1,
+            "items": {
+              "if": {
+                "properties": {
+                  "decision": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "not": {
+                          "const": "cancelled"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "hash": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
