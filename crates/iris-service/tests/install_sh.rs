@@ -141,7 +141,10 @@ fn a_system_with_no_service_manager_keeps_the_program() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(dir.join("home/.local/bin/iris").is_file());
-    assert!(stderr.contains("the background service did not start"), "{stderr}");
+    assert!(
+        stderr.contains("the background service did not start"),
+        "{stderr}"
+    );
     assert!(stderr.contains("iris serve"), "{stderr}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
