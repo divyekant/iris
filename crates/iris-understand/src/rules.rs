@@ -94,7 +94,14 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     }
     let subject = a.text.subject.as_str();
     let quote = or_none(subject);
-    if a.text.invitation && cx.kind != Kind::SelfOwner {
+    // You owe an answer only to a request that names you as a recipient.
+    let to_me = a
+        .head
+        .to
+        .iter()
+        .chain(&a.head.cc)
+        .any(|r| r.eq_ignore_ascii_case(cx.me));
+    if a.text.invitation && cx.kind != Kind::SelfOwner && to_me {
         let owner = json!({ "kind": "self" });
         let item = json!({
             "form": "commitment",
@@ -139,7 +146,9 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
             });
             return Some(vec![Draft::rule(item, "code", line)]);
         }
-        if a.head.list_id.is_some() || a.head.list_unsubscribe {
+        // A file can hold a record that no word of the text names.
+        let list = a.head.list_id.is_some() || a.head.list_unsubscribe;
+        if list && a.text.attachments.is_empty() {
             let mut item = json!({
                 "form": "feed",
                 "status": feed_status(cx),

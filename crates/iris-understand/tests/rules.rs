@@ -135,6 +135,7 @@ fn an_old_code_is_expired() {
 }
 
 const INVITE: &str = "From: Ana Lee <ana@example.org>
+To: Owner <Owner@Example.com>
 Subject: Planning
 Content-Type: multipart/alternative; boundary=a
 
@@ -355,9 +356,25 @@ Invoice 77. Amount 12.50 USD.
 --b--
 ";
     assert!(drafts(raw, Kind::Service, &[]).is_none());
-    // The same message with a neutral file is a feed item.
-    let plain = raw.replace("Invoice 77. Amount 12.50 USD.", "Notes of the week.");
-    assert_eq!(one(&plain, Kind::Service, &[]).item["form"], "feed");
+    // List mail with any file goes to the model: a file name or a file
+    // without record words can hold a receipt too.
+    let plain = raw.replace("Invoice 77. Amount 12.50 USD.", "Order 73, $42");
+    assert!(drafts(&plain, Kind::Service, &[]).is_none());
+}
+
+#[test]
+fn an_invitation_for_another_person_goes_to_the_model() {
+    let other = INVITE.replace(
+        "To: Owner <Owner@Example.com>",
+        "To: Team <team@example.org>",
+    );
+    assert_ne!(other, INVITE);
+    assert!(drafts(&other, Kind::Person, &[]).is_none());
+    let cc = INVITE.replace(
+        "To: Owner <Owner@Example.com>",
+        "To: team@example.org\nCc: owner@example.com",
+    );
+    assert_eq!(one(&cc, Kind::Person, &[]).item["kind"], "invitation");
 }
 
 #[test]
