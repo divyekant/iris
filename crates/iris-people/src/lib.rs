@@ -426,15 +426,27 @@ pub fn addresses(list: &str) -> Vec<String> {
 /// display name if it has one. `mail-parser` reads the list (RFC 5322
 /// quotes, comments, groups and RFC 2047 encoded words).
 pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
+    let low = list.to_lowercase();
     let parsed = HeaderForm::Addresses.parse(list.as_bytes());
     let Some(list) = parsed.value().as_address() else {
         return Vec::new();
     };
     list.mailboxes()
         .filter_map(|m| {
-            let address = valid_address(m.address()?)?;
             let name = m.name().map(str::trim).filter(|n| !n.is_empty());
-            Some((address, name.map(str::to_string)))
+            let raw = m.address()?;
+            // mail-parser 1.0.1 reads a bare quoted local part such as
+            // `"a,b"@example.org` as the name `a,b` and the address
+            // `@example.org`. Join the two again if the list has that text.
+            if let (Some(n), Some(domain)) = (name, raw.strip_prefix('@')) {
+                let whole = format!("\"{n}\"@{domain}");
+                return low
+                    .contains(&whole.to_lowercase())
+                    .then(|| valid_address(&whole))
+                    .flatten()
+                    .map(|a| (a, None));
+            }
+            Some((valid_address(raw)?, name.map(str::to_string)))
         })
         .collect()
 }
@@ -448,7 +460,12 @@ fn one_address(text: &str) -> Option<String> {
 fn valid_address(text: &str) -> Option<String> {
     let a = text.trim().to_lowercase();
     let (local, domain) = a.rsplit_once('@')?;
-    let ok = !local.is_empty() && !domain.is_empty() && !domain.contains(char::is_whitespace);
+    // An `@` in the local part is valid only in a quoted local part.
+    let quoted = local.len() >= 2 && local.starts_with('"') && local.ends_with('"');
+    let ok = !local.is_empty()
+        && (quoted || !local.contains('@'))
+        && !domain.is_empty()
+        && !domain.contains(char::is_whitespace);
     ok.then_some(a)
 }
 
@@ -540,6 +557,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Each address has a local part and a domain, with no `@` outside a
+    /// quoted local part, for any list of address pieces.
+    #[test]
+    fn each_address_has_one_unquoted_at() {
+        const PIECES: [&str; 10] = ["a", "@", "\"", "<", ">", ",", " ", ".", "b.example", "("];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..2000 {
+            let mut list = String::new();
+            for _ in 0..12 {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                list.push_str(PIECES[(x % PIECES.len() as u64) as usize]);
+            }
+            for a in addresses(&list) {
+                let (local, domain) = a.rsplit_once('@').unwrap();
+                assert!(
+                    !local.is_empty() && !domain.is_empty(),
+                    "{list:?} gave {a:?}"
+                );
+                let quoted = local.len() >= 2 && local.starts_with('"') && local.ends_with('"');
+                assert!(quoted || !local.contains('@'), "{list:?} gave {a:?}");
+            }
+        }
+    }
+
     #[test]
     fn address_lists() {
         assert_eq!(
@@ -548,12 +591,18 @@ mod tests {
         );
         assert_eq!(addresses("undisclosed-recipients:;"), Vec::<String>::new());
         assert_eq!(addresses("not an address, @x, x@"), Vec::<String>::new());
-        // mail-parser 1.0.1 reads a bare quoted local part such as
-        // `"john.doe"@example.org` as a name and `@example.org`, so the
-        // address goes out. In `<>` the quoted local part works.
+        assert_eq!(
+            addresses(r#"a@b@c.d, <x@y@z.example>, <"q@r"@s.example>"#),
+            [r#""q@r"@s.example"#]
+        );
+        // A bare quoted local part and one in `<>` both count.
         assert_eq!(
             addresses(r#""john.doe"@Example.org, "a, b"@example.org, Jo <"j o"@example.org>"#),
-            [r#""j o"@example.org"#]
+            [
+                r#""john.doe"@example.org"#,
+                r#""a, b"@example.org"#,
+                r#""j o"@example.org"#
+            ]
         );
         assert_eq!(
             mailboxes(

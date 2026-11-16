@@ -641,9 +641,13 @@ fn a_quoted_local_part_can_have_a_colon() {
         .flat_map(addrs)
         .map(String::from)
         .collect();
-    // Regression with mail-parser 1.0.1: it reads a bare quoted local part
-    // as a name, so both addresses go out. Before: "a:b" and "c:d".
-    assert_eq!(found, BTreeSet::new());
+    assert_eq!(
+        found,
+        BTreeSet::from([
+            "\"a:b\"@example.org".to_string(),
+            "\"c:d\"@example.org".to_string()
+        ])
+    );
 }
 
 #[test]
