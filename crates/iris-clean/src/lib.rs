@@ -48,6 +48,9 @@ pub const MAX_DEPTH: usize = 8;
 pub const INNER_LIMIT: usize = 2 * 1024 * 1024;
 /// The largest PDF attachment (decoded bytes) that gives text (spec 1 section 9).
 pub const PDF_LIMIT: u64 = 10 * 1024 * 1024;
+/// The least bytes of PDF text that the quality check reads, whatever the
+/// budget that is left.
+const PDF_CHECK_TEXT: usize = 4096;
 /// The most characters of an attachment name.
 const NAME_LIMIT: usize = 255;
 
@@ -344,8 +347,9 @@ fn attachment(
         // Check the marker first, so that a file that is not a PDF costs no memory.
         if pdf::is_pdf(&decode_capped(f.body, &f.cte, 1024).0) {
             let (bytes, _) = decode_capped(f.body, &f.cte, PDF_LIMIT as usize);
-            // One byte more than the budget shows a cut.
-            if let Some(mut t) = pdf::text(&bytes, *attach_left + 1) {
+            // The quality check needs some text, also when little budget is
+            // left. One byte more than the budget shows a cut.
+            if let Some(mut t) = pdf::text(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT)) {
                 if t.len() > *attach_left {
                     t.truncate(floor_char(&t, *attach_left));
                     cut = true;

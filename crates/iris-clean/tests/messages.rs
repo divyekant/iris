@@ -217,17 +217,34 @@ fn a_simple_pdf_attachment_gives_text() {
     .into_bytes();
     pdf.extend(data);
     pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
-    let mut raw = b"Subject: Invoice\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
-        Content-Type: text/plain\r\n\r\nSee the PDF.\r\n--m\r\n\
-        Content-Type: application/pdf; name=\"i.pdf\"\r\nContent-Transfer-Encoding: binary\r\n\r\n"
-        .to_vec();
-    raw.extend(&pdf);
-    raw.extend_from_slice(b"\r\n--m--\r\n");
-    let c = clean(&raw);
+    let with_notes = |notes: usize| {
+        let mut raw =
+            b"Subject: Invoice\r\nContent-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+            Content-Type: text/plain\r\n\r\nSee the PDF.\r\n--m\r\n"
+                .to_vec();
+        if notes > 0 {
+            raw.extend_from_slice(b"Content-Type: text/plain; name=n.txt\r\n\r\n");
+            raw.extend(std::iter::repeat_n(b'n', notes));
+            raw.extend_from_slice(b"\r\n--m\r\n");
+        }
+        raw.extend_from_slice(
+            b"Content-Type: application/pdf; name=\"i.pdf\"\r\nContent-Transfer-Encoding: binary\r\n\r\n",
+        );
+        raw.extend(&pdf);
+        raw.extend_from_slice(b"\r\n--m--\r\n");
+        clean(&raw)
+    };
+    let c = with_notes(0);
     assert_eq!(c.text, "See the PDF.");
     assert_eq!(
         c.attachments[0].text.as_deref(),
         Some("Invoice 2025-07 for Avel Torun\nTotal: 120.00 EUR")
+    );
+    // With 2 bytes of budget left, the PDF keeps 2 bytes and the cut mark.
+    let c = with_notes(iris_clean::ATTACHMENT_TEXT_LIMIT - 2);
+    assert_eq!(
+        c.attachments[1].text.as_deref(),
+        Some(format!("In{}", iris_clean::CUT_MARK).as_str())
     );
 }
 

@@ -248,6 +248,8 @@ its first 1 KiB holds `%PDF`.
 - The text must have 3 or more letters, and 85% or more of its characters
   must be letters, digits, white space or one of
   `.,;:!?'"()-/%&@€$£#*+=`. If not, `text` is `None`.
+- The check reads at least 4,096 bytes of text, also when less budget is
+  left. Then the text is clipped to the budget.
 
 ### Known limits
 
