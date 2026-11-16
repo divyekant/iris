@@ -60,6 +60,11 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         return Some(vec![Draft::rule(item, "invitation", quote)]);
     }
     if cx.kind == Kind::Service {
+        // A receipt or a statement can hold a code too: the model reads it,
+        // so that the record and the payment are not lost.
+        if looks_like_record(a) {
+            return None;
+        }
         if let Some((code, line)) = find_code(subject, &a.text.text) {
             let at = a.date(cx);
             let expires = at + CODE_LIFE_MS;
@@ -81,7 +86,7 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
             });
             return Some(vec![Draft::rule(item, "code", line)]);
         }
-        if (a.head.list_id.is_some() || a.head.list_unsubscribe) && !looks_like_record(a) {
+        if a.head.list_id.is_some() || a.head.list_unsubscribe {
             let mut item = json!({
                 "form": "feed",
                 "status": feed_status(cx),
@@ -114,10 +119,16 @@ fn looks_like_record(a: &Analysis) -> bool {
     RECORD_WORDS.iter().any(|w| hay.contains(w))
 }
 
-/// The first code in the order of the message. Each line with a code
-/// word gives one candidate: a code of 4 to 8 digits on that line, else the
-/// next line if it is only such a code. A number on any other line is never
-/// a code. Gives the code and the line that has the code.
+/// The first code in the order of the message. A code is a run of 4 to 8
+/// digits on a line with a code word, bound to the word:
+/// - strong: the word, then only `:`, `-`, `=`, `#` or `is`, then the code;
+/// - weak: at most 3 other words between the code and the word, before or
+///   after it. A weak code that looks like a year (1900 to 2099) does not
+///   count (shortcut: issue #94);
+/// - alone: a line that is only the code, right after a line with a code
+///   word and no number.
+///
+/// Gives the code and the line that has the code (at most 500 characters).
 fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
     // Empty lines do not count: HTML paragraphs give empty lines between lines.
     let lines: Vec<&str> = std::iter::once(subject)
@@ -125,66 +136,110 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    let cue = |l: &str| {
-        let low = l.to_lowercase();
-        CODE_WORDS.iter().any(|w| has_word(&low, w))
-    };
     lines.iter().enumerate().find_map(|(i, &l)| {
-        if !cue(l) {
+        let cues = cues(l);
+        if cues.is_empty() {
             return None;
         }
-        if let Some((code, at)) = digits(l) {
-            let quote = excerpt(l, at, code.len());
-            return Some((code, quote));
+        let nums = numbers(l);
+        let code = nums.iter().find(|&&(s, e)| {
+            let year = e - s == 4 && matches!(&l[s..s + 2], "19" | "20");
+            cues.iter()
+                .any(|&(cs, ce)| match bind(l, (s, e), (cs, ce)) {
+                    Bind::Strong => true,
+                    Bind::Weak => !year,
+                    Bind::None => false,
+                })
+        });
+        if let Some(&(s, e)) = code {
+            return Some((l[s..e].to_string(), excerpt(l, s, e - s)));
         }
         let next = *lines.get(i + 1)?;
-        let (code, _) = digits(next)?;
-        (next == code).then_some((code, next))
+        let alone = numbers(next)
+            .first()
+            .is_some_and(|&(s, e)| (s, e) == (0, next.len()));
+        (nums.is_empty() && alone).then(|| (next.to_string(), next))
     })
 }
 
-/// True if `w` is in `hay` as a word: no letter or digit next to it, so
-/// "barcode" does not hold the word "code".
-fn has_word(hay: &str, w: &str) -> bool {
-    hay.match_indices(w).any(|(i, _)| {
-        let before = hay[..i].chars().next_back();
-        let after = hay[i + w.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
-    })
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bind {
+    Strong,
+    Weak,
+    None,
 }
 
-/// The first run of 4 to 8 ASCII digits with no letter or digit next to it,
-/// and its byte offset in `line`. A year from 1900 to 2099 is not a code
-/// (shortcut: issue #94).
-fn digits(line: &str) -> Option<(String, usize)> {
-    let b = line.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i].is_ascii_digit() {
-            let start = i;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
+/// How a number at `num` is bound to a code word at `cue` in `line`.
+fn bind(line: &str, num: (usize, usize), cue: (usize, usize)) -> Bind {
+    let (gap, after) = if num.0 >= cue.1 {
+        (&line[cue.1..num.0], true)
+    } else if cue.0 >= num.1 {
+        (&line[num.1..cue.0], false)
+    } else {
+        return Bind::None;
+    };
+    let words: Vec<&str> = gap
+        .split(|c: char| c.is_whitespace() || matches!(c, ':' | '-' | '=' | '#'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    match words.as_slice() {
+        [] if after => Bind::Strong,
+        [w] if after && w.eq_ignore_ascii_case("is") => Bind::Strong,
+        w if w.len() <= 3 => Bind::Weak,
+        _ => Bind::None,
+    }
+}
+
+/// The byte ranges of the code words in `line`, as whole words: "barcode"
+/// does not hold the word "code".
+fn cues(line: &str) -> Vec<(usize, usize)> {
+    // ASCII lowercase keeps the byte offsets of `line`.
+    let low = line.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for w in CODE_WORDS {
+        for (i, _) in low.match_indices(w) {
+            let before = low[..i].chars().next_back();
+            let after = low[i + w.len()..].chars().next();
+            if !before.is_some_and(char::is_alphanumeric)
+                && !after.is_some_and(char::is_alphanumeric)
+            {
+                out.push((i, i + w.len()));
             }
-            let mut back = line[..start].chars().rev();
-            let mut ahead = line[i..].chars();
-            // A digit group of a number, like 12.50 or 1,234, is not a code.
-            let edge = |c: Option<char>, next: Option<char>| match c {
-                None => true,
-                Some('.' | ',') => !next.is_some_and(|n| n.is_ascii_digit()),
-                Some(c) => !c.is_alphanumeric(),
-            };
-            let (b1, b2) = (back.next(), back.next());
-            let (a1, a2) = (ahead.next(), ahead.next());
-            let run = &line[start..i];
-            let year = run.len() == 4 && matches!(&run[..2], "19" | "20");
-            if (4..=8).contains(&run.len()) && !year && edge(b1, b2) && edge(a1, a2) {
-                return Some((run.to_string(), start));
-            }
-        } else {
-            i += 1;
         }
     }
-    None
+    out
+}
+
+/// The byte ranges of the runs of 4 to 8 ASCII digits in `line` with no
+/// letter or digit next to them, in order. A digit group of a number, like
+/// 12.50 or 1,234, is not such a run.
+fn numbers(line: &str) -> Vec<(usize, usize)> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+        let mut back = line[..start].chars().rev();
+        let mut ahead = line[i..].chars();
+        let edge = |c: Option<char>, next: Option<char>| match c {
+            None => true,
+            Some('.' | ',') => !next.is_some_and(|n| n.is_ascii_digit()),
+            Some(c) => !c.is_alphanumeric(),
+        };
+        let (b1, b2) = (back.next(), back.next());
+        let (a1, a2) = (ahead.next(), ahead.next());
+        if (4..=8).contains(&(i - start)) && edge(b1, b2) && edge(a1, a2) {
+            out.push((start, i));
+        }
+    }
+    out
 }
 
 /// At most [`QUOTE_CHARS`] characters of `line` that hold the bytes
@@ -213,18 +268,27 @@ mod tests {
 
     #[test]
     fn codes() {
-        assert_eq!(digits("Your code is 482913."), Some(("482913".into(), 13)));
-        assert_eq!(digits("In 2026 code 7731"), Some(("7731".into(), 13)));
-        assert_eq!(digits("Order 123456789"), None);
-        assert_eq!(digits("Total 1234.50 or 1,2345"), None);
-        assert_eq!(digits("ab1234"), None);
+        let code = |s: &str, t: &str| find_code(s, t).map(|(c, _)| c);
+        assert_eq!(code("Your code is 482913.", ""), Some("482913".into()));
         assert_eq!(
-            find_code("Sign in", "Your verification code:\n  7731\nThanks"),
-            Some(("7731".into(), "7731"))
+            code("Your verification code is 2026", ""),
+            Some("2026".into())
         );
-        assert_eq!(find_code("Weekly news", "Read 2024 stories"), None);
-        assert!(has_word("your code: 1234", "code"));
-        assert!(!has_word("barcode 123456", "code"));
-        assert!(!has_word("decode it", "code"));
+        assert_eq!(code("Verification in 2026", ""), None);
+        assert_eq!(code("482913 is your code", ""), Some("482913".into()));
+        assert_eq!(code("Order 123456789 code", ""), None);
+        assert_eq!(code("Code: total 1234.50 or 1,2345", ""), None);
+        assert_eq!(code("code ab1234", ""), None);
+        assert_eq!(
+            code("Sign in", "Your verification code:\n  7731\nThanks"),
+            Some("7731".into())
+        );
+        assert_eq!(code("Weekly news", "Read 2024 stories"), None);
+        assert_eq!(code("barcode 123456", ""), None);
+        assert_eq!(code("decode 123456", ""), None);
+        assert_eq!(
+            code("Your code", "for the shop of the town hall 7731"),
+            None
+        );
     }
 }

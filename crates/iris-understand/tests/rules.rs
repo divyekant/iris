@@ -265,7 +265,7 @@ fn a_year_is_not_a_code() {
 #[test]
 fn a_code_late_in_a_long_line_keeps_its_quote() {
     let raw = format!(
-        "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code {} is 482913 now\n",
+        "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{} your code is 482913 now\n",
         "word ".repeat(200)
     );
     let d = one(&raw, Kind::Service, &[]);
@@ -286,6 +286,20 @@ fn a_long_list_id_gives_a_feed_with_no_list() {
     let d = one(&raw, Kind::Service, &[]);
     assert_eq!(d.item["form"], "feed");
     assert!(d.item.get("list").is_none());
+}
+
+#[test]
+fn a_year_shaped_code_bound_to_its_word_counts() {
+    let raw = "From: Bank <no-reply@bank.example>\nList-Id: <b.example>\nSubject: Sign in\n\nYour verification code is 2026\n";
+    let d = one(raw, Kind::Service, &[]);
+    assert_eq!(d.item["form"], "signal");
+    assert_eq!(d.item["code"], "2026");
+}
+
+#[test]
+fn an_invoice_with_a_code_goes_to_the_model() {
+    let raw = "From: Shop <billing@shop.example>\nSubject: Your invoice\n\nVerification code: 482913\nTotal: 12.50 USD\n";
+    assert!(drafts(raw, Kind::Service, &[]).is_none());
 }
 
 #[test]
