@@ -110,6 +110,13 @@
   </div>
 {/if}
 
+{#if brief.review?.actions}
+  <section aria-labelledby="review">
+    <h2 id="review"><span>Waits for your review</span> <span class="count">{brief.review.actions}</span></h2>
+    <a class="all" href="#/review">Open the review</a>
+  </section>
+{/if}
+
 {#each parts as part (part.key)}
   {#if part.count > 0}
     <section aria-labelledby={part.key}>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Changeset, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -11,6 +11,7 @@
   import Mail from "./views/Mail.svelte";
   import Measures from "./views/Measures.svelte";
   import Rules from "./views/Rules.svelte";
+  import Review from "./views/Review.svelte";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
@@ -98,6 +99,10 @@
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "measures"}
       <Measures />
+    {:else if route.view === "review"}
+      {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
+        <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
+      {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "rules"}
       {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}
     {/if}

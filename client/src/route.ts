@@ -4,7 +4,7 @@ export type Form = "commitment" | "conversation" | "feed" | "signal";
 export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
-  | { view: "home" | "setup" | "brief" | "measures" | "rules" }
+  | { view: "home" | "setup" | "brief" | "measures" | "rules" | "review" }
   | { view: "records"; type: string }
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
@@ -37,7 +37,7 @@ export function parse(hash: string): Route {
   const rule = hash.replace(/^#\/?/, "").split("/")[2] ?? "";
   if (name === "brief" && id === "bundle" && /^[1-9]\d{0,9}$/.test(rule)) return { view: "bundle", rule: Number(rule) };
   if (name === "records") return { view: "records", type: id };
-  if (name === "setup" || name === "brief" || name === "measures" || name === "rules") return { view: name };
+  if (name === "setup" || name === "brief" || name === "measures" || name === "rules" || name === "review") return { view: name };
   return { view: "home" };
 }
 
@@ -49,6 +49,7 @@ export const href = {
 
 export const NAV = [
   ["#/brief", "Brief"],
+  ["#/review", "Review"],
   ["#/commitments", "Commitments"],
   ["#/conversations", "Conversations"],
   ["#/records", "Records"],

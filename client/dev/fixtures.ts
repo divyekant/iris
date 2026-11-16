@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Brief, Item, Message, Policy, Rule, Status } from "../src/api";
+import type { Action, Brief, Changeset, Item, Message, Policy, Rule, Status, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -16,6 +16,7 @@ const of = (list: Item[]) => ({ count: list.length, items: list });
 const byForm = (form: string) => items.filter((i) => i.form === form);
 
 export const status: Status = {
+  mode: "observe",
   accounts: [
     {
       id: 1,
@@ -45,6 +46,7 @@ export const brief: Brief = {
   proposal: { count: 447, verbs: { archive: 412, label: 35 } },
   bundles: [{ rule: 3, name: "Bundle the feed", ...of(byForm("feed")) }],
   hidden: 4,
+  review: { changesets: 2, actions: 4 },
 };
 
 export function message(id: string): Message | undefined {
@@ -118,6 +120,79 @@ export const policy: Policy = {
   },
 };
 
+const HEADS: Record<string, [string, string, string, string]> = {
+  "m-50101": ["t-7712", "Morning Brew", "crew@morningbrew.example", "The week in markets, in five minutes"],
+  "m-50102": ["t-7712", "Morning Brew", "crew@morningbrew.example", "Why oil fell on Tuesday"],
+  "m-50140": ["t-7713", "Product Hunt Daily", "hello@producthunt.example", "Top launches of the week"],
+  "m-55210": ["t-8841", "Priya Raman", "priya@northwind.example", "Q4 numbers for the board"],
+  "m-55211": ["t-8841", "You", "you@example.com", "Re: Q4 numbers for the board"],
+  "m-60001": ["t-9002", "Dana Brooks", "dana@leadgen.example", "Quick question about your Q1 plans"],
+  "m-61500": ["t-9100", "Morning Brew", "crew@morningbrew.example", "Monday: the market opens higher"],
+};
+const PUBLISHERS = [
+  ["Morning Brew", "crew@morningbrew.example", "Your morning in markets"],
+  ["Stratechery", "email@stratechery.example", "The weekly article"],
+  ["The Verge", "newsletter@theverge.example", "Verge Deals of the day"],
+  ["Product Hunt Daily", "hello@producthunt.example", "Top launches of the day"],
+] as const;
+
+/** A summary for each fixture message ID. The triage IDs get a newsletter head. */
+function summaryOf(id: string): Target {
+  const num = Number(id.slice(2));
+  const head = HEADS[id];
+  if (id === "m-50140") return { id, gone: true };
+  const [thread, name, address, subject] = head ?? [`t-${num}`, ...PUBLISHERS[num % PUBLISHERS.length]];
+  const date = new Date(Date.UTC(2026, 10, 15, 8) - (num % 61) * 3_600_000).toISOString();
+  return { id, thread, date, from: { name, address }, subject, labels: ["INBOX"] };
+}
+
+const action = (a: Partial<Action> & Pick<Action, "n" | "verb" | "resolved">): Action => ({
+  revision: 1,
+  targets: { messages: a.resolved.messages },
+  args: {},
+  why: null,
+  flags: [],
+  hash: `${a.n}`.padStart(64, "0"),
+  decision: { state: "in_review", by: "policy", reason: "No rule allows this change." },
+  ...a,
+});
+const range = (from: number, count: number) => Array.from({ length: count }, (_, i) => `m-${from + i}`);
+
+/** Two open changesets: a request of an agent, and the triage of the newsletters (spec 2 section 5.1). */
+export const changesets: Changeset[] = [
+  {
+    id: "cs-77",
+    revision: 1,
+    author: { kind: "agent", name: "Claude Code", session: "se-12", job: "j-142" },
+    why: "Priya needs the Q4 numbers by Friday. I cleared the noise around her thread, so you see it first.",
+    created: "2026-11-16T09:17:02Z",
+    submitted: "2026-11-16T09:17:40Z",
+    state: "open",
+    actions: [
+      action({ n: 1, verb: "label", targets: { threads: ["t-8841"] }, resolved: { messages: ["m-55210", "m-55211"] }, args: { label: "Finance" }, why: "The Q4 thread, so you find it fast." }),
+      action({ n: 2, verb: "archive", targets: { threads: ["t-7712", "t-7713"] }, resolved: { messages: ["m-50101", "m-50102", "m-50140"] }, why: "Two newsletters from last week." }),
+      action({ n: 3, verb: "read", resolved: { messages: ["m-60001"] }, why: "A cold sales mail. You do not answer these.", flags: ["first_contact"] }),
+      action({
+        n: 4,
+        verb: "archive",
+        resolved: { messages: ["m-61500"] },
+        why: "A newsletter from Monday.",
+        decision: { state: "approved", by: "rule", rule: 1, policy: 3, at: "2026-11-16T09:17:41Z" },
+      }),
+    ],
+  },
+  {
+    id: "cs-78",
+    revision: 1,
+    author: { kind: "triage" },
+    why: "Newsletters older than 3 days that you did not open.",
+    created: "2026-11-16T06:00:00Z",
+    submitted: "2026-11-16T06:00:02Z",
+    state: "open",
+    actions: [action({ n: 1, verb: "archive", resolved: { messages: range(70001, 612) }, flags: ["bulk"], decision: { state: "proposed" } })],
+  },
+];
+
 /** The answer for one API path (no `/api/` prefix), or undefined for a 404. */
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
@@ -139,6 +214,9 @@ export function answer(path: string): unknown {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
   }
   if (name === "messages" && id) return message(id);
+  if (name === "messages" && q.get("ids")) return { messages: q.get("ids")!.split(",").map(summaryOf) };
+  if (name === "changesets" && id) return changesets.find((c) => c.id === id);
+  if (name === "changesets") return { changesets };
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
   return undefined;
