@@ -105,6 +105,13 @@ that costs many review rounds when the review finds it.
    agree.
 7. Give each fact one home. If a fact is in two places, one place links to the
    other.
+8. For input that the product does not control, for concurrency and for crash
+   recovery, write the failure list (`## Failure list`). State the supported
+   inputs, and one safe result for all other input. A promise with no limit
+   ("never", "always", "each input") has no end in review.
+9. Before the design writes its own parser, protocol client, format converter or
+   security code, look for a maintained public library. Write the libraries that
+   you checked in `## Options not chosen`.
 
 A second check by another model or person is optional. Use it for a risky
 design. The checker reads the spec and the code or data that each assumption is

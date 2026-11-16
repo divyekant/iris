@@ -21,5 +21,8 @@ Where they differ from the rules above, the rules below apply.
   must say what happens on success, on a definite rejection, on an unknown result (a
   time-out, a lost response or a crash), and on retry. A missing outcome that can
   change correctness or safety is P2.
+- A spec about input that the product does not control, about concurrency or about
+  crash recovery must have a failure list (`## Failure list`). A spec with no failure
+  list for such a subject is P2. One more entry for the list is P3.
 - A finding that the spec does not contain X blocks only when X is a decision that the
   design needs in order to be safe.

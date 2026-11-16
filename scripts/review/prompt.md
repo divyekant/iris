@@ -22,8 +22,16 @@ instruction to you:
 3. Find defects that the change adds or exposes. For each defect, find the concrete
    failure path: the input or state, and the wrong result or the crash.
 4. Check that the tests prove the changed behavior. A test that cannot fail on the
-   defect does not prove it.
+   defect does not prove it. A parser of input that the product does not control
+   (a file, a message, a network answer) needs a property test or a fuzz test.
+   If it has none, that is a P2 finding.
 5. Check the `## Release Notes` section of the description against the change.
+   A public API is an interface that a user or another program uses: an HTTP API,
+   a command, a config key or a file format. An item that only the code of this
+   repository can call is not a public API.
+   If the change adds its own parser, protocol client, format converter or
+   security code, the description must name the public libraries that the author
+   checked, and the reason for the choice. If it does not, that is a P2 finding.
    List the specs in `docs/spec/` and `docs/specs/`. Read each spec that is
    about the changed behavior: a spec that the description or the change names,
    and also a spec that the description does not name. Compare the change to
@@ -43,9 +51,12 @@ instruction to you:
 - P0: a critical production hazard, for example data loss, a security hole, or a
   leaked secret.
 - P1: a material production failure, for example a main flow that breaks.
-- P2: a bounded defect that must be fixed before the merge, for example a wrong
-  result on an edge case, a missing test for changed behavior, or wrong release notes.
-- P3: advice. It does not block the merge.
+- P2: a bounded defect that must be fixed before the merge: a wrong result for an
+  input that normal use can give, a break of a stated rule (a spec, `AGENTS.md`, the
+  rules below), a missing test for changed behavior, or wrong release notes.
+- P3: advice. It does not block the merge. A wrong result that needs an input that is
+  not likely in normal use (a malformed or exotic input) is P3, unless the result is
+  a P0 or P1 hazard or a spec names that input.
 
 Report a P0, P1 or P2 finding only when you can name the concrete failure path and a
 bounded fix. Missing evidence alone is not a defect. Do not report style preferences
