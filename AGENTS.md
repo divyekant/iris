@@ -251,6 +251,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-senders/` | The sender axis of spec 1 section 6.7: decides if the sender of a message is you, a known person, a known service, a stranger or hostile, and keeps the `sender` rows current. Fixed rules, no model. | `engine` |
 | `crates/iris-store/` | The store: the data folder, SQLite with full-text search, raw message files and encrypted secrets. | `engine` |
 | `crates/iris-people/` | People: one profile for each known person (names, addresses, first and last contact, counts, threads), from the mail history in the store. | `engine` |
+| `crates/iris-talk/` | Conversations: the conversation of each mail thread, from the store, as an item of the open model. | `engine` |
 | `crates/iris-sync/` | The first sync of the mirror: a full copy of a Gmail mailbox into the store, with resume after a stop. | `engine` |
 | `crates/iris-clean/` | The clean text of one message: MIME, charsets, HTML to Markdown, no quotes, signatures or tracking. Pure functions. | `engine` |
 | `crates/iris-api/` | The local API: read-only JSON from the store for the web client and the read verbs. It refuses requests that are not local. | `engine` |
