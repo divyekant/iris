@@ -92,8 +92,10 @@ copy, and the sender axis uses the spam label.
    the last 90 days before the full copy is complete (section 7.1). If Gmail returns HTTP 404
    for a message, Gmail deleted it after step 3. Mark the message as gone
    (section 4.5) and continue.
-5. When each known message is fetched or gone, run one incremental sync from `H0`
-   (section 4.3). Then mark the account as "mirror ready".
+5. When each known message is fetched, gone or failed (section 4.7), run one
+   incremental sync from `H0` (section 4.3). Then mark the account as "mirror
+   ready". A failed message stays "known, not fetched" in a ready mirror, until
+   verify (section 4.8) fetches it.
 
 At the quota of the assumptions, the engine fetches about 100 raw messages
 each minute. So the first brief covers the messages that the engine fetched

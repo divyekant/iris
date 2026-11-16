@@ -1035,7 +1035,7 @@ fn fetch_one(store: &Store, gmail: &Gmail, token: &str, id: &str, thread: &str) 
 
 /// Write fetched messages. If the content cleanup deleted a content file
 /// after its fetch (the store gives `MissingContent`), fetch the messages of
-/// that file again, and write again.
+/// that file again, and write again. The last try gives its error.
 fn save(
     store: &Store,
     gmail: &Gmail,
@@ -1043,11 +1043,15 @@ fn save(
     account: i64,
     mut batch: Vec<NewMessage>,
 ) -> Result<()> {
-    for _ in 0..3 {
+    // Each new fetch removes one missing file, so the batch size plus 2
+    // writes is enough unless the cleanup deletes files again and again.
+    let mut tries = batch.len() + 2;
+    loop {
         let sha = match store.put_messages(account, &batch) {
-            Err(iris_store::Error::MissingContent(sha)) => sha,
+            Err(iris_store::Error::MissingContent(sha)) if tries > 1 => sha,
             r => return r.map(|_| ()).map_err(Error::from),
         };
+        tries -= 1;
         let (stale, keep): (Vec<NewMessage>, Vec<NewMessage>) = batch
             .into_iter()
             .partition(|m| m.content_sha256.as_deref() == Some(sha.as_str()));
@@ -1062,7 +1066,6 @@ fn save(
             }
         }
     }
-    Err(iris_store::Error::MissingContent("after 3 fetches".into()).into())
 }
 
 fn now_ms() -> i64 {
