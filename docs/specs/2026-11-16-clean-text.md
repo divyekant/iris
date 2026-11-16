@@ -266,7 +266,7 @@ its first 1 KiB holds `%PDF`.
 - The check reads at least 4,096 bytes of text, also when less budget is
   left. Then the text is clipped to the budget. If the reader stops at a
   limit before the end of the PDF (the text budget, the stream limit or
-  the PDF limit), the text gets `CUT_MARK`, also when
+  the 32 MiB inflate limit of each PDF), the text gets `CUT_MARK`, also when
   trimmed white space makes the text shorter than the budget.
 
 ### Known limits
