@@ -74,6 +74,7 @@ impl Model for Fake {
                 input_tokens: 100,
                 output_tokens: 10,
                 cost_micro_usd: Some(5),
+                known: true,
             },
         })
     }
@@ -1451,6 +1452,11 @@ Can you call me today?
         .unwrap();
     assert!(understand(&b.store, s, &Fake::default(), NOW).unwrap().gone);
     assert_eq!(kind(&b), "stranger");
+    // The kind change makes the mail of the sender pending again, in the
+    // same write (rerun_senders).
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+    assert_eq!(understood, None);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
     // The conversation counts the live message of the stranger.
     let status: String = b.col(
         "SELECT status FROM item WHERE form = 'conversation' AND ?1 = ?1",
@@ -1546,4 +1552,85 @@ fn a_received_message_from_the_mailbox_address_is_not_yours() {
     );
     let doc: Value = serde_json::from_str(&doc).unwrap();
     assert_ne!(doc["latest"]["from"]["kind"], "self", "{doc}");
+}
+
+#[test]
+fn a_kind_change_in_write_1_makes_the_other_mail_of_the_sender_pending() {
+    let b = store("rerun-write1");
+    let ask = "From: Ana <ana@examp1e.org>
+To: owner@example.com
+Subject: Lease
+
+Can you send me the signed lease by Friday?
+";
+    let sent = "From: owner@example.com
+To: bo@example.org
+Subject: Hi
+
+See you soon.
+";
+    let a = b.add_in("1", "ta", NOW - 3 * DAY, ask, &["INBOX"]);
+    understand(&b.store, a, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 1);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET tries = 2 WHERE id = ?1", [a])?;
+            Ok(())
+        })
+        .unwrap();
+    // The sent message makes example.org known: examp1e.org becomes a near
+    // copy, so Ana becomes hostile in write 1 of the sent message.
+    let s = b.add_in("2", "ts", NOW - 2 * DAY, sent, &["SENT"]);
+    let out = understand(&b.store, s, &Fake::default(), NOW).unwrap();
+    assert!(!out.rerun.is_empty());
+    let understood: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", a);
+    assert_eq!(understood, None, "the mail of the sender is pending again");
+    let tries: i64 = b.col("SELECT tries FROM message WHERE id = ?1", a);
+    assert_eq!(tries, 0);
+    assert!(b.items().is_empty(), "its unpinned items are gone");
+}
+
+#[test]
+fn a_rerun_resets_a_sender_with_many_threads() {
+    let b = store("rerun-many");
+    b.kind("ana@example.org", "Ana", "hostile");
+    // More threads than one page of rerun_senders.
+    let n = iris_understand::store::RERUN_PAGE as usize * 2 + 7;
+    let raw = "From: Ana <ana@example.org>\r\nSubject: Hi\r\n\r\nHello.\r\n";
+    let sha = b.store.put_content(raw.as_bytes()).unwrap();
+    let new: Vec<NewMessage> = (0..n)
+        .map(|i| NewMessage {
+            provider_id: format!("m{i}"),
+            thread_provider_id: format!("t{i}"),
+            content_sha256: Some(sha.clone()),
+            internal_date: Some(NOW - DAY),
+            labels: vec!["INBOX".into()],
+            header: iris_store::Header {
+                from_addr: Some("ana@example.org".into()),
+                ..iris_store::Header::default()
+            },
+            ..NewMessage::default()
+        })
+        .collect();
+    b.store.put_messages(b.account, &new).unwrap();
+    let sender: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'ana@example.org' AND ?1 = ?1",
+        0,
+    );
+    let reset = b
+        .store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = 1, tries = 3, retry_at = 9",
+                [],
+            )?;
+            iris_understand::store::rerun_senders(tx, &[sender], NOW)
+        })
+        .unwrap();
+    assert_eq!(reset, n as u64);
+    let left: i64 = b.col(
+        "SELECT count(*) FROM message WHERE ?1 = ?1 AND (understood_at IS NOT NULL OR tries > 0 OR retry_at IS NOT NULL)",
+        0,
+    );
+    assert_eq!(left, 0);
 }

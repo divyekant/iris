@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 2);
+            assert_eq!(iris_store::schema_version(c)?, 3);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -637,4 +637,24 @@ fn a_missing_key_with_a_database_is_an_error() {
     fs::remove_file(dir.0.join("key")).unwrap();
     assert!(matches!(Store::open(&dir.0), Err(Error::Key(_))));
     assert!(!dir.0.join("key").exists(), "no new key");
+}
+
+#[test]
+fn dry_write_gives_the_result_and_writes_nothing() {
+    let dir = TempDir::new("dry");
+    let store = Store::open(&dir.0).unwrap();
+    let n = store
+        .dry_write(|tx| {
+            tx.execute(
+                "INSERT INTO account(provider, address) VALUES ('gmail', 'a@x.example')",
+                [],
+            )?;
+            Ok(tx.query_row("SELECT count(*) FROM account", [], |r| r.get::<_, i64>(0))?)
+        })
+        .unwrap();
+    assert_eq!(n, 1);
+    let after: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM account", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(after, 0);
 }

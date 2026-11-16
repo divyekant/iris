@@ -134,6 +134,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             }
             // The kinds first: the conversation reads them.
             let rerun = iris_senders::refresh(tx, now_ms)?;
+            rerun_senders(tx, &rerun, now_ms)?;
             iris_talk::update(tx, row.thread, None, now_ms)?;
             Ok(Some(rerun))
         })?;
@@ -216,7 +217,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         }
         put_header(tx, message, &a)?;
         // Step 3: the sender rules read the header row of this message.
-        decided = Some(iris_senders::decide(tx, message, &raw, now_ms)?);
+        let d = iris_senders::decide(tx, message, &raw, now_ms)?;
+        // In the transaction of the kind change, so no error loses a rerun.
+        rerun_senders(tx, &d.rerun, now_ms)?;
+        decided = Some(d);
         // The clean text goes in the same checked write, so a sync between
         // two writes cannot leave the text of old content.
         iris_store::put_body(tx, message, &body)?;
@@ -699,13 +703,77 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
 /// correction, section 7.5). Conversations belong to the conversation rule.
 // shortcut: pinned means "has a correction" only; add the references of
 // open changesets and of the ledger when specification 2 builds them.
+/// Makes the mail of the `sender` rows `rows` pending again: a sender that
+/// became or stopped being hostile (section 6.7). For each message from
+/// these addresses that is not gone: deletes its items that are not pinned
+/// (not the conversation), and clears `understood_at`, `tries` and
+/// `retry_at`, because the new hostile state is new input. Then computes the
+/// conversation of each thread again, so no conversation shows reset mail.
+/// Call it in the transaction that changed the kinds.
+///
+/// Set-based writes and thread pages of [`RERUN_PAGE`], so the work is
+/// linear in the mail of the sender and the memory is bounded. Gives the
+/// count of reset messages.
+pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store::Result<u64> {
+    let mut reset = 0;
+    for &row in rows {
+        tx.execute(
+            &format!(
+                "DELETE FROM item WHERE id IN (
+                   SELECT i.id FROM sender s
+                   JOIN header h ON h.from_addr = s.address
+                   JOIN message m ON m.id = h.message_id
+                   JOIN item_source src ON src.message_id = m.id
+                   JOIN item i ON i.id = src.item_id
+                   WHERE s.id = ?1 AND m.gone_at IS NULL AND {DROPPABLE})"
+            ),
+            [row],
+        )?;
+        reset += tx.execute(
+            "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
+             WHERE gone_at IS NULL AND id IN (
+               SELECT h.message_id FROM sender s JOIN header h ON h.from_addr = s.address
+               WHERE s.id = ?1)",
+            [row],
+        )? as u64;
+        let mut after = i64::MIN;
+        loop {
+            let page: Vec<i64> = tx
+                .prepare_cached(
+                    "SELECT DISTINCT m.thread_id FROM sender s
+                     JOIN header h ON h.from_addr = s.address
+                     JOIN message m ON m.id = h.message_id
+                     WHERE s.id = ?1 AND m.gone_at IS NULL AND m.thread_id > ?2
+                     ORDER BY m.thread_id LIMIT ?3",
+                )?
+                .query_map(params![row, after, RERUN_PAGE], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let Some(&last) = page.last() else { break };
+            for t in page {
+                iris_talk::update(tx, t, None, now_ms)?;
+            }
+            after = last;
+        }
+    }
+    Ok(reset)
+}
+
+/// Threads in one page of [`rerun_senders`].
+pub const RERUN_PAGE: i64 = 500;
+
+/// The items of an origin message `src` that a new run replaces: not the
+/// conversation, made by a rule or the model, and with no correction.
+const DROPPABLE: &str = "src.role = 'origin' AND i.form <> 'conversation'
+  AND i.derived_by IN ('rule', 'model')
+  AND NOT EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)";
+
 fn drop_old_items(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
-        "DELETE FROM item WHERE id IN (
-           SELECT i.id FROM item_source s JOIN item i ON i.id = s.item_id
-           WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form <> 'conversation'
-             AND i.derived_by IN ('rule', 'model')
-             AND NOT EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id))",
+        &format!(
+            "DELETE FROM item WHERE id IN (
+               SELECT i.id FROM item_source src JOIN item i ON i.id = src.item_id
+               WHERE src.message_id = ?1 AND {DROPPABLE})"
+        ),
         [message],
     )?;
     Ok(())

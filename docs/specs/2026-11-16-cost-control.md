@@ -1,7 +1,8 @@
 # Spec: cost control for understanding
 
 - Date: 2026-11-16
-- Card: R1-30 (this spec). The build: R1-31 (batch runner), R1-15 (commands).
+- Card: R1-30 (this spec). The build: R1-31 (budget wrapper), R1-32 (batch
+  runner), R1-15 (commands).
 - Status: Draft
 
 ## Problem
@@ -178,7 +179,10 @@ is an upper bound. `iris-model` gives this count before it sends
 (`Client::request_bytes`). The second try of `decide` is reserved on its own.
 
 After a call with unknown usage to a priced model, the wrapper refuses each
-later call of the run with `Error::Unknown` (no request goes out). So the second try of
+later call of the run with `Error::Budget` (no request goes out). The
+runner tells an unknown charge from a spent budget by the state of the
+wrapper, not by the error. The same refusal follows a known cost that is
+larger than its reservation. So the second try of
 `decide` in the same message cannot go out: `store::understand` returns
 `Error::Model`, no try counts, and the message stays pending for the next
 run. The runner then stops with `stop = unknown`.
@@ -313,11 +317,12 @@ CREATE TABLE understand_estimate (
 - The run cost for the limit and the budget is
   `cost_micro_usd + unknown_cost_micro_usd`.
 - `iris-model`: `Usage` gets `known: bool`. A reply with no usage gives
-  `known = false`, not zero tokens. An error after the request went out
-  carries the byte count of the request.
-- `iris-understand`: `Decision`, `Outcome` and `Error::Model` carry, over
-  all calls of the message (also a bad first answer before a good second
-  one), the known usage, `unknown_calls` and `unknown_bound`.
+  `known = false`, not zero tokens.
+- The `Budgeted` wrapper sees each call and its result, so it writes the
+  counts of each call to the run row in its settle write. It computes the
+  byte count of the request before it sends, so an error needs no byte
+  count. `Decision`, `Outcome` and `Error::Model` keep their counts for
+  one message only; the run row does not use them.
 - The cost is the cost that Iris computes from the price that the person
   gave. A price that is too low lets the provider charge more. The commands
   say this. The run row keeps the tokens, so the person can check them
@@ -361,7 +366,8 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
 - `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an
   error, and the body goes nowhere else. For a local model, the client also
   checks that the address of the connection is a loopback address, also
-  after the name lookup of `localhost`. A local model call uses no HTTP proxy: the client
+  after the name lookup of `localhost` (R1-15, with the host check of
+  `iris model set local`). A local model call uses no HTTP proxy: the client
   ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and any configured proxy
   for it, so no proxy on loopback can forward the mail.
 - `iris model show`: the settings and the budget left, never the key.
@@ -447,7 +453,8 @@ more calls.
 - `crates/iris-understand`: module `batch` (pending query, order, lock,
   runner, estimate). `Decision`, `Outcome`, `Error::Model` carry usage
   status.
-- `crates/iris-model`: `Usage::known`; request bytes on errors.
+- `crates/iris-model`: `Usage::known`; `Client::request_bytes` before the
+  call (the `Budgeted` wrapper keeps the worst case of a call that fails).
 - `crates/iris-store`: `schema_3.sql`.
 - `crates/iris`: `iris model`, `iris understand`.
 - `crates/iris-model`: no redirects; the loopback check of a local model.
@@ -509,8 +516,10 @@ scripts/local-ci/run.sh
 ## Rollout
 
 1. R1-30: this spec.
-2. R1-31: `schema_3.sql`, the usage status, the `batch` module.
-3. R1-15: `iris model` and `iris understand`.
+2. R1-31: `schema_3.sql`, the usage status, the `budget` module and
+   `rerun_senders`.
+3. R1-32: the `batch` module (runner, order, run lock, estimate).
+4. R1-15: `iris model` and `iris understand`.
 
 ## Risks
 
@@ -524,8 +533,9 @@ scripts/local-ci/run.sh
 One PR for each card:
 
 1. R1-30: this spec.
-2. R1-31 (depends on R1-30): batch runner, counts, estimate.
-3. R1-15 (depends on R1-31): commands.
+2. R1-31 (depends on R1-30): budget wrapper, counts, sender reruns.
+3. R1-32 (depends on R1-31): batch runner, run lock, estimate.
+4. R1-15 (depends on R1-32): commands.
 
 ## Test plan
 
