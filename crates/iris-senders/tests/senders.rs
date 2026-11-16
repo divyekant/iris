@@ -501,7 +501,7 @@ fn a_new_fetch_of_a_sent_message_clears_its_old_bcc() {
     // understanding of the new bytes has not run yet.
     let raw = format!("From: {OWNER}\r\nSubject: x\r\n\r\nBody.\r\n");
     let mut m = new_message("m1", "t1", 1000, &["SENT"], raw.as_bytes());
-    m.content_sha256 = Some("new".into());
+    m.content_sha256 = Some(c.store.put_content(raw.as_bytes()).unwrap());
     c.store.put_messages(c.acc, &[m]).unwrap();
     assert_eq!(
         c.put("t2", &[], "From: eve@example.org").kind,

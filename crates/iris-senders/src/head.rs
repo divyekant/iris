@@ -116,16 +116,18 @@ impl Head {
 }
 
 /// Remove RFC 5322 comments `( ... )`, which can hold any text.
+/// A `(` in a quoted string is text, not a comment.
 fn strip_comments(v: &str) -> String {
-    let mut depth = 0u32;
+    let (mut depth, mut quoted) = (0u32, false);
     v.chars()
         .filter(|c| {
             match c {
-                '(' => depth += 1,
-                ')' => depth = depth.saturating_sub(1),
-                _ => return depth == 0,
+                '"' if depth == 0 => quoted = !quoted,
+                '(' if !quoted => depth += 1,
+                ')' if !quoted && depth > 0 => depth -= 1,
+                _ => {}
             }
-            false
+            depth == 0 && !(*c == ')' && !quoted)
         })
         .collect()
 }
@@ -134,8 +136,9 @@ fn strip_comments(v: &str) -> String {
 /// brackets. Each entry gives (lowercase address, display name).
 pub(crate) fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
-    let (mut quoted, mut angle, mut start) = (false, false, 0);
+    let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
     let mut push = |s: &str| {
+        let s = strip_comments(s);
         let s = s.trim();
         let (addr, name) = match (s.rfind('<'), s.rfind('>')) {
             (Some(a), Some(b)) if a < b => (&s[a + 1..b], s[..a].trim()),
@@ -151,6 +154,9 @@ pub(crate) fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     };
     for (i, c) in v.char_indices() {
         match c {
+            '(' if !quoted => comment += 1,
+            ')' if !quoted => comment = comment.saturating_sub(1),
+            _ if comment > 0 => {}
             '"' if !angle => quoted = !quoted,
             '<' if !quoted => angle = true,
             '>' if !quoted => angle = false,
@@ -185,6 +191,16 @@ mod tests {
         assert_eq!(to, ["a@example.com", "b@example.net", "c@example.com"]);
         let h = Head::parse(b"Bcc: d@example.org\r\n\r\n");
         assert_eq!(h.recipients(), [("d@example.org".to_string(), true)]);
+    }
+
+    #[test]
+    fn comments_are_not_part_of_an_address() {
+        let h = Head::parse(
+            b"From: lee@example.org (Lee, Ana)\r\nTo: \"Bo (work)\" <bo@example.net>, (x) cy@example.net\r\n\r\n",
+        );
+        assert_eq!(h.from(), Some(("lee@example.org".into(), None)));
+        let to: Vec<String> = h.recipients().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(to, ["bo@example.net", "cy@example.net"]);
     }
 
     #[test]
