@@ -365,3 +365,34 @@ fn a_message_deleted_after_the_list_does_not_stop_the_sync() {
     assert_eq!(mirror_state(&store), fake_state(&fake));
     assert_eq!(sync_state(&store).2, Some(STEP_INCREMENTAL));
 }
+
+#[test]
+fn a_resume_with_a_token_of_another_mailbox_is_refused() {
+    let fake = FakeGmail::start(Mailbox::new(17, 300)).unwrap();
+    let (store, account) = cut_sync(&fake, &Mailbox::new(17, 300), "wrong-resume");
+    // The fake has one address, so make the account another mailbox: the
+    // token now gives a mailbox that is not the account.
+    store
+        .write(|tx| {
+            tx.execute("UPDATE account SET address = 'other@example.com'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let rest = unfetched(&store);
+    let before = raw_requests(&fake);
+    let gmail = client(fake.base_url());
+    assert!(matches!(
+        first_sync(&store, &gmail, account, TOKEN),
+        Err(Error::WrongMailbox)
+    ));
+    assert_eq!(raw_requests(&fake), before);
+    assert_eq!(unfetched(&store), rest);
+    assert_eq!(
+        count(
+            &store,
+            "SELECT count(*) FROM message WHERE gone_at IS NOT NULL"
+        ),
+        0
+    );
+    assert_eq!(sync_state(&store).2, Some(STEP_FETCH));
+}
