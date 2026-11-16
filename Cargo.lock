@@ -877,6 +877,7 @@ dependencies = [
  "base64",
  "iris-clean",
  "iris-senders",
+ "mail-parser",
  "serde_json",
 ]
 

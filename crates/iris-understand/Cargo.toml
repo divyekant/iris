@@ -11,4 +11,5 @@ publish.workspace = true
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
 iris-senders = { version = "0.0.0", path = "../iris-senders" }
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
 serde_json = "1"
