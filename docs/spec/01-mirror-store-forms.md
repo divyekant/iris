@@ -746,6 +746,9 @@ with the newest message first. Older mail gets understood in the background,
 at a low rate, so that the first brief comes early (requirement M4). A
 rebuild uses the same order.
 
+The batch runner, the run counts, the cost limit and the estimate before the
+first run are in `docs/specs/2026-11-16-cost-control.md` (R1-15).
+
 ### 7.2 Clean text
 
 - HTML becomes Markdown. Scripts, styles, tracking images and hidden elements
