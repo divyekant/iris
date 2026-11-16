@@ -1,0 +1,215 @@
+//! `iris write`: a draft of a reply in your voice (card R3-05, crate
+//! `iris-voice`). The model call goes through the one budget of
+//! understanding (docs/specs/2026-11-16-cost-control.md): the command makes
+//! an `understand_run` row with the prompt `draft/0.1` for the counts of
+//! the call, and the `Budgeted` model reserves the worst case first.
+
+use iris_store::{parse_id, Kind, Store};
+use iris_understand::budget::{model_row, Budgeted, ModelRow};
+use iris_understand::Model;
+use rusqlite::{params, OptionalExtension};
+
+/// Makes the model of a `model_setting` row.
+pub type Connect<'a> = &'a dyn Fn(&ModelRow) -> Result<Box<dyn Model>, String>;
+
+/// The thread of `id`: a thread (`t-42`), or the thread of a message (`m-42`).
+fn thread_of(store: &Store, id: &str) -> Result<i64, String> {
+    match parse_id(id) {
+        Some((Kind::Thread, t)) => Ok(t),
+        Some((Kind::Message, m)) => store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT thread_id FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })
+                    .optional()?,
+                )
+            })
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no message {id}")),
+        _ => Err(format!("{id} is not a thread (t-42) or a message (m-42)")),
+    }
+}
+
+/// Writes and saves the draft, and gives the text to print.
+pub fn write(
+    store: &Store,
+    id: &str,
+    intent: Option<&str>,
+    connect: Connect,
+    now_ms: i64,
+) -> Result<String, String> {
+    let thread = thread_of(store, id)?;
+    let row = store
+        .read(|c| Ok(model_row(c)?))
+        .map_err(|e| e.to_string())?
+        .ok_or("No model is set. Use `iris model set`.")?;
+    let model = connect(&row)?;
+    let run = store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
+                                            unknown_cost_micro_usd)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![
+                    now_ms,
+                    row.model,
+                    iris_voice::PROMPT,
+                    row.price.is_some().then_some(0)
+                ],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+        .map_err(|e| e.to_string())?;
+    let budgeted = Budgeted::new(model.as_ref(), store, run, Some(&row));
+    let result = iris_voice::write(store, thread, intent, &budgeted, now_ms);
+    let s = budgeted.state();
+    let stop = match &result {
+        Ok(_) => "done",
+        Err(_) if s.refused => "budget",
+        Err(_) if s.unknown => "unknown",
+        Err(_) if s.key_refused || s.server_failed => "model",
+        Err(_) => "error",
+    };
+    let end = store.write(|tx| {
+        tx.execute(
+            "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
+            params![run, now_ms.max(crate::engine::now_ms()), stop],
+        )?;
+        Ok(())
+    });
+    if let Some(e) = budgeted.take_error() {
+        return Err(format!("store: {e}"));
+    }
+    let saved = result.map_err(|e| match stop {
+        "budget" => {
+            format!("{e}\nApprove a budget first: `iris understand --estimate`, then `--approve`.")
+        }
+        _ => e.to_string(),
+    })?;
+    end.map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{}\n\nIris saved this draft for t-{thread}. {} of your sent messages showed your voice. \
+         Nothing was sent.\n",
+        saved.body, saved.samples
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use iris_model::{Reply, Stop, Usage};
+    use iris_store::{Body, Header, NewMessage};
+
+    use super::*;
+
+    struct Fake;
+
+    impl Model for Fake {
+        fn name(&self) -> &str {
+            "fake"
+        }
+
+        fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
+            Ok(Reply {
+                text: r#"{"body": "Hi Ana, yes. D"}"#.into(),
+                usage: Usage {
+                    input_tokens: 1000,
+                    output_tokens: 100,
+                    cost_micro_usd: None,
+                    known: true,
+                },
+                stop: Stop::End,
+            })
+        }
+    }
+
+    #[test]
+    fn the_call_goes_through_the_budget() {
+        let dir = std::env::temp_dir().join(format!("iris-reply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "me@example.com").unwrap();
+        store
+            .put_labels(account, &[("INBOX", "INBOX", "system")])
+            .unwrap();
+        let ids = store
+            .put_messages(
+                account,
+                &[NewMessage {
+                    provider_id: "in".into(),
+                    thread_provider_id: "t1".into(),
+                    internal_date: Some(1),
+                    labels: vec!["INBOX".into()],
+                    header: Header {
+                        from_addr: Some("ana@example.org".into()),
+                        ..Default::default()
+                    },
+                    body: Some(Body {
+                        subject: "Hi".into(),
+                        sender: "ana@example.org".into(),
+                        text: "Lunch?".into(),
+                    }),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        // A priced model with no approved budget: the call is refused.
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO model_setting(id, provider, base_url, model, version, price_in,
+                       price_out, max_tokens, timeout_s, budget_micro_usd)
+                     VALUES (1, 'anthropic', 'https://api.anthropic.com/v1', 'm', 1, 3000000,
+                       15000000, 1000, 60, NULL)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let connect = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Ok(Box::new(Fake)) };
+        let id = format!("m-{}", ids[0]);
+        let e = write(&store, &id, None, &connect, 10).unwrap_err();
+        assert!(e.contains("Approve a budget"), "{e}");
+        let budget = |store: &Store| {
+            store
+                .read(|c| {
+                    Ok(
+                        c.query_row("SELECT budget_micro_usd FROM model_setting", [], |r| {
+                            r.get::<_, Option<i64>>(0)
+                        })?,
+                    )
+                })
+                .unwrap()
+        };
+        assert_eq!(budget(&store), None);
+
+        // With a budget: the draft is saved and the cost is taken.
+        store
+            .write(|tx| {
+                tx.execute("UPDATE model_setting SET budget_micro_usd = 1000000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let out = write(&store, "t-1", None, &connect, 20).unwrap();
+        assert!(out.starts_with("Hi Ana, yes. D\n"), "{out}");
+        // 1000 tokens in at 3 USD and 100 out at 15 USD for a million.
+        assert_eq!(budget(&store), Some(1_000_000 - 3_000 - 1_500));
+        let runs: Vec<(String, String, i64)> = store
+            .read(|c| {
+                let mut st =
+                    c.prepare("SELECT prompt, stop, calls FROM understand_run ORDER BY id")?;
+                let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })
+            .unwrap();
+        assert_eq!(
+            runs,
+            [
+                ("draft/0.1".into(), "budget".into(), 0),
+                ("draft/0.1".into(), "done".into(), 1)
+            ]
+        );
+        assert!(write(&store, "c-1", None, &connect, 30).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -28,6 +28,7 @@ iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
 iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
+iris-voice = { version = "0.0.0", path = "../iris-voice" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
 # Same version as iris-store, so the program has one copy of SQLite.
 rusqlite = "=0.43.0"
