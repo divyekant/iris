@@ -1387,6 +1387,50 @@ See you soon.
 }
 
 #[test]
+fn a_gone_message_refreshes_the_kinds_before_its_conversation() {
+    let b = store("gone-kinds");
+    // The sent message makes example.org known, so examp1e.org is a near
+    // copy and its sender is hostile.
+    let sent = "From: owner@example.com
+To: bo@example.org
+Subject: Hi
+
+See you soon.
+";
+    let later = "From: ana@examp1e.org
+To: owner@example.com
+Subject: Re: Hi
+
+Can you call me today?
+";
+    let s = b.add_in("1", "t1", NOW - 3 * DAY, sent, &["SENT"]);
+    let m = b.add_in("2", "t1", NOW - 2 * DAY, later, &["INBOX"]);
+    understand(&b.store, s, &Fake::default(), NOW).unwrap();
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let kind = |b: &Box_| -> String {
+        b.col(
+            "SELECT kind FROM sender WHERE address = 'ana@examp1e.org' AND ?1 = ?1",
+            0,
+        )
+    };
+    assert_eq!(kind(&b), "hostile");
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [s])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(understand(&b.store, s, &Fake::default(), NOW).unwrap().gone);
+    assert_eq!(kind(&b), "stranger");
+    // The conversation counts the live message of the stranger.
+    let status: String = b.col(
+        "SELECT status FROM item WHERE form = 'conversation' AND ?1 = ?1",
+        0,
+    );
+    assert_ne!(status, "gone");
+}
+
+#[test]
 fn a_gone_message_leaves_the_conversation() {
     let b = store("gone-talk");
     let first =

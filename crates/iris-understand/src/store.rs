@@ -132,8 +132,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             if state(tx, message, true)? != start {
                 return Ok(None);
             }
+            // The kinds first: the conversation reads them.
+            let rerun = iris_senders::refresh(tx, now_ms)?;
             iris_talk::update(tx, row.thread, None, now_ms)?;
-            Ok(Some(iris_senders::refresh(tx, now_ms)?))
+            Ok(Some(rerun))
         })?;
         return Ok(Outcome {
             gone: done.is_some(),
