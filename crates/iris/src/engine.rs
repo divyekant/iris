@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -183,6 +183,8 @@ pub struct Worker {
     token: Option<AccessToken>,
     /// The sealed sign-in that gave `token`.
     sealed: Vec<u8>,
+    /// Set after each sync, for the understanding thread of the engine.
+    signal: Option<Arc<Signal>>,
 }
 
 impl Worker {
@@ -200,6 +202,7 @@ impl Worker {
             test_token_uri,
             token: None,
             sealed: Vec::new(),
+            signal: None,
         }
     }
 
@@ -267,15 +270,11 @@ impl Worker {
     /// Sync each [`SYNC_EVERY`] until the account leaves the list of
     /// [`sync_accounts`]. Each error goes to standard error.
     pub fn run(mut self) {
-        // The first sync of the thread runs understanding too, so a model
-        // or a budget set before a restart is used without new mail. A run
-        // that another run blocked is owed to the next turn.
-        let mut owed = true;
         loop {
             match self.sync() {
-                Ok(s) => {
-                    if owed || s.fetched + s.gone > 0 {
-                        owed = !understand(&self.store, self.account);
+                Ok(_) => {
+                    if let Some(signal) = &self.signal {
+                        signal.set();
                     }
                 }
                 // Another process syncs the account: not an error.
@@ -291,16 +290,99 @@ impl Worker {
     }
 }
 
-/// The run of understanding after a sync (R1-28). Gives the words and the
-/// senders that search finds (spec 1 section 5.6). If another run holds
-/// the lock, it gives false, and the caller tries again at the next turn:
-/// the other run can pass the new mail. Each error goes to standard error.
-fn understand(store: &Store, account: i64) -> bool {
-    match crate::cost::after_sync(store) {
-        Ok(ran) => ran.is_some(),
-        Err(e) => {
-            say!("iris: account {account}: understand: {e}");
-            true
+/// The time between two tries of a run that another run blocks.
+pub const BUSY_RETRY: Duration = Duration::from_secs(1);
+
+/// A flag that a sync thread sets after each sync, and that the
+/// understanding thread waits for.
+#[derive(Default)]
+pub struct Signal {
+    owed: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl Signal {
+    pub fn set(&self) {
+        *self.owed.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ready.notify_one();
+    }
+
+    /// Waits until the flag is set, then clears it.
+    fn take(&self) {
+        let mut owed = self.owed.lock().unwrap_or_else(|e| e.into_inner());
+        while !*owed {
+            owed = self.ready.wait(owed).unwrap_or_else(|e| e.into_inner());
+        }
+        *owed = false;
+    }
+}
+
+/// The run of understanding after the syncs (R1-28). It runs only when
+/// its input changed since its last run: the history ID of an account
+/// (each mailbox change, labels too), the model row and its budget, or the
+/// count of due retries. So an unchanged mailbox with no model makes no run.
+#[derive(Default)]
+pub struct Understander {
+    last: Option<String>,
+}
+
+impl Understander {
+    /// One turn: `None` if the input did not change since the last run.
+    /// After [`AfterSync::Busy`](crate::cost::AfterSync::Busy) the next
+    /// turn runs.
+    pub fn turn(
+        &mut self,
+        store: &Store,
+    ) -> std::result::Result<Option<crate::cost::AfterSync>, String> {
+        let key = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT (SELECT group_concat(id || ':' || coalesce(history_id, ''), ',')
+                               FROM account),
+                            (SELECT version || ':' || coalesce(budget_micro_usd, '')
+                               FROM model_setting),
+                            (SELECT count(*) FROM message WHERE understood_at IS NULL
+                               AND retry_at IS NOT NULL AND retry_at <= ?1)",
+                    [now_ms()],
+                    |r| {
+                        Ok(format!(
+                            "{}|{}|{}",
+                            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            r.get::<_, i64>(2)?
+                        ))
+                    },
+                )?)
+            })
+            .map_err(|e| e.to_string())?;
+        if self.last.as_ref() == Some(&key) {
+            return Ok(None);
+        }
+        let r = crate::cost::after_sync(store)?;
+        if r != crate::cost::AfterSync::Busy {
+            self.last = Some(key);
+        }
+        Ok(Some(r))
+    }
+}
+
+/// The understanding thread: one [`Understander`] apart from the sync
+/// threads, so a long run does not stop a sync. Gives the words and the
+/// senders that search finds (spec 1 section 5.6). A sync during a run
+/// sets the flag again, so the next turn reads its mail.
+fn understand_loop(store: Arc<Store>, signal: Arc<Signal>) {
+    let mut u = Understander::default();
+    loop {
+        signal.take();
+        loop {
+            match u.turn(&store) {
+                Ok(Some(crate::cost::AfterSync::Busy)) => std::thread::sleep(BUSY_RETRY),
+                Ok(_) => break,
+                Err(e) => {
+                    say!("iris: understand: {e}");
+                    break;
+                }
+            }
         }
     }
 }
@@ -314,6 +396,8 @@ pub struct Engine {
     test_token_uri: Option<String>,
     workers: HashMap<i64, JoinHandle<()>>,
     last_clean: Option<Instant>,
+    signal: Arc<Signal>,
+    understander: Option<JoinHandle<()>>,
 }
 
 impl Engine {
@@ -328,6 +412,8 @@ impl Engine {
             test_token_uri,
             workers: HashMap::new(),
             last_clean: None,
+            signal: Arc::default(),
+            understander: None,
         }
     }
 
@@ -343,18 +429,27 @@ impl Engine {
             if self.workers.contains_key(&account) {
                 continue;
             }
-            let worker = Worker::new(
+            let mut worker = Worker::new(
                 self.store.clone(),
                 Gmail::new(self.gmail.clone()),
                 account,
                 self.test_token_uri.clone(),
             );
+            worker.signal = Some(self.signal.clone());
             let handle = std::thread::Builder::new()
                 .name(format!("sync-{account}"))
                 .spawn(move || worker.run())
                 .map_err(iris_store::Error::Io)?;
             self.workers.insert(account, handle);
             started.push(account);
+        }
+        if self.understander.as_ref().is_none_or(|h| h.is_finished()) {
+            let (store, signal) = (self.store.clone(), self.signal.clone());
+            let handle = std::thread::Builder::new()
+                .name("understand".into())
+                .spawn(move || understand_loop(store, signal))
+                .map_err(iris_store::Error::Io)?;
+            self.understander = Some(handle);
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");

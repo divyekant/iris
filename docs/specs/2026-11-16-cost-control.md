@@ -46,7 +46,10 @@ pending state that the store gives. Each one has an issue:
 - The selection and the reset of `iris rebuild` (spec 1 section 7.5). This
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It
-  calls the runner of this spec.
+  calls the runner of this spec. R1-28 note: `iris serve` runs it in one
+  understanding thread apart from the sync threads. After each sync, the
+  thread runs only if its input changed since its last run: the history ID
+  of an account, the model row and its budget, or the count of due retries.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 
@@ -240,7 +243,10 @@ lose a rerun:
 4. For each thread in order, and for each pending message of it: check the
    stop conditions, then call `store::understand`.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
-6. At the end, write `ended_at` and `stop`.
+6. At the end, write `ended_at` and `stop`. The run after a sync
+   (`Limits::keep_idle` false, R1-28) deletes its row in the same write if
+   it read no message, made no call and holds no reservation, so a run
+   each minute adds no row.
 
 Stop conditions, checked before each message:
 

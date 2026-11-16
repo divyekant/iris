@@ -655,3 +655,27 @@ fn the_sender_refresh_runs_before_the_model_is_made() {
     assert!(matches!(r, Err(Error::Connect(_))));
     assert!(!b.understood(ana), "the refresh reset the mail of Ana");
 }
+
+#[test]
+fn an_idle_run_keeps_its_row_only_with_keep_idle() {
+    let b = store("idle");
+    b.model(false, None);
+    b.add("1", "a", 1, &["INBOX"]);
+    let rows = |b: &Box_| b.col("SELECT count(*) FROM understand_run");
+    let quiet = Limits {
+        keep_idle: false,
+        ..Limits::default()
+    };
+    let r = b.run(&quiet).unwrap();
+    assert_eq!(r.messages, 1);
+    assert_eq!(rows(&b), Some(1), "a run that read a message keeps its row");
+    let r = b.run(&quiet).unwrap();
+    assert!(r.is_idle());
+    assert_eq!(
+        rows(&b),
+        Some(1),
+        "an idle run with keep_idle false leaves no row"
+    );
+    assert!(b.run(&Limits::default()).unwrap().is_idle());
+    assert_eq!(rows(&b), Some(2), "the default keeps the row");
+}

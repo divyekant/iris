@@ -507,14 +507,29 @@ pub fn run(store: &Store, limits: &Limits, now_ms: i64) -> Result<String, String
     report_of(store, &r)
 }
 
+/// The result of [`after_sync`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum AfterSync {
+    /// The report of a run that read a message or made a call.
+    Ran(String),
+    /// Nothing to do: the run deleted its row.
+    Idle,
+    /// Another run holds the lock. Run again after it.
+    Busy,
+}
+
 /// The run after a sync (R1-28): the batch runner with no limit but the
-/// budget. Gives `None` if another run holds the lock: that run reads the
-/// pending messages.
-pub fn after_sync(store: &Store) -> Result<Option<String>, String> {
+/// budget. An idle run leaves no row.
+pub fn after_sync(store: &Store) -> Result<AfterSync, String> {
     let connect = |row: &ModelRow| connect(store, row);
-    match batch::run(store, &connect, &Limits::default(), crate::engine::now_ms()) {
-        Ok(r) => report_of(store, &r).map(Some),
-        Err(batch::Error::Busy) => Ok(None),
+    let limits = Limits {
+        keep_idle: false,
+        ..Limits::default()
+    };
+    match batch::run(store, &connect, &limits, crate::engine::now_ms()) {
+        Ok(r) if r.is_idle() => Ok(AfterSync::Idle),
+        Ok(r) => report_of(store, &r).map(AfterSync::Ran),
+        Err(batch::Error::Busy) => Ok(AfterSync::Busy),
         Err(e) => Err(e.to_string()),
     }
 }

@@ -409,24 +409,76 @@ fn a_tick_opens_a_deferred_commitment_on_its_date() {
 }
 
 #[test]
-fn the_engine_runs_understanding_after_a_sync() {
+fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
     let s = setup("engine-understand", 5);
+    // Another run holds the lock: the sync must not wait for it.
+    let held = iris_understand::batch::lock(&s.store).unwrap();
     let mut e = Engine::new(
         s.store.clone(),
         config(s.fake.base_url()),
         Some(s.tokens.uri.clone()),
     );
     assert_eq!(e.tick().unwrap(), vec![s.account]);
-    // The header rows (the words and the senders of search) come from
-    // understanding, not from the sync.
     wait_for(
         &s.store,
-        "SELECT count(*) FROM understand_run WHERE ended_at IS NOT NULL",
+        "SELECT count(*) FROM account WHERE mirror_ready_at IS NOT NULL",
         Duration::from_secs(30),
     );
+    assert_eq!(count(&s.store, "SELECT count(*) FROM body"), 0);
+    // The run is owed, and runs when the lock is free. The body rows (the
+    // words of search) come from understanding.
+    drop(held);
     wait_for(
         &s.store,
         "SELECT count(*) FROM header",
         Duration::from_secs(30),
     );
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM understand_run WHERE ended_at IS NOT NULL",
+        Duration::from_secs(30),
+    );
+}
+
+#[test]
+fn understanding_runs_again_only_when_its_input_changes() {
+    let s = setup("engine-idle", 5);
+    let mut u = engine::Understander::default();
+    s.worker(s.account).sync().unwrap();
+    assert!(matches!(
+        u.turn(&s.store).unwrap(),
+        Some(iris::cost::AfterSync::Ran(_))
+    ));
+    let rows = count(&s.store, "SELECT count(*) FROM understand_run");
+    // Unchanged mailbox and model: no run, no row.
+    for _ in 0..3 {
+        s.worker(s.account).sync().unwrap();
+        assert_eq!(u.turn(&s.store).unwrap(), None);
+    }
+    assert_eq!(count(&s.store, "SELECT count(*) FROM understand_run"), rows);
+    // A new model is a change of input: one run, and it leaves no row when
+    // it has nothing to read.
+    let set = iris::cost::NewModel {
+        local: true,
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "m".into(),
+        price: None,
+        api_key: None,
+        max_tokens: 100,
+        timeout_s: 1,
+    };
+    iris::cost::set_model(&s.store, &set).unwrap();
+    assert!(u.turn(&s.store).unwrap().is_some());
+    assert_eq!(u.turn(&s.store).unwrap(), None);
+    // A run that the lock blocks is owed to the next turn.
+    s.store
+        .write(|tx| {
+            tx.execute("UPDATE account SET history_id = '1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let held = iris_understand::batch::lock(&s.store).unwrap();
+    assert_eq!(u.turn(&s.store).unwrap(), Some(iris::cost::AfterSync::Busy));
+    drop(held);
+    assert!(u.turn(&s.store).unwrap().is_some());
 }

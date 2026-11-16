@@ -118,6 +118,9 @@ pub struct Limits {
     pub max_messages: Option<u64>,
     /// A run can pass this limit by the cost of one message.
     pub max_cost_micro_usd: Option<u64>,
+    /// False for the run after a sync: a run that read no message and made
+    /// no call deletes its row, so a run each minute adds no row.
+    pub keep_idle: bool,
 }
 
 impl Default for Limits {
@@ -126,6 +129,7 @@ impl Default for Limits {
             batch: BATCH,
             max_messages: None,
             max_cost_micro_usd: None,
+            keep_idle: true,
         }
     }
 }
@@ -183,6 +187,17 @@ pub struct Report {
     pub reserved_micro_usd: i64,
 }
 
+impl Report {
+    /// True if the run read no message, made no call and holds no
+    /// reservation.
+    pub fn is_idle(&self) -> bool {
+        self.messages == 0
+            && self.calls == 0
+            && self.unknown_calls == 0
+            && self.reserved_micro_usd == 0
+    }
+}
+
 pub fn report(c: &Connection, run: i64) -> rusqlite::Result<Report> {
     c.query_row(
         "SELECT stop, messages, calls, input_tokens, output_tokens, cost_micro_usd,
@@ -230,15 +245,20 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
     })?;
     let result = run_messages(store, connect, row.as_ref(), run, limits, now_ms);
     let stop = result.as_ref().map_or(Stop::Error, |s| *s);
-    store.write(|tx| {
+    let keep_idle = limits.keep_idle || result.is_err();
+    let report = store.write(|tx| {
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
             params![run, now_ms.max(clock_ms()), stop.as_str()],
         )?;
-        Ok(())
+        let r = report(tx, run)?;
+        if !keep_idle && r.is_idle() {
+            tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
+        }
+        Ok(r)
     })?;
     result?;
-    Ok(store.read(|c| Ok(report(c, run)?))?)
+    Ok(report)
 }
 
 fn clock_ms() -> i64 {

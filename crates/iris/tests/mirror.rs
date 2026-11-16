@@ -144,3 +144,26 @@ fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
         assert!(!out.trim().is_empty(), "no result for {query}");
     }
 }
+
+#[test]
+fn mirror_sync_waits_for_a_run_that_holds_the_lock() {
+    let fake = FakeGmail::start(Mailbox::new(5, 10)).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-busy");
+    let store = Store::open(&dir).unwrap();
+    add_account(&store, &gmail(fake.base_url()));
+    let held = iris_understand::batch::lock(&store).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        drop(held);
+    });
+    let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    release.join().unwrap();
+    assert!(ok, "{err}");
+    assert!(out.contains("understand: waits for another run"), "{out}");
+    assert!(out.contains("understand: Run "), "{out}");
+    let headers: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM header", [], |r| r.get(0))?))
+        .unwrap();
+    assert!(headers > 0);
+}
