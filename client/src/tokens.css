@@ -66,6 +66,8 @@
   --color-accent-border: rgba(212,175,55,0.15);
   --color-overlay: rgba(0,0,0,0.6);
   --color-unread: #d4af37;
+  /* Text on a primary (gold) background. A value of this palette, not a new color. */
+  --color-on-primary: #0a0a0a;
 }
 
 /* palette: light */
@@ -85,5 +87,6 @@
     --color-accent-border: rgba(184,150,15,0.18);
     --color-overlay: rgba(0,0,0,0.3);
     --color-unread: #b8960f;
+    --color-on-primary: #2C2418;
   }
 }

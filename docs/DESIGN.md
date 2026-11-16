@@ -35,8 +35,30 @@ At most 12 unique colors. The unread indicator uses the brand gold, not blue.
 
 ## Parts
 
-The client is an empty shell in release 0. Add each shared part here when it is
-built.
+Add each shared part here when it is built. The parts are in `client/src/views/`.
+
+| Part | File | Use |
+|---|---|---|
+| Header | `App.svelte` | The Iris mark (a gold ring), and one link for each view. The active link has a gold line under it. On a phone the links scroll in one row. |
+| Opening | `Brief.svelte` | The greeting and the date in muted text, then one sentence in `font-size-4` that says what needs you. |
+| Line | `Line.svelte` | The round mark with the initials of the other party, the title, and one muted line of detail. The whole line opens the item. The envelope opens the source mail. A gold dot marks a conversation that waits for you. |
+| Due tone | `Line.svelte` | A dot after the due date: `warning` for 2 days or less, `error` when late. The words say the same, so color is not the only sign. |
+| Section | `Brief.svelte` | A heading with the count on the right, a line under it, at most 7 lines, and an "All N" link. An empty section does not show. |
+| Code | `Code.svelte` | A login code in mono type, a Copy button, and the time left. It goes away when the code expires. |
+| Quote | `Item.svelte` | The words of the mail that made the item, with a gold line on the left and the link to the mail. |
+| Chips | `Brief.svelte`, `Records.svelte` | Round links or buttons with a count. The chosen chip and a chip under the pointer have a gold border. |
+| Primary button | `Code.svelte`, `Setup.svelte` | A gold background with the `on-primary` text color. One for each screen at most. |
+| Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail or an error. |
+| Access notice | `App.svelte` | Above every view: why the API cannot answer now (no sign-in, a used sign-in address, or no engine). It goes away at the next good answer. It uses the `warning` border. |
+| Setup link | `App.svelte` | Above each view other than setup and the brief, when Iris has no account: a link to setup. The Brief link opens setup in that case. It uses the `warning` border. |
+| Sign-in notice | `SignInNotice.svelte` | Above every view: the address of each account that needs sign-in, from the last status answer, and the command that signs in again. It uses the `warning` border. |
+
+The token `on-primary` is the text color on gold: `#0a0a0a` in the dark
+palette and `#2C2418` in the light palette. Both are colors of the palette, so
+the count of colors does not change. `test/tokens.test.mjs` checks the contrast.
+
+Gold is never the text color, because light gold on a light background fails
+the contrast rule.
 
 ## Rules
 
