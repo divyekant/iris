@@ -492,3 +492,36 @@ test("the brief shows an account that needs sign-in, with the step to fix it", a
   const fine = text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: fx.status, now: NOW, poll: 0 }));
   assert.doesNotMatch(fine, /stopped the sign-in/);
 });
+
+test("a sign-in that does not reach the engine keeps the code for a reload", async () => {
+  const { signIn, SIGN_IN_FAILED } = await load("/src/api.ts");
+  const saved = globalThis.fetch;
+  const memory = new Map();
+  const store = { getItem: (k) => memory.get(k) ?? null, setItem: (k, v) => memory.set(k, v), removeItem: (k) => memory.delete(k) };
+  const hist = { replaceState: () => {} };
+  const sent = [];
+  try {
+    globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+    await assert.rejects(signIn({ hash: "#code=c-9", pathname: "/", search: "" }, hist, store));
+    // The reload has no code in the address, and sends the kept code.
+    globalThis.fetch = async (url, init) => (sent.push(JSON.parse(init.body)), new Response(JSON.stringify({ token: "t-9" })));
+    await signIn({ hash: "#/", pathname: "/", search: "" }, hist, store);
+    assert.deepEqual(sent, [{ code: "c-9" }]);
+    assert.equal(memory.get("iris.token"), "t-9");
+    assert.equal(memory.has("iris.code"), false);
+    // A refused code is not kept: the engine used or refused it.
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "used" }), { status: 403 });
+    await assert.rejects(signIn({ hash: "#code=c-10", pathname: "/", search: "" }, hist, store), { message: SIGN_IN_FAILED });
+    assert.equal(memory.has("iris.code"), false);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("the setup flow shows an account that needs sign-in, with the step to fix it", async () => {
+  const account = { ...fx.status.accounts[0], state: "needs_sign_in", mirror_ready_at: null, sync: { kind: "first", step: 2 } };
+  const status = { accounts: [account], messages: { total: 84212, fetched: 1000, understood: 0, gone: 0 } };
+  const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
+  assert.match(t, /Google stopped the sign-in of/);
+  assert.match(t, /iris account add client\.json/);
+});
