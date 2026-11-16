@@ -82,13 +82,13 @@ pub fn active(conn: &Connection) -> Result<Active> {
 /// The file on disk and the checks that a confirmation makes, other than
 /// the hash. `file_state` and `confirm` both use this, so a file that
 /// `file_state` calls `Changed` is a file that `confirm` accepts.
-enum Checked {
+pub(crate) enum Checked {
     Missing,
     Invalid(Error),
     Ok(Loaded),
 }
 
-fn check(conn: &Connection, data_dir: &std::path::Path) -> Result<Checked> {
+pub(crate) fn check(conn: &Connection, data_dir: &std::path::Path) -> Result<Checked> {
     let loaded = match load(data_dir) {
         Ok(Some(l)) => l,
         Ok(None) => return Ok(Checked::Missing),
@@ -145,34 +145,48 @@ pub fn confirm(store: &Store, sha256: &str, now: i64) -> Result<Confirm> {
         if loaded.sha256 != sha256 {
             return Ok(Confirm::Stale);
         }
-        tx.execute(
-            "INSERT INTO policy_version (text, sha256, confirmed_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![loaded.text, loaded.sha256, now],
-        )?;
-        let version = tx.last_insert_rowid();
-        let ids: Vec<u32> = loaded.policy.rules.iter().map(|r| r.id).collect();
-        let mut gone: Vec<u32> = tx
-            .prepare("SELECT id FROM policy_rule_id WHERE removed_at IS NULL")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        gone.retain(|id| !ids.contains(id));
-        for id in gone {
-            tx.execute(
-                "UPDATE policy_rule_id SET removed_at = ?2 WHERE id = ?1",
-                rusqlite::params![id, now],
-            )?;
-        }
-        for id in &ids {
-            tx.execute(
-                "INSERT OR IGNORE INTO policy_rule_id (id) VALUES (?1)",
-                [id],
-            )?;
-        }
+        let version = record(tx, &loaded.text, &loaded.sha256, &loaded.policy, now)?;
         Ok(Confirm::Done {
             version,
             policy: loaded.policy,
         })
     })
+}
+
+/// Stores `text` as the newest version of the active policy, and records
+/// its rule IDs. A rule ID of the version before that `policy` does not have
+/// is removed, and never used again.
+pub(crate) fn record(
+    tx: &Connection,
+    text: &str,
+    sha256: &str,
+    policy: &Policy,
+    now: i64,
+) -> Result<i64> {
+    tx.execute(
+        "INSERT INTO policy_version (text, sha256, confirmed_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![text, sha256, now],
+    )?;
+    let version = tx.last_insert_rowid();
+    let ids: Vec<u32> = policy.rules.iter().map(|r| r.id).collect();
+    let mut gone: Vec<u32> = tx
+        .prepare("SELECT id FROM policy_rule_id WHERE removed_at IS NULL")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    gone.retain(|id| !ids.contains(id));
+    for id in gone {
+        tx.execute(
+            "UPDATE policy_rule_id SET removed_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, now],
+        )?;
+    }
+    for id in &ids {
+        tx.execute(
+            "INSERT OR IGNORE INTO policy_rule_id (id) VALUES (?1)",
+            [id],
+        )?;
+    }
+    Ok(version)
 }
 
 /// The text of a confirmed version, so that the ledger and the review can

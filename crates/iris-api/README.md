@@ -2,7 +2,8 @@
 
 The local API of Iris (tracker item R1-17). The API gives the web client
 and the read verbs of the `iris` program their data from the store. The API
-is read only.
+reads only, except the policy changes of the web client (see
+[Policy](#policy)).
 
 ## Use
 
@@ -20,7 +21,7 @@ data.
 
 ## Endpoints
 
-All endpoints use `GET` and give JSON, except `/raw`. Times are RFC 3339 in
+All endpoints in this table use `GET` and give JSON, except `/raw`. Times are RFC 3339 in
 UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 
 | Endpoint | Gives |
@@ -68,17 +69,53 @@ newer item is not in `items` and not in `count`. The feed sorts by the address o
 the sender row of the publisher, so the items of one publisher stay together. A sender with no sender row, or with no kind yet, is
 a stranger.
 
+## Policy
+
+The policy view of the web client (specification 2, section 6.3). Each
+endpoint gives the policy object below. `POST` endpoints take a JSON body.
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/policy` | Gives the policy object. Changes nothing. |
+| `POST /api/policy/confirm` | Body `{"sha256"}`: the `file.sha256` that the person saw. Makes the file on disk the active policy. |
+| `POST /api/policy/discard` | Body `{}`. Keeps the file on disk as a copy, then writes the text of the active policy to `policy.toml`. With no active version, no new file is written. The answer has `saved`: the name of the copy in the data folder (`policy.toml.saved-<seconds>`), or `null` when there was no file. |
+| `POST /api/policy/mode` | Body `{"version", "mode"}`. Writes the new mode to the file and makes it active. |
+| `POST /api/policy/remove` | Body `{"version", "id"}`. Removes the rule from the file and makes the file active. The ID is never used again. |
+
+`version` is the active version that the person saw, `null` for the policy
+of the first start. If it is not the active version, or if the file on disk
+is not the active policy (also no file after a confirmation), the change is a
+409. A file that the person saves during a change or a discard is never
+replaced. A change keeps the other text
+and the comments of the file. A comment directly above a removed rule goes
+with the rule. A comment that a blank line separates from the rule stays.
+
+The policy object:
+
+| Field | Content |
+|---|---|
+| `mode` | The mode of the active policy: `observe` or `apply`. |
+| `version` | The active version, or `null` at the first start. |
+| `rules` | The rules of the active policy, in the order of the file. |
+| `error` | `{"line", "message"}` when the active text is not valid any more (for example after a program update), else `null`. The active policy then applies nothing. |
+| `file` | The file on disk, compared to the active policy. `state` is `same`, `missing`, `invalid` (with `error`) or `changed`. A `changed` file has `sha256`, `text`, `mode`, and the rules that it `added`, `removed` and `changed` (`{"before", "after"}`). A rule that keeps its ID and changes any field other than `line` is changed. |
+
+A rule is `{"id", "name", "effect", "verbs", "when", "by", "added", "job",
+"line"}`. `when` holds only the conditions that the rule sets. `line` is the
+line of the rule in its file, from 1.
+
 ## Errors
 
 An error is `{"error": "<reason>"}`:
 
 | Status | Cause |
 |---|---|
-| 400 | The search text, an ID or a filter is not valid. |
+| 400 | The search text, an ID, a filter or a request body is not valid. |
 | 401 | The request has no `Authorization: Bearer` token of the sign-in, or a wrong one. |
 | 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
+| 409 | A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. |
 | 500 | The store failed. |
 
 ## Sign-in

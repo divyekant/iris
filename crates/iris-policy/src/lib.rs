@@ -4,12 +4,15 @@
 //!
 //! This crate reads and checks the file, and evaluates actions and items.
 //! It keeps the active policy in `iris.db` and confirms a changed file
-//! (section 6.3). It never writes the file.
+//! (section 6.3). It writes the file only for a change that the person makes
+//! in the web client (`change`, `discard`), and keeps its comments.
 
 mod active;
+mod edit;
 mod eval;
 
 pub use active::{active, confirm, file_state, version_text, Active, Confirm, FileState};
+pub use edit::{change, discard, edit_text, Change, Discarded, Edited, DEFAULT_TEXT};
 pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
 
 use serde::Deserialize;
@@ -27,24 +30,38 @@ pub const MAX_BYTES: usize = 256 * 1024;
 /// The largest number of rules in one file.
 pub const MAX_RULES: usize = 1000;
 
-/// What the engine does with the result of the rules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    /// Iris applies nothing. Each action stays `proposed`.
-    Observe,
-    /// The rules decide, and the rest goes to review.
-    Apply,
+/// Defines a small enum of fixed names with `name` and `from_name`.
+macro_rules! names {
+    ($(#[$m:meta])* $ty:ident { $($v:ident = $s:literal),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum $ty { $($v),+ }
+
+        impl $ty {
+            pub const ALL: &'static [$ty] = &[$($ty::$v),+];
+
+            pub fn name(self) -> &'static str {
+                match self { $($ty::$v => $s),+ }
+            }
+
+            pub fn from_name(s: &str) -> Option<$ty> {
+                Self::ALL.iter().copied().find(|v| v.name() == s)
+            }
+        }
+    };
 }
 
-/// The effect of a rule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effect {
-    Allow,
-    Review,
-    Deny,
-    Hide,
-    Bundle,
-}
+names!(
+    /// What the engine does with the result of the rules. `observe`: Iris
+    /// applies nothing, and each action stays `proposed`. `apply`: the rules
+    /// decide, and the rest goes to review.
+    Mode { Observe = "observe", Apply = "apply" }
+);
+
+names!(
+    /// The effect of a rule.
+    Effect { Allow = "allow", Review = "review", Deny = "deny", Hide = "hide", Bundle = "bundle" }
+);
 
 impl Effect {
     fn is_action(self) -> bool {
@@ -104,27 +121,6 @@ impl Verb {
     }
 }
 
-/// Defines a small enum of fixed names with `name` and `from_name`.
-macro_rules! names {
-    ($(#[$m:meta])* $ty:ident { $($v:ident = $s:literal),+ $(,)? }) => {
-        $(#[$m])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum $ty { $($v),+ }
-
-        impl $ty {
-            pub const ALL: &'static [$ty] = &[$($ty::$v),+];
-
-            pub fn name(self) -> &'static str {
-                match self { $($ty::$v => $s),+ }
-            }
-
-            pub fn from_name(s: &str) -> Option<$ty> {
-                Self::ALL.iter().copied().find(|v| v.name() == s)
-            }
-        }
-    };
-}
-
 names!(
     /// The five forms of spec 1 section 6.
     Form { Commitment = "commitment", Conversation = "conversation", Record = "record", Feed = "feed", Signal = "signal" }
@@ -146,12 +142,10 @@ names!(
     Author { Person = "person", Agent = "agent", Triage = "triage", Local = "local" }
 );
 
-/// Who wrote a rule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum By {
-    Person,
-    Proposal,
-}
+names!(
+    /// Who wrote a rule.
+    By { Person = "person", Proposal = "proposal" }
+);
 
 /// The conditions of a rule. Each condition that is set must match.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

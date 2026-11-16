@@ -59,8 +59,7 @@ fn check_limit(limit: u32) -> Result<()> {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Status {
-    /// The policy mode (specification 2). Release 1 applies nothing, so
-    /// the mode is always `observe`.
+    /// The mode of the active policy (specification 2, section 6).
     pub mode: &'static str,
     pub accounts: Vec<Account>,
     pub messages: Counts,
@@ -249,10 +248,8 @@ pub fn status(store: &Store) -> Result<Status> {
                 })
             },
         )?;
-        // shortcut: release 1 has no policy file to read; read its mode when
-        // release 2 adds the policy.
         Ok(Status {
-            mode: "observe",
+            mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
         })
