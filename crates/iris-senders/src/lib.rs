@@ -557,6 +557,8 @@ mod tests {
             ("pyapal.com", "paypal.com"),
             ("rnicrosoft.com", "microsoft.com"),
             ("dh1.com", "dhl.com"),
+            ("paypa1.github.io", "paypal.github.io"),
+            ("paypal-login.herokuapp.com", "paypal.herokuapp.com"),
             ("paypall.co.uk", "paypal.co.uk"),
             ("paypal-verify.co.uk", "paypal.co.uk"),
         ];
@@ -574,6 +576,7 @@ mod tests {
             ("shop.co.uk", "shop.com"),
             ("mail.shop.co.uk", "shop.co.uk"),
             ("other.co.uk", "shop.co.uk"),
+            ("mail.paypal.github.io", "paypal.github.io"),
             ("gmail.com", "email.com"),
             ("abc.com", "abd.com"),
             ("github.com", "gitlab.com"),

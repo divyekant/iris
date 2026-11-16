@@ -440,6 +440,36 @@ fn gone_mail_is_no_evidence() {
 }
 
 #[test]
+fn a_hostile_row_whose_known_domain_goes_becomes_a_person_from_sent_mail() {
+    let mut c = Case::new("hostile-clears");
+    for t in ["t1", "t2", "t3"] {
+        c.put(t, &[], &service_mail());
+    }
+    c.put(
+        "t4",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: ann@shop-secure.example.net"),
+    );
+    assert_eq!(
+        c.row("ann@shop-secure.example.net").1.as_deref(),
+        Some("hostile")
+    );
+    // The known service stops being known (a person sets it a stranger).
+    set(&c, "UPDATE sender SET kind = 'stranger', decided_by = 'person' WHERE address = 'no-reply@shop.example.com'");
+    let d = c.put("t5", &[], "From: ann@shop-secure.example.net");
+    assert_eq!((d.kind, d.previous), (Kind::Person, Some(Kind::Hostile)));
+}
+
+#[test]
+fn auto_submitted_no_with_a_comment_is_not_a_service() {
+    let mut c = Case::new("auto-no");
+    let mail = service_mail().replace("auto-generated", "no (human-generated)");
+    for t in ["t1", "t2", "t3"] {
+        assert_eq!(c.put(t, &[], &mail).kind, Kind::Stranger);
+    }
+}
+
+#[test]
 fn another_bcc_message_keeps_a_person() {
     let mut c = Case::new("bcc-two");
     let sent = format!("From: {OWNER}\r\nBcc: eve@example.org");

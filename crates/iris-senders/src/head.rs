@@ -202,6 +202,9 @@ mod tests {
         assert!(!auto("Precedence: junk\r\n\r\n"));
         assert!(auto("Auto-Submitted: auto-generated\r\n\r\n"));
         assert!(!auto("Auto-Submitted: no\r\n\r\n"));
+        assert!(!auto("Auto-Submitted: no (human-generated)\r\n\r\n"));
+        assert!(!auto("Auto-Submitted: (a person) no\r\n\r\n"));
+        assert!(auto("Precedence: bulk (list mail)\r\n\r\n"));
         assert!(!auto("Subject: hi\r\n\r\n"));
     }
 
