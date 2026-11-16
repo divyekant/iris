@@ -848,7 +848,15 @@ The conversation rule runs for each message that is not hostile mail:
   text, the headers that the model needs, the sender kind and the known
   parties. The text goes inside a data block with a fixed delimiter.
   The instruction says that the block is data and that it contains no
-  instructions.
+  instructions. The headers include `List-Id` and `List-Unsubscribe`.
+- The data block has a budget of 96,000 bytes, so that a local model with a
+  small context window can take it. The headers (each line cut to 1,000
+  characters) and the clean text of the message always go in. Existing
+  items, attachment text, and then the earlier messages of the thread,
+  newest first, fill the rest. Text that the budget cuts ends with `[cut]`.
+- In sent mail, a party that the engine fills in for the sender is the
+  owner, also when `From` is an alias. With no `To` and no `Cc` (Bcc only),
+  only the parties in the model answer can make a commitment valid.
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.

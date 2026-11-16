@@ -241,6 +241,100 @@ fn the_engine_sets_statuses_and_parties() {
     assert_eq!(c["counterparty"], json!({"kind": "self"}));
 }
 
+#[test]
+fn a_list_message_gives_the_list_headers_to_the_model() {
+    let raw = "From: Ana <ana@shop.example>\nList-Id: <n.shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Hello\n\nHello.\n";
+    let m = Fake::with(vec![answer(json!([]))]);
+    let (_, d) = run(raw, Kind::Service, &[], &[], Some(&m));
+    assert_eq!(d.unwrap().calls, 1);
+    let data = &m.calls.borrow()[0].1;
+    assert!(data.contains("List-Id: <n.shop.example>\n"), "{data}");
+    assert!(data.contains("List-Unsubscribe: yes\n"), "{data}");
+}
+
+#[test]
+fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties() {
+    // Sent mail from an alias: the issuer of a record is the owner.
+    let alias = "From: Me <me@alias.example>\nTo: Ana <ana@example.org>\nSubject: Note\n\nThe summary of the plan.\n";
+    let record = json!([{"form": "record", "type": "other", "title": "Plan", "quote": "The summary of the plan.",
+                         "fields": {"summary": "The plan"}}]);
+    let m = Fake::with(vec![answer(record)]);
+    let (_, d) = run(alias, Kind::SelfOwner, &["SENT"], &[], Some(&m));
+    let d = d.unwrap();
+    assert_eq!(d.drafts.len(), 1, "{:?}", d);
+    assert_eq!(d.drafts[0].item["issuer"], json!({"kind": "self"}));
+    // Sent mail with Bcc only: the parties of the model make the item.
+    let bcc = "From: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    let promise = json!([{"form": "commitment", "title": "Send", "quote": "I will send the slides",
+                          "direction": "you_owe", "kind": "task",
+                          "counterparty": {"address": "bo@example.org", "name": "Bo"}}]);
+    let m = Fake::with(vec![answer(promise)]);
+    let (_, d) = run(bcc, Kind::SelfOwner, &["SENT"], &[], Some(&m));
+    let d = d.unwrap();
+    assert_eq!((d.calls, d.drafts.len()), (1, 1));
+    let c = &d.drafts[0].item;
+    assert_eq!(c["owner"], json!({"kind": "self"}));
+    assert_eq!(c["counterparty"]["address"], "bo@example.org");
+}
+
+/// The data of one model call stays within `prompt::MAX_DATA` for the
+/// largest inputs, and it always holds the whole clean text of the message.
+#[test]
+fn the_model_data_stays_within_its_budget() {
+    let body = "x".repeat(iris_clean::TEXT_LIMIT - 100);
+    let raw = format!(
+        "From: {name} <a@example.org>\nTo: {to}\nSubject: {subject}\n\n{body}\n",
+        name = "N".repeat(5000),
+        to = (0..500)
+            .map(|i| format!("p{i}@example.org"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        subject = "S".repeat(10_000),
+    );
+    let thread: Vec<String> = (0..50)
+        .map(|i| format!("{i}{}", "é".repeat(10_000)))
+        .collect();
+    let existing: Vec<Value> = (0..200)
+        .map(|i| json!({"id": format!("c-{i}"), "title": "t".repeat(400)}))
+        .collect();
+    let none = |_: &str| Vec::new();
+    let cx = Context {
+        me: ME,
+        kind: Kind::Person,
+        labels: &[],
+        internal_date: Some(NOW),
+        now_ms: NOW,
+        known_person: &none,
+        existing: &existing,
+        thread: &thread,
+        same_sender: &[],
+    };
+    let mut a = analyze(raw.as_bytes(), &cx);
+    a.text.attachment_text = vec![("big.pdf".into(), "ü".repeat(600_000))];
+    let data = prompt::data(&a, &cx);
+    assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
+    assert!(data.contains(&body));
+    // Attachment text comes before the thread.
+    assert!(data.contains("[cut]") && !data.contains("Earlier message"));
+    // Without attachment text, the newest earlier messages fill the rest.
+    a.text.attachment_text.clear();
+    let data = prompt::data(&a, &cx);
+    assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
+    assert!(data.contains("Earlier message in the thread:\n49"));
+    assert!(!data.contains("Earlier message in the thread:\n0"));
+    // With small context, nothing is cut.
+    let small = &thread[..2];
+    let cx = Context {
+        thread: small,
+        existing: &existing[..2],
+        ..cx
+    };
+    a.text.attachment_text = vec![("a.pdf".into(), "Total 5.00".into())];
+    let data = prompt::data(&a, &cx);
+    assert!(!data.contains("[cut]"));
+    assert!(data.contains(&thread[0]) && data.contains(&thread[1]) && data.contains("c-1"));
+}
+
 /// For any JSON answer, `prompt::read` does not panic, and each draft that
 /// it gives has a quote from the mail, a form of the open model, and no
 /// field that only the engine sets.

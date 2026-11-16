@@ -40,8 +40,20 @@ Give an empty list when the mail holds no item. A personal talk with no ask and 
 pub const RETRY_NOTE: &str =
     "\n\nYour last answer did not match the format. Follow the format exactly.";
 
+/// The most bytes of the data block (about 25,000 tokens), so that a local
+/// model with a small context window can take it. The headers (each cut to
+/// `MAX_FIELD` characters) and the clean text of the current message (at
+/// most `iris_clean::TEXT_LIMIT` bytes) always go in. The existing items,
+/// attachment text, then the earlier messages of the thread, newest first,
+/// fill the rest.
+pub const MAX_DATA: usize = 96_000;
+/// The most characters of one header line in the data.
+const MAX_FIELD: usize = 1000;
+/// The mark of text that the budget cut.
+const CUT_MARK: &str = "\n[cut]";
+
 /// The data block text: the headers that the model needs, the sender kind,
-/// the clean text and the attachment names.
+/// the clean text and the attachment names, in at most about `MAX_DATA` bytes.
 pub fn data(a: &Analysis, cx: &Context) -> String {
     let h = &a.head;
     let mut d = String::new();
@@ -50,30 +62,83 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         (None, Some(ad)) => ad.clone(),
         _ => String::new(),
     };
-    d.push_str(&format!("From: {from}\n"));
-    d.push_str(&format!("To: {}\n", h.to.join(", ")));
+    let mut field = |name: &str, value: &str| {
+        d.push_str(&format!("{name}: {}\n", cut(value, MAX_FIELD)));
+    };
+    field("From", &from);
+    field("To", &h.to.join(", "));
     if !h.cc.is_empty() {
-        d.push_str(&format!("Cc: {}\n", h.cc.join(", ")));
+        field("Cc", &h.cc.join(", "));
     }
-    d.push_str(&format!("Date: {}\n", crate::time::rfc3339(a.date(cx))));
-    d.push_str(&format!("Subject: {}\n", a.text.subject));
-    d.push_str(&format!("Owner of the mailbox: {}\n", cx.me));
-    d.push_str(&format!("Sender kind: {}\n", cx.kind.name()));
+    // A list message goes to the model (section 7.3, rule 2): the model needs
+    // the list headers to find a feed item.
+    if let Some(l) = &h.list_id {
+        field("List-Id", l);
+    }
+    if h.list_unsubscribe {
+        field("List-Unsubscribe", "yes");
+    }
+    field("Date", &crate::time::rfc3339(a.date(cx)));
+    field("Subject", &a.text.subject);
+    field("Owner of the mailbox", cx.me);
+    field("Sender kind", cx.kind.name());
     for (name, mime, size) in a.text.attachments.iter().take(MAX_ATTACHMENTS) {
-        d.push_str(&format!("Attachment: {name} ({mime}, {size} bytes)\n"));
+        field("Attachment", &format!("{name} ({mime}, {size} bytes)"));
     }
+    let mut current = format!("\nThe current message:\n{}", a.text.text);
+    let mut left = MAX_DATA.saturating_sub(d.len() + current.len());
+    // An existing item that does not fit is left out: the model can then
+    // find it again, and the store keeps the pinned item (section 7.5).
     for item in cx.existing {
-        d.push_str(&format!("Existing item: {item}\n"));
+        let line = format!("Existing item: {item}\n");
+        if line.len() <= left {
+            left -= line.len();
+            d.push_str(&line);
+        }
     }
-    for earlier in cx.thread {
-        d.push_str(&format!("\nEarlier message in the thread:\n{earlier}\n"));
-    }
-    d.push_str("\nThe current message:\n");
-    d.push_str(&a.text.text);
     for (name, text) in &a.text.attachment_text {
-        d.push_str(&format!("\n\nText of the attachment {name}:\n{text}"));
+        let head = format!("\n\nText of the attachment {name}:\n");
+        if left <= head.len() + CUT_MARK.len() {
+            break;
+        }
+        current.push_str(&head);
+        left -= head.len();
+        left -= push_cut(&mut current, text, left);
     }
+    // The newest earlier messages are the most useful context.
+    let mut earlier: Vec<String> = Vec::new();
+    for e in cx.thread.iter().rev() {
+        let head = "\nEarlier message in the thread:\n";
+        if left <= head.len() + 1 + CUT_MARK.len() {
+            break;
+        }
+        let mut block = head.to_string();
+        left -= head.len() + 1;
+        left -= push_cut(&mut block, e, left);
+        block.push('\n');
+        earlier.push(block);
+    }
+    for block in earlier.iter().rev() {
+        d.push_str(block);
+    }
+    d.push_str(&current);
     d
+}
+
+/// Push `text` to `out`, cut to at most `max` bytes with the cut mark.
+/// Gives the count of bytes pushed.
+fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
+    if text.len() <= max {
+        out.push_str(text);
+        return text.len();
+    }
+    let mut end = max.saturating_sub(CUT_MARK.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
+    out.push_str(CUT_MARK);
+    end + CUT_MARK.len()
 }
 
 /// The model answer as drafts, or `None` if the answer does not have the
@@ -145,7 +210,13 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     if let Some(st) = status {
         m.insert("status".into(), json!(st));
     }
-    let sender = party_sender(a);
+    // In sent mail the sender is the owner, also with an alias in From
+    // (section 6.7).
+    let sender = if cx.kind == crate::Kind::SelfOwner {
+        json!({"kind": "self"})
+    } else {
+        party_sender(a)
+    };
     let mut put = |k: &str, v: Value| {
         m.entry(k.to_string()).or_insert(v);
     };
@@ -153,21 +224,27 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     match form.as_str() {
         "commitment" => {
             let you_owe = src.get("direction").and_then(Value::as_str) == Some("you_owe");
-            // In sent mail the sender is the owner: the other party is the
-            // first recipient. With no recipient, the item is not valid.
+            // In sent mail the other party is the first To or Cc recipient.
+            // With none (Bcc only), only the parties of the model can make
+            // the item valid: the schema check refuses a missing party.
             let other = if cx.kind == crate::Kind::SelfOwner {
-                let to = a.head.to.iter().chain(&a.head.cc).next()?;
-                json!({"kind": "sender", "address": to})
+                a.head
+                    .to
+                    .iter()
+                    .chain(&a.head.cc)
+                    .next()
+                    .map(|to| json!({"kind": "sender", "address": to}))
             } else {
-                sender
+                Some(sender)
             };
-            let (owner, other) = if you_owe {
-                (json!({"kind": "self"}), other)
-            } else {
-                (other, json!({"kind": "self"}))
-            };
-            put("owner", owner);
-            put("counterparty", other);
+            let me = Some(json!({"kind": "self"}));
+            let (owner, other) = if you_owe { (me, other) } else { (other, me) };
+            if let Some(o) = owner {
+                put("owner", o);
+            }
+            if let Some(o) = other {
+                put("counterparty", o);
+            }
         }
         "record" => {
             put("issuer", sender);

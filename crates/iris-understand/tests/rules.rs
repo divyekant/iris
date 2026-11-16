@@ -201,9 +201,14 @@ fn another_number_on_a_code_line_goes_to_the_model() {
     // The same code again is no other number.
     let same = "From: Bank <no-reply@bank.example>\nSubject: Your verification code\n\n7731\nCode 7731 ends in 10 minutes.\n";
     assert_eq!(one(same, Kind::Service, &[]).item["code"], "7731");
-    // A second bare number after the code line makes two candidates (#100).
-    let two = "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code:\n1234\n5678\n";
-    assert!(drafts(two, Kind::Service, &[]).is_none());
+    // A second bare number after the code line makes the code not clear,
+    // with another value or the same value (#100).
+    for second in ["5678", "1234"] {
+        let two = format!(
+            "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code:\n1234\n{second}\n"
+        );
+        assert!(drafts(&two, Kind::Service, &[]).is_none(), "{second}");
+    }
 }
 
 /// For generated lines with one planted code, the rule finds that code. A
