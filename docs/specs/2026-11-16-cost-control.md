@@ -16,8 +16,11 @@ pay again for the same mail.
 
 1. A batch runner understands the pending messages of the store in the order
    of spec 1 section 7.1.
-2. A second run on the same store, with no change of the mail, makes zero
-   model calls.
+2. A message that a run understood is never sent to the model again while
+   its mail does not change. A second run on the same store, with no change
+   of the mail, makes zero calls for these messages. A message that is not
+   understood keeps the retries of spec 1 section 7.4 (`tries`,
+   `retry_at`).
 3. The store keeps the calls, the tokens and the cost of each run.
 4. Before the first paid run, the person sees an estimate and approves a
    budget. No paid call starts unless the budget holds its worst case. The
@@ -174,8 +177,8 @@ the provider bills, and the body holds all of that text, so the byte count
 is an upper bound. `iris-model` gives this count before it sends
 (`Client::request_bytes`). The second try of `decide` is reserved on its own.
 
-After a call with unknown usage, the wrapper refuses each later call of the
-run with `Error::Unknown` (no request goes out). So the second try of
+After a call with unknown usage to a priced model, the wrapper refuses each
+later call of the run with `Error::Unknown` (no request goes out). So the second try of
 `decide` in the same message cannot go out: `store::understand` returns
 `Error::Model`, no try counts, and the message stays pending for the next
 run. The runner then stops with `stop = unknown`.
@@ -251,7 +254,11 @@ Stop conditions, checked before each message:
   not known): the worst case stays taken, and the call counts in
   `unknown_calls`.
 - After a call with an unknown result or unknown usage (a time-out, a lost
-  response, HTTP 429, HTTP 5xx, an answer with no usage): `stop = unknown`.
+  response, HTTP 429, HTTP 5xx, an answer with no usage) to a priced model:
+  `stop = unknown`. For a model with no price, no charge is possible: the
+  call counts in `unknown_calls` (tokens unknown) and the run goes on. A
+  time-out or an error of a local server still stops the run with `stop =
+  model`, because the next call would likely fail too.
 - Another error: `stop = error`, and the error goes to the caller.
 
 ### Counts
@@ -418,6 +425,8 @@ more calls.
 | A sender rerun resets a message of a visited thread | The run ends with mail that it could reach still pending | One more pass, at most two calls of a message in one run. | Batch test. |
 | `--price-in -1`, `--budget 1e309`, or a cost that overflows | The budget grows, or a worst case wraps | Refused before any write; checked arithmetic refuses the call. | Command and unit tests. |
 | A local model with no price | Every call refused for the NULL budget | The wrapper skips the reservation for a model with no price. | Batch test with a local fake. |
+| A local server gives valid answers with no usage | The run stops after one message | No price: the call counts as unknown tokens and the run goes on. | Batch test with a local fake. |
+| A message with two bad answers, after its `retry_at` | A second run calls the model again | Expected: spec 1 section 7.4 retries a message that is not understood, at most 3 tries. Goal 2 covers understood mail only. | Batch test. |
 | A first reply with no usage and an answer that is not valid | The second try pays again before the run stops | The wrapper refuses each call after a call with unknown usage. The message stays pending, no try counts. | Batch test. |
 | The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
@@ -476,8 +485,9 @@ The model call changes nothing outside the product, but it costs money.
 
 ## Acceptance criteria
 
-1. Two runs on the synthetic mailbox with a counting fake: the second makes
-   zero calls. Red if a message is pending after the first run.
+1. Two runs on the synthetic mailbox with a counting fake that gives valid
+   answers: the second makes zero calls. Red if a message is pending after
+   the first run.
 2. `iris understand --estimate` prints the count, the tokens and the cost,
    and makes zero calls. Red if it calls the model.
 3. With a priced model and no budget, `iris understand` and `batch::run`
