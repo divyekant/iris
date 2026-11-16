@@ -42,3 +42,44 @@ fn serve_shows_a_page() {
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("<title>Iris</title>"), "{response}");
 }
+
+/// A service manager or a parent can close the stderr pipe. A failed log
+/// write must not stop the engine.
+#[test]
+fn serve_keeps_running_when_stderr_is_closed() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .args(["serve", "--addr", &addr, "--data"])
+        .arg(std::env::temp_dir().join(format!("iris-serve-closed-{}", std::process::id())))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Close the read end before the program writes its first line.
+    drop(child.stderr.take());
+
+    let begin = std::time::Instant::now();
+    let mut response = String::new();
+    while begin.elapsed() < std::time::Duration::from_secs(10) {
+        if let Ok(mut stream) = TcpStream::connect(&addr) {
+            let request = format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(request.as_bytes()).is_ok() {
+                let _ = stream.read_to_string(&mut response);
+                if !response.is_empty() {
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let exited = child.try_wait().unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(exited.is_none(), "iris serve ended: {exited:?}");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
