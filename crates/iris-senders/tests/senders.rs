@@ -926,6 +926,17 @@ fn a_service_that_was_hostile_is_a_service_again() {
 }
 
 #[test]
+fn a_refresh_after_a_person_sets_a_known_sender_finds_its_look_alikes() {
+    let mut c = Case::new("person-known");
+    c.put("t1", &[], "From: alice@paypal.com");
+    let look_alike = c.put("t2", &[], "From: alerts@paypa1.com");
+    assert_eq!(look_alike.kind, Kind::Stranger);
+    set(&c, "UPDATE sender SET kind = 'person', decided_by = 'person' WHERE address = 'alice@paypal.com'");
+    assert_eq!(refreshed(&c), vec![look_alike.sender.unwrap()]);
+    assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
+}
+
+#[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
     // Messages 3 and 4 each have 2 earlier messages.
