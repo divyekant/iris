@@ -270,3 +270,29 @@ test("in the brief, a refused answer keeps its row and its words after the brief
     view.destroy();
   }
 });
+
+test("in the brief, a row stays when a new brief comes before the answer", async () => {
+  // The engine wrote the accept, and a load of the brief answers first, without Maria.
+  const after = { ...fx.brief, gate: { count: 2, senders: fx.gate.senders.slice(1), next: null } };
+  let post;
+  globalThis.fetch = (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (path === "brief") return Promise.resolve(new Response(JSON.stringify(after), { status: 200 }));
+    if (path === "status") return Promise.resolve(new Response(JSON.stringify(fx.answer("status")), { status: 200 }));
+    return new Promise((done) => (post = () => done(new Response(JSON.stringify(rowFor(path)), { status: 200 }))));
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 30 });
+  try {
+    buttons(view, "Accept")[0].click();
+    await until(() => post);
+    // A poll of the brief comes back while the answer waits.
+    await until(() => text(view.target.querySelector("#strangers")).includes("2"));
+    view.flushSync();
+    assert.match(text(view.target), /Maria Ruiz/);
+    post();
+    await until(() => text(view.target).includes("You know Maria Ruiz now."));
+    assert.ok(button(view, "Undo"));
+  } finally {
+    view.destroy();
+  }
+});

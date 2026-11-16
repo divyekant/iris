@@ -53,13 +53,18 @@
   let next = $state(page.next);
   let loading = $state(false);
 
+  // The senders that the person gave an answer in this view, from the click on. Their
+  // rows stay for the life of the view, whatever the answer, its state or a new page
+  // say: the person sees the outcome there, and Undo. Each other row follows the
+  // newest page. Not reactive: only the merge of a page reads it.
+  const touched = new Set<string>();
+
   // A new page from the brief: keep the order of the rows on the screen, take the new
   // data of each sender, and add the new senders at the end.
   $effect(() => {
     const fresh = new Map(page.senders.map((s) => [s.id, s]));
     untrack(() => {
-      // A row stays while it has something to tell: an answer, or the refusal of an answer.
-      const kept = rows.filter((s) => fresh.has(s.id) || answered(s) || problem[s.id]).map((s) => fresh.get(s.id) ?? s);
+      const kept = rows.filter((s) => fresh.has(s.id) || touched.has(s.id)).map((s) => fresh.get(s.id) ?? s);
       rows = [...kept, ...page.senders.filter((s) => !kept.some((k) => k.id === s.id))];
     });
   });
@@ -72,6 +77,7 @@
 
   async function answer(sender: GateSender, ...verbs: Verb[]) {
     if (busy[sender.id]) return;
+    touched.add(sender.id);
     busy = { ...busy, [sender.id]: true };
     problem = { ...problem, [sender.id]: "" };
     try {
