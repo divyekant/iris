@@ -355,6 +355,19 @@ match in two ways, so that each reading is the strict one:
 
 A rule without `author` matches each author, `local` included.
 
+The engine refuses a file that is not valid (section 6.3). A file is not
+valid when:
+
+- It has a field or a condition that this section does not name. So a typo
+  cannot make a rule wider than the person wrote it.
+- A value is not one of the values above, or two rules have the same `id`.
+- `when` has no condition, or a `name` has more than one line.
+- A `hide` or a `bundle` rule has `verbs`, `author` or `job`. An item has no
+  author and no job, so such a rule could never match.
+- The file is larger than 256 KiB, or has more than 1,000 rules (section 9).
+
+An `allow` rule never matches an action with no message.
+
 ### 6.3 Who changes the file
 
 - Only the person changes the policy. The person edits the file, or uses the
