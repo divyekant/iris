@@ -53,16 +53,10 @@ fn allowed(from: Option<&str>) -> &'static [&'static str] {
             "replaced",
         ],
         Some("in_review") => &["approved", "denied", "expired", "cancelled", "replaced"],
-        // approved to held comes with release 3. Migration 9 adds applied
-        // and failed (R2-02). The ledger migration (R2-03) adds undone.
-        Some("approved") => &[
-            "in_review",
-            "denied",
-            "expired",
-            "cancelled",
-            "applied",
-            "failed",
-        ],
+        // approved to held comes with release 3. applied, failed and
+        // undone come only with the state of the ledger entry (migration
+        // 10, trigger ledger_state): see the_ledger_moves_the_action.
+        Some("approved") => &["in_review", "denied", "expired", "cancelled"],
         Some(_) => &[],
     }
 }
@@ -840,12 +834,13 @@ fn a_submitted_action_does_not_change() {
     );
 }
 
-/// Migration 9: an approved action becomes applied or failed, and keeps
-/// the decision that approved it. No undo before the ledger (R2-03), and
-/// no flag on a closed action.
+/// Migration 11: the state of the ledger entry moves the action. The
+/// action keeps the decision that approved it. A row in `writing` keeps the
+/// action through a withdraw, and the action then ends only as its row
+/// ends.
 #[test]
-fn the_apply_keeps_the_decision() {
-    let dir = TempDir::new("apply");
+fn the_ledger_moves_the_action() {
+    let dir = TempDir::new("ledger");
     let s = store(&dir);
     s.write(|tx| {
         submit(tx, draft(tx)?)?;
@@ -856,85 +851,307 @@ fn the_apply_keeps_the_decision() {
         )?)
     })
     .unwrap();
-    for to in ["applied", "failed"] {
-        works(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
-        for change in [
-            "decided_by = 'person', rule = NULL, policy = NULL",
-            "rule = 4",
-            "reason = 'r'",
-            "decided_at = 6",
-        ] {
-            fails(
-                &s,
-                &format!("UPDATE changeset_action SET state = '{to}', {change}"),
-            );
-        }
+    const CLAIM: &str = "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+         VALUES (1, 1, '{}', 'writing', 'inverse', 7);
+         INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+         VALUES (last_insert_rowid(), 1, 1, '[\"INBOX\"]', '[]');";
+    // A new entry claims an approved action, in writing, before its calls.
+    for bad in ["'applied', 'inverse', 7", "'writing', 'other', 7"] {
+        refused(
+            &s,
+            &format!(
+                "INSERT INTO ledger(action_id, ops, state, undo, at) VALUES (1, '{{}}', {bad})"
+            ),
+        );
     }
-    fails(&s, "UPDATE changeset_action SET state = 'undone'");
-    fails(
+    refused(
         &s,
-        "UPDATE changeset_action SET state = 'applied';
-         UPDATE changeset_action SET state = 'undone'",
+        "INSERT INTO ledger(action_id, ops, state, undo, at, call)
+         VALUES (1, '{}', 'writing', 'inverse', 7, 1)",
     );
-    fails(
+    refused(
         &s,
-        "UPDATE changeset_action SET state = 'denied', decided_by = 'person', reason = 'No.',
-           flags = '[\"bulk\"]'",
+        "INSERT INTO ledger(action_id, ops, state, undo, at)
+         VALUES (99, '{}', 'writing', 'inverse', 7)",
     );
-    // The mark of the apply: only on an approved action, from 0 to 1. A
-    // withdraw keeps a marked action approved, and it ends only as applied
-    // or failed.
-    fails(
+    refused(&s, &format!("{CLAIM} {CLAIM}"));
+    // Only a resolved message of the action, and only before the first call.
+    refused(
         &s,
-        "UPDATE changeset_action SET applying = 1, state = 'applied'",
+        "INSERT INTO ledger(action_id, ops, state, undo, at) VALUES (1, '{}', 'writing', 'inverse', 7);
+         INSERT INTO ledger_message(ledger_id, message_id, call, pre, post) VALUES (1, 2, 1, '[]', '[]')",
     );
-    for end in ["applied", "failed"] {
+    refused(
+        &s,
+        &format!("{CLAIM} UPDATE ledger SET call = 1;
+         INSERT INTO ledger_message(ledger_id, message_id, call, pre, post) VALUES (1, 2, 2, '[]', '[]')"),
+    );
+    // No direct move of the action, also with a row.
+    refused(
+        &s,
+        &format!("{CLAIM} UPDATE changeset_action SET state = 'applied'"),
+    );
+    for to in ["applied", "failed"] {
+        works(
+            &s,
+            &format!("{CLAIM} UPDATE ledger SET call = 1; UPDATE ledger SET state = '{to}'"),
+        );
+        // A withdraw keeps an action with a row in writing.
         works(
             &s,
             &format!(
-                "UPDATE changeset_action SET applying = 1;
-                 UPDATE changeset SET state = 'withdrawn';
-                 UPDATE changeset_action SET state = '{end}'"
+                "{CLAIM} UPDATE changeset SET state = 'withdrawn';
+                 UPDATE ledger SET state = '{to}'"
             ),
         );
     }
+    // While its row is in writing, the action ends only as the row ends.
     for other in [
-        "state = 'denied', decided_by = 'person', reason = 'No.'",
+        "state = 'denied', decided_by = 'person', rule = NULL, policy = NULL, reason = 'No.'",
         "state = 'in_review', decided_by = 'engine', rule = NULL, policy = NULL, reason = 'r'",
-        "applying = 0",
+        "state = 'expired', decided_by = 'expiry', rule = NULL, policy = NULL,
+           decided_at = unixepoch() * 1000",
     ] {
-        fails(
-            &s,
-            &format!(
-                "UPDATE changeset_action SET applying = 1;
-                 UPDATE changeset_action SET {other}"
-            ),
-        );
+        refused(&s, &format!("{CLAIM} UPDATE changeset_action SET {other}"));
     }
-    fails(
+    // The progress of the calls: forward only, and only in writing.
+    for bad in [
+        "UPDATE ledger SET call = 2; UPDATE ledger SET call = 1",
+        "UPDATE ledger SET ops = '[]'",
+        "UPDATE ledger SET at = 8",
+        "UPDATE ledger SET state = 'undone', undone_by = 1",
+        "UPDATE ledger SET state = 'applied'; UPDATE ledger SET state = 'writing'",
+        "UPDATE ledger SET state = 'applied'; UPDATE ledger SET call = 3",
+        "UPDATE ledger SET state = 'applied'; UPDATE ledger SET error = 'e'",
+        "UPDATE ledger SET state = 'applied'; UPDATE ledger_message SET done = 1",
+        "UPDATE ledger_message SET done = 1; UPDATE ledger_message SET done = 0",
+        "UPDATE ledger_message SET listed = 'gone'; UPDATE ledger_message SET listed = 'unknown'",
+        "UPDATE ledger_message SET listed = 'gone', done = 1",
+        "UPDATE ledger SET call = 1; UPDATE ledger_message SET pre = '[]'",
+        "UPDATE ledger_message SET call = 2",
+        "DELETE FROM ledger_message",
+        "DELETE FROM ledger_message; DELETE FROM ledger",
+    ] {
+        refused(&s, &format!("{CLAIM} {bad}"));
+    }
+    // The recovery reads `pre` again for a call that never started.
+    works(&s, &format!("{CLAIM} UPDATE ledger_message SET pre = '[]'"));
+    // Two rows in writing never share a message.
+    refused(
         &s,
-        "UPDATE changeset SET state = 'withdrawn';
-         UPDATE changeset_action SET applying = 1",
+        &format!(
+            "{CLAIM}
+             UPDATE changeset SET revision = 2, submitted_at = NULL;
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (1, 2, 1, 'archive', '{{}}', '{{}}');
+             INSERT INTO action_message(action_id, message_id) VALUES (2, 1);
+             UPDATE changeset_action SET hash = 'h' WHERE id = 2;
+             UPDATE changeset SET submitted_at = 1;
+             UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 5 WHERE id = 2;
+             INSERT INTO ledger(action_id, ops, state, undo, at)
+             VALUES (2, '{{}}', 'writing', 'inverse', 7);
+             INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+             VALUES (2, 1, 1, '[]', '[]')"
+        ),
     );
-    fails(
+    // A failed entry with no changed message has nothing to undo.
+    refused(
         &s,
-        "UPDATE changeset SET revision = 2, submitted_at = NULL;
-         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, applying)
-         VALUES (1, 2, 1, 'archive', '{}', '{}', 1)",
+        &format!(
+            "{CLAIM} UPDATE ledger SET state = 'failed';
+             UPDATE ledger SET state = 'undone', undone_by = 1"
+        ),
     );
-    // A withdrawn changeset applies nothing more.
-    fails(
-        &s,
-        "UPDATE changeset SET state = 'withdrawn';
-         UPDATE changeset_action SET state = 'applied'",
-    );
-    // The changeset closes with its last open action.
-    s.write(|tx| Ok(tx.execute("UPDATE changeset_action SET state = 'applied'", [])?))
+    // The applied action keeps its decision, the changeset closes, and the
+    // undo moves the action to undone.
+    s.write(|tx| {
+        tx.execute_batch(&format!(
+            "{CLAIM} UPDATE ledger SET call = 1; UPDATE ledger_message SET done = 1;
+             UPDATE ledger SET state = 'applied'"
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+    let row: (String, String, i64, String) = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT a.state, a.decided_by, a.rule, c.state FROM changeset_action a
+                 JOIN changeset c ON c.id = a.changeset_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
         .unwrap();
-    let state: String = s
-        .read(|c| Ok(c.query_row("SELECT state FROM changeset", [], |r| r.get(0))?))
+    assert_eq!(row, ("applied".into(), "rule".into(), 3, "closed".into()));
+    refused(&s, "UPDATE changeset_action SET state = 'undone'");
+    refused(&s, "UPDATE ledger SET state = 'undone'");
+    refused(&s, "UPDATE ledger SET state = 'undone', undone_by = 99");
+    refused(&s, "UPDATE ledger SET history_id = '5'");
+    refused(&s, "UPDATE ledger SET state = 'undone', undone_by = 1");
+    // The undo is an action of its own, with its own entry.
+    s.write(|tx| {
+        tx.execute_batch(
+            "UPDATE changeset SET revision = 2, submitted_at = NULL;
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 2, 1, 'inbox', '{}', '{}');
+         INSERT INTO action_message(action_id, message_id) VALUES (2, 1);
+         UPDATE changeset_action SET hash = 'h' WHERE id = 2;
+         UPDATE changeset SET submitted_at = 1;
+         UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+           decided_at = 5 WHERE id = 2;
+         INSERT INTO ledger(action_id, ops, state, undo, at)
+         VALUES (2, '{}', 'writing', 'inverse', 7);
+         UPDATE ledger SET state = 'applied' WHERE id = 2;
+         UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 1;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    // An undo entry undoes one entry only.
+    refused(
+        &s,
+        "UPDATE changeset SET revision = 3, submitted_at = NULL;
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 3, 1, 'archive', '{}', '{}');
+         UPDATE changeset_action SET hash = 'h' WHERE id = 3;
+         UPDATE changeset SET submitted_at = 2;
+         UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+           decided_at = 5 WHERE id = 3;
+         INSERT INTO ledger(action_id, ops, state, undo, at)
+         VALUES (3, '{}', 'writing', 'inverse', 7);
+         UPDATE ledger SET state = 'applied' WHERE id = 3;
+         UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 3",
+    );
+    let undone: String = s
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT state FROM changeset_action WHERE id = 1", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
         .unwrap();
-    assert_eq!(state, "closed");
+    assert_eq!(undone, "undone");
+}
+
+/// As `fails`, and the store refused the write with an Iris rule (a
+/// trigger or a constraint), not for a defect of the SQL text.
+fn refused(s: &Store, sql: &str) {
+    let e = s
+        .dry_write(|tx| Ok(tx.execute_batch(sql)?))
+        .expect_err(sql)
+        .to_string();
+    assert!(
+        e.contains("iris:") || e.contains("constraint failed"),
+        "{sql}: {e}"
+    );
+}
+
+/// Migration 11 gives each applied or failed action of migration 9 an
+/// entry with no undo, and fails an action with the mark `applying`: its
+/// calls started, and nothing lists them.
+#[test]
+fn migration_11_keeps_the_rule_of_migration_9() {
+    let dir = TempDir::new("migrate10");
+    fs::create_dir_all(&dir.0).unwrap();
+    // A store at migration 9: Store::open makes the key and the folder,
+    // then the test steps the database back by hand.
+    drop(Store::open(&dir.0).unwrap());
+    let db = dir.0.join("iris.db");
+    fs::remove_file(&db).unwrap();
+    let c = Connection::open(&db).unwrap();
+    for sql in [
+        include_str!("../src/schema_1.sql"),
+        include_str!("../src/schema_2.sql"),
+        include_str!("../src/schema_3.sql"),
+        include_str!("../src/schema_4.sql"),
+        include_str!("../src/schema_5.sql"),
+        include_str!("../src/schema_6.sql"),
+        include_str!("../src/schema_7.sql"),
+        include_str!("../src/schema_8.sql"),
+        include_str!("../src/schema_9.sql"),
+    ] {
+        c.execute_batch(sql).unwrap();
+    }
+    c.pragma_update(None, "user_version", 9).unwrap();
+    c.execute_batch(
+        "INSERT INTO account(provider, address) VALUES ('gmail', 'owner@example.com');
+         INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('a', 'h1', 0);",
+    )
+    .unwrap();
+    for (n, end) in [
+        (1, "approved"),
+        (2, "applied"),
+        (3, "failed"),
+        (4, "marked"),
+    ] {
+        c.execute_batch(&format!(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES ({n}, 1, 1, 'archive', '{{}}', '{{}}');
+             UPDATE changeset_action SET hash = 'h' WHERE id = {n};
+             UPDATE changeset SET why = 'w', submitted_at = 0 WHERE id = {n};
+             UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 1 WHERE id = {n};"
+        ))
+        .unwrap();
+        match end {
+            "approved" => {}
+            "marked" => c
+                .execute(
+                    "UPDATE changeset_action SET applying = 1 WHERE id = ?1",
+                    [n],
+                )
+                .map(|_| ())
+                .unwrap(),
+            _ => c
+                .execute(
+                    "UPDATE changeset_action SET state = ?2 WHERE id = ?1",
+                    rusqlite::params![n, end],
+                )
+                .map(|_| ())
+                .unwrap(),
+        }
+    }
+    drop(c);
+    let s = Store::open(&dir.0).unwrap();
+    let rows: Vec<(i64, String, Option<String>, Option<String>)> = s
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT a.id, a.state, l.state, l.undo FROM changeset_action a
+                 LEFT JOIN ledger l ON l.action_id = a.id ORDER BY a.id",
+            )?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let some = |t: &str| Some(t.to_string());
+    assert_eq!(
+        rows,
+        vec![
+            (1, "approved".into(), None, None),
+            (2, "applied".into(), some("applied"), some("none")),
+            (3, "failed".into(), some("failed"), some("none")),
+            (4, "failed".into(), some("failed"), some("none")),
+        ]
+    );
+    // A final entry has no undo, also with a later entry that ended.
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO ledger(action_id, ops, state, undo, at)
+             VALUES (1, '{}', 'writing', 'inverse', 7);
+             UPDATE ledger SET state = 'applied' WHERE action_id = 1;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    refused(
+        &s,
+        "UPDATE ledger SET state = 'undone',
+           undone_by = (SELECT id FROM ledger WHERE action_id = 1)
+         WHERE action_id = 2",
+    );
 }
 
 /// The changeset is open while an action is open, then closed.
@@ -966,4 +1183,39 @@ fn the_changeset_closes_with_its_last_open_action() {
     })
     .unwrap();
     assert_eq!(state(&s), "closed");
+}
+
+/// Migration 11: a ledger entry pins the items of its action (specification
+/// 1, section 7.5), also after the action left the open states.
+#[test]
+fn a_ledger_entry_pins_its_items() {
+    let dir = TempDir::new("pin");
+    let s = store(&dir);
+    s.write(|tx| {
+        let cs = draft(tx)?;
+        tx.execute(
+            "INSERT INTO action_item(action_id, item_id) VALUES (1, 42)",
+            [],
+        )?;
+        submit(tx, cs)?;
+        tx.execute_batch(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 5;
+             INSERT INTO ledger(action_id, ops, state, undo, at)
+             VALUES (1, '{}', 'writing', 'inverse', 7);
+             UPDATE ledger SET state = 'applied';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let pinned: bool = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM item_pin WHERE item_id = 42)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(pinned);
 }

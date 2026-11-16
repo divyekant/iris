@@ -434,7 +434,7 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
 
 /// Expire each open action 14 days or more after its submit (section 5.5):
 /// `proposed`, `in_review` and `approved`, by `expiry`. An action whose
-/// provider calls started (`applying`) continues to its end. `held`
+/// provider calls started (a ledger row in `writing`) continues to its end. `held`
 /// (release 3) does not expire. Gives the count of expired actions. The
 /// engine runs it on each tick.
 pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
@@ -443,12 +443,12 @@ pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
 
 /// [`expire`] in a write transaction of the caller.
 pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
-    // shortcut: R2-03 replaces `applying` with the ledger row in `writing`
-    // (issue #169); then this query checks the ledger.
     Ok(c.execute(
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = 'no decision or apply in 14 days', decided_at = ?1
-         WHERE state IN ('proposed', 'in_review', 'approved') AND applying = 0
+         WHERE state IN ('proposed', 'in_review', 'approved')
+           AND NOT EXISTS (SELECT 1 FROM ledger l
+                           WHERE l.action_id = changeset_action.id AND l.state = 'writing')
            AND submitted_at <= ?1 - ?2",
         params![now_ms, EXPIRY_MS],
     )?)
@@ -1139,7 +1139,8 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
     )?;
     let mut st = c.prepare(
         "SELECT id, revision, n, verb, targets, args, why, flags, state, decided_by, rule,
-                reason, decided_at, hash, policy
+                reason, decided_at, hash, policy,
+                (SELECT l.id FROM ledger l WHERE l.action_id = changeset_action.id)
          FROM changeset_action WHERE changeset_id = ?1 ORDER BY revision, n",
     )?;
     let mut rows = st.query([changeset])?;
@@ -1157,6 +1158,7 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
         let at: Option<i64> = r.get(12)?;
         let hash: Option<String> = r.get(13)?;
         let policy: Option<i64> = r.get(14)?;
+        let ledger: Option<i64> = r.get(15)?;
         write!(
             out,
             r#"{{"n":{},"revision":{},"verb":"{}","targets":{},"resolved":{{"messages":["#,
@@ -1196,13 +1198,15 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
         });
         write!(
             out,
-            r#"]}},"args":{},"why":{},"flags":{},"hash":{},"decision":{}}}"#,
+            r#"]}},"args":{},"why":{},"flags":{},"hash":{},"decision":{}{}}}"#,
             r.get::<_, String>(5)?,
             r.get::<_, Option<String>>(6)?
                 .map_or(Value::Null, Value::String),
             r.get::<_, String>(7)?,
             hash.map_or(Value::Null, Value::String),
             decision,
+            // The ledger entry of the action (section 7.1).
+            ledger.map_or(String::new(), |l| format!(r#","ledger":"l-{l}""#)),
         )?;
     }
     out.write_all(b"]}")?;

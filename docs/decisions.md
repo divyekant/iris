@@ -15,6 +15,22 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D5 (2026-11-16): The state of the ledger entry moves the action
+
+- Decided by: Claude (technical owner), card R2-03
+- Why: The trigger `ledger_state` writes the state of a ledger entry to its
+  action, and the trigger `action_state` refuses `applied`, `failed` and
+  `undone` without an entry in the same state. So the action and its entry
+  always agree, for each writer. The entry keeps only the action ID: the
+  changeset, the verb, the author and the decision come from the action row,
+  which does not change after the submit. A gone message does not fail an
+  entry; only a message that the recovery cannot confirm (`unknown`) does.
+- Options not chosen: The engine writes both states (two writes that can
+  disagree after a defect). A copy of the action columns in each entry (more
+  bytes, and two copies of one fact).
+- Links: card R2-03, migration 11 (`schema_11.sql`), specification 2,
+  section 7
+
 ## D4 (2026-11-16): The client uses the "Iris" palette, not the gold
 
 - Decided by: dk, on the before/after page of card R1-27

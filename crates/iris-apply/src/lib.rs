@@ -1,30 +1,30 @@
-//! The apply of one approved changeset action to Gmail (specification 2,
-//! section 7.2), for the verbs `archive`, `inbox`, `read`, `unread`,
-//! `trash`, `label` and `unlabel`. The apply changes the mirror after each
-//! provider call.
+//! The apply of one approved changeset action to Gmail, with its ledger
+//! entry (specification 2, sections 7.1 to 7.3), for the verbs `archive`,
+//! `inbox`, `read`, `unread`, `trash`, `label` and `unlabel`.
 //!
 //! The steps of [`apply`]:
 //!
 //! 1. Expire an action 14 days after its submit. Wait while the active
-//!    policy has the mode `observe`. Send an action
-//!    that a rule approved to review (no ledger yet for the bulk count).
-//!    Deny an action whose hash does not agree with its rows. For `label`
-//!    and `unlabel`, find the user label of the name at Gmail.
-//! 2. Read the labels of each message at Gmail (`format=minimal`), 1,000
-//!    messages at a time. Skip a gone message and a message that already
-//!    has the target state.
-//! 3. Change the other messages: one `batchModify` call for each page, or
-//!    one `trash` call for each message. Before its first `batchModify`, a
-//!    `label` action makes its label if Gmail does not have it. Write the new labels to the mirror
-//!    after each call.
-//! 4. Set the state `applied`, or `failed` after a clear refusal.
+//!    policy has the mode `observe`. Send an action that a rule approved
+//!    to review (issue #168). Deny an action whose hash does not agree with
+//!    its rows. Before these checks, run the recovery of each ledger row
+//!    of the account in `writing`. For `label` and `unlabel`, find the
+//!    user label of the name at Gmail, and make it for `label` if Gmail
+//!    does not have it (no ledger entry: the label stays after an undo).
+//! 2. Read the labels of each message at Gmail (`format=minimal`). Skip a
+//!    gone message and a message that already has the target state.
+//! 3. In one transaction, claim the action: the ledger row in `writing`,
+//!    with one row for each other message, its `pre`, `post` and call.
+//! 4. For each call: save its number, call Gmail (one `batchModify` call
+//!    for each 1,000 messages, or one `trash` call for each message), save
+//!    `done` for its messages and write the change to the mirror.
+//! 5. Set the state `applied`, or `failed`. The trigger `ledger_state`
+//!    moves the action to the same state.
 //!
-//! This release has no ledger (R2-03). Before the first write call, the
-//! apply marks the action `applying` (migration 9). A withdraw keeps a
-//! marked action approved. After the mark, no call is made again: an
-//! unknown result, a refusal, a read that fails, or the mark of an earlier
-//! apply that stopped gives `failed`. See the failure list in
-//! specification 2, section 7.2.
+//! No provider call is made two times. After an unknown result, and for a
+//! row in `writing` of an apply that stopped, the recovery of section 7.3
+//! reads the labels at Gmail. See the failure list in specification 2,
+//! section 7.2.
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
@@ -50,7 +50,8 @@ pub enum Error {
     /// or in another. The action
     /// stays as it was. Apply again after the other apply.
     Busy,
-    /// The verb has no Gmail apply: the state verbs (issue #164).
+    /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
+    /// and the state verbs.
     Verb(String),
 }
 
@@ -92,6 +93,10 @@ pub struct Counts {
     pub unchanged: u64,
     /// Message row IDs that are gone: not in the mirror, or HTTP 404.
     pub gone: Vec<i64>,
+    /// Message row IDs whose call started and whose change the recovery
+    /// cannot confirm (section 7.3). Iris does not call Gmail again for
+    /// them, and the person decides.
+    pub unknown: Vec<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,15 +120,12 @@ pub enum Outcome {
 /// An open action expires 14 days after its submit (section 5.5).
 const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
-/// The label change of a verb, with Gmail label IDs.
+/// The label change of an action, with Gmail label IDs.
 struct Change {
     add: Vec<String>,
     remove: Vec<String>,
     /// `messages.trash` for each message, not `batchModify`.
     trash: bool,
-    /// A `label` action whose label Gmail does not have: the name to make
-    /// before the first `batchModify`. Each message needs the change.
-    create: Option<String>,
 }
 
 impl Change {
@@ -142,14 +144,63 @@ impl Change {
             add: own(add),
             remove: own(remove),
             trash,
-            create: None,
         })
+    }
+
+    /// The change that a ledger row recorded in `ops` (see [`Change::ops`]).
+    /// The recovery uses it: the label IDs of `label` and `unlabel` are
+    /// known only at the claim.
+    fn of_ledger(c: &Connection, ledger: i64) -> rusqlite::Result<Change> {
+        let trash: bool = c.query_row(
+            "SELECT json_extract(ops, '$.call') = 'trash' FROM ledger WHERE id = ?1",
+            [ledger],
+            |r| r.get(0),
+        )?;
+        let list = |key: &str| -> rusqlite::Result<Vec<String>> {
+            let mut st = c.prepare(&format!(
+                "SELECT value FROM ledger, json_each(ledger.ops, '$.{key}')
+                 WHERE ledger.id = ?1 ORDER BY key"
+            ))?;
+            let rows = st.query_map([ledger], |r| r.get(0))?;
+            rows.collect()
+        };
+        Ok(Change {
+            add: list("add")?,
+            remove: list("remove")?,
+            trash,
+        })
+    }
+
+    /// The labels that the action changes, that a message with `labels`
+    /// has before the action, as a JSON array. For `trash`, also `INBOX`
+    /// (section 7.1).
+    fn pre(&self, labels: &[String]) -> String {
+        let inbox = ["INBOX".to_string()];
+        let watched: Vec<&String> = self
+            .add
+            .iter()
+            .chain(&self.remove)
+            .chain(if self.trash { &inbox[..] } else { &[] })
+            .filter(|w| labels.contains(w))
+            .collect();
+        labels_json(watched)
+    }
+
+    /// The `ops` of the ledger row: the call, the labels to add and remove,
+    /// and the number of calls.
+    fn ops(&self, calls: i64) -> String {
+        serde_json::json!({
+            "call": if self.trash { "trash" } else { "batchModify" },
+            "add": self.add,
+            "remove": self.remove,
+            "calls": calls,
+        })
+        .to_string()
     }
 
     /// True if a message with `labels` does not have the target state.
     fn needed(&self, labels: &[String]) -> bool {
-        self.create.is_some()
-            || self.add.iter().any(|l| !labels.contains(l))
+        self.add.iter().any(|l| !labels.contains(l))
             || self.remove.iter().any(|l| labels.contains(l))
     }
 }
@@ -219,15 +270,22 @@ pub struct Token<'a> {
     pub refused: bool,
 }
 
-/// Apply the approved action `action` to the mailbox `account` at Gmail.
-/// One apply runs at a time: a second apply gets [`Error::Busy`].
+/// Apply the approved action `action` to the mailbox `account` at Gmail,
+/// with its ledger entry (section 7.2). One apply runs at a time: a second
+/// apply gets [`Error::Busy`].
 ///
-/// No provider call of an action is made two times. Before the first write
-/// call, the apply marks the action `applying` (migration 9). After that,
-/// each end other than success is `failed`: an unknown result, a refusal,
-/// a read that fails, and an apply that finds the mark of an earlier apply
-/// that stopped. Before the first write call, an error leaves the action
-/// as it was, and the next apply does each check again.
+/// If the action has a ledger row in `writing`, an earlier apply stopped:
+/// the apply runs the recovery of section 7.3 for the row, also in the
+/// mode `observe`. Else, before its own claim, the apply runs the recovery
+/// of each row of the account in `writing`, so no two rows in `writing`
+/// share a message.
+///
+/// No provider call is made two times. Before the claim, an error leaves
+/// the action as it was, and the next apply does each check again. After
+/// the claim, an unknown result starts the recovery at once. If a read of
+/// the recovery fails, the apply gives the error, the row stays in
+/// `writing`, and the next apply of an action of the account continues the
+/// recovery.
 pub fn apply(
     store: &Store,
     gmail: &Gmail,
@@ -235,38 +293,27 @@ pub fn apply(
     account: i64,
     action: i64,
 ) -> Result<Outcome> {
-    // One apply at a time. While the lock lives, a mark found below is the
-    // mark of an apply that stopped, not of one that runs.
+    // One apply at a time. While the lock lives, a row in `writing` is the
+    // row of an apply that stopped, not of one that runs.
     let _lock = lock(store)?;
     // No sync of the account runs while the apply reads labels and writes
     // them to the mirror, so no label that a sync saved is lost.
-    let _sync = match iris_sync::lock(store, account) {
-        Ok(l) => l,
-        Err(iris_sync::Error::Store(e)) => return Err(Error::Store(e)),
-        // The lock gives only a store error or OtherSync.
-        Err(_) => return Err(Error::Busy),
-    };
-    let head: Option<(String, Option<String>, String, bool)> = store.read(|c| {
-        Ok(c.query_row(
-            "SELECT verb, hash, decided_by, applying FROM changeset_action
-             WHERE id = ?1 AND state = 'approved'",
-            [action],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?)
-    })?;
-    let (verb, approved_hash, decided_by, applying) = head.ok_or(Error::NotApproved(action))?;
-    if applying {
-        // An earlier apply stopped after a write call started. Its result
-        // is not known, so no call is made again (section 7.3).
-        return failed(
-            store,
-            action,
-            Counts::default(),
-            "An earlier apply stopped after a call to Gmail started. Iris does not call \
-             Gmail again for this action. The next sync shows the labels.",
-        );
-    }
+    let _sync = sync_lock(store, account)?;
+    #[allow(clippy::type_complexity)]
+    let head: Option<(String, Option<String>, String, Option<i64>, Option<i64>)> =
+        store.read(|c| {
+            Ok(c.query_row(
+                "SELECT a.verb, a.hash, a.decided_by, l.id, l.account_id
+                 FROM changeset_action a
+                 LEFT JOIN ledger l ON l.action_id = a.id AND l.state = 'writing'
+                 WHERE a.id = ?1 AND a.state = 'approved'",
+                [action],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?)
+        })?;
+    let (verb, approved_hash, decided_by, writing, writing_account) =
+        head.ok_or(Error::NotApproved(action))?;
     // The label name of `label` and `unlabel`; submit checked the argument.
     let label: Option<String> = match verb.as_str() {
         "label" | "unlabel" => store.read(|c| {
@@ -283,40 +330,41 @@ pub fn apply(
             add: Vec::new(),
             remove: Vec::new(),
             trash: false,
-            create: None,
         },
         _ => Change::of(&verb).ok_or(Error::Verb(verb.clone()))?,
     };
+    if let Some(ledger) = writing {
+        // The Gmail IDs of the row are of its own mailbox.
+        if writing_account != Some(account) {
+            return Err(Error::OtherMailbox);
+        }
+        let mut run = Run::new(store, gmail, token, account)?;
+        run.mailbox()?;
+        return run.recover(ledger);
+    }
+    // The rows in `writing` of the account end before any outcome of this
+    // action, also when this action waits or is refused (section 7.3).
+    let mut run = None;
+    if writing_rows(store, account)? {
+        let mut r = Run::new(store, gmail, token, account)?;
+        r.mailbox()?;
+        r.recover_account()?;
+        run = Some(r);
+    }
     if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
         return Ok(o);
     }
-
-    // Gmail message IDs belong to one mailbox: the token must be of the
-    // mailbox of the account.
-    let address: String = store.read(|c| {
-        Ok(c.query_row(
-            "SELECT address FROM account WHERE id = ?1",
-            [account],
-            |r| r.get(0),
-        )?)
-    })?;
-    let mut run = Run {
-        store,
-        gmail,
-        token,
-        renewed: false,
-        address,
-        account,
-        action,
-        marked: false,
-        counts: Counts::default(),
+    let mut run = match run {
+        Some(r) => r,
+        None => {
+            let mut r = Run::new(store, gmail, token, account)?;
+            r.mailbox()?;
+            r
+        }
     };
-    let address = run.address.clone();
-    match run.call(|g, t| owns(g, t, &address)) {
-        Ok(true) => {}
-        Ok(false) => return Err(Error::OtherMailbox),
-        Err(e) => return Err(Error::Gmail(e)),
-    }
+    // Step 1: the user label of `label` and `unlabel`. A label that Gmail
+    // does not have is made now, with no ledger entry: it stays after an
+    // undo (section 7.2).
     if let Some(name) = &label {
         let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
         let id = match find_label(&labels, name) {
@@ -329,16 +377,33 @@ pub fn apply(
                 store.put_labels(account, &[(&l.id, &l.name, "user")])?;
                 Some(l.id.clone())
             }
+            Ok(None) if verb == "label" => match run.create_label(name)? {
+                Ok(id) => Some(id),
+                // The create was a write call: the action ends, with its
+                // ledger entry and no message (section 7.2, step 1).
+                Err(error) => return run.fail_unclaimed(action, &change, error),
+            },
             Ok(None) => None,
         };
         match (verb.as_str(), id) {
             ("label", Some(id)) => change.add.push(id),
-            ("label", None) => change.create = Some(name.clone()),
             (_, Some(id)) => change.remove.push(id),
             // No message has a label that Gmail does not have.
             (_, None) => {}
         }
     }
+
+    // Step 2: the labels at Gmail. The mirror gets the labels of each
+    // message as Gmail gave them. The messages to change wait in a table
+    // of the write connection, page by page (section 9), until the claim.
+    store.write(|tx| {
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS apply_todo(
+               message_id INTEGER PRIMARY KEY, pre TEXT NOT NULL);
+             DELETE FROM temp.apply_todo;",
+        )?;
+        Ok(())
+    })?;
     let mut after = 0;
     loop {
         // A gone message has no provider ID here.
@@ -358,39 +423,64 @@ pub fn apply(
             break;
         };
         after = last;
-        // The messages to change, with their labels at Gmail. The mirror
-        // gets the labels of each other message as Gmail gave them.
-        let mut todo: Vec<(i64, String, Vec<String>)> = Vec::new();
-        let mut same: Vec<(i64, Vec<String>)> = Vec::new();
+        let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
+        let mut todo: Vec<(i64, String)> = Vec::new();
         for (id, provider_id) in page {
             let Some(provider_id) = provider_id else {
                 run.counts.gone.push(id);
                 continue;
             };
             match run.call(|g, t| g.minimal(t, &provider_id)) {
-                Ok(m) if change.needed(&m.label_ids) => todo.push((id, provider_id, m.label_ids)),
-                Ok(m) => same.push((id, m.label_ids)),
+                Ok(m) => {
+                    if change.needed(&m.label_ids) {
+                        todo.push((id, change.pre(&m.label_ids)));
+                    } else {
+                        run.counts.unchanged += 1;
+                    }
+                    seen.push((id, m.label_ids));
+                }
                 Err(iris_gmail::Error::NotFound) => run.counts.gone.push(id),
-                Err(e) => return run.stop(e),
+                Err(e) => {
+                    mirror(store, account, &seen);
+                    return Err(Error::Gmail(e));
+                }
             }
         }
-        run.counts.unchanged += same.len() as u64;
-        mirror(store, account, &same);
-        if !todo.is_empty() {
-            if let Some(o) = run.mark()? {
-                return Ok(o);
+        mirror(store, account, &seen);
+        store.write(|tx| {
+            let mut add =
+                tx.prepare_cached("INSERT INTO temp.apply_todo(message_id, pre) VALUES (?1, ?2)")?;
+            for (id, pre) in &todo {
+                add.execute(params![id, pre])?;
             }
-        }
-        if let Err(e) = run.change(&mut change, &todo) {
-            return run.stop(e);
-        }
+            Ok(())
+        })?;
     }
-    // An action with no write call has no mark: the expiry and the mode
-    // apply until its end, in the transaction that closes it.
-    if let Some(o) = finish(store, action, "applied", !run.marked)? {
-        return Ok(o);
+    // Step 3: the claim, with the ledger row in `writing`.
+    match run.claim(action, &change)? {
+        Ok(ledger) => run.calls(ledger, &change),
+        Err(o) => Ok(o),
     }
-    Ok(Outcome::Applied(run.counts))
+}
+
+/// The recovery of section 7.3 for each ledger row in `writing` of the
+/// account. The engine runs it at start. It holds the same locks as
+/// [`apply`].
+pub fn recover(store: &Store, gmail: &Gmail, token: &mut Token<'_>, account: i64) -> Result<()> {
+    let _lock = lock(store)?;
+    let _sync = sync_lock(store, account)?;
+    let mut run = Run::new(store, gmail, token, account)?;
+    run.mailbox()?;
+    run.recover_account()
+}
+
+fn sync_lock(store: &Store, account: i64) -> Result<iris_sync::SyncLock> {
+    match iris_sync::lock(store, account) {
+        Ok(l) => Ok(l),
+        Err(iris_sync::Error::Store(e)) => Err(Error::Store(e)),
+        // The lock gives only a store error or OtherSync.
+        Err(_) => Err(Error::Busy),
+    }
 }
 
 /// One apply in progress.
@@ -402,13 +492,53 @@ struct Run<'a, 'b> {
     /// The address of the account: each token must be of this mailbox.
     address: String,
     account: i64,
-    action: i64,
-    /// True after the mark `applying`: a write call can have started.
-    marked: bool,
+    /// The messages of step 2 that have no ledger message row.
     counts: Counts,
 }
 
-impl Run<'_, '_> {
+/// What the recovery learned of one message (section 7.3).
+enum Found {
+    Done,
+    Listed(&'static str),
+    Pre(String),
+}
+
+impl<'a, 'b> Run<'a, 'b> {
+    fn new(
+        store: &'a Store,
+        gmail: &'a Gmail,
+        token: &'a mut Token<'b>,
+        account: i64,
+    ) -> Result<Run<'a, 'b>> {
+        let address: String = store.read(|c| {
+            Ok(c.query_row(
+                "SELECT address FROM account WHERE id = ?1",
+                [account],
+                |r| r.get(0),
+            )?)
+        })?;
+        Ok(Run {
+            store,
+            gmail,
+            token,
+            renewed: false,
+            address,
+            account,
+            counts: Counts::default(),
+        })
+    }
+
+    /// Gmail message IDs belong to one mailbox: the token must be of the
+    /// mailbox of the account.
+    fn mailbox(&mut self) -> Result<()> {
+        let address = self.address.clone();
+        match self.call(|g, t| owns(g, t, &address)) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Error::OtherMailbox),
+            Err(e) => Err(Error::Gmail(e)),
+        }
+    }
+
     /// One Gmail call. After HTTP 401, Gmail did not run the call: get a
     /// new token one time for the apply, and call one time again.
     fn call<T>(
@@ -437,109 +567,338 @@ impl Run<'_, '_> {
         r
     }
 
-    /// Mark the action before its first write call. The mark is a claim:
-    /// only one apply sets it, so a second apply of the same action at the
-    /// same time makes no write call. The same transaction checks the
-    /// expiry and the mode again, because the reads of step 2 take time.
-    fn mark(&mut self) -> Result<Option<Outcome>> {
-        if self.marked {
-            return Ok(None);
-        }
-        let action = self.action;
-        let (gated, n) = self.store.write(|tx| {
+    /// Step 3: in one transaction, the ledger row in `writing` and one
+    /// message row for each message to change, with its call. The same
+    /// transaction checks the expiry and the mode again, because the reads
+    /// of step 2 take time. Gives the ledger row, or the outcome of the
+    /// expiry or the mode.
+    fn claim(&mut self, action: i64, change: &Change) -> Result<std::result::Result<i64, Outcome>> {
+        let account = self.account;
+        let claimed = self.store.write(|tx| {
             if let Some(o) = gate(tx, action)? {
-                return Ok((Some(o), 0));
+                return Ok(Err(o));
             }
-            let n = tx.execute(
-                "UPDATE changeset_action SET applying = 1
-                 WHERE id = ?1 AND state = 'approved' AND applying = 0
-                   AND (SELECT state FROM changeset c WHERE c.id = changeset_id) <> 'withdrawn'",
+            let approved: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = 'approved')",
                 [action],
+                |r| r.get(0),
             )?;
-            Ok((None, n))
-        })?;
-        if gated.is_some() {
-            return Ok(gated);
-        }
-        if n == 0 {
-            return Err(Error::NotApproved(action));
-        }
-        self.marked = true;
-        Ok(None)
-    }
-
-    /// The end after a Gmail error. Before the mark, the action stays as it
-    /// was. After the mark, it is failed: no call is made again.
-    fn stop(self, e: iris_gmail::Error) -> Result<Outcome> {
-        if !self.marked {
-            return Err(Error::Gmail(e));
-        }
-        let error = if e.write_result_unknown() {
-            format!("The result of a call is not known, and Iris does not call again: {e}")
-        } else {
-            e.to_string()
-        };
-        failed(self.store, self.action, self.counts, &error)
-    }
-
-    /// The write calls of one page, each with its mirror write.
-    fn change(
-        &mut self,
-        change: &mut Change,
-        todo: &[(i64, String, Vec<String>)],
-    ) -> std::result::Result<(), iris_gmail::Error> {
-        if todo.is_empty() {
-            return Ok(());
-        }
-        if let Some(name) = change.create.take() {
-            let id = self.create_label(&name)?;
-            change.add.push(id);
-        }
-        if change.trash {
-            for (id, provider_id, _) in todo {
-                let m = self.call(|g, t| g.trash(t, provider_id))?;
-                mirror(self.store, self.account, &[(*id, m.label_ids)]);
-                self.counts.changed += 1;
+            if !approved {
+                return Ok(Ok(None));
             }
-            return Ok(());
+            let n: i64 = tx.query_row("SELECT count(*) FROM temp.apply_todo", [], |r| r.get(0))?;
+            let calls = if change.trash {
+                n
+            } else {
+                (n + BATCH_LIMIT as i64 - 1) / BATCH_LIMIT as i64
+            };
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, ?3, 'writing', 'inverse', ?4)",
+                params![action, account, change.ops(calls), now()],
+            )?;
+            let ledger = tx.last_insert_rowid();
+            // One trash call for each message, one batchModify call for
+            // each 1,000 messages, in the order of the message IDs.
+            tx.execute(
+                "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                 SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
+                 FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
+                       FROM temp.apply_todo)",
+                params![ledger, change.trash, BATCH_LIMIT as i64, labels_json(&change.add)],
+            )?;
+            tx.execute("DELETE FROM temp.apply_todo", [])?;
+            Ok(Ok(Some(ledger)))
+        })?;
+        match claimed {
+            Ok(Some(ledger)) => Ok(Ok(ledger)),
+            Ok(None) => Err(Error::NotApproved(action)),
+            Err(o) => Ok(Err(o)),
         }
-        let ids: Vec<&str> = todo.iter().map(|(_, p, _)| p.as_str()).collect();
-        let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
-        let remove: Vec<&str> = change.remove.iter().map(String::as_str).collect();
-        self.call(|g, t| g.batch_modify(t, &ids, &add, &remove))?;
-        // The labels after the call: the labels of step 2 with the change.
-        let after: Vec<(i64, Vec<String>)> = todo
-            .iter()
-            .map(|(id, _, labels)| {
-                let mut l: Vec<String> = labels
-                    .iter()
-                    .filter(|l| !change.remove.contains(l))
-                    .cloned()
-                    .collect();
-                l.extend(change.add.iter().cloned());
-                (*id, l)
+    }
+
+    /// Step 4: each call that did not start, in order. Each call first
+    /// saves its number, then calls, then saves `done` for its messages.
+    fn calls(&mut self, ledger: i64, change: &Change) -> Result<Outcome> {
+        let (from, last): (i64, i64) = self.store.read(|c| {
+            Ok(c.query_row(
+                "SELECT call, coalesce((SELECT max(call) FROM ledger_message
+                                        WHERE ledger_id = l.id), 0)
+                 FROM ledger l WHERE id = ?1",
+                [ledger],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })?;
+        for k in from + 1..=last {
+            let messages: Vec<(i64, Option<String>)> = self.store.read(|c| {
+                let mut st = c.prepare_cached(
+                    "SELECT lm.message_id, m.provider_id FROM ledger_message lm
+                     LEFT JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+                     WHERE lm.ledger_id = ?1 AND lm.call = ?2 AND lm.done = 0
+                       AND lm.listed IS NULL
+                     ORDER BY 1",
+                )?;
+                let rows = st.query_map(params![ledger, k], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })?;
+            let live: Vec<(i64, String)> = messages
+                .iter()
+                .filter_map(|(id, p)| p.clone().map(|p| (*id, p)))
+                .collect();
+            self.store.write(|tx| {
+                tx.execute(
+                    "UPDATE ledger SET call = ?2 WHERE id = ?1",
+                    params![ledger, k],
+                )?;
+                // Gone in the mirror after the claim: no call for it.
+                for (id, _) in messages.iter().filter(|(_, p)| p.is_none()) {
+                    set_listed(tx, ledger, *id, "gone")?;
+                }
+                Ok(())
+            })?;
+            if live.is_empty() {
+                continue;
+            }
+            let result = if change.trash {
+                let (id, p) = &live[0];
+                self.call(|g, t| g.trash(t, p))
+                    .map(|m| vec![(*id, m.label_ids)])
+            } else {
+                let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
+                let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
+                let remove: Vec<&str> = change.remove.iter().map(String::as_str).collect();
+                self.call(|g, t| g.batch_modify(t, &ids, &add, &remove))
+                    .map(|()| Vec::new())
+            };
+            match result {
+                Ok(labels) => {
+                    self.store.write(|tx| {
+                        Ok(tx.execute(
+                            "UPDATE ledger_message SET done = 1
+                             WHERE ledger_id = ?1 AND call = ?2 AND listed IS NULL",
+                            params![ledger, k],
+                        )?)
+                    })?;
+                    if change.trash {
+                        mirror(self.store, self.account, &labels);
+                    } else {
+                        let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
+                        mirror_change(self.store, self.account, &ids, change);
+                    }
+                }
+                // Gmail can have applied the call: read, never call again.
+                Err(e) if e.write_result_unknown() => return self.recover(ledger),
+                // A clear refusal, or a second 401: no later call.
+                Err(e) => return self.end(ledger, Some(e.to_string())),
+            }
+        }
+        self.end(ledger, None)
+    }
+
+    /// Step 5: `applied` when no message is `unknown`, else `failed`. The
+    /// trigger ledger_state moves the action to the same state.
+    fn end(&mut self, ledger: i64, error: Option<String>) -> Result<Outcome> {
+        let (call, unknown): (i64, bool) = self.store.read(|c| {
+            Ok(c.query_row(
+                "SELECT call, EXISTS (SELECT 1 FROM ledger_message
+                                      WHERE ledger_id = l.id AND listed = 'unknown')
+                 FROM ledger l WHERE id = ?1",
+                [ledger],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })?;
+        // The history ID is a note for the person: a failed read leaves it out.
+        let history = if call > 0 {
+            self.call(|g, t| g.profile(t))
+                .ok()
+                .map(|p| p.history_id.to_string())
+        } else {
+            None
+        };
+        let error = error.or_else(|| {
+            unknown.then(|| {
+                "Iris cannot confirm the change of one or more messages, and does not call \
+                 Gmail again for them."
+                    .to_string()
             })
-            .collect();
-        mirror(self.store, self.account, &after);
-        self.counts.changed += todo.len() as u64;
+        });
+        let state = if error.is_some() { "failed" } else { "applied" };
+        self.store.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE ledger SET state = ?2, error = ?3, history_id = ?4
+                 WHERE id = ?1 AND state = 'writing'",
+                params![ledger, state, error, history],
+            )?)
+        })?;
+        let counts = self.counts(ledger)?;
+        Ok(match error {
+            None => Outcome::Applied(counts),
+            Some(error) => Outcome::Failed { counts, error },
+        })
+    }
+
+    /// The counts of step 2 with the messages of the ledger row. Only the
+    /// listed messages come back as IDs.
+    fn counts(&self, ledger: i64) -> Result<Counts> {
+        let mut counts = self.counts.clone();
+        let (changed, skipped): (i64, i64) = self.store.read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FILTER (WHERE done = 1),
+                        count(*) FILTER (WHERE listed = 'skipped')
+                 FROM ledger_message WHERE ledger_id = ?1",
+                [ledger],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })?;
+        counts.changed += changed as u64;
+        counts.unchanged += skipped as u64;
+        let listed: Vec<(i64, String)> = self.store.read(|c| {
+            let mut st = c.prepare(
+                "SELECT message_id, listed FROM ledger_message
+                 WHERE ledger_id = ?1 AND listed IN ('gone', 'unknown') ORDER BY 1",
+            )?;
+            let rows = st.query_map([ledger], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })?;
+        for (id, why) in listed {
+            if why == "gone" {
+                counts.gone.push(id);
+            } else {
+                counts.unknown.push(id);
+            }
+        }
+        counts.gone.sort_unstable();
+        Ok(counts)
+    }
+
+    /// The recovery of section 7.3 for one row in `writing`. Each message
+    /// whose call started is read: `done` if it has the `post` state, else
+    /// `unknown`, and no call is made again for it. Each message whose call
+    /// never started is read again for its `pre`. Then the calls that never
+    /// started continue.
+    fn recover(&mut self, ledger: i64) -> Result<Outcome> {
+        let (call, change) = self.store.read(|c| {
+            let call: i64 =
+                c.query_row("SELECT call FROM ledger WHERE id = ?1", [ledger], |r| {
+                    r.get(0)
+                })?;
+            Ok((call, Change::of_ledger(c, ledger)?))
+        })?;
+        let mut after = 0;
+        loop {
+            let page: Vec<(i64, Option<String>, i64)> = self.store.read(|c| {
+                let mut st = c.prepare_cached(
+                    "SELECT lm.message_id, m.provider_id, lm.call FROM ledger_message lm
+                     LEFT JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+                     WHERE lm.ledger_id = ?1 AND lm.done = 0 AND lm.listed IS NULL
+                       AND lm.message_id > ?2
+                     ORDER BY 1 LIMIT ?3",
+                )?;
+                let rows = st.query_map(params![ledger, after, BATCH_LIMIT as i64], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            })?;
+            let Some(&(last, _, _)) = page.last() else {
+                break;
+            };
+            after = last;
+            let mut found: Vec<(i64, Found)> = Vec::new();
+            let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
+            let mut failure = None;
+            for (id, provider_id, message_call) in page {
+                let started = message_call <= call;
+                let Some(provider_id) = provider_id else {
+                    found.push((id, Found::Listed("gone")));
+                    continue;
+                };
+                match self.call(|g, t| g.minimal(t, &provider_id)) {
+                    Ok(m) => {
+                        let post = !change.needed(&m.label_ids);
+                        found.push((
+                            id,
+                            match (started, post) {
+                                (true, true) => Found::Done,
+                                (true, false) => Found::Listed("unknown"),
+                                (false, true) => Found::Listed("skipped"),
+                                (false, false) => Found::Pre(change.pre(&m.label_ids)),
+                            },
+                        ));
+                        seen.push((id, m.label_ids));
+                    }
+                    Err(iris_gmail::Error::NotFound) => found.push((id, Found::Listed("gone"))),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            // Keep what the reads confirmed, also before a read that failed.
+            self.store.write(|tx| {
+                for (id, f) in &found {
+                    match f {
+                        Found::Done => {
+                            tx.execute(
+                                "UPDATE ledger_message SET done = 1
+                                 WHERE ledger_id = ?1 AND message_id = ?2",
+                                params![ledger, id],
+                            )?;
+                        }
+                        Found::Listed(why) => set_listed(tx, ledger, *id, why)?,
+                        Found::Pre(pre) => {
+                            tx.execute(
+                                "UPDATE ledger_message SET pre = ?3
+                                 WHERE ledger_id = ?1 AND message_id = ?2",
+                                params![ledger, id, pre],
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+            mirror(self.store, self.account, &seen);
+            if let Some(e) = failure {
+                return Err(Error::Gmail(e));
+            }
+        }
+        self.calls(ledger, &change)
+    }
+
+    /// The recovery of each row of the account in `writing`.
+    fn recover_account(&mut self) -> Result<()> {
+        let account = self.account;
+        let rows: Vec<i64> = self.store.read(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM ledger WHERE state = 'writing' AND account_id = ?1 ORDER BY id",
+            )?;
+            let rows = st.query_map([account], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })?;
+        for ledger in rows {
+            self.recover(ledger)?;
+        }
         Ok(())
     }
 }
 
 impl Run<'_, '_> {
-    /// Make the user label `name` at Gmail (after the mark), and save it in
-    /// the store. Gives its ID. After each error (for example HTTP 409: a
-    /// label with the name exists now, or an unknown result), the apply
-    /// reads the labels: the user label of the name is the label to use.
-    /// The create is not called again (section 7.2, step 1).
-    fn create_label(&mut self, name: &str) -> std::result::Result<String, iris_gmail::Error> {
+    /// Make the user label `name` at Gmail, and save it in the store.
+    /// Gives its ID. After each error (for example HTTP 409: a label with
+    /// the name exists now, or an unknown result), the apply reads the
+    /// labels: the user label of the name is the label to use. Else the
+    /// action stays as it was, and no message changed (section 7.2, step 1).
+    fn create_label(&mut self, name: &str) -> Result<std::result::Result<String, String>> {
         let label = match self.call(|g, t| g.create_label(t, name)) {
             Ok(l) => l,
             Err(e) => {
-                let labels = self.call(|g, t| g.labels(t))?;
+                let labels = self.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
                 match find_label(&labels, name) {
                     Ok(Some(l)) => l.clone(),
-                    _ => return Err(e),
+                    _ => {
+                        return Ok(Err(format!(
+                            "Gmail did not make the label, and has no user label of the name: {e}"
+                        )))
+                    }
                 }
             }
         };
@@ -547,17 +906,80 @@ impl Run<'_, '_> {
         let _ = self
             .store
             .put_labels(self.account, &[(&label.id, &label.name, "user")]);
-        Ok(label.id)
+        Ok(Ok(label.id))
+    }
+
+    /// End an action as `failed` with a ledger entry of no message, after
+    /// a write call before its claim (the label create).
+    fn fail_unclaimed(&mut self, action: i64, change: &Change, error: String) -> Result<Outcome> {
+        let account = self.account;
+        let ended = self.store.write(|tx| {
+            // The mode and the expiry, as in the claim: an action that
+            // waits or expires does not fail.
+            if let Some(o) = gate(tx, action)? {
+                return Ok(Err(o));
+            }
+            let n = tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 SELECT ?1, ?2, ?3, 'writing', 'inverse', ?4
+                 WHERE EXISTS (SELECT 1 FROM changeset_action WHERE id = ?1 AND state = 'approved')",
+                params![action, account, change.ops(0), now()],
+            )?;
+            if n == 1 {
+                tx.execute(
+                    "UPDATE ledger SET state = 'failed', error = ?2 WHERE id = ?1",
+                    params![tx.last_insert_rowid(), error],
+                )?;
+            }
+            Ok(Ok(n == 1))
+        })?;
+        match ended {
+            Err(o) => return Ok(o),
+            Ok(false) => return Err(Error::NotApproved(action)),
+            Ok(true) => {}
+        }
+        Ok(Outcome::Failed {
+            counts: self.counts.clone(),
+            error,
+        })
     }
 }
 
-fn failed(store: &Store, action: i64, counts: Counts, error: &str) -> Result<Outcome> {
-    // Only a marked action fails: no gate.
-    finish(store, action, "failed", false)?;
-    Ok(Outcome::Failed {
-        counts,
-        error: error.to_string(),
-    })
+fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_store::Result<()> {
+    tx.execute(
+        "UPDATE ledger_message SET listed = ?3 WHERE ledger_id = ?1 AND message_id = ?2",
+        params![ledger, message, why],
+    )?;
+    Ok(())
+}
+
+/// Milliseconds since the Unix epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// A JSON array of label IDs (serde_json writes the escapes).
+fn labels_json<S: AsRef<str>>(labels: impl IntoIterator<Item = S>) -> String {
+    serde_json::Value::from(
+        labels
+            .into_iter()
+            .map(|l| l.as_ref().to_string())
+            .collect::<Vec<String>>(),
+    )
+    .to_string()
+}
+
+/// True if the account has a ledger row in `writing`.
+fn writing_rows(store: &Store, account: i64) -> Result<bool> {
+    Ok(store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ledger WHERE state = 'writing' AND account_id = ?1)",
+            [account],
+            |r| r.get(0),
+        )?)
+    })?)
 }
 
 /// The expiry and the mode, in the transaction of the caller: `expired`
@@ -569,7 +991,8 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = NULL,
            decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-         WHERE id = ?1 AND state = 'approved' AND applying = 0
+         WHERE id = ?1 AND state = 'approved'
+           AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
            AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
         params![action, EXPIRY_MS],
     )?;
@@ -675,36 +1098,34 @@ fn mirror(store: &Store, account: i64, messages: &[(i64, Vec<String>)]) {
     });
 }
 
-/// Move an approved action to `applied` or `failed`. The decision that
-/// approved it stays (migration 9). With `gated`, the same transaction
-/// checks the expiry and the mode first, and gives their outcome.
-fn finish(store: &Store, action: i64, state: &str, gated: bool) -> Result<Option<Outcome>> {
-    let (gate_outcome, n) = store.write(|tx| {
-        if gated {
-            if let Some(o) = gate(tx, action)? {
-                return Ok((Some(o), 0));
+/// Write the change of a `batchModify` call to the mirror: the labels of
+/// step 2 (or of the recovery) are in the mirror, so only the labels of the
+/// change differ. As [`mirror`], a store error loses only the mirror write.
+fn mirror_change(store: &Store, account: i64, messages: &[i64], change: &Change) {
+    let _ = store.write(|tx| {
+        let mut remove = tx.prepare_cached(
+            "DELETE FROM message_label WHERE message_id = ?1 AND label_id =
+               (SELECT id FROM label WHERE account_id = ?2 AND provider_id = ?3)",
+        )?;
+        let mut add = tx.prepare_cached(
+            "INSERT OR IGNORE INTO message_label(message_id, label_id)
+             SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
+        )?;
+        for id in messages {
+            for l in &change.remove {
+                remove.execute(params![id, account, l])?;
+            }
+            for l in &change.add {
+                add.execute(params![id, account, l])?;
             }
         }
-        let n = tx.execute(
-            "UPDATE changeset_action SET state = ?2 WHERE id = ?1 AND state = 'approved'",
-            params![action, state],
-        )?;
-        Ok((None, n))
-    })?;
-    if gate_outcome.is_some() {
-        return Ok(gate_outcome);
-    }
-    if n == 0 {
-        return Err(Error::NotApproved(action));
-    }
-    Ok(None)
+        Ok(())
+    });
 }
 
 /// A decision of the engine on an approved action: `denied` or `in_review`.
 fn decide(store: &Store, action: i64, state: &str, reason: &str) -> Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64);
+    let now = now();
     let n = store.write(|tx| {
         Ok(tx.execute(
             "UPDATE changeset_action SET state = ?2, decided_by = 'engine', rule = NULL,

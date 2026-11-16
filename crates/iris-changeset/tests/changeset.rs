@@ -1391,12 +1391,14 @@ fn an_open_action_pins_its_items() {
     }
 }
 
-/// Mark an approved action as `applying`, as the apply (R2-02) does before
-/// its first write call.
-fn mark_applying(s: &Store, cs: i64, n: i64) {
+/// Claim an approved action with a ledger row in `writing`, as the apply
+/// does before its first write call (migration 11).
+fn start_writing(s: &Store, cs: i64, n: i64) {
     s.write(|tx| {
         Ok(tx.execute(
-            "UPDATE changeset_action SET applying = 1 WHERE changeset_id = ?1 AND n = ?2",
+            "INSERT INTO ledger(action_id, ops, state, undo, at)
+             SELECT id, '{}', 'writing', 'inverse', 1 FROM changeset_action
+             WHERE changeset_id = ?1 AND n = ?2",
             rusqlite::params![cs, n],
         )?)
     })
@@ -1418,7 +1420,7 @@ fn a_withdraw_cancels_the_open_actions() {
     approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), NOW).unwrap();
     approve(&s, at(cs, 1, 2), &hash(&s, cs, 1, 2), NOW).unwrap();
     decide(&s, at(cs, 1, 3), State::InReview, By::Policy, None, NOW).unwrap();
-    mark_applying(&s, cs, 1);
+    start_writing(&s, cs, 1);
     let other = Author {
         session: Some("se-13".into()),
         ..agent()
@@ -1484,7 +1486,7 @@ fn open_actions_expire_14_days_after_the_submit() {
     approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), NOW).unwrap();
     approve(&s, at(cs, 1, 2), &hash(&s, cs, 1, 2), NOW).unwrap();
     decide(&s, at(cs, 1, 3), State::InReview, By::Policy, None, NOW).unwrap();
-    mark_applying(&s, cs, 1);
+    start_writing(&s, cs, 1);
     // A draft of another changeset has no submit, so it does not expire.
     let draft = create(&s, &agent(), NOW).unwrap();
     add_action(
@@ -1516,6 +1518,9 @@ fn open_actions_expire_14_days_after_the_submit() {
         ]
     );
     assert_eq!(d["actions"][1]["decision"]["by"], "expiry");
-    assert_eq!(d["state"], "open", "the applying action is still open");
+    assert_eq!(
+        d["state"], "open",
+        "the action with a writing ledger row is still open"
+    );
     assert!(doc(&s, draft)["actions"][0]["decision"].is_null());
 }
