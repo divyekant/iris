@@ -196,7 +196,10 @@ const TRIAGE_OPEN: &str =
 /// `undone` and `denied`. The apply keeps the decision of the rule on
 /// `applied` and `failed` (schema 7, trigger `action_state`). An action in
 /// `in_review` waits for the person, so the review counts it, not this.
-pub(crate) const BY_RULE: &str = "a.decided_by = 'rule' AND a.state <> 'in_review'";
+/// An approved action that expires or is cancelled gets the decision of
+/// `expiry` or `author`, and changed nothing, so it leaves this set.
+pub(crate) const BY_RULE: &str = "a.decided_by = 'rule'
+    AND a.state IN ('approved', 'held', 'applied', 'failed', 'undone', 'denied')";
 
 /// The first brief (specification 1, section 8).
 #[derive(Debug, Serialize, PartialEq, Default)]

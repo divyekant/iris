@@ -542,6 +542,14 @@ async fn lists_each_action_that_a_rule_decided() {
                 rusqlite::params![state, first + n, 1],
             )?;
         }
+        // An approved action that the author withdraws gets the decision
+        // of the author and changed nothing: not handled.
+        tx.execute(
+            "UPDATE changeset_action SET state = 'cancelled', decided_by = 'author',
+               rule = NULL, policy = NULL
+             WHERE changeset_id = ?1 AND n = 1",
+            [first + 4],
+        )?;
         // In review waits for the person: not handled.
         tx.execute(
             "UPDATE changeset_action SET state = 'in_review'
@@ -552,16 +560,16 @@ async fn lists_each_action_that_a_rule_decided() {
     })
     .unwrap();
     let (_, b) = get(&s, "/api/brief").await;
-    assert_eq!(b["handled"], json!({"count": 8, "verbs": {"archive": 8}}));
+    assert_eq!(b["handled"], json!({"count": 6, "verbs": {"archive": 6}}));
     let (_, p) = get(&s, "/api/handled?limit=200").await;
-    assert_eq!(p["count"], 4);
+    assert_eq!(p["count"], 3);
     let states: Vec<&str> = p["actions"]
         .as_array()
         .unwrap()
         .iter()
         .map(|a| a["state"].as_str().unwrap())
         .collect();
-    assert_eq!(states, ["approved", "undone", "failed", "approved"]);
+    assert_eq!(states, ["undone", "failed", "approved"]);
     for bad in [
         "/api/handled?after=x",
         "/api/handled?after=01",
