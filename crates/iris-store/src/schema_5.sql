@@ -67,6 +67,12 @@ CREATE TABLE changeset_action (
               THEN decided_by IS NULL AND rule IS NULL AND policy IS NULL
                    AND reason IS NULL AND decided_at IS NULL
               ELSE decided_by IS NOT NULL END),
+  -- Who decides each state (section 5.2).
+  CHECK (state IS NOT 'expired' OR coalesce(decided_by, '') = 'expiry'),
+  CHECK (coalesce(state, '') NOT IN ('cancelled', 'replaced')
+         OR coalesce(decided_by, '') = 'author'),
+  CHECK (state IS NOT 'denied'
+         OR coalesce(decided_by, '') IN ('rule', 'person', 'policy', 'limit', 'engine')),
   -- A person approves or denies, but does not send an action to review.
   CHECK (state IS NOT 'in_review' OR coalesce(decided_by, '') IN ('rule', 'policy', 'limit',
     'engine')),
@@ -143,11 +149,11 @@ END;
 -- Section 5.2 also allows failed to undone, but only when the ledger lists
 -- a changed message. The ledger (R2-03) adds that move with its check.
 --
--- Only submit gives a draft action a state other than 'cancelled': it sets
--- the hash and the submit time in the same write.
+-- Only the submit of its revision gives a draft action a state other than
+-- 'cancelled' (trigger changeset_submit).
 CREATE TRIGGER action_state BEFORE UPDATE OF state ON changeset_action
 WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
-    '>proposed', '>denied', '>cancelled',
+    '>proposed', '>cancelled',
     'proposed>approved', 'proposed>in_review', 'proposed>denied', 'proposed>expired',
     'proposed>cancelled', 'proposed>replaced',
     'in_review>approved', 'in_review>denied', 'in_review>expired', 'in_review>cancelled',
@@ -155,6 +161,9 @@ WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
     'approved>applied', 'approved>failed', 'approved>in_review', 'approved>denied',
     'approved>expired', 'approved>cancelled',
     'applied>undone')
+  -- An action in review waits for a person (section 5.2).
+  OR (old.state = 'in_review' AND new.state IN ('approved', 'denied')
+      AND new.decided_by IS NOT 'person')
   -- A withdrawn changeset applies nothing more (section 5.5).
   OR (new.state IN ('in_review', 'approved', 'applied', 'failed')
       AND (SELECT state FROM changeset WHERE id = new.changeset_id) = 'withdrawn')
@@ -225,11 +234,28 @@ BEGIN
   WHERE id = new.changeset_id AND state <> 'withdrawn';
 END;
 
--- The submit of a revision replaces the proposed and in_review actions of
--- the older revisions (section 5.5), and a new revision is a draft.
+-- A submit needs one or more actions in the revision, each with its hash.
+CREATE TRIGGER changeset_submit_check BEFORE UPDATE OF submitted_at ON changeset
+WHEN old.submitted_at IS NULL AND new.submitted_at IS NOT NULL
+  AND (NOT EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
+                   AND revision = new.revision)
+       OR EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
+                  AND revision = new.revision AND hash IS NULL))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a submit needs actions, each with its hash');
+END;
+
+-- The submit of a revision proposes each of its actions in the same write,
+-- so a submitted revision has no draft action. The engine then denies the
+-- actions that are not valid. The submit also replaces the proposed and
+-- in_review actions of the older revisions (section 5.5). A new revision
+-- is a draft.
 CREATE TRIGGER changeset_submit AFTER UPDATE OF revision, submitted_at ON changeset
 WHEN new.state <> 'withdrawn'
 BEGIN
+  UPDATE changeset_action SET state = 'proposed', submitted_at = new.submitted_at
+  WHERE old.submitted_at IS NULL AND new.submitted_at IS NOT NULL
+    AND changeset_id = new.id AND revision = new.revision AND state IS NULL;
   UPDATE changeset_action SET state = 'replaced', decided_by = 'author', rule = NULL,
     policy = NULL, reason = NULL, decided_at = new.submitted_at
   WHERE new.submitted_at IS NOT NULL AND changeset_id = new.id

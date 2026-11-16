@@ -41,7 +41,9 @@ const STATES: [&str; 11] = [
 /// Section 5.2, as the test sees it: the next states of each state.
 fn allowed(from: Option<&str>) -> &'static [&'static str] {
     match from {
-        None => &["proposed", "denied", "cancelled"],
+        // The submit proposes a draft action (a_submit_proposes_each_action);
+        // no other write gives it a state, except a withdraw.
+        None => &["cancelled"],
         Some("proposed") => &[
             "approved",
             "in_review",
@@ -107,15 +109,16 @@ fn draft(c: &Connection) -> rusqlite::Result<i64> {
     Ok(cs)
 }
 
-/// The submit of the changeset, as `iris-changeset` writes it.
+/// The submit of the newest revision, as `iris-changeset` writes it: the
+/// hash of each draft action, then the submit time. The trigger proposes
+/// each action.
 fn submit(c: &Connection, cs: i64) -> rusqlite::Result<()> {
     c.execute(
-        "UPDATE changeset SET why = 'w', submitted_at = 0 WHERE id = ?1",
+        "UPDATE changeset_action SET hash = 'h' WHERE changeset_id = ?1 AND state IS NULL",
         [cs],
     )?;
     c.execute(
-        "UPDATE changeset_action SET hash = 'h', submitted_at = 0, state = 'proposed'
-         WHERE changeset_id = ?1",
+        "UPDATE changeset SET why = 'w', submitted_at = 0 WHERE id = ?1",
         [cs],
     )?;
     Ok(())
@@ -133,6 +136,35 @@ fn works(s: &Store, sql: &str) {
         .unwrap_or_else(|e| panic!("{sql}: {e}"));
 }
 
+/// The decision columns that go with a state, as a person, a rule or the
+/// engine writes them.
+fn decision(from: Option<&str>, to: &str) -> &'static str {
+    match to {
+        "proposed" => {
+            "decided_by = NULL, rule = NULL, policy = NULL, reason = NULL, decided_at = NULL"
+        }
+        "expired" => {
+            "decided_by = 'expiry', rule = NULL, policy = NULL, reason = NULL,
+             decided_at = 1209600000"
+        }
+        "cancelled" | "replaced" => {
+            "decided_by = 'author', rule = NULL, policy = NULL, reason = NULL,
+             decided_at = 1209600000"
+        }
+        "applied" | "failed" if from.is_some() => "decided_by = decided_by",
+        "approved" | "denied" if from != Some("in_review") => {
+            "decided_by = 'rule', rule = 1, policy = 1, reason = 'r', decided_at = 1209600000"
+        }
+        "in_review" => {
+            "decided_by = 'rule', rule = 1, policy = 1, reason = 'r', decided_at = 1209600000"
+        }
+        _ => {
+            "decided_by = 'person', rule = NULL, policy = NULL, reason = 'r',
+             decided_at = 1209600000"
+        }
+    }
+}
+
 /// Each move of each state: the store allows only the moves of section 5.2.
 #[test]
 fn only_the_moves_of_section_5_2() {
@@ -143,60 +175,50 @@ fn only_the_moves_of_section_5_2() {
     for from in froms {
         for to in STATES {
             let r = s.dry_write(|tx| {
-                // Set the from state past the trigger, then put it back.
-                let trigger: String = tx.query_row(
-                    "SELECT sql FROM sqlite_master WHERE name = 'action_state'",
-                    [],
-                    |r| r.get(0),
-                )?;
-                tx.execute_batch("DROP TRIGGER action_state")?;
-                tx.execute(
-                    "UPDATE changeset_action SET state = ?1,
-                       decided_by = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 'rule'),
-                       rule = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 1),
-                       policy = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 1),
-                       reason = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 'r'),
-                       decided_at = iif(coalesce(?1, 'proposed') = 'proposed', NULL, 1209600000),
-                       hash = iif(?1 IS NULL, NULL, 'h'),
-                       submitted_at = iif(?1 IS NULL, NULL, 0)",
-                    [from],
-                )?;
-                tx.execute_batch(&trigger)?;
-                // The submit. For replaced, a newer revision is submitted.
-                tx.execute("UPDATE changeset SET submitted_at = 0, why = 'w'", [])?;
-                // The submit of a newer revision replaces the action, or
-                // leaves it.
-                if to == "replaced" {
-                    tx.execute_batch(
-                        "UPDATE changeset SET revision = 2, submitted_at = NULL;
-                         UPDATE changeset SET submitted_at = 0;",
+                if let Some(from) = from {
+                    // Set the from state past the trigger, then put it back.
+                    let trigger: String = tx.query_row(
+                        "SELECT sql FROM sqlite_master WHERE name = 'action_state'",
+                        [],
+                        |r| r.get(0),
                     )?;
-                    let now: Option<String> =
-                        tx.query_row("SELECT state FROM changeset_action", [], |r| r.get(0))?;
-                    return Ok(from != Some("replaced") && now.as_deref() == Some("replaced"));
+                    tx.execute_batch("DROP TRIGGER action_state")?;
+                    tx.execute(
+                        &format!(
+                            "UPDATE changeset_action SET state = ?1, hash = 'h', submitted_at = 0,
+                               {}",
+                            decision(None, from)
+                        ),
+                        [from],
+                    )?;
+                    tx.execute_batch(&trigger)?;
+                    tx.execute("UPDATE changeset SET submitted_at = 0, why = 'w'", [])?;
                 }
+                let now = |tx: &rusqlite::Transaction| -> rusqlite::Result<Option<String>> {
+                    tx.query_row("SELECT state FROM changeset_action WHERE id = 1", [], |r| {
+                        r.get(0)
+                    })
+                };
                 // A withdraw cancels the action in the same write, or leaves it.
                 if to == "cancelled" {
                     tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
-                    let now: Option<String> =
-                        tx.query_row("SELECT state FROM changeset_action", [], |r| r.get(0))?;
-                    return Ok(from != Some("cancelled") && now.as_deref() == Some("cancelled"));
+                    return Ok(from != Some("cancelled") && now(tx)?.as_deref() == Some(to));
                 }
-                // 14 days after the submit: the event of expired. From a
-                // draft, submit sets the hash and the time with the state.
-                // Submit proposes with no decision.
-                let decision = if to == "proposed" {
-                    "decided_by = NULL, rule = NULL, policy = NULL, reason = NULL, decided_at = NULL"
-                } else {
-                    "decided_by = 'rule', rule = 1, policy = 1, reason = 'r', decided_at = 1209600000"
-                };
-                let hash = if from.is_none() {
-                    ", hash = 'h', submitted_at = 0"
-                } else {
-                    ""
-                };
+                // The submit of a newer revision replaces the action, or
+                // leaves it.
+                if to == "replaced" && from.is_some() {
+                    tx.execute_batch(
+                        "UPDATE changeset SET revision = 2, submitted_at = NULL;
+                         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets,
+                           args, hash) VALUES (1, 2, 1, 'archive', '{}', '{}', 'h');
+                         UPDATE changeset SET submitted_at = 0;",
+                    )?;
+                    return Ok(from != Some("replaced") && now(tx)?.as_deref() == Some(to));
+                }
+                // 14 days after the submit: the event of expired.
                 let sql = format!(
-                    "UPDATE changeset_action SET state = ?1, {decision}{hash} WHERE changeset_id = ?2"
+                    "UPDATE changeset_action SET state = ?1, {} WHERE changeset_id = ?2",
+                    decision(from, to)
                 );
                 Ok(tx.execute(&sql, rusqlite::params![to, cs]).is_ok())
             });
@@ -204,6 +226,33 @@ fn only_the_moves_of_section_5_2() {
             assert_eq!(r.unwrap(), expect, "{from:?} -> {to:?}");
         }
     }
+}
+
+/// The submit of a revision proposes each of its actions in the same write.
+#[test]
+fn a_submit_proposes_each_action() {
+    let dir = TempDir::new("proposes");
+    let s = store(&dir);
+    s.write(|tx| Ok(draft(tx)?)).unwrap();
+    // No submit with an action that has no hash, or with no action.
+    fails(&s, "UPDATE changeset SET submitted_at = 0, why = 'w'");
+    fails(
+        &s,
+        "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+         UPDATE changeset SET submitted_at = 0, why = 'w' WHERE id = last_insert_rowid();",
+    );
+    s.write(|tx| Ok(submit(tx, 1)?)).unwrap();
+    let row: (String, i64, String) = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT a.state, a.submitted_at, c.state FROM changeset_action a
+                 JOIN changeset c ON c.id = a.changeset_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(row, ("proposed".into(), 0, "open".into()));
 }
 
 /// Without its event, each of these moves is refused.
@@ -472,14 +521,33 @@ fn a_new_revision_replaces_and_is_a_draft() {
     s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 2, submitted_at = NULL", [])?))
         .unwrap();
     assert_eq!(state(&s, "SELECT state FROM changeset"), "draft");
-    s.write(|tx| Ok(tx.execute("UPDATE changeset SET submitted_at = 5", [])?))
-        .unwrap();
-    assert_eq!(state(&s, "SELECT state FROM changeset_action"), "replaced");
-    assert_eq!(state(&s, "SELECT state FROM changeset"), "closed");
+    s.write(|tx| {
+        Ok(tx.execute_batch(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+             VALUES (1, 2, 1, 'archive', '{}', '{}', 'h');
+             UPDATE changeset SET submitted_at = 5;",
+        )?)
+    })
+    .unwrap();
+    assert_eq!(
+        state(&s, "SELECT state FROM changeset_action WHERE revision = 1"),
+        "replaced"
+    );
+    assert_eq!(state(&s, "SELECT state FROM changeset"), "open");
     fails(
         &s,
-        "UPDATE changeset_action SET state = 'approved', decided_by = 'person'",
+        "UPDATE changeset_action SET state = 'approved', decided_by = 'person'
+         WHERE revision = 1",
     );
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'denied', decided_by = 'person', reason = 'No.'
+             WHERE revision = 2",
+            [],
+        )?)
+    })
+    .unwrap();
+    assert_eq!(state(&s, "SELECT state FROM changeset"), "closed");
     // All actions decided, then a new revision: the changeset is a draft.
     s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 3, submitted_at = NULL", [])?))
         .unwrap();
@@ -555,6 +623,38 @@ fn a_rule_decision_names_a_live_rule_of_the_active_policy() {
     for (id, policy) in [(3, 1), (3, 9), (7, 2), (4, 2)] {
         fails(&s, &rule(id, policy));
     }
+    // An action in review waits for a person: no rule decides it.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'in_review', decided_by = 'policy'",
+            [],
+        )?)
+    })
+    .unwrap();
+    fails(&s, &rule(3, 2));
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'denied', decided_by = 'rule', rule = 3,
+           policy = 2, reason = 'r'",
+    );
+    works(
+        &s,
+        "UPDATE changeset_action SET state = 'approved', decided_by = 'person'",
+    );
+    // Each end names its own actor.
+    for sql in [
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'rule', rule = 3,
+           policy = 2, decided_at = 1209600000",
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'person',
+           decided_at = 1209600000",
+    ] {
+        fails(&s, sql);
+    }
+    works(
+        &s,
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry',
+           decided_at = 1209600000",
+    );
     // With no confirmed policy, no rule decides.
     s.write(|tx| Ok(tx.execute_batch("DELETE FROM policy_version; DELETE FROM policy_rule_id;")?))
         .unwrap();
