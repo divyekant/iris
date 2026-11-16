@@ -75,7 +75,7 @@
     {:else if route.view === "section"}
       {@const key = route.key}
       {#await get<Page>(`brief/${key}?limit=50`) then page}
-        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" />
+        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" expiring={key === "signals"} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "list"}
       {@const form = route.form}

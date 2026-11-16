@@ -1,12 +1,23 @@
 <!-- A full list, 50 items for each page: all items of one form, or one section of the brief. -->
 <script lang="ts">
   import { get, own, type Page } from "../api";
-  import { addPage } from "../format";
+  import { watch } from "../clock";
+  import { addPage, nextExpiry, unexpired } from "../format";
   import Line from "./Line.svelte";
 
   // `more` is the API path of the list. `cursor` names the parameter that takes `next`:
   // `before` for the lists of a form, `after` for the sections of the brief. Send `next` back unchanged.
-  let { title, page, more = "", cursor = "before" }: { title: string; page: Page; more?: string; cursor?: "before" | "after" } = $props();
+  // `expiring`: the Signals section of the brief, where a signal leaves at its expiry (spec 1 section 8).
+  let {
+    title,
+    page,
+    more = "",
+    cursor = "before",
+    expiring = false,
+    now: start = new Date(),
+  }: { title: string; page: Page; more?: string; cursor?: "before" | "after"; expiring?: boolean; now?: Date } = $props();
+  // svelte-ignore state_referenced_locally
+  let now = $state(start);
 
   // svelte-ignore state_referenced_locally
   let items = $state(page.items);
@@ -16,6 +27,9 @@
   let duplicates = $state(page.duplicates ?? {});
   let error = $state("");
   let busy = $state(false);
+  let shown = $derived(expiring ? unexpired(items, now) : items);
+  let until = $derived(expiring ? nextExpiry(items, now) : undefined);
+  $effect(() => (until ? watch(until, (d) => (now = d)) : undefined));
 
   async function loadMore() {
     busy = true;
@@ -34,11 +48,11 @@
 </script>
 
 <h1>{title}</h1>
-{#if items.length === 0}
+{#if shown.length === 0}
   <p class="empty">Nothing here now. New items show here after the next sync.</p>
 {:else}
   <ul>
-    {#each items as item (item.id)}<Line {item} twins={duplicates[item.id]} />{/each}
+    {#each shown as item (item.id)}<Line {item} twins={duplicates[item.id]} />{/each}
   </ul>
 {/if}
 {#if next && more}<button type="button" onclick={loadMore} disabled={busy}>{busy ? "Loading" : "Show more"}</button>{/if}

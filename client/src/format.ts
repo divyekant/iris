@@ -76,17 +76,27 @@ export function liveCode(item: Item, now = new Date()): boolean {
   return item.form === "signal" && !!item.code && item.status === "active" && timeLeft(item.expires, now) !== null;
 }
 
+/** The items whose expiry is later than `now`, or that have no expiry (spec 1 section 8, Signals). */
+export function unexpired(items: Item[], now: Date): Item[] {
+  return items.filter((i) => !i.expires || Date.parse(i.expires) > now.getTime());
+}
+
+/** The first expiry after `now` among the items, or undefined. A view wakes at it. */
+export function nextExpiry(items: Item[], now: Date): string | undefined {
+  return unexpired(items, now)
+    .map((i) => i.expires)
+    .filter((e): e is string => !!e)
+    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+}
+
 /**
  * The Signals of the brief at `now` (spec 1 section 8): a signal leaves at its expiry, and a live
  * login code shows at the top, not in the rows. `next` is the first expiry still to come.
  */
 export function signals(section: Section, now: Date) {
-  const live = section.items.filter((i) => !i.expires || Date.parse(i.expires) > now.getTime());
+  const live = unexpired(section.items, now);
   const codes = live.filter((i) => liveCode(i, now));
-  const next = live
-    .map((i) => i.expires)
-    .filter((e): e is string => !!e)
-    .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const next = nextExpiry(live, now);
   return { codes, rows: live.filter((i) => !codes.includes(i)), count: section.count - (section.items.length - live.length), next };
 }
 
