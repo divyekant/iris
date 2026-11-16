@@ -20,6 +20,9 @@
   let items = $state(firstHidden.items);
   // svelte-ignore state_referenced_locally
   let nextItem = $state(firstHidden.next);
+  // A possible duplicate shows with its original (spec 1 section 7.5), as in each list of the brief.
+  // svelte-ignore state_referenced_locally
+  let duplicates = $state(firstHidden.duplicates ?? {});
   let error = $state("");
   let busy = $state("");
 
@@ -41,6 +44,7 @@
       } else {
         const page = await get<Page>(`brief/hidden?limit=50&after=${encodeURIComponent(String(nextItem ?? ""))}`);
         items = addPage(items, page.items);
+        duplicates = { ...duplicates, ...page.duplicates };
         nextItem = page.next;
       }
     } catch (e) {
@@ -78,7 +82,7 @@
   <section aria-labelledby="hidden">
     <h2 id="hidden"><span>Hidden from your brief</span> <span class="count">{firstHidden.count}</span></h2>
     <ul>
-      {#each items as item (item.id)}<Line {item} note={item.attention?.reason ?? ""} />{/each}
+      {#each items as item (item.id)}<Line {item} twins={duplicates[item.id]} note={item.attention?.reason ?? ""} />{/each}
     </ul>
     {#if nextItem}<button type="button" onclick={() => more("hidden")} disabled={!!busy}>{busy === "hidden" ? "Loading" : "Show more"}</button>{/if}
   </section>

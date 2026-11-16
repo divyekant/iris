@@ -11,8 +11,8 @@ test("each list of the handled view loads its next page", async () => {
   const pages = {
     "handled?limit=50": { ...fx.handled, next: "7" },
     "handled?limit=50&after=7": { count: 1, next: null, actions: [{ ...fx.handled.actions[0], changeset: "cs-3", state: "approved" }] },
-    "brief/hidden?limit=50": { count: 4, items: fx.hidden.slice(0, 2), next: "c1" },
-    "brief/hidden?limit=50&after=c1": { count: 4, items: fx.hidden.slice(2), next: null },
+    "brief/hidden?limit=50": { count: 4, items: fx.hidden.slice(0, 2), next: "c1", duplicates: { [fx.hidden[0].id]: ["c-901"] } },
+    "brief/hidden?limit=50&after=c1": { count: 4, items: fx.hidden.slice(2), next: null, duplicates: { [fx.hidden[3].id]: ["c-902"] } },
   };
   const saved = globalThis.fetch;
   globalThis.fetch = async (url) => {
@@ -33,6 +33,9 @@ test("each list of the handled view loads its next page", async () => {
     await until(() => app.target.querySelectorAll("li.line").length === 4);
     app.flushSync();
     assert.equal(buttons().length, 0);
+    // The possible duplicates of the first and of the next page show with their originals.
+    assert.ok(app.target.querySelector('a[href="#/item/c-901"]'));
+    assert.ok(app.target.querySelector('a[href="#/item/c-902"]'));
     assert.deepEqual(asked, ["handled?limit=50&after=7", "brief/hidden?limit=50&after=c1"]);
   } finally {
     app.destroy();
