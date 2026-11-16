@@ -98,6 +98,7 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/changesets", get(get_changesets))
         .route("/api/changesets/{id}", get(get_changeset))
         .route("/api/changesets/{id}/decide", post(post_decide))
+        .route("/api/changesets/{id}/withdraw", post(post_withdraw))
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
@@ -174,6 +175,21 @@ async fn post_decide(
     };
     let b = body(b)?;
     decide(&s, row, &b.actions, now_ms())?;
+    Ok(
+        stream(move |w| {
+            iris_changeset::write_document(&s, row, w).map_err(review::changeset_error)
+        })
+        .await,
+    )
+}
+
+/// The withdraw of the person (section 5.5). The answer is the changeset
+/// after the withdraw. The request has no body.
+async fn post_withdraw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    review::withdraw(&s, row)?;
     Ok(
         stream(move |w| {
             iris_changeset::write_document(&s, row, w).map_err(review::changeset_error)

@@ -578,3 +578,73 @@ async fn lists_each_action_that_a_rule_decided() {
         assert_eq!(get(&s, bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
     }
 }
+
+#[tokio::test]
+async fn the_person_withdraws_an_open_changeset() {
+    let dir = temp("withdraw");
+    let s = store(&dir);
+    let cs = changeset(&s, "Clean up.", &[&["t-1"], &["m-3"]], NOW);
+    let (_, doc) = get(&s, &format!("/api/changesets/cs-{cs}")).await;
+    let hash = doc["actions"][0]["hash"].as_str().unwrap().to_string();
+    // One action approved (it waits for apply), one waits for the person.
+    let approve = json!({ "actions": [{ "revision": 1, "n": 1, "approve": true, "hash": hash }] });
+    let decide = format!("/api/changesets/cs-{cs}/decide");
+    assert_eq!(
+        post(&s, &decide, &approve.to_string()).await.0,
+        StatusCode::OK
+    );
+
+    let uri = format!("/api/changesets/cs-{cs}/withdraw");
+    let (code, after) = post(&s, &uri, "").await;
+    assert_eq!(code, StatusCode::OK, "{after}");
+    // The answer is the changeset after the withdraw: each open action is cancelled.
+    assert_eq!(after["state"], "withdrawn");
+    assert_eq!(states(&s, cs).await, ["cancelled", "cancelled"]);
+    assert_eq!(get(&s, "/api/changesets").await.1["changesets"], json!([]));
+    assert_eq!(
+        get(&s, "/api/brief").await.1["review"],
+        json!({ "changesets": 0, "actions": 0 })
+    );
+    // A second withdraw, or a decision after the withdraw, is a conflict.
+    assert_eq!(post(&s, &uri, "").await.0, StatusCode::CONFLICT);
+    let deny = json!({ "actions": [{ "revision": 1, "n": 2, "approve": false }] }).to_string();
+    assert_eq!(post(&s, &decide, &deny).await.0, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn withdraws_only_an_open_changeset() {
+    let dir = temp("withdraw-refused");
+    let s = store(&dir);
+    let cs = changeset(&s, "Clean up.", &[&["t-1"]], NOW);
+    let uri = format!("/api/changesets/cs-{cs}/withdraw");
+    // While a new revision is a draft, the review does not show the changeset.
+    revise(&s, cs, &agent()).unwrap();
+    assert_eq!(post(&s, &uri, "").await.0, StatusCode::CONFLICT);
+    assert_eq!(states(&s, cs).await, ["proposed"]);
+
+    // A closed changeset: the person denied its only action.
+    let closed = changeset(&s, "Read.", &[&["m-3"]], NOW);
+    let deny = json!({ "actions": [{ "revision": 1, "n": 1, "approve": false }] }).to_string();
+    assert_eq!(
+        post(&s, &format!("/api/changesets/cs-{closed}/decide"), &deny)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(&s, &format!("/api/changesets/cs-{closed}/withdraw"), "")
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        get(&s, &format!("/api/changesets/cs-{closed}")).await.1["state"],
+        "closed"
+    );
+
+    assert_eq!(
+        post(&s, "/api/changesets/cs-99/withdraw", "").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
+}
