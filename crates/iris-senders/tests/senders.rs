@@ -831,6 +831,98 @@ fn a_refresh_after_a_change_of_evidence_keeps_known_domains_true() {
     assert!(refreshed(&c).is_empty());
 }
 
+/// Store the raw messages `heads` (thread, labels, head) as sync does, with
+/// empty header rows. Then understand them newest first: save the header
+/// row of each one just before its decision, as spec 1 section 7.1 does.
+fn staged(c: &mut Case, heads: &[(&str, &[&str], String)]) -> Vec<Decision> {
+    let mut stored = Vec::new();
+    for (thread, labels, head) in heads {
+        c.n += 1;
+        let raw = format!("{head}\r\nSubject: x\r\n\r\nBody text.\r\n");
+        let mut m = new_message(
+            &format!("m{}", c.n),
+            thread,
+            c.n * 1000,
+            labels,
+            raw.as_bytes(),
+        );
+        let full = std::mem::take(&mut m.header);
+        let id = c.store.put_messages(c.acc, &[m]).unwrap()[0];
+        stored.push((id, raw, full));
+    }
+    let mut out = Vec::new();
+    for (id, raw, full) in stored.into_iter().rev() {
+        c.store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE header SET from_addr = ?1, to_addrs = ?2, cc_addrs = ?3 WHERE message_id = ?4",
+                    rusqlite::params![full.from_addr, full.to_addrs, full.cc_addrs, id],
+                )?;
+                out.push(decide(tx, id, raw.as_bytes(), 7)?);
+                Ok(())
+            })
+            .unwrap();
+    }
+    out
+}
+
+#[test]
+fn a_service_understood_newest_first_is_a_service_after_the_refresh() {
+    let mut c = Case::new("staged-service");
+    let heads: Vec<(&str, &[&str], String)> = ["t1", "t2", "t3"]
+        .into_iter()
+        .map(|t| (t, &[][..], service_mail()))
+        .collect();
+    staged(&mut c, &heads);
+    refreshed(&c);
+    assert_eq!(
+        c.row("no-reply@shop.example.com").1.as_deref(),
+        Some("service")
+    );
+}
+
+#[test]
+fn a_reply_with_no_recipient_makes_an_earlier_sender_a_person() {
+    let mut c = Case::new("staged-reply");
+    // Newest first: the reply is decided first, before the header row of
+    // Zed's message is saved. Then Zed's message is decided.
+    staged(
+        &mut c,
+        &[
+            ("t1", &[][..], "From: zed@example.net".to_string()),
+            ("t1", &["SENT"][..], format!("From: {OWNER}")),
+        ],
+    );
+    assert_eq!(c.row("zed@example.net").1.as_deref(), Some("person"));
+    // Oldest first: Zed is a stranger, then the reply makes him a person.
+    let mut c = Case::new("reply-later");
+    assert_eq!(
+        c.put("t1", &[], "From: zed@example.net").kind,
+        Kind::Stranger
+    );
+    c.put("t1", &["SENT"], &format!("From: {OWNER}"));
+    assert_eq!(c.row("zed@example.net").1.as_deref(), Some("person"));
+}
+
+#[test]
+fn a_service_that_was_hostile_is_a_service_again() {
+    let mut c = Case::new("hostile-service");
+    let sent = format!("From: {OWNER}\r\nTo: support@paypal.com");
+    c.put("t1", &["SENT"], &sent);
+    // The look-alike service is hostile while paypal.com is known.
+    let mail = "From: no-reply@paypa1.com\r\nAuto-Submitted: auto-generated\r\nAuthentication-Results: mx.google.com;\r\n dkim=pass header.i=@paypa1.com";
+    for t in ["t2", "t3", "t4"] {
+        assert_eq!(c.put(t, &[], mail).kind, Kind::Hostile);
+    }
+    // paypal.com stops being known: the sent message loses SENT.
+    let raw = format!("{sent}\r\nSubject: x\r\n\r\nBody text.\r\n");
+    let m = new_message("m1", "t1", 1000, &["INBOX"], raw.as_bytes());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    refreshed(&c);
+    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("stranger"));
+    assert_eq!(c.row("no-reply@paypa1.com").1.as_deref(), Some("service"));
+}
+
 #[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
