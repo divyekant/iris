@@ -255,8 +255,9 @@ content of the draft (section 7.5).
 6. The engine returns one result for each action, and the exit code of
    section 8.4.
 
-If the policy mode is `observe`, step 5 does not run, and each action stays
-`proposed`. A `proposed` action has no decision columns (section 5.6), so the
+If the policy mode is `observe`, the rules do not run in step 5, and each
+action stays `proposed`, except an action that a hard limit denies (section
+6.5): it gets `denied` by `limit` in both modes. A `proposed` action has no decision columns (section 5.6), so the
 engine does not store what the policy would do. The triage changeset of
 release 2 follows the mode of the active policy, as each other changeset does
 (specification 1, section 8). Release 1 computes the triage proposal and does
@@ -837,7 +838,12 @@ The policy governs mailbox actions (sections 4 to 6). The writes in
 the table are not mailbox actions, so they do not go through the policy.
 Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
-each verb goes through the socket.
+each verb that adds, submits or withdraws an action goes through the socket
+(`docs/specs/2026-11-16-engine-socket.md`). The read verbs (`status`,
+`search`, `show`, `brief` and `list`) keep the exception of release 1: they
+change nothing, so they cannot skip the policy. One engine runs on a data
+folder: `iris serve` holds the lock `engine.lock` in the data folder while it
+runs.
 
 | Mode | When | Socket | Who |
 |---|---|---|---|

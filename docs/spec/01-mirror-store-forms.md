@@ -482,6 +482,7 @@ Iris gives short IDs that a person and an agent can type:
 | `r-` | Record |
 | `f-` | Feed item |
 | `s-` | Signal |
+| `w-` | Watch (card R5-07) |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
 Iris install and the engine never uses it again, also after a rebuild deletes
@@ -1027,6 +1028,15 @@ shows only under Strangers, so each item shows one time and each section count
 is exact. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
+The web client opens the brief with Due soon, after the live login codes
+(card R3-08). Due soon holds each item of You owe that is due in 2 days or
+less, or that is late, in the local day of the viewer. The engine does not
+know that day (it has no time zone of the owner), so the client makes this
+split from the You owe items, and the API keeps one You owe section. The
+client shows You owe with the rest of its items, and with the engine count
+less the Due soon items. The "All" link of You owe, and the link of Due soon,
+give the engine count, because the full list holds both.
+
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
 applied.") is a list that the engine computes when the brief opens, in the
@@ -1084,7 +1094,9 @@ changeset (specification 2, section 5.4):
 - In the policy mode `apply`, the active policy decides each `proposed`
   action of the new revision in the same transaction (specification 2,
   section 5.4, step 5), and the action keeps the reason of the decision. In
-  the mode `observe`, each action stays `proposed`.
+  the mode `observe`, each action stays `proposed`, except an action that a
+  hard limit denies (specification 2, section 6.5): it gets `denied` by
+  `limit`.
 
 Failure list of a triage run. Supported input: the account row ID and the
 forms, labels and senders in the store.

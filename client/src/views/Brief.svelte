@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, loadBrief, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { across, copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
+  import { across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
@@ -48,8 +48,11 @@
   let until = $derived([signal.next, nextDay(now)].filter((t): t is string => !!t).sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
   $effect(() => watch(until, (d) => (now = d)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
+  // What you owe that is due in 2 days or less, or late, leads the brief (R3-08). It shows only there, so You owe counts the rest.
+  // shortcut: the API gives at most 200 items of You owe, so a due item past them stays in You owe; page the API if one person owes more.
+  let soon = $derived(dueSoon(brief.you_owe.items, now));
   let parts = $derived([
-    { key: "you_owe", title: "You owe", ...brief.you_owe },
+    { key: "you_owe", title: "You owe", count: brief.you_owe.count - soon.length, items: brief.you_owe.items.filter((i) => !soon.includes(i)), duplicates: brief.you_owe.duplicates, total: brief.you_owe.count },
     { key: "owed_to_you", title: "Owed to you", ...brief.owed_to_you },
     { key: "conversations", title: "Conversations", ...brief.conversations },
     { key: "strangers", title: "From senders you do not know", ...brief.strangers },
@@ -114,6 +117,16 @@
   </div>
 {/if}
 
+{#if soon.length}
+  <section class="soon" aria-labelledby="soon">
+    <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
+    <ul>
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} />{/each}
+    </ul>
+    {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
+  </section>
+{/if}
+
 {#if brief.review?.actions}
   <section aria-labelledby="review">
     <h2 id="review"><span>Waits for your review</span> <span class="count">{brief.review.actions}</span></h2>
@@ -134,7 +147,7 @@
           {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
         </ul>
       {/if}
-      <a class="all" href={`#/brief/${part.key}`}>All {part.count}</a>
+      <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
     </section>
   {/if}
 {/each}
@@ -303,6 +316,10 @@
   }
   footer p {
     margin: 0 0 var(--space-2);
+  }
+  .soon {
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
   }
   .warning {
     color: var(--color-text);

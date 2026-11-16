@@ -60,6 +60,11 @@ export function due(item: Item, now = new Date()): Due | null {
   return { text: `due ${words}`, tone: days <= 2 ? "soon" : "" };
 }
 
+/** The commitments of `items` that are due in 2 days or less, or late, in the local day of `now`. */
+export function dueSoon(items: Item[], now = new Date()): Item[] {
+  return items.filter((item) => !!due(item, now)?.tone);
+}
+
 /** Time left until a date-time, as words: "in 9 minutes". Null after the time. */
 export function timeLeft(value: string | undefined, now = new Date()): string | null {
   if (!value) return null;

@@ -97,8 +97,6 @@ on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
 `IRIS_DATA` changes the folder. The refresh token and the client file are
 encrypted with the `key` file of the data folder.
 
-CAUTION: The backup folder holds the key and your mail. Keep it private.
-
 `iris serve` prints the sign-in address of the local API, with a one-time
 code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
 program can exchange the code for a token with `POST /api/session`
@@ -124,6 +122,20 @@ calls run only inside an approved budget (see "Understand the mail").
 
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
+
+## Watch for a mail
+
+A watch tells you one time when a new mail matches a search text.
+
+| Command | Does |
+|---|---|
+| `iris watch add "<text>"` | Starts a watch, for example `iris watch add "visa from:embassy"`. The text uses the syntax of `iris search`. |
+| `iris watch list` | Shows each watch. A watch `waits`, or it `arrived` with the mail that matched. |
+| `iris watch remove <id>` | Removes the watch (`w-3`). |
+
+Test the text with `iris search` first. Only mail that arrives after the
+watch can match. `iris serve` checks each minute. Mail that you send, drafts
+and hostile mail never match.
 
 ## Understand the mail
 
@@ -156,11 +168,51 @@ the draft and prints it. It sends nothing. The call uses the same budget as
 understanding. Iris makes no draft for a thread with hostile mail, or for a
 thread with a message that understanding did not read yet.
 
+## Back up, export and move
+
+CAUTION: A backup folder and an export folder hold your mail. A backup folder
+also holds the key. Keep them private.
+
 To copy the data folder while the engine runs, run:
 
 ```bash
 target/release/iris backup <empty-folder>
 ```
+
+The backup is a complete data folder. Iris opens it as it is, at any path.
+
+To get your data in open formats, run:
+
+```bash
+target/release/iris export <empty-folder>
+```
+
+| File | Content |
+|---|---|
+| `items.jsonl` | One item on each line, as the open model gives it |
+| `messages.jsonl` | One message on each line, as `iris show <id> --json` gives it, with `file`: the path of its raw message |
+| `mail/<id>.eml` | The raw message. A mail program can open it. |
+
+The export holds no secret: no key, no sign-in and no model key.
+
+To move Iris to another machine, do these steps:
+
+1. On the old machine, stop the engine. If the background service runs it,
+   run `iris service remove`.
+2. Run `iris backup <empty-folder>`.
+3. Copy the backup folder to the data folder of the new machine:
+   `~/Library/Application Support/iris` on macOS, `~/.local/share/iris` on
+   Linux. If Iris ran on the new machine before, move its data folder away
+   first. Use a private channel, for example `scp -r`.
+4. On the new machine, install Iris and run `iris status`. Make sure that
+   it shows your accounts.
+5. Run `iris service install`.
+
+CAUTION: Do not run the engine on two machines with the same data. Two
+engines can apply one change two times.
+
+The sign-in and the OAuth client file move with the backup, so the new
+machine needs no new sign-in.
 
 ## Layout
 
