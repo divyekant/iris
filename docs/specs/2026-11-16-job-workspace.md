@@ -117,6 +117,12 @@ The granted messages of a job:
 - A job in the state `done` grants nothing. The build of a done job writes
   the job files and no thread, item or person file. The read verbs of a
   session of a done job see nothing (R4-04 ends the session).
+- Each caller that moves a job to `done` (`iris_job::finish`) builds its
+  workspace after the move, so the mail files go at once. The engine also
+  builds, at each start, the workspace of each done job that still has a
+  `threads/` folder. If the build after `finish` fails or the engine
+  stops, the mail files stay only until that start. The callers come with
+  R4-04 and R4-09 (known limit until then, with a GitHub issue).
 
 - A thread of the scope grants each clean message of the thread.
 - An item of the scope that is not `gone` grants each clean source message
@@ -142,8 +148,12 @@ the granted messages:
    7.4). So the build writes one of two documents:
 
    - The full document: only when each source thread of the item is a
-     thread of the active scope. A thread ref grants each clean message of
-     the thread, which is the context that understanding used.
+     thread of the active scope, and each message of each source thread is
+     granted now, except a draft that is not gone. The build cannot know
+     which messages a run used as context, so it checks all of them: a
+     message that became hostile mail, gone or a signal source after the run
+     makes the document short. Understanding gives no draft text to the
+     model.
    - The short document: for an item of the scope whose source thread is
      not a thread of the scope. It holds only `id`, `form`, `status` and
      `sources` (the `m-` IDs of its source messages). Each value comes from
@@ -370,6 +380,8 @@ Markdown and JSON with `serde_json`.
 | An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
 | An unknown job | `Error::NotFound` | Unit test |
 | A job in the state `done` | No thread, item or person file. The job files stay | Unit test |
+| A crash between `finish` and the build of the done job | The mail files stay until the next engine start, which builds each done job with a `threads/` folder (R4-04) | Test with R4-04 |
+| A message of a source thread that became hostile mail, gone or a signal source after the run | The item gets the short document | Unit test |
 
 ## Impact
 
