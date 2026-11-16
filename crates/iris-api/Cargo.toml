@@ -11,6 +11,7 @@ publish.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
+iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
