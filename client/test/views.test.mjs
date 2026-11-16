@@ -545,3 +545,41 @@ test("only the newest request of a view applies its answer (A, then B, then A)",
   assert.equal(b(), false);
   assert.equal(a2(), true);
 });
+
+test("one access state holds the sign-in and engine problem of every call, and a good answer clears it", async () => {
+  const { get, signIn, SIGN_IN, SIGN_IN_FAILED, UNREACHABLE } = await load("/src/api.ts");
+  const { access } = await load("/src/access.svelte.ts");
+  const saved = globalThis.fetch;
+  const ok = async () => new Response(JSON.stringify({ ok: 1 }));
+  try {
+    // A token that the engine does not know (for example after a restart of iris serve).
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "no token" }), { status: 401 });
+    await assert.rejects(get("status"), { message: SIGN_IN });
+    assert.equal(access.problem, SIGN_IN);
+    globalThis.fetch = ok;
+    await get("status");
+    assert.equal(access.problem, "");
+    // The engine does not answer: a poll gets the same state as a first load.
+    globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+    await assert.rejects(get("brief"), { message: UNREACHABLE });
+    assert.equal(access.problem, UNREACHABLE);
+    globalThis.fetch = ok;
+    await get("brief");
+    assert.equal(access.problem, "");
+    // A refused code.
+    globalThis.fetch = async () => new Response("{}", { status: 403 });
+    await assert.rejects(signIn({ hash: "#code=x", pathname: "/", search: "" }, undefined, undefined), { message: SIGN_IN_FAILED });
+    assert.equal(access.problem, SIGN_IN_FAILED);
+    // A bad escape.
+    access.problem = "";
+    await assert.rejects(signIn({ hash: "#code=%", pathname: "/", search: "" }, undefined, undefined));
+    assert.equal(access.problem, SIGN_IN_FAILED);
+    // A good code clears the problem.
+    globalThis.fetch = async () => new Response(JSON.stringify({ token: "t-3" }));
+    await signIn({ hash: "#code=y", pathname: "/", search: "" }, undefined, undefined);
+    assert.equal(access.problem, "");
+  } finally {
+    globalThis.fetch = saved;
+    access.problem = "";
+  }
+});
