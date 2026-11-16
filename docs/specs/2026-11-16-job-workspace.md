@@ -82,7 +82,10 @@ scope already does nothing. `iris_job::scope(store, job)` gives the refs.
 ### What the scope grants
 
 A message is clean when the conversation rule counts it as clean
-(`iris_talk`: understood, not a draft, not hostile mail) and it is not gone.
+(`iris_talk`: understood, not a draft, not hostile mail), it is not gone,
+and it is not the source (`item_source`) of a `signal` item. A signal can
+hold a security code, and the source text holds the same code, so no part
+of that message goes into a workspace.
 The rule of hostile mail is the rule of spec 1 section 6.7: a hostile mark,
 or a sender of the kind `hostile` on a message that you did not send. A
 message that is not understood yet is not clean, because the engine has not
@@ -93,16 +96,17 @@ workspace.
 The granted messages of a job:
 
 - A thread of the scope grants each clean message of the thread.
-- An item of the scope grants each clean source message (`item_source`) of
-  the item, and no other message of its thread. Gmail can put two subjects
+- An item of the scope that is not `gone` grants each clean source message
+  (`item_source`) of the item, and no other message of its thread. Gmail can put two subjects
   in one thread (spec 1), so an item does not grant its whole thread.
 
 The build reads the scope in one read transaction, and writes only data of
 the granted messages:
 
 1. The thread files: one file for each thread with a granted message. The
-   file holds only the granted messages, and says how many messages of the
-   thread are not in it.
+   file holds only the granted messages. The file does not say if the
+   thread has other messages, because that count comes from mail outside
+   the grant.
 2. The items: each item of the forms `commitment` and `record`, that is not
    `gone`, whose source messages are all granted. An item of the scope and an
    item with a source in a granted thread both pass this check. An item with
@@ -157,8 +161,7 @@ or reads them. The build does not touch other paths.
 ```
 # Q4 numbers
 
-Thread t-8841. 3 messages. 1 message is not in this file (hostile mail, a
-draft or mail that Iris did not read yet).
+Thread t-8841. 3 messages.
 
 ## m-50101, 2026-11-14T09:00:00.000Z
 
@@ -190,8 +193,7 @@ messages in the thread files.
 ### The build
 
 `iris_workspace::build(store, job, dir) -> Result<Built>`. `Built` gives the
-counts of threads, messages, items and people that the build wrote, and the
-count of messages that it left out.
+counts of threads, messages, items and people that the build wrote.
 
 1. Make `dir` with mode `0700` if it is not there. Refuse a `dir` that is a
    symbolic link or not a folder.
@@ -249,8 +251,8 @@ Markdown and JSON with `serde_json`.
 
 | Input or event | Result | Test |
 |---|---|---|
-| A thread with hostile mail, a draft, a message that is not understood, a gone message | The message is not in the file. The file says how many are left out | Unit test with each kind |
-| A signal, a feed item or a conversation with a source in the scope | No file | Unit test |
+| A thread with hostile mail, a draft, a message that is not understood, a gone message | The message is not in the file. The file does not count it | Unit test with each kind |
+| A signal, a feed item or a conversation with a source in the scope | No file. The source message of a signal is in no thread file | Unit test |
 | An item or a thread of the scope that is gone from the store | Left out, no error | Unit test |
 | A thread of another job, or mail of no job | Not in the folder | Unit test: the folder lists only the scope files |
 | An item of the scope in a thread with other subjects | Only the item and its source messages are in the folder, not the other messages and items of the thread | Unit test |
@@ -302,7 +304,8 @@ None.
    files of the layout, and no file for another thread, item or person. Red
    if a file of mail outside the scope is in the folder, or if a person file
    counts a message outside the scope.
-2. Hostile mail, a draft and a signal of the scope threads are in no file,
+2. Hostile mail, a draft, a signal and the source message of a signal of
+   the scope threads are in no file,
    and no item with such a source is in the folder. Red if their text is in
    any file of the folder.
 3. An item of the scope grants only its source messages. Red if another
