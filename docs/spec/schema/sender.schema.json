@@ -14,6 +14,10 @@
     "kind": { "enum": ["person", "service", "stranger", "hostile"] },
     "basis": { "type": "string", "minLength": 1, "maxLength": 200 },
     "decided_by": { "enum": ["engine", "person"] },
-    "decided_at": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" }
+    "decided_at": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+    "declined_at": {
+      "$ref": "urn:iris:model:0:common#/$defs/dateTime",
+      "description": "When the person declined the sender at the stranger gate. Applies only while the kind is stranger."
+    }
   }
 }

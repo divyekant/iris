@@ -12,6 +12,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// The answers of the person at the stranger gate.
+pub mod gate;
 /// The header parser of the sender rules. `iris-understand` reads the
 /// same headers with it, so both crates agree on each value.
 pub mod head;
@@ -42,7 +44,7 @@ impl Kind {
         }
     }
 
-    fn parse(s: &str) -> Option<Kind> {
+    pub(crate) fn parse(s: &str) -> Option<Kind> {
         [Kind::Person, Kind::Service, Kind::Stranger, Kind::Hostile]
             .into_iter()
             .find(|k| k.name() == s)
