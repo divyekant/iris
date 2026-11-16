@@ -811,7 +811,16 @@ impl<'a, 'b> Run<'a, 'b> {
                        AND NOT EXISTS (
                          SELECT 1 FROM ledger n JOIN changeset_action a ON a.id = n.action_id
                          JOIN changeset_action x ON x.changeset_id = a.changeset_id
-                         WHERE n.id = ?1 AND x.state IS NOT 'applied')",
+                         WHERE n.id = ?1 AND x.state IS NOT 'applied')
+                       -- No step 1 entry: no undo to record, and the end of
+                       -- this entry must not fail.
+                       AND EXISTS (
+                         SELECT 1 FROM ledger n
+                         JOIN changeset_action a ON a.id = n.action_id
+                         JOIN changeset_action a1 ON a1.changeset_id = a.changeset_id
+                         JOIN ledger_undo u1 ON u1.action_id = a1.id AND u1.step = 1
+                         JOIN ledger l1 ON l1.action_id = a1.id
+                         WHERE n.id = ?1)",
                     [ledger],
                 )?;
             }

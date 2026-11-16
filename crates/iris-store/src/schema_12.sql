@@ -32,7 +32,12 @@ WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.c
                          AND o.verb || '>' || a.verb IN (
                            'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',
                            'label>unlabel', 'unlabel>label', 'trash>untrash', 'untrash>trash'))
-                        OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive')))
+                        OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive'
+                            -- Step 1 of the same entry, in the same changeset.
+                            AND EXISTS (SELECT 1 FROM ledger_undo u1
+                                        JOIN changeset_action a1 ON a1.id = u1.action_id
+                                        WHERE u1.ledger_id = new.ledger_id AND u1.step = 1
+                                          AND a1.changeset_id = a.changeset_id))))
   OR EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
              WHERE u.ledger_id = new.ledger_id AND u.step = new.step
                AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'))

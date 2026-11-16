@@ -1561,3 +1561,48 @@ fn only_the_undo_of_trash_makes_untrash() {
         assert_eq!(state, "denied");
     }
 }
+
+/// Step 2 of the undo of a `trash` needs step 1 of the same entry in the
+/// same changeset (migration 12).
+#[test]
+fn a_second_step_needs_its_first_step() {
+    let b = setup("undo-orphan", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let first = b.approved("trash", &ms[..1], PERSON);
+    applied(b.apply(first));
+    let other = b.approved("trash", &ms[1..], PERSON);
+    applied(b.apply(other));
+    // A step 1 of the undo of the other entry, in another changeset.
+    iris_apply::undo(&b.store, b.entry(other), now()).unwrap();
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let cs = iris_changeset::create(&b.store, &person, now()).unwrap();
+    let target = format!("m-{}", ms[0]);
+    iris_changeset::add_action(
+        &b.store,
+        cs,
+        &person,
+        iris_changeset::Verb::Archive,
+        &[target.as_str()],
+        &serde_json::Map::new(),
+        None,
+    )
+    .unwrap();
+    for ledger in [b.entry(first), b.entry(other)] {
+        let e = b
+            .store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO ledger_undo(action_id, ledger_id, step)
+                     SELECT id, ?2, 2 FROM changeset_action WHERE changeset_id = ?1",
+                    params![cs, ledger],
+                )?)
+            })
+            .unwrap_err();
+        assert!(e.to_string().contains("iris:"), "{e}");
+    }
+}
