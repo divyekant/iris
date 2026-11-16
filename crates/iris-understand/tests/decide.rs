@@ -410,6 +410,12 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
         .1
         .unwrap();
     assert_eq!((d.drafts.len(), d.failed), (0, true));
+    // Mail from the mailbox address with no SENT label: the sender is the
+    // owner, so no other side and no item.
+    let self_note = "From: owner@example.com\nTo: owner@example.com\nSubject: Note\n\nI will send the slides by Friday.\n";
+    let m = Fake::with(vec![answer(promise.clone()), answer(promise.clone())]);
+    let d = run(self_note, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.drafts.len(), d.failed), (0, true));
     // In received mail too, the other side is never the owner: the sender
     // takes the place of a model party with no address.
     for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {

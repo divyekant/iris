@@ -349,6 +349,10 @@ fn commitment_sides(
             party_sender(a)
         }
     };
+    // Each path ends here: an owner address on the other side gives no item.
+    let mut party = party;
+    fix(&mut party, &owner_addresses(a, cx))?;
+    party.get("address")?;
     item[mine] = json!({"kind": "self"});
     item[other] = party;
     Some(())
