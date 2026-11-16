@@ -20,7 +20,10 @@ pay again for the same mail.
    model calls.
 3. The store keeps the calls, the tokens and the cost of each run.
 4. Before the first paid run, the person sees an estimate and approves a
-   budget. No paid call happens outside the budget, on any path.
+   budget. No paid call starts unless the budget holds its worst case. The
+   computed cost can pass the budget only when the provider bills more
+   input tokens than the bytes of the request body: by at most that one
+   call, after which the runs stop until a new approval.
 5. The person sets the model and its key with the `iris` command. The key is
    a secret (spec 1 section 5.4).
 
@@ -273,17 +276,28 @@ message. No path calls `store::understand` with a priced model outside
   reads the API key from standard input with no echo. It never takes the
   key as an argument.
 - `iris model set local <base-url> <model>`: no key, no price. The host of
-  `<base-url>` must be a loopback address (`127.0.0.0/8`, `::1` or
-  `localhost`), so the mail text stays on the machine. Any other host is
+  `<base-url>` must be a loopback IP literal (`127.0.0.0/8` or `::1`) or
+  `localhost`, so the mail text stays on the machine. Any other host is
   refused. A remote server is not a local model.
+- `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an
+  error, and the body goes nowhere else. For a local model, the client also
+  checks that the address of the connection is a loopback address, also
+  after the name lookup of `localhost`.
 - `iris model show`: the settings and the budget left, never the key.
-- `iris understand --estimate`: prints the estimate, no call. It ends with
-  an approval code: the `version` of the `model_setting` row (a number that
-  each `iris model set` makes larger) that the estimate used.
+- `iris understand --estimate`: prints the estimate, no call. It writes an
+  estimate receipt (a row of `understand_estimate`: a random ID, the
+  `version` of the `model_setting` row, the counts, the cost, the time) and
+  prints the ID as the approval code. Each `iris model set` makes `version`
+  larger.
 - `iris understand --approve <code> --budget <usd>`: approves the budget.
-  It takes the run lock, and writes the budget only if `<code>` is the
-  `version` of the row now. So the person approves only after they saw the
-  estimate of the same model and price, in an earlier command.
+  It takes the run lock. It writes the budget only if a receipt with that
+  code exists, its `version` is the `version` of the row now, and it is not
+  older than 24 hours. Then it deletes the receipt, so a code works one
+  time. It also needs a terminal: if standard input is not a TTY, it
+  refuses. It shows the estimate of the receipt again and asks the person
+  to type the budget again. So a script or an agent with no terminal cannot
+  approve, and the person approves only after an estimate of the same model
+  and price.
 - `iris understand [--max-cost <usd>] [--max-messages <n>]`: runs the batch
   runner with the budget that is left, and prints the run row. With no
   budget, the free steps run and paid calls are refused (see
@@ -315,6 +329,9 @@ more calls.
 | `iris model set` during a run | Calls on an old row with a new budget | `iris model set` needs the run lock and fails. | Command test. |
 | `iris model set` between the estimate and the approval | A budget for a model the person did not see | The approval code is the row version; a changed row refuses the approval. | Command test. |
 | `iris model set local https://remote.example/v1 m` | Mail text leaves the machine | Refused: the host is not a loopback address. | Command test. |
+| A local server answers 307 or 308 to a remote host | The client sends the mail to the remote host | No redirect is followed: the call fails. | Model client test with a redirecting fake server. |
+| `--approve` with a code that no estimate made, an old code, or a code of another model version | Approval with no estimate | Refused. | Command test. |
+| `--approve` with no terminal | An agent approves spend | Refused. | Command test. |
 | A provider bills more input tokens than the body bytes | Settle passes the reservation | The budget can go below zero once; the run stops with `stop = budget` and shows the overrun. | Fake model with a large usage. |
 | The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
 | A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
@@ -338,6 +355,9 @@ more calls.
 - `crates/iris-model`: `Usage::known`; request bytes on errors.
 - `crates/iris-store`: `schema_3.sql`.
 - `crates/iris`: `iris model`, `iris understand`.
+- `crates/iris-model`: no redirects; the loopback check of a local model.
+- Spec 2 section 8.1: the release 1 table of local writes lists `model set`
+  and `understand`, and says who approves a budget.
 - Spec 1 section 5.5 and spec 2 section 8.2 list the tables and commands.
 - Memory: the IDs of one thread and one message at a time.
 

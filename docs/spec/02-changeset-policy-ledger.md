@@ -623,6 +623,8 @@ write to the local store, but none of them changes the mailbox:
 | `mirror sync` | Messages, content files and the sync log | Specification 1, sections 4.2 to 4.7 |
 | `mirror verify` | Repairs of the mirror, and the sync log | Specification 1, section 4.8 |
 | `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
+| `model set` | The model setting and its sealed key | `docs/specs/2026-11-16-cost-control.md` |
+| `understand` | Items, run rows, estimate receipts and the budget | `docs/specs/2026-11-16-cost-control.md`. The budget approval needs an estimate receipt and a terminal (a TTY), so no script or agent with no terminal can approve spend. It is not a mailbox action. Release 2 moves the approval to the web client (section 8.6). |
 
 The policy governs mailbox actions (sections 4 to 6). The writes in
 the table are not mailbox actions, so they do not go through the policy.
