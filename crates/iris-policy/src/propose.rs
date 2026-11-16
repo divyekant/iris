@@ -318,8 +318,9 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
             // An action on hostile mail gives no candidate: Iris does not
             // propose a rule from it, even one that the hard limits allow.
             c.sourced |= approved && !hostile;
+            // An approval on hostile mail does not count either; a refusal does.
             match (changed, approved) {
-                (true, true) => c.yes += 1,
+                (true, true) if !hostile => c.yes += 1,
                 (true, false) => c.no += 1,
                 _ => {}
             }

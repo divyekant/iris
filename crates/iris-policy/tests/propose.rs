@@ -291,7 +291,11 @@ fn each_proposal_agrees_with_the_decisions() {
                 let d = policy.decide(&action, fs.iter().map(Facts::message));
                 if d.outcome == Outcome::Allow {
                     assert_eq!(*state, "approved", "seed {seed}: {p:?} allows a refusal");
-                    yes += 1;
+                    // An approval on hostile mail does not count.
+                    let hostile = fs
+                        .iter()
+                        .any(|f| f.hostile || f.sender_kind == SenderKind::Hostile);
+                    yes += i64::from(!hostile);
                 }
             }
             assert_eq!(yes, p.approvals, "seed {seed}: {p:?}");
@@ -375,4 +379,16 @@ fn a_refusal_whose_header_is_gone_blocks_its_verb() {
         })
         .unwrap();
     assert!(refresh(&store).is_empty(), "the refusal can be from deals@");
+}
+
+#[test]
+fn hostile_approvals_do_not_count() {
+    let (_dir, store) = store("hostile-mix");
+    let m = message(&store, "deals@shop.example", false);
+    decided(&store, "archive", &[m], "approved");
+    for _ in 0..MIN_APPROVALS - 1 {
+        let m = message(&store, "deals@shop.example", true);
+        decided(&store, "archive", &[m], "approved");
+    }
+    assert!(find(&refresh(&store), "deals@shop.example").is_none());
 }

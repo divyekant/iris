@@ -614,7 +614,7 @@ changes:
 - A candidate is one verb and one condition: the `sender` address or the
   `sender_kind` that each message of one approved action has. An action on
   hostile mail (a hostile mark, or a sender of the kind `hostile`) gives no
-  candidate, and `hostile` is never a candidate.
+  candidate and counts as no approval, and `hostile` is never a candidate.
 - The candidate rule is added to the active policy. An action counts for it
   only when the rule changes the decision of that action to approved
   (section 6.4), with the author, the job and the flag `bulk` of the
