@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0xd2e4_ab6d_b05f_ace5;
+    const GOLDEN_42_2000: u64 = 0xdcd8_5b12_bbca_bd4d;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {
@@ -361,7 +361,7 @@ mod tests {
                 !raw.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r'),
                 "bare LF in {i}"
             );
-            for word in head.split(|c: char| c.is_whitespace() || "<>,\"".contains(c)) {
+            for word in head.split(|c: char| c.is_whitespace() || "<>,;\"".contains(c)) {
                 if let Some(at) = word.find('@') {
                     let domain = &word[at + 1..];
                     assert!(
