@@ -360,8 +360,10 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
 - `iris model set anthropic <model> --price-in <usd> --price-out <usd>`
   reads the API key from standard input with no echo. It never takes the
   key as an argument.
-- `iris model set local <base-url> <model>`: no key, no price. The host of
-  `<base-url>` must be a loopback IP literal (`127.0.0.0/8` or `::1`) or
+- `iris model set local <base-url> <model>`: no key, no price. The scheme
+  of `<base-url>` must be `http`: TLS on loopback adds nothing, and the run
+  connects to an IP literal, which a certificate for `localhost` does not
+  match. The host of `<base-url>` must be a loopback IP literal (`127.0.0.0/8` or `::1`) or
   `localhost`, so the mail text stays on the machine. Any other host is
   refused. A remote server is not a local model.
 - `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an

@@ -62,30 +62,54 @@ pub fn usd(micro: i64) -> String {
     }
 }
 
-/// The host of an `http` or `https` URL, if it is `localhost` or a loopback
-/// IP literal (`127.0.0.0/8`, `::1`). Any other host gives an error, so the
-/// mail text stays on the machine.
-pub fn local_host(url: &str) -> Result<String, String> {
-    let refuse = || format!("`{url}` is not on this machine: use localhost, 127.0.0.1 or [::1]");
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .ok_or_else(refuse)?;
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    if authority.contains('@') {
+/// The parts of a local model URL: the host (`localhost` or a loopback IP
+/// literal, IPv6 in brackets), the port and the path with the query.
+struct LocalUrl {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+/// Parses a local model URL with `http::Uri`. Only `http` is accepted: TLS
+/// on loopback adds nothing, and the run connects to an IP literal (see
+/// `pin_local_url`), which a certificate for `localhost` does not match.
+fn parse_local(url: &str) -> Result<LocalUrl, String> {
+    let refuse = || {
+        format!("`{url}` is not on this machine: use http:// with localhost, 127.0.0.1 or [::1]")
+    };
+    let uri: http::Uri = url.parse().map_err(|_| refuse())?;
+    if uri.scheme_str() != Some("http") {
         return Err(refuse());
     }
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or_default(),
-        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
-    };
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-    if loopback {
-        Ok(host.to_ascii_lowercase())
-    } else {
-        Err(refuse())
+    let authority = uri.authority().ok_or_else(refuse)?;
+    if authority.as_str().contains('@') {
+        return Err(refuse());
     }
+    let host = authority.host().to_ascii_lowercase();
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host == "localhost" || bare.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !loopback {
+        return Err(refuse());
+    }
+    // `Authority::port` gives `None` for a port that is not a u16, so read
+    // the port text after the host.
+    let port_text = &authority.as_str()[authority.host().len()..];
+    let port = match port_text.strip_prefix(':') {
+        None if port_text.is_empty() => 80,
+        Some(p) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            p.parse::<u16>().map_err(|_| refuse())?
+        }
+        _ => return Err(refuse()),
+    };
+    let path = uri.path_and_query().map_or("", |p| p.as_str()).to_string();
+    Ok(LocalUrl { host, port, path })
+}
+
+/// The host of a local model URL, if it is `localhost` or a loopback IP
+/// literal (`127.0.0.0/8`, `::1`). Any other host gives an error, so the
+/// mail text stays on the machine.
+pub fn local_host(url: &str) -> Result<String, String> {
+    parse_local(url).map(|u| u.host)
 }
 
 /// The local URL with its host replaced by a loopback IP literal. Each
@@ -93,38 +117,23 @@ pub fn local_host(url: &str) -> Result<String, String> {
 /// lookup of `localhost`. The client connects to the checked address only,
 /// so a later lookup cannot give another address.
 fn pin_local_url(url: &str) -> Result<String, String> {
-    let host = local_host(url)?;
-    let authority = url.split("://").nth(1).unwrap_or_default();
-    let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
-    let https = url.starts_with("https://");
-    let port = match authority.strip_prefix('[') {
-        Some(v6) => v6.split_once("]:").map(|(_, p)| p),
-        None => authority.rsplit_once(':').map(|(_, p)| p),
-    };
-    let port = match port {
-        Some(p) => p
-            .parse::<u16>()
-            .map_err(|_| format!("`{url}` has a bad port"))?,
-        None if https => 443,
-        None => 80,
-    };
-    let addrs: Vec<_> = (host.as_str(), port)
+    let u = parse_local(url)?;
+    let bare = u.host.trim_start_matches('[').trim_end_matches(']');
+    let addrs: Vec<_> = (bare, u.port)
         .to_socket_addrs()
-        .map_err(|e| format!("cannot find {host}: {e}"))?
+        .map_err(|e| format!("cannot find {}: {e}", u.host))?
         .collect();
     if addrs.is_empty() || addrs.iter().any(|a| !a.ip().is_loopback()) {
-        return Err(format!("{host} has an address that is not on this machine"));
-    }
-    if host != "localhost" {
-        return Ok(url.to_string());
+        return Err(format!(
+            "{} has an address that is not on this machine",
+            u.host
+        ));
     }
     let ip = match addrs[0].ip() {
         IpAddr::V4(v4) => v4.to_string(),
         IpAddr::V6(v6) => format!("[{v6}]"),
     };
-    let (scheme, rest) = url.split_once("://").unwrap_or_default();
-    // `local_host` accepted the URL, so the authority starts with the host.
-    Ok(format!("{scheme}://{ip}{}", &rest["localhost".len()..]))
+    Ok(format!("http://{ip}:{}{}", u.port, u.path))
 }
 
 /// What `iris model set` writes.
@@ -182,19 +191,19 @@ pub fn set_model(store: &Store, m: &NewModel) -> Result<i64, String> {
 /// echo on a terminal. The key is never an argument.
 pub fn read_key() -> Result<String, String> {
     let stdin = std::io::stdin();
-    let tty = stdin.is_terminal();
-    if tty {
+    // The guard turns the echo on again on each path out of this function.
+    let _echo_off = if stdin.is_terminal() {
         let _ = write!(std::io::stderr(), "API key (no echo): ");
         let _ = std::io::stderr().flush();
-        echo(false);
-    }
+        Some(EchoOff::new()?)
+    } else {
+        None
+    };
     let mut line = String::new();
-    let r = stdin.lock().read_line(&mut line);
-    if tty {
-        echo(true);
-        let _ = writeln!(std::io::stderr());
-    }
-    r.map_err(|e| e.to_string())?;
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     let key = line.trim().to_string();
     if key.is_empty() {
         return Err("no API key on standard input".into());
@@ -202,12 +211,33 @@ pub fn read_key() -> Result<String, String> {
     Ok(key)
 }
 
-/// Turns the echo of the terminal on or off with `stty` (macOS and Linux).
-fn echo(on: bool) {
-    let _ = std::process::Command::new("stty")
-        .arg(if on { "echo" } else { "-echo" })
+/// The echo of the terminal is off while this value lives. It uses `stty`
+/// (macOS and Linux). If `stty` fails, no key is read.
+struct EchoOff;
+
+impl EchoOff {
+    fn new() -> Result<EchoOff, String> {
+        if stty("-echo") {
+            Ok(EchoOff)
+        } else {
+            Err("cannot turn off the echo of the terminal, so the key is not read".into())
+        }
+    }
+}
+
+impl Drop for EchoOff {
+    fn drop(&mut self) {
+        stty("echo");
+        let _ = writeln!(std::io::stderr());
+    }
+}
+
+fn stty(arg: &str) -> bool {
+    std::process::Command::new("stty")
+        .arg(arg)
         .stdin(std::process::Stdio::inherit())
-        .status();
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// `iris model show`: the settings and the budget left, never the key.
@@ -542,7 +572,7 @@ mod tests {
             "http://localhost:8080/v1",
             "http://127.0.0.1:1234/v1",
             "http://127.9.9.9/v1",
-            "https://[::1]:8443/v1",
+            "http://[::1]:8443/v1",
             "http://LOCALHOST/v1",
         ] {
             assert!(local_host(ok).is_ok(), "{ok}");
@@ -556,6 +586,13 @@ mod tests {
             "127.0.0.1:8080",
             "http://[::2]/v1",
             "http://0.0.0.0/v1",
+            "https://localhost/v1",
+            "https://[::1]:8443/v1",
+            "http://[::1/v1",
+            "http://[::1",
+            "http://localhost:/v1",
+            "http://localhost:99999/v1",
+            "http://[::ffff:10.0.0.1]/v1",
         ] {
             assert!(local_host(bad).is_err(), "{bad}");
         }
@@ -575,5 +612,128 @@ mod tests {
         let host = local_host(&pinned).unwrap();
         assert!(host.parse::<IpAddr>().unwrap().is_loopback(), "{pinned}");
         assert!(pinned.ends_with(":9/v1"), "{pinned}");
+    }
+
+    /// A small xorshift generator with a fixed seed, so a failure repeats.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n.max(1)
+        }
+        fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+            items[self.below(items.len() as u64) as usize]
+        }
+    }
+
+    /// Property: a URL is local if and only if its scheme is `http`, it has
+    /// no user part, and its host is `localhost` or a loopback literal. A
+    /// pinned URL keeps the port and the path and has a loopback IP host.
+    #[test]
+    fn property_local_urls() {
+        // (host text, true if the host is loopback)
+        const HOSTS: &[(&str, bool)] = &[
+            ("localhost", true),
+            ("LocalHost", true),
+            ("127.0.0.1", true),
+            ("127.200.0.9", true),
+            ("[::1]", true),
+            ("[0:0:0:0:0:0:0:1]", true),
+            ("localhost.evil.example", false),
+            ("127.0.0.1.evil.example", false),
+            ("evil.example", false),
+            ("10.0.0.1", false),
+            ("0.0.0.0", false),
+            ("[::]", false),
+            ("[::ffff:127.0.0.1]", false),
+            ("[::1", false),
+            ("", false),
+        ];
+        const SCHEMES: &[&str] = &["http://", "https://", "ftp://", "", "HTTP://"];
+        const USERS: &[&str] = &["", "", "", "user@", "127.0.0.1@", "a:b@"];
+        const PORTS: &[&str] = &["", ":1", ":8080", ":65535", ":", ":65536", ":x"];
+        const PATHS: &[&str] = &["", "/", "/v1", "/v1?x=1", "/a/b#f", "/@evil.example"];
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..20_000 {
+            let (host, loopback) = HOSTS[rng.below(HOSTS.len() as u64) as usize];
+            let scheme = rng.pick(SCHEMES);
+            let user = rng.pick(USERS);
+            let port = rng.pick(PORTS);
+            let path = rng.pick(PATHS);
+            let url = format!("{scheme}{user}{host}{port}{path}");
+            let port_ok = !matches!(port, ":" | ":65536" | ":x");
+            let scheme_ok = scheme.eq_ignore_ascii_case("http://");
+            let expect = loopback && scheme_ok && user.is_empty() && port_ok && !path.contains('#');
+            let got = parse_local(&url);
+            if !path.contains('#') {
+                assert_eq!(got.is_ok(), expect, "{url}");
+            } else {
+                assert!(got.is_err() || loopback, "{url}");
+            }
+            if let Ok(u) = got {
+                let bare = u.host.trim_start_matches('[').trim_end_matches(']');
+                assert!(u.host == "localhost" || bare.parse::<IpAddr>().unwrap().is_loopback());
+                if u.host != "localhost" {
+                    let pinned = pin_local_url(&url).unwrap();
+                    let p = parse_local(&pinned).unwrap();
+                    let ip = |h: &str| {
+                        h.trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .parse::<IpAddr>()
+                            .unwrap()
+                    };
+                    assert_eq!(ip(&p.host), ip(&u.host), "{url}");
+                    assert_eq!((p.port, p.path), (u.port, u.path), "{url}");
+                }
+            }
+        }
+        // Random bytes never panic, and each accepted URL has a loopback host.
+        let bytes = b"htp:/[]@.:1lochst?#%0";
+        for _ in 0..20_000 {
+            let n = rng.below(24) as usize;
+            let s: String = (0..n)
+                .map(|_| bytes[rng.below(bytes.len() as u64) as usize] as char)
+                .collect();
+            if let Ok(h) = local_host(&s) {
+                let bare = h.trim_start_matches('[').trim_end_matches(']');
+                assert!(
+                    h == "localhost" || bare.parse::<IpAddr>().unwrap().is_loopback(),
+                    "{s}"
+                );
+            }
+        }
+    }
+
+    /// Property: each amount in micro-USD gives back the same amount through
+    /// its text, inside the bound only; random text gives an amount inside
+    /// the bound or an error.
+    #[test]
+    fn property_amounts() {
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        for _ in 0..20_000 {
+            let max = rng.below(100_001);
+            let micro = rng.below(max * 1_000_000 + 2_000_000);
+            let got = parse_usd(&usd(micro as i64), max);
+            if micro <= max * 1_000_000 {
+                assert_eq!(got, Ok(micro), "{micro} {max}");
+            } else {
+                assert!(got.is_err(), "{micro} {max}");
+            }
+        }
+        let chars = b"0123456789.-+e ";
+        for _ in 0..20_000 {
+            let n = rng.below(16) as usize;
+            let s: String = (0..n)
+                .map(|_| chars[rng.below(chars.len() as u64) as usize] as char)
+                .collect();
+            if let Ok(v) = parse_usd(&s, 1000) {
+                assert!(v <= 1_000_000_000, "{s}");
+                assert!(s.bytes().all(|b| b.is_ascii_digit() || b == b'.'), "{s}");
+                assert_eq!(parse_usd(&usd(v as i64), 1000), Ok(v), "{s}");
+            }
+        }
     }
 }

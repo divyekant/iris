@@ -684,6 +684,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "clap",
+ "http",
  "iris-api",
  "iris-auth",
  "iris-fakegmail",

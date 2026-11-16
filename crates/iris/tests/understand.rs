@@ -40,12 +40,9 @@ fn iris_in(store: &Store, args: &[&str], stdin: &str) -> (bool, String, String) 
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // The command can exit before it reads standard input (a refused
+    // argument), so a broken pipe here is not an error.
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
     let out = child.wait_with_output().unwrap();
     (
         out.status.success(),

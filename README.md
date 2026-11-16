@@ -133,7 +133,7 @@ understood is not read again, so a second run makes no model call.
 
 | Command | Does |
 |---|---|
-| `iris model set local <base-url> <model>` | Uses a model server on this machine. No key, no cost. |
+| `iris model set local <base-url> <model>` | Uses a model server on this machine, for example `http://localhost:11434/v1`. No key, no cost. |
 | `iris model set anthropic <model> --price-in <usd> --price-out <usd>` | Uses Anthropic. Reads the API key from standard input. The prices are USD for each million tokens. |
 | `iris model show` | The model, the prices and the budget that is left. It never shows the key. |
 | `iris understand --estimate` | The count of messages, the tokens and the cost. It makes no call. It prints an approval code. |

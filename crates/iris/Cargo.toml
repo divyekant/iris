@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# Already in the build through ureq: the URL parser of local model URLs.
+http = "1"
 clap = { version = "4", features = ["derive"] }
 iris-api = { version = "0.0.0", path = "../iris-api" }
 iris-service = { version = "0.0.0", path = "../iris-service" }
