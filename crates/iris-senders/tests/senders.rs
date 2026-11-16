@@ -669,6 +669,53 @@ fn a_sent_message_reports_each_hostile_change_of_a_recipient() {
     assert!(d.rerun.is_empty());
 }
 
+#[test]
+fn a_look_alike_recipient_of_the_same_sent_message_is_hostile() {
+    let mut c = Case::new("same-message");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: support@paypal.com, alerts@paypa1.com"),
+    );
+    // Neither domain was known before. The two domains are near copies of
+    // each other, so the message proves neither one: both are hostile.
+    assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
+    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("hostile"));
+    // Mail from one of them is decided with the known domains only. The
+    // other row is hostile, so it is not known, and the sent message counts.
+    let d = c.put("t2", &[], "From: support@paypal.com");
+    assert_eq!(d.kind, Kind::Person);
+    assert_eq!(
+        c.put("t3", &[], "From: alerts@paypa1.com").kind,
+        Kind::Hostile
+    );
+}
+
+#[test]
+fn another_qualifying_message_keeps_a_service() {
+    let mut c = Case::new("service-two");
+    // Messages 3 and 4 each have 2 earlier messages.
+    for t in ["t1", "t2", "t3", "t4"] {
+        c.put(t, &[], &service_mail());
+    }
+    set(&c, "DELETE FROM message WHERE id = 4");
+    let raw = format!("{}\r\nSubject: x\r\n\r\nBody text.\r\n", service_mail());
+    assert_eq!(again(&c, 1, &raw).kind, Kind::Service);
+}
+
+#[test]
+fn a_fetch_of_the_same_bytes_keeps_a_bcc_person() {
+    let mut c = Case::new("same-bytes");
+    let head = format!("From: {OWNER}\r\nBcc: eve@example.org");
+    c.put("t1", &["SENT"], &head);
+    // The mirror stores the same message again, with the same content. The
+    // understanding step does not run on it again.
+    let raw = format!("{head}\r\nSubject: x\r\n\r\nBody text.\r\n");
+    let m = new_message("m1", "t1", 1000, &["SENT"], raw.as_bytes());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    assert_eq!(c.put("t2", &[], "From: eve@example.org").kind, Kind::Person);
+}
+
 fn answer(kind: Kind) -> Sender {
     match kind {
         Kind::SelfOwner => Sender::Owner,
