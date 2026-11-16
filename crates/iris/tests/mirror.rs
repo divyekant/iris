@@ -79,3 +79,30 @@ fn mirror_sync_with_no_account_fails() {
     assert!(!ok);
     assert!(err.contains("no account"), "{err}");
 }
+
+#[test]
+fn mirror_verify_reports_an_account_that_needs_sign_in() {
+    let fake = FakeGmail::start(Mailbox::new(5, 3)).unwrap();
+    let tokens = token_server();
+    let dir = data_dir("mirror-sign-in");
+    let store = Store::open(&dir).unwrap();
+    let first = add_account(&store, &gmail(fake.base_url()));
+    rename_account(&store, first, "old@example.com");
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET state = 'needs_sign_in' WHERE id = ?1",
+                [first],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_account(&store, &gmail(fake.base_url()));
+    let (ok, out, err) = iris(&dir, &fake, &tokens, &["mirror", "verify"]);
+    assert!(!ok, "a mailbox that did not run must fail the command");
+    assert!(
+        err.contains("account 1: the account needs a new sign-in"),
+        "{err}"
+    );
+    assert!(out.contains("account 2: verified at history"), "{out}");
+}

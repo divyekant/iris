@@ -130,8 +130,12 @@ fn serve_answers_the_api_before_the_web_client() {
         assert!(stderr.read_line(&mut line).unwrap() > 0, "no address line");
     }
     let addr = line.trim().rsplit("http://").next().unwrap().to_string();
+    // A sync error of the worker can come between the two lines.
     let mut line = String::new();
-    stderr.read_line(&mut line).unwrap();
+    while !line.contains("sign-in address") {
+        line.clear();
+        assert!(stderr.read_line(&mut line).unwrap() > 0, "no sign-in line");
+    }
     let code = line.trim().rsplit("#code=").next().unwrap().to_string();
     assert!(line.contains(&format!("http://{addr}/#code=")), "{line}");
     let send = |request: String| {

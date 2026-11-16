@@ -710,8 +710,11 @@ The web client is the only place to approve, deny, undo and change the
 policy. The engine protects its web interface:
 
 - At each start, the engine makes a random web secret of 32 bytes and a
-  one-time code. `iris serve` opens a one-time sign-in address in the
-  browser, and prints it: `http://<address>/#code=<code>`. The browser does
+  one-time code. `iris serve` prints a one-time sign-in address:
+  `http://<address>/#code=<code>`. Release 1 does not open the browser,
+  because the engine often runs as a background service with no screen
+  (`iris service install`). The person opens the address. A later release
+  can open the browser when the engine runs in a terminal. The browser does
   not send the fragment to a server. The client exchanges the code one time
   (`POST /api/session`) for the web secret, keeps the secret in the storage
   of its origin, and sends it as `Authorization: Bearer <secret>`. The engine

@@ -144,12 +144,18 @@ pub fn run(cli: Cli) -> Result<(), String> {
 /// If another process syncs an account, that account gives an error.
 fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
     let config = gmail_config()?;
-    let accounts = engine::sync_accounts(&store).map_err(|e| e.to_string())?;
+    let accounts = engine::signed_in_accounts(&store).map_err(|e| e.to_string())?;
     if accounts.is_empty() {
         return Err("no account to sync: run `iris account add <client.json>`".into());
     }
     let mut failed = false;
-    for account in accounts {
+    for (account, state) in accounts {
+        // Report each account, so a success means that each mailbox ran.
+        if state.as_deref() == Some(engine::STATE_NEEDS_SIGN_IN) {
+            failed = true;
+            eprintln!("iris: account {account}: {}", engine::Error::NeedsSignIn);
+            continue;
+        }
         let mut worker = engine::Worker::new(
             store.clone(),
             iris_gmail::Gmail::new(config.clone()),
