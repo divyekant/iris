@@ -142,7 +142,7 @@ Schema of the changeset comes with the release 2 code, from this section.
       "args": {},
       "why": "Two newsletters from last week.",
       "flags": [],
-      "decision": { "state": "applied", "by": "rule", "rule": 1, "at": "2026-11-16T09:17:41Z" },
+      "decision": { "state": "applied", "by": "rule", "rule": 1, "policy": 3, "at": "2026-11-16T09:17:41Z" },
       "ledger": "l-901"
     },
     {
@@ -170,6 +170,7 @@ Schema of the changeset comes with the release 2 code, from this section.
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
 | `actions[].decision.state` | See section 5.2. |
+| `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].ledger` | The ledger entry, after apply. |
 
 ### 5.2 States of an action
