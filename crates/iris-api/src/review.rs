@@ -143,18 +143,7 @@ pub fn decide(store: &Store, changeset: i64, decisions: &[Decision], now_ms: i64
     }
     use iris_changeset::{ActionId, By, Error as Cs, State};
     iris_changeset::transaction(store, |c| {
-        // The review shows only an open changeset (the OPEN condition of the
-        // list and the counts). While a new revision is a draft, no decision applies.
-        let open: bool = c.query_row(
-            &format!("SELECT EXISTS (SELECT 1 FROM changeset c WHERE c.id = ?1 AND {OPEN})"),
-            [changeset],
-            |r| r.get(0),
-        )?;
-        if !open {
-            return Err(Cs::Refused(
-                "the changeset is not open for review now".into(),
-            ));
-        }
+        require_open(c, changeset)?;
         for d in decisions {
             let action = ActionId {
                 changeset,
@@ -191,11 +180,44 @@ pub fn decide(store: &Store, changeset: i64, decisions: &[Decision], now_ms: i64
         }
         Ok(())
     })
-    .map_err(|e| match e {
+    .map_err(|e| conflict(e, "the action is not in this changeset"))
+}
+
+/// The person withdraws one changeset (section 5.5: "each changeset"), in
+/// any state but `withdrawn`. Each open action and each draft action
+/// becomes `cancelled`; applied actions stay. A second withdraw is
+/// [`Error::Conflict`].
+pub fn withdraw(store: &Store, changeset: i64) -> Result<()> {
+    iris_changeset::withdraw(store, changeset, None)
+        .map_err(|e| conflict(e, "the changeset is not in the store"))
+}
+
+/// The review shows only an open changeset (the OPEN condition of the list
+/// and the counts). While a new revision is a draft, or after a withdraw or
+/// the last decision, no decision of the person applies.
+fn require_open(c: &Connection, changeset: i64) -> iris_changeset::Result<()> {
+    let open: bool = c.query_row(
+        &format!("SELECT EXISTS (SELECT 1 FROM changeset c WHERE c.id = ?1 AND {OPEN})"),
+        [changeset],
+        |r| r.get(0),
+    )?;
+    if !open {
+        return Err(iris_changeset::Error::Refused(
+            "the changeset is not open for review now".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A refusal of the changeset store is a 409: the request does not agree
+/// with the store now. `missing` names a `NotFound`.
+fn conflict(e: iris_changeset::Error, missing: &str) -> Error {
+    use iris_changeset::Error as Cs;
+    match e {
         Cs::Store(e) => Error::Store(e),
-        Cs::NotFound => Error::Conflict("the action is not in this changeset".into()),
+        Cs::NotFound => Error::Conflict(missing.into()),
         Cs::Refused(why) => Error::Conflict(why),
-    })
+    }
 }
 
 /// The row ID of the changeset `id` (`cs-77`), or `None` when no changeset
