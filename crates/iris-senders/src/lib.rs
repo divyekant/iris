@@ -582,7 +582,23 @@ pub fn near_copy(domain: &str, known: &str) -> bool {
 
 /// Hosting suffixes under which each name has another owner, so each one
 /// is a public suffix (as in the public suffix list).
-const HOSTED: [&str; 18] = [
+const HOSTED: [&str; 34] = [
+    "wordpress.com",
+    "blogspot.com.au",
+    "wixsite.com",
+    "weebly.com",
+    "tumblr.com",
+    "substack.com",
+    "myshopify.com",
+    "squarespace.com",
+    "webflow.io",
+    "notion.site",
+    "glitch.me",
+    "onrender.com",
+    "fly.dev",
+    "surge.sh",
+    "ngrok.io",
+    "azurestaticapps.net",
     "duckdns.org",
     "ddns.net",
     "no-ip.org",
@@ -604,7 +620,8 @@ const HOSTED: [&str; 18] = [
 ];
 
 /// The number of labels at the end of `d` that form its public suffix.
-/// shortcut: a hosting suffix of [`HOSTED`] counts its labels, a two-letter
+/// shortcut: a hosting suffix of [`HOSTED`] (a short list of the common
+/// hosts of the public suffix list) counts its labels, a two-letter
 /// country domain with a common second level (`co.uk`, `com.au`) has 2, each
 /// other domain has 1; use the public suffix list if other suffixes give
 /// wrong results.

@@ -287,7 +287,8 @@ impl Store {
     /// new values and keeps its ID. A message that was gone comes back, and
     /// its `understood_at` is cleared, so understanding runs on it again
     /// (specification 1, section 4.4). A message with a new `content_sha256`
-    /// loses its old clean text and its `understood_at`. A message with the
+    /// loses its old clean text and its `understood_at`, and so does a
+    /// message that gets or loses the label `SENT` or `DRAFT`. A message with the
     /// same content and an empty header keeps its saved header. Gives the row
     /// ID of each message.
     ///
@@ -320,6 +321,13 @@ impl Store {
                  RETURNING id",
             )?;
             let mut clear_labels = tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1")?;
+            // A bit mask: 1 for SENT, 2 for DRAFT.
+            let mut owner_labels = tx.prepare_cached(
+                "SELECT coalesce(sum(CASE l.provider_id WHEN 'SENT' THEN 1 WHEN 'DRAFT' THEN 2 END), 0)
+                   FROM message_label ml JOIN label l ON l.id = ml.label_id WHERE ml.message_id = ?1",
+            )?;
+            let mut ununderstood =
+                tx.prepare_cached("UPDATE message SET understood_at = NULL WHERE id = ?1")?;
             let mut label = tx.prepare_cached(
                 "INSERT OR IGNORE INTO message_label(message_id, label_id)
                  SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
@@ -368,11 +376,17 @@ impl Store {
                         return Err(Error::MissingContent(sha.clone()));
                     }
                 }
+                let owner_before: i64 = owner_labels.query_row([id], |r| r.get(0))?;
                 clear_labels.execute([id])?;
                 // A label that the store does not have adds no row
                 // (specification 1, section 4.3).
                 for l in &m.labels {
                     label.execute(params![id, account, l])?;
+                }
+                // SENT and DRAFT decide if the message is from you, so a
+                // change of them needs the understanding again.
+                if owner_labels.query_row([id], |r| r.get::<_, i64>(0))? != owner_before {
+                    ununderstood.execute([id])?;
                 }
                 let h = &m.header;
                 if !keep_header { header.execute(params![
