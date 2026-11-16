@@ -392,9 +392,31 @@ pub fn apply(
             r
         }
     };
+    // The undo of `label` or `unlabel` changes the label of the entry, by
+    // its ID: a rename at Gmail after the entry does not change it.
+    let undo_label: Option<String> = match &label {
+        Some(_) => store.read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(json_extract(l.ops, '$.add[0]'), json_extract(l.ops, '$.remove[0]'))
+                 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id WHERE u.action_id = ?1",
+                [action],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+        })?,
+        None => None,
+    };
+    if let Some(id) = undo_label {
+        match verb.as_str() {
+            "label" => change.add.push(id),
+            _ => change.remove.push(id),
+        }
+    }
     // Step 1: the user label of `label` and `unlabel`. A label that Gmail
     // does not have is made now, with no ledger entry: it stays after an
     // undo (section 7.2).
+    let label = label.filter(|_| change.add.is_empty() && change.remove.is_empty());
     if let Some(name) = &label {
         let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
         let id = match find_label(&labels, name) {
@@ -1089,6 +1111,7 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
            decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
          WHERE id = ?1 AND state = 'approved'
            AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
+           AND NOT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)
            AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
         params![action, EXPIRY_MS],
     )?;

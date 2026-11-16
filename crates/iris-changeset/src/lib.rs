@@ -434,7 +434,9 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
 
 /// Expire each open action 14 days or more after its submit (section 5.5):
 /// `proposed`, `in_review` and `approved`, by `expiry`. An action whose
-/// provider calls started (a ledger row in `writing`) continues to its end. `held`
+/// provider calls started (a ledger row in `writing`) continues to its end.
+/// An undo (migration 12) does not expire: the person approved it, and step
+/// 2 of a `trash` undo must apply after a long stop (section 7.4). `held`
 /// (release 3) does not expire. Gives the count of expired actions. The
 /// engine runs it on each tick.
 pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
@@ -449,6 +451,7 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
          WHERE state IN ('proposed', 'in_review', 'approved')
            AND NOT EXISTS (SELECT 1 FROM ledger l
                            WHERE l.action_id = changeset_action.id AND l.state = 'writing')
+           AND NOT EXISTS (SELECT 1 FROM ledger_undo u WHERE u.action_id = changeset_action.id)
            AND submitted_at <= ?1 - ?2",
         params![now_ms, EXPIRY_MS],
     )?)

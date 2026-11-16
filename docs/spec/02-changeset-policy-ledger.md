@@ -277,8 +277,9 @@ that a rule approved at the same time cannot together go past the limit of
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
   which continues to its end. Applied actions stay.
-- 14 days after submit, each open action that is not `held`, and has no
-  ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
+- 14 days after submit, each open action that is not `held`, has no
+  ledger row in the state `writing`, and is not an undo (section 7.4),
+  becomes `expired`. The changeset is `closed` when no action is open.
 
 ### 5.6 Failure list of the changeset store
 
@@ -664,7 +665,7 @@ the expiry and the mode again.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
-| An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. An action with a row in `writing` does not expire. |
+| An action 14 days or more after its submit (section 5.5) | An action applies after the person stopped to expect it | The apply sets `expired`, by `expiry`, with no call. An action with a row in `writing`, and an undo, do not expire. |
 | The mode is `observe`, also when the person changes it during the reads of step 2 | An action applies without the mode `apply` | The action stays `approved` and waits. The claim transaction checks the mode and the expiry again. A row in `writing` continues to its end (section 5.4). |
 | A token of another mailbox | The Gmail IDs of one mailbox change messages of another | Before step 2, and after each new token, the address of the Gmail profile must be the address of the account. Else the apply changes nothing (`OtherMailbox`), or the new token counts as no token. A row in `writing` recovers only with a token of its own account. |
 | An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | Until the engine counts the ledger rows of the last hour (issue #168), the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
@@ -738,7 +739,11 @@ applies it.
    `untrash`). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
    resolves the messages with `done` that are not gone, in SQL, so no list
    of message IDs is in memory (section 9). Only an action with the link
-   of migration 12 to that entry can target an entry.
+   of migration 12 to that entry can target an entry. The undo of `label`
+   or `unlabel` changes the label of the entry by its ID (from `ops`), so a
+   rename of the label at Gmail after the entry does not change the undo.
+   An undo does not expire (section 5.5): the person approved it, and
+   action 2 must apply also after a long stop.
    One transaction submits it, and the person approves it: the choice of
    the person is the approval. The table `ledger_undo` (migration 12) links
    the action to the entry. The rules, the mode `observe` and the flag
@@ -787,7 +792,7 @@ An undo of an undo is a new action, not a delete of the record.
 | Input or event | Failure mode | Safe result |
 |---|---|---|
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
-| A second undo while an undo of the entry is open | Two undos change the same messages | `undo` refuses it until each action of the open undo ended. The trigger refuses a second open link of the same step. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
+| A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
 | A link of an action whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
 | A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |

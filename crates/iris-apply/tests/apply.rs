@@ -1643,3 +1643,82 @@ fn only_an_undo_targets_an_entry() {
         .unwrap();
     assert_eq!(state, "denied");
 }
+
+/// The undo of `label` removes the label of the entry by its ID, also after
+/// a rename at Gmail.
+#[test]
+fn the_undo_of_label_follows_the_label_id() {
+    let b = setup("undo-rename", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.labelled("label", "Undo/Before", &ms);
+    applied(b.apply(a));
+    let id = label_id(&b, "Undo/Before").unwrap();
+    assert!(b.fake.rename_label(&id, "Undo/After"));
+    let c = match &b.undo(a)[..] {
+        [Outcome::Applied(c)] => c.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(c.changed, 2);
+    for &m in &ms {
+        assert!(!b.gmail_labels(m).contains(&id));
+    }
+    assert_eq!(b.state(a).0, "undone");
+}
+
+/// An undo does not expire: step 2 of the undo of `trash` applies after a
+/// stop of more than 14 days (section 7.4).
+#[test]
+fn an_undo_does_not_expire() {
+    let b = setup("undo-expiry", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    // The undo was made 15 days ago: the apply and the expiry routine use
+    // the clock of now.
+    let old = now() - 15 * 24 * 60 * 60 * 1000;
+    let actions = iris_apply::undo(&b.store, b.entry(a), old).unwrap();
+    applied(b.apply(actions[0]));
+    assert_eq!(iris_changeset::expire(&b.store, now()).unwrap(), 0);
+    let c = applied(b.apply(actions[1]));
+    assert_eq!(c.changed, 1);
+    assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+    assert_eq!(b.state(a).0, "undone");
+}
+
+/// While step 2 of an undo is open, no other undo of the entry can start,
+/// also from a writer that adds the link itself.
+#[test]
+fn an_open_second_step_blocks_a_new_undo() {
+    let b = setup("undo-open2", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    let actions = iris_apply::undo(&b.store, entry, now()).unwrap();
+    applied(b.apply(actions[0]));
+    assert!(matches!(
+        iris_apply::undo(&b.store, entry, now()),
+        Err(Error::Undo(_))
+    ));
+    let r = b.store.write(|tx| {
+        tx.execute(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 1)",
+            [],
+        )?;
+        let cs = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (?1, 1, 1, 'untrash', ?2, '{}')",
+            params![cs, format!("{{\"ledger\":[\"l-{entry}\"]}}")],
+        )?;
+        Ok(tx.execute(
+            "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, ?2, 1)",
+            params![tx.last_insert_rowid(), entry],
+        )?)
+    });
+    assert!(r.unwrap_err().to_string().contains("iris:"));
+    applied(b.apply(actions[1]));
+    assert_eq!(b.state(a).0, "undone");
+}

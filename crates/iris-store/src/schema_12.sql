@@ -17,7 +17,7 @@ CREATE INDEX ledger_undo_ledger ON ledger_undo(ledger_id);
 
 -- The link is written with the draft action of the person, before the
 -- submit. The entry has an undo and is not undone, the verb fits the step,
--- and no other open undo of the entry exists.
+-- and no action of another undo of the entry is open.
 CREATE TRIGGER ledger_undo_insert BEFORE INSERT ON ledger_undo
 WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
                  WHERE a.id = new.action_id AND a.state IS NULL AND c.author_kind = 'person')
@@ -38,9 +38,13 @@ WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.c
                                         JOIN changeset_action a1 ON a1.id = u1.action_id
                                         WHERE u1.ledger_id = new.ledger_id AND u1.step = 1
                                           AND a1.changeset_id = a.changeset_id))))
+  -- One open undo of an entry: no open action of another undo changeset,
+  -- and one action of each step in the same changeset.
   OR EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
-             WHERE u.ledger_id = new.ledger_id AND u.step = new.step
-               AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'))
+             JOIN changeset_action na ON na.id = new.action_id
+             WHERE u.ledger_id = new.ledger_id
+               AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved')
+               AND (a.changeset_id <> na.changeset_id OR u.step = new.step))
 BEGIN
   SELECT RAISE(ABORT, 'iris: this undo link is not allowed');
 END;
