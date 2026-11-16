@@ -193,7 +193,12 @@ impl Walker {
                 // so that a version that is not used takes none of the budget.
                 // A version with no visible text (empty or all hidden) is skipped.
                 for part in parts.into_iter().rev() {
-                    let before = (self.body_left, self.cut);
+                    let before = (
+                        self.body_left,
+                        self.cut,
+                        self.attach_left,
+                        self.attachments.len(),
+                    );
                     let bodies = self.entity(part, depth + 1);
                     // Visible means text that stays after the quote and signature steps.
                     let visible = bodies.iter().any(|t| {
@@ -203,8 +208,10 @@ impl Walker {
                     if visible {
                         return bodies;
                     }
-                    // A version with no visible text gives its budget back.
-                    (self.body_left, self.cut) = before;
+                    // A version with no visible text gives its budgets and attachments back.
+                    let listed;
+                    (self.body_left, self.cut, self.attach_left, listed) = before;
+                    self.attachments.truncate(listed);
                 }
                 return Vec::new();
             }

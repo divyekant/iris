@@ -349,7 +349,8 @@ fn b64(c: u8) -> Option<u8> {
 
 /// Lenient base64: skip characters outside the alphabet, stop at `=`.
 fn base64(b: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(b.len() / 4 * 3 + 3);
+    // Reserve the decoded size, not the input size: white space decodes to nothing.
+    let mut out = Vec::with_capacity(decoded_len(b, "base64") as usize + 3);
     let (mut acc, mut n) = (0u32, 0);
     for &c in b {
         if c == b'=' {
@@ -373,7 +374,7 @@ fn base64(b: &[u8]) -> Vec<u8> {
 
 /// Lenient quoted-printable: an `=` that does not start a valid escape stays.
 fn qp(b: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(b.len());
+    let mut out = Vec::with_capacity(qp_walk(b, |_| {}) as usize);
     qp_walk(b, |c| out.push(c));
     out
 }
