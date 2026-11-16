@@ -277,8 +277,10 @@ its first 1 KiB holds `%PDF`.
 - Code maps: a stream whose data holds `begincmap` is a code map of its
   object number. The reader reads its `begincodespacerange` (at most 16),
   `beginbfchar` and `beginbfrange` entries, with a direct destination or an
-  array of destinations. Each entry and each UTF-16 unit costs one from a
-  budget of 1,048,576 for each PDF. A destination has at most 64 units.
+  array of destinations (at most 255 items). Each entry costs 16 bytes and
+  each UTF-16 unit costs 2 bytes of a budget of 1 MiB for each PDF. A
+  destination has at most 64 units. The keyword `begincmap` counts only
+  outside the strings and comments of the stream.
 - Text waits in one buffer of at most two times the text budget, with the
   font of each string. The fonts and the maps can come after the content.
 - Font of a string: the name of the last `Tf`, also from the stream before.
@@ -403,7 +405,8 @@ None.
   limit table, the cascade order, the reply rules, the link targets and the
   attachment budget order. A change of one of these rules makes a test go red.
 - `tests/bounds.rs` measures the heap peak: below 8 MiB for a 36 MB message
-  with HTML and an attachment, below 16 MiB for a PDF of 9 MiB. A copy of a
+  with HTML and an attachment, below 16 MiB for a PDF of 9 MiB, below
+  12 MiB for a PDF with a dense code map of 4 MiB. A copy of a
   whole part or of an attachment makes it go red.
 
 ## Verify

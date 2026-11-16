@@ -23,7 +23,7 @@ const DICT_LIMIT: usize = 4096;
 const OBJ_LIMIT: usize = 16 * 1024;
 /// The most bytes of kept objects for one PDF, with 64 more for each object.
 const OBJ_BUDGET: usize = 4 * 1024 * 1024;
-/// The most code map entries for one PDF, with one more for each UTF-16 unit.
+/// The most bytes of code map entries and UTF-16 units for one PDF.
 const MAP_BUDGET: usize = 1024 * 1024;
 /// The most fonts (a content stream and a font name) for one PDF.
 const FONT_LIMIT: usize = 4096;
@@ -109,7 +109,7 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         total += decoded.len();
         if objects {
             doc.object_stream(dict, &decoded);
-        } else if find(&decoded, b"begincmap").is_some() {
+        } else if is_cmap(&decoded) {
             if let Some(n) = num {
                 doc.add_map(n, &decoded);
             }
@@ -515,6 +515,12 @@ fn content_text(c: &[u8], num: Option<u32>, doc: &mut Doc) {
     }
 }
 
+/// True if the stream has the keyword `begincmap` outside its strings and
+/// comments.
+fn is_cmap(data: &[u8]) -> bool {
+    find(data, b"begincmap").is_some() && Lexer::new(data).any(|t| t == Tok::Word(b"begincmap"))
+}
+
 fn is_delimiter(b: u8) -> bool {
     b.is_ascii_whitespace() || b"()<>[]{}/%".contains(&b)
 }
@@ -879,21 +885,27 @@ struct CMap {
     spaces: Vec<(usize, u32, u32)>,
     /// Sorted by code length, then by the lowest code.
     entries: Vec<Entry>,
+    /// The UTF-16 destinations of all entries. A list destination is a
+    /// count of units before the units of each item.
+    units: Vec<u16>,
 }
 
+/// One `bfchar` or `bfrange` entry, in 16 bytes.
 struct Entry {
-    len: usize,
     lo: u32,
     hi: u32,
-    dst: Dst,
+    /// The start of the destination in `CMap::units`.
+    at: u32,
+    /// The count of units of the destination, or of items of a list.
+    n: u8,
+    len: u8,
+    /// True if the destination is a list: one item for each code from
+    /// `lo`. Else each next code adds one to the last unit.
+    list: bool,
 }
 
-enum Dst {
-    /// The UTF-16 text of `lo`. Each next code adds one to the last unit.
-    Next(Vec<u16>),
-    /// The UTF-16 text of each code from `lo`.
-    List(Vec<Vec<u16>>),
-}
+/// The bytes of one entry in the map budget.
+const ENTRY_COST: usize = std::mem::size_of::<Entry>();
 
 /// The length and the value of a code of 1 to 4 bytes in hex.
 fn code(h: &[u8]) -> Option<(usize, u32)> {
@@ -906,18 +918,6 @@ fn be(b: &[u8]) -> u32 {
     b.iter().take(4).fold(0, |v, &x| (v << 8) | u32::from(x))
 }
 
-/// The UTF-16 units of a hex string, at most 64, and at most `left`.
-fn units(h: &[u8], left: &mut usize) -> Vec<u16> {
-    let b = hex(&h[..h.len().min(256)]);
-    let u: Vec<u16> = b
-        .chunks(2)
-        .take(*left)
-        .map(|p| u16::from_be_bytes([p[0], p.get(1).copied().unwrap_or(0)]))
-        .collect();
-    *left -= u.len();
-    u
-}
-
 fn push_units(u: impl Iterator<Item = u16>, out: &mut String) {
     out.extend(
         char::decode_utf16(u)
@@ -927,8 +927,21 @@ fn push_units(u: impl Iterator<Item = u16>, out: &mut String) {
 }
 
 impl CMap {
+    /// Add the UTF-16 units of a hex string, at most 64, and give their
+    /// count. Each unit takes 2 bytes from `left`.
+    fn add_units(&mut self, h: &[u8], left: &mut usize) -> u8 {
+        let b = hex(&h[..h.len().min(256)]);
+        let n = b.chunks(2).len().min(*left / 2);
+        for p in b.chunks(2).take(n) {
+            self.units
+                .push(u16::from_be_bytes([p[0], p.get(1).copied().unwrap_or(0)]));
+        }
+        *left -= 2 * n;
+        n as u8
+    }
+
     /// Read the code space and the `bfchar` and `bfrange` entries. Each entry
-    /// and each UTF-16 unit takes one from `left`.
+    /// and each UTF-16 unit takes its bytes from `left`.
     fn parse(data: &[u8], left: &mut usize) -> CMap {
         enum Op<'a> {
             Hex(&'a [u8]),
@@ -939,7 +952,7 @@ impl CMap {
         let mut mode = &b""[..];
         let mut lx = Lexer::new(data);
         while let Some(t) = lx.next() {
-            if *left == 0 {
+            if *left < ENTRY_COST || m.units.len() >= u32::MAX as usize - 65_536 {
                 break;
             }
             match t {
@@ -948,7 +961,7 @@ impl CMap {
                     let mut l = Vec::new();
                     for t in lx.by_ref() {
                         match t {
-                            Tok::Hex(h) if l.len() < 256 => l.push(h),
+                            Tok::Hex(h) if l.len() < 255 => l.push(h),
                             Tok::ArrClose => break,
                             _ => {}
                         }
@@ -962,46 +975,60 @@ impl CMap {
                 }
                 _ => ops.clear(),
             }
-            match (mode, ops.as_slice()) {
+            let entry = match (mode, ops.as_slice()) {
                 (b"begincodespacerange", [Op::Hex(a), Op::Hex(b)]) => {
                     if let (Some((n, lo)), Some((k, hi))) = (code(a), code(b)) {
                         if n == k && lo <= hi && m.spaces.len() < 16 {
                             m.spaces.push((n, lo, hi));
                         }
                     }
+                    None
                 }
-                (b"beginbfchar", [Op::Hex(a), Op::Hex(d)]) => {
-                    if let Some((len, v)) = code(a) {
-                        *left -= 1;
-                        let dst = Dst::Next(units(d, left));
-                        m.entries.push(Entry {
-                            len,
-                            lo: v,
-                            hi: v,
-                            dst,
-                        });
+                (b"beginbfchar", [Op::Hex(a), d @ Op::Hex(_)]) => {
+                    code(a).map(|(len, v)| (len, v, v, d))
+                }
+                (b"beginbfrange", [Op::Hex(a), Op::Hex(b), d]) => match (code(a), code(b)) {
+                    (Some((len, lo)), Some((k, hi))) if len == k && lo <= hi => {
+                        Some((len, lo, hi, d))
                     }
-                }
-                (b"beginbfrange", [Op::Hex(a), Op::Hex(b), d]) => {
-                    if let (Some((len, lo)), Some((k, hi))) = (code(a), code(b)) {
-                        if len == k && lo <= hi {
-                            *left -= 1;
-                            let dst = match d {
-                                Op::Hex(h) => Dst::Next(units(h, left)),
-                                Op::List(l) => {
-                                    Dst::List(l.iter().map(|h| units(h, left)).collect())
-                                }
-                            };
-                            m.entries.push(Entry { len, lo, hi, dst });
-                        }
-                    }
-                }
-                (_, [_, _, _]) => {}
+                    _ => None,
+                },
+                (_, [_, _, _]) => None,
                 _ => continue,
+            };
+            if let Some((len, lo, hi, d)) = entry {
+                *left -= ENTRY_COST;
+                let at = m.units.len() as u32;
+                let (n, list) = match d {
+                    Op::Hex(h) => (m.add_units(h, left), false),
+                    Op::List(l) => {
+                        let mut items = 0u8;
+                        for h in l {
+                            // Each item takes one unit for its count.
+                            if *left < 2 {
+                                break;
+                            }
+                            *left -= 2;
+                            let c = m.units.len();
+                            m.units.push(0);
+                            m.units[c] = u16::from(m.add_units(h, left));
+                            items += 1;
+                        }
+                        (items, true)
+                    }
+                };
+                m.entries.push(Entry {
+                    lo,
+                    hi,
+                    at,
+                    n,
+                    len: len as u8,
+                    list,
+                });
             }
             ops.clear();
         }
-        m.entries.sort_by_key(|e| (e.len, e.lo));
+        m.entries.sort_unstable_by_key(|e| (e.len, e.lo));
         m
     }
 
@@ -1028,9 +1055,11 @@ impl CMap {
 
     /// The entry of a code.
     fn find(&self, len: usize, v: u32) -> Option<&Entry> {
-        let i = self.entries.partition_point(|e| (e.len, e.lo) <= (len, v));
+        let i = self
+            .entries
+            .partition_point(|e| (e.len as usize, e.lo) <= (len, v));
         let e = &self.entries[i.checked_sub(1)?];
-        (e.len == len && v <= e.hi).then_some(e)
+        (e.len as usize == len && v <= e.hi).then_some(e)
     }
 
     /// Add the text of one code to `out`. False if the map has no entry.
@@ -1039,17 +1068,27 @@ impl CMap {
             return false;
         };
         let off = v - e.lo;
-        match &e.dst {
-            Dst::Next(u) => {
-                if let Some((&last, head)) = u.split_last() {
-                    let last = last.wrapping_add(off as u16);
-                    push_units(head.iter().copied().chain(std::iter::once(last)), out);
-                }
+        let mut at = e.at as usize;
+        if e.list {
+            if off >= u32::from(e.n) {
+                return false;
             }
-            Dst::List(l) => match l.get(off as usize) {
-                Some(u) => push_units(u.iter().copied(), out),
-                None => return false,
-            },
+            // Skip the items before this code: at most 254.
+            for _ in 0..off {
+                at += 1 + usize::from(self.units.get(at).copied().unwrap_or(0));
+            }
+            let n = usize::from(self.units.get(at).copied().unwrap_or(0));
+            let item = self.units.get(at + 1..at + 1 + n).unwrap_or_default();
+            push_units(item.iter().copied(), out);
+        } else {
+            let u = self
+                .units
+                .get(at..at + usize::from(e.n))
+                .unwrap_or_default();
+            if let Some((&last, head)) = u.split_last() {
+                let last = last.wrapping_add(off as u16);
+                push_units(head.iter().copied().chain(std::iter::once(last)), out);
+            }
         }
         true
     }
@@ -1936,5 +1975,14 @@ mod tests {
         let (got, cut) = text_cut(&sample(&t, false), 4096);
         assert_eq!(got.map(|t| t.len()), Some(4094));
         assert!(cut);
+    }
+
+    #[test]
+    fn begincmap_in_page_text_is_content() {
+        let t = b"BT (The begincmap report) Tj ET % begincmap\n";
+        assert_eq!(
+            text(&sample(t, true), 100).as_deref(),
+            Some("The begincmap report")
+        );
     }
 }

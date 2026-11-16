@@ -166,6 +166,47 @@ fn memory_and_time_stay_bounded() {
     eprintln!("peak: {peak} bytes (PDF with many strings before one operator)");
     assert!(peak < 10 * 1024 * 1024, "peak {peak}");
 
+    // A PDF with a dense code map of 4 MiB: the map entries have a budget.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let mut cmap =
+        b"begincmap 1 begincodespacerange <0000> <FFFF> endcodespacerange beginbfchar".to_vec();
+    let mut n = 0u32;
+    while cmap.len() < 4 * 1024 * 1024 - 64 {
+        cmap.extend(format!(" <{:04X}> <0041>", n % 0x10000).bytes());
+        n += 1;
+    }
+    cmap.extend_from_slice(b" endbfchar endcmap");
+    let content = b"BT /F1 9 Tf <0001000200030004> Tj ET";
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(&cmap, 6);
+    let mut pdf = format!(
+        "%PDF-1.4\n2 0 obj\n<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n\
+         5 0 obj\n<< /Subtype /Type0 /ToUnicode 6 0 R >>\nendobj\n\
+         3 0 obj\n<< /Length {} >>\nstream\n",
+        content.len()
+    )
+    .into_bytes();
+    pdf.extend_from_slice(content);
+    pdf.extend(
+        format!(
+            "\nendstream\nendobj\n6 0 obj\n<< /Filter /FlateDecode /Length {} >>\nstream\n",
+            z.len()
+        )
+        .bytes(),
+    );
+    pdf.extend(z);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    for chunk in pdf.chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, c) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with a dense code map)");
+    assert_eq!(c.attachments[0].text.as_deref(), Some("AAAA"));
+    assert!(peak < 12 * 1024 * 1024, "peak {peak}");
+
     // A plain body part of 2 MiB of empty lines and of short quote lines.
     for line in ["\n", "> a\n", "-- \n"] {
         let mut raw = b"Subject: Re: Lines\r\nIn-Reply-To: <a@b>\r\n\r\nHi\n".to_vec();
