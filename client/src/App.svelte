@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { get, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
+  import { followSignIn, get, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -18,6 +18,8 @@
 
   $effect(() => {
     const update = () => {
+      // A sign-in address opened in this tab: the access state shows a failure.
+      if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
       scrollTo(0, 0);
     };

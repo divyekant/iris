@@ -186,6 +186,23 @@ export function signIn(
   })();
   return ready;
 }
+/**
+ * For a sign-in address that the person opens in a tab that shows Iris already:
+ * only the hash changes, so sign in, then load the page again with the token.
+ * No reload after a failure, so a stopped engine does not make a reload loop.
+ */
+export async function followSignIn(
+  loc: Pick<Location, "hash" | "pathname" | "search"> = globalThis.location,
+  hist: Pick<History, "replaceState"> | undefined = globalThis.history,
+  store: Store | undefined = session(),
+  reload: () => void = () => globalThis.location.reload(),
+): Promise<boolean> {
+  if (!/^#code=/.test(loc.hash)) return false;
+  const done = await signIn(loc, hist, store).then(() => true, () => false);
+  if (done) reload();
+  return done;
+}
+
 // Read the code before the first view reads the hash.
 signIn().catch(() => {});
 
