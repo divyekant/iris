@@ -8,8 +8,8 @@ use std::path::Path;
 
 use iris_store::{format_id, new_private_dir, Kind, Store};
 
-use crate::read::{doc_of, message, raw};
-use crate::{Error, Result};
+use crate::read::{doc_of, message_in};
+use crate::Result;
 
 /// What [`export`] wrote.
 #[derive(Debug, PartialEq, Eq)]
@@ -23,13 +23,9 @@ pub struct Exported {
     pub files: u64,
 }
 
-fn io(e: io::Error) -> Error {
-    Error::Store(e.into())
-}
-
-fn line(out: &mut impl Write, v: &serde_json::Value) -> Result<()> {
-    serde_json::to_writer(&mut *out, v).map_err(|e| io(e.into()))?;
-    out.write_all(b"\n").map_err(io)
+fn line(out: &mut impl Write, v: &impl serde::Serialize) -> io::Result<()> {
+    serde_json::to_writer(&mut *out, v)?;
+    out.write_all(b"\n")
 }
 
 /// Write the export to the folder `dest`, which must not exist or must be
@@ -38,63 +34,73 @@ fn line(out: &mut impl Write, v: &serde_json::Value) -> Result<()> {
 /// - `items.jsonl`: one item document of the open model on each line.
 /// - `messages.jsonl`: one message on each line, as `/api/messages/{id}`
 ///   gives it, with `file`: the path of its raw message in the export, or
-///   `null`.
+///   `null` when the message has no content (`content_sha256` is null).
 /// - `mail/<m-id>.eml`: the raw message (RFC 5322) of each message.
+///
+/// All files come from one read transaction, so each reference in them
+/// agrees: a message names only items of `items.jsonl`. The rows stream
+/// from SQLite, so memory does not grow with the mailbox. A message that
+/// refers to a content file that is not there is an error
+/// ([`iris_store::Error::MissingContent`]): the export is not complete.
 pub fn export(store: &Store, dest: &Path) -> Result<Exported> {
+    Ok(write(store, dest)?)
+}
+
+fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
     // The content cleanup cannot delete a raw message during the export.
     let _lock = store.backup_lock()?;
     new_private_dir(dest)?;
     let mail = dest.join("mail");
-    fs::create_dir(&mail).map_err(io)?;
-
-    let mut items = BufWriter::new(File::create(dest.join("items.jsonl")).map_err(io)?);
-    let mut n_items = 0;
+    fs::create_dir(&mail)?;
+    let mut items = BufWriter::new(File::create(dest.join("items.jsonl"))?);
+    let mut messages = BufWriter::new(File::create(dest.join("messages.jsonl"))?);
+    let mut n = Exported {
+        items: 0,
+        messages: 0,
+        files: 0,
+    };
     store.read(|c| {
-        let mut st = c.prepare("SELECT id, form, status, doc FROM item ORDER BY id")?;
+        // One snapshot for all reads: it starts at the first read.
+        let tx = c.unchecked_transaction()?;
+        let mut st = tx.prepare("SELECT id, form, status, doc FROM item ORDER BY id")?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
-            serde_json::to_writer(&mut items, &doc_of(r)?).map_err(io::Error::from)?;
-            items.write_all(b"\n")?;
-            n_items += 1;
+            line(&mut items, &doc_of(r)?)?;
+            n.items += 1;
+        }
+        let mut st = tx.prepare("SELECT id, content_sha256 FROM message ORDER BY id")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let (row, sha): (i64, Option<String>) = (r.get(0)?, r.get(1)?);
+            let Some(m) = message_in(&tx, row)? else {
+                continue;
+            };
+            let id = format_id(Kind::Message, row);
+            let file = match sha {
+                Some(sha) => {
+                    let src = store
+                        .content_path(&sha)
+                        .ok_or_else(|| iris_store::Error::MissingContent(sha.clone()))?;
+                    let name = format!("mail/{id}.eml");
+                    match fs::copy(&src, dest.join(&name)) {
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                            return Err(iris_store::Error::MissingContent(sha))
+                        }
+                        r => r?,
+                    };
+                    n.files += 1;
+                    Some(name)
+                }
+                None => None,
+            };
+            let mut v = serde_json::to_value(&m).map_err(io::Error::from)?;
+            v["file"] = file.into();
+            line(&mut messages, &v)?;
+            n.messages += 1;
         }
         Ok(())
     })?;
-    items.flush().map_err(io)?;
-
-    // shortcut: one read for each message (about 3 queries); a single query
-    // is faster if an export of a large mailbox is too slow.
-    let rows: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare("SELECT id FROM message ORDER BY id")?;
-        let ids = st
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
-    })?;
-    let mut messages = BufWriter::new(File::create(dest.join("messages.jsonl")).map_err(io)?);
-    let (mut n_messages, mut files) = (0, 0);
-    for row in rows {
-        let id = format_id(Kind::Message, row);
-        let Some(m) = message(store, &id)? else {
-            continue;
-        };
-        let mut v = serde_json::to_value(&m).map_err(|e| io(e.into()))?;
-        let file = match raw(store, &id)? {
-            Some(src) => {
-                let name = format!("mail/{id}.eml");
-                fs::copy(src, dest.join(&name)).map_err(io)?;
-                files += 1;
-                Some(name)
-            }
-            None => None,
-        };
-        v["file"] = file.into();
-        line(&mut messages, &v)?;
-        n_messages += 1;
-    }
-    messages.flush().map_err(io)?;
-    Ok(Exported {
-        items: n_items,
-        messages: n_messages,
-        files,
-    })
+    items.flush()?;
+    messages.flush()?;
+    Ok(n)
 }
