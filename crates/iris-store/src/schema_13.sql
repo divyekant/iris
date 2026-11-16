@@ -45,6 +45,8 @@ CREATE TABLE matter_run (
 -- after the decision. Only a proposal can be deleted.
 CREATE TRIGGER matter_insert BEFORE INSERT ON matter
 WHEN new.status IS NOT 'proposed' OR new.sealed IS NOT 0 OR new.keep IS NOT NULL
+  -- `INSERT OR REPLACE` must not replace a matter that exists.
+  OR EXISTS (SELECT 1 FROM matter WHERE id = new.id)
 BEGIN
   SELECT RAISE(ABORT, 'iris: a matter starts as a proposal');
 END;
@@ -113,6 +115,15 @@ WHEN EXISTS (SELECT 1 FROM matter WHERE id = old.matter_id)
   AND EXISTS (SELECT 1 FROM item WHERE id = old.item_id)
 BEGIN
   SELECT RAISE(ABORT, 'iris: a member row goes only with its item or its matter');
+END;
+
+-- A proposal that loses a member to understanding (the cascade of an item
+-- delete) is deleted whole. So a decision always covers each member that
+-- Iris proposed, and a decline pins the full grouping.
+CREATE TRIGGER matter_item_lost AFTER DELETE ON matter_item
+WHEN (SELECT status FROM matter WHERE id = old.matter_id) = 'proposed'
+BEGIN
+  DELETE FROM matter WHERE id = old.matter_id;
 END;
 
 -- A live member: a kept member whose item is still eligible (the spec,

@@ -209,6 +209,16 @@ fn the_triggers_hold_the_member_rules() {
     ] {
         assert!(sql(&b, &text).is_err(), "{text}");
     }
+    // `INSERT OR REPLACE` does not replace a decided matter.
+    assert!(sql(
+        &b,
+        &format!(
+            "INSERT OR REPLACE INTO matter(id, title, status, model, prompt, created_at, updated_at)
+             VALUES ({m}, 'x', 'proposed', 'm', 'p', 0, 0)"
+        )
+    )
+    .is_err());
+    assert_eq!(status(&b, m), "confirmed");
     // A proposal can be deleted, with its member rows.
     assert_eq!(
         sql(&b, &format!("DELETE FROM matter WHERE id = {m2}")).unwrap(),
@@ -225,30 +235,27 @@ fn the_triggers_hold_the_member_rules() {
 }
 
 #[test]
-fn a_proposal_that_loses_members_is_not_valid() {
-    // Items 1 and 3 share thread 0 (2 threads).
-    let b = setup("valid", 2, &["record", "conversation", "commitment"]);
+fn a_proposal_that_loses_a_member_is_deleted_whole() {
+    // 3 threads: after the loss, 2 members of 2 threads stay, which would
+    // be valid. The proposal goes all the same, so no decision covers a
+    // part of what Iris proposed.
+    let b = setup("lost", 3, &["record", "conversation", "commitment"]);
     let m = propose(&b, &[1, 2, 3]).unwrap();
-    // Understanding deletes item 2: the cascade removes the member row, and
-    // the other members are of one thread only.
     b.store
-        .write(|tx| {
-            tx.execute("DELETE FROM item_source WHERE item_id = 2", [])?;
-            tx.execute("DELETE FROM item WHERE id = 2", [])?;
-            Ok(())
-        })
+        .write(|tx| Ok(tx.execute("DELETE FROM item WHERE id = 2", [])?))
         .unwrap();
+    assert!(matches!(decline(&b.store, m, 2), Err(Error::NotFound)));
     assert!(matches!(
         confirm(&b.store, m, "Trip", &[1], 2),
-        Err(Error::Conflict(_))
+        Err(Error::NotFound)
     ));
-    assert_eq!(b.store.write(|tx| Ok(clean(tx))).unwrap().unwrap(), 1);
-    assert!(
+    assert_eq!(
         read(&b, |c| c.query_row(
-            "SELECT count(*) FROM matter",
+            "SELECT count(*) FROM matter_item",
             [],
             |r| r.get::<_, i64>(0)
-        )) == 0
+        )),
+        0
     );
     // The members are free again.
     propose(&b, &[1, 3]).unwrap();
