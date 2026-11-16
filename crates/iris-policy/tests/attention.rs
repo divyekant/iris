@@ -65,7 +65,8 @@ struct Msg {
     kind: SenderKind,
     hostile: bool,
     labels: Vec<String>,
-    date: i64,
+    /// `None`: the message has no date.
+    date: Option<i64>,
     items: Vec<(i64, Item)>,
 }
 
@@ -155,7 +156,7 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                     items.push((item, it));
                 }
                 // With no header, a date only in the header is no date.
-                let date = if addr.is_empty() && in_header { NOW } else { date };
+                let date = if addr.is_empty() && in_header { None } else { Some(date) };
                 out.push(Msg {
                     sender: addr.to_lowercase(),
                     kind: match addr {
@@ -245,7 +246,9 @@ fn stored(store: &Store) -> Vec<(i64, Field)> {
         .unwrap()
 }
 
-fn expected(policy: &Policy, mailbox: &[Msg]) -> Vec<(i64, Attention)> {
+/// The attention of each item at the time `now`. A message with no date
+/// has the age 0.
+fn expected(policy: &Policy, mailbox: &[Msg], now: i64) -> Vec<(i64, Attention)> {
     let mut out = Vec::new();
     for m in mailbox {
         let all: Vec<Item> = m.items.iter().map(|(_, i)| *i).collect();
@@ -254,11 +257,11 @@ fn expected(policy: &Policy, mailbox: &[Msg]) -> Vec<(i64, Attention)> {
             sender_kind: m.kind,
             hostile: m.hostile,
             labels: &m.labels,
-            date: m.date,
+            date: m.date.unwrap_or(now),
             items: &all,
         };
         for (id, it) in &m.items {
-            out.push((*id, policy.attention(it, &msg, NOW)));
+            out.push((*id, policy.attention(it, &msg, now)));
         }
     }
     out.sort_by_key(|(id, _)| *id);
@@ -292,47 +295,105 @@ fn each_policy_change_writes_the_attention_of_each_item() {
     // Invariant: after each confirmation and each change from the web
     // client, the attention of each item is the attention that the active
     // policy gives it.
+    // An item whose attention changes gets the time of the change in
+    // `updated_at` (milliseconds) and `doc.updated`; each other item keeps
+    // its times.
+    let check =
+        |s: &Store, policy: &Policy, mail: &[Msg], t: i64, before: &[(i64, Field)], what: &str| {
+            let times = stamps(s);
+            let got = stored(s);
+            let want = expected(policy, mail, t);
+            assert_eq!(got.len(), want.len());
+            for (((id, g), (_, w)), ((_, old), (_, (at, updated)))) in
+                got.iter().zip(want).zip(before.iter().zip(times))
+            {
+                assert!(agrees(g, w, policy), "{what} item {id}: {g:?} != {w:?}");
+                if g != old {
+                    assert_eq!(
+                        (at, updated.as_deref()),
+                        (t * 1000, Some(&*iso(s, t))),
+                        "{what} item {id}"
+                    );
+                } else {
+                    assert!(
+                        at < t * 1000,
+                        "{what} item {id}: an item with no change got a new time"
+                    );
+                }
+            }
+        };
     for seed in 1..=20u64 {
         let (_d, s) = store(&format!("p{seed}"));
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mail = mailbox(&s, &mut rng);
         let mut ids = 0;
-        for step in 0..4 {
+        for step in 0..4i64 {
+            let t = NOW + step * 3600;
             let text = format!("# step {step}\n{}", random_policy(&mut rng, &mut ids));
             std::fs::write(s.dir().join(FILE), &text).unwrap();
             let sha = match file_state(&s).unwrap() {
                 FileState::Changed(l) => l.sha256,
                 other => panic!("seed {seed} step {step}: {other:?}"),
             };
-            let policy = match confirm(&s, &sha, NOW).unwrap() {
+            let before = stored(&s);
+            let policy = match confirm(&s, &sha, t).unwrap() {
                 Confirm::Done { policy, .. } => policy,
                 other => panic!("seed {seed} step {step}: {other:?}"),
             };
-            let got = stored(&s);
-            let want = expected(&policy, &mail);
-            assert_eq!(got.len(), want.len());
-            for ((id, g), (_, w)) in got.iter().zip(want) {
-                assert!(
-                    agrees(g, w, &policy),
-                    "seed {seed} step {step} item {id}: {g:?} != {w:?}\n{text}"
-                );
-            }
+            check(
+                &s,
+                &policy,
+                &mail,
+                t,
+                &before,
+                &format!("seed {seed} step {step}\n{text}\n"),
+            );
             // A change from the web client evaluates again too.
             if let Some(r) = policy.rules.first() {
                 let version = s.read(active).unwrap().version;
+                let before = stored(&s);
                 let Edited::Done { policy, .. } =
-                    change(&s, version, Change::Remove(r.id), NOW).unwrap()
+                    change(&s, version, Change::Remove(r.id), t + 60).unwrap()
                 else {
                     panic!("seed {seed} step {step}: remove");
                 };
-                let want = expected(&policy, &mail);
-                for ((id, g), (_, w)) in stored(&s).iter().zip(want) {
-                    assert!(
-                        agrees(g, w, &policy),
-                        "seed {seed} step {step} item {id} after remove"
-                    );
-                }
+                check(
+                    &s,
+                    &policy,
+                    &mail,
+                    t + 60,
+                    &before,
+                    &format!("seed {seed} step {step} after remove"),
+                );
             }
         }
     }
+}
+
+/// `updated_at` and `doc.updated` of each item, by item ID.
+fn stamps(store: &Store) -> Vec<(i64, (i64, Option<String>))> {
+    store
+        .read(|c| {
+            c.prepare(
+                "SELECT id, updated_at, json_extract(doc, '$.updated') FROM item ORDER BY id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
+        })
+        .unwrap()
+}
+
+/// The time `t` (seconds) in the form of the open model: RFC 3339, UTC, with
+/// milliseconds.
+fn iso(_: &Store, t: i64) -> String {
+    let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    // 1_800_000_000 is 2027-01-15T08:00:00Z; the test times are on that day.
+    assert_eq!(days, 20_833, "the test times must stay on 2027-01-15");
+    format!(
+        "2027-01-15T{:02}:{:02}:{:02}.000Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
 }

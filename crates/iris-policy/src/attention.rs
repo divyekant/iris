@@ -42,11 +42,13 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
          WHERE s.message_id = ?1 AND s.role = 'origin'",
     )?;
     // SQLite makes the JSON of the field. Only an item whose attention
-    // changes gets a write.
+    // changes gets a write, with the time of the change (spec 1 section 6.1).
     let mut write = tx.prepare(
         "WITH a(v) AS (SELECT CASE WHEN ?3 IS NULL THEN json_object('state', ?2)
                        ELSE json_object('state', ?2, 'rule', ?3, 'reason', ?4) END)
-         UPDATE item SET doc = json_set(doc, '$.attention', json((SELECT v FROM a)))
+         UPDATE item SET updated_at = ?5 * 1000,
+           doc = json_set(doc, '$.attention', json((SELECT v FROM a)),
+                          '$.updated', strftime('%Y-%m-%dT%H:%M:%fZ', ?5, 'unixepoch'))
          WHERE id = ?1 AND coalesce(json_extract(doc, '$.attention'), '') <> (SELECT v FROM a)",
     )?;
     for id in messages {
@@ -129,7 +131,7 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
         };
         for (item, it) in &rows {
             let (state, rule, reason) = field(policy, policy.attention(it, &msg, now));
-            write.execute(params![item, state, rule, reason])?;
+            write.execute(params![item, state, rule, reason, now])?;
         }
     }
     Ok(())
