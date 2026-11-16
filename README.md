@@ -99,6 +99,32 @@ encrypted with the `key` file of the data folder.
 
 CAUTION: The backup folder holds the key and your mail. Keep it private.
 
+`iris serve` prints the sign-in address of the local API, with a one-time
+code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
+program can exchange the code for a token with `POST /api/session`
+(`crates/iris-api/README.md`).
+
+## Read the mirror
+
+These commands read the store. Add `--json` to get the JSON of the local API: one JSON document for one
+object, and JSON Lines for a list.
+
+| Command | Gives |
+|---|---|
+| `iris status` | The accounts, the state of the sync and the message counts |
+| `iris search "<text>"` | The messages that match the search text, newest first |
+| `iris show <id>` | One message (`m-42`) or one item (`c-7`) |
+| `iris mirror sync` | One sync of each account now |
+| `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
+
+Release 1 limit: the sync stores the raw messages only. Words and the
+`from:` and `to:` filters find a message after the understanding step reads
+it (tracker items R1-10 and R1-28). Before that, use `label:`, `after:` and
+`before:`.
+
+The text of a message is data. `iris show` removes the control characters, so
+a message cannot send commands to your terminal.
+
 To copy the data folder while the engine runs, run:
 
 ```bash

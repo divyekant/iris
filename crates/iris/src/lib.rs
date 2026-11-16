@@ -1,6 +1,7 @@
 //! The Iris engine and the `iris` command.
 
 pub mod engine;
+pub mod verbs;
 
 use std::io::BufRead;
 use std::net::SocketAddr;
@@ -41,6 +42,35 @@ pub enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
+    /// Sync or verify the mirror now, outside the schedule of `iris serve`.
+    Mirror {
+        #[command(subcommand)]
+        command: MirrorCommand,
+    },
+    /// Show the accounts, the sync and the message counts.
+    Status {
+        /// Print the JSON of the local API (`/api/status`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search the mail (specification 1, section 5.6), newest first.
+    Search {
+        /// The search text, for example "contract from:dana after:2026-10-01".
+        text: String,
+        /// The most messages to show, 1 to 200.
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=200))]
+        limit: u32,
+        /// Print the JSON of the local API (`/api/search`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one message (`m-42`) or one item (`c-7`).
+    Show {
+        id: String,
+        /// Print the JSON of the local API (`/api/messages/{id}`). An item is always JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -51,6 +81,16 @@ pub enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+}
+
+#[derive(Subcommand)]
+pub enum MirrorCommand {
+    /// Sync each account one time (specification 1, section 4.3).
+    Sync,
+    /// Compare the mirror of each account with Gmail, and check the local
+    /// content (specification 1, section 4.8). A difference makes the next
+    /// sync run a full resync.
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -113,10 +153,20 @@ pub fn run(cli: Cli) -> Result<(), String> {
     let open =
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
     match &cli.command {
-        Command::Serve { addr } => serve(Arc::new(open()?), *addr).map_err(|e| e.to_string()),
+        Command::Serve { addr } => {
+            // Check before the store opens, so a refused address makes no data folder.
+            check_loopback(*addr).map_err(|e| e.to_string())?;
+            serve(Arc::new(open()?), *addr).map_err(|e| e.to_string())
+        }
         Command::Account {
             command: AccountCommand::Add { client, paste },
         } => account_add(&open()?, client, *paste),
+        Command::Mirror { command } => mirror(Arc::new(open()?), command),
+        Command::Status { json } => print(verbs::status(&open()?, *json)),
+        Command::Search { text, limit, json } => {
+            print(verbs::search(&open()?, text, *limit, *json))
+        }
+        Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
@@ -127,6 +177,77 @@ pub fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// `iris mirror sync|verify`: each account that has a sign-in, one at a time.
+/// If another process syncs an account, that account gives an error.
+fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
+    let config = gmail_config()?;
+    let accounts = engine::signed_in_accounts(&store).map_err(|e| e.to_string())?;
+    if accounts.is_empty() {
+        return Err("no account to sync: run `iris account add <client.json>`".into());
+    }
+    let mut failed = false;
+    for (account, state) in accounts {
+        // Report each account, so a success means that each mailbox ran.
+        if state.as_deref() == Some(engine::STATE_NEEDS_SIGN_IN) {
+            failed = true;
+            eprintln!("iris: account {account}: {}", engine::Error::NeedsSignIn);
+            continue;
+        }
+        let mut worker = engine::Worker::new(
+            store.clone(),
+            iris_gmail::Gmail::new(config.clone()),
+            account,
+            std::env::var("IRIS_TEST_TOKEN_URI").ok(),
+        );
+        let line = match command {
+            MirrorCommand::Sync => worker.sync().map(|s| {
+                format!(
+                    "synced to history {}: fetched {}, gone {}, failed {}{}",
+                    s.history_id,
+                    s.fetched,
+                    s.gone,
+                    s.failed,
+                    if s.resync { ", full resync" } else { "" }
+                )
+            }),
+            MirrorCommand::Verify => worker.verify().map(|r| {
+                let mut text = format!(
+                    "verified at history {}: {} differences, {} skipped{}",
+                    r.history_id,
+                    r.total,
+                    r.skipped,
+                    if r.resync {
+                        ", the next sync runs a full resync"
+                    } else {
+                        ""
+                    }
+                );
+                for d in &r.differences {
+                    text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
+                }
+                text
+            }),
+        };
+        match line {
+            Ok(text) => println!("account {account}: {text}"),
+            Err(e) => {
+                failed = true;
+                eprintln!("iris: account {account}: {e}");
+            }
+        }
+    }
+    if failed {
+        Err("one or more accounts failed".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn print(out: verbs::Output) -> Result<(), String> {
+    print!("{}", out?);
+    Ok(())
 }
 
 /// `iris account add`: sign in, then save the client and the sealed refresh token.
@@ -211,14 +332,29 @@ fn test_token_uri(client: iris_auth::Client) -> Result<iris_auth::Client, String
 }
 
 /// Return all the routes of the engine.
-pub fn app() -> axum::Router {
-    iris_web::router()
+pub fn app(store: Arc<Store>, auth: Arc<iris_api::Auth>) -> axum::Router {
+    // The API routes come before the fallback of the web client.
+    iris_api::router(store, auth).merge(iris_web::router())
+}
+
+/// The API has no TLS, so only this machine may connect (specification 2,
+/// section 8.2).
+fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "{addr} is not a loopback address: use 127.0.0.1 or [::1]"
+        )))
+    }
 }
 
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
+    check_loopback(addr)?;
     let gmail = gmail_config().map_err(std::io::Error::other)?;
+    let api_store = store.clone();
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
         .name("sync".into())
@@ -230,8 +366,15 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        eprintln!("iris: serving on http://{}", listener.local_addr()?);
-        axum::serve(listener, app())
+        let local = listener.local_addr()?;
+        // The API checks the Host against the bound address.
+        let auth = Arc::new(iris_api::Auth::new(local)?);
+        eprintln!("iris: serving on http://{local}");
+        // The one-time code of the API sign-in (specification 2, section 8.6).
+        if let Some(url) = auth.sign_in_url() {
+            eprintln!("iris: sign-in address of the local API: {url}");
+        }
+        axum::serve(listener, app(api_store, auth))
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             })
@@ -265,6 +408,19 @@ mod tests {
                 panic!("not service");
             };
             assert_eq!(matches!(action, ServiceAction::Install), install);
+        }
+    }
+
+    #[test]
+    fn serve_refuses_an_address_that_is_not_loopback() {
+        let dir = std::env::temp_dir().join(format!("iris-serve-open-{}", std::process::id()));
+        let store = Arc::new(Store::open(&dir).unwrap());
+        for addr in ["0.0.0.0:0", "192.0.2.1:4800", "[::]:0"] {
+            let err = serve(store.clone(), addr.parse().unwrap()).unwrap_err();
+            assert!(
+                err.to_string().contains("not a loopback address"),
+                "{addr}: {err}"
+            );
         }
     }
 

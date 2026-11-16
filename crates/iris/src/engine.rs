@@ -147,6 +147,18 @@ pub fn mark_needs_sign_in(store: &Store, account: i64, sealed: &[u8]) -> Result<
     })?)
 }
 
+/// Each account with a stored sign-in, with its state.
+pub fn signed_in_accounts(store: &Store) -> Result<Vec<(i64, Option<String>)>> {
+    Ok(store.read(|c| {
+        let mut st =
+            c.prepare("SELECT id, state FROM account WHERE token IS NOT NULL ORDER BY id")?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?)
+}
+
 /// The accounts that the engine syncs: each account with a stored sign-in
 /// that Google did not refuse.
 pub fn sync_accounts(store: &Store) -> Result<Vec<i64>> {
@@ -191,13 +203,26 @@ impl Worker {
         }
     }
 
-    /// Sync the account one time. On HTTP 401, get a new access token one
-    /// time and sync again. If the new token gets HTTP 401 too, the account
-    /// needs a new sign-in (specification 1, section 4.7).
+    /// Sync the account one time (specification 1, section 4.3).
     pub fn sync(&mut self) -> Result<iris_sync::Synced> {
+        self.call(iris_sync::sync)
+    }
+
+    /// Verify the mirror of the account one time (specification 1, section 4.8).
+    pub fn verify(&mut self) -> Result<iris_sync::Report> {
+        self.call(iris_sync::verify)
+    }
+
+    /// Call `f` with an access token. On HTTP 401, get a new access token one
+    /// time and call again. If the new token gets HTTP 401 too, the account
+    /// needs a new sign-in (specification 1, section 4.7).
+    fn call<T>(
+        &mut self,
+        f: impl Fn(&Store, &Gmail, i64, &str) -> iris_sync::Result<T>,
+    ) -> Result<T> {
         for _ in 0..2 {
             let token = self.access()?;
-            match iris_sync::sync(&self.store, &self.gmail, self.account, token.expose()) {
+            match f(&self.store, &self.gmail, self.account, token.expose()) {
                 Err(iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)) => {
                     self.token = None;
                 }

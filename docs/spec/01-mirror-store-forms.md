@@ -453,6 +453,11 @@ The engine adds indexes for the queries of the brief: `item(form, status)`,
   filters into SQL conditions and the words into an FTS5 query. It never
   passes the text of a person or an agent to FTS5 without the escape of
   quotes and operators.
+- The sync stores bytes only (section 4.7). The `header` and `body` rows,
+  and so the words and the `from:` and `to:` filters, come from step 8 of
+  understanding (section 7.1). Until understanding reads a message, only
+  `label:`, `after:` and `before:` find it. The engine runs understanding
+  after each sync (tracker item R1-28, after R1-10).
 
 ### 5.7 IDs
 
