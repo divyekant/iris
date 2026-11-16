@@ -350,17 +350,61 @@ fn a_kind_set_by_a_person_wins_and_a_row_of_another_crate_gets_its_kind() {
 }
 
 #[test]
-fn mail_from_the_account_address_is_self() {
+fn mail_from_the_account_address_without_sent_is_received_mail() {
     let mut c = Case::new("self");
     let d = c.put(
         "t1",
         &["INBOX"],
         "From: Owner <OWNER@example.com>\r\nTo: dee@example.org",
     );
-    assert_eq!(d.kind, Kind::SelfOwner);
     // A From with the account address is no proof of a sent message: anyone
-    // can write it. The recipients stay unknown.
+    // can write it. Only the SENT label makes mail from you.
+    assert_eq!(d.kind, Kind::Stranger);
+    assert!(d.sender.is_some());
     assert_eq!(c.row("dee@example.org").1, None);
+}
+
+/// Run `decide` again on the stored message `id` with the raw bytes `raw`.
+fn again(c: &Case, id: i64, raw: &str) -> Decision {
+    c.store
+        .write(|tx| Ok(decide(tx, id, raw.as_bytes(), 7)?))
+        .unwrap()
+}
+
+fn set(c: &Case, sql: &str) {
+    c.store
+        .write(|tx| {
+            tx.execute(sql, [])?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_service_without_its_qualifying_message_is_decided_again() {
+    let raw = format!("{}\r\nSubject: x\r\n\r\nBody text.\r\n", service_mail());
+    for change in [
+        "DELETE FROM message WHERE id = 3",
+        "UPDATE message SET content_sha256 = 'other' WHERE id = 3",
+    ] {
+        let mut c = Case::new("service-gone");
+        for t in ["t1", "t2", "t3"] {
+            c.put(t, &[], &service_mail());
+        }
+        assert_eq!(again(&c, 1, &raw).kind, Kind::Service);
+        set(&c, change);
+        assert_eq!(again(&c, 1, &raw).kind, Kind::Stranger, "{change}");
+    }
+}
+
+#[test]
+fn a_bcc_person_whose_sent_message_changed_is_decided_again() {
+    let mut c = Case::new("bcc-changed");
+    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nBcc: eve@example.org"));
+    assert_eq!(c.put("t2", &[], "From: eve@example.org").kind, Kind::Person);
+    // The raw bytes of the sent message are no longer the bytes that named Eve.
+    set(&c, "UPDATE message SET content_sha256 = 'other' WHERE id = 1");
+    assert_eq!(c.put("t3", &[], "From: eve@example.org").kind, Kind::Stranger);
 }
 
 #[test]
