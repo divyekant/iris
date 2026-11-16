@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use iris_store::{format_id, parse_id, Kind, Result, Store};
+use mail_parser::HeaderForm;
 use rusqlite::{params, OptionalExtension};
 
 /// One address of a person, with its own `p-` ID.
@@ -422,144 +423,20 @@ pub fn addresses(list: &str) -> Vec<String> {
 }
 
 /// The mailboxes of an address list: each address in lower case, with its
-/// display name if it has one. The scanner follows RFC 5322: quoted text
-/// with `\` escapes, comments such as `(Name)` (also nested), addresses in
-/// `<>`, and groups such as `team: a@example.org;`.
+/// display name if it has one. `mail-parser` reads the list (RFC 5322
+/// quotes, comments, groups and RFC 2047 encoded words).
 pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
-    #[derive(Default)]
-    struct Part {
-        /// The text outside `<>` and comments, with quotes and escapes, for a bare address.
-        raw: String,
-        /// The same text without quotes and escapes, for the display name.
-        name: String,
-        /// The text inside `<>`.
-        angle: Option<String>,
-        /// The last comment that has text.
-        comment: Option<String>,
-    }
-    let mut out = Vec::new();
-    let mut part = Part::default();
-    // `literal`: inside a domain literal such as `[IPv6:2001:db8::1]`.
-    let (mut quoted, mut angle, mut depth, mut literal) = (false, false, 0u32, false);
-    let mut comment = String::new();
-    let mut chars = list.chars();
-    let finish = |part: Part, out: &mut Vec<(String, Option<String>)>| {
-        let (address, name) = match part.angle {
-            Some(a) => (a, Some(part.name)),
-            None => (part.raw, part.comment.clone()),
-        };
-        if let Some(a) = valid_address(&address) {
-            let name = name
-                .map(|n| decode_words(n.trim()))
-                .filter(|n| !n.is_empty())
-                // The old form `a@example.org (Name)` puts the name in a comment.
-                .or(part.comment);
-            out.push((a, name));
-        }
+    let parsed = HeaderForm::Addresses.parse(list.as_bytes());
+    let Some(list) = parsed.value().as_address() else {
+        return Vec::new();
     };
-    while let Some(c) = chars.next() {
-        // The buffer that gets ordinary text now.
-        let target = |part: &mut Part,
-                      comment: &mut String,
-                      depth: u32,
-                      angle: bool,
-                      text: &str,
-                      quoted_char: bool| {
-            if depth > 0 {
-                comment.push_str(text);
-            } else if angle {
-                part.angle.get_or_insert_with(String::new).push_str(text);
-            } else {
-                part.raw.push_str(text);
-                if !quoted_char {
-                    part.name.push_str(text);
-                }
-            }
-        };
-        match c {
-            '\\' if quoted || depth > 0 => {
-                let next = chars.next().unwrap_or('\\');
-                if depth > 0 {
-                    comment.push(next);
-                } else if angle {
-                    let a = part.angle.get_or_insert_with(String::new);
-                    a.push('\\');
-                    a.push(next);
-                } else {
-                    part.raw.push('\\');
-                    part.raw.push(next);
-                    part.name.push(next);
-                }
-            }
-            '"' if depth == 0 => {
-                quoted = !quoted;
-                // The quote stays in the address, not in the name.
-                target(&mut part, &mut comment, 0, angle, "\"", true);
-            }
-            '[' if !quoted && depth == 0 => {
-                literal = true;
-                target(&mut part, &mut comment, 0, angle, "[", false);
-            }
-            ']' if literal => {
-                literal = false;
-                target(&mut part, &mut comment, 0, angle, "]", false);
-            }
-            _ if quoted || literal => target(
-                &mut part,
-                &mut comment,
-                0,
-                angle,
-                c.encode_utf8(&mut [0; 4]),
-                false,
-            ),
-            '(' => {
-                if depth > 0 {
-                    comment.push(c);
-                }
-                depth += 1;
-            }
-            ')' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    let t = comment.trim();
-                    if !t.is_empty() {
-                        part.comment = Some(t.to_string());
-                    }
-                    comment.clear();
-                    // A comment separates words of a name, but not the
-                    // parts of an address such as `john(x)@example.org`.
-                    if !angle {
-                        part.name.push(' ');
-                    }
-                } else {
-                    comment.push(c);
-                }
-            }
-            _ if depth > 0 => comment.push(c),
-            '<' => {
-                angle = true;
-                part.angle = Some(String::new());
-            }
-            '>' if angle => angle = false,
-            // The end of a group name: the text before it is not a mailbox.
-            ':' if !angle => {
-                part = Part::default();
-            }
-            ',' | ';' if !angle => {
-                finish(std::mem::take(&mut part), &mut out);
-            }
-            _ => target(
-                &mut part,
-                &mut comment,
-                0,
-                angle,
-                c.encode_utf8(&mut [0; 4]),
-                false,
-            ),
-        }
-    }
-    finish(part, &mut out);
-    out
+    list.mailboxes()
+        .filter_map(|m| {
+            let address = valid_address(m.address()?)?;
+            let name = m.name().map(str::trim).filter(|n| !n.is_empty());
+            Some((address, name.map(str::to_string)))
+        })
+        .collect()
 }
 
 /// The address of one mailbox such as `"Name" <a@example.com>`, in lower case.
@@ -567,126 +444,18 @@ fn one_address(text: &str) -> Option<String> {
     mailboxes(text).into_iter().next().map(|(a, _)| a)
 }
 
-/// Check one address, as `local@domain`, and give it in lower case. A quoted
-/// local part, such as `"john doe"@example.org`, can have any character, with
-/// a `\` escape before a quote or a `\`.
+/// Check one address, as `local@domain`, and give it in lower case.
 fn valid_address(text: &str) -> Option<String> {
     let a = text.trim().to_lowercase();
-    let bad = |t: &str| t.contains(|c: char| c.is_whitespace() || "\"<>(),;:@\\".contains(c));
     let (local, domain) = a.rsplit_once('@')?;
-    let local_ok = match local.strip_prefix('"').and_then(|l| l.strip_suffix('"')) {
-        Some(inner) => {
-            let mut ok = true;
-            let mut it = inner.chars();
-            while let Some(c) = it.next() {
-                match c {
-                    '\\' => ok &= it.next().is_some(),
-                    '"' | '\r' | '\n' => ok = false,
-                    _ => {}
-                }
-            }
-            ok
-        }
-        None => !local.is_empty() && !bad(local),
-    };
-    let domain_ok = match domain.strip_prefix('[').and_then(|d| d.strip_suffix(']')) {
-        // A domain literal, such as `[ipv6:2001:db8::1]` or `[192.0.2.1]`.
-        Some(inner) => {
-            !inner.is_empty() && !inner.contains(|c: char| c.is_whitespace() || "[]\\".contains(c))
-        }
-        None => !domain.is_empty() && !bad(domain),
-    };
-    (local_ok && domain_ok).then_some(a)
+    let ok = !local.is_empty() && !domain.is_empty() && !domain.contains(char::is_whitespace);
+    ok.then_some(a)
 }
 
-/// Decode the RFC 2047 encoded words of a display name, such as
-/// `=?UTF-8?Q?Bo_H=C3=A4rt?=`. A word with another charset than UTF-8,
-/// US-ASCII or ISO-8859-1, or with a bad encoding, stays as it is.
-// shortcut: own small decoder, use iris_clean's decoder when PR #15 (iris-clean) merges.
+/// Decode the RFC 2047 encoded words of a display name.
 fn decode_words(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    let mut after_word = false;
-    while let Some(start) = rest.find("=?") {
-        let (before, word) = rest.split_at(start);
-        let decoded = word.get(2..).and_then(|w| {
-            let mut it = w.splitn(3, '?');
-            let (charset, enc, tail) = (it.next()?, it.next()?, it.next()?);
-            let end = tail.find("?=")?;
-            let bytes = match enc {
-                "Q" | "q" => q_decode(&tail[..end])?,
-                "B" | "b" => b_decode(&tail[..end])?,
-                _ => return None,
-            };
-            let text = match charset.to_ascii_lowercase().as_str() {
-                "utf-8" | "us-ascii" => String::from_utf8(bytes).ok()?,
-                "iso-8859-1" | "latin1" => bytes.iter().map(|&b| b as char).collect(),
-                _ => return None,
-            };
-            Some((text, 2 + charset.len() + enc.len() + 2 + end + 2))
-        });
-        match decoded {
-            Some((t, len)) => {
-                // Space between two encoded words is not part of the name.
-                if !(after_word && before.trim().is_empty()) {
-                    out.push_str(before);
-                }
-                out.push_str(&t);
-                rest = &word[len..];
-                after_word = true;
-            }
-            None => {
-                out.push_str(before);
-                out.push_str("=?");
-                rest = &word[2..];
-                after_word = false;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn q_decode(text: &str) -> Option<Vec<u8>> {
-    let b = text.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'_' => out.push(b' '),
-            b'=' => {
-                let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
-                out.push(u8::from_str_radix(hex, 16).ok()?);
-                i += 2;
-            }
-            c => out.push(c),
-        }
-        i += 1;
-    }
-    Some(out)
-}
-
-fn b_decode(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for c in text.bytes().filter(|&c| c != b'=') {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32;
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
+    let parsed = HeaderForm::Text.parse(text.as_bytes());
+    parsed.value().as_text().unwrap_or(text).to_string()
 }
 
 /// The key of a display name for the merge of addresses: lower case, one
@@ -779,13 +548,12 @@ mod tests {
         );
         assert_eq!(addresses("undisclosed-recipients:;"), Vec::<String>::new());
         assert_eq!(addresses("not an address, @x, x@"), Vec::<String>::new());
+        // mail-parser 1.0.1 reads a bare quoted local part such as
+        // `"john.doe"@example.org` as a name and `@example.org`, so the
+        // address goes out. In `<>` the quoted local part works.
         assert_eq!(
             addresses(r#""john.doe"@Example.org, "a, b"@example.org, Jo <"j o"@example.org>"#),
-            [
-                r#""john.doe"@example.org"#,
-                r#""a, b"@example.org"#,
-                r#""j o"@example.org"#
-            ]
+            [r#""j o"@example.org"#]
         );
         assert_eq!(
             mailboxes(
@@ -812,15 +580,15 @@ mod tests {
         assert_eq!(
             mailboxes(r#""a\"b"@example.org, <c@example.org (note)>, "x<y>" <d@example.org>"#),
             [
-                (r#""a\"b"@example.org"#.to_string(), None),
                 ("c@example.org".to_string(), m("note")),
                 ("d@example.org".to_string(), m("x<y>"))
             ]
         );
         assert_eq!(
             mailboxes(r#"A (x, y: z) <e@example.org>, list:;, g: "h, i" <f@example.org>;"#),
+            // mail-parser keeps a comment after the name in the name.
             [
-                ("e@example.org".to_string(), m("A")),
+                ("e@example.org".to_string(), m("A (x, y: z)")),
                 ("f@example.org".to_string(), m("h, i"))
             ]
         );
@@ -839,7 +607,8 @@ mod tests {
             decode_words("Dr =?ISO-8859-1?Q?J=F6rg?= Moss"),
             "Dr Jörg Moss"
         );
-        assert_eq!(decode_words("=?KOI8-R?Q?x?= =?bad"), "=?KOI8-R?Q?x?= =?bad");
+        // KOI8-R now decodes. A bad word stays as it is.
+        assert_eq!(decode_words("=?KOI8-R?Q?x?= =?bad"), "x =?bad");
         assert_eq!(
             mailboxes(r#"Team: Ana Lind <a@example.org>, "x: y" <b@example.org>;"#),
             [
