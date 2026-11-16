@@ -278,12 +278,12 @@ fn decide_message(
         // The `replied` rule: each earlier sender of the thread. Its row
         // is decided again now, and by each refresh.
         let earlier: Vec<String> = conn
-            .prepare_cached(
+            .prepare_cached(&format!(
                 "SELECT DISTINCT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
                   WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
-                    AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL
-                    AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)",
-            )?
+                    AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL AND {RECEIVED}
+                    AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)"
+            ))?
             .query_map(params![message, date.unwrap_or(i64::MIN), account], |r| {
                 r.get(0)
             })?
@@ -367,6 +367,11 @@ const SENT_NOT_DRAFT: &str =
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
+/// True when the message `m` is received mail: no label `SENT` or `DRAFT`.
+const RECEIVED: &str =
+    "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                  WHERE ml.message_id = m.id AND l.provider_id IN ('SENT', 'DRAFT'))";
+
 /// SQL that is true when the header `h` names the address of parameter
 /// `?n` in `To` or `Cc`.
 fn to_addr(n: u8) -> String {
@@ -436,7 +441,7 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
                SELECT 1 FROM header hm JOIN message m ON m.id = hm.message_id
                  JOIN message s ON s.thread_id = m.thread_id AND s.id != m.id
                  JOIN header h ON h.message_id = s.id
-                WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {SENT_NOT_DRAFT}
+                WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {RECEIVED} AND {SENT_NOT_DRAFT}
                   AND (s.internal_date > m.internal_date OR {}))",
             to_addr(1)
         ),
