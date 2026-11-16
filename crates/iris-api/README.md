@@ -250,6 +250,34 @@ A dev server of the client must forward `/api` with the `Host` and the
 `Origin` of the engine (in Vite: `changeOrigin: true`, and set `Origin` to the
 target in `headers`).
 
+## Ask
+
+A question of the person about their mail (card R5-09). The engine searches
+the mail for the words of the question, gives the best 12 messages to the
+model as data, and answers with the messages that the answer comes from.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/ask` | Body `{"question"}`, 1 to 500 characters. The answer is `{"answer", "sources", "read", "cost_micro_usd"}`. |
+
+| Field | Content |
+|---|---|
+| `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. A claim is one fact, in one or more sentences. One or more marks `[n]` come before the end mark of its last sentence, and name the sources of all of its text. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
+| `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
+| `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
+| `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
+
+The search leaves out gone mail, hostile mail, the mail of a hostile sender,
+SPAM and TRASH. After the call, the engine checks each source again: against
+these rules, and for a change of the date, sender, subject or text that the
+model saw. A claim with a source that fails the check goes. The call
+takes from the one model budget (see
+`docs/specs/2026-11-16-cost-control.md`) and holds the run lock. With no
+model, with a budget that cannot pay the worst case of the call, or while a
+run of understanding holds the lock, the answer is a 503. A failed
+model call, or a model answer that is not valid, is a 502. The text of the
+answer is data: show it as text, never as markup.
+
 ## Watches
 
 A watch is a search text (specification 1, section 5.6) that gives one notice

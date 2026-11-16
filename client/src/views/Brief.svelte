@@ -10,6 +10,7 @@
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
+  import Gate from "./Gate.svelte";
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
@@ -55,14 +56,21 @@
   const removed = (id: string) => change((w) => w.filter((x) => x.id !== id));
   const ready = (s: Status | null) => copying(s).length === 0;
 
+  // Two loads of the brief can answer out of order (a poll, an answer at the gate):
+  // each takes a ticket, and a brief shows only while its ticket is the newest.
+  const briefTicket = newest();
+
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
   let syncing = $derived(!ready(status));
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([loadBrief(), get<Status>("status")]),
-      ([b, s]) => ((brief = b), (status = s)),
+      () => {
+        const fresh = briefTicket();
+        return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
+      },
+      ([b, s, fresh]) => (fresh() && (brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });
@@ -76,6 +84,14 @@
   });
 
   const SHOWN = 7;
+  // After an answer at the gate, the items of the sender move: load the brief again.
+  // The gate stays after the last answer, so that its Undo stays too.
+  let answered = $state(false);
+  const reload = () => {
+    answered = true;
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
@@ -180,7 +196,14 @@
 {/if}
 
 {#each parts as part (part.key)}
-  {#if part.count > 0}
+  {#if part.key === "strangers" && brief.gate}
+    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0 || answered}
+      <section aria-labelledby="strangers">
+        <h2 id="strangers"><span>{part.title}</span> <span class="count">{brief.gate.count}</span></h2>
+        <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />
+      </section>
+    {/if}
+  {:else if part.count > 0}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
