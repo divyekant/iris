@@ -308,8 +308,8 @@ fn add_and_submit_refusals() {
         &s,
         cs,
         &agent(),
-        Verb::Close,
-        &["c-1", "r-2"],
+        Verb::Correct,
+        &["c-1", "r-1"],
         &Map::new(),
         None,
     ));
@@ -1308,6 +1308,24 @@ fn state_verbs_take_items() {
         json!(["m-1"])
     );
     assert_eq!(hash_doc(&s, cs, 1, 5)["resolved"]["messages"], json!([]));
+}
+
+/// `correct` takes items of any form in one action (section 4): the form
+/// of each item does not need to agree. Each item must pass the rules of a
+/// correction, so a field of the commitment only denies the record.
+#[test]
+fn correct_takes_items_of_two_forms() {
+    let dir = TempDir::new("forms");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let a = args(json!({"field": "due.date", "value": "2026-12-01"}));
+    add_action(&s, cs, &agent(), Verb::Correct, &["c-1", "r-2"], &a, None).unwrap();
+    submit(&s, cs, &agent(), "Fix the dates.", NOW).unwrap();
+    let d = hash_doc(&s, cs, 1, 1);
+    assert_eq!(d["targets"], json!({"items": ["c-1", "r-2"]}), "{d}");
+    assert_eq!(d["decision"]["state"], "denied", "{d}");
+    let why = d["decision"]["reason"].as_str().unwrap();
+    assert!(why.contains("r-2") && !why.contains("target"), "{why}");
 }
 
 /// An item that an open action names is pinned (specification 1, section

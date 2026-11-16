@@ -260,7 +260,7 @@ pub fn create_in(c: &Connection, author: &Author, now_ms: i64) -> Result<i64> {
 }
 
 /// Add an action to the draft revision of a changeset. `targets` are short
-/// IDs of one kind: threads, messages, or items. Gives the action number.
+/// IDs of one group: threads, messages, or items. Gives the action number.
 /// Submit checks the targets and the arguments.
 pub fn add_action(
     store: &Store,
@@ -316,9 +316,9 @@ pub fn add_action_in(
 /// `{"items": [...]}`.
 fn targets_json(targets: &[&str]) -> Result<String> {
     let mut group = None;
-    let mut first = None;
     let mut ids = Vec::with_capacity(targets.len());
-    // One kind for all targets, so the row ID names one target.
+    // One group for all targets, so the row ID names one target: the items
+    // of all forms share one table (a `correct` can name `c-1` and `r-2`).
     let mut seen = HashSet::with_capacity(targets.len());
     for t in targets {
         let (kind, row) = parse_id(t).ok_or_else(|| refused(format!("{t:?} is not an ID")))?;
@@ -328,10 +328,9 @@ fn targets_json(targets: &[&str]) -> Result<String> {
             Kind::Sender => return Err(refused(format!("{t} is a sender, not a target"))),
             _ => "items",
         };
-        if first.is_some_and(|k| k != kind) {
-            return Err(refused("the targets of one action are of one kind".into()));
+        if group.is_some_and(|k| k != g) {
+            return Err(refused("the targets of one action are in one group".into()));
         }
-        first = Some(kind);
         group = Some(g);
         if !seen.insert(row) {
             return Err(refused(format!("{t} is a target two times")));
