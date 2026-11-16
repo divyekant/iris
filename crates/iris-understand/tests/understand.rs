@@ -60,14 +60,20 @@ impl Model for Fake {
             .borrow_mut()
             .pop_front()
             .unwrap_or_else(|| Ok(r#"{"items": []}"#.into()))?;
+        // The answer "REFUSE" plays a refusal of the provider.
+        let stop = if next == "REFUSE" {
+            Stop::Refused
+        } else {
+            Stop::End
+        };
         Ok(Reply {
+            stop,
             text: next,
             usage: Usage {
                 input_tokens: 100,
                 output_tokens: 10,
                 cost_micro_usd: Some(5),
             },
-            stop: Stop::End,
         })
     }
 }
@@ -592,4 +598,85 @@ fn a_date_with_a_huge_year_does_not_stop_understanding() {
     assert!(b
         .col::<Option<i64>>("SELECT date FROM header WHERE message_id = ?1", m)
         .is_none());
+}
+
+#[test]
+fn the_model_gets_the_text_of_an_attachment() {
+    let b = store("attachment");
+    let raw = "From: Shop <shop@example.com>
+To: owner@example.com
+Subject: Your papers
+Content-Type: multipart/mixed; boundary=z
+
+--z
+Content-Type: text/plain
+
+See the file.
+--z
+Content-Type: text/plain; name=invoice.txt
+Content-Disposition: attachment; filename=invoice.txt
+
+Invoice 77: total 50.00 USD, due 2026-01-15.
+--z--
+";
+    let m = b.add("1", raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let calls = fake.calls.borrow();
+    assert!(
+        calls[0].1.contains("Invoice 77: total 50.00 USD"),
+        "{}",
+        calls[0].1
+    );
+}
+
+#[test]
+fn a_spam_label_after_3_tries_still_gives_the_mark() {
+    let b = store("tries-spam");
+    let m = b.add("1", ASK, &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET tries = 3 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    let m2 = b.add("1", ASK, &["SPAM"]);
+    assert_eq!(m, m2);
+    let fake = Fake::default();
+    let out = understand(&b.store, m, &fake, NOW).unwrap();
+    assert!(out.hostile);
+    assert_eq!(fake.calls.borrow().len(), 0);
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["spam"]"#);
+}
+
+#[test]
+fn a_failed_new_run_removes_the_old_items() {
+    let b = store("fail-rerun");
+    let m = b.add("1", ASK, &["INBOX"]);
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 1);
+    let out = understand(&b.store, m, &Fake::with(&["bad", "bad"]), NOW).unwrap();
+    assert!(out.failed);
+    assert!(b.items().is_empty());
+    assert_eq!(
+        b.col::<i64>("SELECT tries FROM message WHERE id = ?1", m),
+        1
+    );
+}
+
+#[test]
+fn a_refusal_is_an_error_and_counts_no_try() {
+    let b = store("refused");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let fake = Fake::with(&["REFUSE", "REFUSE"]);
+    assert!(matches!(
+        understand(&b.store, m, &fake, NOW),
+        Err(Error::Model(_))
+    ));
+    assert_eq!(fake.calls.borrow().len(), 1);
+    assert_eq!(
+        b.col::<i64>("SELECT tries FROM message WHERE id = ?1", m),
+        0
+    );
 }
