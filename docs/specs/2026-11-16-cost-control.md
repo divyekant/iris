@@ -75,6 +75,10 @@ A reset makes a message pending again. One function of `iris-store`,
 - It deletes the items whose origin is the message and that are not pinned
   (spec 1 section 7.5), other than the conversation.
 - It sets `understood_at`, `tries` and `retry_at` to NULL, 0 and NULL.
+- It does the same for each later message of the thread (by
+  `internal_date`, then `id`) that is not gone. A later message got the
+  earlier one as thread context (spec 1 section 7.4), so its items can
+  depend on it.
 
 So an old item of a message that became spam never stays visible, also
 when the run stops before it reaches the message. Step 0 of the next run
@@ -231,7 +235,7 @@ CREATE TABLE understand_run (
   The command shows both numbers: "spent" and "up to ... more for calls with
   no answer".
 - `stop` is the stop condition: `done`, `cost`, `messages`, `model`,
-  `unknown` or `error`. A run that the process did not end (a crash) keeps `ended_at`
+  `unknown`, `approval` or `error`. A run that the process did not end (a crash) keeps `ended_at`
   NULL and `stop` NULL.
 - A model error that has no answer still has calls. `Error::Model` gets the
   usage of the calls before the error, so that the run row counts them.
@@ -264,6 +268,22 @@ A new migration row adds the table `model_setting` with one row:
 million tokens, NULL for no price), `api_key` (BLOB, sealed with the store
 key, NULL for a local model), `max_tokens`, `timeout_s`.
 
+### Approval of paid runs
+
+A run that can cost money needs the approval of the person, on every path:
+
+- `model_setting.approved_at` and `model_setting.run_max_cost_micro_usd`
+  hold the approval and the cost limit of each run.
+- `batch::run` checks them first, also before step 0. With a price and no
+  approval, it stops with `stop = approval` and makes no call. A model with
+  no price (local) needs no approval.
+- `batch::run` uses the smaller of the cost limit of the caller and
+  `run_max_cost_micro_usd`. So an automatic run (R1-28, after each sync)
+  has the limit that the person approved, and cannot pass it.
+- `iris understand --yes` records the approval and the limit
+  (`--max-cost`, default 1 USD for each run). `iris model set` clears the
+  approval, because the price or the model changed.
+
 ### Commands
 
 - `iris model set anthropic <model> --price-in <usd> --price-out <usd>`
@@ -274,9 +294,9 @@ key, NULL for a local model), `max_tokens`, `timeout_s`.
 - `iris model show` shows the settings without the key.
 - `iris understand --estimate` prints the estimate and makes no call.
 - `iris understand [--max-cost <usd>] [--max-messages <n>] [--yes]` prints
-  the estimate first. Before the first run of the store (no row in
-  `understand_run`), it starts only with `--yes`. Then it runs the batch
-  runner and prints the run row.
+  the estimate first. With no approval (above), it starts only with
+  `--yes`, which records the approval. Then it runs the batch runner and
+  prints the run row.
 
 ## Options not chosen
 
@@ -307,6 +327,8 @@ No parser or protocol code is new. The model client is `iris-model`.
 | Sent mail makes Alice a known person, and an understood message from another address has the display name Alice | The spoof mark is stale | The same transaction resets that message and the later messages of its thread. | Store test. |
 | A sync removes the domain that made a look-alike sender hostile | The estimate shows zero, the run pays | The estimate does step 0 in a rolled-back transaction, so it counts the reset messages. | Batch test. |
 | A second `iris understand` while a run goes on | Two runs pay twice | The second run gets "a run is in progress" and makes no call. | Two runners on one store: one gets the error, the fake model sees each message once. |
+| A first sync calls the runner (R1-28) before the person saw an estimate | Paid calls with no approval | `batch::run` stops with `stop = approval`, no call. | Batch test with a priced fake model and no approval. |
+| An earlier message of an understood thread gets new content or `SPAM` | Later items used it as context | The reset covers the later messages of the thread. | Store test. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
 | A `SPAM` label comes or goes on an understood message | The hostile mark is stale | The label write resets the message, so the next run checks it again. | Store test. |
@@ -333,7 +355,9 @@ No parser or protocol code is new. The model client is `iris-model`.
   resets in `put_messages` and the label writes.
 - `crates/iris-sync`: the reset when a gone message comes back.
 - `crates/iris`: the commands `iris model` and `iris understand`.
-- Spec 1: section 7.1 links this spec; section 5.5 lists the new tables.
+- Spec 1: section 7.1 links this spec; section 5.5 lists the new tables
+  and the reset rule of the `message` row. Spec 2 section 8.2 lists the
+  new commands.
 - Memory: one batch of IDs (50 integers) and one message at a time.
 
 ## Assumptions
@@ -380,8 +404,9 @@ outside the product, but it costs money.
 2. `iris understand --estimate` on a store with pending mail prints the
    count, the tokens and a cost, and the fake model gets zero calls. Red if
    it calls the model.
-3. The first `iris understand` without `--yes` makes zero calls. Red if it
-   starts.
+3. The first `iris understand` without `--yes` makes zero calls, and so does
+   `batch::run` from any caller with a priced model and no approval. Red if
+   either starts.
 4. A run with `--max-cost` stops before the next message when the run cost
    reaches the limit. Red if it continues.
 5. The run row has the calls, the tokens and the cost of the fake model.

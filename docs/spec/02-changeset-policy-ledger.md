@@ -658,6 +658,8 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris mirror sync` | Runs an incremental sync now. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
+| `iris model set`, `iris model show` | Sets the model of understanding and its key (read from standard input), or shows the settings without the key (`docs/specs/2026-11-16-cost-control.md`). | host | 1 |
+| `iris understand [--estimate] [--max-cost <usd>] [--max-messages <n>] [--yes]` | Shows the estimate, records the approval of paid runs, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | both | 1 |
