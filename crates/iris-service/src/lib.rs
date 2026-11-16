@@ -247,13 +247,11 @@ pub fn remove() -> io::Result<Option<PathBuf>> {
 /// Stop and disable the systemd unit, then delete its file. `booted` says if
 /// systemd runs this system (the test of `sd_booted`).
 fn remove_unit(systemctl: &str, file: &Path, booted: bool) -> io::Result<()> {
-    // If the stop fails, keep the file, so that a second remove can try again.
-    match run(systemctl, &["--user", "disable", "--now", UNIT]) {
-        // No systemctl and no systemd: nothing can run the unit, so delete the file.
-        Err(e) if e.kind() == io::ErrorKind::NotFound && !booted => {}
-        other => {
-            other?;
-        }
+    // With no running systemd, nothing can run the unit: delete the file with
+    // no stop. A systemctl call would fail (no user bus) and block the remove.
+    if booted {
+        // If the stop fails, keep the file, so that a second remove can try again.
+        run(systemctl, &["--user", "disable", "--now", UNIT])?;
     }
     std::fs::remove_file(file)?;
     // The unit is stopped and disabled, so the remove is complete. The
@@ -444,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_unit_with_no_systemctl_deletes_the_file_only_if_systemd_does_not_run() {
+    fn remove_unit_deletes_the_file_with_no_stop_only_if_systemd_does_not_run() {
         let dir =
             std::env::temp_dir().join(format!("iris-service-nosystemctl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -458,6 +456,24 @@ mod tests {
         assert!(remove_unit(missing, &file, true).is_err());
         assert!(file.exists());
         assert!(remove_unit(missing, &file, false).is_ok());
+        assert!(!file.exists());
+        // systemctl exists but systemd does not run (no user bus): delete the file.
+        let failing = dir.join("failing-systemctl");
+        std::fs::write(
+            &failing,
+            "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n",
+        )
+        .unwrap();
+        assert!(Command::new("chmod")
+            .arg("755")
+            .arg(&failing)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(&file, "unit").unwrap();
+        assert!(remove_unit(failing.to_str().unwrap(), &file, true).is_err());
+        assert!(file.exists());
+        assert!(remove_unit(failing.to_str().unwrap(), &file, false).is_ok());
         assert!(!file.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }

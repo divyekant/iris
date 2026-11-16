@@ -75,16 +75,20 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     )
     .unwrap();
 
-    fake(
-        &bin,
-        "case \"$*\" in *disable*) echo 'Failed to connect to bus' >&2; exit 1 ;; esac",
-    );
-    let err = iris_service::remove().unwrap_err();
-    assert!(
-        err.to_string().contains("Failed to connect to bus"),
-        "{err}"
-    );
-    assert!(file.exists(), "a failed stop must keep the file");
+    // The stop runs only when systemd runs on this machine (the unit tests
+    // of remove_unit cover both cases).
+    if Path::new("/run/systemd/system").is_dir() {
+        fake(
+            &bin,
+            "case \"$*\" in *disable*) echo 'Failed to connect to bus' >&2; exit 1 ;; esac",
+        );
+        let err = iris_service::remove().unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to connect to bus"),
+            "{err}"
+        );
+        assert!(file.exists(), "a failed stop must keep the file");
+    }
 
     // A failed reload after the stop does not fail the remove: the unit is
     // stopped, disabled and its file is gone.
