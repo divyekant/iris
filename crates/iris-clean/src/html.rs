@@ -85,6 +85,9 @@ struct Writer {
     lists: usize,
     /// The open link: its target and the output position of its text.
     link: Option<(String, usize)>,
+    /// Each closed link whose text is not its target: `(text, href)`, with
+    /// the href as the HTML gives it.
+    links: Vec<(String, String)>,
     /// True when the output reached `OUT_LIMIT`.
     full: bool,
 }
@@ -163,6 +166,9 @@ impl Writer {
         if text.is_empty() || text == plain {
             return;
         }
+        if !self.full {
+            self.links.push((text.clone(), href.clone()));
+        }
         // Percent-encode the characters that end a link target, and each
         // white space or control character, so that the target is one
         // token with each character of the href in it. A reader of the text
@@ -202,6 +208,14 @@ impl Writer {
 /// reply), quoted history of common mail clients goes out too.
 /// Return the Markdown and true if the output reached [`OUT_LIMIT`].
 pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
+    let (out, full, _) = convert(html, drop_quotes);
+    (out, full)
+}
+
+/// [`to_markdown`], and each link whose text is not its target, as
+/// `(text, href)`: the text as the Markdown shows it, the href as the HTML
+/// gives it. A link after the output limit is not in the list.
+pub(crate) fn convert(html: &str, drop_quotes: bool) -> (String, bool, Vec<(String, String)>) {
     let b = html.as_bytes();
     let mut w = Writer {
         line_start: true,
@@ -317,7 +331,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         hidden += own_hidden as usize;
     }
     w.close_link();
-    (w.out, w.full)
+    (w.out, w.full, w.links)
 }
 
 fn pop_to(stack: &mut Vec<Open>, at: usize, hidden: &mut usize, w: &mut Writer) {

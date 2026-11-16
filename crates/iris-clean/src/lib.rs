@@ -81,7 +81,26 @@ pub struct Clean {
     /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
     /// decoded body has a `METHOD:REQUEST` line.
     pub invitation: bool,
+    /// Each HTML link of the body whose text is not its target, in order
+    /// (the link check of spec 1 section 6.7). A version of the body that
+    /// the text does not use adds its links too: a mail client can show it.
+    pub links: Vec<Link>,
+    /// True if links went out: past [`LINK_BYTES`], or past the output
+    /// limit of an HTML part.
+    pub links_cut: bool,
 }
+
+/// One HTML link whose text is not its target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    /// The link text as the clean text shows it, trimmed. It can have lines.
+    pub text: String,
+    /// The `href` as the HTML gives it, with its entities decoded.
+    pub href: String,
+}
+
+/// The most bytes of link texts and hrefs in [`Clean::links`].
+pub const LINK_BYTES: usize = 1024 * 1024;
 
 /// One attachment: a name, a type and a size, and the text if there is one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +126,8 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: true,
             attachments: Vec::new(),
             invitation: false,
+            links: Vec::new(),
+            links_cut: false,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -116,10 +137,12 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: false,
             attachments: Vec::new(),
             invitation: false,
+            links: Vec::new(),
+            links_cut: false,
         };
     };
     let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
-    let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
+    let (subject, text, cut, files, links) = message(parsed.root(), 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
         attachment(f, &mut parts, &mut attach_left, &mut attachments);
@@ -130,6 +153,30 @@ pub fn clean(raw: &[u8]) -> Clean {
         cut,
         attachments,
         invitation,
+        links_cut: links.cut,
+        links: links.list,
+    }
+}
+
+/// The links of one message, inside [`LINK_BYTES`].
+#[derive(Default)]
+struct Links {
+    list: Vec<Link>,
+    bytes: usize,
+    cut: bool,
+}
+
+impl Links {
+    fn add(&mut self, found: Vec<(String, String)>) {
+        for (text, href) in found {
+            let size = text.len() + href.len();
+            if self.cut || self.bytes + size > LINK_BYTES {
+                self.cut = true;
+                return;
+            }
+            self.bytes += size;
+            self.list.push(Link { text, href });
+        }
     }
 }
 
@@ -261,7 +308,7 @@ fn message<'a>(
     m: MessageRef<'a>,
     depth: usize,
     parts: &mut usize,
-) -> (String, String, bool, Vec<File<'a>>) {
+) -> (String, String, bool, Vec<File<'a>>, Links) {
     let root = m.root_part();
     let subject = field(root, HeaderName::Subject).map_or(String::new(), |raw| {
         let parsed = HeaderForm::Text.parse(raw);
@@ -284,6 +331,7 @@ fn message<'a>(
         dropped: 0,
         files: Vec::new(),
         is_reply,
+        links: Links::default(),
     };
     w.entity(root, depth);
     *parts = w.parts;
@@ -291,7 +339,7 @@ fn message<'a>(
     if w.cut {
         text.push_str(CUT_MARK);
     }
-    (subject, text, w.cut, w.files)
+    (subject, text, w.cut, w.files, w.links)
 }
 
 /// True if a `text/calendar` part in the MIME tree of `part` is a request.
@@ -410,6 +458,8 @@ struct Walker<'a> {
     files: Vec<File<'a>>,
     /// True if the message is a reply. Quoted history then goes out.
     is_reply: bool,
+    /// The links of each HTML part that the walker reads.
+    links: Links,
 }
 
 impl<'a> Walker<'a> {
@@ -525,8 +575,11 @@ impl<'a> Walker<'a> {
         let text = mime::decode(&bytes, charset);
         drop(bytes);
         let text = if html {
-            let (md, full) = html::to_markdown(&text, self.is_reply);
+            let (md, full, links) = html::convert(&text, self.is_reply);
             self.cut |= full;
+            self.links.add(links);
+            // The links after the output limit are not in the list.
+            self.links.cut |= full;
             md
         } else {
             text
@@ -601,7 +654,9 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
             });
             return;
         };
-        let (subject, mut t, inner_cut, files) = message(parsed.root(), f.depth + 1, parts);
+        // shortcut: the links of an attached message do not count; count
+        // them if phishing comes as an attached message.
+        let (subject, mut t, inner_cut, files, _) = message(parsed.root(), f.depth + 1, parts);
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {

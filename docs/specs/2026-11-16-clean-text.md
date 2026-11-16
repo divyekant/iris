@@ -36,7 +36,8 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool }
+pub struct Link { pub text: String, pub href: String }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
 pub const TEXT_LIMIT: usize = 32_000;           // characters of `text`
@@ -187,9 +188,21 @@ not used makes no cut in either case.
   These go out with their content: `head`, `svg`, `math`.
 - Links: `[text](href)` for an `http`, `https` or `mailto` target. If the
   text is the target, only the text shows. If the text has more than one
-  line, the form is `text (<href>)`. In the target, a space, `(`, `)`, `<`
-  and `>` become percent codes (`%20`, `%28`, `%29`, `%3C`, `%3E`). Other
-  targets (for example `javascript:`) show the text only.
+  line, the form is `text (<href>)`. In the target, `(`, `)`, `<`, `>` and
+  each white space or control character become percent codes of their
+  UTF-8 bytes (`%28`, `%29`, `%3C`, `%3E`, `%20`, `%09`, `%C2%A0`), so the
+  target is one token. Other targets (for example `javascript:`) show the
+  text only.
+- `Clean.links` lists each link whose text is not empty and is not its
+  target (card R5-10, the hostile mark `link` of spec 1 section 6.7): the
+  text as the clean text shows it (trimmed, with its lines), and the href
+  as the HTML gives it (entities decoded, not percent-encoded). Each HTML
+  part that the walker reads adds its links, also a version of
+  `multipart/alternative` that the text does not use, because a mail client
+  can show it. A hidden link has no text, so it is not in the list. The
+  texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
+  true when links went out: past `LINK_BYTES`, or past the output limit of
+  an HTML part. The links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
