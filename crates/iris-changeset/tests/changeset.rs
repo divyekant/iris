@@ -1095,13 +1095,14 @@ fn label_takes_one_user_label() {
     s.write(|tx| {
         Ok(tx.execute(
             "INSERT INTO label(account_id, provider_id, name, kind)
-             VALUES (1, 'Label_9', 'Muted', 'system'), (1, 'Label_10', 'Épinglé', 'system')",
+             VALUES (1, 'Label_9', 'Muted', 'system'), (1, 'Label_10', 'Épinglé', 'system'),
+               (1, 'Label_11', 'Σ', 'system')",
             [],
         )?)
     })
     .unwrap();
     let cs = create(&s, &agent(), NOW).unwrap();
-    let cases: [(Verb, Value, bool); 18] = [
+    let cases: [(Verb, Value, bool); 20] = [
         (Verb::Label, json!({"label": "Finance"}), true),
         (Verb::Unlabel, json!({"label": "Finance"}), true),
         // A new label: the apply makes it (section 7.2).
@@ -1122,6 +1123,9 @@ fn label_takes_one_user_label() {
         // No regard to case, also outside ASCII.
         (Verb::Label, json!({"label": "épinglé"}), false),
         (Verb::Label, json!({"label": "ÉPINGLÉ"}), false),
+        // Case folding, not a lower case: σ, ς and Σ are one letter.
+        (Verb::Label, json!({"label": "ς"}), false),
+        (Verb::Unlabel, json!({"label": "σ"}), false),
     ];
     for (verb, a, _) in &cases {
         add_action(&s, cs, &agent(), *verb, &["t-1"], &args(a.clone()), None).unwrap();

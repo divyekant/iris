@@ -25,6 +25,7 @@ use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use unicase::UniCase;
 
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
@@ -620,16 +621,18 @@ fn label_name(
             ))
         }
     };
-    // Unicode lower case on both sides: `upper` and `lower` of SQLite change
-    // only ASCII letters. The store has a few system labels for each account.
-    let lower = name.to_lowercase();
-    let mut system =
-        SYSTEM_LABELS.iter().any(|l| l.to_lowercase() == lower) || lower.starts_with("category_");
+    // Unicode case folding on both sides (`unicase`): SQLite `upper` and
+    // `lower` change only ASCII letters, and a lower case does not equate
+    // each case pair (for example `Σ` and `ς`). The store has a few system
+    // labels for each account.
+    let folded = UniCase::new(name.as_str());
+    let mut system = SYSTEM_LABELS.iter().any(|l| UniCase::new(*l) == folded)
+        || UniCase::new(name.get(..9).unwrap_or("")) == UniCase::new("CATEGORY_");
     let mut st = c.prepare("SELECT name, provider_id FROM label WHERE kind = 'system'")?;
     let mut rows = st.query([])?;
     while let (false, Some(r)) = (system, rows.next()?) {
         let (n, id): (String, String) = (r.get(0)?, r.get(1)?);
-        system = n.to_lowercase() == lower || id.to_lowercase() == lower;
+        system = UniCase::new(n.as_str()) == folded || UniCase::new(id.as_str()) == folded;
     }
     Ok(if system {
         Err(format!("{name} is a system label: use its own verb"))
