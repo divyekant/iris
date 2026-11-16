@@ -1109,4 +1109,38 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn three_missing_content_files_are_each_fetched_and_saved() {
+        let fake = FakeGmail::start(Mailbox::new(1, 3)).unwrap();
+        let gmail = Gmail::new(iris_gmail::Config {
+            base_url: fake.base_url(),
+            ..iris_gmail::Config::default()
+        });
+        let dir = std::env::temp_dir().join(format!("iris-sync-missing3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", iris_synth::OWNER).unwrap();
+        // Three files that are not there: three new fetches, then one write.
+        let lost: Vec<NewMessage> = (0..3)
+            .map(|i| NewMessage {
+                provider_id: FakeGmail::id_of(i),
+                thread_provider_id: "t".into(),
+                content_sha256: Some(i.to_string().repeat(64)),
+                fetched_at: Some(1),
+                ..NewMessage::default()
+            })
+            .collect();
+        save(&store, &gmail, "token", account, lost).unwrap();
+        let fetched: i64 = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM message WHERE content_sha256 IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(fetched, 3);
+    }
 }
