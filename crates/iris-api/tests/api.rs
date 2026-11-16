@@ -732,6 +732,20 @@ async fn brief_follows_the_queries_of_section_8() {
         "UPDATE item SET duplicate_of = ?1 WHERE id = ?2",
         [late, dup],
     );
+    // A duplicate that is done is not part of the pair in You owe.
+    let dup_done = add_item(
+        &store,
+        "commitment",
+        "done",
+        1,
+        12,
+        owe(&person, Value::Null),
+    );
+    exec(
+        &store,
+        "UPDATE item SET duplicate_of = ?1 WHERE id = ?2",
+        [late, dup_done],
+    );
 
     let b = iris_api::brief(&store, NOW).unwrap();
     let b = serde_json::to_value(b).unwrap();
@@ -768,6 +782,7 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["not_understood"], 1);
     // Message 21 got the date 0 above: it is the oldest fetched message.
     assert_eq!(b["oldest_fetched"], "1970-01-01T00:00:00Z");
+    assert_eq!(b["proposal"], Value::Null);
 
     // The HTTP route gives the same shape.
     let (code, http) = get(&store, "/api/brief").await;

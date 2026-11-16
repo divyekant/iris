@@ -146,6 +146,13 @@ pub struct Section {
     pub duplicates: serde_json::Map<String, Value>,
 }
 
+/// The count of the proposed actions, in total and for each verb.
+#[derive(Debug, Serialize, PartialEq, Default)]
+pub struct Proposal {
+    pub count: i64,
+    pub verbs: serde_json::Map<String, Value>,
+}
+
 /// The first brief (specification 1, section 8).
 #[derive(Debug, Serialize, PartialEq, Default)]
 pub struct Brief {
@@ -164,6 +171,10 @@ pub struct Brief {
     /// The date of the oldest fetched message that is not gone: the brief
     /// covers the mail from this date (specification 1, section 4.2).
     pub oldest_fetched: Option<String>,
+    /// The triage proposal of specification 1, section 8: the mailbox
+    /// changes that observe mode would propose, with nothing applied.
+    /// `None` until observe mode (tracker item R1-16) gives the function.
+    pub proposal: Option<Proposal>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -475,9 +486,10 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
                 .query_map([], doc_of)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut duplicates = serde_json::Map::new();
-            let mut st = c.prepare_cached(
-                "SELECT id, form FROM item WHERE duplicate_of = ?1 AND status != 'gone' ORDER BY id",
-            )?;
+            // Only a duplicate that this section would show is part of the pair.
+            let mut st = c.prepare(&format!(
+                "SELECT id, form FROM item WHERE duplicate_of = ?1 AND {filter} ORDER BY id"
+            ))?;
             for doc in &items {
                 let Some(id) = doc["id"].as_str() else { continue };
                 let Some((_, row)) = parse_id(id) else { continue };
@@ -537,6 +549,9 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             hostile,
             not_understood,
             oldest_fetched,
+            // shortcut: no triage proposal until crates/iris-observe (R1-16)
+            // merges; then call it here.
+            proposal: None,
         })
     })?)
 }

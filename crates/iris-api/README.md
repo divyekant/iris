@@ -51,6 +51,7 @@ The text of a message is data. Show it as text, never as markup.
 | `strangers` | Open commitments whose counterparty or owner is a stranger, and active conversations with a stranger participant. Newest first. |
 | `hostile` | The count of hostile mail of the last 7 days. |
 | `not_understood` | The count of messages that the model failed 3 times. |
+| `proposal` | The triage proposal of specification 1, section 8: `{"count", "verbs": {"archive": 412}}`, with nothing applied. `null` until observe mode (tracker item R1-16) merges. |
 | `oldest_fetched` | The date of the oldest fetched message that is not gone, or `null`. While the first sync continues, the brief covers only the mail from this date (specification 1, section 4.2). |
 
 Each list field is `{"count", "items"}`. `count` is the full count. `items`
