@@ -317,7 +317,11 @@ pub fn apply(
             return run.stop(e);
         }
     }
-    finish(store, action, "applied")?;
+    // An action with no write call has no mark: the expiry and the mode
+    // apply until its end, in the transaction that closes it.
+    if let Some(o) = finish(store, action, "applied", !run.marked)? {
+        return Ok(o);
+    }
     Ok(Outcome::Applied(run.counts))
 }
 
@@ -443,7 +447,8 @@ impl Run<'_, '_> {
 }
 
 fn failed(store: &Store, action: i64, counts: Counts, error: &str) -> Result<Outcome> {
-    finish(store, action, "failed")?;
+    // Only a marked action fails: no gate.
+    finish(store, action, "failed", false)?;
     Ok(Outcome::Failed {
         counts,
         error: error.to_string(),
@@ -559,18 +564,28 @@ fn mirror(store: &Store, account: i64, messages: &[(i64, Vec<String>)]) {
 }
 
 /// Move an approved action to `applied` or `failed`. The decision that
-/// approved it stays (migration 9).
-fn finish(store: &Store, action: i64, state: &str) -> Result<()> {
-    let n = store.write(|tx| {
-        Ok(tx.execute(
+/// approved it stays (migration 9). With `gated`, the same transaction
+/// checks the expiry and the mode first, and gives their outcome.
+fn finish(store: &Store, action: i64, state: &str, gated: bool) -> Result<Option<Outcome>> {
+    let (gate_outcome, n) = store.write(|tx| {
+        if gated {
+            if let Some(o) = gate(tx, action)? {
+                return Ok((Some(o), 0));
+            }
+        }
+        let n = tx.execute(
             "UPDATE changeset_action SET state = ?2 WHERE id = ?1 AND state = 'approved'",
             params![action, state],
-        )?)
+        )?;
+        Ok((None, n))
     })?;
+    if gate_outcome.is_some() {
+        return Ok(gate_outcome);
+    }
     if n == 0 {
         return Err(Error::NotApproved(action));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// A decision of the engine on an approved action: `denied` or `in_review`.

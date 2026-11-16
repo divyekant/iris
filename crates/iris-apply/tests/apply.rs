@@ -462,6 +462,33 @@ fn the_mark_checks_the_mode_again() {
     assert_eq!(b.calls("messages"), 0);
 }
 
+/// An action with no write call: the mode changes to observe during the
+/// reads, and the action waits.
+#[test]
+fn an_action_with_no_write_checks_the_mode_at_its_end() {
+    let b = setup("late-mode-nowrite", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    for &m in &ms {
+        b.fake.modify_labels(&b.provider_id(m), &[], &["INBOX"]);
+    }
+    let a = b.approved("archive", &ms, PERSON);
+    b.fake.fail_next(&[0, 401]);
+    let r = b.apply_as(b.account, a, &mut || {
+        b.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO policy_version(text, sha256, confirmed_at)
+                     VALUES ('version = 0\nmode = \"observe\"\n', 'h5', 5)",
+                    [],
+                )?)
+            })
+            .unwrap();
+        Some(TOKEN.into())
+    });
+    assert_eq!(r.unwrap(), Outcome::Waiting);
+    assert_eq!(b.state(a).0, "approved");
+}
+
 /// A token of another mailbox changes nothing.
 #[test]
 fn the_token_must_be_of_the_account() {
