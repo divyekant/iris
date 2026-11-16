@@ -15,7 +15,7 @@ fn addresses_split_and_lowercase() {
         a,
         vec![
             ("ana@example.com".into(), Some("Lee, Ana".into())),
-            ("bob@example.org".into(), None),
+            ("bob@example.org".into(), Some("Bob, B".into())),
             ("c@x.example".into(), None),
         ]
     );
@@ -108,6 +108,14 @@ fn a_base64_calendar_request_is_found() {
     // "METHOD:REQUEST" in base64, over two lines.
     let raw = b"Content-Type: multipart/mixed; boundary=z\r\n\r\n--z\r\nContent-Type: text/calendar\r\nContent-Transfer-Encoding: base64\r\n\r\nTUVUSE9EOlJF\r\nUVVFU1Q=\r\n--z--\r\n";
     assert!(inv(raw));
+}
+
+#[test]
+fn a_folded_part_header_is_unfolded_like_the_top_header() {
+    let raw = b"Content-Type: multipart/mixed; boundary=z\r\n\r\n--z\r\nContent-Type:\r\n text/calendar;\r\n method=REQUEST\r\nContent-Transfer-Encoding:\r\n base64\r\n\r\nTUVUSE9EOlJFUVVFU1Q=\r\n--z--\r\n";
+    assert!(inv(raw));
+    let top = b"Content-Type: text/calendar\r\nContent-Transfer-Encoding:\r\n base64\r\n\r\nTUVUSE9EOlJFUVVFU1Q=\r\n";
+    assert!(inv(top));
 }
 
 #[test]

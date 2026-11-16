@@ -130,6 +130,12 @@ fn fields(raw: &[u8]) -> Vec<(String, String)> {
             out.push((n.trim().to_string(), v.trim().to_string()));
         }
     }
+    // A value can start on the next line (`Name:` then ` value`).
+    for (_, v) in &mut out {
+        if v.starts_with(' ') {
+            v.remove(0);
+        }
+    }
     out
 }
 
@@ -140,6 +146,11 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     iris_senders::head::addresses(v)
         .into_iter()
         .filter(|(a, _)| !a.contains(char::is_whitespace))
+        // `a@b.example (Ana Lee)`: the comment shows as the display name.
+        .map(|(a, n)| {
+            let n = n.or_else(|| comment_name(v, &a));
+            (a, n)
+        })
         .map(|(a, n)| {
             (
                 a,
@@ -148,6 +159,17 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
             )
         })
         .collect()
+}
+
+/// The comment right after a bare address in `v`, as in
+/// `ana@example.org (Ana Lee)`.
+fn comment_name(v: &str, addr: &str) -> Option<String> {
+    let low = v.to_ascii_lowercase();
+    let at = low.find(addr)? + addr.len();
+    let rest = v[at..].trim_start();
+    let inner = rest.strip_prefix('(')?;
+    let end = inner.find(')')?;
+    Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
 }
 
 /// Decode RFC 2047 encoded words of a display name with the decoder of
@@ -227,41 +249,21 @@ fn strip_comments(v: &str) -> String {
 
 /// True if the message has a `text/calendar` MIME entity with the method
 /// `REQUEST`: a `method=REQUEST` parameter of its `Content-Type`, or a
-/// `METHOD:REQUEST` line in its body (also a base64 body). Only the
-/// boundaries that a `Content-Type` header declares start a new entity, so
-/// calendar words in a plain-text body do not count.
+/// `METHOD:REQUEST` line in its decoded body (plain, base64 or
+/// quoted-printable). Only the boundaries that a `Content-Type` header
+/// declares start a new entity, so calendar words in a plain-text body do
+/// not count. Each header block is read whole (at most 256 KiB) and
+/// unfolded with [`fields`], the same as the top header block.
 fn invitation(raw: &[u8]) -> bool {
     let mut boundaries: Vec<Vec<u8>> = Vec::new();
-    let (mut in_head, mut cal) = (true, false);
-    // The Content-Type value of the header block that the loop reads now.
-    let mut ct: Option<Vec<u8>> = None;
-    // The entity has `Content-Transfer-Encoding: base64` or
-    // `quoted-printable`.
-    let (mut b64_head, mut b64) = (false, false);
-    let (mut qp_head, mut qp) = (false, false);
+    let mut in_head = true;
+    // The header block of the entity that the loop reads now.
+    let mut block: Vec<u8> = Vec::new();
+    // The body rule of the entity, from its header block.
+    let mut body = Enc::Other;
     // The encoded text of a calendar body (base64 or quoted-printable, with
     // the soft line breaks joined), at most CALENDAR_B64 bytes.
     let mut buf: Vec<u8> = Vec::new();
-    let end_header = |ct: &mut Option<Vec<u8>>, cal: &mut bool, b: &mut Vec<Vec<u8>>| -> bool {
-        let Some(v) = ct.take() else { return false };
-        let low = v.to_ascii_lowercase();
-        if let Some(bd) = param(&low, &v, b"boundary=") {
-            if b.len() < 50 {
-                b.push(bd);
-            }
-        }
-        *cal = contains(&low, b"text/calendar");
-        *cal && param(&low, &v, b"method=").is_some_and(|m| m.eq_ignore_ascii_case(b"request"))
-    };
-    let request = |buf: &[u8], qp: bool| {
-        let text = if qp {
-            quoted_printable(buf)
-        } else {
-            base64(buf)
-        };
-        text.split(|&c| c == b'\n')
-            .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
-    };
     for line in raw.split(|&c| c == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let is_boundary = line.starts_with(b"--")
@@ -270,62 +272,103 @@ fn invitation(raw: &[u8]) -> bool {
                 rest.starts_with(bd) && matches!(&rest[bd.len()..], b"" | b"--")
             });
         if is_boundary {
-            if end_header(&mut ct, &mut cal, &mut boundaries) || request(&buf, qp) {
+            if in_head && end_block(&block, &mut boundaries, &mut body) || request(&buf, body) {
                 return true;
             }
-            (in_head, cal, b64_head, b64) = (true, false, false, false);
-            (qp_head, qp) = (false, false);
+            (in_head, body) = (true, Enc::Other);
+            block.clear();
             buf.clear();
             continue;
         }
         if in_head {
             if line.is_empty() {
                 in_head = false;
-                if end_header(&mut ct, &mut cal, &mut boundaries) {
+                if end_block(&block, &mut boundaries, &mut body) {
                     return true;
                 }
-                b64 = cal && b64_head;
-                qp = cal && qp_head;
-            } else if line.starts_with(b" ") || line.starts_with(b"\t") {
-                // A folded value stays inside the header limit.
-                if let Some(v) = ct.as_mut().filter(|v| v.len() + line.len() <= HEAD_LIMIT) {
-                    v.extend_from_slice(line);
-                }
-            } else {
-                if end_header(&mut ct, &mut cal, &mut boundaries) {
-                    return true;
-                }
-                if line.len() > 13 && line[..13].eq_ignore_ascii_case(b"content-type:") {
-                    ct = Some(line[13..line.len().min(HEAD_LIMIT)].to_vec());
-                }
-                let cte = b"content-transfer-encoding:";
-                if line.len() > cte.len() && line[..cte.len()].eq_ignore_ascii_case(cte) {
-                    let v = line[cte.len()..].trim_ascii();
-                    b64_head = v.eq_ignore_ascii_case(b"base64");
-                    qp_head = v.eq_ignore_ascii_case(b"quoted-printable");
-                }
+            } else if block.len() < HEAD_LIMIT {
+                // A long line is cut, not dropped, so its field name stays.
+                let room = HEAD_LIMIT - block.len() - 1;
+                block.extend_from_slice(&line[..line.len().min(room)]);
+                block.push(b'\n');
             }
-        } else if b64 {
-            if buf.len() + line.len() <= CALENDAR_B64 {
+            continue;
+        }
+        match body {
+            Enc::Base64 if buf.len() + line.len() <= CALENDAR_B64 => {
                 buf.extend_from_slice(line.trim_ascii());
             }
-        } else if qp {
-            // A line that ends with `=` goes on in the next line.
-            let (part, soft) = match line.strip_suffix(b"=") {
-                Some(p) => (p, true),
-                None => (line, false),
-            };
-            if buf.len() + part.len() < CALENDAR_B64 {
-                buf.extend_from_slice(part);
-                if !soft {
-                    buf.push(b'\n');
+            Enc::Qp => {
+                // A line that ends with `=` goes on in the next line.
+                let (part, soft) = match line.strip_suffix(b"=") {
+                    Some(p) => (p, true),
+                    None => (line, false),
+                };
+                if buf.len() + part.len() < CALENDAR_B64 {
+                    buf.extend_from_slice(part);
+                    if !soft {
+                        buf.push(b'\n');
+                    }
                 }
             }
-        } else if cal && line.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST") {
-            return true;
+            Enc::Plain if line.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST") => {
+                return true;
+            }
+            _ => {}
         }
     }
-    request(&buf, qp)
+    (in_head && end_block(&block, &mut boundaries, &mut body)) || request(&buf, body)
+}
+
+/// How the scan reads the body of one entity.
+#[derive(Clone, Copy, PartialEq)]
+enum Enc {
+    /// Not a calendar: the scan skips the body.
+    Other,
+    /// A calendar with no transfer encoding.
+    Plain,
+    Base64,
+    Qp,
+}
+
+/// Read one header block: record its boundary, and set the body rule.
+/// True if its `Content-Type` has `method=REQUEST`.
+fn end_block(block: &[u8], boundaries: &mut Vec<Vec<u8>>, body: &mut Enc) -> bool {
+    let f = fields(block);
+    let get = |name: &str| {
+        f.iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map_or("", |(_, v)| v.as_str())
+    };
+    let ct = get("content-type").as_bytes();
+    let low = ct.to_ascii_lowercase();
+    if let Some(bd) = param(&low, ct, b"boundary=") {
+        if boundaries.len() < 50 {
+            boundaries.push(bd);
+        }
+    }
+    let cal = contains(&low, b"text/calendar");
+    *body = match get("content-transfer-encoding")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        _ if !cal => Enc::Other,
+        "base64" => Enc::Base64,
+        "quoted-printable" => Enc::Qp,
+        _ => Enc::Plain,
+    };
+    cal && param(&low, ct, b"method=").is_some_and(|m| m.eq_ignore_ascii_case(b"request"))
+}
+
+/// True if the decoded calendar text in `buf` has a `METHOD:REQUEST` line.
+fn request(buf: &[u8], body: Enc) -> bool {
+    let text = match body {
+        Enc::Base64 => base64(buf),
+        Enc::Qp => quoted_printable(buf),
+        _ => return false,
+    };
+    text.split(|&c| c == b'\n')
+        .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
 }
 
 /// The most encoded bytes of one calendar body that the scan decodes. The

@@ -107,6 +107,14 @@ fn an_encoded_known_name_is_compared_after_decoding() {
 }
 
 #[test]
+fn a_comment_after_a_bare_address_is_the_display_name() {
+    let raw = "From: ana@evil.example (Ana Lee)\nSubject: Hi\n\nPay this.\n";
+    let a = analysis(raw, &[], ANA, &[]);
+    assert_eq!(a.head.from_name.as_deref(), Some("Ana Lee"));
+    assert_eq!(a.marks, vec![Mark::Spoof]);
+}
+
+#[test]
 fn the_spam_label_is_a_mark() {
     let raw = "From: x@example.net\nSubject: Win\n\nWin now.\n";
     assert_eq!(run(raw, &["INBOX", "SPAM"], &[], &[]), vec![Mark::Spam]);
