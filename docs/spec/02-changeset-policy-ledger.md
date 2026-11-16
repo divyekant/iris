@@ -631,7 +631,7 @@ only the calls that Gmail did not make.
 | Input or event | Failure mode | Safe result |
 |---|---|---|
 | The mode is `observe` | An action applies without the mode `apply` | The action stays `approved` and waits. |
-| An action that a rule of an older policy version approved | A rule that the person removed applies the action | The engine sends the action to `in_review`, by `engine`. It does not evaluate the action again (section 5.4) yet. |
+| An action that a rule approved | A rule that the person removed applies the action, or two rule approvals of one author go past the `bulk` limit of 500 messages in one hour (section 5.4) | The bulk count of the last hour needs the ledger. So the engine sends each rule approval to `in_review`, by `engine`, and only a person approval applies. |
 | The hash of the rows does not agree with the hash of the approval | The person approved one action, and another applies | The engine denies the action, by `engine`. |
 | A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |
 | A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. |

@@ -350,36 +350,35 @@ fn observe_applies_nothing() {
     assert_eq!(b.fake.requests().len(), before);
 }
 
-/// An action that a rule of an older policy approved goes back to review.
+/// Before the ledger, no rule approval applies: two actions of 300
+/// messages that a rule approved would go past the bulk limit of 500
+/// (section 5.4). Each goes to review, and a person approval applies.
 #[test]
-fn a_rule_of_an_older_policy_sends_the_action_to_review() {
-    let b = setup("older", 40, Some(APPLY_POLICY));
+fn a_rule_approval_goes_to_review() {
+    let b = setup("rule", 40, Some(APPLY_POLICY));
     let ms = b.messages(IN_INBOX, 2);
-    let a = b.approved(
-        "archive",
-        &ms,
-        "decided_by = 'rule', rule = 1, policy = 1, decided_at = 2",
-    );
-    b.store
-        .write(|tx| {
-            Ok(tx.execute(
-                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h2', 3)",
-                [APPLY_POLICY],
-            )?)
-        })
-        .unwrap();
-    assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
-    assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
-    assert_eq!(b.calls("batchModify"), 0);
-
-    // The same rule under the active policy applies.
-    let ok = b.approved(
-        "archive",
-        &ms,
-        "decided_by = 'rule', rule = 1, policy = 2, decided_at = 2",
-    );
+    for policy in [1, 2] {
+        if policy == 2 {
+            b.store
+                .write(|tx| {
+                    Ok(tx.execute(
+                        "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h2', 3)",
+                        [APPLY_POLICY],
+                    )?)
+                })
+                .unwrap();
+        }
+        let a = b.approved(
+            "archive",
+            &ms,
+            &format!("decided_by = 'rule', rule = 1, policy = {policy}, decided_at = 2"),
+        );
+        assert!(matches!(b.apply(a), Ok(Outcome::Review(_))));
+        assert_eq!(b.state(a), ("in_review".into(), "engine".into()));
+    }
+    assert_eq!(b.calls("messages"), 0);
+    let ok = b.approved("archive", &ms, PERSON);
     applied(b.apply(ok));
-    assert_eq!(b.state(ok), ("applied".into(), "rule".into()));
 }
 
 /// The hash check, another account, a verb with no apply, and a state that

@@ -5,7 +5,7 @@
 //! The steps of [`apply`]:
 //!
 //! 1. Wait while the active policy has the mode `observe`. Send an action
-//!    that a rule of an older policy approved back to review. Deny an action
+//!    that a rule approved to review (no ledger yet for the bulk count). Deny an action
 //!    whose hash does not agree with its rows.
 //! 2. Read the labels of each message at Gmail (`format=minimal`), 1,000
 //!    messages at a time. Skip a gone message and a message that already
@@ -89,7 +89,8 @@ pub enum Outcome {
     Failed { counts: Counts, error: String },
     /// The state is `denied` by `engine`, with this reason.
     Denied(String),
-    /// The state is `in_review` by `engine`, with this reason.
+    /// The state is `in_review` by `engine`, with this reason: a rule
+    /// approved the action.
     Review(String),
     /// The mode is `observe`. The action stays `approved` and waits.
     Waiting,
@@ -158,27 +159,30 @@ pub fn apply(
     account: i64,
     action: i64,
 ) -> Result<Outcome> {
-    let head: Option<(String, Option<String>, String, Option<i64>)> = store.read(|c| {
+    let head: Option<(String, Option<String>, String)> = store.read(|c| {
         Ok(c.query_row(
-            "SELECT verb, hash, decided_by, policy FROM changeset_action
+            "SELECT verb, hash, decided_by FROM changeset_action
              WHERE id = ?1 AND state = 'approved'",
             [action],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?)
     })?;
-    let (verb, approved_hash, decided_by, policy) = head.ok_or(Error::NotApproved(action))?;
+    let (verb, approved_hash, decided_by) = head.ok_or(Error::NotApproved(action))?;
     let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
 
     let active = store.read(iris_policy::active)?;
     if active.policy.mode == Mode::Observe {
         return Ok(Outcome::Waiting);
     }
-    // shortcut: an action of a rule goes back to review after any policy
-    // change; evaluate it again (section 5.4, flag bulk too) with the
-    // ledger (issue #168).
-    if decided_by == "rule" && policy != active.version {
-        let reason = "The policy changed after a rule approved the action.";
+    // Section 5.4 evaluates a rule approval again before the apply, with
+    // the bulk count of the last hour from the ledger. With no ledger, the
+    // count is not known, so only a person approves an apply.
+    // shortcut: each rule approval goes to review; evaluate it again with
+    // the ledger (issue #168).
+    if decided_by == "rule" {
+        let reason = "A person must approve the action: Iris cannot check the rule again \
+                      before the ledger exists.";
         decide(store, action, "in_review", reason)?;
         return Ok(Outcome::Review(reason.into()));
     }
