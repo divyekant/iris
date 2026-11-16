@@ -1864,8 +1864,27 @@ fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversati
     // A party that becomes the owner names no sender row.
     let rid = format!("r-{row}");
     assert!(b.items()[0]["issuer"]["sender"].is_string());
-    let doc = correct(&b.store, &rid, "issuer.kind", json!("self"), NOW).unwrap();
-    assert!(doc["issuer"].get("sender").is_none(), "{}", doc["issuer"]);
+    // The kind alone: a self party with the address of another person.
+    assert!(correct(&b.store, &rid, "issuer.kind", json!("self"), NOW).is_err());
+    // The owner address, or a self party: only `{"kind": "self"}` stays.
+    let doc = correct(
+        &b.store,
+        &rid,
+        "issuer.address",
+        json!("Owner@Example.com"),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc["issuer"], json!({"kind": "self"}));
+    let doc = correct(
+        &b.store,
+        &rid,
+        "issuer",
+        json!({"kind": "self", "name": "Bo"}),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc["issuer"], json!({"kind": "self"}));
 
     // A conversation: the summary, yes; a field of the conversation rule, no.
     let v: i64 = b.col(

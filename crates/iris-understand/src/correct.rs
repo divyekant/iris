@@ -73,12 +73,15 @@ pub fn correct(
     let Some((_, item)) = iris_store::parse_id(id) else {
         return no_item();
     };
-    let row: Option<(String, String)> = tx
-        .query_row("SELECT form, doc FROM item WHERE id = ?1", [item], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let row: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT i.form, i.doc, a.address FROM item i JOIN account a ON a.id = i.account_id
+             WHERE i.id = ?1",
+            [item],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .optional()?;
-    let Some((form, doc)) = row else {
+    let Some((form, doc, me)) = row else {
         return no_item();
     };
     let Ok(mut doc) = serde_json::from_str::<Value>(&doc) else {
@@ -98,6 +101,14 @@ pub fn correct(
     }
     if !iris_talk::set_field(&mut doc, field, value.clone()) {
         return Ok(Err(format!("the field {field:?} does not fit the item")));
+    }
+    // The party rule of a model answer (section 7.4): the owner address
+    // makes a `self` party with no other field, and a `self` party with the
+    // address of another person is not valid.
+    if crate::prompt::parties(&mut doc, &[&me]).is_none() {
+        return Ok(Err(
+            "a party is not valid: a self party with the address of another person, or a party with no address".into(),
+        ));
     }
     doc["updated"] = iris_talk::rfc3339(now_ms).into();
     // The status that follows from the corrected document (section 6.8).

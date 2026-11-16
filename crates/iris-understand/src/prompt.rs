@@ -396,7 +396,7 @@ fn squash(s: &str) -> String {
 /// `p-` ID is added later, from the sender row.
 /// `None` if a party is neither the owner nor has an address: the store
 /// finds the sender row of a party only by its address.
-fn parties(item: &mut Value, me: &[&str]) -> Option<()> {
+pub(crate) fn parties(item: &mut Value, me: &[&str]) -> Option<()> {
     for key in ["owner", "counterparty", "issuer", "publisher"] {
         if let Some(p) = item.get_mut(key) {
             fix(p, me)?;
