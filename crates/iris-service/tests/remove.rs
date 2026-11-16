@@ -1,5 +1,6 @@
-//! A failed install leaves the service file as it was before. `remove` keeps
-//! the service file when the stop fails, so that a second remove can try again. A fake `systemctl` on PATH stands in for systemd.
+//! A failed install keeps the service file and returns the error. `remove`
+//! keeps the service file when the stop fails, so that a second remove can
+//! try again, and deletes it when the system has no systemctl. A fake `systemctl` on PATH stands in for systemd.
 //! This file has one test, because the test changes HOME and PATH.
 #![cfg(target_os = "linux")]
 
@@ -40,7 +41,8 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     );
     assert!(!home.join("calls").exists());
 
-    // A failed install leaves no new unit file, and keeps an old one as it was.
+    // A failed install returns the error and keeps the unit file, so that
+    // a second install or a remove can finish the work.
     let unit = home.join(".config/systemd/user/iris.service");
     fake(&bin, "echo 'Failed to connect to bus' >&2; exit 1");
     let err = iris_service::install(Path::new("/opt/iris")).unwrap_err();
@@ -48,12 +50,14 @@ fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
         err.to_string().contains("Failed to connect to bus"),
         "{err}"
     );
-    assert!(!unit.exists(), "a failed install must remove its new file");
-    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
-    std::fs::write(&unit, "old unit").unwrap();
-    assert!(iris_service::install(Path::new("/opt/iris")).is_err());
-    assert_eq!(std::fs::read_to_string(&unit).unwrap(), "old unit");
-    std::fs::remove_file(&unit).unwrap();
+    assert!(unit.exists());
+
+    // With no systemctl on the system, remove deletes the unit file.
+    std::fs::remove_file(bin.join("systemctl")).unwrap();
+    std::env::set_var("PATH", &bin);
+    assert_eq!(iris_service::remove().unwrap(), Some(unit.clone()));
+    assert!(!unit.exists());
+    std::env::set_var("PATH", format!("{}:{path}", bin.display()));
     std::fs::remove_file(home.join("calls")).unwrap();
 
     let file = iris_service::write(
