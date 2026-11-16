@@ -830,6 +830,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-job"
+version = "0.0.0"
+dependencies = [
+ "iris-spec",
+ "iris-store",
+ "iris-talk",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-model"
 version = "0.0.0"
 dependencies = [
