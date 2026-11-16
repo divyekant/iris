@@ -14,5 +14,6 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 clap = { version = "4", features = ["derive"] }
+iris-service = { version = "0.0.0", path = "../iris-service" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal"] }

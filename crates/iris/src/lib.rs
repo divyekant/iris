@@ -22,6 +22,39 @@ pub enum Command {
         #[arg(long, default_value = DEFAULT_ADDR)]
         addr: SocketAddr,
     },
+    /// Install or remove the background service that runs `iris serve`.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ServiceAction {
+    /// Install the service for this program and start it now.
+    Install,
+    /// Stop the service and remove its file.
+    Remove,
+}
+
+/// Run `iris service install` or `iris service remove`. Return the message
+/// for the user.
+pub fn service(action: ServiceAction) -> std::io::Result<String> {
+    match action {
+        ServiceAction::Install => {
+            // The service file holds this path, so give the real file, not a link.
+            let program = std::env::current_exe()?.canonicalize()?;
+            let file = iris_service::install(&program)?;
+            Ok(format!(
+                "iris: installed and started the service ({})",
+                file.display()
+            ))
+        }
+        ServiceAction::Remove => Ok(match iris_service::remove()? {
+            Some(file) => format!("iris: stopped the service and removed {}", file.display()),
+            None => "iris: no service is installed".to_string(),
+        }),
+    }
 }
 
 /// Return the version line that `iris --version` prints.
@@ -63,7 +96,20 @@ mod tests {
     #[test]
     fn cli_parses_serve_with_default_addr() {
         let cli = Cli::try_parse_from(["iris", "serve"]).unwrap();
-        let Command::Serve { addr } = cli.command;
+        let Command::Serve { addr } = cli.command else {
+            panic!("not serve");
+        };
         assert_eq!(addr.to_string(), DEFAULT_ADDR);
+    }
+
+    #[test]
+    fn cli_parses_service_install_and_remove() {
+        for (arg, install) in [("install", true), ("remove", false)] {
+            let cli = Cli::try_parse_from(["iris", "service", arg]).unwrap();
+            let Command::Service { action } = cli.command else {
+                panic!("not service");
+            };
+            assert_eq!(matches!(action, ServiceAction::Install), install);
+        }
     }
 }
