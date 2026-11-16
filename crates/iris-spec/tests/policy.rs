@@ -331,3 +331,27 @@ fn a_float_with_no_fraction_is_a_known_difference_of_the_schema() {
         assert!(iris_policy::parse(text).is_err(), "{text}");
     }
 }
+
+/// An editor loads `policy.schema.json` alone, with no registry of the other
+/// schemas. So the schema must have no `$ref` to another file, and must still
+/// give each verdict of the parser on the samples.
+#[test]
+fn the_policy_schema_works_alone() {
+    let schema: Value = iris_spec::read_json(&schema_dir().join("policy.schema.json"));
+    let alone = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .should_validate_formats(true)
+        .offline()
+        .build(&schema)
+        .expect("the policy schema loads with no other schema");
+    for (dir, valid) in [("examples", true), ("examples/invalid", false)] {
+        for (name, text) in samples(&schema_dir().join(dir)) {
+            assert_eq!(schema_accepts(&alone, &text), valid, "{name}");
+        }
+    }
+    assert!(!schema_accepts(
+        &alone,
+        "version = 0\nmode = \"apply\"\n[[rule]]\nid = 1\nname = \"x\"\neffect = \"hide\"\n\
+         when = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10T10:00:00Z\n"
+    ));
+}

@@ -99,7 +99,7 @@
           ]
         },
         "added": {
-          "$ref": "urn:iris:model:0:common#/$defs/date"
+          "$ref": "#/$defs/date"
         },
         "job": {
           "type": "string",
@@ -203,6 +203,11 @@
           "maximum": 4294967295
         }
       }
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
     }
-  }
+  },
+  "$comment": "This schema has no $ref to another file, so a TOML editor can load it alone."
 }
