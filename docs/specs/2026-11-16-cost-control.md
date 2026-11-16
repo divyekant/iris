@@ -149,6 +149,11 @@ The runner gives `store::understand` a model that wraps the real one
 (`Budgeted`). The wrapper reserves money before each call and settles after
 it, in its own writes:
 
+For a model with no price (`price_in` and `price_out` NULL), the wrapper
+reserves nothing and refuses nothing for the budget: it sends the call and
+records its tokens and `unknown_calls` in the run row. The steps below apply
+to a priced model only.
+
 1. Before the call, in one write: if `budget_micro_usd` is NULL (no
    approval) or less than the worst case of the call, refuse the call with
    `Error::Budget` (no request goes out). The write is one `UPDATE ... SET
@@ -403,6 +408,7 @@ more calls.
 | A new `SPAM` message after an older message that waits for the budget | Its hostile mark is missing | The thread rule does not hold `SPAM` mail or mail from a hostile sender. | Batch test. |
 | A sender rerun resets a message of a visited thread | The run ends with mail that it could reach still pending | One more pass, at most two calls of a message in one run. | Batch test. |
 | `--price-in -1`, `--budget 1e309`, or a cost that overflows | The budget grows, or a worst case wraps | Refused before any write; checked arithmetic refuses the call. | Command and unit tests. |
+| A local model with no price | Every call refused for the NULL budget | The wrapper skips the reservation for a model with no price. | Batch test with a local fake. |
 | A first reply with no usage and an answer that is not valid | The second try pays again before the run stops | The wrapper refuses each call after a call with unknown usage. The message stays pending, no try counts. | Batch test. |
 | The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
