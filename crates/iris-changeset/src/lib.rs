@@ -105,11 +105,12 @@ names!(
 );
 
 names!(
-    /// The verbs of release 2 (section 4).
+    /// The verbs of release 2 (section 4), and `draft` and `send` of
+    /// release 3 (`docs/specs/2026-11-16-send.md`).
     Verb {
         Archive = "archive", Inbox = "inbox", Label = "label", Unlabel = "unlabel",
         Read = "read", Unread = "unread", Trash = "trash", Untrash = "untrash", Close = "close",
-        Defer = "defer", Decline = "decline", Correct = "correct",
+        Defer = "defer", Decline = "decline", Correct = "correct", Draft = "draft", Send = "send",
     }
 );
 
@@ -312,8 +313,8 @@ pub fn add_action_in(
     Ok(n)
 }
 
-/// The targets as JSON: `{"threads": [...]}`, `{"messages": [...]}` or
-/// `{"items": [...]}`.
+/// The targets as JSON: `{"threads": [...]}`, `{"messages": [...]}`,
+/// `{"items": [...]}`, `{"drafts": [...]}` or `{"accounts": [...]}`.
 fn targets_json(targets: &[&str]) -> Result<String> {
     let mut group = None;
     let mut ids = Vec::with_capacity(targets.len());
@@ -326,6 +327,8 @@ fn targets_json(targets: &[&str]) -> Result<String> {
             Kind::Thread => "threads",
             Kind::Message => "messages",
             Kind::Sender => return Err(refused(format!("{t} is a sender, not a target"))),
+            Kind::Draft => "drafts",
+            Kind::Account => "accounts",
             _ => "items",
         };
         if group.is_some_and(|k| k != g) {
@@ -530,6 +533,9 @@ pub fn submit_in(
         if denial.is_none() && verb == Verb::Correct {
             denial = check_correct(c, id, &args, now_ms)?;
         }
+        if denial.is_none() && WRITE_VERBS.contains(&verb.as_str()) {
+            denial = check_write(c, id, verb, &args)?;
+        }
         if let Some(why) = denial {
             clear(c, id)?;
             denials.push((id, why));
@@ -549,7 +555,7 @@ pub fn submit_in(
              WHERE a.changeset_id = ?1
                AND (a.state IS NULL
                     OR a.state IN ('approved', 'held', 'applied'))
-               AND a.verb NOT IN ('close', 'defer', 'decline', 'correct')",
+               AND a.verb NOT IN ('close', 'defer', 'decline', 'correct', 'draft', 'send')",
         [changeset],
         |r| r.get(0),
     )?;
@@ -558,10 +564,11 @@ pub fn submit_in(
         last = n;
         let (count, hash) = hash(c, id)?;
         // The flags of a mailbox verb: a state verb changes no message, and
-        // has no target thread.
+        // has no target thread. A write verb (draft, send) changes no
+        // message either, but its thread can be a first contact.
         let valid = count > 0 && !STATE_VERBS.contains(&verb.as_str());
         let mut flags = Vec::new();
-        if valid && (count > BULK || total > BULK) {
+        if valid && !WRITE_VERBS.contains(&verb.as_str()) && (count > BULK || total > BULK) {
             flags.push("bulk");
         }
         if valid && first_contact(c, id)? {
@@ -672,6 +679,15 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
         },
         // The undo of a trash (R2-03, section 7.4) makes its own changeset.
         Verb::Untrash => Err("only the undo of a trash makes untrash".into()),
+        // The content checks need the target: see check_draft.
+        Verb::Draft => Ok(()),
+        Verb::Send => {
+            if args.is_empty() {
+                Ok(())
+            } else {
+                Err("send takes no arguments".into())
+            }
+        }
     })
 }
 
@@ -715,10 +731,15 @@ fn label_name(
 /// targets are items.
 const STATE_VERBS: [&str; 4] = ["close", "defer", "decline", "correct"];
 
+/// The verbs that write mail (release 3). A `draft` takes one account, one
+/// thread or one draft; a `send` takes one draft.
+const WRITE_VERBS: [&str; 2] = ["draft", "send"];
+
 /// Delete the rows that submit derives from the targets of an action.
 fn clear(c: &Connection, action: i64) -> Result<()> {
     c.execute("DELETE FROM action_message WHERE action_id = ?1", [action])?;
     c.execute("DELETE FROM action_item WHERE action_id = ?1", [action])?;
+    c.execute("DELETE FROM action_draft WHERE action_id = ?1", [action])?;
     Ok(())
 }
 
@@ -739,14 +760,23 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return bad();
     };
     let state = STATE_VERBS.contains(&verb.as_str());
-    match (state, group.as_str()) {
-        (false, "threads" | "messages") | (true, "items") => {}
-        (false, _) => return Ok(Some("a mailbox verb takes threads or messages".into())),
-        (true, _) => return Ok(Some(format!("{} takes items", verb.as_str()))),
+    let write = WRITE_VERBS.contains(&verb.as_str());
+    match (verb, group.as_str()) {
+        (Verb::Draft, "accounts" | "threads") | (Verb::Send, "drafts") => {}
+        // A change of a draft needs its undo first (spec 2, section 7.5).
+        (Verb::Draft, _) => return Ok(Some("draft takes one account or one thread".into())),
+        (Verb::Send, _) => return Ok(Some("send takes one draft".into())),
+        _ if state && group == "items" => {}
+        _ if !state && (group == "threads" || group == "messages") => {}
+        _ if state => return Ok(Some(format!("{} takes items", verb.as_str()))),
+        _ => return Ok(Some("a mailbox verb takes threads or messages".into())),
     }
     // Each verb needs one or more targets. A thread can still give no message.
     if ids.is_empty() {
         return Ok(Some("the action has no target".into()));
+    }
+    if write && ids.len() != 1 {
+        return Ok(Some(format!("{} takes one target", verb.as_str())));
     }
     let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
@@ -759,13 +789,19 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         }
         let found: bool = match (kind, group.as_str()) {
             (Kind::Thread, "threads") => {
+                // A reply resolves to one message, its parent (send spec,
+                // section 3): the newest one with no DRAFT label.
                 c.execute(
                     "INSERT OR IGNORE INTO action_message(action_id, message_id)
                      SELECT ?1, m.id FROM message m WHERE m.thread_id = ?2 AND m.gone_at IS NULL
                        AND NOT EXISTS (SELECT 1 FROM message_label ml
                          JOIN label l ON l.id = ml.label_id
-                         WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))",
-                    params![action, row],
+                         WHERE ml.message_id = m.id
+                           AND (l.provider_id IN ('SPAM', 'TRASH')
+                                OR (?3 AND l.provider_id = 'DRAFT')))
+                     ORDER BY m.internal_date DESC, m.id DESC
+                     LIMIT CASE WHEN ?3 THEN 1 ELSE -1 END",
+                    params![action, row, verb == Verb::Draft],
                 )?;
                 c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
@@ -786,7 +822,29 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                         |r| r.get(0),
                     )?
             }
-            (Kind::Thread | Kind::Message | Kind::Sender, _) => return bad(),
+            (Kind::Account, "accounts") => c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM account WHERE id = ?1)",
+                [row],
+                |r| r.get(0),
+            )?,
+            (Kind::Draft, "drafts") => {
+                let found = c.execute(
+                    "INSERT INTO action_draft(action_id, draft_id)
+                     SELECT ?1, id FROM draft WHERE id = ?2",
+                    params![action, row],
+                )? == 1;
+                // The thread of a reply, for the hostile check and the flags.
+                c.execute(
+                    "INSERT OR IGNORE INTO action_message(action_id, message_id)
+                     SELECT ?1, m.id FROM draft d JOIN message m ON m.thread_id = d.thread_id
+                     WHERE d.id = ?2 AND m.gone_at IS NULL",
+                    params![action, row],
+                )?;
+                found
+            }
+            (Kind::Thread | Kind::Message | Kind::Sender | Kind::Draft | Kind::Account, _) => {
+                return bad()
+            }
             (_, "items") => {
                 if verb != Verb::Correct && kind != Kind::Commitment {
                     return Ok(Some(format!("{} takes only commitments", verb.as_str())));
@@ -821,7 +879,7 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         [action],
         |r| r.get(0),
     )?;
-    if none && !state {
+    if none && !state && !write {
         return Ok(Some("the targets have no message to change".into()));
     }
     // One action changes one mailbox: the apply and the undo use one account.
@@ -831,7 +889,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
            JOIN message m ON m.id = am.message_id WHERE am.action_id = ?1
            UNION ALL
            SELECT i.account_id FROM action_item ai
-           JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1)",
+           JOIN item i ON i.id = ai.item_id WHERE ai.action_id = ?1
+           UNION ALL
+           SELECT d.account_id FROM action_draft ad
+           JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = ?1)",
         [action],
         |r| r.get(0),
     )?;
@@ -839,6 +900,137 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return Ok(Some("the targets are in two or more accounts".into()));
     }
     Ok(None)
+}
+
+/// The checks of a write verb (`docs/specs/2026-11-16-send.md`, sections 4
+/// and 5), after resolve. Gives the reason of the denial, or `None`.
+fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Option<String>> {
+    if hostile(c, action)? {
+        return Ok(Some(format!(
+            "the thread has hostile mail: only a person can {} in it",
+            verb.as_str()
+        )));
+    }
+    if verb == Verb::Send {
+        let draft: i64 = c.query_row(
+            "SELECT draft_id FROM action_draft WHERE action_id = ?1",
+            [action],
+            |r| r.get(0),
+        )?;
+        return draft_busy(c, action, draft);
+    }
+    let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
+        return Ok(Some(
+            "draft takes {\"to\": [...], \"cc\": [...], \"subject\": \"...\", \"body\": \"...\"}"
+                .into(),
+        ));
+    };
+    let reply: bool = c.query_row(
+        "SELECT json_type(targets, '$.threads') IS NOT NULL FROM changeset_action WHERE id = ?1",
+        [action],
+        |r| r.get(0),
+    )?;
+    let content = if reply {
+        if !content.subject.is_empty() {
+            return Ok(Some("a reply takes no subject: Iris sets it".into()));
+        }
+        // The apply reads the Message-ID of the parent at Gmail: the mirror
+        // can lack it before the understanding of the message.
+        match parent(c, action)? {
+            None => return Ok(Some("the thread has no message to reply to".into())),
+            Some(p) => iris_compose::Content {
+                subject: iris_compose::reply_subject(&p.subject),
+                ..content
+            },
+        }
+    } else {
+        content
+    };
+    Ok(content.check().err())
+}
+
+/// Spec 2, section 6.5: an author other than the person writes no mail
+/// into a thread with hostile mail. True if the action is such a write:
+/// each message of the threads of its resolved messages counts, not only
+/// the resolved ones. The apply checks it again.
+pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT cs.author_kind <> 'person' AND EXISTS (
+           SELECT 1 FROM message m
+           LEFT JOIN header h ON h.message_id = m.id
+           LEFT JOIN sender p ON p.address = h.from_addr
+           WHERE m.thread_id IN (SELECT t.thread_id FROM action_message am
+                                 JOIN message t ON t.id = am.message_id WHERE am.action_id = a.id)
+             AND (m.hostile IS NOT NULL OR p.kind = 'hostile'))
+         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+        [action],
+        |r| r.get(0),
+    )?)
+}
+
+/// A draft that has a send which can go out, or that went out, takes no
+/// other send: a `ledger_send` row, a sent draft, a draft
+/// in a form that Iris does not write (`foreign_at`), an
+/// `approved` or `held` send, an open send of another changeset, or an
+/// earlier send of the same revision. A `proposed` or `in_review` send of
+/// an older revision of the same changeset is replaced by this submit.
+fn draft_busy(c: &Connection, action: i64, draft: i64) -> Result<Option<String>> {
+    let busy: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_send WHERE draft_id = ?2)
+             OR EXISTS (SELECT 1 FROM draft WHERE id = ?2
+                        AND (sent_at IS NOT NULL OR foreign_at IS NOT NULL))
+             OR EXISTS (
+               SELECT 1 FROM action_draft o JOIN changeset_action b ON b.id = o.action_id
+               JOIN changeset_action a ON a.id = ?1
+               WHERE o.draft_id = ?2 AND b.id <> a.id AND b.verb = 'send'
+                 AND (b.state IN ('approved', 'held')
+                      OR (b.state IN ('proposed', 'in_review') AND b.changeset_id <> a.changeset_id)
+                      OR (b.state IS NULL AND b.changeset_id = a.changeset_id
+                          AND b.revision = a.revision)))",
+        params![action, draft],
+        |r| r.get(0),
+    )?;
+    Ok(busy.then(|| {
+        format!(
+            "{} was sent, has a send that can go out, or has a form that Iris does not write",
+            format_id(Kind::Draft, draft)
+        )
+    }))
+}
+
+/// The parent of a reply (spec section 3): the one message that submit
+/// resolved (`action_message`, in the action hash). A message that comes
+/// into the thread after the submit is never the parent.
+pub struct Parent {
+    pub message: i64,
+    /// The message is gone now: the apply denies the reply.
+    pub gone: bool,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub subject: String,
+}
+
+/// The parent of the reply `action`, or `None` if submit resolved no
+/// message.
+pub fn parent(c: &Connection, action: i64) -> Result<Option<Parent>> {
+    Ok(c.query_row(
+        "SELECT m.id, m.gone_at IS NOT NULL, nullif(trim(h.message_id_hdr), ''), h.in_reply_to,
+                coalesce(h.subject, '')
+             FROM action_message am JOIN message m ON m.id = am.message_id
+             LEFT JOIN header h ON h.message_id = m.id
+             WHERE am.action_id = ?1",
+        [action],
+        |r| {
+            Ok(Parent {
+                message: r.get(0)?,
+                gone: r.get(1)?,
+                message_id: r.get(2)?,
+                in_reply_to: r.get(3)?,
+                subject: r.get(4)?,
+            })
+        },
+    )
+    .optional()?)
 }
 
 /// `correct` (section 4): the rules of a correction (`iris_understand::correct`)
@@ -913,6 +1105,20 @@ pub fn hash(c: &Connection, action: i64) -> Result<(i64, String)> {
         h.update(format_id(Kind::Message, id).as_bytes());
         h.update(b",");
         count += 1;
+    }
+    // A draft target (release 3): the approval binds to the content of the
+    // draft (docs/specs/2026-11-16-send.md, section 5).
+    let draft: Option<String> = c
+        .query_row(
+            "SELECT d.hash FROM action_draft a JOIN draft d ON d.id = a.draft_id
+             WHERE a.action_id = ?1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(d) = draft {
+        h.update(b"draft:");
+        h.update(d.as_bytes());
     }
     let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok((count, hex))
