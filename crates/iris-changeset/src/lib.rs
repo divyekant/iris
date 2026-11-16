@@ -641,8 +641,9 @@ fn label_name(
     // Unicode case folding on both sides (`unicase`): SQLite `upper` and
     // `lower` change only ASCII letters, and a lower case does not equate
     // each case pair (for example `Σ` and `ς`). The store has a few system
-    // labels for each account.
-    let folded = UniCase::new(name.trim());
+    // labels for each account. The whole name is compared: " INBOX" is a
+    // user label, not `INBOX` (the schema permits spaces at the ends).
+    let folded = UniCase::new(name.as_str());
     let mut system = SYSTEM_LABELS.iter().any(|l| UniCase::new(*l) == folded)
         || UniCase::new(name.get(..9).unwrap_or("")) == UniCase::new("CATEGORY_");
     let mut st = c.prepare("SELECT name, provider_id FROM label WHERE kind = 'system'")?;
@@ -690,6 +691,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         (false, "threads" | "messages") | (true, "items") => {}
         (false, _) => return Ok(Some("a mailbox verb takes threads or messages".into())),
         (true, _) => return Ok(Some(format!("{} takes items", verb.as_str()))),
+    }
+    // Each verb needs one or more targets. A thread can still give no message.
+    if ids.is_empty() {
+        return Ok(Some("the action has no target".into()));
     }
     let mut seen = HashSet::with_capacity(ids.len());
     for id in ids {
@@ -757,8 +762,8 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
             return Ok(Some(format!("{id} is not in the mirror")));
         }
     }
-    // No target, or a thread with each message gone or in SPAM or TRASH. An
-    // item can have no origin message.
+    // A thread with each message gone or in SPAM or TRASH. An item can have
+    // no origin message.
     let none: bool = c.query_row(
         "SELECT NOT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)",
         [action],
@@ -1169,5 +1174,57 @@ mod tests {
             Err(Error::NotFound)
         ));
         assert!(matches!(finish(Ok(()), Some(Ok(1))), Ok(1)));
+    }
+
+    /// Property test of `is_date` against a second calendar: each year of
+    /// 0000 to 9999, each month 00 to 13 and each day 00 to 32. A day is
+    /// valid when it is before the first day of the next month
+    /// (`days_from_civil` of iris-understand).
+    #[test]
+    fn is_date_agrees_with_the_calendar() {
+        use iris_understand::time::days_from_civil as day;
+        for y in 0..=9999i64 {
+            for m in 0..=13i64 {
+                let len = if (1..=12).contains(&m) {
+                    day(y + m / 12, m % 12 + 1, 1) - day(y, m, 1)
+                } else {
+                    0
+                };
+                for d in 0..=32i64 {
+                    let text = format!("{y:04}-{m:02}-{d:02}");
+                    assert_eq!(is_date(&text), (1..=len).contains(&d), "{text}");
+                }
+            }
+        }
+    }
+
+    /// Fuzz test of `is_date` with random strings near the date form: it
+    /// never panics, and it accepts only the ten-byte form that the
+    /// calendar test checks.
+    #[test]
+    fn is_date_takes_no_other_text() {
+        let parts = [
+            "0", "1", "2", "9", "-", "/", " ", "+", "x", "\u{663}", "２", "é", "29", "02", "2024-",
+        ];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        for _ in 0..200_000 {
+            let text: String = (0..next(12))
+                .map(|_| parts[next(parts.len() as u64) as usize])
+                .collect();
+            if is_date(&text) {
+                let b = text.as_bytes();
+                assert!(b.len() == 10 && b[4] == b'-' && b[7] == b'-', "{text:?}");
+                assert!(
+                    text.chars().all(|c| c == '-' || c.is_ascii_digit()),
+                    "{text:?}"
+                );
+            }
+        }
     }
 }

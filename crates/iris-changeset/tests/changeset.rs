@@ -532,8 +532,9 @@ fn first_contact_flag_for_a_stranger_thread() {
 }
 
 /// Fuzz test of the target rows that the product does not control: random
-/// JSON shapes and IDs, written as another writer would. Submit never
-/// panics, and an action is `proposed` only with one or more messages.
+/// verbs, JSON shapes, IDs and arguments, written as another writer would.
+/// Submit never panics. A mailbox action is `proposed` only with one or
+/// more messages, a state action only with items of its kind.
 #[test]
 fn random_target_rows() {
     let dir = TempDir::new("fuzz");
@@ -549,8 +550,9 @@ fn random_target_rows() {
     let ids = [
         "t-1", "t-2", "t-3", "t-9", "m-1", "m-3", "m-5", "c-1", "r-2", "p-1", "x", "m-0", "1",
     ];
-    let mut proposed = 0;
-    for round in 0..200 {
+    let verbs = ["archive", "close", "decline", "defer", "correct"];
+    let (mut proposed, mut state) = (0, 0);
+    for round in 0..400 {
         let cs = create(&s, &agent(), NOW).unwrap();
         s.write(|tx| {
             for n in 1..=8 {
@@ -570,6 +572,11 @@ fn random_target_rows() {
                     targets.insert(keys[next(keys.len() as u64) as usize].into(), v);
                 }
                 let args = [
+                    "{\"reason\":\"Done.\"}",
+                    "{\"date\":\"2028-02-29\"}",
+                    "{\"date\":\"2027-02-29\"}",
+                    "{\"field\":\"due.date\",\"value\":\"2026-12-01\"}",
+                    "{\"field\":\"fields.order\",\"value\":\"EB-1\"}",
                     "{}",
                     " { } ",
                     "[]",
@@ -578,11 +585,16 @@ fn random_target_rows() {
                     "\"x\"",
                     "0",
                     "{\"\":{}}",
-                ][next(16).saturating_sub(8) as usize];
+                ];
+                let v = next(verbs.len() as u64) as usize;
+                let verb = verbs[v];
+                // Half the rows get the valid shape of the verb, the rest any shape.
+                let fit = [5, 0, 0, 1, 3 + next(2) as usize][v];
+                let args = args[if next(2) == 0 { fit } else { next(13) as usize }];
                 tx.execute(
                     "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                     VALUES (?1, 1, ?2, 'archive', ?3, ?4)",
-                    rusqlite::params![cs, n, Value::Object(targets).to_string(), args],
+                     VALUES (?1, 1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![cs, n, verb, Value::Object(targets).to_string(), args],
                 )?;
             }
             Ok(())
@@ -609,10 +621,23 @@ fn random_target_rows() {
         for a in &all {
             let resolved = a["resolved"]["messages"].as_array().unwrap();
             match a["decision"]["state"].as_str().unwrap() {
-                "proposed" => {
+                "proposed" if a["verb"] == "archive" => {
                     assert!(!resolved.is_empty(), "round {round}: {a}");
                     assert_eq!(a["args"], json!({}), "round {round}: {a}");
                     proposed += 1;
+                }
+                "proposed" => {
+                    // The fixture has the commitment c-1 and the record r-2.
+                    let kinds: &[&str] = match a["verb"].as_str().unwrap() {
+                        "correct" => &["c-1", "r-2"],
+                        _ => &["c-1"],
+                    };
+                    let items = a["targets"]["items"].as_array().unwrap();
+                    assert!(!items.is_empty(), "round {round}: {a}");
+                    for i in items {
+                        assert!(kinds.contains(&i.as_str().unwrap()), "round {round}: {a}");
+                    }
+                    state += 1;
                 }
                 "denied" => assert!(resolved.is_empty(), "round {round}: {a}"),
                 other => panic!("round {round}: {other}"),
@@ -620,6 +645,7 @@ fn random_target_rows() {
         }
     }
     assert!(proposed > 0, "the test reaches the proposed path");
+    assert!(state > 0, "the test reaches a proposed state action");
 }
 
 /// Submit gives the messages from the targets only: a row of another
@@ -1113,7 +1139,7 @@ fn label_takes_one_user_label() {
     })
     .unwrap();
     let cs = create(&s, &agent(), NOW).unwrap();
-    let cases: [(Verb, Value, bool); 21] = [
+    let cases: [(Verb, Value, bool); 24] = [
         (Verb::Label, json!({"label": "Finance"}), true),
         (Verb::Unlabel, json!({"label": "Finance"}), true),
         // A new label: the apply makes it (section 7.2).
@@ -1128,6 +1154,10 @@ fn label_takes_one_user_label() {
         // A name with a space at an end is a user label too (#204).
         (Verb::Label, json!({"label": " Finance"}), true),
         (Verb::Label, json!({"label": " "}), false),
+        // The whole name is compared: a spaced name is not the system label.
+        (Verb::Label, json!({"label": " INBOX"}), true),
+        (Verb::Label, json!({"label": "Muted "}), true),
+        (Verb::Unlabel, json!({"label": " Σ"}), true),
         (Verb::Label, json!({"label": 7}), false),
         (Verb::Label, json!({"label": "Finance", "x": 1}), false),
         (Verb::Label, json!({"name": "Finance"}), false),
