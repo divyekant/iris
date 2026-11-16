@@ -1,5 +1,14 @@
 //! The Iris engine and the `iris` command.
 
+/// Write one line to stderr. A failed write (for example a closed pipe under
+/// a service manager) is ignored: `eprintln!` panics, and that stops the engine.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod engine;
 pub mod verbs;
 
@@ -192,7 +201,7 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         // Report each account, so a success means that each mailbox ran.
         if state.as_deref() == Some(engine::STATE_NEEDS_SIGN_IN) {
             failed = true;
-            eprintln!("iris: account {account}: {}", engine::Error::NeedsSignIn);
+            say!("iris: account {account}: {}", engine::Error::NeedsSignIn);
             continue;
         }
         let mut worker = engine::Worker::new(
@@ -234,7 +243,7 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
             Ok(text) => println!("account {account}: {text}"),
             Err(e) => {
                 failed = true;
-                eprintln!("iris: account {account}: {e}");
+                say!("iris: account {account}: {e}");
             }
         }
     }
@@ -258,12 +267,12 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
     // before a token exists.
     let gmail = gmail()?;
     let sign_in = client.sign_in().map_err(|e| e.to_string())?;
-    eprintln!(
+    say!(
         "iris: open this address in a browser and sign in:\n{}",
         sign_in.url()
     );
     let tokens = if paste {
-        eprintln!("iris: then paste the address of the browser here:");
+        say!("iris: then paste the address of the browser here:");
         let mut line = String::new();
         std::io::stdin()
             .lock()
@@ -278,7 +287,7 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
         engine::save_sign_in(store, &gmail, &json, &tokens).map_err(|e| e.to_string())?;
     println!("iris: added {address}");
     if tokens.refresh_expires_in.is_some() {
-        eprintln!(
+        say!(
             "iris: caution: the OAuth client is in the \"Testing\" status, so the sign-in \
              ends after 7 days. Publish the app to \"In production\"."
         );
@@ -369,10 +378,10 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         let local = listener.local_addr()?;
         // The API checks the Host against the bound address.
         let auth = Arc::new(iris_api::Auth::new(local)?);
-        eprintln!("iris: serving on http://{local}");
+        say!("iris: serving on http://{local}");
         // The one-time code of the API sign-in (specification 2, section 8.6).
         if let Some(url) = auth.sign_in_url() {
-            eprintln!("iris: sign-in address of the local API: {url}");
+            say!("iris: sign-in address of the local API: {url}");
         }
         axum::serve(listener, app(api_store, auth))
             .with_graceful_shutdown(async {

@@ -353,6 +353,23 @@ pub(crate) fn render(seed: u64, m: &Meta) -> Vec<u8> {
             service.1
         ));
     }
+    if m.sender == Sender::KnownService && matches!(m.form, Form::Signal | Form::Record) {
+        headers.push("Auto-Submitted: auto-generated".to_string());
+    }
+    if m.sender != Sender::Owner {
+        // Gmail adds this header on receipt (authserv-id mx.google.com). A
+        // hostile sender fails DMARC; each other sender passes.
+        let domain = &from_addr[from_addr.find('@').unwrap() + 1..];
+        headers.push(if hostile {
+            format!(
+                "Authentication-Results: mx.google.com;\r\n       spf=softfail smtp.mailfrom={from_addr};\r\n       dmarc=fail (p=NONE) header.from={domain}"
+            )
+        } else {
+            format!(
+                "Authentication-Results: mx.google.com;\r\n       dkim=pass header.i=@{domain} header.s=s1;\r\n       spf=pass (google.com: domain of {from_addr} designates 192.0.2.1 as permitted sender) smtp.mailfrom={from_addr};\r\n       dmarc=pass (p=NONE) header.from={domain}"
+            )
+        });
+    }
     headers.push("MIME-Version: 1.0".to_string());
 
     let text_part = if odd && odd_kind == 1 {

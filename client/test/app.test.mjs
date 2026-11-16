@@ -1,17 +1,30 @@
-// Render App.svelte on the server and check that the page shows the Iris name.
+// The app shell shows the Iris name and the navigation to each view.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { compile } from "svelte/compiler";
-import { render } from "svelte/server";
+import { render } from "./render.mjs";
 
-test("the app shows the Iris heading", async () => {
-  const source = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8");
-  const { js } = compile(source, { generate: "server", filename: "App.svelte" });
-  // Write inside client/, so that the import of `svelte` resolves to node_modules.
-  const out = new URL("../.test-build/App.server.js", import.meta.url);
-  mkdirSync(new URL(".", out), { recursive: true });
-  writeFileSync(out, js.code);
-  const { default: App } = await import(out.href);
-  assert.match(render(App).body, /<h1[^>]*>Iris<\/h1>/);
+test("the app shows the Iris name and the views", async () => {
+  const html = await render("/src/App.svelte");
+  assert.match(html, /<a class="name[^"]*" href="#\/brief">[\s\S]*?Iris\s*<\/a>/);
+  for (const view of ["Brief", "Commitments", "Conversations", "Records", "Feed", "Signals", "Measures"]) {
+    assert.match(html, new RegExp(`>${view}</a>`));
+  }
+});
+
+test("the app shows the access problem above each view", async () => {
+  const { load } = await import("./render.mjs");
+  const { access } = await load("/src/access.svelte.ts");
+  // The views start API calls while they render. Keep them pending, so they do not change the state.
+  const saved = globalThis.fetch;
+  globalThis.fetch = () => new Promise(() => {});
+  access.problem = "Open the sign-in address that iris serve printed.";
+  try {
+    const html = await render("/src/App.svelte");
+    assert.match(html, /<p[^>]*class="problem[^"]*"[^>]*role="alert"[^>]*>Open the sign-in address that iris serve printed\.<\/p>|<p[^>]*role="alert"[^>]*class="problem[^"]*"[^>]*>Open the sign-in address/);
+    access.problem = "";
+    assert.doesNotMatch(await render("/src/App.svelte"), /class="problem/);
+  } finally {
+    globalThis.fetch = saved;
+    access.problem = "";
+  }
 });

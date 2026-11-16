@@ -38,6 +38,9 @@ TREE_TRAILER = "Local-CI-Tree: "
 # One line per area in the proof body: `<area> <fingerprint> ran` or
 # `<area> <fingerprint> reused <sha of the proof that ran it>`.
 AREA_TRAILER = "Local-CI-Area: "
+# The commit that got the pre-review (scripts/review/review.py --pre).
+PRE_REVIEW_TRAILER = "Local-CI-Pre-Review: "
+PRE_REVIEW_LINES = 300
 # A change to one of these files selects every area.
 DEFAULT_ALWAYS = (CONFIG, "scripts/local-ci/**")
 PROTECTED = ("main", "master", "develop")
@@ -262,6 +265,32 @@ def proof_problem(head: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def pre_review(root: Path, config: Dict[str, Any], merge_base: str) -> Optional[str]:
+    """The reviewed commit of the pre-review of this branch, or None when the branch is small
+    and needs none. A large branch with no pre-review is refused: the reviewer of the PR
+    must not be the first reader of the code."""
+    limit = int((config.get("review") or {}).get("pre_review_lines", PRE_REVIEW_LINES))
+    # shortcut: lockfile lines count too, exclude them if a dependency bump is refused too often.
+    added = sum(int(row.split()[0]) for row in git(root, "diff", "--numstat", merge_base, "HEAD").splitlines()
+                if row.split()[0].isdigit())
+    if added <= limit:
+        return None
+    # An earlier proof commit of the branch keeps the record for a new checkout.
+    earlier = re.search("^" + PRE_REVIEW_TRAILER + r"([0-9a-f]{40})$",
+                        git(root, "log", "--format=%B", f"{merge_base}..HEAD"), re.MULTILINE)
+    if earlier:
+        return earlier.group(1)
+    try:
+        sha = str(json.loads((root / ".local-ci" / "pre-review.json").read_text(encoding="utf-8"))["head"])
+    except (OSError, ValueError, KeyError, TypeError):
+        sha = ""
+    on_branch = re.fullmatch(r"[0-9a-f]{40}", sha) and sha in git(root, "rev-list", f"{merge_base}..HEAD").split()
+    if not on_branch:
+        raise Refusal(f"the branch adds {added} lines (more than {limit}) and has no pre-review; run "
+                      "`python3 scripts/review/review.py --pre`, fix the findings, then run local CI again")
+    return sha
+
+
 def recorded_passes(root: Path, base: str) -> Dict[str, str]:
     """Fingerprints that passed on this branch since the merge base, mapped to the proof
     commit that ran them."""
@@ -439,6 +468,7 @@ def run(root: Path, prove: bool, every: bool) -> int:
             return 0
         git(root, "fetch", "-q", "origin", base)
         merge_base, files = changed_files(root, f"origin/{base}")
+        reviewed = pre_review(root, config, merge_base) if prove else None
         names = list(config["areas"]) if every else select_areas(config, files)
         print(f"local-ci: {head['sha'][:12]} changes {len(files)} files; areas: {', '.join(names) or 'none'}",
               flush=True)
@@ -458,7 +488,8 @@ def run(root: Path, prove: bool, every: bool) -> int:
         if not prove:
             return 0
         lines = [f"{n} {prints[n]} reused {reused[n]}" if n in reused else f"{n} {prints[n]} ran" for n in names]
-        body = "\n".join([TREE_TRAILER + head["tree"], *(AREA_TRAILER + line for line in lines)])
+        body = "\n".join([TREE_TRAILER + head["tree"], *(AREA_TRAILER + line for line in lines),
+                          *([PRE_REVIEW_TRAILER + reviewed] if reviewed else [])])
         git(root, "commit", "-q", "--allow-empty", "--no-verify", "-m", PROOF_PREFIX + summary, "-m", body)
         proof = git(root, "rev-parse", "HEAD")
         push_proof(root, proof, branch)

@@ -424,12 +424,13 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_seen` | `account_id`, `message_id`, `labels` TEXT (JSON), PK(`account_id`, `message_id`) | The messages that the lists of a full resync or a verify name, with their label sets. The engine clears it when a new run starts, not when an unfinished run continues after a crash. |
 | `label` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `name` TEXT, `kind` TEXT (`system` or `user`), UNIQUE(`account_id`, `provider_id`) | Labels of the provider. |
 | `thread` | `id` INTEGER PK, `account_id`, `provider_id` TEXT, `viewed_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | Threads of the provider. Gives the `t-` IDs. `viewed_at` is the last view of the thread in Iris. |
-| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). |
+| `message` | `id` INTEGER PK, `account_id`, `thread_id`, `provider_id` TEXT, `content_sha256` TEXT, `size` INTEGER, `internal_date` INTEGER, `fetched_at` INTEGER, `gone_at` INTEGER, `understood_at` INTEGER, `hostile` TEXT (JSON), `tries` INTEGER, `retry_at` INTEGER, UNIQUE(`account_id`, `provider_id`) | One row for each message. Gives the `m-` IDs. `hostile` is the list of the hostile marks of the message (section 6.7). `tries` and `retry_at` hold the failed tries of the model (section 7.4). The store clears `understood_at` when the content hash changes, when a gone message comes back, and when the message gets or loses the label `SENT` or `DRAFT`. |
 | `message_label` | `message_id`, `label_id`, PK(`message_id`, `label_id`) | The label set of each message. |
-| `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. |
+| `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
 | `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
+| `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
 | `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `by` TEXT, `at` INTEGER | Each change of an item by a person, or by an applied action of specification 2. `by` is `person` or the changeset ID. The item stays through a rebuild (section 7.5). |
@@ -646,8 +647,11 @@ changes it. From release 2, the person sets the kind in the web client. In
 release 5, the stranger gate makes this a rule in the policy file.
 
 The engine decides the kind of a sender again each time it understands a
-message with that address. The first sync fetches newest first, so a known
-person can be a `stranger` for some time. The brief reads the kind of each
+message with that address. After each batch of sync or understanding, a
+refresh derives each stored `person`, `service` and `hostile` kind again
+from the evidence in the store, so a message that goes, gets new bytes or
+loses `SENT` changes the kinds at the next refresh. The first sync fetches
+newest first, so a known person can be a `stranger` for some time. The brief reads the kind of each
 party when it runs its query (section 8), so a later change of a kind moves
 the items. If a sender becomes `hostile` or stops being `hostile`, the engine
 runs understanding again on each message from that address.
@@ -865,11 +869,18 @@ status is `gone`.
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |
 
+The sections do not overlap. A conversation with a `stranger` participant
+shows only under Strangers, so each item shows one time and each section count
+is exact. The client uses the counts of the engine and does not remove
+duplicates between sections.
+
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
 applied.") is a list that the engine computes when the brief opens, in the
 changeset format of specification 2, with each action in the state
-`proposed`. Release 1 does not store it. From release 2, triage stores it as
+`proposed`. The brief gives only the totals of the proposal: the count of
+actions, and the count for each verb. The local API gives the full list
+separately. Release 1 does not store it. From release 2, triage stores it as
 a changeset in the mode `observe`.
 
 The triage proposal of release 1 (crate `iris-observe`) has these rules:

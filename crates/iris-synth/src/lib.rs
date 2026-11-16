@@ -108,6 +108,11 @@ struct Meta {
     sender: Sender,
     /// The other side of the thread is a stranger, not a known person.
     stranger_thread: bool,
+    /// The true kind of the sender, by the rules of spec 1 section 6.7. It is
+    /// `sender`, except for a stranger that the owner wrote to in the thread:
+    /// that is a known person. The kind belongs to the address, so the first
+    /// messages of a service are from a known service too.
+    truth: Sender,
     traits: u8,
 }
 
@@ -160,6 +165,16 @@ impl Mailbox {
         }
         metas.truncate(count);
         metas.sort_by_key(|m| (m.date, m.thread, m.pos));
+        let owner_threads: std::collections::HashSet<u32> = metas
+            .iter()
+            .filter(|m| m.sender == Sender::Owner)
+            .map(|m| m.thread)
+            .collect();
+        for m in &mut metas {
+            if m.sender == Sender::Stranger && owner_threads.contains(&m.thread) {
+                m.truth = Sender::KnownPerson;
+            }
+        }
         Mailbox { seed, metas }
     }
 
@@ -179,7 +194,7 @@ impl Mailbox {
             thread: m.thread,
             date: m.date,
             form: m.form,
-            sender: m.sender,
+            sender: m.truth,
             traits: m.traits,
         }
     }
@@ -270,6 +285,7 @@ fn plan_thread(seed: u64, thread: u32, out: &mut Vec<Meta>) {
             form,
             sender: if owner { Sender::Owner } else { sender },
             stranger_thread: sender == Sender::Stranger,
+            truth: if owner { Sender::Owner } else { sender },
             traits: t,
         });
         date += 600 + r.below(2 * 86_400) as i64;
@@ -307,7 +323,7 @@ mod tests {
         assert_eq!(hash(42, 2000), GOLDEN_42_2000, "got {:#x}", hash(42, 2000));
     }
 
-    const GOLDEN_42_2000: u64 = 0xd2e4_ab6d_b05f_ace5;
+    const GOLDEN_42_2000: u64 = 0x300f_c186_69b7_f8d7;
 
     #[test]
     fn full_mailbox_has_every_form_sender_and_trait() {
@@ -361,7 +377,7 @@ mod tests {
                 !raw.windows(2).any(|w| w[1] == b'\n' && w[0] != b'\r'),
                 "bare LF in {i}"
             );
-            for word in head.split(|c: char| c.is_whitespace() || "<>,\"".contains(c)) {
+            for word in head.split(|c: char| c.is_whitespace() || "<>,;\"".contains(c)) {
                 if let Some(at) = word.find('@') {
                     let domain = &word[at + 1..];
                     assert!(

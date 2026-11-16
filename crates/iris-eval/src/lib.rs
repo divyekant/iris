@@ -287,12 +287,14 @@ mod tests {
     #[test]
     fn scores_are_exact_for_a_known_answer() {
         let mb = Mailbox::new(11, 3000);
-        // Find one record, one hostile message and one feed item.
+        // Find one record and one feed item of a known service, and one
+        // hostile message.
         let find =
             |p: &dyn Fn(&Answer) -> bool| (0..mb.len()).find(|i| p(&expected(&mb, *i))).unwrap();
-        let rec = find(&|a| a.form == Some(Form::Record));
+        let service = |a: &Answer, f| a.form == Some(f) && a.sender == Some(Sender::KnownService);
+        let rec = find(&|a| service(a, Form::Record));
         let hostile = find(&|a| a.form.is_none());
-        let feed = find(&|a| a.form == Some(Form::Feed));
+        let feed = find(&|a| service(a, Form::Feed));
         let mut answers = vec![
             // A record that is called a feed, with a wrong amount and a correct vendor.
             {

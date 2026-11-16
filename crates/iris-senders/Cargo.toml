@@ -1,0 +1,16 @@
+[package]
+name = "iris-senders"
+description = "The sender axis of Iris: decides if a sender is you, a known person, a known service, a stranger or hostile."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-store = { version = "0.0.0", path = "../iris-store" }
+rusqlite = "=0.43.0"
+
+[dev-dependencies]
+iris-eval = { version = "0.0.0", path = "../iris-eval" }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }
