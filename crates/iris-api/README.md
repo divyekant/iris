@@ -4,8 +4,9 @@ The local API of Iris (tracker item R1-17). The API gives the web client
 and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
 [Policy](#policy)), the review of the person: decisions and withdraws
-(see [Review](#review)), and the state verbs of the person (see
-[State verbs](#state-verbs)).
+(see [Review](#review)), the state verbs of the person (see
+[State verbs](#state-verbs)), and the days of use of the measures page (see
+[Measures](#measures)).
 
 ## Use
 
@@ -134,6 +135,38 @@ The changeset must be open for each decision. Each action of a decision must wai
 decisions write in one transaction. If one is refused (a hash that changed,
 an action that has a decision, a new revision that is a draft, or an action
 that is not in the changeset), nothing is written and the answer is a 409.
+
+## Measures
+
+The measures of the manifesto, "How we measure Iris" (card R5-12). The
+engine computes them from the store. Nothing leaves the machine.
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
+| `POST /api/measures/use` | Body `{"day": "YYYY-MM-DD"}`. Counts one use of the web client on that day. The answer is `{}`. |
+| `POST /api/measures/open` | The same body. Counts one use and one source mail opened on that day. |
+
+- `days`: the newest 28 days of use, the newest first, each
+  `{"day", "opens"}`. A day with no entry is a day with no use.
+- `first_brief`: `{"connect", "brief", "seconds"}`, or `null`. `connect` is
+  the start of the first sync. `brief` is the end of the first understanding
+  run that understood a message.
+- `mirror`: the newest mirror check (`iris mirror verify`) of each account,
+  each `{"account", "checked", "differences", "complete"}`. `differences` is
+  `null` if the log has no count. `complete` is `false` when an error stopped
+  the check.
+- `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
+  the engine from `ps`, or `null`.
+- `approvals`: `{"decided", "approved"}`, the decisions of the person on the
+  actions of an agent or of triage. The state verbs of the person are not in
+  the count.
+- `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
+  not an undo. `undone` counts the actions of them that an undo reversed.
+
+`day` is the local date of the person. It must be the date of the engine in
+UTC, or the day before or after it. Another day, or a body that is not
+valid, is a 400, and nothing is written. Another event is a 404.
 
 ## State verbs
 

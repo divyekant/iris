@@ -1,4 +1,4 @@
-//! The local API of Iris (tracker item R1-17): read-only JSON from the store
+//! The local API of Iris (tracker item R1-17): JSON from the store
 //! for the web client and the read verbs. `crates/iris-api/README.md` gives
 //! the endpoints.
 //!
@@ -24,6 +24,7 @@ use iris_store::Store;
 use serde::Deserialize;
 
 mod auth;
+pub mod measures;
 pub mod policy;
 mod read;
 mod review;
@@ -105,6 +106,8 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
+        .route("/api/measures", get(get_measures))
+        .route("/api/measures/{event}", post(post_measure))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
         .route("/api/policy/discard", post(post_discard))
@@ -397,6 +400,37 @@ async fn get_raw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
         ),
     ];
     Ok((headers, Body::from_stream(parts)).into_response())
+}
+
+async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
+    let rss = tokio::task::spawn_blocking(measures::rss_kib)
+        .await
+        .ok()
+        .flatten();
+    Ok(Json(measures::measures(&s, rss)?).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DayBody {
+    day: String,
+}
+
+/// One use of the web client (`use`) or one source mail opened (`open`)
+/// on the local day of the person. The answer is `{}`.
+async fn post_measure(
+    State(s): State<Arc<Store>>,
+    Path(event): Path<String>,
+    b: std::result::Result<Json<DayBody>, JsonRejection>,
+) -> Result<Response> {
+    let open = match event.as_str() {
+        "use" => false,
+        "open" => true,
+        _ => return Ok(not_found()),
+    };
+    let b = body(b)?;
+    measures::count_use(&s, &b.day, open, now_ms())?;
+    Ok(Json(serde_json::json!({})).into_response())
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
