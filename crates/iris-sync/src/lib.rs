@@ -680,8 +680,7 @@ fn apply(
         // The mirror does not have the message: fetch it, with the labels of now.
         return match fetch_one(store, gmail, token, &m.id, &m.thread_id)? {
             Fetched::Message(msg) => {
-                save(store, gmail, token, account, vec![*msg])?;
-                done.fetched += 1;
+                save(store, gmail, token, account, vec![*msg], done)?;
                 Ok(())
             }
             // Gmail deleted the message after the record. A known row of
@@ -957,8 +956,7 @@ fn fetch(store: &Store, gmail: &Gmail, account: i64, token: &str, done: &mut Don
                 Fetched::Failed(id, e) => failed.push((id, e)),
             }
         }
-        done.fetched += messages.len() as u64;
-        save(store, gmail, token, account, messages)?;
+        save(store, gmail, token, account, messages, done)?;
         done.gone += mark_gone(store, account, &gone)?;
         for (id, e) in &failed {
             record_failure(store, account, id, e)?;
@@ -1043,13 +1041,16 @@ fn fetch_one(store: &Store, gmail: &Gmail, token: &str, id: &str, thread: &str) 
 
 /// Write fetched messages. If the content cleanup deleted a content file
 /// after its fetch (the store gives `MissingContent`), fetch the messages of
-/// that file again, and write again. The last try gives its error.
+/// that file again, and write again. The last try gives its error. A
+/// message whose new fetch fails stays "known, not fetched". Adds the
+/// counts to `done`.
 fn save(
     store: &Store,
     gmail: &Gmail,
     token: &str,
     account: i64,
     mut batch: Vec<NewMessage>,
+    done: &mut Done,
 ) -> Result<()> {
     // Each new fetch removes one missing file, so the batch size plus 2
     // writes is enough unless the cleanup deletes files again and again.
@@ -1057,7 +1058,11 @@ fn save(
     loop {
         let sha = match store.put_messages(account, &batch) {
             Err(iris_store::Error::MissingContent(sha)) if tries > 1 => sha,
-            r => return r.map(|_| ()).map_err(Error::from),
+            r => {
+                r?;
+                done.fetched += batch.len() as u64;
+                return Ok(());
+            }
         };
         tries -= 1;
         let (stale, keep): (Vec<NewMessage>, Vec<NewMessage>) = batch
@@ -1067,10 +1072,12 @@ fn save(
         for m in stale {
             match fetch_one(store, gmail, token, &m.provider_id, &m.thread_provider_id)? {
                 Fetched::Message(new) => batch.push(*new),
-                Fetched::Gone(id) => {
-                    mark_gone(store, account, &[id])?;
+                Fetched::Gone(id) => done.gone += mark_gone(store, account, &[id])?,
+                Fetched::Failed(id, e) => {
+                    store.write(|tx| insert_known(tx, account, &id, &m.thread_provider_id))?;
+                    record_failure(store, account, &id, &e)?;
+                    done.failed += 1;
                 }
-                Fetched::Failed(id, e) => record_failure(store, account, &id, &e)?,
             }
         }
     }
@@ -1107,7 +1114,15 @@ mod tests {
             fetched_at: Some(1),
             ..NewMessage::default()
         };
-        save(&store, &gmail, "token", account, vec![lost]).unwrap();
+        save(
+            &store,
+            &gmail,
+            "token",
+            account,
+            vec![lost],
+            &mut Done::default(),
+        )
+        .unwrap();
         let sha: String = store
             .read(|c| Ok(c.query_row("SELECT content_sha256 FROM message", [], |r| r.get(0))?))
             .unwrap();
@@ -1142,7 +1157,7 @@ mod tests {
                 ..NewMessage::default()
             })
             .collect();
-        save(&store, &gmail, "token", account, lost).unwrap();
+        save(&store, &gmail, "token", account, lost, &mut Done::default()).unwrap();
         let fetched: i64 = store
             .read(|c| {
                 Ok(c.query_row(
@@ -1153,5 +1168,40 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fetched, 3);
+    }
+
+    #[test]
+    fn a_new_fetch_that_fails_keeps_the_message_known() {
+        let fake = FakeGmail::start(Mailbox::new(1, 3)).unwrap();
+        let gmail = Gmail::new(iris_gmail::Config {
+            base_url: fake.base_url(),
+            ..iris_gmail::Config::default()
+        });
+        let dir = std::env::temp_dir().join(format!("iris-sync-missing400-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", iris_synth::OWNER).unwrap();
+        let lost = NewMessage {
+            provider_id: FakeGmail::id_of(0),
+            thread_provider_id: "t".into(),
+            content_sha256: Some("0".repeat(64)),
+            fetched_at: Some(1),
+            ..NewMessage::default()
+        };
+        // The new fetch gets HTTP 400.
+        fake.fail_next(&[400]);
+        let mut done = Done::default();
+        save(&store, &gmail, "token", account, vec![lost], &mut done).unwrap();
+        assert_eq!((done.fetched, done.failed), (0, 1));
+        let unfetched: i64 = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM message WHERE fetched_at IS NULL AND content_sha256 IS NULL",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(unfetched, 1, "known, not fetched");
     }
 }
