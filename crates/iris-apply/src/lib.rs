@@ -40,6 +40,9 @@ pub enum Error {
     /// changed its state before its first provider call (for example a
     /// withdraw), or another apply of the action has the mark.
     NotApproved(i64),
+    /// Another apply runs now, in this process or in another. The action
+    /// stays as it was. Apply again after the other apply.
+    Busy,
     /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
     /// and the state verbs.
     Verb(String),
@@ -51,6 +54,7 @@ impl std::fmt::Display for Error {
             Error::Store(e) => write!(f, "store: {e}"),
             Error::Gmail(e) => write!(f, "Gmail: {e}"),
             Error::NotApproved(a) => write!(f, "action {a} is not approved"),
+            Error::Busy => write!(f, "another apply runs now"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
         }
     }
@@ -157,6 +161,26 @@ pub fn hash(c: &Connection, action: i64) -> rusqlite::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// The file lock `apply.lock` in the data folder. The operating system
+/// frees it when the process ends.
+fn lock(store: &Store) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(store.dir().join(LOCK_FILE))
+        .map_err(iris_store::Error::Io)?;
+    // flock on Linux and macOS: two opens of the file conflict, also in one process.
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Busy),
+        Err(std::fs::TryLockError::Error(e)) => Err(iris_store::Error::Io(e).into()),
+    }
+}
+
+/// The name of the apply lock in the data folder.
+pub const LOCK_FILE: &str = "apply.lock";
+
 /// The access token of the mailbox. `renew` gives a new token after HTTP
 /// 401, or `None` if there is none (the account needs a sign-in).
 pub struct Token<'a> {
@@ -165,7 +189,7 @@ pub struct Token<'a> {
 }
 
 /// Apply the approved action `action` to the mailbox `account` at Gmail.
-/// Run one apply at a time, on the one engine thread that writes.
+/// One apply runs at a time: a second apply gets [`Error::Busy`].
 ///
 /// No provider call of an action is made two times. Before the first write
 /// call, the apply marks the action `applying` (migration 9). After that,
@@ -180,6 +204,9 @@ pub fn apply(
     account: i64,
     action: i64,
 ) -> Result<Outcome> {
+    // One apply at a time. While the lock lives, a mark found below is the
+    // mark of an apply that stopped, not of one that runs.
+    let _lock = lock(store)?;
     let head: Option<(String, Option<String>, String, bool)> = store.read(|c| {
         Ok(c.query_row(
             "SELECT verb, hash, decided_by, applying FROM changeset_action

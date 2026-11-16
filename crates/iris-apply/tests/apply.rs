@@ -391,23 +391,46 @@ fn an_old_action_expires() {
     assert_eq!(b.calls("messages"), 0);
 }
 
-/// Two applies of one action at the same time: only the one with the
-/// mark makes a write call.
+/// Two applies at the same time: the second gets Busy and changes
+/// nothing, and the first ends as applied.
 #[test]
 fn two_applies_make_one_write() {
     let b = setup("two", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    let a = b.approved("archive", &ms, PERSON);
+    // Another apply holds the lock.
+    let other = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(b.dir.join(iris_apply::LOCK_FILE))
+        .unwrap();
+    other.lock().unwrap();
+    assert!(matches!(b.apply(a), Err(Error::Busy)));
+    assert_eq!(b.state(a).0, "approved");
+    assert!(!b.applying(a));
+    drop(other);
     for round in 0..5 {
         let verb = if round % 2 == 0 { "archive" } else { "inbox" };
-        let ms = b.messages("1", 20);
         let a = b.approved(verb, &ms, PERSON);
         let before = b.calls("batchModify");
         let results: Vec<_> = std::thread::scope(|sc| {
             let t: Vec<_> = (0..2).map(|_| sc.spawn(|| b.apply(a))).collect();
             t.into_iter().map(|t| t.join().unwrap()).collect()
         });
-        let ok = results.iter().filter(|r| r.is_ok()).count();
-        assert!(ok >= 1, "{results:?}");
-        assert!(b.calls("batchModify") - before <= 1, "{results:?}");
+        assert!(
+            results.iter().any(|r| matches!(r, Ok(Outcome::Applied(_)))),
+            "{results:?}"
+        );
+        assert!(
+            results.iter().all(|r| matches!(
+                r,
+                Ok(Outcome::Applied(_)) | Err(Error::Busy) | Err(Error::NotApproved(_))
+            )),
+            "{results:?}"
+        );
+        assert_eq!(b.state(a).0, "applied");
+        assert_eq!(b.calls("batchModify") - before, 1);
     }
 }
 
