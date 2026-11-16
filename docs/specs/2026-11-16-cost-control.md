@@ -134,9 +134,11 @@ The runner gives `store::understand` a model that wraps the real one
 (`Budgeted`). The wrapper reserves money before each call and settles after
 it, in its own writes:
 
-1. Before the call, in one write: if `budget_micro_usd` is less than the
-   worst case of the call, refuse the call with `Error::Budget` (no request
-   goes out). Else take the worst case from `budget_micro_usd` and add it to
+1. Before the call, in one write: if `budget_micro_usd` is NULL (no
+   approval) or less than the worst case of the call, refuse the call with
+   `Error::Budget` (no request goes out). The write is one `UPDATE ... SET
+   budget_micro_usd = budget_micro_usd - ?worst WHERE budget_micro_usd IS
+   NOT NULL AND budget_micro_usd >= ?worst`; zero changed rows is a refusal. Else take the worst case from `budget_micro_usd` and add it to
    `reserved_micro_usd` of the run row.
 2. Send the request.
 3. After it, in one write: give back the worst case minus the real cost
@@ -308,10 +310,11 @@ a limit: the budget and the limits bound the spend.
 
 ### Rebuild
 
-`iris rebuild` (later card) calls `batch::run` with a rebuild selection.
-`batch::run` takes the lock and checks the budget before it changes any
-message. No path calls `store::understand` with a priced model outside
-`batch::run`.
+`iris rebuild` (later card) calls `batch::run` with a rebuild selection, so
+each of its paid calls goes through the run lock and the `Budgeted` wrapper.
+No path calls `store::understand` with a priced model outside `batch::run`.
+Which items a rebuild deletes, and when, is a decision of the rebuild card
+(spec 1 section 7.5), not of this spec.
 
 ### Commands
 
@@ -386,7 +389,7 @@ more calls.
 | A first reply with no usage and an answer that is not valid | The second try pays again before the run stops | The wrapper refuses each call after a call with unknown usage. The message stays pending, no try counts. | Batch test. |
 | The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
-| A priced model and no budget | Paid calls with no approval | `stop = budget`, no call, also from R1-28. | Batch test. |
+| A priced model and no budget (`budget_micro_usd` NULL) | Paid calls with no approval | The reservation write changes no row, so the wrapper refuses each call; `stop = budget`, also from R1-28. | Batch test with a NULL budget. |
 | Automatic runs after each sync | Each run spends again | All runs take from one budget. | Batch test: two runs, one budget. |
 | A changed model row after the approval | The approval of another price | `iris model set` clears the budget; the runner makes its own model from the row. | Batch test. |
 | A second runner | Two runs pay twice | "a run is in progress", no call. | Two runners on one store. |
