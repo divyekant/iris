@@ -126,6 +126,7 @@ fn message<'a>(
         texts: Vec::new(),
         chars: 0,
         cut: false,
+        dropped: 0,
         files: Vec::new(),
         is_reply,
     };
@@ -159,6 +160,8 @@ struct Walker<'a> {
     chars: usize,
     /// True if body text went out because of a limit.
     cut: bool,
+    /// The count of parts with clean text that did not fit in [`TEXT_LIMIT`].
+    dropped: usize,
     files: Vec<File<'a>>,
     /// True if the message is a reply. Quoted history then goes out.
     is_reply: bool,
@@ -232,12 +235,11 @@ impl<'a> Walker<'a> {
     fn alternative(&mut self, list: Vec<&'a [u8]>, depth: usize) {
         for part in list.into_iter().rev() {
             let before = (self.texts.len(), self.chars, self.cut, self.files.len());
+            let dropped = self.dropped;
             self.entity(part, depth + 1);
-            if self.texts.len() > before.0 {
-                return;
-            }
-            // When the text is full, a version cannot add text. Its cut stays.
-            if self.chars >= TEXT_LIMIT && self.cut {
+            // A version with text is used, also when the text is full and
+            // its text did not fit: its cut stays.
+            if self.texts.len() > before.0 || self.dropped > dropped {
                 return;
             }
             let texts;
@@ -252,34 +254,39 @@ impl<'a> Walker<'a> {
     fn body_part(&mut self, body: &[u8], cte: &str, html: bool, charset: Option<&str>) {
         // Also when the text is full, the part goes through the steps: only
         // a later part with clean text makes a cut.
-        // A cut of a part counts only if the part has clean text.
-        let (bytes, mut cut) = decode_capped(body, cte, PART_LIMIT);
+        let (bytes, truncated) = decode_capped(body, cte, PART_LIMIT);
+        self.cut |= truncated;
         let text = mime::decode(&bytes, charset);
         drop(bytes);
         let text = if html {
             let (md, full) = html::to_markdown(&text, self.is_reply);
-            cut |= full;
+            self.cut |= full;
             md
         } else {
             text
         };
         let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
         // The quote and signature steps keep a list of the lines. Bound it.
-        if let Some((i, _)) = text.match_indices('\n').nth(MAX_LINES) {
+        // The end of line MAX_LINES: a cut only if text follows it.
+        if let Some((i, _)) = text
+            .match_indices('\n')
+            .nth(MAX_LINES - 1)
+            .filter(|&(i, _)| i + 1 < text.len())
+        {
             text.truncate(i);
-            cut = true;
+            self.cut = true;
         }
         let text = quote::strip_signature(&quote::strip_quotes(&text, self.is_reply));
         let mut text = tidy(&url::clean_urls(&text));
         if text.is_empty() {
             return;
         }
-        self.cut |= cut;
         // The texts join with an empty line: two characters.
         let sep = if self.texts.is_empty() { 0 } else { 2 };
         let Some(left) = TEXT_LIMIT.checked_sub(self.chars + sep).filter(|&l| l > 0) else {
             self.chars = TEXT_LIMIT;
             self.cut = true;
+            self.dropped += 1;
             return;
         };
         if let Some((i, _)) = text.char_indices().nth(left) {

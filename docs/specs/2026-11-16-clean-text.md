@@ -106,7 +106,9 @@ The steps, in order:
 The texts of the body parts join with one empty line. When the text has
 `TEXT_LIMIT` characters, it stops there, and a later body part with clean
 text makes the text cut. A later part with no clean text (for example, only
-hidden HTML) makes no cut.
+hidden HTML) makes no cut, unless a limit of steps 1 to 3 cut that part: the
+rest of the part was not read. A version of `multipart/alternative` that is
+not used makes no cut in either case.
 
 ### HTML
 

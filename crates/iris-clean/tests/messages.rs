@@ -839,3 +839,20 @@ fn numeric_entities_with_leading_zeros() {
     let raw = crlf("Subject: E\nContent-Type: text/html\n\n<p>&#00000000065;&#x0000000042; &#99999999999;</p>\n");
     assert_eq!(clean(&raw).text, "AB \u{fffd}");
 }
+
+#[test]
+fn text_on_the_line_after_max_lines_is_cut() {
+    let over = format!(
+        "Subject: L\n\n{}critical\n",
+        "\n".repeat(iris_clean::MAX_LINES)
+    );
+    let c = clean(over.as_bytes());
+    assert!(c.cut && !c.text.contains("critical"), "{}", c.text);
+    let at = format!(
+        "Subject: L\n\n{}last",
+        "\n".repeat(iris_clean::MAX_LINES - 1)
+    );
+    let c = clean(at.as_bytes());
+    assert!(!c.cut);
+    assert_eq!(c.text, "last");
+}
