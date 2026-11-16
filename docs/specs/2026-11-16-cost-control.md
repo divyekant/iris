@@ -91,8 +91,9 @@ So an old unpinned item of a message that became spam never stays
 visible, also when the run stops before it reaches the message.
 
 A pinned item (with a correction) keeps its ID and its corrections. While
-its origin message has a hostile mark or the label `SPAM`, the local API and
-the brief do not show it. When the hostile state clears, the item shows
+its origin message is hostile mail, the local API and the brief do not show
+it. Hostile mail is a message with a hostile mark, the label `SPAM`, or a
+`From` sender of the kind `hostile` (spec 1 section 6.7). When the hostile state clears, the item shows
 again. The store does not change it. Step 0 of the next run
 computes the conversation again for each thread with a message that got a
 reset after its conversation was computed (`understood_at` NULL and a
@@ -159,7 +160,9 @@ Stop conditions:
 - The run cost reached `Limits::max_cost_micro_usd`. The check comes before
   each message, so a run can pass the limit by the cost of one message (at
   most two calls).
-- `Limits::max_messages` messages are done.
+- `Limits::max_messages` messages are done. The check comes before each
+  message, like the cost check, so a run can stop inside a thread. The next
+  run goes on with the same thread, because its older messages are done.
 - The model refuses the call before any charge: a refused key (HTTP 401,
   403) or HTTP 429. `stop = model`. The message stays pending.
 - A call has an unknown result or unknown usage: a time-out, a lost
@@ -273,7 +276,10 @@ CREATE TABLE understand_run (
 ### Estimate
 
 `iris_understand::batch::estimate(store, price, now) -> Estimate` reads the
-pending messages and gives:
+reachable messages and gives the numbers below. A reachable message meets
+each pending condition except the thread rule: a later message of a thread
+counts, because the run reaches it when the older messages are done. The
+runner keeps the full pending rule for its selection.
 
 - The count of pending messages, in the 90-day group and in all.
 - The input tokens: for each pending message without the label `SPAM`,
@@ -373,8 +379,10 @@ No parser or protocol code is new. The model client is `iris-model`.
 | An earlier message of an understood thread gets new content or `SPAM` | Later items used it as context | The reset covers the later messages of the thread. | Store test. |
 | Sync removes the only sent evidence of a person, and no paid run is approved | The kind stays `person` | Sync calls `batch::refresh`, which needs no approval. | Batch test: refresh with a priced model and no approval. |
 | `iris rebuild` with a priced model and no approval, or while a run holds the lock | Items deleted with no replacement | `batch::run` refuses before the reset, so no item changes. | Batch test: a refused rebuild leaves each item. |
-| A pinned item whose origin message gets `SPAM` | A corrected item of hostile mail shows | The API and the brief hide it while the origin is hostile. It keeps its ID and corrections and shows again when the state clears. | API test. |
+| A pinned item whose origin message gets `SPAM`, or whose sender becomes hostile | A corrected item of hostile mail shows | The API and the brief hide it while the origin is hostile mail. It keeps its ID and corrections and shows again when the state clears. | API test. |
 | A library caller passes another paid model after the approval | The approval and the limit of another price | The runner makes the model from `model_setting` itself; the caller gives no model. | Batch test: a changed row clears the approval. |
+| A new thread of ten messages | The estimate counts only the first message | The estimate counts each reachable message. | Batch test: estimate of a ten-message thread is ten. |
+| `--max-messages 1` and a thread of two pending messages | The runner does both | The check comes before each message: one message, `stop = messages`. | Batch test. |
 | Two threads with pending mail, the newer one with two messages | An older thread runs between the messages of a newer one | The runner finishes the newer thread first. | Batch test of the order. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
