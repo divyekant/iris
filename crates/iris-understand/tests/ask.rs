@@ -8,6 +8,7 @@ use std::rc::Rc;
 use iris_model::{Error as ModelError, Reply, Stop, Usage};
 use iris_store::{Body, Header, NewMessage, Store};
 use iris_understand::ask::{ask, terms, Answer, Error};
+use iris_understand::batch;
 use iris_understand::budget::ModelRow;
 use iris_understand::Model;
 
@@ -37,6 +38,8 @@ struct Fake {
     /// `Err` is a transport error: an unknown result.
     answer: Result<String, String>,
     calls: Calls,
+    /// Runs in the call, before the answer.
+    during: Option<Rc<dyn Fn()>>,
 }
 
 impl Model for Fake {
@@ -52,6 +55,9 @@ impl Model for Fake {
         self.calls
             .borrow_mut()
             .push((instruction.to_string(), data.to_string()));
+        if let Some(f) = &self.during {
+            f();
+        }
         let text = self.answer.clone().map_err(ModelError::Transport)?;
         Ok(Reply {
             stop: Stop::End,
@@ -165,6 +171,15 @@ const MAIL: &[Mail] = &[
 ];
 
 fn run(b: &Box_, answer: Result<&str, &str>, question: &str) -> (Result<Answer, Error>, Calls) {
+    run_with(b, answer, question, None)
+}
+
+fn run_with(
+    b: &Box_,
+    answer: Result<&str, &str>,
+    question: &str,
+    during: Option<Rc<dyn Fn()>>,
+) -> (Result<Answer, Error>, Calls) {
     let calls: Calls = Rc::default();
     let c = calls.clone();
     let answer = answer.map(str::to_string).map_err(str::to_string);
@@ -172,6 +187,7 @@ fn run(b: &Box_, answer: Result<&str, &str>, question: &str) -> (Result<Answer, 
         Ok(Box::new(Fake {
             answer: answer.clone(),
             calls: c.clone(),
+            during: during.clone(),
         }))
     };
     (ask(&b.store, &connect, question, NOW), calls)
@@ -186,9 +202,10 @@ fn one(b: &Box_, sql: &str) -> Option<i64> {
 #[test]
 fn answers_with_the_messages_that_it_comes_from() {
     let b = setup("answer", Some(1_000_000), MAIL);
-    let reply = r#"{"answer": "It leaves at 07:40 [2], check-in opens 36 hours before [1].",
-                   "sources": [{"n": 2, "quote": "  FLIGHT "},
-                               {"n": 1, "quote": "a quote that the mail does not have"}]}"#;
+    let reply = r#"{"claims": [{"text": "It leaves at 07:40.", "sources": [2]},
+                              {"text": "Check-in opens 36 hours before.", "sources": [1]}],
+                   "quotes": [{"n": 2, "quote": "  FLIGHT "},
+                              {"n": 1, "quote": "a quote that the mail does not have"}]}"#;
     let (got, calls) = run(&b, Ok(reply), "When does my flight to Lisbon leave?");
     let got = got.unwrap();
     // One call. The search found the two TAP mails (the first one as
@@ -215,15 +232,15 @@ fn answers_with_the_messages_that_it_comes_from() {
     assert_eq!(got.sources[0].message, second_in_data);
     assert_eq!(got.sources.len(), 2);
     assert_eq!(
-        got.text.as_deref(),
-        Some("It leaves at 07:40 [1], check-in opens 36 hours before [2].")
+        got.text().as_deref(),
+        Some("It leaves at 07:40 [1]. Check-in opens 36 hours before [2].")
     );
     // The cost of 100 + 10 tokens, from the run row of the call.
     assert_eq!(got.cost_micro_usd, Some(110));
     assert_eq!(
         one(
             &b,
-            "SELECT count(*) FROM understand_run WHERE prompt = 'ask/0.1' AND stop = 'done'"
+            "SELECT count(*) FROM understand_run WHERE prompt = 'ask/0.2' AND stop = 'done'"
         ),
         Some(1)
     );
@@ -240,7 +257,7 @@ fn answers_with_the_messages_that_it_comes_from() {
 fn no_matching_mail_makes_no_call() {
     let b = setup("nomatch", Some(1_000_000), MAIL);
     for q in ["What is the weather in Oslo?", "what is it?", "Lisbon?"] {
-        let (got, calls) = run(&b, Ok("{}"), q);
+        let (got, calls) = run(&b, Ok(r#"{"claims": []}"#), q);
         let got = got.unwrap();
         if q == "Lisbon?" {
             continue;
@@ -248,7 +265,7 @@ fn no_matching_mail_makes_no_call() {
         assert_eq!(
             got,
             Answer {
-                text: None,
+                claims: vec![],
                 sources: vec![],
                 read: 0,
                 cost_micro_usd: None
@@ -259,7 +276,7 @@ fn no_matching_mail_makes_no_call() {
     assert_eq!(
         one(
             &b,
-            "SELECT count(*) FROM understand_run WHERE prompt = 'ask/0.1'"
+            "SELECT count(*) FROM understand_run WHERE prompt = 'ask/0.2'"
         ),
         Some(1)
     );
@@ -292,7 +309,7 @@ fn leaves_out_gone_hostile_trash_and_a_hostile_sender() {
             Ok(())
         })
         .unwrap();
-    let (got, calls) = run(&b, Ok(r#"{"answer": "", "sources": []}"#), "invoices");
+    let (got, calls) = run(&b, Ok(r#"{"claims": [], "quotes": []}"#), "invoices");
     assert_eq!(got.unwrap().read, 1);
     let data = &calls.borrow()[0].1;
     assert!(data.contains("Invoice 1"));
@@ -305,12 +322,12 @@ fn leaves_out_gone_hostile_trash_and_a_hostile_sender() {
 fn an_answer_with_no_source_is_no_answer() {
     let b = setup("nosource", Some(1_000_000), MAIL);
     for reply in [
-        r#"{"answer": "", "sources": []}"#,
-        r#"{"answer": "Noon.", "sources": []}"#,
-        r#"{"answer": "Noon [7].", "sources": [{"n": 9}]}"#,
+        r#"{"claims": [], "quotes": []}"#,
+        r#"{"claims": [{"text": "Noon.", "sources": []}]}"#,
+        r#"{"claims": [{"text": "Noon [1].", "sources": [9]}], "quotes": [{"n": 9}]}"#,
     ] {
         let got = run(&b, Ok(reply), "flight").0.unwrap();
-        assert_eq!((got.text, got.sources), (None, vec![]), "{reply}");
+        assert_eq!((got.text(), got.sources), (None, vec![]), "{reply}");
         assert_eq!(got.cost_micro_usd, Some(110));
     }
 }
@@ -363,8 +380,51 @@ fn a_model_error_or_a_bad_answer_is_an_error() {
         ),
         Some(1)
     );
-    let got = run(&b, Ok("not json"), "flight").0;
-    assert!(matches!(got, Err(Error::Model(_))), "{got:?}");
+    // An answer out of the format is a failure of the model, with its cost.
+    for reply in ["not json", r#"{"answer": "Noon [1]."}"#] {
+        let got = run(&b, Ok(reply), "flight").0;
+        assert!(matches!(got, Err(Error::Model(_))), "{got:?}");
+    }
+    assert_eq!(
+        one(
+            &b,
+            "SELECT count(*) FROM understand_run WHERE stop = 'model' AND cost_micro_usd = 110"
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        one(
+            &b,
+            "SELECT count(*) FROM understand_run WHERE stop = 'done'"
+        ),
+        Some(0)
+    );
+}
+
+/// The call holds the run lock from the read of the model row to the
+/// settlement, so `iris model set` and a budget change wait for it. With
+/// the lock held, Ask makes no call.
+#[test]
+fn the_call_holds_the_run_lock() {
+    let b = Rc::new(setup("lock", Some(1_000_000), MAIL));
+    let busy = Rc::new(RefCell::new(None));
+    let (bb, seen) = (b.clone(), busy.clone());
+    let during: Rc<dyn Fn()> = Rc::new(move || {
+        *seen.borrow_mut() = Some(matches!(batch::lock(&bb.store), Err(batch::Error::Busy)));
+    });
+    let reply = r#"{"claims": [{"text": "At 07:40.", "sources": [1]}]}"#;
+    assert!(run_with(&b, Ok(reply), "flight", Some(during)).0.is_ok());
+    assert_eq!(*busy.borrow(), Some(true));
+    // The lock goes with the end of the call.
+    drop(batch::lock(&b.store).unwrap());
+    let held = batch::lock(&b.store).unwrap();
+    let (got, calls) = run(&b, Ok(reply), "flight");
+    assert!(matches!(got, Err(Error::Busy)), "{got:?}");
+    assert!(calls.borrow().is_empty());
+    drop(held);
+    // A question with no match needs no lock.
+    let _held = batch::lock(&b.store).unwrap();
+    assert!(run(&b, Ok(reply), "weather in Oslo").0.is_ok());
 }
 
 #[test]

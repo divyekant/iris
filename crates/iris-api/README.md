@@ -213,14 +213,17 @@ model as data, and answers with the messages that the answer comes from.
 
 | Field | Content |
 |---|---|
-| `answer` | The answer, or `null` when the mail does not answer the question. Each sentence has one or more marks `[n]`: the sources of its facts. The engine drops a sentence with no mark that names a message of the data. |
+| `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. Each claim is one sentence with one or more marks `[n]` before its end mark: the sources of its facts. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
 | `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
 | `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
 | `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
 
 The search leaves out gone mail, hostile mail, the mail of a hostile sender,
-SPAM and TRASH. The call takes from the one model budget (see
-`docs/specs/2026-11-16-cost-control.md`). With no model, or with a budget
-that cannot pay the worst case of the call, the answer is a 503. A failed
+SPAM and TRASH. The engine checks each source against these rules again
+after the call. A claim with a source that fails the check goes. The call
+takes from the one model budget (see
+`docs/specs/2026-11-16-cost-control.md`) and holds the run lock. With no
+model, with a budget that cannot pay the worst case of the call, or while a
+run of understanding holds the lock, the answer is a 503. A failed
 model call, or a model answer that is not valid, is a 502. The text of the
 answer is data: show it as text, never as markup.

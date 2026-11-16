@@ -2,10 +2,11 @@
 //! answered by `iris_understand::ask` with the messages that the answer
 //! comes from.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use iris_store::Store;
-use iris_understand::ask::{self, Answer};
+use iris_understand::ask;
 use iris_understand::budget::ModelRow;
 use iris_understand::Model;
 use serde::Serialize;
@@ -43,37 +44,48 @@ pub struct AskAnswer {
 
 /// Answers `question`. Blocking: the model call can take up to the time-out
 /// of the model row.
+///
+/// The mail can change during the call. Each source is checked again against
+/// the rules of the search ([`ask::eligible`]) in the same snapshot as its
+/// summary. A claim with a source that fails the check goes, so the answer
+/// shows only mail that Ask can read now.
 pub fn answer(store: &Store, connect: &Connect, question: &str, now_ms: i64) -> Result<AskAnswer> {
-    let Answer {
-        text,
-        sources,
-        read,
-        cost_micro_usd,
-    } = ask::ask(store, &|row| connect(row), question, now_ms).map_err(|e| match e {
+    let mut a = ask::ask(store, &|row| connect(row), question, now_ms).map_err(|e| match e {
         ask::Error::Question(why) => Error::Query(why),
         ask::Error::Store(e) => Error::Store(e),
-        e @ (ask::Error::NoModel | ask::Error::Budget) => Error::Unavailable(e.to_string()),
+        e @ (ask::Error::NoModel | ask::Error::Budget | ask::Error::Busy) => {
+            Error::Unavailable(e.to_string())
+        }
         ask::Error::Model(why) => Error::Model(why),
     })?;
     let sources = store.read(|c| {
-        let mut out = Vec::with_capacity(sources.len());
-        for (i, s) in sources.into_iter().enumerate() {
-            // A message row that went away after the answer: the mark stays
-            // with no source, and the client shows it as text.
-            if let Some((message, _)) = message_row(c, s.message)? {
-                out.push(AskSource {
-                    n: i + 1,
-                    quote: s.quote,
-                    message,
-                });
+        // One snapshot for the check and the summaries.
+        let tx = c.unchecked_transaction()?;
+        let mut rows = HashMap::new();
+        for s in &a.sources {
+            if ask::eligible(&tx, s.message)? {
+                if let Some((m, _)) = message_row(&tx, s.message)? {
+                    rows.insert(s.message, m);
+                }
             }
         }
-        Ok(out)
+        a.retain(|s| rows.contains_key(&s.message));
+        Ok(a.sources
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                Some(AskSource {
+                    n: i + 1,
+                    quote: s.quote.clone(),
+                    message: rows.remove(&s.message)?,
+                })
+            })
+            .collect())
     })?;
     Ok(AskAnswer {
-        answer: text,
+        answer: a.text(),
         sources,
-        read,
-        cost_micro_usd,
+        read: a.read,
+        cost_micro_usd: a.cost_micro_usd,
     })
 }

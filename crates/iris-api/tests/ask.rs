@@ -11,7 +11,8 @@ use iris_understand::Model;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-struct Fake(String);
+/// The answer, and a change of the store during the call.
+struct Fake(String, Option<Arc<dyn Fn() + Send + Sync>>);
 
 impl Model for Fake {
     fn name(&self) -> &str {
@@ -23,6 +24,9 @@ impl Model for Fake {
     }
 
     fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
+        if let Some(f) = &self.1 {
+            f();
+        }
         Ok(Reply {
             stop: Stop::End,
             text: self.0.clone(),
@@ -76,9 +80,13 @@ fn store(name: &str, budget: Option<i64>) -> Arc<Store> {
 }
 
 fn fake(answer: &str) -> Option<Connect> {
+    fake_with(answer, None)
+}
+
+fn fake_with(answer: &str, during: Option<Arc<dyn Fn() + Send + Sync>>) -> Option<Connect> {
     let answer = answer.to_string();
     Some(Arc::new(move |_| {
-        Ok(Box::new(Fake(answer.clone())) as Box<dyn Model>)
+        Ok(Box::new(Fake(answer.clone(), during.clone())) as Box<dyn Model>)
     }))
 }
 
@@ -112,7 +120,8 @@ async fn ask(
 #[tokio::test]
 async fn answers_with_the_summary_of_each_source() {
     let s = store("answer", Some(1_000_000));
-    let reply = r#"{"answer": "It leaves at 07:40 [1].", "sources": [{"n": 1, "quote": "Departure 07:40"}]}"#;
+    let reply = r#"{"claims": [{"text": "It leaves at 07:40.", "sources": [1]}],
+                    "quotes": [{"n": 1, "quote": "Departure 07:40"}]}"#;
     let (code, v) = ask(
         &s,
         fake(reply),
@@ -153,7 +162,7 @@ async fn answers_with_the_summary_of_each_source() {
 #[tokio::test]
 async fn refuses_a_bad_request_no_model_and_no_budget() {
     let s = store("refuse", None);
-    let ok = fake(r#"{"answer": "", "sources": []}"#);
+    let ok = fake(r#"{"claims": [], "quotes": []}"#);
     for body in [
         r#"{"question": ""}"#,
         r#"{"q": "flight"}"#,
@@ -180,4 +189,33 @@ async fn refuses_a_bad_request_no_model_and_no_budget() {
     // A model answer that is not JSON.
     let (code, _) = ask(&s, fake("no"), r#"{"question": "flight"}"#, true).await;
     assert_eq!(code, StatusCode::BAD_GATEWAY);
+}
+
+/// The mail can change during the call: a source that Ask cannot read now
+/// goes, with its claims.
+#[tokio::test]
+async fn a_source_that_goes_during_the_call_takes_its_claims() {
+    let s = store("gone", Some(1_000_000));
+    let s2 = s.clone();
+    let gone: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        s2.write(|tx| {
+            Ok(tx
+                .execute("UPDATE message SET gone_at = 1", [])
+                .map(|_| ())?)
+        })
+        .unwrap();
+    });
+    let reply = r#"{"claims": [{"text": "It leaves at 07:40.", "sources": [1]}]}"#;
+    let (code, v) = ask(
+        &s,
+        fake_with(reply, Some(gone)),
+        r#"{"question": "When does my flight leave?"}"#,
+        true,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(
+        v,
+        json!({"answer": null, "sources": [], "read": 1, "cost_micro_usd": 110})
+    );
 }

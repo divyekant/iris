@@ -21,9 +21,12 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Why: One call keeps the cost of a question low and its worst case known
   before the call. The FTS5 index exists, and `bm25` ranks the matches. The
   call uses the one budget of understanding, with its own `understand_run`
-  row (`prompt` = `ask/0.1`), so the person approves one budget for all model
-  use. Each fact of an answer must cite a message of the data, and a quote
-  stays only if its message has it, so the person can check each answer.
+  row (`prompt` = `ask/0.2`), so the person approves one budget for all model
+  use. The call holds the run lock, so the model row and its budget do not
+  change during the call. The model gives claims in JSON, each with the
+  numbers of its messages, so Iris reads no sentence boundaries in free
+  text. Each claim must cite a message of the data, and a quote stays only
+  if its message has it, so the person can check each answer.
   Hostile mail, a hostile sender, SPAM, TRASH and gone mail are not data.
 - Options not chosen: A first call that writes the search (two calls for each
   question, and a second cost). Vector search (an embedding model and an
