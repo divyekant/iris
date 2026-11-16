@@ -292,20 +292,19 @@ pub const UNDERSTAND_EVERY: Duration = Duration::from_secs(10);
 /// The longest wait before a new try of a run that stopped on an error.
 pub const RETRY_MAX: Duration = Duration::from_secs(3600);
 
-/// The run of understanding after the syncs (R1-28). Each turn runs if a
-/// run can make progress now ([`iris_understand::batch::can_progress`]).
-/// The runner decides this from the store, so each sync, repair, label
-/// change, retry or new budget that gives work gets a run, also during a
-/// long first sync. A run that stopped on `model`, `unknown`, `error` or
-/// `budget` waits from [`SYNC_EVERY`], doubled up to [`RETRY_MAX`], so a
-/// failed server or a small budget gets no call each turn. A change of the
-/// model row or its budget ends the wait.
+/// The run of understanding after the syncs (R1-28). Each turn runs the
+/// batch runner; the runner reads only pending mail, and mail that waits
+/// for a model is not pending (`message.waits_model`, schema 5). So a turn
+/// with nothing to do reads no message and leaves no row. A run that
+/// stopped on `model`, `unknown` or `error` starts a wait, from
+/// [`SYNC_EVERY`] doubled up to [`RETRY_MAX`]. During the wait, the turns
+/// run the free steps only, so new mail stays searchable and a failed
+/// server gets no call; the mail that needs the model gets the mark. When
+/// the wait ends, the marks are cleared and the next run calls the model.
 pub struct Understander {
     not_before: Option<Instant>,
     wait: Option<Duration>,
     first_wait: Duration,
-    /// The model row and budget when the wait started.
-    model_at_wait: Option<String>,
 }
 
 impl Default for Understander {
@@ -321,61 +320,37 @@ impl Understander {
             not_before: None,
             wait: None,
             first_wait,
-            model_at_wait: None,
         }
     }
 
-    /// One turn: `None` if no run was due.
-    pub fn turn(
-        &mut self,
-        store: &Store,
-    ) -> std::result::Result<Option<crate::cost::AfterSync>, String> {
-        let model = model_key(store)?;
-        if self.not_before.is_some() && self.model_at_wait != model {
-            self.wait = None;
-            self.not_before = None;
+    /// One turn of the runner.
+    pub fn turn(&mut self, store: &Store) -> std::result::Result<crate::cost::AfterSync, String> {
+        let calls = self.not_before.is_none_or(|t| Instant::now() >= t);
+        if calls && self.not_before.is_some() {
+            // The wait ended: the mail that waited during it gets a call.
+            iris_understand::batch::clear_waiting(store).map_err(|e| e.to_string())?;
         }
-        if self.not_before.is_some_and(|t| Instant::now() < t) {
-            return Ok(None);
-        }
-        let can =
-            iris_understand::batch::can_progress(store, now_ms()).map_err(|e| e.to_string())?;
-        if !can {
-            return Ok(None);
-        }
-        let r = crate::cost::after_sync(store);
+        let r = crate::cost::after_sync(store, calls);
         match &r {
             Ok(crate::cost::AfterSync::Busy) => {}
             Ok(crate::cost::AfterSync::Ran { retry: true, .. }) | Err(_) => {
-                let wait = self
-                    .wait
-                    .map_or(self.first_wait, |w| (w * 2).min(RETRY_MAX));
-                self.wait = Some(wait);
-                self.not_before = Some(Instant::now() + wait);
-                self.model_at_wait = model;
+                if calls {
+                    let wait = self
+                        .wait
+                        .map_or(self.first_wait, |w| (w * 2).min(RETRY_MAX));
+                    self.wait = Some(wait);
+                    self.not_before = Some(Instant::now() + wait);
+                }
             }
             Ok(_) => {
-                self.wait = None;
-                self.not_before = None;
+                if calls {
+                    self.wait = None;
+                    self.not_before = None;
+                }
             }
         }
-        r.map(Some)
+        r
     }
-}
-
-/// The model row version and its budget, or `None` with no model.
-fn model_key(store: &Store) -> std::result::Result<Option<String>, String> {
-    use rusqlite::OptionalExtension;
-    store
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT version || ':' || coalesce(budget_micro_usd, '') FROM model_setting",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })
-        .map_err(|e| e.to_string())
 }
 
 /// The understanding thread: one [`Understander`] apart from the sync
@@ -385,7 +360,7 @@ fn understand_loop(store: Arc<Store>) {
     let mut u = Understander::default();
     loop {
         match u.turn(&store) {
-            Ok(Some(crate::cost::AfterSync::Busy)) => {
+            Ok(crate::cost::AfterSync::Busy) => {
                 std::thread::sleep(BUSY_RETRY);
                 continue;
             }

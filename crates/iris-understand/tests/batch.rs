@@ -272,8 +272,14 @@ fn two_runs_share_one_budget() {
     assert_eq!(r.cost_micro_usd, Some(COST));
     assert_eq!(r.reserved_micro_usd, 0);
     assert_eq!(b.budget(), Some(WORST + 100 - COST));
+    // The refused message waits for a larger budget, so the second run
+    // reads nothing and makes no call.
+    assert_eq!(
+        b.col("SELECT count(*) FROM message WHERE waits_model = 1"),
+        Some(1)
+    );
     let r = b.run(&Limits::default()).unwrap();
-    assert_eq!((r.stop.as_deref(), r.calls), (Some("budget"), 0));
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("done"), 0));
     assert_eq!(b.script.calls(), 1);
 }
 
@@ -678,4 +684,97 @@ fn an_idle_run_keeps_its_row_only_with_keep_idle() {
     );
     assert!(b.run(&Limits::default()).unwrap().is_idle());
     assert_eq!(rows(&b), Some(2), "the default keeps the row");
+}
+
+/// Property: the mark `waits_model` goes away on each change of an input
+/// of a refused call (labels, content, gone state, hostile marks, the model
+/// row, a larger budget), by any write path, and stays when the budget only
+/// gets smaller.
+#[test]
+fn the_waits_model_mark_clears_on_each_input_change() {
+    let b = store("waits");
+    b.model(true, Some(1000));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let mark = |b: &Box_| {
+        b.store
+            .write(|tx| {
+                tx.execute("UPDATE message SET waits_model = 1 WHERE id = ?1", [m])?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    let waits = |b: &Box_| b.col(&format!("SELECT waits_model FROM message WHERE id = {m}"));
+    let changes: &[(&str, &str, bool)] = &[
+        (
+            "budget down",
+            "UPDATE model_setting SET budget_micro_usd = budget_micro_usd - 1",
+            false,
+        ),
+        (
+            "budget up",
+            "UPDATE model_setting SET budget_micro_usd = budget_micro_usd + 10",
+            true,
+        ),
+        (
+            "budget set",
+            "UPDATE model_setting SET budget_micro_usd = NULL",
+            false,
+        ),
+        (
+            "approval",
+            "UPDATE model_setting SET budget_micro_usd = 5",
+            true,
+        ),
+        (
+            "new version",
+            "UPDATE model_setting SET version = version + 1",
+            true,
+        ),
+        (
+            "label removed",
+            "DELETE FROM message_label WHERE message_id = :m",
+            true,
+        ),
+        (
+            "label added",
+            "INSERT INTO message_label(message_id, label_id) SELECT :m, id FROM label LIMIT 1",
+            true,
+        ),
+        (
+            "content",
+            "UPDATE message SET content_sha256 = content_sha256 WHERE id = :m",
+            true,
+        ),
+        ("gone", "UPDATE message SET gone_at = 1 WHERE id = :m", true),
+        (
+            "back",
+            "UPDATE message SET gone_at = NULL WHERE id = :m",
+            true,
+        ),
+        (
+            "hostile",
+            "UPDATE message SET hostile = '[]' WHERE id = :m",
+            true,
+        ),
+        (
+            "unrelated",
+            "UPDATE message SET size = size WHERE id = :m",
+            false,
+        ),
+    ];
+    for (name, sql, clears) in changes {
+        mark(&b);
+        let sql = sql.replace(":m", &m.to_string());
+        b.store
+            .write(|tx| {
+                tx.execute(&sql, [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(waits(&b), Some(i64::from(!clears)), "{name}");
+    }
+    // A new model row (`iris model set` replaces the row) clears it too.
+    mark(&b);
+    b.model(false, None);
+    assert_eq!(waits(&b), Some(0), "model set");
 }

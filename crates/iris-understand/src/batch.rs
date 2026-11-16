@@ -35,7 +35,7 @@ const NO_DATE: i64 = -9_223_372_036_854_775_807;
 
 /// The pending conditions other than the thread rule, on message `m`.
 const BASE: &str = "m.gone_at IS NULL AND m.understood_at IS NULL
-  AND m.content_sha256 IS NOT NULL
+  AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
   AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
   AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
@@ -121,6 +121,11 @@ pub struct Limits {
     /// False for the run after a sync: a run that read no message and made
     /// no call deletes its row, so a run each minute adds no row.
     pub keep_idle: bool,
+    /// False: no model call. Each refused message gets the mark
+    /// `waits_model`, as with no model. The run after a sync uses it while
+    /// it waits after a model error, then clears the marks with
+    /// [`clear_waiting`].
+    pub calls: bool,
 }
 
 impl Default for Limits {
@@ -130,6 +135,7 @@ impl Default for Limits {
             max_messages: None,
             max_cost_micro_usd: None,
             keep_idle: true,
+            calls: true,
         }
     }
 }
@@ -280,8 +286,8 @@ fn run_messages(
     // resets come before the main pass, which sees them.
     refresh_senders(store, now_ms)?;
     let inner: Box<dyn Model> = match row {
-        Some(r) => connect(r).map_err(Error::Connect)?,
-        None => Box::new(NoModel),
+        Some(r) if limits.calls => connect(r).map_err(Error::Connect)?,
+        _ => Box::new(NoModel),
     };
     let model = Budgeted::new(inner.as_ref(), store, run, row);
     let mut r = Runner {
@@ -381,6 +387,20 @@ impl Runner<'_> {
             called.push(message);
             let rows = match store::understand(self.store, message, self.model, self.now_ms) {
                 Ok(o) => o.rerun,
+                // The call was refused (no model, or no budget): the message
+                // waits until an input of the refusal changes (schema 5
+                // triggers), so later runs do not read it again.
+                Err(store::Error::Model(iris_model::Error::Budget(_), rows)) => {
+                    self.store.write(|tx| {
+                        tx.execute(
+                            "UPDATE message SET waits_model = 1
+                             WHERE id = ?1 AND understood_at IS NULL",
+                            [message],
+                        )?;
+                        Ok(())
+                    })?;
+                    rows
+                }
                 Err(store::Error::Model(_, rows)) => rows,
                 Err(e) => return Err(Error::Understand(e)),
             };
@@ -528,33 +548,13 @@ fn from_of(path: &std::path::Path) -> Option<String> {
     crate::Head::parse(&raw).from_addr
 }
 
-/// True if a run can make progress now: a reachable pending message (the
-/// thread rule included) that the free steps can finish or start, or any
-/// reachable pending message when a model can be called. The free steps
-/// can act on a message with no `body` row (new or changed mail, its
-/// write 1 not done) and on hostile mail (`SPAM`, or a `hostile` sender).
-/// A model can be called if a model row exists and it has no price or a
-/// budget above 0. The run after a sync (R1-28) runs only then, so an
-/// unchanged store, or mail that waits for a model, makes no run.
-pub fn can_progress(store: &Store, now_ms: i64) -> Result<bool, Error> {
-    let sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM message m WHERE {BASE} AND {THREAD_RULE}
-           AND (NOT EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
-                OR EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id = 'SPAM')
-                OR EXISTS (SELECT 1 FROM header h JOIN sender s ON s.address = h.from_addr
-                           WHERE h.message_id = m.id AND s.kind = 'hostile')
-                OR EXISTS (SELECT 1 FROM model_setting
-                           WHERE price_in IS NULL OR coalesce(budget_micro_usd, 0) > 0)))"
-    );
-    Ok(store.read(|c| {
-        Ok(c.prepare_cached(&sql)?.query_row(
-            rusqlite::named_params! {
-                ":now": now_ms,
-                ":max_tries": MAX_TRIES,
-                ":no_date": NO_DATE,
-            },
-            |r| r.get(0),
+/// Clears the mark `waits_model` of each message, so the next run reads
+/// that mail again. Gives the count of messages.
+pub fn clear_waiting(store: &Store) -> Result<usize, Error> {
+    Ok(store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE message SET waits_model = 0 WHERE waits_model = 1",
+            [],
         )?)
     })?)
 }
@@ -595,7 +595,9 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
                 EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                         WHERE ml.message_id = m.id AND l.provider_id = 'SPAM'),
                 min(coalesce(m.size, :max_data), :max_data)
-         FROM message m WHERE {BASE}"
+         FROM message m WHERE {}",
+        // Mail that waits for a model is the work that an approval pays for.
+        BASE.replace(" AND m.waits_model = 0", "")
     );
     let mut st = tx.prepare(&sql)?;
     let mut rows = st.query(rusqlite::named_params! {

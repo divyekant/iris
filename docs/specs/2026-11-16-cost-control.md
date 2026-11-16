@@ -47,14 +47,13 @@ pending state that the store gives. Each one has an issue:
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It
   calls the runner of this spec. R1-28 note: `iris serve` runs it in one
-  understanding thread apart from the sync threads, each 10 seconds, only
-  if a run can make progress (`batch::can_progress`): a reachable pending
-  message that has no `body` row yet, that is hostile mail, or any
-  reachable pending message when a model can be called (no price, or a
-  budget above 0). Mail that waits for a model makes no run. A run that
-  stopped on `model`, `unknown`, `error` or `budget` runs again after a
-  wait that doubles from 60 seconds to 1 hour. A change of the model row or
-  its budget ends the wait.
+  understanding thread apart from the sync threads, each 10 seconds. A run
+  with nothing pending reads nothing and leaves no row
+  (`Limits::keep_idle`). A run that stopped on `model`, `unknown` or
+  `error` starts a wait that doubles from 60 seconds to 1 hour. During the
+  wait, runs make no call (`Limits::calls`); the mail that needs the model
+  gets `waits_model`. When the wait ends, the engine clears the marks, and
+  the next run calls the model.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 
@@ -69,6 +68,15 @@ A message is pending when all of these are true:
 - It has no `DRAFT` label.
 - `tries` is less than `MAX_TRIES` (3), and `retry_at` is NULL or not later
   than now.
+- `waits_model` is 0 (R1-28, schema 5). The runner sets it to 1 when the
+  call of the message was refused before it went out (no model, or no
+  budget). Triggers of the store set it to 0 on each change of an input of
+  that refusal: a label, the content, `gone_at`, `hostile` or `tries` of
+  the message, a new or changed model row, or a larger budget. So no write
+  path can leave the mark after a change, and a run does not read the
+  same waiting mail again. The estimate counts this mail: an approval
+  pays for it. The older-message rule below still counts a message that
+  waits.
 - Each message of its thread that is not gone has `content_sha256` set
   (spec 1 section 7.1).
 - No older message of its thread waits. An older message waits when it is

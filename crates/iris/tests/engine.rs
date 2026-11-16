@@ -441,29 +441,28 @@ fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
 }
 
 #[test]
-fn understanding_runs_only_when_a_run_can_make_progress() {
+fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
     let s = setup("engine-idle", 5);
     let mut u = engine::Understander::new(Duration::ZERO);
     s.worker(s.account).sync().unwrap();
     assert!(matches!(
         u.turn(&s.store).unwrap(),
-        Some(iris::cost::AfterSync::Ran { .. })
+        iris::cost::AfterSync::Ran { .. }
     ));
     let rows = count(&s.store, "SELECT count(*) FROM understand_run");
-    // With no model, the mail that waits for a model gives no run.
-    for _ in 0..3 {
-        s.worker(s.account).sync().unwrap();
-        assert_eq!(u.turn(&s.store).unwrap(), None);
-    }
-    assert_eq!(count(&s.store, "SELECT count(*) FROM understand_run"), rows);
-    // A SPAM label on waiting mail, with no new mail and no model: the free
-    // steps can finish it, so a run is due. A run that the lock blocks is
-    // owed to the next turn.
     let waiting = count(
         &s.store,
-        "SELECT max(id) FROM message WHERE understood_at IS NULL",
+        "SELECT max(id) FROM message WHERE waits_model = 1",
     );
-    assert!(waiting > 0, "mail waits for a model");
+    assert!(waiting > 0, "with no model, mail waits");
+    // No change: each turn reads nothing and leaves no row.
+    for _ in 0..3 {
+        s.worker(s.account).sync().unwrap();
+        assert_eq!(u.turn(&s.store).unwrap(), iris::cost::AfterSync::Idle);
+    }
+    assert_eq!(count(&s.store, "SELECT count(*) FROM understand_run"), rows);
+    // A SPAM label, by any write path, clears the mark: the free steps
+    // read the message with no model. A run that the lock blocks is owed.
     s.store
         .write(|tx| {
             tx.execute(
@@ -480,9 +479,12 @@ fn understanding_runs_only_when_a_run_can_make_progress() {
         })
         .unwrap();
     let held = iris_understand::batch::lock(&s.store).unwrap();
-    assert_eq!(u.turn(&s.store).unwrap(), Some(iris::cost::AfterSync::Busy));
+    assert_eq!(u.turn(&s.store).unwrap(), iris::cost::AfterSync::Busy);
     drop(held);
-    assert!(u.turn(&s.store).unwrap().is_some());
+    assert!(matches!(
+        u.turn(&s.store).unwrap(),
+        iris::cost::AfterSync::Ran { .. }
+    ));
     assert_eq!(
         count(
             &s.store,
@@ -493,5 +495,5 @@ fn understanding_runs_only_when_a_run_can_make_progress() {
         1,
         "the SPAM mail is read with no model"
     );
-    assert_eq!(u.turn(&s.store).unwrap(), None);
+    assert_eq!(u.turn(&s.store).unwrap(), iris::cost::AfterSync::Idle);
 }

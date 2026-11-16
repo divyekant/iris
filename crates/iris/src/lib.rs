@@ -406,7 +406,7 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
     if matches!(command, MirrorCommand::Sync) {
         let mut said = false;
         loop {
-            match cost::after_sync(&store) {
+            match cost::after_sync(&store, true) {
                 Ok(cost::AfterSync::Ran { report, .. }) => {
                     print!("{}", prefix_lines("understand: ", &report))
                 }

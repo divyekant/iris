@@ -410,25 +410,25 @@ fn the_run_after_a_sync_tries_again_after_a_model_error() {
     let pending = "SELECT count(*) FROM message WHERE understood_at IS NULL";
     let before = col(&store, pending).unwrap();
     let mut u = iris::engine::Understander::new(std::time::Duration::ZERO);
-    // The server fails: the run stops and asks for a retry.
+    // The server fails: the run stops and starts a wait.
     let r = u.turn(&store).unwrap();
     assert!(
-        matches!(r, Some(iris::cost::AfterSync::Ran { retry: true, .. })),
+        matches!(r, iris::cost::AfterSync::Ran { retry: true, .. }),
         "{r:?}"
     );
-    // The mailbox and the model do not change; the server works again. The
-    // next turn runs, and the pending mail is read.
+    // The mailbox and the model do not change; the wait (0 here) ends, and
+    // the server works again. The next turn calls it, and the mail is read.
     let r = u.turn(&store).unwrap();
     assert!(
-        matches!(r, Some(iris::cost::AfterSync::Ran { retry: false, .. })),
+        matches!(r, iris::cost::AfterSync::Ran { retry: false, .. }),
         "{r:?}"
     );
     assert!(col(&store, pending).unwrap() < before);
-    assert_eq!(u.turn(&store).unwrap(), None, "nothing changed");
+    assert_eq!(u.turn(&store).unwrap(), iris::cost::AfterSync::Idle);
 }
 
 #[test]
-fn a_run_stopped_on_the_budget_waits_until_the_budget_changes() {
+fn mail_refused_for_the_budget_waits_until_the_budget_grows() {
     let (store, _fake) = synced("budget-wait");
     let model = iris::cost::NewModel {
         local: false,
@@ -442,16 +442,19 @@ fn a_run_stopped_on_the_budget_waits_until_the_budget_changes() {
     };
     iris::cost::set_model(&store, &model).unwrap();
     let mut u = iris::engine::Understander::new(std::time::Duration::from_secs(3600));
-    // New mail: the free steps run, the paid calls are refused.
+    // New mail: the free steps run, the paid calls are refused, and the
+    // mail waits.
     let r = u.turn(&store).unwrap();
     assert!(
-        matches!(r, Some(iris::cost::AfterSync::Ran { retry: true, .. })),
+        matches!(r, iris::cost::AfterSync::Ran { retry: false, .. }),
         "{r:?}"
     );
-    assert_eq!(u.turn(&store).unwrap(), None, "the run waits");
-    // An approved budget ends the wait.
+    assert!(col(&store, "SELECT count(*) FROM message WHERE waits_model = 1").unwrap() > 0);
+    assert_eq!(u.turn(&store).unwrap(), iris::cost::AfterSync::Idle);
+    // The estimate counts the mail that waits: the approval pays for it.
     let now = iris::engine::now_ms();
     let out = iris::cost::estimate(&store, now).unwrap();
+    assert!(!out.contains("Messages to understand: 0"), "{out}");
     let code = out
         .split("--approve ")
         .nth(1)
@@ -459,5 +462,13 @@ fn a_run_stopped_on_the_budget_waits_until_the_budget_changes() {
         .unwrap()
         .to_string();
     iris::cost::approve(&store, &code, 5_000_000, now).unwrap();
-    assert!(u.turn(&store).unwrap().is_some(), "a new budget runs");
+    assert_eq!(
+        col(&store, "SELECT count(*) FROM message WHERE waits_model = 1"),
+        Some(0),
+        "a larger budget clears the marks"
+    );
+    assert!(matches!(
+        u.turn(&store).unwrap(),
+        iris::cost::AfterSync::Ran { .. }
+    ));
 }
