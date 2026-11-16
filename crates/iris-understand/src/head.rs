@@ -4,8 +4,6 @@
 /// The most bytes of the header block that the parser reads (the same limit
 /// as `iris-clean`).
 const HEAD_LIMIT: usize = 256 * 1024;
-/// The most addresses of one `To` or `Cc` header.
-const MAX_ADDRS: usize = 200;
 /// The authserv-id of the `Authentication-Results` header that Gmail adds.
 pub const GMAIL_AUTHSERV: &str = "mx.google.com";
 
@@ -149,7 +147,6 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
                     .filter(|n| !n.is_empty()),
             )
         })
-        .take(MAX_ADDRS)
         .collect()
 }
 

@@ -150,12 +150,52 @@ Invoice 77: total 50.00 USD.
 #[test]
 fn the_date_is_internal_date_then_the_header_then_now() {
     let raw = "From: a@example.org\nDate: Wed, 31 Dec 2025 09:00:00 +0000\nSubject: x\n\nHi.\n";
-    let a = analysis(raw, &[], &[], &[]);
-    let cx_date = a.head.date.unwrap();
-    assert_eq!(cx_date, 1_767_171_600_000);
+    let header = 1_767_171_600_000;
+    let date = |raw: &str, internal: Option<i64>| {
+        let lookup = |_: &str| Vec::new();
+        let cx = Context {
+            me: "owner@example.com",
+            kind: Kind::Stranger,
+            labels: &[],
+            internal_date: internal,
+            now_ms: NOW,
+            known_person: &lookup,
+            existing: &[],
+            thread: &[],
+            same_sender: &[],
+        };
+        analyze(&crlf(raw), &cx).date(&cx)
+    };
+    assert_eq!(date(raw, Some(42)), 42);
+    assert_eq!(date(raw, None), header);
+    let no_date = "From: a@example.org\nSubject: x\n\nHi.\n";
+    assert_eq!(date(no_date, None), NOW);
     let huge =
         "From: a@example.org\nDate: 1 Jan 9223372036854775807 00:00 +0000\nSubject: x\n\nHi.\n";
-    assert!(analysis(huge, &[], &[], &[]).head.date.is_none());
+    assert_eq!(date(huge, None), NOW);
+}
+
+#[test]
+fn a_dmarc_result_needs_the_from_domain() {
+    // A DMARC fail with no header.from domain is no evidence about From.
+    let fail = "Authentication-Results: mx.google.com; dmarc=fail (p=REJECT)\nFrom: Shop <billing@shop.example>\nSubject: Pay\n\nPay now.\n";
+    assert!(run(fail, &[], &[], &[]).is_empty());
+    // A DMARC pass for another domain does not clear a spoof.
+    let other = "Authentication-Results: mx.google.com; dkim=pass header.d=other.example; dmarc=pass header.from=else.example\nFrom: Ana Lee <ana@other.example>\nSubject: Hi\n\nCall me.\n";
+    assert_eq!(run(other, &[], ANA, &[]), vec![Mark::Spoof]);
+    let none = "Authentication-Results: mx.google.com; dkim=pass header.d=other.example; dmarc=pass\nFrom: Ana Lee <ana@other.example>\nSubject: Hi\n\nCall me.\n";
+    assert_eq!(run(none, &[], ANA, &[]), vec![Mark::Spoof]);
+}
+
+#[test]
+fn every_recipient_is_kept() {
+    let to: Vec<String> = (0..250).map(|i| format!("p{i}@example.org")).collect();
+    let raw = format!(
+        "From: a@example.org\nTo: {}\nSubject: x\n\nHi.\n",
+        to.join(", ")
+    );
+    let a = analysis(&raw, &[], &[], &[]);
+    assert_eq!(a.head.to, to);
 }
 
 #[test]

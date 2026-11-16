@@ -160,19 +160,25 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
     let mut marks = Vec::new();
     let from = head.from_addr.as_deref().unwrap_or("");
     let from_domain = head::domain(from);
-    if let Some(a) = &head.auth {
-        let for_from = a.dmarc_from.as_deref().is_none_or(|d| d == from_domain);
-        if a.dmarc.as_deref() == Some("fail") && for_from {
-            marks.push(Mark::Dmarc);
-        }
+    // A DMARC result counts only with its `header.from` domain, and only
+    // for the domain of this From address.
+    let dmarc = head
+        .auth
+        .as_ref()
+        .filter(|a| {
+            a.dmarc_from
+                .as_deref()
+                .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
+        })
+        .and_then(|a| a.dmarc.as_deref());
+    if dmarc == Some("fail") {
+        marks.push(Mark::Dmarc);
     }
     if let Some(name) = &head.from_name {
         let known = (cx.known_person)(name);
         if !known.is_empty() {
-            let pass = head
-                .auth
-                .as_ref()
-                .is_some_and(|a| a.dkim_pass(from_domain) && a.dmarc.as_deref() == Some("pass"));
+            let pass = dmarc == Some("pass")
+                && head.auth.as_ref().is_some_and(|a| a.dkim_pass(from_domain));
             if !known.iter().any(|k| k.eq_ignore_ascii_case(from)) && !pass {
                 marks.push(Mark::Spoof);
             }
