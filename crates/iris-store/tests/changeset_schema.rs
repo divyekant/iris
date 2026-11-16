@@ -164,11 +164,16 @@ fn only_the_moves_of_section_5_2() {
                 tx.execute_batch(&trigger)?;
                 // The submit. For replaced, a newer revision is submitted.
                 tx.execute("UPDATE changeset SET submitted_at = 0, why = 'w'", [])?;
+                // The submit of a newer revision replaces the action, or
+                // leaves it.
                 if to == "replaced" {
                     tx.execute_batch(
                         "UPDATE changeset SET revision = 2, submitted_at = NULL;
                          UPDATE changeset SET submitted_at = 0;",
                     )?;
+                    let now: Option<String> =
+                        tx.query_row("SELECT state FROM changeset_action", [], |r| r.get(0))?;
+                    return Ok(from != Some("replaced") && now.as_deref() == Some("replaced"));
                 }
                 // A withdraw cancels the action in the same write, or leaves it.
                 if to == "cancelled" {
@@ -445,6 +450,40 @@ fn a_draft_has_no_decision() {
         &s,
         "UPDATE changeset_action SET state = 'in_review', decided_by = 'policy'",
     );
+}
+
+/// The submit of a new revision replaces the proposed and in_review actions
+/// of the older revisions, and a new revision makes the changeset a draft.
+#[test]
+fn a_new_revision_replaces_and_is_a_draft() {
+    let dir = TempDir::new("newrev");
+    let s = store(&dir);
+    let state = |s: &Store, sql: &str| -> String {
+        s.read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?)).unwrap()
+    };
+    s.write(|tx| {
+        submit(tx, draft(tx)?)?;
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'in_review', decided_by = 'policy'",
+            [],
+        )?)
+    })
+    .unwrap();
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 2, submitted_at = NULL", [])?))
+        .unwrap();
+    assert_eq!(state(&s, "SELECT state FROM changeset"), "draft");
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET submitted_at = 5", [])?))
+        .unwrap();
+    assert_eq!(state(&s, "SELECT state FROM changeset_action"), "replaced");
+    assert_eq!(state(&s, "SELECT state FROM changeset"), "closed");
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'approved', decided_by = 'person'",
+    );
+    // All actions decided, then a new revision: the changeset is a draft.
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 3, submitted_at = NULL", [])?))
+        .unwrap();
+    assert_eq!(state(&s, "SELECT state FROM changeset"), "draft");
 }
 
 /// The moves are part of the trigger. No table holds them.

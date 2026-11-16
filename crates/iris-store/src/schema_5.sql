@@ -16,9 +16,10 @@ CREATE TABLE changeset (
   why TEXT,
   created_at INTEGER NOT NULL,
   submitted_at INTEGER,
-  -- 'draft' until an action of the changeset has a state. Then 'open'
-  -- while an action is open, else 'closed'. The trigger action_closes keeps
-  -- it current, and changeset_state refuses any other value.
+  -- 'draft' while the newest revision is not submitted. Then 'open' while
+  -- an action is open, else 'closed'. The triggers action_closes and
+  -- changeset_submit keep it current, and changeset_state refuses any other
+  -- value.
   state TEXT NOT NULL DEFAULT 'draft'
     CHECK (state IN ('draft', 'open', 'closed', 'withdrawn')),
   -- coalesce: a CHECK that gives NULL passes.
@@ -210,32 +211,47 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: a withdrawn changeset stays withdrawn');
 END;
 
--- A changeset is 'draft' until an action has a state, then 'open' while one
--- or more actions are open, else 'closed'. changeset_state checks the same.
+-- The state of a changeset: 'draft' while the newest revision is not
+-- submitted, then 'open' while one or more actions are open, else
+-- 'closed'. changeset_state checks the same.
 CREATE TRIGGER action_closes AFTER UPDATE OF state ON changeset_action
 BEGIN
   UPDATE changeset SET state =
-    CASE WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.changeset_id
+    CASE WHEN submitted_at IS NULL THEN 'draft'
+         WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.changeset_id
                       AND state IN ('proposed', 'in_review', 'approved', 'held'))
            THEN 'open'
-         WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.changeset_id
-                      AND state IS NOT NULL)
-           THEN 'closed'
-         ELSE 'draft' END
+         ELSE 'closed' END
   WHERE id = new.changeset_id AND state <> 'withdrawn';
+END;
+
+-- The submit of a revision replaces the proposed and in_review actions of
+-- the older revisions (section 5.5), and a new revision is a draft.
+CREATE TRIGGER changeset_submit AFTER UPDATE OF revision, submitted_at ON changeset
+WHEN new.state <> 'withdrawn'
+BEGIN
+  UPDATE changeset_action SET state = 'replaced', decided_by = 'author', rule = NULL,
+    policy = NULL, reason = NULL, decided_at = new.submitted_at
+  WHERE new.submitted_at IS NOT NULL AND changeset_id = new.id
+    AND revision < new.revision AND state IN ('proposed', 'in_review');
+  UPDATE changeset SET state =
+    CASE WHEN new.submitted_at IS NULL THEN 'draft'
+         WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
+                      AND state IN ('proposed', 'in_review', 'approved', 'held'))
+           THEN 'open'
+         ELSE 'closed' END
+  WHERE id = new.id;
 END;
 
 -- The state of a changeset comes from its actions. Only a withdraw writes
 -- another value.
 CREATE TRIGGER changeset_state BEFORE UPDATE OF state ON changeset
 WHEN new.state <> 'withdrawn' AND new.state IS NOT (
-  CASE WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
+  CASE WHEN new.submitted_at IS NULL THEN 'draft'
+       WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
                     AND state IN ('proposed', 'in_review', 'approved', 'held'))
          THEN 'open'
-       WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
-                    AND state IS NOT NULL)
-         THEN 'closed'
-       ELSE 'draft' END)
+       ELSE 'closed' END)
 BEGIN
   SELECT RAISE(ABORT, 'iris: the state of a changeset comes from its actions');
 END;

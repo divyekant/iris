@@ -169,7 +169,7 @@ Schema of the changeset comes with the release 2 code, from this section.
 | `revision` | Starts at 1. The author submits a new revision after a review comment. Each action of the old revision in the state `proposed` or `in_review` becomes `replaced`. The new revision has its own actions and decisions. |
 | `author.kind` | `person`, `agent`, `triage` or `local`. |
 | `why` | The reason of the author, in one or two sentences. Required. |
-| `state` | `draft` (before submit), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
+| `state` | `draft` (the newest revision is not submitted), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
 | `actions[].n` | The number of the action in the changeset, from 1. |
 | `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
 | `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
@@ -309,6 +309,7 @@ section 5.1) keep other users out.
 | Flags that are not a JSON array of the names of section 5.3 | A flag that a check does not see | The triggers refuse the write. |
 | A draft or `proposed` action with a decision, a decided action that does not name who decided, or a person who sends an action to review | A decision that no one made | A `CHECK` refuses the write. Submit proposes an action with no decision. |
 | A changeset state that does not agree with its actions | A reader sees a closed changeset with an open action | The triggers write the state from the actions, and refuse any other value. Only a withdraw writes `withdrawn`. |
+| The submit of a new revision while older actions are `proposed` or `in_review` | An action that the author revised gets an approval | The trigger `changeset_submit` replaces them in the same write. |
 | A withdraw while an action is open | A withdrawn changeset applies an action | The trigger `changeset_withdraw` cancels each open action and each draft action in the same write. A withdrawn changeset stays withdrawn. |
 | A move to `applied` or `failed` that changes the decision | The ledger cannot name who approved the action | The trigger `action_state` refuses the write. |
 | An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
