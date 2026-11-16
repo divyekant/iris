@@ -134,6 +134,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             }
             // The kinds first: the conversation reads them.
             let rerun = iris_senders::refresh(tx, now_ms)?;
+            rerun_senders(tx, &rerun, now_ms)?;
             iris_talk::update(tx, row.thread, None, now_ms)?;
             Ok(Some(rerun))
         })?;
@@ -216,7 +217,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         }
         put_header(tx, message, &a)?;
         // Step 3: the sender rules read the header row of this message.
-        decided = Some(iris_senders::decide(tx, message, &raw, now_ms)?);
+        let d = iris_senders::decide(tx, message, &raw, now_ms)?;
+        // In the transaction of the kind change, so no error loses a rerun.
+        rerun_senders(tx, &d.rerun, now_ms)?;
+        decided = Some(d);
         // The clean text goes in the same checked write, so a sync between
         // two writes cannot leave the text of old content.
         iris_store::put_body(tx, message, &body)?;
@@ -699,6 +703,43 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
 /// correction, section 7.5). Conversations belong to the conversation rule.
 // shortcut: pinned means "has a correction" only; add the references of
 // open changesets and of the ledger when specification 2 builds them.
+/// Makes the mail of the `sender` rows `rows` pending again: a sender that
+/// became or stopped being hostile (section 6.7). For each message from
+/// these addresses that is not gone: deletes its items that are not pinned
+/// (not the conversation), and clears `understood_at`, `tries` and
+/// `retry_at`, because the new hostile state is new input. Then computes the
+/// conversation of each thread again, so no conversation shows reset mail.
+/// Call it in the transaction that changed the kinds.
+/// Gives the threads of the reset messages.
+pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store::Result<Vec<i64>> {
+    let mut threads = Vec::new();
+    for &row in rows {
+        let messages: Vec<(i64, i64)> = tx
+            .prepare_cached(
+                "SELECT m.id, m.thread_id FROM sender s
+                 JOIN header h ON h.from_addr = s.address
+                 JOIN message m ON m.id = h.message_id
+                 WHERE s.id = ?1 AND m.gone_at IS NULL",
+            )?
+            .query_map([row], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (m, t) in messages {
+            drop_old_items(tx, m)?;
+            tx.execute(
+                "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = ?1",
+                [m],
+            )?;
+            if !threads.contains(&t) {
+                threads.push(t);
+            }
+        }
+    }
+    for &t in &threads {
+        iris_talk::update(tx, t, None, now_ms)?;
+    }
+    Ok(threads)
+}
+
 fn drop_old_items(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
         "DELETE FROM item WHERE id IN (

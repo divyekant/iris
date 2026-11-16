@@ -9,6 +9,7 @@
 //!
 //! Mail text is data, never instructions. Code only compares the text.
 
+pub mod budget;
 pub mod head;
 pub mod prompt;
 pub mod rules;
@@ -347,6 +348,12 @@ pub trait Model {
     /// The model name for `derived.model`.
     fn name(&self) -> &str;
     fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error>;
+    /// An upper bound of the bytes of the request body for these texts: the
+    /// input tokens of the worst case of a call (`batch`). The default
+    /// allows JSON escapes (at most 6 bytes for each byte) and the framing.
+    fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
+        6 * (instruction.len() + data.len()) as u64 + 8192
+    }
 }
 
 /// An `iris_model::Client` and the name of its model.
@@ -362,6 +369,10 @@ impl Model for Named {
 
     fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
         self.client.ask(instruction, data)
+    }
+
+    fn request_bytes(&self, instruction: &str, data: &str) -> u64 {
+        self.client.request_bytes(instruction, data)
     }
 }
 

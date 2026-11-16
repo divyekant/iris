@@ -313,11 +313,12 @@ CREATE TABLE understand_estimate (
 - The run cost for the limit and the budget is
   `cost_micro_usd + unknown_cost_micro_usd`.
 - `iris-model`: `Usage` gets `known: bool`. A reply with no usage gives
-  `known = false`, not zero tokens. An error after the request went out
-  carries the byte count of the request.
-- `iris-understand`: `Decision`, `Outcome` and `Error::Model` carry, over
-  all calls of the message (also a bad first answer before a good second
-  one), the known usage, `unknown_calls` and `unknown_bound`.
+  `known = false`, not zero tokens.
+- The `Budgeted` wrapper sees each call and its result, so it writes the
+  counts of each call to the run row in its settle write. It computes the
+  byte count of the request before it sends, so an error needs no byte
+  count. `Decision`, `Outcome` and `Error::Model` keep their counts for
+  one message only; the run row does not use them.
 - The cost is the cost that Iris computes from the price that the person
   gave. A price that is too low lets the provider charge more. The commands
   say this. The run row keeps the tokens, so the person can check them
@@ -361,7 +362,8 @@ Which items a rebuild deletes, and when, is a decision of the rebuild card
 - `iris-model` follows no HTTP redirect for any provider: a 3xx answer is an
   error, and the body goes nowhere else. For a local model, the client also
   checks that the address of the connection is a loopback address, also
-  after the name lookup of `localhost`. A local model call uses no HTTP proxy: the client
+  after the name lookup of `localhost` (R1-15, with the host check of
+  `iris model set local`). A local model call uses no HTTP proxy: the client
   ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and any configured proxy
   for it, so no proxy on loopback can forward the mail.
 - `iris model show`: the settings and the budget left, never the key.

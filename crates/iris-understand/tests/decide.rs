@@ -49,6 +49,7 @@ fn text(t: &str) -> Reply {
             input_tokens: 100,
             output_tokens: 10,
             cost_micro_usd: Some(5),
+            known: true,
         },
         stop: Stop::End,
     }
