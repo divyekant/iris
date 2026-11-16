@@ -213,7 +213,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     (out, full)
 }
 
-/// [`to_markdown`], and each link whose text is not its target, as
+/// The Markdown of `to_markdown`, and each link whose text is not its target, as
 /// `(text, href)`: the text as the Markdown shows it, the href as the HTML
 /// gives it. A link after the output limit is not in the list.
 pub(crate) fn convert(html: &str, drop_quotes: bool) -> (String, bool, Vec<(String, String)>) {
