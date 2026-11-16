@@ -91,3 +91,11 @@ Content-Type: text/plain\r\n\r\nSee below.\r\n--m\r\nContent-Type: message/rfc82
 Subject: old\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nMETHOD:REQUEST\r\n--m--\r\n";
     assert!(!inv(raw));
 }
+
+#[test]
+fn a_calendar_before_the_text_version_of_an_alternative_counts() {
+    let raw = b"Content-Type: multipart/alternative; boundary=a\r\n\r\n--a\r\n\
+Content-Type: text/calendar; charset=utf-8\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n--a\r\n\
+Content-Type: text/plain\r\n\r\nYou are invited.\r\n--a--\r\n";
+    assert!(inv(raw));
+}

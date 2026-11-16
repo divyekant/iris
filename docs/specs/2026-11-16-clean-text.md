@@ -386,11 +386,15 @@ client. They are not defects of this design:
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
 - Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
-  address, so the person goes out of the profiles. A quoted local part
-  outside `<>` (`"a:b"@example.org`), a comment inside an address
-  (`john(work)@example.org`), and a domain literal with a `:` outside `<>`
-  (`user@[IPv6:2001:db8::1]`). The same forms inside `<>` work. A comment
-  after a bare address (`a@example.org (Ana)`) is the display name.
+  address, so the person goes out of the profiles. A comment inside an
+  address (`john(work)@example.org`), a domain literal with a `:` outside
+  `<>` (`user@[IPv6:2001:db8::1]`), a quoted local part outside `<>` with an
+  escaped character (`"a\"b"@example.org`), and an `@` outside a quoted
+  local part (`a@b@example.org`). The same valid forms inside `<>` work.
+  `mail-parser` reads a bare quoted local part (`"a:b"@example.org`) as a
+  name and `@example.org`. `iris-people` joins the two again when the list
+  holds that exact text, so this form works. A comment after a bare address
+  (`a@example.org (Ana)`) is the display name.
 
 ### Limits and the cut
 

@@ -595,6 +595,9 @@ mod tests {
             addresses(r#"a@b@c.d, <x@y@z.example>, <"q@r"@s.example>"#),
             [r#""q@r"@s.example"#]
         );
+        // shortcut: a bare quoted local part with an escape gives no address
+        // (mail-parser 1.0.1 unescapes the name); upgrade with the parser (#83).
+        assert_eq!(addresses(r#""a\"b"@example.org"#), Vec::<String>::new());
         // A bare quoted local part and one in `<>` both count.
         assert_eq!(
             addresses(r#""john.doe"@Example.org, "a, b"@example.org, Jo <"j o"@example.org>"#),
