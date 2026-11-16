@@ -55,6 +55,7 @@ fn each_form_has_a_schema_and_a_sample() {
         "sender",
         "changeset",
         "job",
+        "matter",
     ] {
         let schema = read_json(&dir.join(format!("{name}.schema.json")));
         assert_eq!(schema["$id"], format!("urn:iris:model:0:{name}"));

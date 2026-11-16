@@ -844,6 +844,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-matters"
+version = "0.0.0"
+dependencies = [
+ "iris-store",
+ "rusqlite",
+]
+
+[[package]]
 name = "iris-model"
 version = "0.0.0"
 dependencies = [

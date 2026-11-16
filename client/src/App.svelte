@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Changeset, type GatePage, type HandledPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -15,6 +15,8 @@
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
   import Gate from "./views/Gate.svelte";
+  import Jobs from "./views/Jobs.svelte";
+  import Job from "./views/Job.svelte";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
@@ -37,6 +39,7 @@
   // svelte-ignore state_referenced_locally
   if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
 
+  const JOB_STATES = ["needs_you", "working", "waiting", "done"] as const;
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
@@ -66,7 +69,7 @@
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate"}
+  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -116,6 +119,14 @@
     {:else if route.view === "review"}
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
+      {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "jobs"}
+      {#await Promise.all(JOB_STATES.map((state) => get<JobPage>(`jobs?state=${state}&limit=${state === "done" ? 20 : 50}`))) then [needs_you, working, waiting, done]}
+        <Jobs pages={{ needs_you, working, waiting, done }} />
+      {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "job"}
+      {#await get<JobDetail>(`jobs/${encodeURIComponent(route.id)}`) then detail}
+        <Job {detail} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "rules"}
       {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}

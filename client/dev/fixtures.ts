@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -373,6 +373,55 @@ export function watchPost(path: string, body: { text?: string }): [number, unkno
   return [201, w];
 }
 
+// Jobs of the agents (card R4-09): one in each state.
+const at = (day: number, h: number, m = 0) => new Date(Date.UTC(2026, 10, day, h, m)).toISOString();
+const dana = { name: "Dana Whitfield", address: "dana@northwind.example" };
+export const jobs: Record<string, Job> = {
+  "j-12": { id: "j-12", goal: "Get the signed contract from Dana before 20 Nov.", due: at(20, 0), created: at(16, 9), updated: at(16, 18, 41), state: "waiting", wait: { thread: "t-8841", until: at(18, 9) } },
+  "j-14": {
+    id: "j-14",
+    goal: "Pay the Q4 invoice from Brightline.",
+    due: at(17, 17),
+    created: at(16, 8),
+    updated: at(16, 10, 2),
+    state: "needs_you",
+    question: "The invoice says 2,400 EUR, but the quote said 2,150 EUR. Pay the full amount, or ask Brightline about the difference first?",
+  },
+  "j-15": { id: "j-15", goal: "Book a dentist appointment for next week, in the morning.", created: at(16, 11), updated: at(16, 11), state: "working" },
+  "j-9": { id: "j-9", goal: "Cancel the gym membership.", created: at(12, 9), updated: at(13, 15), state: "done", end: "complete" },
+};
+export const jobDetails: Record<string, JobDetail> = {
+  "j-12": {
+    job: {
+      ...jobs["j-12"],
+      events: [
+        { at: at(16, 9), state: "working", by: "person" },
+        { at: at(16, 9, 20), state: "waiting", by: "agent", wait: { thread: "t-8841", until: at(17, 9) }, why: "I asked Dana for the signed copy. She said she sends it today." },
+        { at: at(16, 16, 5), state: "working", by: "engine", why: "reply" },
+        { at: at(16, 16, 12), state: "needs_you", by: "agent", question: "Dana sent a version with a new clause 7 (payment in 45 days, not 30). Accept it?" },
+        { at: at(16, 18, 30), state: "working", by: "person", answer: "Accept 45 days. Ask her to sign today." },
+        { at: at(16, 18, 41), state: "waiting", by: "agent", wait: { thread: "t-8841", until: at(18, 9) }, why: "Dana signs tomorrow morning." },
+      ],
+    },
+    changesets: [
+      { id: "cs-31", at: at(16, 9, 18), state: "closed", why: "File the old drafts of the contract, so only the newest stays in the inbox.", actions: { applied: 3 } },
+      { id: "cs-34", at: at(16, 18, 38), state: "open", why: "Reply to Dana: accept clause 7 and ask for the signature.", actions: { in_review: 1 } },
+    ],
+    threads: { "t-8841": { id: "m-90211", thread: "t-8841", date: at(16, 16, 2), from: dana, subject: "Re: Northwind contract, final version", labels: ["INBOX"], gone: false } },
+  },
+  "j-14": {
+    job: { ...jobs["j-14"], events: [{ at: at(16, 8), state: "working", by: "person" }, { at: at(16, 10, 2), state: "needs_you", by: "agent", question: jobs["j-14"].question, why: "The amounts do not agree." }] },
+    changesets: [],
+    threads: {},
+  },
+};
+const jobPage = (state: string | null) => {
+  const list = Object.values(jobs)
+    .filter((j) => (state && state !== "open" ? j.state === state : j.state !== "done"))
+    .sort((a, b) => Number(b.id.slice(2)) - Number(a.id.slice(2)));
+  return { jobs: list, next: null };
+};
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
@@ -402,6 +451,8 @@ export function answer(path: string): unknown {
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
   if (name === "watches") return watches;
+  if (name === "jobs" && id) return jobDetails[id];
+  if (name === "jobs") return jobPage(q.get("state"));
   return undefined;
 }
 

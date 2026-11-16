@@ -391,11 +391,12 @@ fn the_spec_examples_are_valid_and_a_bad_item_is_not() {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         let name = p.file_name().unwrap().to_str().unwrap().to_string();
-        // The sender, the changeset and the job are not items.
+        // The sender, the changeset, the job and the matter are not items.
         if !name.ends_with(".json")
             || name.starts_with("sender")
             || name.starts_with("changeset")
             || name.starts_with("job")
+            || name.starts_with("matter")
         {
             continue;
         }
