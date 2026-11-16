@@ -1,4 +1,4 @@
-//! Migration 5: the changeset tables and their triggers (specification 2,
+//! Migration 7: the changeset tables and their triggers (specification 2,
 //! section 5). Each test writes raw SQL, as any writer of the store can.
 
 use std::fs;

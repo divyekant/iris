@@ -35,7 +35,7 @@ const NO_DATE: i64 = -9_223_372_036_854_775_807;
 
 /// The pending conditions other than the thread rule, on message `m`.
 const BASE: &str = "m.gone_at IS NULL AND m.understood_at IS NULL
-  AND m.content_sha256 IS NOT NULL
+  AND m.content_sha256 IS NOT NULL AND m.waits_model = 0
   AND m.tries < :max_tries AND (m.retry_at IS NULL OR m.retry_at <= :now)
   AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
@@ -118,6 +118,16 @@ pub struct Limits {
     pub max_messages: Option<u64>,
     /// A run can pass this limit by the cost of one message.
     pub max_cost_micro_usd: Option<u64>,
+    /// False for the run after a sync: a run that read no message and made
+    /// no call deletes its row, so a run each minute adds no row.
+    pub keep_idle: bool,
+    /// True for the run after a sync: honor the wait after a model error
+    /// of [`retry_after`]. During the wait the run makes no model call, and
+    /// each refused message gets the mark `waits_model`, as with no model.
+    /// The first run after the wait clears the marks and calls the model.
+    /// The run takes these decisions under its lock. Every run that can
+    /// call the model updates the wait at its end ([`end_wait`]).
+    pub wait_after_error: bool,
 }
 
 impl Default for Limits {
@@ -126,6 +136,8 @@ impl Default for Limits {
             batch: BATCH,
             max_messages: None,
             max_cost_micro_usd: None,
+            keep_idle: true,
+            wait_after_error: false,
         }
     }
 }
@@ -183,6 +195,17 @@ pub struct Report {
     pub reserved_micro_usd: i64,
 }
 
+impl Report {
+    /// True if the run read no message, made no call and holds no
+    /// reservation.
+    pub fn is_idle(&self) -> bool {
+        self.messages == 0
+            && self.calls == 0
+            && self.unknown_calls == 0
+            && self.reserved_micro_usd == 0
+    }
+}
+
 pub fn report(c: &Connection, run: i64) -> rusqlite::Result<Report> {
     c.query_row(
         "SELECT stop, messages, calls, input_tokens, output_tokens, cost_micro_usd,
@@ -216,29 +239,57 @@ pub type Connect<'a> = &'a dyn Fn(&ModelRow) -> Result<Box<dyn Model>, String>;
 /// caller.
 pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Result<Report, Error> {
     let _lock = lock(store)?;
-    let row = store.read(|c| Ok(model_row(c)?))?;
-    let priced = row.as_ref().is_some_and(|r| r.price.is_some());
-    let name = row.as_ref().map_or("", |r| r.model.as_str());
-    let run = store.write(|tx| {
+    // The row, the wait and the clear of the marks, in one write under the
+    // lock: no other run can mark or clear between them.
+    let (row, calls, run) = store.write(|tx| {
+        let row = model_row(tx)?;
+        let wait = match &row {
+            Some(_) if limits.wait_after_error => retry_after(tx)?,
+            _ => None,
+        };
+        let calls = wait.is_none_or(|t| now_ms >= t);
+        if calls && wait.is_some() {
+            // The wait has ended: this run takes it, so the next run does
+            // not clear the marks again. The count of errors stays, so a new
+            // error doubles the wait.
+            tx.execute("UPDATE model_setting SET retry_at = NULL", [])?;
+            clear_retry_marks(tx)?;
+        }
         tx.execute(
             "INSERT INTO understand_run(started_at, model, prompt, cost_micro_usd,
                                         unknown_cost_micro_usd)
              VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![now_ms, name, PROMPT, priced.then_some(0)],
+            params![
+                now_ms,
+                row.as_ref()
+                    .filter(|_| calls)
+                    .map_or("", |r| r.model.as_str()),
+                PROMPT,
+                row.as_ref().is_some_and(|r| r.price.is_some()).then_some(0)
+            ],
         )?;
-        Ok(tx.last_insert_rowid())
+        Ok((row, calls, tx.last_insert_rowid()))
     })?;
-    let result = run_messages(store, connect, row.as_ref(), run, limits, now_ms);
+    let result = run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms);
     let stop = result.as_ref().map_or(Stop::Error, |s| *s);
-    store.write(|tx| {
+    let keep_idle = limits.keep_idle || result.is_err();
+    let report = store.write(|tx| {
+        let ended = now_ms.max(clock_ms());
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, now_ms.max(clock_ms()), stop.as_str()],
+            params![run, ended, stop.as_str()],
         )?;
-        Ok(())
+        let r = report(tx, run)?;
+        if calls && row.is_some() {
+            end_wait(tx, &stop, &r, ended)?;
+        }
+        if !keep_idle && r.is_idle() {
+            tx.execute("DELETE FROM understand_run WHERE id = ?1", [run])?;
+        }
+        Ok(r)
     })?;
     result?;
-    Ok(store.read(|c| Ok(report(c, run)?))?)
+    Ok(report)
 }
 
 fn clock_ms() -> i64 {
@@ -251,6 +302,7 @@ fn run_messages(
     store: &Store,
     connect: Connect,
     row: Option<&ModelRow>,
+    calls: bool,
     run: i64,
     limits: &Limits,
     now_ms: i64,
@@ -260,13 +312,18 @@ fn run_messages(
     // resets come before the main pass, which sees them.
     refresh_senders(store, now_ms)?;
     let inner: Box<dyn Model> = match row {
-        Some(r) => connect(r).map_err(Error::Connect)?,
-        None => Box::new(NoModel),
+        Some(r) if calls => connect(r).map_err(Error::Connect)?,
+        _ => Box::new(NoModel),
     };
     let model = Budgeted::new(inner.as_ref(), store, run, row);
     let mut r = Runner {
         store,
         model: &model,
+        mark: if row.is_some() && !calls {
+            WAITS_RETRY
+        } else {
+            WAITS_INPUT
+        },
         run,
         limits,
         now_ms,
@@ -322,6 +379,8 @@ struct Runner<'a> {
     run: i64,
     limits: &'a Limits,
     now_ms: i64,
+    /// The cause that a refused message records in `waits_model`.
+    mark: i64,
     done: u64,
     since_refresh: usize,
     /// A sender rerun reset mail in this run: one more pass.
@@ -361,6 +420,21 @@ impl Runner<'_> {
             called.push(message);
             let rows = match store::understand(self.store, message, self.model, self.now_ms) {
                 Ok(o) => o.rerun,
+                // The call was refused (no model, no budget, or the wait
+                // after a model error): the message waits until that cause
+                // ends, so later runs do not read it again. The mark names
+                // the cause.
+                Err(store::Error::Model(iris_model::Error::Budget(_), rows)) => {
+                    self.store.write(|tx| {
+                        tx.execute(
+                            "UPDATE message SET waits_model = ?2
+                             WHERE id = ?1 AND understood_at IS NULL",
+                            params![message, self.mark],
+                        )?;
+                        Ok(())
+                    })?;
+                    rows
+                }
                 Err(store::Error::Model(_, rows)) => rows,
                 Err(e) => return Err(Error::Understand(e)),
             };
@@ -422,7 +496,8 @@ fn threads_after(
            SELECT m.thread_id, coalesce(max(m.internal_date), :no_date) AS newest,
                   CASE WHEN max(m.internal_date) >= :recent THEN 0 ELSE 1 END AS grp
            FROM message m WHERE m.gone_at IS NULL GROUP BY m.thread_id
-           HAVING max(m.understood_at IS NULL AND m.content_sha256 IS NOT NULL) = 1)
+           HAVING max(m.understood_at IS NULL AND m.content_sha256 IS NOT NULL
+                      AND m.waits_model = 0) = 1)
          WHERE (grp, -newest, -thread_id) > (:g, -:n, -:t)
          ORDER BY grp, newest DESC, thread_id DESC LIMIT :page",
     )?;
@@ -508,6 +583,77 @@ fn from_of(path: &std::path::Path) -> Option<String> {
     crate::Head::parse(&raw).from_addr
 }
 
+/// `waits_model`: the call was refused for an input of the store (no
+/// model, or no budget). A change of that input, or an approval, clears it.
+pub const WAITS_INPUT: i64 = 1;
+/// `waits_model`: the run made no call in the wait after a model error.
+/// Only the end of that wait clears it.
+pub const WAITS_RETRY: i64 = 2;
+
+/// Clears each mark `waits_model` (an approval), so the next run reads that
+/// mail again. Gives the count of messages.
+pub fn clear_waiting(tx: &Transaction) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE message SET waits_model = 0 WHERE waits_model <> 0",
+        [],
+    )
+}
+
+/// Clears the marks of the wait after a model error, at the end of that
+/// wait. The marks of a budget or model refusal stay.
+fn clear_retry_marks(tx: &Transaction) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE message SET waits_model = 0 WHERE waits_model = ?1",
+        [WAITS_RETRY],
+    )
+}
+
+/// The first wait after a run that stopped on `model`, `unknown` or
+/// `error`, in milliseconds. Each such stop in a row doubles it.
+pub const RETRY_FIRST_MS: i64 = 60_000;
+/// The longest wait, in milliseconds.
+pub const RETRY_MAX_MS: i64 = 3_600_000;
+
+/// The end of the wait after model errors of the current model row
+/// (`model_setting.retry_at`), or `None`. `iris model set` writes a new row,
+/// so a new model has no wait.
+pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
+    Ok(
+        c.query_row("SELECT retry_at FROM model_setting", [], |r| r.get(0))
+            .optional()?
+            .flatten(),
+    )
+}
+
+/// The wait state after a run that could call the model, in the end write
+/// of the run (under its lock). Only evidence of the model changes it: a
+/// stop on `model`, `unknown` or `error` starts or doubles the wait; a run
+/// that made a call and did not stop on an error ends it and clears the
+/// marks of that wait (`WAITS_RETRY` only: a budget refusal of the same
+/// run keeps its mark). A run that made no call changes nothing.
+fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
+    if matches!(stop, Stop::Model | Stop::Unknown | Stop::Error) {
+        tx.execute(
+            "UPDATE model_setting SET retry_failures = retry_failures + 1,
+                    retry_at = ?1 + min(?2 << min(retry_failures, 6), ?3)",
+            params![ended, RETRY_FIRST_MS, RETRY_MAX_MS],
+        )?;
+    } else if r.calls > 0 {
+        let waited: bool =
+            tx.query_row("SELECT retry_failures > 0 FROM model_setting", [], |r| {
+                r.get(0)
+            })?;
+        if waited {
+            tx.execute(
+                "UPDATE model_setting SET retry_failures = 0, retry_at = NULL",
+                [],
+            )?;
+            clear_retry_marks(tx)?;
+        }
+    }
+    Ok(())
+}
+
 /// The size of the work before a run (spec "Estimate").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Estimate {
@@ -544,7 +690,9 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
                 EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                         WHERE ml.message_id = m.id AND l.provider_id = 'SPAM'),
                 min(coalesce(m.size, :max_data), :max_data)
-         FROM message m WHERE {BASE}"
+         FROM message m WHERE {}",
+        // Mail that waits for a model is the work that an approval pays for.
+        BASE.replace(" AND m.waits_model = 0", "")
     );
     let mut st = tx.prepare(&sql)?;
     let mut rows = st.query(rusqlite::named_params! {
@@ -577,4 +725,36 @@ fn estimate_in(tx: &Transaction, now_ms: i64) -> iris_store::Result<Estimate> {
         }
     }
     Ok(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread whose only unread mail waits for a model gives no page, so
+    /// an idle run reads no thread (PR #137 review round 5).
+    #[test]
+    fn a_thread_with_only_waiting_mail_gives_no_page() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE message(id INTEGER PRIMARY KEY, thread_id INTEGER,
+               internal_date INTEGER, gone_at INTEGER, understood_at INTEGER,
+               content_sha256 BLOB, waits_model INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO message VALUES (1, 10, 5, NULL, NULL, x'00', 1);
+             INSERT INTO message VALUES (2, 10, 6, NULL, 7, x'00', 0);
+             INSERT INTO message VALUES (3, 20, 5, NULL, NULL, x'00', 1);
+             INSERT INTO message VALUES (4, 20, 6, NULL, NULL, x'00', 0);",
+        )
+        .unwrap();
+        let start = (-1, 0, 0);
+        let threads: Vec<i64> = threads_after(&c, start, 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(threads, [20]);
+        c.execute("UPDATE message SET waits_model = 1 WHERE id = 4", [])
+            .unwrap();
+        assert!(threads_after(&c, start, 10).unwrap().is_empty());
+    }
 }

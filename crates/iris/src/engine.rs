@@ -283,6 +283,31 @@ impl Worker {
     }
 }
 
+/// The time between two tries of a run that another run blocks.
+pub const BUSY_RETRY: Duration = Duration::from_secs(1);
+
+/// The time between two turns of the understanding thread.
+pub const UNDERSTAND_EVERY: Duration = Duration::from_secs(10);
+
+/// The understanding thread (R1-28): the run after a sync
+/// ([`crate::cost::after_sync`]) each [`UNDERSTAND_EVERY`], apart from the
+/// sync threads, so a long run does not stop a sync. It gives the words and
+/// the senders that search finds (spec 1 section 5.6). The runner reads
+/// only pending mail, so a turn with nothing to do reads no message.
+fn understand_loop(store: Arc<Store>) {
+    loop {
+        match crate::cost::after_sync(&store, now_ms()) {
+            Ok(crate::cost::AfterSync::Busy) => {
+                std::thread::sleep(BUSY_RETRY);
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => say!("iris: understand: {e}"),
+        }
+        std::thread::sleep(UNDERSTAND_EVERY);
+    }
+}
+
 /// The schedule: one sync thread for each account, so a long first sync of
 /// one account does not stop the syncs of the other accounts.
 pub struct Engine {
@@ -292,6 +317,7 @@ pub struct Engine {
     test_token_uri: Option<String>,
     workers: HashMap<i64, JoinHandle<()>>,
     last_clean: Option<Instant>,
+    understander: Option<JoinHandle<()>>,
 }
 
 impl Engine {
@@ -306,6 +332,7 @@ impl Engine {
             test_token_uri,
             workers: HashMap::new(),
             last_clean: None,
+            understander: None,
         }
     }
 
@@ -333,6 +360,14 @@ impl Engine {
                 .map_err(iris_store::Error::Io)?;
             self.workers.insert(account, handle);
             started.push(account);
+        }
+        if self.understander.as_ref().is_none_or(|h| h.is_finished()) {
+            let store = self.store.clone();
+            let handle = std::thread::Builder::new()
+                .name("understand".into())
+                .spawn(move || understand_loop(store))
+                .map_err(iris_store::Error::Io)?;
+            self.understander = Some(handle);
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");

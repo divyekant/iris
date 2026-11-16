@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -10,6 +10,8 @@
   import Item from "./views/Item.svelte";
   import Mail from "./views/Mail.svelte";
   import Measures from "./views/Measures.svelte";
+  import Rules from "./views/Rules.svelte";
+  import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
@@ -69,6 +71,7 @@
         {#if route.view === "setup" || home(status, route.view === "brief" ? "brief" : "home") === "setup"}
           <Setup {status} />
         {:else}
+          <PolicyNotice />
           {#await loadBrief() then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
         {/if}
       {:catch error}{@render failed(error)}
@@ -90,11 +93,14 @@
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "measures"}
       <Measures />
+    {:else if route.view === "rules"}
+      {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}
     {/if}
   {/key}
 </main>
 
 <footer class="site">
+  <a href="#/rules">Rules</a>
   <a href="#/measures">Measures</a>
   <span>Iris runs on your machine.</span>
 </footer>

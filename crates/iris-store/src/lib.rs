@@ -20,7 +20,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, Transaction};
 
-pub use backup::{BackupLock, Cleaned, GONE_KEEP_MS};
+pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
@@ -33,6 +33,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_3.sql"),
     include_str!("schema_4.sql"),
     include_str!("schema_5.sql"),
+    include_str!("schema_6.sql"),
+    include_str!("schema_7.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,

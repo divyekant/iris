@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 5);
+            assert_eq!(iris_store::schema_version(c)?, 7);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -722,4 +722,28 @@ fn a_deferred_commitment_opens_on_its_date() {
     assert_eq!(row(gone).0, "gone");
     // A second run finds nothing to change.
     assert_eq!(store.reopen_deferred(now).unwrap(), 0);
+}
+
+#[test]
+fn a_sender_lookup_without_case_uses_an_index() {
+    // Invariant: each `address = ? COLLATE NOCASE` lookup of a sender is an
+    // index search, not a scan of the sender table.
+    let dir = std::env::temp_dir().join(format!("iris-store-nocase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(c.prepare(
+                "EXPLAIN QUERY PLAN SELECT kind FROM sender WHERE address = ?1 COLLATE NOCASE",
+            )?
+            .query_map(["A@x.example"], |r| r.get(3))?
+            .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX sender_address_nocase")),
+        "{plan:?}"
+    );
 }

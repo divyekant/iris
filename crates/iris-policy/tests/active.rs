@@ -120,7 +120,10 @@ fn a_file_that_is_not_valid_keeps_the_active_policy() {
 #[test]
 fn a_removed_rule_id_is_never_used_again() {
     let (_d, s) = store("ids");
+    assert_eq!(s.read(next_rule_id).unwrap(), 1);
+    let mut seen = vec![];
     for (ids, ok) in [
+        (&[7][..], true),
         (&[1, 2][..], true),
         (&[1][..], true),
         (&[1, 3][..], true),
@@ -137,7 +140,13 @@ fn a_removed_rule_id_is_never_used_again() {
             assert!(e.message.contains("removed rule"), "{e}");
         }
         match confirm(&s, &sha256_hex(&file(ids)), 10).unwrap() {
-            Confirm::Done { .. } => assert!(ok, "{ids:?} must be refused"),
+            Confirm::Done { .. } => {
+                assert!(ok, "{ids:?} must be refused");
+                // The next ID is free: no rule had it, also not a removed one.
+                seen.extend_from_slice(ids);
+                let next = s.read(next_rule_id).unwrap();
+                assert_eq!(next, seen.iter().max().unwrap() + 1, "{ids:?}");
+            }
             Confirm::Invalid(e) => {
                 assert!(!ok, "{ids:?}: {e}");
                 assert!(e.message.contains("removed rule"), "{e}");

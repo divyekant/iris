@@ -407,3 +407,101 @@ fn a_tick_opens_a_deferred_commitment_on_its_date() {
         .unwrap();
     assert_eq!(status, "open");
 }
+
+#[test]
+fn understanding_runs_apart_from_the_sync_and_after_a_held_lock() {
+    let s = setup("engine-understand", 5);
+    // Another run holds the lock: the sync must not wait for it.
+    let held = iris_understand::batch::lock(&s.store).unwrap();
+    let mut e = Engine::new(
+        s.store.clone(),
+        config(s.fake.base_url()),
+        Some(s.tokens.uri.clone()),
+    );
+    assert_eq!(e.tick().unwrap(), vec![s.account]);
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM account WHERE mirror_ready_at IS NOT NULL",
+        Duration::from_secs(30),
+    );
+    assert_eq!(count(&s.store, "SELECT count(*) FROM body"), 0);
+    // The run is owed, and runs when the lock is free. The body rows (the
+    // words of search) come from understanding.
+    drop(held);
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM header",
+        Duration::from_secs(30),
+    );
+    wait_for(
+        &s.store,
+        "SELECT count(*) FROM understand_run WHERE ended_at IS NOT NULL",
+        Duration::from_secs(30),
+    );
+}
+
+#[test]
+fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
+    let s = setup("engine-idle", 5);
+    s.worker(s.account).sync().unwrap();
+    assert!(matches!(
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+        iris::cost::AfterSync::Ran { .. }
+    ));
+    let rows = count(&s.store, "SELECT count(*) FROM understand_run");
+    let waiting = count(
+        &s.store,
+        "SELECT max(id) FROM message WHERE waits_model = 1",
+    );
+    assert!(waiting > 0, "with no model, mail waits");
+    // No change: each turn reads nothing and leaves no row.
+    for _ in 0..3 {
+        s.worker(s.account).sync().unwrap();
+        assert_eq!(
+            iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+            iris::cost::AfterSync::Idle
+        );
+    }
+    assert_eq!(count(&s.store, "SELECT count(*) FROM understand_run"), rows);
+    // A SPAM label, by any write path, clears the mark: the free steps
+    // read the message with no model. A run that the lock blocks is owed.
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO label(account_id, provider_id, name, kind)
+                 VALUES (?1, 'SPAM', 'SPAM', 'system')",
+                [s.account],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = 'SPAM'",
+                [waiting, s.account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let held = iris_understand::batch::lock(&s.store).unwrap();
+    assert_eq!(
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+        iris::cost::AfterSync::Busy
+    );
+    drop(held);
+    assert!(matches!(
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+        iris::cost::AfterSync::Ran { .. }
+    ));
+    assert_eq!(
+        count(
+            &s.store,
+            &format!(
+                "SELECT count(*) FROM message WHERE id = {waiting} AND understood_at IS NOT NULL"
+            )
+        ),
+        1,
+        "the SPAM mail is read with no model"
+    );
+    assert_eq!(
+        iris::cost::after_sync(&s.store, engine::now_ms()).unwrap(),
+        iris::cost::AfterSync::Idle
+    );
+}
