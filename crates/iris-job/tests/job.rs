@@ -467,3 +467,28 @@ fn a_reader_refuses_text_that_is_not_utf8() {
         Err(Error::Store(_))
     ));
 }
+
+/// Issue #303: a valid job with a bad event gives an error and no byte of
+/// the document, so a caller cannot send a partial document.
+#[test]
+fn a_bad_event_gives_no_partial_document() {
+    let dir = TempDir::new("partial");
+    let store = Store::open(&dir.0).unwrap();
+    let job = create(&store, "Get the contract.", None, NOW).unwrap();
+    ask(&store, job, "Which copy?", None, NOW + 1).unwrap();
+    assert!(sql(
+        &store,
+        &format!(
+            "INSERT INTO job_event (job_id, at, state, by, answer)
+               VALUES ({job}, {}, 'working', 'person', CAST(x'80' AS TEXT))",
+            NOW + 2
+        )
+    ));
+    assert!(get(&store, job).is_ok(), "the job row stays valid");
+    let mut out = Vec::new();
+    assert!(matches!(
+        write_document(&store, job, &mut out),
+        Err(Error::Store(_))
+    ));
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}

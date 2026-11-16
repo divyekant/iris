@@ -472,12 +472,17 @@ fn event_json(e: &Event) -> Value {
 
 /// Write the JSON document of `job` (`docs/spec/schema/job.schema.json`).
 /// The events stream from the store, so no list of events is in memory.
+/// On an error of the store, nothing is written to `out`.
 pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<()> {
     read(store, |c| write_in(c, job, out))
 }
 
 fn write_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
     let j = job_in(c, job)?;
+    // Read each event once before the first byte (issue #303): a row that
+    // does not parse gives an error and no partial document. The same read
+    // transaction gives the same rows to the second pass.
+    each_event(c, job, |_| Ok(()))?;
     let mut m = Map::new();
     m.insert("model".into(), "iris/0".into());
     m.insert("id".into(), format_job_id(j.id).into());
