@@ -2,7 +2,8 @@
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
   With `ondone`, an open commitment starts with a round tick box: a click marks
-  it done after the same Undo time as the item view, then calls `ondone`.
+  it done after the same Undo time as the item view, then calls `ondone`. The
+  view that passes `ondone` calls `flushHolds` when the person leaves it.
 -->
 <script lang="ts">
   import type { Item } from "../api";
@@ -57,15 +58,8 @@
     }
   }
 
-  // If the person leaves during the hold, the click stands: send it now. The POST uses keepalive.
-  $effect(() => {
-    const leave = () => pending?.flush();
-    window.addEventListener("pagehide", leave);
-    return () => {
-      window.removeEventListener("pagehide", leave);
-      leave();
-    };
-  });
+  // The hold outlives this line: a brief refresh can remove the row while Undo
+  // time remains. The brief sends each hold when the person leaves it.
 
   let who = $derived(other(item));
   let date = $derived(item.form === "commitment" ? due(item, now) : null);

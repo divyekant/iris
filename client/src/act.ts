@@ -70,7 +70,9 @@ export function said(verb: Verb, date?: string): string {
  */
 export function hold(send: () => void, ms = HOLD): { cancel(): void; flush(): void } {
   let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(go, ms);
+  holds.add(go);
   function go() {
+    holds.delete(go);
     if (timer === undefined) return;
     clearTimeout(timer);
     timer = undefined;
@@ -78,9 +80,19 @@ export function hold(send: () => void, ms = HOLD): { cancel(): void; flush(): vo
   }
   return {
     cancel() {
+      holds.delete(go);
       clearTimeout(timer);
       timer = undefined;
     },
     flush: go,
   };
+}
+
+// Each hold that has not sent yet. A view whose rows can leave while a hold runs
+// (the brief) sends them all when the person leaves the view, not when one row goes.
+const holds = new Set<() => void>();
+
+/** Send each hold that waits now: the person leaves the view or the page. */
+export function flushHolds(): void {
+  for (const go of [...holds]) go();
 }

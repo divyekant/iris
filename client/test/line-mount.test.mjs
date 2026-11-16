@@ -73,14 +73,81 @@ test("Undo sends nothing and brings the tick box back", async () => {
   }
 });
 
-test("leaving in the hold still sends", async () => {
+test("a row that leaves keeps its hold, and flushHolds sends at once", async () => {
+  const act = await load("/src/act.ts");
   const asked = serve(() => [200, commitment("done")]);
-  const view = await mount("/src/views/Line.svelte", { item: commitment(), delay: 60_000, ondone: () => {} });
+  // A brief refresh removes the row: Undo time remains, so nothing goes yet.
+  const row = await mount("/src/views/Line.svelte", { item: commitment(), delay: 150, ondone: () => {} });
+  box(row).click();
+  await until(() => button(row, "Undo"));
+  row.destroy();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(asked.length, 0, "no send when one row goes");
+  await until(() => asked.length === 1);
+  // The person leaves the view: each hold sends now.
+  const left = await mount("/src/views/Line.svelte", { item: commitment(), delay: 60_000, ondone: () => {} });
+  box(left).click();
+  await until(() => button(left, "Undo"));
+  act.flushHolds();
+  await until(() => asked.length === 2);
+  left.destroy();
+  assert.deepEqual(asked[1], ["items/c-311/close", {}]);
+});
+
+const copy = (x) => JSON.parse(JSON.stringify(x));
+const closed = () => {
+  const b = copy(fx.brief);
+  b.you_owe = { ...b.you_owe, count: b.you_owe.count - 1, items: b.you_owe.items.filter((i) => i.id !== "c-311") };
+  return b;
+};
+const title = commitment().title;
+const owes = (view) => [...view.target.querySelectorAll(".line")].some((l) => text(l).includes(title) && !l.classList.contains("said"));
+
+test("the brief sends a held Done when the person leaves it", async () => {
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    return new Response(JSON.stringify(commitment("done")), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: copy(fx.brief), status: fx.status, watches: [], poll: 0, hold: 60_000 });
   box(view).click();
   await until(() => button(view, "Undo"));
   view.destroy();
-  await until(() => asked.length === 1);
-  assert.deepEqual(asked, [["items/c-311/close", {}]]);
+  await until(() => asked.some((u) => u.endsWith("items/c-311/close")));
+});
+
+test("a poll that started before a quick Done does not bring the item back", async () => {
+  let briefs = 0;
+  let staleSent = false;
+  globalThis.fetch = async (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    let out = {};
+    if (path === "brief") {
+      briefs += 1;
+      if (briefs === 1) {
+        // The first poll reads before the close and answers after the reload.
+        await new Promise((r) => setTimeout(r, 300));
+        staleSent = true;
+        out = copy(fx.brief);
+      } else out = closed();
+    } else if (path === "status") out = fx.status;
+    else if (path.startsWith("brief/signals")) out = { items: [], next: null };
+    else if (path === "watches") out = [];
+    else out = commitment("done");
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: copy(fx.brief), status: { ...fx.status }, watches: [], poll: 20, hold: 10 });
+  try {
+    await until(() => briefs === 1);
+    box(view).click();
+    await until(() => briefs >= 2 && !owes(view));
+    await until(() => staleSent);
+    await new Promise((r) => setTimeout(r, 20));
+    view.flushSync();
+    assert.ok(!owes(view), "the closed item stays gone");
+  } finally {
+    view.destroy();
+  }
 });
 
 test("a refusal shows the reason, a 409 loads the brief again, and no answer says so", async () => {

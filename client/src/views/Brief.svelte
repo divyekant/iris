@@ -13,6 +13,7 @@
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
+  import { flushHolds, HOLD } from "../act";
 
   let {
     brief: firstBrief,
@@ -20,7 +21,8 @@
     watches: firstWatches,
     now: start = new Date(),
     poll = 5000,
-  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number } = $props();
+    hold = HOLD,
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -58,13 +60,30 @@
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
   let syncing = $derived(!ready(status));
+  // Each brief load takes a ticket from `fresher`, so a poll that started before
+  // a quick Done never puts the closed item back.
+  const fresher = newest();
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([loadBrief(), get<Status>("status")]),
-      ([b, s]) => ((brief = b), (status = s)),
+      () => {
+        const fresh = fresher();
+        return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
+      },
+      ([b, s, fresh]) => {
+        if (fresh()) brief = b;
+        status = s;
+      },
       syncing ? poll : poll * 12,
     );
+  });
+  // A quick Done holds for Undo. If the person leaves the brief or the page, the click stands: send it now.
+  $effect(() => {
+    window.addEventListener("pagehide", flushHolds);
+    return () => {
+      window.removeEventListener("pagehide", flushHolds);
+      flushHolds();
+    };
   });
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
@@ -78,8 +97,6 @@
   const SHOWN = 7;
 
   // After a quick Done, load the brief again, so the item and the counts change. A failed load waits for the next poll.
-  // The ticket keeps an older answer from undoing a newer one.
-  const fresher = newest();
   async function reload() {
     const fresh = fresher();
     try {
@@ -176,7 +193,7 @@
   <section class="soon" aria-labelledby="soon">
     <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
     <ul>
-      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={reload} />{/each}
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={reload} delay={hold} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
@@ -199,7 +216,7 @@
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
       {#if part.items.length}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={reload} />{/each}
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={reload} delay={hold} />{/each}
         </ul>
       {/if}
       <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
