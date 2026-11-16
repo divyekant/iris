@@ -465,3 +465,30 @@ test("a next page adds only items that the list does not show yet", async () => 
   const b = { ...a, id: "c-2" };
   assert.deepEqual(addPage([a], [a, b]).map((i) => i.id), ["c-311", "c-2"]);
 });
+
+test("a mail renders the engine shape: header text for To and Cc, and fields that can be null", async () => {
+  const message = { ...fx.message("m-55210"), to: "Sam Ortiz <sam@example.com>, b@example.com", cc: null, date: null, subject: null, from: { name: null, address: "a@example.com" } };
+  const t = text(await render("/src/views/Mail.svelte", { message }));
+  assert.match(t, /No subject/);
+  assert.match(t, /a@example\.com/);
+  assert.match(t, /To Sam Ortiz <sam@example\.com>, b@example\.com/);
+  assert.doesNotMatch(t, /copy to/);
+  const both = text(await render("/src/views/Mail.svelte", { message: { ...message, to: null, cc: "c@example.com" } }));
+  assert.match(both, /To no one, copy to c@example\.com/);
+});
+
+test("a mail that Iris has not read yet keeps the download of the original", async () => {
+  const html = await render("/src/views/Mail.svelte", { message: { ...fx.message("m-55210"), text: null, gone: false } });
+  assert.match(text(html), /Iris has not read this mail yet\. Download the original to read it now\./);
+  assert.match(html, /<button[^>]*class="raw[^"]*"[^>]*>Download the original</);
+  assert.doesNotMatch(html, /<pre/);
+});
+
+test("the brief shows an account that needs sign-in, with the step to fix it", async () => {
+  const account = { ...fx.status.accounts[0], state: "needs_sign_in" };
+  const t = text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: { ...fx.status, accounts: [account] }, now: NOW, poll: 0 }));
+  assert.match(t, new RegExp(`Google stopped the sign-in of ${account.address.replace(".", "\\.")}\\. Iris copies no new mail from this account until you sign in again\\.`));
+  assert.match(t, /iris account add client\.json/);
+  const fine = text(await render("/src/views/Brief.svelte", { brief: fx.brief, status: fx.status, now: NOW, poll: 0 }));
+  assert.doesNotMatch(fine, /stopped the sign-in/);
+});
