@@ -398,6 +398,13 @@ impl Engine {
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");
         }
+        // Triage (R2-05): store the proposal of each account. A run with no
+        // change writes nothing.
+        for account in sync_accounts(&self.store)? {
+            if let Err(e) = iris_triage::run(&self.store, account, now_ms()) {
+                say!("iris: account {account}: triage: {e}");
+            }
+        }
         if self.last_clean.is_none_or(|t| t.elapsed() >= CLEAN_EVERY) {
             self.last_clean = Some(Instant::now());
             if let Err(e) = self.store.clean_gone(now_ms()) {
