@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_changeset::{
-    add_action, create, revise, submit, write_document, Author, AuthorKind, Error, Verb, BULK,
+    add_action, approve, create, decide, revise, submit, write_document, ActionId, Author,
+    AuthorKind, By, Error, State, Verb, BULK,
 };
 use iris_store::{NewMessage, Store};
 use serde_json::{json, Map, Value};
@@ -723,4 +724,242 @@ fn the_hash_covers_each_input() {
         hash(&s, cs, 1, 3),
         expect("archive", r#"{"messages":["m-1"]}"#, &["m-1"])
     );
+}
+
+fn at(changeset: i64, revision: i64, n: i64) -> ActionId {
+    ActionId {
+        changeset,
+        revision,
+        n,
+    }
+}
+
+#[test]
+fn a_person_approves_only_with_the_hash() {
+    let dir = TempDir::new("person");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+    refused(approve(&s, at(cs, 1, 1), "", NOW));
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    refused(decide(
+        &s,
+        at(cs, 1, 1),
+        State::Approved,
+        By::Person,
+        None,
+        NOW,
+    ));
+    for by in [By::Policy, By::Limit, By::Engine, By::Author, By::Expiry] {
+        refused(decide(&s, at(cs, 1, 1), State::Approved, by, None, NOW));
+    }
+    let r = s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'engine'",
+            [],
+        )?)
+    });
+    assert!(r.is_err());
+    refused(approve(&s, at(cs, 1, 1), "0000", NOW));
+    assert!(matches!(
+        approve(&s, at(cs, 1, 7), "0000", NOW),
+        Err(Error::NotFound)
+    ));
+    approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), NOW).unwrap();
+}
+
+/// A rule can change and keep its ID: each rule decision names the policy
+/// version too, so the decision names one rule text.
+#[test]
+fn a_rule_decision_names_the_policy_version() {
+    let dir = TempDir::new("policy");
+    let s = store(&dir);
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('b', 'h2', 0);
+             UPDATE policy_rule_id SET removed_at = 0 WHERE id = 4;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+    add_action(&s, cs, &agent(), Verb::Archive, &["m-4"], &Map::new(), None).unwrap();
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    let rule = |id, policy| By::Rule { id, policy };
+    decide(&s, at(cs, 1, 1), State::Approved, rule(3, 2), None, NOW).unwrap();
+    decide(
+        &s,
+        at(cs, 1, 2),
+        State::Denied,
+        rule(2, 2),
+        Some("Rule 2 denies it."),
+        NOW,
+    )
+    .unwrap();
+    let d = doc(&s, cs);
+    assert_eq!(d["actions"][0]["decision"]["rule"], 3);
+    assert_eq!(d["actions"][0]["decision"]["policy"], 2);
+    assert_eq!(d["actions"][1]["decision"]["rule"], 2);
+    // Only a rule ID of the active policy decides: not an older version, not
+    // a version or an ID that the store does not have, not a removed ID.
+    let other = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        other,
+        &agent(),
+        Verb::Archive,
+        &["m-2"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&s, other, &agent(), "Archive.", NOW).unwrap();
+    for (id, policy) in [(3, 1), (3, 9), (7, 2), (4, 2)] {
+        refused(decide(
+            &s,
+            at(other, 1, 1),
+            State::Approved,
+            rule(id, policy),
+            None,
+            NOW,
+        ));
+    }
+    assert_eq!(
+        doc(&s, other)["actions"][0]["decision"]["state"],
+        "proposed"
+    );
+}
+
+/// An approved action of revision 1 stays open after revision 2. When it
+/// comes back to review, the person approves it with its hash.
+#[test]
+fn a_person_approves_an_older_action_that_came_back() {
+    let dir = TempDir::new("older");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    let rule = By::Rule { id: 1, policy: 1 };
+    decide(&s, at(cs, 1, 1), State::Approved, rule, None, NOW).unwrap();
+    let h1 = hash(&s, cs, 1, 1);
+    revise(&s, cs, &agent()).unwrap();
+    add_action(&s, cs, &agent(), Verb::Read, &["m-4"], &Map::new(), None).unwrap();
+    submit(&s, cs, &agent(), "And read.", NOW).unwrap();
+    decide(
+        &s,
+        at(cs, 1, 1),
+        State::InReview,
+        By::Policy,
+        Some("The rule is gone."),
+        NOW,
+    )
+    .unwrap();
+    refused(approve(&s, at(cs, 1, 1), "0000", NOW));
+    approve(&s, at(cs, 1, 1), &h1, NOW).unwrap();
+    assert_eq!(doc(&s, cs)["actions"][0]["decision"]["by"], "person");
+}
+
+/// The policy and the review move a proposed action: in review, approved
+/// or denied, each by its own actor (section 5.2).
+#[test]
+fn decisions_of_the_policy_and_the_person() {
+    let dir = TempDir::new("states");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for (verb, target) in [
+        (Verb::Archive, "t-1"),
+        (Verb::Read, "m-4"),
+        (Verb::Trash, "m-4"),
+    ] {
+        add_action(&s, cs, &agent(), verb, &[target], &Map::new(), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Priya needs the numbers.", NOW).unwrap();
+    decide(
+        &s,
+        at(cs, 1, 1),
+        State::InReview,
+        By::Policy,
+        Some("No rule allows archive."),
+        NOW,
+    )
+    .unwrap();
+    // An action in review waits for a person: no rule decides it.
+    refused(decide(
+        &s,
+        at(cs, 1, 1),
+        State::Approved,
+        By::Rule { id: 1, policy: 1 },
+        None,
+        NOW,
+    ));
+    approve(&s, at(cs, 1, 1), &hash(&s, cs, 1, 1), NOW + 1).unwrap();
+    decide(
+        &s,
+        at(cs, 1, 2),
+        State::Approved,
+        By::Rule { id: 4, policy: 1 },
+        None,
+        NOW,
+    )
+    .unwrap();
+    // decide sets only in_review, approved and denied, each by its actor.
+    for (to, by) in [
+        (State::Applied, By::Engine),
+        (State::Expired, By::Expiry),
+        (State::Cancelled, By::Author),
+        (State::InReview, By::Person),
+        (State::Denied, By::Author),
+        (State::Denied, By::Expiry),
+    ] {
+        refused(decide(&s, at(cs, 1, 3), to, by, Some("r"), NOW));
+    }
+    refused(decide(
+        &s,
+        at(cs, 1, 3),
+        State::Denied,
+        By::Person,
+        None,
+        NOW,
+    ));
+    decide(
+        &s,
+        at(cs, 1, 3),
+        State::Denied,
+        By::Person,
+        Some("Keep it."),
+        NOW,
+    )
+    .unwrap();
+
+    let d = doc(&s, cs);
+    assert_eq!(d["state"], "open", "two actions are approved");
+    assert_eq!(d["actions"][0]["decision"]["by"], "person");
+    assert_eq!(d["actions"][1]["decision"]["by"], "rule");
+    assert_eq!(d["actions"][1]["decision"]["rule"], 4);
+    assert_eq!(d["actions"][2]["decision"]["reason"], "Keep it.");
+    assert_eq!(
+        d["actions"][2]["decision"]["at"],
+        "2025-11-16T08:57:02.000Z"
+    );
+    // A decided action does not move again.
+    refused(decide(
+        &s,
+        at(cs, 1, 3),
+        State::Approved,
+        By::Rule { id: 1, policy: 1 },
+        None,
+        NOW,
+    ));
+    // A draft action has no decision.
+    let draft = create(&s, &agent(), NOW).unwrap();
+    add_action(&s, draft, &agent(), Verb::Read, &["m-1"], &Map::new(), None).unwrap();
+    refused(decide(
+        &s,
+        at(draft, 1, 1),
+        State::Denied,
+        By::Engine,
+        Some("r"),
+        NOW,
+    ));
 }

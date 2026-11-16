@@ -132,6 +132,51 @@ impl State {
     }
 }
 
+/// Who decided an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum By {
+    /// An `allow` or `deny` rule of the active policy: its ID, and the
+    /// confirmed policy version. A rule can change and keep its ID, so the two
+    /// together name one rule text. The policy of the first start has no rule.
+    Rule { id: i64, policy: i64 },
+    /// The person, in the web client.
+    Person,
+    /// The policy with no rule: its default, or the mode.
+    Policy,
+    /// A hard limit (section 6.5).
+    Limit,
+    /// The engine: a target or an argument that is not valid, or a check
+    /// before the apply.
+    Engine,
+    /// The author withdrew the changeset.
+    Author,
+    /// 14 days with no decision or no apply.
+    Expiry,
+}
+
+impl By {
+    /// The column values: `decided_by`, `rule` and `policy`.
+    fn parts(self) -> (&'static str, Option<i64>, Option<i64>) {
+        match self {
+            By::Rule { id, policy } => ("rule", Some(id), Some(policy)),
+            By::Person => ("person", None, None),
+            By::Policy => ("policy", None, None),
+            By::Limit => ("limit", None, None),
+            By::Engine => ("engine", None, None),
+            By::Author => ("author", None, None),
+            By::Expiry => ("expiry", None, None),
+        }
+    }
+}
+
+/// One action: the changeset, the revision and the action number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActionId {
+    pub changeset: i64,
+    pub revision: i64,
+    pub n: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Author {
     pub kind: AuthorKind,
@@ -599,6 +644,126 @@ fn hash(c: &Connection, action: i64) -> Result<(i64, String)> {
     }
     let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok((count, hex))
+}
+
+/// Move an action to `to`. The trigger `action_state` refuses a move that
+/// section 5.2 does not allow. A person approves only with [`approve`].
+pub fn decide(
+    store: &Store,
+    action: ActionId,
+    to: State,
+    by: By,
+    reason: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    if to == State::Approved && by == By::Person {
+        return Err(refused(
+            "a person approves with the hash that the review showed".into(),
+        ));
+    }
+    // The policy and the review move an action. Each other state has its
+    // own path, with the check of its event: submit (replaced), withdraw
+    // (cancelled), expiry (expired), the apply (R2-02) and the ledger (R2-03)
+    // in the transaction of the ledger entry, a send (held, release 3).
+    if !matches!(to, State::InReview | State::Approved | State::Denied) {
+        return Err(refused(format!("decide does not set {}", to.as_str())));
+    }
+    if to == State::Denied && reason.is_none_or(|r| r.trim().is_empty()) {
+        return Err(refused("a denial needs a reason".into()));
+    }
+    // Who decides each state (section 5.2). A person approves with
+    // `approve`, and does not send an action to review.
+    let allowed = match to {
+        State::Approved => matches!(by, By::Rule { .. }),
+        State::InReview => matches!(by, By::Rule { .. } | By::Policy | By::Limit | By::Engine),
+        _ => !matches!(by, By::Author | By::Expiry),
+    };
+    if !allowed {
+        return Err(refused(format!(
+            "{} does not set {}",
+            by.parts().0,
+            to.as_str()
+        )));
+    }
+    write(store, |c| {
+        let state: Option<Option<String>> = c
+            .query_row(
+                "SELECT state FROM changeset_action WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+                params![action.changeset, action.revision, action.n],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match state {
+            None => Err(Error::NotFound),
+            Some(None) => Err(refused("the action is a draft: submit it first".into())),
+            Some(Some(_)) => set_state(c, action, to, by, reason, now_ms),
+        }
+    })
+}
+
+fn set_state(
+    c: &Connection,
+    a: ActionId,
+    to: State,
+    by: By,
+    reason: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    let (by, rule, policy) = by.parts();
+    let changed = c.execute(
+        "UPDATE changeset_action SET state = ?4, decided_by = ?5, rule = ?6, reason = ?7,
+           decided_at = ?8, policy = ?9
+         WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+        params![
+            a.changeset,
+            a.revision,
+            a.n,
+            to.as_str(),
+            by,
+            rule,
+            reason,
+            now_ms,
+            policy
+        ],
+    )?;
+    if changed == 0 {
+        return Err(Error::NotFound);
+    }
+    Ok(())
+}
+
+/// The approval of a person (section 5.5). It names the revision, the
+/// action number, and the hash that the review showed. The engine refuses
+/// it for an old revision or another hash.
+pub fn approve(store: &Store, action: ActionId, hash: &str, now_ms: i64) -> Result<()> {
+    let ActionId {
+        changeset,
+        revision,
+        n,
+    } = action;
+    write(store, |c| {
+        let row: Option<(i64, Option<i64>, Option<String>)> = c
+            .query_row(
+                "SELECT c.revision, c.submitted_at, a.hash FROM changeset c
+                 JOIN changeset_action a ON a.changeset_id = c.id
+                 WHERE c.id = ?1 AND a.revision = ?2 AND a.n = ?3",
+                params![changeset, revision, n],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (_, submitted, seen) = row.ok_or(Error::NotFound)?;
+        // The submit of a new revision replaces each older action with no
+        // decision, and the trigger refuses to approve a replaced action. An
+        // older action that stays open was approved, and can come back to
+        // review (section 5.4): the person approves it with its hash.
+        if submitted.is_none() {
+            return Err(refused("a new revision is a draft".into()));
+        }
+        if seen.as_deref() != Some(hash) {
+            return Err(refused("the action changed after the review".into()));
+        }
+        set_state(c, action, State::Approved, By::Person, None, now_ms)
+    })
 }
 
 /// Write a changeset as JSON (section 5.1). The message IDs stream from the
