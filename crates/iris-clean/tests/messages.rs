@@ -870,13 +870,24 @@ fn a_header_after_the_header_limit_does_not_count() {
 }
 
 #[test]
-fn a_header_value_past_the_value_limit_is_cut() {
-    // The charset parameter starts after 16 KiB of the value, so it does not count.
+fn a_mime_field_past_the_value_limit_is_not_parsed() {
+    // mail-parser parses a MIME field in full, so Iris refuses one past 16 KiB.
     let pad = "a".repeat(17 * 1024);
     let raw = format!(
         "Subject: Long\r\nContent-Type: text/plain; x=\"{pad}\"; charset=utf-16le\r\n\r\nHi"
     );
-    assert_eq!(clean(raw.as_bytes()).text, "Hi");
+    let c = clean(raw.as_bytes());
+    assert!(c.cut);
+    assert_eq!(c.text, iris_clean::CUT_MARK);
+}
+
+#[test]
+fn a_subject_past_the_value_limit_is_cut() {
+    let raw = format!("Subject: {}\r\n\r\nHi", "s".repeat(17 * 1024));
+    let c = clean(raw.as_bytes());
+    // The raw value starts with the space after the colon.
+    assert_eq!(c.subject.len(), 16 * 1024 - 1);
+    assert_eq!(c.text, "Hi");
 }
 
 #[test]

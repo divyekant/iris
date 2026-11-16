@@ -209,10 +209,35 @@ fn memory_and_time_stay_bounded() {
     );
     let (peak, _, c) = peak_of(raw.as_bytes());
     eprintln!("peak: {peak} bytes (large fields of each kind)");
-    assert!(c.attachments.len() <= 1);
-    // mail-parser parses the MIME fields in full, so their parameters cost
-    // memory. Measured: about 2.3 bytes for each byte of the message.
-    assert!(peak < 3 * raw.len(), "peak {peak} for {} bytes", raw.len());
+    // A MIME field past VALUE_LIMIT: Iris does not parse the message (fail closed).
+    assert!(c.cut && c.text == iris_clean::CUT_MARK && c.attachments.is_empty());
+    assert!(peak < 1024 * 1024, "peak {peak}");
+
+    // Many MIME fields under the value limit, with encoded parameters: their
+    // sum passes MIME_FIELD_LIMIT, so Iris does not parse the message.
+    let field = format!(
+        "Content-Type: text/plain{}\r\n",
+        "; p=\"=?utf-8?B?w5w=?=\"".repeat(600)
+    );
+    let mut raw = String::from("Content-Type: multipart/mixed; boundary=m\r\n\r\n");
+    while raw.len() < 8 * iris_clean::MIME_FIELD_LIMIT {
+        raw.push_str(&format!("--m\r\n{field}\r\nx\r\n"));
+    }
+    let (peak, _, c) = peak_of(raw.as_bytes());
+    eprintln!("peak: {peak} bytes (many MIME fields)");
+    assert!(c.cut && c.attachments.is_empty());
+    assert!(peak < 1024 * 1024, "peak {peak}");
+
+    // Just under the limit, the message is parsed. The peak has a fixed bound.
+    let mut raw = String::from("Content-Type: multipart/mixed; boundary=m\r\n\r\n");
+    while raw.len() + field.len() + 16 < iris_clean::MIME_FIELD_LIMIT {
+        raw.push_str(&format!("--m\r\n{field}\r\nx\r\n"));
+    }
+    raw.push_str("--m--\r\n");
+    let (peak, _, c) = peak_of(raw.as_bytes());
+    eprintln!("peak: {peak} bytes (MIME fields under the limit)");
+    assert!(!c.attachments.is_empty() || !c.text.is_empty());
+    assert!(peak < 4 * iris_clean::MIME_FIELD_LIMIT, "peak {peak}");
 
     // One HTML tag with very many attributes.
     let raw = format!(
