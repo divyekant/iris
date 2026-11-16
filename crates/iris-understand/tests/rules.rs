@@ -312,6 +312,20 @@ fn an_unclear_code_in_a_list_message_goes_to_the_model() {
 }
 
 #[test]
+fn a_long_line_of_one_code_is_read_in_linear_time() {
+    let line = "code 1234 ".repeat(30_000);
+    let raw = format!("From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{line}\n");
+    let start = std::time::Instant::now();
+    let d = one(&raw, Kind::Service, &[]);
+    assert_eq!(d.item["code"], "1234");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn a_long_line_of_codes_is_read_in_linear_time() {
     // About 300 KB on one line: a slow search takes minutes, not seconds.
     let line = "code 1234 code 5678 ".repeat(15_000);
@@ -337,9 +351,13 @@ fn a_payment_notice_in_a_list_message_goes_to_the_model() {
 fn a_promotion_code_is_no_sign_in_code() {
     let raw = "From: Shop <deals@shop.example>\nSubject: Your discount code\n\nUse code 1234 at checkout. Log in to see more.\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());
-    // In a list message, it is a feed item.
-    let list = format!("List-Id: <deals.shop.example>\n{raw}");
+    // In a list message, it is a feed item when it has no sign-in word.
+    let promo = raw.replace(" Log in to see more.", "");
+    let list = format!("List-Id: <deals.shop.example>\n{promo}");
     assert_eq!(one(&list, Kind::Service, &[]).item["form"], "feed");
+    // Sign-in mail with a promotion word is no feed item: the model reads it.
+    let mixed = "From: Shop <no-reply@shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Sign in\n\nYour code: 482913\nShop our sale.\n";
+    assert!(drafts(mixed, Kind::Service, &[]).is_none());
 }
 
 #[test]

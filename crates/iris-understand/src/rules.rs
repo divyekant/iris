@@ -123,6 +123,10 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         // A sign-in message gives a code signal or goes to the model: it is
         // never a feed item.
         if is_login(a) {
+            // A promotion word in sign-in mail: the model decides.
+            if is_promo(a) {
+                return None;
+            }
             let (code, line) = find_code(subject, &a.text.text)?;
             let at = a.date(cx);
             let expires = at + CODE_LIFE_MS;
@@ -185,11 +189,17 @@ fn looks_like_record(a: &Analysis) -> bool {
     RECORD_WORDS.iter().any(|w| low.contains(w)) || !words(&hay, &ACTION_WORDS).is_empty()
 }
 
-/// The message is about a sign-in, and not a promotion: a code in it is a
-/// sign-in code (specification 1, section 6.6).
+/// The message is about a sign-in: a code in it can be a sign-in code
+/// (specification 1, section 6.6).
 fn is_login(a: &Analysis) -> bool {
     let hay = format!("{}\n{}", a.text.subject, a.text.text);
-    !words(&hay, &LOGIN_WORDS).is_empty() && words(&hay, &PROMO_WORDS).is_empty()
+    !words(&hay, &LOGIN_WORDS).is_empty()
+}
+
+/// The message has a word of a promotion.
+fn is_promo(a: &Analysis) -> bool {
+    let hay = format!("{}\n{}", a.text.subject, a.text.text);
+    !words(&hay, &PROMO_WORDS).is_empty()
 }
 
 /// The one code of the message, with the line that has it (at most 500
@@ -212,16 +222,17 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    let mut found: Option<(String, &str)> = None;
+    // The code, its line and its range: the quote is cut once, at the end.
+    let mut found: Option<(&str, &str, usize, usize)> = None;
     for (i, &l) in lines.iter().enumerate() {
         let cues = cues(l);
         if cues.is_empty() {
             continue;
         }
         let nums = numbers(l);
-        let bound: Vec<(String, &str)> = if !nums.is_empty() {
+        let bound: Vec<(&str, &str, usize, usize)> = if !nums.is_empty() {
             bound(l, &cues, &nums, 0)
-                .map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s)))
+                .map(|(s, e)| (&l[s..e], l, s, e))
                 .collect()
         } else if let Some(&next) = lines.get(i + 1).filter(|n| self::cues(n).is_empty()) {
             // The cue line and the next line as one text, with the cues at
@@ -230,7 +241,7 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
             let shift = l.len() + 1;
             bound(&both, &cues, &numbers(next), shift)
                 .map(|(s, e)| (s - shift, e - shift))
-                .map(|(s, e)| (next[s..e].to_string(), excerpt(next, s, e - s)))
+                .map(|(s, e)| (&next[s..e], next, s, e))
                 .collect()
         } else {
             Vec::new()
@@ -243,7 +254,7 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
             }
         }
     }
-    found
+    found.map(|(code, line, s, e)| (code.to_string(), excerpt(line, s, e - s)))
 }
 
 /// The numbers of `nums` (moved by `shift` in `text`) that bind to one of
