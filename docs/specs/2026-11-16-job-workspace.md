@@ -114,6 +114,10 @@ workspace.
 
 The granted messages of a job:
 
+- A job in the state `done` grants nothing. The build of a done job writes
+  the job files and no thread, item or person file. The read verbs of a
+  session of a done job see nothing (R4-04 ends the session).
+
 - A thread of the scope grants each clean message of the thread.
 - An item of the scope that is not `gone` grants each clean source message
   (`item_source`) of the item, and no other message of its thread. Gmail can put two subjects
@@ -151,7 +155,8 @@ this rule:
   and the items of the workspace. A search never adds a thread to the
   workspace.
 - `iris brief` is a host verb only: the brief covers the whole mailbox.
-- `iris status` in a session shows the job, not the mailbox counts.
+- `iris status` in a session shows only the job and the counts of the
+  workspace: no account, sync or mailbox count.
 
 This PR changes spec 2 section 8.2 to say this.
 
@@ -326,6 +331,7 @@ Markdown and JSON with `serde_json`.
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
 | An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
 | An unknown job | `Error::NotFound` | Unit test |
+| A job in the state `done` | No thread, item or person file. The job files stay | Unit test |
 
 ## Impact
 
