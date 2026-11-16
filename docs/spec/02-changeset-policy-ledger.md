@@ -142,7 +142,7 @@ Schema of the changeset comes with the release 2 code, from this section.
       "args": {},
       "why": "Two newsletters from last week.",
       "flags": [],
-      "decision": { "state": "applied", "by": "rule", "rule": 1, "at": "2026-11-16T09:17:41Z" },
+      "decision": { "state": "applied", "by": "rule", "rule": 1, "policy": 3, "at": "2026-11-16T09:17:41Z" },
       "ledger": "l-901"
     },
     {
@@ -170,6 +170,7 @@ Schema of the changeset comes with the release 2 code, from this section.
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
 | `actions[].decision.state` | See section 5.2. |
+| `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].ledger` | The ledger entry, after apply. |
 
 ### 5.2 States of an action
@@ -381,6 +382,10 @@ An `allow` rule never matches an action with no message.
 - The engine keeps the active policy in `iris.db`: the text of the last file
   that the person confirmed, and its SHA-256 hash. The engine evaluates only
   the active policy.
+- The engine keeps each confirmed text as a numbered version (table
+  `policy_version`), and never changes or deletes a version. The person can
+  edit a rule and keep its `id`. A decision by a rule names the version and
+  the rule `id`, so it always points to one rule text.
 - When the file changes on disk, the engine reads it again. If the file is
   valid, the web client shows the difference to the active policy, and the
   person confirms it. Only then does the file become the active policy.
@@ -389,6 +394,10 @@ An `allow` rule never matches an action with no message.
   hash of that text is not the hash of the confirmation, the engine refuses
   the confirmation, and the web client shows the new difference. So a
   confirmation never makes active a text that the person did not see.
+- The engine keeps each rule `id` of each active policy (table
+  `policy_rule_id`). It refuses a confirmation of a file that has the `id`
+  of a rule that an earlier active policy removed, and the brief names the
+  line. The status of the file shows the same error before a confirmation.
 - When the person changes the policy in the web client (a change of `mode`,
   an accepted proposal or the removal of a rule), the engine writes the file
   and makes it the active policy in one step. The engine starts from the text
@@ -488,7 +497,7 @@ or with a change of Iris state:
 | `changeset`, `revision`, `action` | The action that the entry applies. |
 | `verb` | The verb. |
 | `author` | The author of the changeset. |
-| `decided_by` | `rule` with its ID, or `person`. |
+| `decided_by` | `rule` with its ID and the policy version (section 6.3), or `person`. |
 | `ops` | The provider operations, as JSON: the labels to add and remove, and the number of calls. For a state verb, the field. |
 | `pre`, `post` | For a state verb only: the old and the new values. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |

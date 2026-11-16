@@ -2,12 +2,14 @@
 //! that decide which actions apply without review, and which items the brief
 //! hides or bundles.
 //!
-//! This crate reads and checks the file, and evaluates actions and items. It
-//! writes nothing. The active policy in `iris.db` and the confirmation of a
-//! changed file (section 6.3) are in the store.
+//! This crate reads and checks the file, and evaluates actions and items.
+//! It keeps the active policy in `iris.db` and confirms a changed file
+//! (section 6.3). It never writes the file.
 
+mod active;
 mod eval;
 
+pub use active::{active, confirm, file_state, version_text, Active, Confirm, FileState};
 pub use eval::{Action, Attention, Decision, Item, Message, Outcome};
 
 use serde::Deserialize;
