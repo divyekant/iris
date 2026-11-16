@@ -268,6 +268,7 @@ fn the_command_exits_4_with_no_engine_and_shows_a_changeset_with_one() {
     );
     assert!(text.starts_with(&format!("ID: cs-{cs}\n")), "{text}");
     assert!(text.contains("1.1 close c-1 draft"), "{text}");
+    assert!(text.contains(r#"args: {"reason":"Done."}"#), "{text}");
     let out = iris().args(["changeset", "--drafts"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), format!("cs-{cs}\n"));
     let out = iris()
@@ -310,6 +311,38 @@ fn a_slow_request_is_closed_and_the_connections_are_bounded() {
     let mut rest = Vec::new();
     quiet.read_to_end(&mut rest).unwrap();
     assert!(rest.is_empty(), "no answer to a connection with no request");
+    // A partial line with no newline: at the read timeout, code 2.
+    let mut part = UnixStream::connect(d.join(socket::SOCKET)).unwrap();
+    part.write_all(b"{\"v\":1").unwrap();
+    let mut line = String::new();
+    BufReader::new(part).read_line(&mut line).unwrap();
+    let a: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(a["code"], json!(code::USAGE), "{line}");
+}
+
+#[test]
+fn the_command_waits_at_most_the_answer_wait_for_the_whole_answer() {
+    use std::time::{Duration, Instant};
+    let d = dir("drip");
+    std::fs::create_dir_all(&d).unwrap();
+    // An engine that sends one byte each 50 ms and never a newline.
+    let l = std::os::unix::net::UnixListener::bind(d.join(socket::SOCKET)).unwrap();
+    std::thread::spawn(move || {
+        let mut s = l.incoming().next().unwrap().unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut s).read_line(&mut line).unwrap();
+        while s.write_all(b" ").is_ok() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    let start = Instant::now();
+    let e = socket::request_with(&d, "drafts", json!({}), Duration::from_millis(400)).unwrap_err();
+    assert_eq!(e.code, code::ERROR);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// A store with the commitment c-1 (open) and the message m-1.

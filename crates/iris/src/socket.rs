@@ -4,11 +4,11 @@
 //! changesets go through it, never through the store (specification 2,
 //! section 8.1).
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iris_changeset::{format_changeset_id, parse_changeset_id, Author, AuthorKind, Verb};
 use iris_store::{FileLock, Store};
@@ -187,7 +187,10 @@ async fn connection(
     // One request on each connection: bytes after the line are dropped.
     let stream = limited.into_inner().into_inner();
     match got {
-        Err(_) => return Ok(()),
+        // A timeout with no byte: close with no answer. A partial line (the
+        // read appends what it got before the timeout) gets code 2 below.
+        Err(_) if line.is_empty() => return Ok(()),
+        Err(_) => {}
         Ok(Err(e)) => return Err(e),
         Ok(Ok(_)) => {}
     }
@@ -430,6 +433,11 @@ pub const MAX_ANSWER: u64 = 64 * 1024 * 1024;
 /// result. Code 4 when no engine answers the connect. Code 1 when the
 /// answer does not come.
 pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
+    request_with(dir, verb, args, ANSWER_WAIT)
+}
+
+/// [`request`] with another wait for the whole answer, for tests.
+pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Result<Value, Failure> {
     let path = dir.join(SOCKET);
     let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|_| {
         Failure::new(
@@ -451,15 +459,28 @@ pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
         serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
     line.push(b'\n');
     stream
-        .set_read_timeout(Some(ANSWER_WAIT))
-        .and_then(|()| stream.set_write_timeout(Some(ANSWER_WAIT)))
+        .set_read_timeout(Some(wait))
+        .and_then(|()| stream.set_write_timeout(Some(wait)))
         .and_then(|()| stream.write_all(&line))
         .map_err(|_| unknown(&hint))?;
+    // One deadline for the whole answer: a peer that sends one byte at a
+    // time cannot hold the command past `wait`. At most MAX_ANSWER.
+    let deadline = Instant::now() + wait;
     let mut answer = Vec::new();
-    // The command reads at most MAX_ANSWER: a larger answer is an error.
-    BufReader::new(std::io::Read::take(&mut stream, MAX_ANSWER))
-        .read_until(b'\n', &mut answer)
-        .map_err(|_| unknown(&hint))?;
+    let mut chunk = [0u8; 8192];
+    while answer.last() != Some(&b'\n') {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || answer.len() as u64 > MAX_ANSWER {
+            return Err(unknown(&hint));
+        }
+        stream
+            .set_read_timeout(Some(left))
+            .map_err(|_| unknown(&hint))?;
+        match std::io::Read::read(&mut stream, &mut chunk) {
+            Ok(0) | Err(_) => return Err(unknown(&hint)),
+            Ok(n) => answer.extend_from_slice(&chunk[..n]),
+        }
+    }
     let answer: Value = serde_json::from_slice(&answer).map_err(|_| unknown(&hint))?;
     if answer["ok"] == json!(true) {
         return Ok(answer["result"].clone());

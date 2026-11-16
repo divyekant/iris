@@ -540,6 +540,12 @@ pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
             s(&a["verb"]),
             targets.join(",")
         );
+        if let Some(args) = a["args"].as_object().filter(|o| !o.is_empty()) {
+            line.push_str(&format!(
+                " args: {}",
+                verbs::field(&serde_json::Value::from(args.clone()).to_string())
+            ));
+        }
         if let Some(why) = a["why"].as_str() {
             line.push_str(&format!(" why: {}", verbs::field(why)));
         }
