@@ -50,9 +50,22 @@ A message is pending when all of these are true:
 - Each message of its thread that is not gone has `content_sha256` set
   (spec 1 section 7.1: the engine understands a thread when the mirror has
   each known message of it).
+- No older message of its thread waits (the thread rule below).
 
 A held message (`tries` or `retry_at`) is not pending, so a run makes no
 call for it. `store::understand` keeps its own check of the retry state.
+
+The thread rule: an older message of the thread waits when it is not gone,
+not a draft, `understood_at` is NULL and `tries` is less than `MAX_TRIES`.
+While an older message waits (also for its `retry_at`), the later messages
+of the thread are not pending. A message with `MAX_TRIES` tries stops for
+good (spec 1 section 7.4), so it does not hold its thread. The order of
+spec 1 section 7.1 thus holds: a message gets the thread context of each
+older message that can still be understood.
+
+The runner reads the pending rule again for each message, just before the
+call, not only when it selects the batch. So an older message that failed
+in the same batch holds the later messages of its thread.
 
 ### Order
 
@@ -70,14 +83,10 @@ these steps:
 
 1. Read the next batch: at most `Limits::batch` (default 50) pending message
    IDs, in the order above. Only the IDs stay in memory.
-2. For each message, call `store::understand`. Then add its calls, tokens
-   and cost to the run row, in one small write.
-3. After the batch, in one write:
-   1. Call `iris_senders::refresh`.
-   2. For each sender row whose kind changed, set `understood_at` to NULL on
-      each message from that address that is not gone. These messages are
-      pending again.
-   3. Call `iris_talk::update` for each thread of these messages.
+2. For each message that is still pending, call `store::understand`. Then
+   add its calls, tokens and cost to the run row, in one small write.
+3. After the batch, in one write, call `iris_senders::refresh` and apply its
+   kind changes (below).
 4. Stop when a stop condition is true. Else go to step 1.
 
 Stop conditions:
@@ -92,10 +101,32 @@ Stop conditions:
   too. The message stays pending.
 - Another error of the store.
 
-Step 3.2 is the only path that makes an understood message pending again
-in a run. It changes `iris_senders::refresh` so that it gives each row whose
-kind changed, not only the rows that became or stopped being hostile (issue
-#106).
+### Kind changes
+
+A sender kind changes in three places: `iris_senders::decide` in write 1 of
+`store::understand`, `iris_senders::refresh` in the gone branch of
+`store::understand`, and `refresh` at the end of each batch. A change made
+for one message can change the kind of another sender, for example a sent
+message that makes a domain known, so a look-alike sender becomes hostile.
+
+Invariant: a kind change and its effects commit in the same transaction. One
+function, `apply_kind_changes(tx, changes, now)`, runs right after each
+`decide` and each `refresh`, in the same transaction:
+
+- For a sender that became hostile or stopped being hostile: each message
+  from that address that is not gone, and each later message of the same
+  threads, loses its items that are not pinned and gets `understood_at`
+  NULL. These messages are pending again, and their hostile check runs
+  again. A run that stops after this write leaves no stale item: the
+  messages show as not understood.
+- For each other kind change (for example stranger to person): the
+  conversation of each thread with mail from that address is computed again
+  (issue #106). The items from the model keep the sender kind of their run.
+  Iris does not pay again for these messages.
+
+So `iris_senders::decide` and `refresh` give each row whose kind changed,
+with the old and the new kind. A crash cannot lose a change, because there
+is no list to carry from one transaction to the next.
 
 ### Run rows
 
@@ -187,15 +218,20 @@ No parser or protocol code is new. The model client is `iris-model`.
 | A refused key (401, 403) | No call can work | The run stops with `stop = model`. No try counts. | Fake model error. |
 | A time-out, 429, 5xx | Result not known | The run stops with `stop = model`. The message stays pending. | Fake model error. |
 | The cost limit | The run reaches it | The run stops before the next message, with `stop = cost`. | Fake model with a price. |
-| A kind change in a batch | Old items of other threads use the old kind | The messages of the sender are pending again; their threads get a new conversation. | Store test. |
-| A message that is pending again for each batch | A loop with no end | A message is pending again only after a kind change of its sender. Refresh changes a kind only when the evidence changes. | Run with no change: zero calls. |
+| A sent message makes a domain known, and an understood look-alike sender becomes hostile | Old items of the look-alike mail stay | In write 1 of the sent message, its items go and its messages are pending again. A run that stops at the cost limit right after it leaves no stale item. | Store test: look-alike first, then the sent message, run stops with `--max-messages 1`. |
+| Another kind change (stranger to person) | The conversations of other threads use the old kind | The same transaction computes them again. No model call. | Store test. |
+| An older message of a thread fails two answers | A later reply runs without its context | The later reply waits while the older message waits. It runs after the older message is understood or stops after 3 tries. | Batch test: failed older message and a newer reply in one batch. |
+| A message that is pending again for each batch | A loop with no end | A message is pending again only after its sender becomes or stops being hostile. A kind changes only when the evidence changes. | Run with no change: zero calls. |
 | All other errors | | The run stops with `stop = error`, and the error goes to the caller. | |
 
 ## Impact
 
 - `crates/iris-understand`: new module `batch` (pending query, order,
   runner, estimate). `Error::Model` carries usage.
-- `crates/iris-senders`: `refresh` gives each changed row.
+- `crates/iris-senders`: `decide` and `refresh` give each changed row, with
+  the old and the new kind.
+- `crates/iris-understand/src/store.rs`: write 1 and the gone branch call
+  `apply_kind_changes`.
 - `crates/iris-store`: `schema_3.sql` (`understand_run`, `model_setting`).
 - `crates/iris`: the commands `iris model` and `iris understand`.
 - Spec 1: section 7.1 links this spec; section 5.5 lists the new tables.
