@@ -201,7 +201,8 @@ fn is_login(a: &Analysis) -> bool {
 /// If a line has a code word and no number, the next line continues it: a
 /// number there binds to the code word with the words of both lines in the
 /// gap. Across the line break only a strong code counts, like a line of only
-/// the code. A weak one is not clear.
+/// the code. A weak one is not clear. A next line with its own code word is
+/// read as its own line, not as a continuation.
 ///
 /// Gives the code and the line that has the code (at most 500 characters),
 /// `Some(None)` if the code is not clear, or `None` if there is no code.
@@ -225,7 +226,8 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<Option<(String, &'a 
         let pick = if !nums.is_empty() {
             the_code(l, &cues, &nums, None)
                 .map(|o| o.map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s))))
-        } else if let Some(&next) = lines.get(i + 1) {
+        } else if let Some(&next) = lines.get(i + 1).filter(|n| self::cues(n).is_empty()) {
+            // A next line with its own code word is a cue line of its own.
             // The cue line and the next line as one text, with the cues at
             // their own offsets and the numbers after the line break.
             let both = format!("{l}\n{next}");
@@ -445,6 +447,10 @@ mod tests {
             None
         );
         assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
+        assert_eq!(
+            code("Your verification code", "Code: 123456"),
+            Some("123456".into())
+        );
         // Across a line break, only a strong code is clear.
         assert_eq!(
             find_code("Your verification code", "Use 482913 to sign in"),
