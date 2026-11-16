@@ -287,9 +287,7 @@ pub fn app(store: Arc<Store>, auth: Arc<iris_api::Auth>) -> axum::Router {
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     let gmail = gmail_config().map_err(std::io::Error::other)?;
-    let auth = Arc::new(iris_api::Auth::new()?);
-    let sign_in = auth.sign_in_path().unwrap_or_default();
-    let routes = app(store.clone(), auth);
+    let api_store = store.clone();
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
         .name("sync".into())
@@ -302,10 +300,14 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
+        // The API checks the Host against the bound address.
+        let auth = Arc::new(iris_api::Auth::new(local)?);
         eprintln!("iris: serving on http://{local}");
         // The one-time code signs in one browser (specification 2, section 8.6).
-        eprintln!("iris: open the web client: http://{local}{sign_in}");
-        axum::serve(listener, routes)
+        if let Some(url) = auth.sign_in_url() {
+            eprintln!("iris: open the web client: {url}");
+        }
+        axum::serve(listener, app(api_store, auth))
             .with_graceful_shutdown(async {
                 let _ = tokio::signal::ctrl_c().await;
             })

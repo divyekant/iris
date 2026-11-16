@@ -125,39 +125,40 @@ fn serve_answers_the_api_before_the_web_client() {
     let addr = line.trim().rsplit("http://").next().unwrap().to_string();
     let mut line = String::new();
     stderr.read_line(&mut line).unwrap();
-    let sign_in = line
-        .trim()
-        .rsplit(addr.as_str())
-        .next()
-        .unwrap()
-        .to_string();
-    assert!(sign_in.starts_with("/api/session?code="), "{line}");
-    let get = |path: &str, cookie: &str| {
+    let code = line.trim().rsplit("#code=").next().unwrap().to_string();
+    assert!(line.contains(&format!("http://{addr}/#code=")), "{line}");
+    let send = |request: String| {
         let mut stream = std::net::TcpStream::connect(&addr).unwrap();
-        write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nCookie: {cookie}\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
     };
-    // Without the cookie the API answers 401, not the page of the web client.
-    let refused = get("/api/status", "");
-    let signed = get(&sign_in, "");
-    let cookie = signed
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("set-cookie: ")
-                .or_else(|| l.strip_prefix("Set-Cookie: "))
-        })
-        .map(|c| c.split(';').next().unwrap().to_string())
-        .unwrap_or_default();
-    let response = get("/api/status", &cookie);
+    let get = |auth: &str| {
+        send(format!(
+            "GET /api/status HTTP/1.1\r\nHost: {addr}\r\n{auth}Connection: close\r\n\r\n"
+        ))
+    };
+    // Without the token the API answers 401, not the page of the web client.
+    let refused = get("");
+    let body = format!("{{\"code\":\"{code}\"}}");
+    let session = send(format!(
+        "POST /api/session HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+    let token = session
+        .split("\"token\":\"")
+        .nth(1)
+        .and_then(|t| t.split('"').next())
+        .unwrap_or_default()
+        .to_string();
+    let response = get(&format!("Authorization: Bearer {token}\r\n"));
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
-    assert!(response.starts_with("HTTP/1.1 200"), "{signed}\n{response}");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "{session}\n{response}"
+    );
     assert!(response.contains("owner@example.com"), "{response}");
 }
