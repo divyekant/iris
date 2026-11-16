@@ -812,9 +812,8 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     }
     let tails = tails(now);
     let mut brief = store.read(|c| {
-        let section = |sql: &(String, String)| {
-            read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s)
-        };
+        let section =
+            |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
         let records = count_records(c, SHOWN)?;
         let hostile = c.query_row(
             "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
