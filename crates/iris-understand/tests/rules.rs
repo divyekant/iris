@@ -203,7 +203,7 @@ fn another_number_on_a_code_line_goes_to_the_model() {
     assert_eq!(one(same, Kind::Service, &[]).item["code"], "7731");
     // A second bare number after the code line makes the code not clear,
     // with another value or the same value (#100).
-    for second in ["5678", "1234"] {
+    for second in ["5678", "1234", "12", "123456789", "123 456"] {
         let two = format!(
             "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code:\n1234\n{second}\n"
         );

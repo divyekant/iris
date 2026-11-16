@@ -254,20 +254,23 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
             }
         }
         "record" => {
-            put("issuer", sender);
+            // The headers give the fields of the sender and the list, not
+            // the model (section 6.7).
+            m.insert("issuer".into(), sender);
         }
         "feed" => {
-            put("publisher", sender);
-            put("published", json!(crate::time::rfc3339(at)));
+            m.insert("publisher".into(), sender);
+            m.insert("published".into(), json!(crate::time::rfc3339(at)));
+            m.remove("list");
             if let Some(l) = &a.head.list_id {
-                put("list", json!(l));
+                m.insert("list".into(), json!(l));
             }
         }
         "signal" => {
             let code = src.get("kind").and_then(Value::as_str) == Some("code");
             let life = if code { 15 * 60 * 1000 } else { 7 * 86_400_000 };
             put("expires", json!(crate::time::rfc3339(at + life)));
-            put("issuer", sender);
+            m.insert("issuer".into(), sender);
             // The status follows the final expiry, also an expiry from the model.
             let past = m
                 .get("expires")

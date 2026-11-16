@@ -279,6 +279,28 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
     let d = d.unwrap();
     assert_eq!(d.drafts.len(), 1, "{:?}", d);
     assert_eq!(d.drafts[0].item["issuer"], json!({"kind": "self"}));
+    // The model cannot set the fields that the headers give.
+    let feed = "From: News <news@shop.example>\nList-Id: <n.shop.example>\nSubject: News\n\nRead the news.\n";
+    let items = json!([
+        {"form": "feed", "title": "News", "quote": "Read the news.", "published": "2000-01-01T00:00:00Z",
+         "list": "<other.example>", "publisher": {"address": "x@evil.example"}},
+        {"form": "record", "type": "other", "title": "N", "quote": "Read the news.",
+         "fields": {"summary": "N"}, "issuer": {"address": "x@evil.example"}}
+    ]);
+    let m = Fake::with(vec![answer(items)]);
+    let (_, d) = run(feed, Kind::Service, &[], &[], Some(&m));
+    let d = d.unwrap();
+    assert_eq!(d.drafts.len(), 2, "{d:?}");
+    let f = &d.drafts[0].item;
+    assert_eq!(f["list"], "<n.shop.example>");
+    assert_eq!(f["publisher"]["address"], "news@shop.example");
+    assert_ne!(f["published"], "2000-01-01T00:00:00Z");
+    assert_eq!(d.drafts[1].item["issuer"]["address"], "news@shop.example");
+    let record = json!([{"form": "record", "type": "other", "title": "Plan", "quote": "The summary of the plan.",
+                         "fields": {"summary": "The plan"}, "issuer": {"address": "me@alias.example"}}]);
+    let m = Fake::with(vec![answer(record)]);
+    let (_, d) = run(alias, Kind::SelfOwner, &["SENT"], &[], Some(&m));
+    assert_eq!(d.unwrap().drafts[0].item["issuer"], json!({"kind": "self"}));
     // Sent mail with Bcc only: the parties of the model make the item.
     let bcc = "From: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
     let promise = json!([{"form": "commitment", "title": "Send", "quote": "I will send the slides",

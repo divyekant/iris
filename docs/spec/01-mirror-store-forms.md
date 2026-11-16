@@ -779,8 +779,8 @@ A code is a run of 4 to 8 digits bound to a code word ("code",
   "482913 is your code".
 - On the next line, if the line with the code word has no number and the
   next line has no code word: "Your code:" then "482913". If the line after
-  that is also only a number, the code is not clear: "Your code:", "1234",
-  "5678" gives no code.
+  that is also only a number of any length, the code is not clear:
+  "Your code:", "1234", "5678" gives no code.
 
 The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a code word, or on a line with a bound number, has that value ("Your old code was 5678" makes the code not clear).
 Two values, or no bound number, give no clear code. A number with other
@@ -856,7 +856,9 @@ The conversation rule runs for each message that is not hostile mail:
   be 128,000 bytes). Existing items, attachment text, and then the earlier
   messages of the thread, newest first, fill the rest. Text that the
   budget cuts ends with `[cut]`.
-- In sent mail, a party that the engine fills in for the sender is the
+- The engine, not the model, sets the fields that the headers give: the
+  `issuer` of a record or a signal, and the `publisher`, `published` and
+  `list` of a feed. In sent mail, the party of the sender is the
   owner, also when `From` is an alias. With no `To` and no `Cc` (Bcc only),
   only the parties in the model answer can make a commitment valid.
 - The answer must have a boolean `phishing`. Each party in the answer must
