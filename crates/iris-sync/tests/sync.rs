@@ -2,92 +2,18 @@
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use iris_fakegmail::FakeGmail;
-use iris_gmail::{Config, Gmail};
+
 use iris_store::Store;
 use iris_sync::{first_sync, Error, STEP_FETCH, STEP_INCREMENTAL};
 use iris_synth::Mailbox;
 
-const TOKEN: &str = "test-token";
-const OWNER: &str = "owner@example.com";
-
-fn client(base_url: String) -> Gmail {
-    Gmail::new(Config {
-        base_url,
-        quota_per_minute: 10_000_000,
-        backoff_start: Duration::from_millis(1),
-        backoff_max: Duration::from_millis(4),
-        ..Config::default()
-    })
-}
-
-fn data_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("iris-sync-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
-}
-
-fn count(store: &Store, sql: &str) -> i64 {
-    store
-        .read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
-        .unwrap()
-}
-
-fn raw_requests(fake: &FakeGmail) -> usize {
-    fake.requests()
-        .iter()
-        .filter(|r| r.contains("format=raw"))
-        .count()
-}
-
-/// The fake as the mirror must see it: (message ID, sorted label IDs).
-fn fake_state(fake: &FakeGmail) -> Vec<(String, Vec<String>)> {
-    let gmail = client(fake.base_url());
-    let mut out = Vec::new();
-    let mut page: Option<String> = None;
-    loop {
-        let p = gmail.messages(TOKEN, &[], true, page.as_deref()).unwrap();
-        for m in p.messages {
-            let mut labels = gmail.minimal(TOKEN, &m.id).unwrap().label_ids;
-            labels.sort();
-            out.push((m.id, labels));
-        }
-        match p.next_page_token {
-            Some(t) => page = Some(t),
-            None => break,
-        }
-    }
-    out.sort();
-    out
-}
-
-fn mirror_state(store: &Store) -> Vec<(String, Vec<String>)> {
-    let mut out: Vec<(String, Vec<String>)> = store
-        .read(|c| {
-            let mut st = c.prepare(
-                "SELECT m.provider_id, coalesce(group_concat(l.provider_id, ' '), '')
-                 FROM message m LEFT JOIN message_label ml ON ml.message_id = m.id
-                 LEFT JOIN label l ON l.id = ml.label_id
-                 WHERE m.gone_at IS NULL GROUP BY m.id",
-            )?;
-            let rows = st.query_map([], |r| {
-                let labels: String = r.get(1)?;
-                let mut labels: Vec<String> =
-                    labels.split_whitespace().map(str::to_string).collect();
-                labels.sort();
-                Ok((r.get(0)?, labels))
-            })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
-    out.sort();
-    out
-}
+mod common;
+use common::*;
 
 /// Each fetched message has its content file, with the same bytes as the fake.
 fn check_content(store: &Store, mailbox: &Mailbox) {
@@ -121,18 +47,6 @@ fn temp_files(dir: &Path) -> usize {
         }
     }
     n
-}
-
-fn sync_state(store: &Store) -> (Option<String>, Option<String>, Option<i64>, Option<String>) {
-    store
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT sync_kind, sync_start, sync_step, history_id FROM account",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?)
-        })
-        .unwrap()
 }
 
 #[test]
@@ -366,6 +280,15 @@ fn a_message_deleted_after_the_list_does_not_stop_the_sync() {
     assert_eq!(gone, vec![victim]);
     assert_eq!(mirror_state(&store), fake_state(&fake));
     assert_eq!(sync_state(&store).2, Some(STEP_INCREMENTAL));
+
+    // Step 5: the incremental sync from H0 makes the mirror ready.
+    iris_sync::sync(&store, &gmail, account, TOKEN).unwrap();
+    let ready: Option<i64> = store
+        .read(|c| Ok(c.query_row("SELECT mirror_ready_at FROM account", [], |r| r.get(0))?))
+        .unwrap();
+    assert!(ready.is_some());
+    assert_eq!(sync_state(&store).0, None);
+    assert_eq!(mirror_state(&store), fake_state(&fake));
 }
 
 #[test]

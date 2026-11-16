@@ -1,4 +1,4 @@
-//! The peak memory of a first sync of 100,000 messages (specification 1,
+//! The peak memory of a first sync and a full resync of 100,000 messages (specification 1,
 //! section 9).
 //!
 //! The fake Gmail server runs in a child process, so the peak memory of this
@@ -40,6 +40,20 @@ fn status_kb(field: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
+fn report(what: &str, time: Duration, before: Option<u64>) {
+    println!("{what}: {COUNT} messages in {time:?}");
+    if let (Some(rss), Some(peak), Some(before)) =
+        (status_kb("VmRSS:"), status_kb("VmHWM:"), before)
+    {
+        println!(
+            "{what}: resident memory before {} MB, after {} MB, peak {} MB",
+            before / 1024,
+            rss / 1024,
+            peak / 1024
+        );
+    }
+}
+
 #[test]
 #[ignore]
 fn peak_memory_of_a_first_sync() {
@@ -70,23 +84,27 @@ fn peak_memory_of_a_first_sync() {
     });
     let before = status_kb("VmRSS:");
     let start = Instant::now();
-    let done = iris_sync::first_sync(&store, &gmail, account, "test-token").unwrap();
-    let time = start.elapsed();
+    let done = iris_sync::sync(&store, &gmail, account, "test-token").unwrap();
+    report("first sync", start.elapsed(), before);
     assert_eq!(done.fetched as usize, COUNT);
+
+    // A full resync of the same mailbox (specification 1, section 4.4).
+    store
+        .write(|tx| {
+            tx.execute("UPDATE account SET sync_kind = 'resync'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    // Linux: "5" sets the peak (VmHWM) to the resident memory of now.
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+    let before = status_kb("VmRSS:");
+    let start = Instant::now();
+    let done = iris_sync::sync(&store, &gmail, account, "test-token").unwrap();
+    report("full resync", start.elapsed(), before);
+    assert!(done.resync);
+    assert_eq!(done.fetched, 0);
     drop(child.stdin.take());
     let _ = child.wait();
     drop(out);
-
-    println!("{COUNT} messages in {time:?}");
-    if let (Some(rss), Some(peak), Some(before)) =
-        (status_kb("VmRSS:"), status_kb("VmHWM:"), before)
-    {
-        println!(
-            "resident memory before {} MB, after {} MB, peak {} MB",
-            before / 1024,
-            rss / 1024,
-            peak / 1024
-        );
-    }
     let _ = std::fs::remove_dir_all(&dir);
 }

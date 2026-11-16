@@ -1,6 +1,6 @@
 [package]
 name = "iris-sync"
-description = "The first sync of the Iris mirror: a full copy of a Gmail mailbox into the store."
+description = "The sync of the Iris mirror: first sync, incremental sync and full resync of a Gmail mailbox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
