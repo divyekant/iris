@@ -409,7 +409,7 @@ more calls.
 |---|---|---|---|
 | A second run | All mail understood | Zero calls. | Counting fake, two runs. |
 | A crash after the call, before write 3 | The model ran, no items | The message stays pending; the next run pays for it again (one message). | Fake model, stop after the call. |
-| A crash between the reservation and the settle write | Items saved, counts not | The budget keeps the whole worst case taken. The run row misses the tokens of one message. | Limit #113 (counts only); batch test of the reservation. |
+| A crash between the reservation and the settle write of a call | The call can be charged, nothing is settled | No item is saved for that call (write 3 comes later). The worst case stays taken from the budget. The run row misses the counts of the call. | Limit #113 (counts only); batch test of the reservation. |
 | The budget covers one call but not two | A second try outside the budget | The wrapper reserves each call; it refuses the second call. | Batch test. |
 | `iris model set` during a run | Calls on an old row with a new budget | `iris model set` needs the run lock and fails. | Command test. |
 | `iris model set` between the estimate and the approval | A budget for a model the person did not see | The approval code is the row version; a changed row refuses the approval. | Command test. |
