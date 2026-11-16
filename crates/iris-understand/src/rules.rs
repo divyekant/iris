@@ -236,6 +236,13 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         } else if let Some(&next) = lines.get(i + 1).filter(|n| self::cues(n).is_empty()) {
             // The cue line and the next line as one text, with the cues at
             // their own offsets and the numbers after the line break.
+            // A second line that is only a number makes the code not clear:
+            // "Your code:\n1234\n5678" has two candidates (#100).
+            if let Some(after) = lines.get(i + 2) {
+                if numbers(after) == [(0, after.len())] {
+                    near.push(after);
+                }
+            }
             let both = format!("{l}\n{next}");
             let shift = l.len() + 1;
             bound(&both, &cues, &numbers(next), shift)

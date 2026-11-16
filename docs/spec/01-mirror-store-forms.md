@@ -778,7 +778,9 @@ A code is a run of 4 to 8 digits bound to a code word ("code",
 - Before the code word, with only "is", "your", "the" or "a" between them:
   "482913 is your code".
 - On the next line, if the line with the code word has no number and the
-  next line has no code word: "Your code:" then "482913".
+  next line has no code word: "Your code:" then "482913". If the line after
+  that is also only a number, the code is not clear: "Your code:", "1234",
+  "5678" gives no code.
 
 The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a code word, or on a line with a bound number, has that value ("Your old code was 5678" makes the code not clear).
 Two values, or no bound number, give no clear code. A number with other
@@ -853,7 +855,9 @@ The conversation rule runs for each message that is not hostile mail:
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row
-  of each address. Then it validates each item against the schemas. If an
+  of each address. Then it validates each item against the schemas. A quote
+  that does not occur in the subject, the clean text or the attachment text
+  makes the answer not valid. If an
   item is not valid, the engine tries one time again. If the second answer is
   not valid, the engine saves no item, adds 1 to `tries` of the message, and
   sets `retry_at` to 1 day later. After 3 tries, the engine stops, and the
