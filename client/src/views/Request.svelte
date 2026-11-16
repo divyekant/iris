@@ -3,7 +3,8 @@
   each action with its real targets (messages or items) and the arguments
   that set its effect. Each waiting change starts ticked. The person unticks
   what they do not want, and one button approves the ticked changes and
-  denies the others.
+  denies the others. The person can also withdraw the whole request, after
+  one question in the page.
 -->
 <script lang="ts">
   import { get, post, type Changeset, type Item, type Target } from "../api";
@@ -92,6 +93,37 @@
 
   // One request for each decision: the engine approves the ticked changes, with the hash that
   // this screen showed, and denies the others. If one is refused, it writes nothing (409).
+  // Spec 2 section 5.5: the person can withdraw an open request. The store cancels each change
+  // that Iris did not start; a change that Iris started goes on to its end. The page cannot see
+  // which approved changes Iris started, so the question promises no count, and the result
+  // counts from the states that the store gives back. A withdraw cannot be undone: the page asks once.
+  let asking = $state(false);
+  async function withdraw() {
+    if (busy || stale) return;
+    busy = true;
+    problem = saved = "";
+    const before = new Set(c.actions.filter((a) => a.decision?.state === "cancelled").map(key));
+    try {
+      const after = await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {});
+      onchange(after);
+      asking = false;
+      const gone = after.actions.filter((a) => a.decision?.state === "cancelled" && !before.has(key(a))).length;
+      const going = after.actions.filter((a) => a.decision?.state === "approved").length;
+      saved = [
+        `You withdrew this request. Iris cancelled ${gone === 1 ? "one change" : `${gone} changes`}.`,
+        going ? `Iris started ${going === 1 ? "one change" : `${going} changes`} before the withdraw, and ${going === 1 ? "it goes" : "they go"} on to the end.` : "",
+      ].join(" ").trim();
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      asking = false;
+      if (status === 409) await refresh("Iris did not withdraw the request, because it changed after you opened it. Here it is as it is now.");
+      else if (status === undefined || status >= 500) await refresh("Iris does not know if it withdrew the request. Here it is as it is now.");
+      else problem = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function decide() {
     const yes = chosen.length;
     const no = open.length - yes;
@@ -140,6 +172,25 @@
   {/if}
 {/snippet}
 
+<!-- Withdraw ends the whole request, so it sits at the end of the decision row (option B, the owner's pick). -->
+{#snippet ask()}
+  <button type="button" class="quiet end" disabled={busy || stale} onclick={() => (asking = true)}>Withdraw the request</button>
+{/snippet}
+
+{#snippet question()}
+  <div class="question" role="group" aria-labelledby={`${c.id}-ask`}>
+    <p id={`${c.id}-ask`}><b>Withdraw this request?</b></p>
+    <p>
+      Iris cancels each change of this request that it did not start. A change that Iris made or started stays in your
+      mailbox, also the part of a failed change that Iris made before it failed. You cannot undo a withdraw.
+    </p>
+    <div class="answers">
+      <button type="button" class="outline" disabled={busy} onclick={withdraw}>Withdraw the request</button>
+      <button type="button" class="quiet" disabled={busy} onclick={() => (asking = false)}>Keep it</button>
+    </div>
+  </div>
+{/snippet}
+
 <article class="request" aria-labelledby={`${c.id}-who`}>
   <header>
     {#if c.author.kind === "triage"}
@@ -177,8 +228,16 @@
       <button type="button" class="primary" class:deny={!chosen.length} disabled={!ready} onclick={decide}>{plan(chosen.length, open.length)}</button>
       <p>Iris makes none of these changes before you approve them.</p>
       {#if missing.length && !problem}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
+      {#if !asking}{@render ask()}{/if}
+    </div>
+  {:else if c.state === "open" && !asking}
+    <div class="decide">
+      <p>No change of this request waits for your decision.</p>
+      {@render ask()}
     </div>
   {/if}
+  {#if asking}{@render question()}{/if}
+  {#if c.state === "withdrawn" && !saved}<p class="saved">This request is withdrawn.</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}
@@ -427,6 +486,65 @@
   .primary:disabled {
     cursor: progress;
     opacity: 0.6;
+  }
+  .quiet {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--color-text-faint);
+    font-size: var(--font-size--1);
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+  }
+  .quiet:hover,
+  .quiet:focus-visible {
+    color: var(--color-text);
+    text-decoration-color: currentColor;
+  }
+  .quiet:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+  .end {
+    margin-left: auto;
+  }
+  /* The withdraw question: a notice with a warning line, as the observe note of the review. */
+  .question {
+    margin: var(--space-4) 0 var(--space-6);
+    padding-left: var(--space-4);
+    border-left: 4px solid var(--color-warning);
+    animation: arrive var(--transition-normal) both;
+  }
+  .question p {
+    margin: 0 0 var(--space-2);
+    max-width: 60ch;
+    color: var(--color-text-muted);
+  }
+  .question p b {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+  .answers {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+    margin-top: var(--space-3);
+  }
+  .outline {
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-text);
+    font-weight: 500;
+    transition: border-color var(--transition-fast);
+  }
+  .outline:hover,
+  .outline:focus-visible {
+    border-color: var(--color-text-muted);
   }
   .saved {
     margin: var(--space-4) 0 0;
