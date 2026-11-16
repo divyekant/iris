@@ -268,6 +268,9 @@ fn the_person_rule() {
         .unwrap();
     assert_eq!((ana.from_you, ana.from_them, ana.threads.len()), (2, 0, 2));
     assert_eq!(ana.first_at, 1000);
+    // Ana is known only from sent mail: the name comes from the To field.
+    assert_eq!(ana.name.as_deref(), Some("Ana Lind"));
+    assert_eq!(ana.names, ["Ana Lind"]);
     assert_eq!(ana.last_at, 6000);
     let bo = all.iter().find(|p| addrs(p) == ["bo@example.org"]).unwrap();
     assert_eq!((bo.from_you, bo.from_them), (0, 1));
@@ -471,4 +474,20 @@ fn a_bcc_recipient_is_a_known_person() {
         found,
         BTreeSet::from(["ana@example.org", "bo@example.org", "cy@example.org"])
     );
+}
+
+#[test]
+fn a_quoted_local_part_is_an_address() {
+    let mut h = Hand::new("quoted");
+    h.add(
+        "t1",
+        "SENT",
+        "me@example.com",
+        "Me",
+        r#"John <"john.doe"@example.org>"#,
+    );
+    let all = h.people();
+    assert_eq!(all.len(), 1);
+    assert_eq!(addrs(&all[0]), [r#""john.doe"@example.org"#]);
+    assert_eq!(all[0].name.as_deref(), Some("John"));
 }
