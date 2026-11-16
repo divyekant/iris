@@ -435,6 +435,9 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
 | `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `by` TEXT, `at` INTEGER | Each change of an item by a person, or by an applied action of specification 2. `by` is `person` or the changeset ID. The item stays through a rebuild (section 7.5). |
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
+| `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
+| `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
+| `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
 AUTOINCREMENT`, so SQLite never gives the row ID of a deleted row to a new
@@ -745,6 +748,11 @@ after the commitment. The threads of the last 90 days come first, the thread
 with the newest message first. Older mail gets understood in the background,
 at a low rate, so that the first brief comes early (requirement M4). A
 rebuild uses the same order.
+
+The batch runner, the run counts, the cost limit and the estimate before the
+first run are in `docs/specs/2026-11-16-cost-control.md` (R1-15). One exception to oldest first: mail with the label `SPAM` or from
+a `hostile` sender needs no thread context, so it does not wait for the
+older messages of its thread.
 
 ### 7.2 Clean text
 

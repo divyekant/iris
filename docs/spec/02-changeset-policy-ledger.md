@@ -623,6 +623,8 @@ write to the local store, but none of them changes the mailbox:
 | `mirror sync` | Messages, content files and the sync log | Specification 1, sections 4.2 to 4.7 |
 | `mirror verify` | Repairs of the mirror, and the sync log | Specification 1, section 4.8 |
 | `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
+| `model set` | The model setting and its sealed key | `docs/specs/2026-11-16-cost-control.md` |
+| `understand` | Items, run rows, estimate receipts and the budget | `docs/specs/2026-11-16-cost-control.md`. The budget approval needs an estimate receipt and a terminal (a TTY). It is not a mailbox action. See the exception below. |
 
 The policy governs mailbox actions (sections 4 to 6). The writes in
 the table are not mailbox actions, so they do not go through the policy.
@@ -641,6 +643,13 @@ session gets: it holds no token and no credential. The sandbox of release 4
 must make sure that a session cannot reach `iris.sock` or the socket of
 another session.
 
+Release 1 exception: `iris understand --approve` approves a model budget in
+the terminal. Release 1 has no web write path, and the budget limits money,
+not the mailbox. Host mode is the OS user that owns the data folder, which
+is the person. In release 1, the person gives no agent host access to that
+folder (an agent with host access could approve a budget). Release 2 moves
+the approval to the web client (section 8.6).
+
 The command has no verb to approve, to deny or to change the policy. Only the
 web client does these steps, for the person. The person has no terminal client
 (decision of the maintainer). In host mode, a changeset has the author `local`
@@ -658,6 +667,8 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris mirror sync` | Runs an incremental sync now. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
+| `iris model set`, `iris model show` | Sets the model of understanding and its key (read from standard input), or shows the settings without the key (`docs/specs/2026-11-16-cost-control.md`). | host | 1 |
+| `iris understand --estimate`, `iris understand --approve <code> --budget <usd>`, `iris understand [--max-cost <usd>] [--max-messages <n>]` | Shows the estimate and its approval code, approves a budget for paid runs after the estimate, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | both | 1 |
@@ -726,7 +737,7 @@ agent that does not work in a folder. The rules for the MCP interface:
 ### 8.6 The web client and the trust boundary
 
 The web client is the only place to approve, deny, undo and change the
-policy. The engine protects its web interface:
+policy. The one exception is the model budget of release 1 (section 8.1). The engine protects its web interface:
 
 - At each start, the engine makes a random web secret of 32 bytes and a
   one-time code. `iris serve` prints a one-time sign-in address:
