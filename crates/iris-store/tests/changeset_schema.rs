@@ -993,7 +993,7 @@ fn the_ledger_moves_the_action() {
     // of the person (migration 12). An action with no link is not an undo.
     const UNDO: &str = "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 6);
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-         VALUES (2, 1, 1, 'inbox', '{}', '{}');";
+         VALUES (2, 1, 1, 'inbox', '{\"ledger\":[\"l-1\"]}', '{}');";
     const UNDO_APPLIED: &str = "INSERT INTO action_message(action_id, message_id) VALUES (2, 1);
          UPDATE changeset_action SET hash = 'h' WHERE id = 2;
          UPDATE changeset SET why = 'u', submitted_at = 6 WHERE id = 2;
@@ -1025,8 +1025,11 @@ fn the_ledger_moves_the_action() {
          INSERT INTO ledger_undo VALUES (2, 1, 1)",
         "INSERT INTO ledger_undo VALUES (2, 1, 1);
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-         VALUES (2, 1, 2, 'inbox', '{}', '{}');
+         VALUES (2, 1, 2, 'inbox', '{\"ledger\":[\"l-1\"]}', '{}');
          INSERT INTO ledger_undo VALUES (3, 1, 1)",
+        // The target is the whole entry.
+        "UPDATE changeset_action SET targets = '{\"messages\":[\"m-1\"]}' WHERE id = 2;
+         INSERT INTO ledger_undo VALUES (2, 1, 1)",
         "INSERT INTO ledger_undo VALUES (2, 1, 1); UPDATE ledger_undo SET step = 2",
         "INSERT INTO ledger_undo VALUES (2, 1, 1); DELETE FROM ledger_undo",
     ] {

@@ -1597,31 +1597,34 @@ fn random_ledger_targets() {
             targets.insert("messages".into(), json!(["m-1"]));
         }
         let targets = Value::Object(targets).to_string();
-        let linked = next(3) != 0;
+        let exact = targets == "{\"ledger\":[\"l-1\"]}";
         let cs = create(&s, &person, NOW).unwrap();
-        s.write(|tx| {
-            tx.execute(
-                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-                 VALUES (?1, 1, 1, 'inbox', ?2, '{}')",
-                rusqlite::params![cs, targets],
-            )?;
-            if linked {
+        let action = s
+            .write(|tx| {
                 tx.execute(
-                    "INSERT INTO ledger_undo(action_id, ledger_id, step)
-                     VALUES (last_insert_rowid(), 1, 1)",
-                    [],
+                    "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                     VALUES (?1, 1, 1, 'inbox', ?2, '{}')",
+                    rusqlite::params![cs, targets],
                 )?;
-            }
-            Ok(())
-        })
-        .unwrap();
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        // The link needs the whole entry as the target (migration 12).
+        let linked = next(3) != 0
+            && s.write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, 1, 1)",
+                    [action],
+                )?)
+            })
+            .map_err(|e| assert!(!exact && e.to_string().contains("iris:"), "{e}"))
+            .is_ok();
         submit(&s, cs, &person, "Undo.", NOW).unwrap();
         let mut out = Vec::new();
         write_document(&s, cs, &mut out).unwrap();
         let d: Value = serde_json::from_slice(&out).unwrap();
         let a = &d["actions"][0];
         let resolved = a["resolved"]["messages"].as_array().unwrap();
-        let exact = targets == "{\"ledger\":[\"l-1\"]}";
         match a["decision"]["state"].as_str().unwrap() {
             "proposed" => {
                 assert!(linked && exact, "round {round}: {a}");

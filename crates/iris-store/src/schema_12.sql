@@ -23,11 +23,13 @@ WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.c
                  WHERE a.id = new.action_id AND a.state IS NULL AND c.author_kind = 'person')
   OR NOT EXISTS (SELECT 1 FROM ledger WHERE id = new.ledger_id
                    AND state IN ('applied', 'failed') AND undo = 'inverse')
-  -- Step 1 is the inverse of the verb of the entry, with the same
-  -- arguments. Step 2 is the `archive` after the `untrash` of a `trash`.
+  -- The target is the entry. Step 1 is the inverse of the verb of the
+  -- entry, with the same arguments. Step 2 is the `archive` after the `untrash` of a `trash`.
   OR NOT EXISTS (SELECT 1 FROM changeset_action a, ledger l
                  JOIN changeset_action o ON o.id = l.action_id
                  WHERE a.id = new.action_id AND l.id = new.ledger_id
+                   -- The target is the whole entry.
+                   AND json(a.targets) = json_object('ledger', json_array('l-' || l.id))
                    AND ((new.step = 1 AND json(a.args) = json(o.args)
                          AND o.verb || '>' || a.verb IN (
                            'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',

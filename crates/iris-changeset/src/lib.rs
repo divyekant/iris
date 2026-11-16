@@ -772,6 +772,14 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     if group == "ledger" && !state {
         return resolve_undo(c, action, ids);
     }
+    let linked: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
+        [action],
+        |r| r.get(0),
+    )?;
+    if linked {
+        return Ok(Some("an undo targets its ledger entry".into()));
+    }
     match (state, group.as_str()) {
         (false, "threads" | "messages") | (true, "items") => {}
         (false, _) => return Ok(Some("a mailbox verb takes threads or messages".into())),

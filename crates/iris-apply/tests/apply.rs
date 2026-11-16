@@ -1521,8 +1521,9 @@ fn a_failed_untrash_lets_the_undo_end() {
     assert_eq!(b.entry_state(entry).0, "undone");
 }
 
-/// A linked draft keeps its verb, arguments and targets, so the check of
-/// the link stays true (migration 12).
+/// A link needs the whole entry as the target, and a linked draft keeps
+/// its verb, arguments and targets, so the check of the link stays true
+/// (migration 12).
 #[test]
 fn a_linked_action_does_not_change() {
     let b = setup("undo-untrash", 60, Some(APPLY_POLICY));
@@ -1548,15 +1549,26 @@ fn a_linked_action_does_not_change() {
         None,
     )
     .unwrap();
-    b.store
-        .write(|tx| {
+    let link = || {
+        b.store.write(|tx| {
             Ok(tx.execute(
                 "INSERT INTO ledger_undo(action_id, ledger_id, step)
                  SELECT id, ?2, 1 FROM changeset_action WHERE changeset_id = ?1",
                 params![cs, entry],
             )?)
         })
+    };
+    // A message target is not the whole entry: no link.
+    assert!(link().unwrap_err().to_string().contains("iris:"));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE changeset_action SET targets = ?2 WHERE changeset_id = ?1",
+                params![cs, format!("{{\"ledger\":[\"l-{entry}\"]}}")],
+            )?)
+        })
         .unwrap();
+    link().unwrap();
     // The action of a link does not change, also in a draft.
     for edit in [
         "verb = 'untrash'",
@@ -1593,25 +1605,19 @@ fn a_second_step_needs_its_first_step() {
         job: None,
     };
     let cs = iris_changeset::create(&b.store, &person, now()).unwrap();
-    let target = format!("m-{}", ms[0]);
-    iris_changeset::add_action(
-        &b.store,
-        cs,
-        &person,
-        iris_changeset::Verb::Archive,
-        &[target.as_str()],
-        &serde_json::Map::new(),
-        None,
-    )
-    .unwrap();
-    for ledger in [b.entry(first), b.entry(other)] {
+    for (n, ledger) in [(1, b.entry(first)), (2, b.entry(other))] {
         let e = b
             .store
             .write(|tx| {
+                tx.execute(
+                    "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                     VALUES (?1, 1, ?2, 'archive', ?3, '{}')",
+                    params![cs, n, format!("{{\"ledger\":[\"l-{ledger}\"]}}")],
+                )?;
                 Ok(tx.execute(
                     "INSERT INTO ledger_undo(action_id, ledger_id, step)
-                     SELECT id, ?2, 2 FROM changeset_action WHERE changeset_id = ?1",
-                    params![cs, ledger],
+                     VALUES (last_insert_rowid(), ?1, 2)",
+                    [ledger],
                 )?)
             })
             .unwrap_err();
