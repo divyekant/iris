@@ -252,3 +252,172 @@ fn the_client_waits_for_quota() {
         t.elapsed()
     );
 }
+
+const DRAFT: &[u8] =
+    b"From: owner@example.com\r\nSubject: Hi\r\nMessage-ID: <iris.1@example.com>\r\n\r\nHello\r\n";
+
+#[test]
+fn a_draft_is_created_read_and_sent_in_its_thread() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    let thread = gmail.messages(TOKEN, &[], true, None).unwrap().messages[0]
+        .thread_id
+        .clone();
+    let d = gmail.create_draft(TOKEN, DRAFT, Some(&thread)).unwrap();
+    assert_eq!(d.message.thread_id, thread);
+    let got = gmail.draft_raw(TOKEN, &d.id).unwrap();
+    assert_eq!(
+        (got.raw.as_deref().unwrap(), got.message.thread_id.as_str()),
+        (DRAFT, thread.as_str())
+    );
+
+    // The person edits the draft at Gmail; the send carries the bytes of Iris.
+    assert!(fake.edit_draft(
+        &d.id,
+        b"Subject: Hi\r\nMessage-ID: <iris.1@example.com>\r\n\r\nBye\r\n"
+    ));
+
+    let found = gmail
+        .drafts(TOKEN, "rfc822msgid:<iris.1@example.com>")
+        .unwrap();
+    assert_eq!(found.iter().map(|d| &d.id).collect::<Vec<_>>(), [&d.id]);
+    assert!(gmail
+        .drafts(TOKEN, "rfc822msgid:iris.2@example.com")
+        .unwrap()
+        .is_empty());
+
+    // With no thread ID, the sent message goes into a new thread: the
+    // thread ID of the request decides.
+    let lone_raw = b"From: owner@example.com\r\nSubject: Hi\r\nMessage-ID: <iris.9@example.com>\r\n\r\nHello\r\n";
+    let other = gmail.create_draft(TOKEN, lone_raw, Some(&thread)).unwrap();
+    let lone = gmail.send_draft(TOKEN, &other.id, lone_raw, None).unwrap();
+    assert_ne!(lone.thread_id, thread);
+    let sent = gmail
+        .send_draft(TOKEN, &d.id, DRAFT, Some(&thread))
+        .unwrap();
+    assert_eq!(
+        (sent.thread_id.as_str(), sent.label_ids.as_slice()),
+        (thread.as_str(), &["SENT".to_string()][..])
+    );
+    let mut out = Vec::new();
+    gmail.raw(TOKEN, &sent.id, &mut out).unwrap();
+    assert_eq!(out, DRAFT);
+    assert!(matches!(
+        gmail.draft_raw(TOKEN, &d.id),
+        Err(Error::NotFound)
+    ));
+    assert!(matches!(
+        gmail.send_draft(TOKEN, &d.id, DRAFT, None),
+        Err(Error::Api { status: 404, .. }) | Err(Error::NotFound)
+    ));
+
+    // The search finds the sent message by its Message-ID, also in another form.
+    let page = gmail
+        .search(TOKEN, "rfc822msgid:iris.1@example.com", None)
+        .unwrap();
+    assert_eq!(
+        page.messages.iter().map(|m| &m.id).collect::<Vec<_>>(),
+        [&sent.id]
+    );
+}
+
+#[test]
+fn a_draft_send_with_a_lost_answer_is_unknown_and_the_search_finds_it() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    let d = gmail.create_draft(TOKEN, DRAFT, None).unwrap();
+    fake.fail_next_write(&[503], true);
+    let e = gmail.send_draft(TOKEN, &d.id, DRAFT, None).unwrap_err();
+    assert!(e.write_result_unknown(), "{e}");
+    let sends = fake
+        .requests()
+        .iter()
+        .filter(|r| r.ends_with("/drafts/send"))
+        .count();
+    assert_eq!(sends, 1);
+    let page = gmail
+        .search(TOKEN, "rfc822msgid:<iris.1@example.com>", None)
+        .unwrap();
+    assert_eq!(page.messages.len(), 1);
+}
+
+#[test]
+fn a_rate_limit_of_a_draft_write_is_unknown_and_has_no_second_request() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    fake.fail_next_write(&[429], false);
+    assert!(gmail
+        .create_draft(TOKEN, DRAFT, None)
+        .unwrap_err()
+        .write_result_unknown());
+    let d = gmail.create_draft(TOKEN, DRAFT, None).unwrap();
+    fake.fail_next_write(&[429], false);
+    let e = gmail.send_draft(TOKEN, &d.id, DRAFT, None).unwrap_err();
+    assert!(e.write_result_unknown(), "{e}");
+    let count = |end: &str| fake.requests().iter().filter(|r| r.ends_with(end)).count();
+    assert_eq!((count("/drafts"), count("/drafts/send")), (2, 1));
+}
+
+#[test]
+fn the_person_can_edit_and_delete_a_draft_at_the_fake() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    let d = gmail.create_draft(TOKEN, DRAFT, None).unwrap();
+    assert!(fake.edit_draft(&d.id, b"Subject: x\r\n\r\ny\r\n"));
+    assert_eq!(
+        gmail.draft_raw(TOKEN, &d.id).unwrap().raw.as_deref(),
+        Some(&b"Subject: x\r\n\r\ny\r\n"[..])
+    );
+    assert!(fake.delete_draft(&d.id));
+    assert!(fake.draft_ids().is_empty());
+    assert!(matches!(
+        gmail.draft_raw(TOKEN, &d.id),
+        Err(Error::NotFound)
+    ));
+}
+
+/// A draft larger than the answer limit of a JSON call still reads: the
+/// client streams it, and gives no raw for a message over DRAFT_LIMIT.
+#[test]
+fn a_large_draft_reads_with_no_raw() {
+    let fake = FakeGmail::start(Mailbox::new(3, 5)).unwrap();
+    let gmail = client(&fake);
+    let d = gmail.create_draft(TOKEN, DRAFT, None).unwrap();
+    // 13 MiB of attachment text: more than 16 MiB as base64 in the answer.
+    let mut big = b"Subject: x\r\n\r\n".to_vec();
+    big.resize(13 * 1024 * 1024, b'a');
+    assert!(fake.edit_draft(&d.id, &big));
+    let got = gmail.draft_raw(TOKEN, &d.id).unwrap();
+    assert_eq!((got.id.as_str(), got.raw), (d.id.as_str(), None));
+    // At the limit, the raw is kept.
+    big.truncate(iris_gmail::DRAFT_LIMIT);
+    assert!(fake.edit_draft(&d.id, &big));
+    assert_eq!(
+        gmail.draft_raw(TOKEN, &d.id).unwrap().raw.map(|r| r.len()),
+        Some(iris_gmail::DRAFT_LIMIT)
+    );
+}
+
+#[test]
+fn a_draft_search_reads_every_page() {
+    let fake = FakeGmail::start(Mailbox::new(3, 10)).unwrap();
+    let gmail = client(&fake);
+    let other = b"Subject: Hi\r\nMessage-ID: <other@example.com>\r\n\r\nHello\r\n";
+    let raw = b"Subject: Hi\r\nMessage-ID: <iris.5@example.com>\r\n\r\nHello\r\n";
+    gmail.create_draft(TOKEN, other, None).unwrap();
+    let ids: Vec<String> = (0..3)
+        .map(|_| gmail.create_draft(TOKEN, raw, None).unwrap().id)
+        .collect();
+    fake.set_page_limit(1);
+
+    // The matching drafts are on three pages. Without the page tokens,
+    // the search finds only the first one.
+    let found = gmail
+        .drafts(TOKEN, "rfc822msgid:<iris.5@example.com>")
+        .unwrap();
+    assert_eq!(found.iter().map(|d| d.id.clone()).collect::<Vec<_>>(), ids);
+    assert!(fake
+        .requests()
+        .iter()
+        .any(|r| r.contains("drafts?") && r.contains("pageToken=2")));
+}
