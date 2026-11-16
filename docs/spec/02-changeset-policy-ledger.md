@@ -758,7 +758,9 @@ applies it.
       (for example an archived message that `messages.untrash` put in the
       inbox). It changes only the messages that an `untrash` of an undo of
       the entry changed (`done`), and that have `INBOX` now. Until action 1
-      ends, the apply of action 2 waits.
+      ends, the apply of action 2 waits. After action 1 ends, `applied` or
+      `failed`, action 2 applies: the caller applies each action of the
+      undo in order.
 
    The undo never sets a full label set, so a label that the person added
    while the message was in the trash stays. If the engine stops between the
@@ -780,7 +782,8 @@ An undo of an undo is a new action, not a delete of the record.
 | Input or event | Failure mode | Safe result |
 |---|---|---|
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
-| A second undo while an undo of the entry is open | Two undos change the same messages | `undo` refuses it. The trigger refuses a second open link of the same step. |
+| A second undo while an undo of the entry is open | Two undos change the same messages | `undo` refuses it until each action of the open undo ended. The trigger refuses a second open link of the same step. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
+| A link of an action whose verb is not the inverse of the entry, with other arguments, or a step 2 of an entry that is not `trash` | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. Submit denies `untrash` unless the action is step 1 of the undo of a `trash` entry, also when a writer changes the verb of a linked draft. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
 | A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
 | A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message with a later `ledger_message` row with `done` or `unknown`, except the rows of the undos of the same entry. |

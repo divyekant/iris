@@ -16,13 +16,23 @@ CREATE TABLE ledger_undo (
 CREATE INDEX ledger_undo_ledger ON ledger_undo(ledger_id);
 
 -- The link is written with the draft action of the person, before the
--- submit. The entry has an undo and is not undone, and no other open undo
--- of the entry exists.
+-- submit. The entry has an undo and is not undone, the verb fits the step,
+-- and no other open undo of the entry exists.
 CREATE TRIGGER ledger_undo_insert BEFORE INSERT ON ledger_undo
 WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
                  WHERE a.id = new.action_id AND a.state IS NULL AND c.author_kind = 'person')
   OR NOT EXISTS (SELECT 1 FROM ledger WHERE id = new.ledger_id
                    AND state IN ('applied', 'failed') AND undo = 'inverse')
+  -- Step 1 is the inverse of the verb of the entry, with the same
+  -- arguments. Step 2 is the `archive` after the `untrash` of a `trash`.
+  OR NOT EXISTS (SELECT 1 FROM changeset_action a, ledger l
+                 JOIN changeset_action o ON o.id = l.action_id
+                 WHERE a.id = new.action_id AND l.id = new.ledger_id
+                   AND ((new.step = 1 AND json(a.args) = json(o.args)
+                         AND o.verb || '>' || a.verb IN (
+                           'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',
+                           'label>unlabel', 'unlabel>label', 'trash>untrash', 'untrash>trash'))
+                        OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive')))
   OR EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
              WHERE u.ledger_id = new.ledger_id AND u.step = new.step
                AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'))

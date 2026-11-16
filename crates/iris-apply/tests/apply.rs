@@ -1468,3 +1468,96 @@ fn a_failed_second_step_keeps_the_trash_entry() {
     }
     assert_eq!(b.entry_state(entry).0, "undone");
 }
+
+/// A failed `untrash` ends step 1. Step 2 then applies, and the person can
+/// undo the entry again when each action of the undo ended.
+#[test]
+fn a_failed_untrash_lets_the_undo_end() {
+    let b = setup("undo-step1", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    let before: Vec<Vec<String>> = ms.iter().map(|&m| b.gmail_labels(m)).collect();
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    let actions = iris_apply::undo(&b.store, entry, now()).unwrap();
+    assert_eq!(actions.len(), 2);
+    b.fake.fail_next_write(&[400], false);
+    assert!(matches!(b.apply(actions[0]), Ok(Outcome::Failed { .. })));
+    // Step 2 is still open: no second undo now.
+    assert!(matches!(
+        iris_apply::undo(&b.store, entry, now()),
+        Err(Error::Undo(_))
+    ));
+    let c = applied(b.apply(actions[1]));
+    assert_eq!(
+        (c.changed, c.unchanged),
+        (0, 1),
+        "no untrash changed the message"
+    );
+    assert_eq!(b.entry_state(entry), ("applied".into(), None));
+    let outcomes = b.undo(a);
+    assert!(
+        outcomes.iter().all(|o| matches!(o, Outcome::Applied(_))),
+        "{outcomes:?}"
+    );
+    for (i, &m) in ms.iter().enumerate() {
+        assert_eq!(b.gmail_labels(m), before[i]);
+    }
+    assert_eq!(b.entry_state(entry).0, "undone");
+}
+
+/// Submit denies an `untrash` that is not step 1 of the undo of a `trash`,
+/// also when a writer changes the verb of a linked draft.
+#[test]
+fn only_the_undo_of_trash_makes_untrash() {
+    let b = setup("undo-untrash", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    let a = b.approved("archive", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let cs = iris_changeset::create(&b.store, &person, now()).unwrap();
+    let target = format!("m-{}", ms[0]);
+    iris_changeset::add_action(
+        &b.store,
+        cs,
+        &person,
+        iris_changeset::Verb::Inbox,
+        &[target.as_str()],
+        &serde_json::Map::new(),
+        None,
+    )
+    .unwrap();
+    let changed = b.store.write(|tx| {
+        tx.execute(
+            "INSERT INTO ledger_undo(action_id, ledger_id, step)
+             SELECT id, ?2, 1 FROM changeset_action WHERE changeset_id = ?1",
+            params![cs, entry],
+        )?;
+        Ok(tx.execute(
+            "UPDATE changeset_action SET verb = 'untrash' WHERE changeset_id = ?1",
+            [cs],
+        )?)
+    });
+    assert!(changed.is_ok(), "a draft can change: {changed:?}");
+    {
+        iris_changeset::submit(&b.store, cs, &person, "u", now()).unwrap();
+        let state: String = b
+            .store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT state FROM changeset_action WHERE changeset_id = ?1",
+                    [cs],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(state, "denied");
+    }
+}

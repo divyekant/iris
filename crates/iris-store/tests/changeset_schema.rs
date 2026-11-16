@@ -1016,6 +1016,13 @@ fn the_ledger_moves_the_action() {
         "UPDATE changeset SET author_kind = 'agent' WHERE id = 2;
          INSERT INTO ledger_undo VALUES (2, 1, 1)",
         "INSERT INTO ledger_undo VALUES (1, 1, 1)",
+        // The verb of the link fits the entry: the entry is an `archive`.
+        "UPDATE changeset_action SET verb = 'untrash' WHERE id = 2;
+         INSERT INTO ledger_undo VALUES (2, 1, 1)",
+        "UPDATE changeset_action SET verb = 'archive' WHERE id = 2;
+         INSERT INTO ledger_undo VALUES (2, 1, 2)",
+        "UPDATE changeset_action SET args = '{\"label\":\"x\"}' WHERE id = 2;
+         INSERT INTO ledger_undo VALUES (2, 1, 1)",
         "INSERT INTO ledger_undo VALUES (2, 1, 1);
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
          VALUES (2, 1, 2, 'inbox', '{}', '{}');

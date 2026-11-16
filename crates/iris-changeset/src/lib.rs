@@ -676,10 +676,12 @@ fn supported(
             _ => Err("correct needs {\"field\": \"...\", \"value\": ...}".into()),
         },
         // Only the undo of a trash makes untrash (section 7.4): its action
-        // has the link of migration 12.
+        // is step 1 of the undo of a `trash` entry (migration 12).
         Verb::Untrash => {
             let undo: bool = c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
+                "SELECT EXISTS (SELECT 1 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id
+                                JOIN changeset_action o ON o.id = l.action_id
+                                WHERE u.action_id = ?1 AND u.step = 1 AND o.verb = 'trash')",
                 [action],
                 |r| r.get(0),
             )?;
