@@ -69,8 +69,18 @@ in the same batch holds the later messages of its thread.
 
 ### Resets
 
-A reset makes a message pending again: in one write, `understood_at`,
-`tries` and `retry_at` go back to NULL, 0 and NULL. The retry state belongs
+A reset makes a message pending again. One function of `iris-store`,
+`reset(tx, message)`, does it in the write of the change:
+
+- It deletes the items whose origin is the message and that are not pinned
+  (spec 1 section 7.5), other than the conversation.
+- It sets `understood_at`, `tries` and `retry_at` to NULL, 0 and NULL.
+
+So an old item of a message that became spam never stays visible, also
+when the run stops before it reaches the message. Step 0 of the next run
+computes the conversation again for each thread with a message that got a
+reset after its conversation was computed (`understood_at` NULL and a
+source of the conversation item). R1-28 starts a run after each sync. The retry state belongs
 to the old state of the message, so a reset clears it too. Without that, a
 message with 3 failed tries stays out of the pending set after a change.
 
@@ -150,16 +160,23 @@ function, `apply_kind_changes(tx, changes, now)`, runs right after each
 
 - For a sender that became hostile or stopped being hostile: each message
   from that address that is not gone, and each later message of the same
-  threads, loses its items that are not pinned and gets a reset. These messages are pending again, and their hostile check runs
-  again. A run that stops after this write leaves no stale item: the
+  threads, gets a reset. These messages are pending again, and their
+  hostile check runs again. A run that stops after this write leaves no stale item: the
   messages show as not understood.
-- For each other kind change (for example stranger to person): the
+- For a change of the known persons (a row becomes or stops being `person`,
+  or the name of a `person` row changes): each message whose `From`
+  display name is the old or the new name (case does not matter) and whose
+  `From` address is not the address of that row, and each later message of
+  the same threads, gets a reset. The spoof mark of these messages can
+  change (spec 1 section 6.7).
+- For each other kind change (for example stranger to service): the
   conversation of each thread with mail from that address is computed again
   (issue #106). The items from the model keep the sender kind of their run.
   Iris does not pay again for these messages.
 
-So `iris_senders::decide` and `refresh` give each row whose kind changed,
-with the old and the new kind. A crash cannot lose a change, because there
+So `iris_senders::decide` and `refresh` give each row whose kind or name
+changed, with the old and the new kind and name. The name writes of
+`iris-senders` (`upsert`) report a name change too. A crash cannot lose a change, because there
 is no list to carry from one transaction to the next.
 
 ### Run rows
@@ -188,15 +205,33 @@ CREATE TABLE understand_run (
 - `unknown_calls` counts each call that the provider can charge for but
   whose usage Iris does not know: a time-out, a lost response, HTTP 5xx, and
   an HTTP 200 answer with no usage or a usage that does not parse
-  (`BadAnswer`). A call with usage counts its usage, not a worst case. Each one
-  adds its worst case to `unknown_cost_micro_usd`: the data budget as input
-  tokens (one token for each byte, `MAX_DATA` plus `PROMPT_TOKENS`) and
-  `max_tokens` as output tokens, at the price of the model.
+  (`BadAnswer`). A call with usage counts its usage, not a worst case. Each
+  one adds its worst case to `unknown_cost_micro_usd`, at the price of the
+  model.
+- The worst case of one call comes from the request itself, not from an
+  estimate: the byte count of the instruction and the data block that the
+  call sent, as input tokens (a token covers at least one byte), and
+  `max_tokens` as output tokens.
+- After a call with unknown usage, the run stops with `stop = unknown`. So
+  the cost check can pass the limit by at most one message, whose worst
+  case is in `unknown_cost_micro_usd`.
+
+### Usage of each call
+
+- `iris-model`: `Usage` gets `known: bool`. A reply with no usage, or a
+  usage that does not parse, gives `known = false`, not zero tokens. An
+  error after the request went out (`BadAnswer`, a time-out, a lost
+  response, 5xx) carries the byte count of the request.
+- `iris-understand`: `Decision` and `Outcome` carry, over all calls of the
+  message (also a bad first answer before a good second one): the known
+  usage, `unknown_calls` and `unknown_bound` (the sum of the worst cases).
+  `Error::Model` carries the same three values for the calls before the
+  error and the call that failed.
 - The cost check of the run uses `cost_micro_usd + unknown_cost_micro_usd`.
   The command shows both numbers: "spent" and "up to ... more for calls with
   no answer".
-- `stop` is the stop condition: `done`, `cost`, `messages`, `model` or
-  `error`. A run that the process did not end (a crash) keeps `ended_at`
+- `stop` is the stop condition: `done`, `cost`, `messages`, `model`,
+  `unknown` or `error`. A run that the process did not end (a crash) keeps `ended_at`
   NULL and `stop` NULL.
 - A model error that has no answer still has calls. `Error::Model` gets the
   usage of the calls before the error, so that the run row counts them.
@@ -212,6 +247,11 @@ pending messages and gives:
   message in bytes.
 - The output tokens: `OUTPUT_TOKENS` (400) for each such message.
 - The cost from the price, or none.
+
+The estimate first does step 0 of the run (refresh and kind changes) in a
+transaction that it rolls back. Then it counts the pending messages in that
+transaction. So the estimate counts the messages that step 0 resets, and it
+changes nothing.
 
 The estimate counts one call for each message. A second call after a bad
 answer and the hostile mail that makes no call move the real cost. The
@@ -263,7 +303,9 @@ No parser or protocol code is new. The model client is `iris-model`.
 | A sync during a run | A message changes between two writes | `store::understand` gives `changed`. The message stays pending for the next batch. | Existing tests of the store step. |
 | A refused key (401, 403) | No call can work | The run stops with `stop = model`. No try counts. | Fake model error. |
 | A time-out, a lost response, 5xx | Result not known; the provider can charge | The run stops with `stop = model`. The message stays pending. `unknown_calls` and `unknown_cost_micro_usd` grow by one worst case. | Fake model error: the run row has the worst case. |
-| HTTP 200 with no usage or a body that does not parse | The provider can charge, Iris has no count | The call counts in `unknown_calls` with its worst case, also when the try counts as a bad answer. The cost check includes it. | Fake model reply with no usage. |
+| HTTP 200 with no usage or a body that does not parse | The provider can charge, Iris has no count | The call counts in `unknown_calls` with its worst case from the request bytes, also when a second try succeeds. The run stops with `stop = unknown`. | Fake model reply with no usage. |
+| Sent mail makes Alice a known person, and an understood message from another address has the display name Alice | The spoof mark is stale | The same transaction resets that message and the later messages of its thread. | Store test. |
+| A sync removes the domain that made a look-alike sender hostile | The estimate shows zero, the run pays | The estimate does step 0 in a rolled-back transaction, so it counts the reset messages. | Batch test. |
 | A second `iris understand` while a run goes on | Two runs pay twice | The second run gets "a run is in progress" and makes no call. | Two runners on one store: one gets the error, the fake model sees each message once. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
@@ -279,7 +321,10 @@ No parser or protocol code is new. The model client is `iris-model`.
 ## Impact
 
 - `crates/iris-understand`: new module `batch` (pending query, order,
-  runner, estimate). `Error::Model` carries usage.
+  runner, estimate, run lock). `Decision`, `Outcome` and `Error::Model`
+  carry the known usage, `unknown_calls` and `unknown_bound`.
+- `crates/iris-model`: `Usage::known`; errors after the request carry the
+  request bytes.
 - `crates/iris-senders`: `decide` and `refresh` give each changed row, with
   the old and the new kind.
 - `crates/iris-understand/src/store.rs`: write 1 and the gone branch call
@@ -380,9 +425,10 @@ scripts/local-ci/run.sh
 
 ## Spec checks
 
-- [x] Each assumption holds with a second caller: two runners on one store
-  both call `store::understand`, whose checked writes save one result.
-  Both can pay for the same message. R1-28 runs one runner only.
+- [x] Each assumption holds with a second caller: `batch::run` takes the run
+  lock itself, so every entry point (the `iris understand` command, R1-28
+  in `iris serve` and `iris mirror sync`) holds it. A second runner makes no
+  call. `batch::estimate` takes no lock: it changes nothing.
 - [x] Each assumption holds when an outcome is unknown: see External writes.
 - [x] Each dropped mechanism was dropped for a reason (Options not chosen).
 - [x] No "idempotent" step is check-then-act: the pending query only picks
