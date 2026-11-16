@@ -139,13 +139,15 @@ pub fn format_job_id(row: i64) -> String {
     format!("j-{row}")
 }
 
-/// Parse `j-42`. Gives `None` for any other text.
+/// Parse `j-42`. Gives `None` for any other text, also `j-042`: only the
+/// text that [`format_job_id`] gives for a row parses
+/// (`docs/spec/schema/job.schema.json`, `^j-[1-9][0-9]*$`).
 pub fn parse_job_id(text: &str) -> Option<i64> {
     let n = text.strip_prefix("j-")?;
-    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+    if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    n.parse().ok().filter(|row| *row > 0)
+    n.parse().ok()
 }
 
 /// Run `f` in one write transaction. The transaction commits only when `f`
@@ -492,7 +494,7 @@ fn event_json(e: &Event) -> Value {
 /// The events stream from the store, so no list of events is in memory.
 /// On an error of the store, nothing is written to `out`.
 pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<()> {
-    read(store, |c| write_in(c, job, out))
+    read(store, |c| write_document_in(c, job, out))
 }
 
 /// The fields of the job document without `events`: the summary of a job.
@@ -519,7 +521,8 @@ pub fn job_json(j: &Job) -> Value {
     Value::Object(m)
 }
 
-fn write_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
+/// [`write_document`] on `c`, for one read with other queries.
+pub fn write_document_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
     let j = job_in(c, job)?;
     // Read each event once before the first byte (issue #303): a row that
     // does not parse gives an error and no partial document. The same read

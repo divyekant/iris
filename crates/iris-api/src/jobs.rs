@@ -86,55 +86,74 @@ fn io(e: std::io::Error) -> Error {
 /// - `threads`: for each thread of a wait of the job, the summary of its
 ///   newest message that is not gone, or `{"id", "gone": true}`.
 ///
-/// The answer streams. If the job document fails, `out` gets no byte
-/// (issue #303).
+/// The answer streams. All parts come from one read of the store. If the
+/// job document fails, `out` gets no byte (issue #303).
 pub fn write_job(store: &Store, row: i64, out: &mut impl Write) -> Result<()> {
+    let mut res = Ok(());
+    store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        res = write_job_in(&tx, row, out);
+        Ok(())
+        // The drop of `tx` ends the read.
+    })?;
+    res
+}
+
+fn write_job_in(c: &Connection, row: i64, out: &mut impl Write) -> Result<()> {
     let mut head = Prefixed {
         prefix: Some(b"{\"job\":"),
         out: &mut *out,
     };
-    iris_job::write_document(store, row, &mut head).map_err(job_error)?;
+    iris_job::write_document_in(c, row, &mut head).map_err(job_error)?;
     out.write_all(b",\"changesets\":[").map_err(io)?;
-    store.read(|c| {
-        let mut q = c.prepare_cached(
+    let mut q = c
+        .prepare_cached(
             "SELECT c.id, r.first, c.state, c.why,
-               (SELECT json_group_object(state, n) FROM
-                 (SELECT coalesce(a.state, 'draft') AS state, count(*) AS n
-                  FROM changeset_action a
-                  WHERE a.changeset_id = c.id AND a.revision = c.revision
-                  GROUP BY 1))
-             FROM changeset c
-             JOIN (SELECT changeset_id, min(submitted_at) AS first
-                   FROM changeset_revision GROUP BY changeset_id) r ON r.changeset_id = c.id
-             WHERE c.author_job = ?1
-             ORDER BY r.first, c.id",
-        )?;
-        let mut rows = q.query([iris_job::format_job_id(row)])?;
-        let mut first = true;
-        while let Some(r) = rows.next()? {
-            let actions: Option<String> = r.get(4)?;
-            let actions: Value = actions
-                .and_then(|a| serde_json::from_str(&a).ok())
-                .unwrap_or_else(|| json!({}));
-            let one = json!({
-                "id": iris_changeset::format_changeset_id(r.get(0)?),
-                "at": rfc3339(r.get(1)?),
-                "state": r.get::<_, String>(2)?,
-                "why": r.get::<_, Option<String>>(3)?,
-                "actions": actions,
-            });
-            if !first {
-                out.write_all(b",")?;
-            }
-            first = false;
-            serde_json::to_writer(&mut *out, &one).map_err(std::io::Error::other)?;
+           (SELECT json_group_object(state, n) FROM
+             (SELECT coalesce(a.state, 'draft') AS state, count(*) AS n
+              FROM changeset_action a
+              WHERE a.changeset_id = c.id AND a.revision = c.revision
+              GROUP BY 1))
+         FROM changeset c
+         JOIN (SELECT changeset_id, min(submitted_at) AS first
+               FROM changeset_revision GROUP BY changeset_id) r ON r.changeset_id = c.id
+         WHERE c.author_job = ?1
+         ORDER BY r.first, c.id",
+        )
+        .map_err(sql)?;
+    let mut rows = q.query([iris_job::format_job_id(row)]).map_err(sql)?;
+    let mut first = true;
+    while let Some(r) = rows.next().map_err(sql)? {
+        let one = summary(r).map_err(sql)?;
+        if !first {
+            out.write_all(b",").map_err(io)?;
         }
-        Ok(())
-    })?;
+        first = false;
+        serde_json::to_writer(&mut *out, &one).map_err(|e| io(std::io::Error::other(e)))?;
+    }
     out.write_all(b"],\"threads\":").map_err(io)?;
-    let threads = store.read(|c| Ok(wait_threads(c, row)?))?;
+    let threads = wait_threads(c, row).map_err(sql)?;
     serde_json::to_writer(&mut *out, &threads).map_err(|e| io(std::io::Error::other(e)))?;
     out.write_all(b"}").map_err(io)
+}
+
+fn sql(e: rusqlite::Error) -> Error {
+    Error::Store(e.into())
+}
+
+/// One changeset of a job: `{"id", "at", "state", "why", "actions"}`.
+fn summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    let actions: Option<String> = r.get(4)?;
+    let actions: Value = actions
+        .and_then(|a| serde_json::from_str(&a).ok())
+        .unwrap_or_else(|| json!({}));
+    Ok(json!({
+        "id": iris_changeset::format_changeset_id(r.get(0)?),
+        "at": rfc3339(r.get(1)?),
+        "state": r.get::<_, String>(2)?,
+        "why": r.get::<_, Option<String>>(3)?,
+        "actions": actions,
+    }))
 }
 
 fn wait_threads(c: &Connection, job: i64) -> rusqlite::Result<Value> {
@@ -152,12 +171,13 @@ fn wait_threads(c: &Connection, job: i64) -> rusqlite::Result<Value> {
     let mut out = Map::new();
     for (thread, newest) in rows {
         let id = format_id(Kind::Thread, thread);
+        // The gone state of the same read as the summary.
         let summary = match newest {
-            Some(m) => message_row(c, m)?.map(|(summary, _)| summary),
+            Some(m) => message_row(c, m)?.filter(|(_, more)| !more.gone),
             None => None,
         };
         let v = match summary {
-            Some(s) => {
+            Some((s, _)) => {
                 let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
                 v["gone"] = false.into();
                 v

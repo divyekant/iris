@@ -426,17 +426,21 @@ fn job_id_parser() {
     for _ in 0..20_000 {
         let len = (rng.next() % 8) as usize;
         let text: String = (0..len).map(|_| rng.pick(alphabet) as char).collect();
+        // The parser takes only the canonical form: the text that
+        // format_job_id gives for the row (no zero in front, no sign).
         let expect = text
             .strip_prefix("j-")
-            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
             .and_then(|n| n.parse::<i64>().ok())
-            .filter(|n| *n > 0);
+            .filter(|n| *n > 0 && format_job_id(*n) == text);
         assert_eq!(parse_job_id(&text), expect, "{text:?}");
         if let Some(n) = expect {
             assert_eq!(parse_job_id(&format_job_id(n)), Some(n));
         }
     }
     assert_eq!(parse_job_id("j-99999999999999999999"), None);
+    for bad in ["j-01", "j-007", "j-0", "j-+1"] {
+        assert_eq!(parse_job_id(bad), None, "{bad}");
+    }
 }
 
 /// SQLite stores text that is not UTF-8 from raw SQL, and has no check of

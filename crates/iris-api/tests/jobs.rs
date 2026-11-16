@@ -156,6 +156,7 @@ async fn pages_the_jobs_of_a_state_newest_first() {
         "/api/jobs?limit=201",
         "/api/jobs?after=7",
         "/api/jobs?after=j-0",
+        "/api/jobs?after=j-01",
         "/api/jobs?after=",
     ] {
         let (code, v) = get(&s, bad).await;
@@ -242,7 +243,7 @@ async fn one_job_with_its_changesets_and_the_mail_of_its_waits() {
     assert_eq!(v["changesets"].as_array().unwrap().len(), 1);
     assert_eq!(v["threads"], json!({}));
 
-    for missing in ["j-99", "j-0", "7", "cs-1", "j-1x", "j-%2B1"] {
+    for missing in ["j-99", "j-0", "j-01", "7", "cs-1", "j-1x", "j-%2B1"] {
         assert_eq!(
             get(&s, &format!("/api/jobs/{missing}")).await.0,
             StatusCode::NOT_FOUND,
@@ -274,4 +275,62 @@ async fn a_bad_event_gives_an_error_and_no_partial_job() {
     let (code, v) = get(&s, &format!("/api/jobs/j-{job}")).await;
     assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(v["error"].is_string(), "{v}");
+}
+
+/// A writer that runs `f` once, at its first byte.
+struct OnFirst<F: FnMut()> {
+    f: Option<F>,
+    out: Vec<u8>,
+}
+
+impl<F: FnMut()> std::io::Write for OnFirst<F> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if let Some(mut f) = self.f.take() {
+            f();
+        }
+        self.out.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The whole answer of one job comes from one read: a write during the
+/// answer (a sync marks the newest mail of the wait thread gone) does not
+/// show in a later part, so no part disagrees with another.
+#[tokio::test]
+async fn one_job_is_one_read_of_the_store() {
+    let dir = temp("snapshot");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Get the contract.", None, NOW).unwrap();
+    let until = Wait {
+        thread: Some(1),
+        until_ms: NOW + DAY,
+    };
+    wait(&s, job, until, None, NOW + 1).unwrap();
+    let id = iris_job::format_job_id(job);
+    let s2 = s.clone();
+    let mut w = OnFirst {
+        f: Some(|| {
+            s2.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = 2", [])?))
+                .unwrap();
+            changeset(&s2, Some(&id), Some(NOW + 10));
+        }),
+        out: Vec::new(),
+    };
+    iris_api::write_job(&s, job, &mut w).unwrap();
+    let v: Value = serde_json::from_slice(&w.out).unwrap();
+    assert_eq!(
+        v["changesets"],
+        json!([]),
+        "the changeset came after the read"
+    );
+    assert_eq!(v["threads"]["t-1"]["id"], "m-2");
+    assert_eq!(v["threads"]["t-1"]["gone"], false);
+    // A new read sees the write: the newest message that is not gone.
+    let (_, v) = get(&s, &format!("/api/jobs/{}", iris_job::format_job_id(job))).await;
+    assert_eq!(v["threads"]["t-1"]["id"], "m-1");
+    assert_eq!(v["changesets"].as_array().unwrap().len(), 1);
 }
