@@ -7,6 +7,7 @@ This folder holds the specifications of Iris and the open model.
 | [01-mirror-store-forms.md](01-mirror-store-forms.md) | The mirror, the store, and the data format of the five forms and the sender axis | 1 |
 | [02-changeset-policy-ledger.md](02-changeset-policy-ledger.md) | The changeset, the policy file, the ledger and the `iris` command | 2 |
 | [schema/](schema/) | Version 0 of the open model as JSON Schema (draft 2020-12), with sample documents | 1 |
+| [schema/changeset.schema.json](schema/changeset.schema.json) | The changeset document of specification 2, section 5.1, as JSON Schema, with sample documents | 2 |
 
 ## Status
 

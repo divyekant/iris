@@ -1,0 +1,1164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:changeset",
+  "title": "Iris open model 0 (draft): changeset",
+  "description": "Draft. One changeset document: the proposed mailbox and Iris changes of one author, with the state and the decision of each action. See docs/spec/02-changeset-policy-ledger.md, sections 4 and 5.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "model",
+    "id",
+    "revision",
+    "author",
+    "why",
+    "created",
+    "submitted",
+    "state",
+    "actions"
+  ],
+  "properties": {
+    "model": {
+      "const": "iris/0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^cs-[1-9][0-9]*$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "author": {
+      "$ref": "#/$defs/author"
+    },
+    "why": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created": {
+      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+    },
+    "submitted": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+        }
+      ]
+    },
+    "state": {
+      "enum": [
+        "draft",
+        "open",
+        "closed",
+        "withdrawn"
+      ]
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "The state is draft while the newest revision is not submitted (section 5.1).",
+      "if": {
+        "properties": {
+          "state": {
+            "const": "draft"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "submitted": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A submit needs a reason, and the reason stays after the submit, also after a withdraw (section 5.1).",
+      "if": {
+        "required": [
+          "submitted"
+        ],
+        "properties": {
+          "submitted": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "why": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Only the actions of a draft revision have no decision. A submit gives each action a state, and a withdraw cancels each draft action (sections 5.4 and 5.5).",
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "withdrawn"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "properties": {
+                "decision": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "open",
+              "closed"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "submitted": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "open"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "contains": {
+              "type": "object",
+              "required": [
+                "decision"
+              ],
+              "properties": {
+                "decision": {
+                  "type": "object",
+                  "required": [
+                    "state"
+                  ],
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "proposed",
+                        "in_review",
+                        "approved"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "closed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "not": {
+                "type": "object",
+                "required": [
+                  "decision"
+                ],
+                "properties": {
+                  "decision": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "proposed",
+                          "in_review",
+                          "approved"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Only a new revision replaces an action (section 5.5).",
+      "if": {
+        "properties": {
+          "revision": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "not": {
+                "type": "object",
+                "required": [
+                  "decision"
+                ],
+                "properties": {
+                  "decision": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "replaced"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Only the undo of a trash makes untrash, in a changeset with the author person (section 7.4). Submit denies untrash from each other author.",
+      "if": {
+        "properties": {
+          "author": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "const": "person"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "not": {
+                "allOf": [
+                  {
+                    "properties": {
+                      "verb": {
+                        "const": "untrash"
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "decision"
+                    ],
+                    "properties": {
+                      "decision": {
+                        "type": "object",
+                        "required": [
+                          "state"
+                        ],
+                        "properties": {
+                          "state": {
+                            "enum": [
+                              "proposed",
+                              "in_review",
+                              "approved",
+                              "applied",
+                              "failed",
+                              "undone",
+                              "expired",
+                              "replaced"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A withdraw cancels each proposed and in_review action (section 5.5).",
+      "if": {
+        "properties": {
+          "state": {
+            "const": "withdrawn"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "not": {
+                "type": "object",
+                "required": [
+                  "decision"
+                ],
+                "properties": {
+                  "decision": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "proposed",
+                          "in_review"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "A stored changeset has a hash for each submitted action, and a submit needs one or more actions (section 5.4, migration 7). Only the triage proposal of release 1, which the engine does not store, can have no action and no hash. A cancelled action can be a draft action of a withdrawn changeset, with no hash.",
+      "if": {
+        "required": [
+          "submitted",
+          "author"
+        ],
+        "properties": {
+          "submitted": {
+            "type": "string"
+          },
+          "author": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "const": "triage"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "minItems": 1,
+            "items": {
+              "if": {
+                "properties": {
+                  "decision": {
+                    "type": "object",
+                    "required": [
+                      "state"
+                    ],
+                    "properties": {
+                      "state": {
+                        "not": {
+                          "const": "cancelled"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "hash": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "person",
+            "agent",
+            "triage",
+            "local"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "job": {
+          "type": "string"
+        }
+      }
+    },
+    "verb": {
+      "$comment": "The verbs of release 2 (section 4). Only the undo of a trash makes untrash (section 7.4).",
+      "enum": [
+        "archive",
+        "inbox",
+        "label",
+        "unlabel",
+        "read",
+        "unread",
+        "trash",
+        "untrash",
+        "close",
+        "defer",
+        "decline",
+        "correct"
+      ]
+    },
+    "flag": {
+      "enum": [
+        "new_recipient",
+        "outside_thread",
+        "money",
+        "date",
+        "attachment",
+        "first_contact",
+        "untrusted_content",
+        "bulk"
+      ]
+    },
+    "itemId": {
+      "type": "string",
+      "pattern": "^[cvrfs]-[1-9][0-9]*$"
+    },
+    "action": {
+      "$comment": "targets and args hold the text that the author gave. The engine denies an action with targets or args that do not fit the verb. So only an action that passed the submit checks gets the strict shape (see checked).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "n",
+        "revision",
+        "verb",
+        "targets",
+        "resolved",
+        "args",
+        "flags",
+        "hash",
+        "decision"
+      ],
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "verb": {
+          "$ref": "#/$defs/verb"
+        },
+        "targets": true,
+        "resolved": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "messages"
+          ],
+          "properties": {
+            "messages": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "urn:iris:model:0:common#/$defs/messageId"
+              }
+            }
+          }
+        },
+        "args": true,
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/flag"
+          }
+        },
+        "hash": {
+          "$comment": "null before submit, and in a triage proposal that the engine does not store (section 5.1).",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "decision": {
+          "$comment": "null while the revision of the action is a draft.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/decision"
+            }
+          ]
+        },
+        "ledger": {
+          "type": "string",
+          "pattern": "^l-[1-9][0-9]*$"
+        }
+      },
+      "if": {
+        "required": [
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "proposed",
+                  "in_review",
+                  "approved",
+                  "applied",
+                  "failed",
+                  "undone",
+                  "expired",
+                  "replaced"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "$ref": "#/$defs/checked"
+      },
+      "allOf": [
+        {
+          "$comment": "An applied, failed or undone action has its ledger entry (section 7.1).",
+          "if": {
+            "type": "object",
+            "required": [
+              "decision"
+            ],
+            "properties": {
+              "decision": {
+                "type": "object",
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "applied",
+                      "failed",
+                      "undone"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "ledger"
+            ]
+          }
+        },
+        {
+          "$comment": "After submit, only the triage proposal of release 1 has no hash, and it stays proposed (section 5.1).",
+          "if": {
+            "type": "object",
+            "required": [
+              "decision"
+            ],
+            "properties": {
+              "decision": {
+                "type": "object",
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "in_review",
+                      "approved",
+                      "applied",
+                      "failed",
+                      "undone",
+                      "expired",
+                      "replaced"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hash": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "checked": {
+      "$comment": "An action that passed the submit checks: its targets and args fit the verb (sections 4 and 5.6). A draft, denied or cancelled action can hold other text.",
+      "properties": {
+        "targets": {
+          "$ref": "#/$defs/targets"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "enum": [
+                  "archive",
+                  "inbox",
+                  "read",
+                  "unread",
+                  "trash",
+                  "untrash"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "enum": [
+                  "label",
+                  "unlabel"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "label"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "pattern": "\\S",
+                    "not": {
+                      "pattern": "^([Ii][Nn][Bb][Oo][Xx]|[Ss][Pp][Aa][Mm]|[Tt][Rr][Aa][Ss][Hh]|[Uu][Nn][Rr][Ee][Aa][Dd]|[Ss][Tt][Aa][Rr][Rr][Ee][Dd]|[Ii][Mm][Pp][Oo][Rr][Tt][Aa][Nn][Tt]|[Ss][Ee][Nn][Tt]|[Dd][Rr][Aa][Ff][Tt]|[Cc][Hh][Aa][Tt]|[Cc][Aa][Tt][Ee][Gg][Oo][Rr][Yy]_[Pp][Ee][Rr][Ss][Oo][Nn][Aa][Ll]|[Cc][Aa][Tt][Ee][Gg][Oo][Rr][Yy]_[Ss][Oo][Cc][Ii][Aa][Ll]|[Cc][Aa][Tt][Ee][Gg][Oo][Rr][Yy]_[Pp][Rr][Oo][Mm][Oo][Tt][Ii][Oo][Nn][Ss]|[Cc][Aa][Tt][Ee][Gg][Oo][Rr][Yy]_[Uu][Pp][Dd][Aa][Tt][Ee][Ss]|[Cc][Aa][Tt][Ee][Gg][Oo][Rr][Yy]_[Ff][Oo][Rr][Uu][Mm][Ss])$"
+                    },
+                    "$comment": "Submit refuses the name or the ID of a system label, with no regard to case (section 4). The list is the system labels of Gmail."
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "enum": [
+                  "close",
+                  "decline"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "defer"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "date"
+                ],
+                "properties": {
+                  "date": {
+                    "$ref": "urn:iris:model:0:common#/$defs/date"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "correct"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "field",
+                  "value"
+                ],
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "pattern": "\\S"
+                  },
+                  "value": true
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments. correct changes any item (section 4).",
+          "if": {
+            "properties": {
+              "verb": {
+                "enum": [
+                  "close",
+                  "defer",
+                  "decline",
+                  "correct"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "required": [
+                  "items"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": false
+                }
+              },
+              "resolved": {
+                "properties": {
+                  "messages": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "enum": [
+                  "close",
+                  "defer",
+                  "decline"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "$ref": "#/$defs/commitmentId"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "The choice of the person is the approval of an undo (section 7.4).",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "untrash"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "decision": {
+                "properties": {
+                  "by": {
+                    "enum": [
+                      "person",
+                      "expiry"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "targets": {
+      "$comment": "IDs of one kind: threads, messages or items. A sender is not a target (section 5.6).",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "threads": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "urn:iris:model:0:common#/$defs/threadId"
+          }
+        },
+        "messages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "urn:iris:model:0:common#/$defs/messageId"
+          }
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/itemId"
+          }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "proposed",
+            "in_review",
+            "approved",
+            "applied",
+            "failed",
+            "denied",
+            "expired",
+            "cancelled",
+            "replaced",
+            "undone"
+          ],
+          "$comment": "held is for a send in the held outbox (release 3). No verb of this version can be held."
+        },
+        "by": {
+          "enum": [
+            "rule",
+            "person",
+            "policy",
+            "limit",
+            "engine",
+            "author",
+            "expiry"
+          ]
+        },
+        "rule": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "policy": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "type": "string"
+        },
+        "at": {
+          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+        }
+      },
+      "dependentRequired": {
+        "rule": [
+          "policy"
+        ],
+        "policy": [
+          "rule"
+        ]
+      },
+      "allOf": [
+        {
+          "$comment": "A proposed action has no decision yet. Each other state names who decided.",
+          "if": {
+            "properties": {
+              "state": {
+                "const": "proposed"
+              }
+            }
+          },
+          "then": {
+            "maxProperties": 1
+          },
+          "else": {
+            "required": [
+              "by"
+            ]
+          }
+        },
+        {
+          "$comment": "A rule decision names its rule and the policy version. Only a rule decision names a rule.",
+          "if": {
+            "required": [
+              "by"
+            ],
+            "properties": {
+              "by": {
+                "const": "rule"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "rule"
+            ]
+          },
+          "else": {
+            "properties": {
+              "rule": false
+            }
+          }
+        },
+        {
+          "$comment": "An allow rule or a person approves. An applied or failed action keeps the decision that approved it.",
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "approved",
+                  "applied",
+                  "failed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "by": {
+                "enum": [
+                  "rule",
+                  "person"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "A person approves or denies, but does not send an action to review.",
+          "if": {
+            "properties": {
+              "state": {
+                "const": "in_review"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "by": {
+                "enum": [
+                  "rule",
+                  "policy",
+                  "limit",
+                  "engine"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "A denial names who refused it and says why.",
+          "if": {
+            "properties": {
+              "state": {
+                "const": "denied"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "by": {
+                "enum": [
+                  "rule",
+                  "person",
+                  "policy",
+                  "limit",
+                  "engine"
+                ]
+              },
+              "reason": {
+                "pattern": "\\S"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "expired"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "by": {
+                "const": "expiry"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "cancelled",
+                  "replaced"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "by": {
+                "const": "author"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "commitmentId": {
+      "type": "string",
+      "pattern": "^c-[1-9][0-9]*$"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "model": "iris/0",
+  "id": "cs-80",
+  "revision": 1,
+  "author": {
+    "kind": "person"
+  },
+  "why": null,
+  "created": "2026-11-16T10:02:11.120Z",
+  "submitted": null,
+  "state": "draft",
+  "actions": [
+    {
+      "n": 1,
+      "revision": 1,
+      "verb": "read",
+      "targets": {
+        "messages": [
+          "m-61002"
+        ]
+      },
+      "resolved": {
+        "messages": []
+      },
+      "args": {},
+      "why": null,
+      "flags": [],
+      "hash": null,
+      "decision": null
+    }
+  ]
+}

@@ -149,6 +149,12 @@ fn the_first_run_proposes_archives_and_makes_zero_writes_to_gmail() {
     let mut out = Vec::new();
     write_changeset(&store, account, "2026-11-16T09:00:00Z", &mut out).unwrap();
     let cs: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    // The document agrees with the published changeset schema.
+    let errors: Vec<String> = iris_spec::validator("changeset")
+        .iter_errors(&cs)
+        .map(|e| format!("{e} at {}", e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
     assert_eq!(cs["author"]["kind"], "triage");
     assert_eq!(cs["state"], "open");
     let actions = cs["actions"].as_array().unwrap();
