@@ -46,8 +46,11 @@ to attach files to the release. It needs no other secret.
 Use this command on macOS or Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh | sh
+curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && sh install.sh
 ```
+
+The command saves `install.sh` in the current folder first. If the download
+fails, `sh` does not run and the command shows the error.
 
 The script does these steps:
 
@@ -127,7 +130,7 @@ Use these steps if the release has no program for your system:
 Install the release before the bad release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh | IRIS_VERSION=<old tag> sh
+curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && IRIS_VERSION=<old tag> sh install.sh
 ```
 
 The service file points to `~/.local/bin/iris`, so the service runs the old

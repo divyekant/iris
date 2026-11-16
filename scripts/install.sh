@@ -3,7 +3,7 @@
 # GitHub Release, check its SHA-256 sum, and install it to ~/.local/bin.
 # No sudo. The script connects only to the download address below.
 #
-#   curl -fsSL https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh | sh
+#   curl -fsSLO https://raw.githubusercontent.com/divyekant/iris/main/scripts/install.sh && sh install.sh
 #
 # Settings (environment variables):
 #   IRIS_VERSION       a release tag, for example v2026.11.16.1. Default: the latest release.
