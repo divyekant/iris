@@ -43,11 +43,11 @@ fn install_sh_installs_the_real_program_and_its_service() {
         "sha256sum *.tar.gz > SHA256SUMS || shasum -a 256 *.tar.gz > SHA256SUMS",
         &rel,
     );
-    // `launchctl print` fails: no agent is loaded yet.
+    // `launchctl print` exits 113 ("Could not find service"): no agent is loaded yet.
     for tool in ["systemctl", "launchctl"] {
         std::fs::write(
             bin.join(tool),
-            format!("#!/bin/sh\necho \"{tool} $*\" >> \"$HOME/calls\"\n[ \"$1\" != print ]\n"),
+            format!("#!/bin/sh\necho \"{tool} $*\" >> \"$HOME/calls\"\n[ \"$1\" != print ] || exit 113\n"),
         )
         .unwrap();
     }

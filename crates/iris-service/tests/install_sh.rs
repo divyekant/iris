@@ -34,7 +34,7 @@ fn release(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(&stage).unwrap();
     std::fs::write(
         stage.join("iris"),
-        "#!/bin/sh\necho \"$@\" >> \"$HOME/calls\"\n",
+        "#!/bin/sh\necho \"$@\" >> \"$HOME/calls\"\nif [ \"$1\" = service ] && [ -n \"${FAKE_NO_SERVICE:-}\" ]; then echo 'no systemctl' >&2; exit 1; fi\n",
     )
     .unwrap();
     sh("chmod 755 iris", &stage);
@@ -130,5 +130,18 @@ fn a_missing_sum_line_installs_nothing() {
     );
     assert!(!out.status.success());
     assert!(!dir.join("bin/iris").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_system_with_no_service_manager_keeps_the_program() {
+    let dir = tmp("nomanager");
+    let rel = release(&dir);
+    let out = install(&dir, &rel, &[("FAKE_NO_SERVICE", "1")]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(dir.join("home/.local/bin/iris").is_file());
+    assert!(stderr.contains("the background service is not"), "{stderr}");
+    assert!(stderr.contains("iris serve"), "{stderr}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
