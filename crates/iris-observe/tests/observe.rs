@@ -376,5 +376,13 @@ fn the_changeset_id_names_the_content_of_the_proposal() {
         })
         .unwrap();
     assert_ne!(id(&store), b);
+    // Back to the earlier content: the earlier ID (specification 1, section 8).
+    store
+        .write(|tx| {
+            tx.execute("UPDATE item SET form = 'feed' WHERE id = 2", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(id(&store), b);
     let _ = std::fs::remove_dir_all(&dir);
 }
