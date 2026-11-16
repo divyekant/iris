@@ -110,6 +110,7 @@ export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. St
 // this origin only, not in a cookie, because a cookie goes to each port of a host.
 type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const KEY = "iris.token";
+const CODE = "iris.code";
 function session(): Store | undefined {
   try {
     return globalThis.sessionStorage;
@@ -125,30 +126,47 @@ try {
 }
 let ready: Promise<void> = Promise.resolve();
 
-/** Trade the code in the address (`#code=...`) for the token. Does nothing with no code. */
+// Keep `fn` from throwing when the browser blocks the storage.
+function quiet<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Trade the code in the address (`#code=...`) for the token. Does nothing with no code.
+ * The code stays in the storage of this origin until the engine answers, so a
+ * reload tries again after an exchange that did not reach the engine.
+ */
 export function signIn(
   loc: Pick<Location, "hash" | "pathname" | "search"> | undefined = globalThis.location,
   hist: Pick<History, "replaceState"> | undefined = globalThis.history,
   store: Store | undefined = session(),
 ): Promise<void> {
-  const code = loc?.hash.match(/^#code=([^&]+)/)?.[1];
+  const inAddress = loc?.hash.match(/^#code=([^&]+)/)?.[1];
+  const code = inAddress ? decodeURIComponent(inAddress) : quiet(() => store?.getItem(CODE));
   if (!loc || !code) return Promise.resolve();
-  // Remove the code from the address bar and the history before the exchange.
-  hist?.replaceState(null, "", `${loc.pathname}${loc.search}#/`);
+  if (inAddress) {
+    quiet(() => store?.setItem(CODE, code));
+    // Remove the code from the address bar and the history before the exchange.
+    hist?.replaceState(null, "", `${loc.pathname}${loc.search}#/`);
+  }
   ready = (async () => {
+    // A throw here (no answer) keeps the code for the next try.
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: decodeURIComponent(code) }),
+      body: JSON.stringify({ code }),
     });
+    // The engine answered: it used the code or refused it. After a server error, keep it for a reload.
+    if (response.status < 500) quiet(() => store?.removeItem(CODE));
     const body = await response.json().catch(() => null);
     if (!response.ok || typeof body?.token !== "string") throw new Error(SIGN_IN_FAILED);
     token = body.token;
-    try {
-      store?.setItem(KEY, body.token);
-    } catch {
-      // No storage: the token works until the page closes.
-    }
+    // With no storage, the token works until the page closes.
+    quiet(() => store?.setItem(KEY, body.token));
   })();
   return ready;
 }

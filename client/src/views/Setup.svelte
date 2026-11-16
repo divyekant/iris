@@ -5,6 +5,7 @@
 <script lang="ts">
   import { get, type Status } from "../api";
   import { poll as every } from "../clock";
+  import SignInNotice from "./SignInNotice.svelte";
 
   let { status: initial, poll = 2000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
@@ -29,6 +30,8 @@
       </li>
     {/each}
   </ol>
+
+  <SignInNotice accounts={status.accounts} />
 
   {#if stage === 0}
     <section>

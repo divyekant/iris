@@ -49,6 +49,7 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 | Chips | `Brief.svelte`, `Records.svelte` | Round links or buttons with a count. The chosen chip and a chip under the pointer have a gold border. |
 | Primary button | `Code.svelte`, `Setup.svelte` | A gold background with the `on-primary` text color. One for each screen at most. |
 | Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail or an error. |
+| Sign-in notice | `SignInNotice.svelte` | In the brief and the setup flow: the address of each account that needs sign-in, and the command that signs in again. It uses the `warning` border. |
 
 The token `on-primary` is the text color on gold: `#0a0a0a` in the dark
 palette and `#2C2418` in the light palette. Both are colors of the palette, so

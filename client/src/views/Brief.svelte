@@ -9,6 +9,7 @@
   import { greeting, liveCode, nextDay, party, partyKey, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
+  import SignInNotice from "./SignInNotice.svelte";
 
   let {
     brief: firstBrief,
@@ -75,8 +76,6 @@
   // Counts for each sender are exact only when the API gave every feed item.
   let feedComplete = $derived(brief.feed.items.length >= brief.feed.count);
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
-  // Spec 1 section 4.7: Google refused the refresh token, so the sync stopped.
-  let locked = $derived(status?.accounts.filter((a) => a.state === "needs_sign_in") ?? []);
   let copying = $derived(status && !status.accounts.some((a) => a.mirror_ready_at) ? status.messages : null);
   let day = $derived(now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }));
 </script>
@@ -86,14 +85,7 @@
   <h1>{summary(brief)}</h1>
 </div>
 
-{#each locked as account (account.id)}
-  <div class="locked" role="alert">
-    <p>
-      Google stopped the sign-in of {account.address}. Iris copies no new mail from this account until you sign in again.
-      On the machine that runs Iris, run <code>iris account add client.json</code> with the same client file.
-    </p>
-  </div>
-{/each}
+<SignInNotice accounts={status?.accounts ?? []} />
 
 {#if copying}
   <div class="copying" role="status">
@@ -187,14 +179,6 @@
       opacity: 0;
       transform: translateY(var(--space-1));
     }
-  }
-  .locked {
-    margin-bottom: var(--space-8);
-    border-left: 4px solid var(--color-warning);
-    padding-left: var(--space-3);
-  }
-  .locked p {
-    margin: 0;
   }
   .copying {
     margin-bottom: var(--space-8);
