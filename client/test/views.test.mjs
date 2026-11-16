@@ -457,3 +457,11 @@ test("the fixture API answers the endpoints of the local API", () => {
   assert.equal(fx.answer("brief/you_owe?limit=50").items.length, 2);
   assert.equal(fx.answer("nothing"), undefined);
 });
+
+test("a next page adds only items that the list does not show yet", async () => {
+  // Keyset paging can give an item again when its sort key moves between two pages.
+  const { addPage } = await load("/src/format.ts");
+  const a = item("c-311");
+  const b = { ...a, id: "c-2" };
+  assert.deepEqual(addPage([a], [a, b]).map((i) => i.id), ["c-311", "c-2"]);
+});
