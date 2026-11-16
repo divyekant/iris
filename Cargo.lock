@@ -724,6 +724,7 @@ dependencies = [
  "iris-store",
  "iris-synth",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]
