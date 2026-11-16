@@ -21,13 +21,26 @@
   // The targets of each action, loaded in pages: messages by their summaries, items one by one.
   const loader = pages(async (ids, items) => {
     if (!items) return (await get<{ messages: Target[] }>(`messages?ids=${ids.map(encodeURIComponent).join(",")}`)).messages.map(messageRow);
-    return Promise.all(ids.map((id) => get<Item>(`items/${encodeURIComponent(id)}`).then((i) => itemRow(id, i), () => itemRow(id, null))));
+    return Promise.all(
+      ids.map((id) =>
+        get<Item>(`items/${encodeURIComponent(id)}`).then(
+          (i) => itemRow(id, i),
+          // Only a 404 says that the item is gone. Each other failure is a problem to show.
+          (e) => {
+            if ((e as { status?: number }).status === 404) return itemRow(id, null);
+            throw e;
+          },
+        ),
+      ),
+    );
   });
   let rows: Record<string, Row[]> = $state({});
   let problem = $state("");
   function load(a: (typeof actions)[number], count: number) {
     loader.more(a, count).then(
-      (list) => list && (rows[key(a)] = list),
+      (list) => {
+        if (list) rows[key(a)] = list;
+      },
       (e) => (problem = e instanceof Error ? e.message : String(e)),
     );
   }
@@ -98,7 +111,7 @@
   {#if problem}<p role="alert">{problem}</p>{/if}
 
   {#if decided.length}
-    <details>
+    <details open={!open.length}>
       <summary>{decided.length === 1 ? "One more change has a decision" : `${decided.length} more changes have a decision`}</summary>
       <ul class="decided">
         {#each decided as a (key(a))}

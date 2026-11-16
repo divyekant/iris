@@ -316,7 +316,8 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
 export async function get<T>(path: string): Promise<T> {
   const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(body?.error ?? `The engine answered ${response.status}.`);
+  // The status goes with the error, so that a caller can tell a 404 from other failures.
+  if (!response.ok) throw Object.assign(new Error(body?.error ?? `The engine answered ${response.status}.`), { status: response.status });
   // Spec 1 section 4.7: Google refused the refresh token of these accounts, so their sync stopped.
   if (path === "status") {
     const accounts = (body as Status).accounts ?? [];

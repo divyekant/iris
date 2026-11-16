@@ -9,6 +9,7 @@
 
   let { changesets, mode = "apply" }: { changesets: Changeset[]; mode?: Mode } = $props();
 
+  // Each open changeset shows, also one whose actions all have a decision. The headline counts only the waiting ones.
   let asks = $derived(changesets.filter((c) => shown(c).some(waits)));
   let count = $derived(asks.reduce((sum, c) => sum + shown(c).filter(waits).length, 0));
   let headline = $derived(
@@ -23,7 +24,7 @@
 <div class="opening">
   <p class="day">Review</p>
   <h1>{headline}</h1>
-  {#if count === 0}
+  {#if changesets.length === 0}
     <p class="empty">When an agent or Iris asks to change your mailbox, the request shows here with each message that it changes.</p>
   {/if}
 </div>
@@ -32,7 +33,7 @@
   <p class="note">Iris is in observe mode. A change that you approve waits until you choose apply mode in <a href="#/rules">Rules</a>.</p>
 {/if}
 
-{#each asks as c (c.id)}<Request changeset={c} />{/each}
+{#each changesets as c (c.id)}<Request changeset={c} />{/each}
 
 <style>
   .opening {

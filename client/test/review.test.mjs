@@ -61,14 +61,17 @@ test("the review says who asks and why, and each change with its count and flags
   assert.match(t, /Iris makes none of these changes before you approve them\./);
 });
 
-test("one request names its author, and a review with nothing to decide says so", async () => {
+test("one request names its author, and a review with nothing to decide says so, but still shows each open request", async () => {
   const one = text(await render("/src/views/Review.svelte", { changesets: [fx.changesets[0]], mode: "apply" }));
   assert.match(one, /Claude Code asks for 3 changes\./);
   assert.doesNotMatch(one, /observe mode/);
   const closed = { ...fx.changesets[1], actions: [act({ decision: { state: "denied", by: "person", reason: "No." } })] };
   const none = text(await render("/src/views/Review.svelte", { changesets: [closed], mode: "apply" }));
   assert.match(none, /Nothing waits for your review\./);
-  assert.doesNotMatch(none, /Iris triage/);
+  assert.match(none, /Iris triage/);
+  assert.doesNotMatch(none, /When an agent or Iris asks/);
+  const empty = text(await render("/src/views/Review.svelte", { changesets: [], mode: "apply" }));
+  assert.match(empty, /Nothing waits for your review\. When an agent or Iris asks/);
 });
 
 test("the brief says how many changes wait for review and links the review", async () => {
