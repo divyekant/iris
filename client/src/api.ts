@@ -2,7 +2,8 @@ import { access } from "./access.svelte.ts";
 import { addPage } from "./format";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads, except
-// the policy changes of the policy view (spec 2 section 6.3).
+// the policy changes of the policy view (spec 2 section 6.3), the decisions of
+// the review, and the state verbs of a commitment (spec 2 section 4).
 
 export type Party = { kind: "self" | "sender"; sender?: string; name?: string; address?: string };
 export type Money = { value: string; currency: string };
@@ -26,6 +27,8 @@ export type Item = {
   owner?: Party;
   counterparty?: Party;
   due?: { date?: string; at?: string; strict?: boolean };
+  /** The day a deferred commitment opens again. */
+  deferred_until?: string;
   amount?: Money;
   participants?: Party[];
   latest?: { at: string; from: Party; snippet: string };
@@ -222,9 +225,10 @@ export function own(error: unknown): string {
 }
 
 /** Set the access state that App.svelte shows above each view, and throw it. */
-function fail(problem: string): never {
+// `status`: the HTTP status when the engine answered, so that a caller can tell a refusal from no answer.
+function fail(problem: string, status?: number): never {
   access.problem = problem;
-  throw new Error(problem);
+  throw Object.assign(new Error(problem), status ? { status } : {});
 }
 
 // Spec 2 section 8.6 and crates/iris-api/README.md: the API gives a token one
@@ -332,7 +336,10 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const init: RequestInit =
-    body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+    body === undefined
+      ? { headers }
+      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+        { method: "POST", keepalive: true, headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
@@ -342,7 +349,7 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
       quiet(() => session()?.removeItem(KEY));
     }
     if (token) return call(path, accept, body);
-    fail(signInError?.message ?? SIGN_IN);
+    fail(signInError?.message ?? SIGN_IN, 401);
   }
   access.problem = "";
   return response;

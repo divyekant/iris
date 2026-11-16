@@ -11,6 +11,7 @@ mod file_lock;
 mod id;
 mod search;
 mod secret;
+mod watch;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -26,6 +27,7 @@ pub use content::ContentWriter;
 pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
+pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
 /// Migrations go forward only. Never change a migration after it merged: add one.
@@ -42,6 +44,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_10.sql"),
     include_str!("schema_11.sql"),
     include_str!("schema_12.sql"),
+    include_str!("schema_13.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -70,6 +73,8 @@ pub enum Error {
     /// the content cleanup deleted it, or the write of the file did not end.
     /// Fetch the message again.
     MissingContent(String),
+    /// The text of a watch is not valid, or too many watches wait.
+    Watch(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -85,6 +90,7 @@ impl fmt::Display for Error {
             Error::Key(why) => write!(f, "secret: {why}"),
             Error::Query(why) => write!(f, "search: {why}"),
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
+            Error::Watch(why) => write!(f, "watch: {why}"),
         }
     }
 }
@@ -551,6 +557,19 @@ fn lock(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     // A panic in another thread does not make the connection unsafe: SQLite
     // rolls back an open transaction when the guard of rusqlite drops.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Make the folder `dest` of a copy of mail (a backup or an export) with
+/// mode 0700. `dest` must not exist, or must be an empty folder, so that a
+/// copy never mixes with other files.
+pub fn new_private_dir(dest: &Path) -> Result<()> {
+    if dest.exists() && fs::read_dir(dest)?.next().is_some() {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the folder is not empty",
+        )));
+    }
+    Ok(make_private_dir(dest)?)
 }
 
 /// Make a folder with mode 0700, or set mode 0700 on a folder that exists.

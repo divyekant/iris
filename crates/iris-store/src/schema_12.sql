@@ -1,39 +1,23 @@
--- Migration 12: the rules that Iris proposes from the approvals of the
--- person (specification 2, section 6.6, card R5-01).
+-- Migration 12: watches (card R5-07, docs/specs/2026-11-16-watch.md).
 --
--- A proposal is a row here, never a line in `policy.toml`. Only an accept
--- by the person adds the rule to the file, with `by = "proposal"`. The
--- engine adds, updates and deletes `open` rows on each pass. An `accepted`
--- or a `dismissed` row stays, so that Iris does not propose the same rule
--- again.
+-- A watch is a search text (specification 1, section 5.6). It gives one
+-- notice: the first new message that matches. Then it waits for nothing.
 
-CREATE TABLE rule_proposal (
+CREATE TABLE watch (
   -- AUTOINCREMENT: the engine never uses an ID again (specification 1, 5.7).
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  verb TEXT NOT NULL CHECK (verb IN ('archive', 'inbox', 'read', 'unread', 'trash')),
-  -- The one condition of the rule, and its value.
-  cond TEXT NOT NULL CHECK (cond IN ('sender', 'sender_kind')),
-  value TEXT NOT NULL,
-  -- The number of approvals that the rule would have decided.
-  approvals INTEGER NOT NULL CHECK (approvals >= 1),
-  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'accepted', 'dismissed')),
-  -- The ID of the rule in the file, after the accept.
-  rule INTEGER CHECK ((state = 'accepted') = (rule IS NOT NULL)),
-  -- Seconds since 1970-01-01 UTC.
+  text TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE (verb, cond, value)
+  -- The largest message row ID at the start. Only a larger row ID is new.
+  after_message INTEGER NOT NULL,
+  -- The first message that matched, and when the engine found it. Both
+  -- are NULL while the watch waits. No foreign key: the cleanup of a gone
+  -- message must not delete or reset the notice, and AUTOINCREMENT never
+  -- gives the row ID of a deleted message to a new message.
+  message_id INTEGER,
+  arrived_at INTEGER,
+  CHECK ((message_id IS NULL) = (arrived_at IS NULL))
 );
 
--- The person decides a proposal one time.
-CREATE TRIGGER rule_proposal_state BEFORE UPDATE OF state ON rule_proposal
-WHEN old.state <> 'open' AND new.state IS NOT old.state
-BEGIN
-  SELECT RAISE(ABORT, 'iris: a decided proposal does not change');
-END;
-
-CREATE TRIGGER rule_proposal_delete BEFORE DELETE ON rule_proposal
-WHEN old.state <> 'open'
-BEGIN
-  SELECT RAISE(ABORT, 'iris: a decided proposal does not change');
-END;
+-- The check of the engine reads only the watches that wait.
+CREATE INDEX watch_waits ON watch(id) WHERE message_id IS NULL;

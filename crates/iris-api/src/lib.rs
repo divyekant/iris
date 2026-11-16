@@ -24,14 +24,18 @@ use iris_store::Store;
 use serde::Deserialize;
 
 mod auth;
+mod export;
 pub mod policy;
 mod read;
 mod review;
 mod verbs;
+mod watch;
 pub use auth::{Auth, SIGN_IN};
+pub use export::{export, Exported};
 pub use read::*;
 pub use review::*;
 pub use verbs::*;
+pub use watch::*;
 
 #[derive(Debug)]
 pub enum Error {
@@ -60,6 +64,7 @@ impl From<iris_store::Error> for Error {
     fn from(e: iris_store::Error) -> Error {
         match e {
             iris_store::Error::Query(why) => Error::Query(why),
+            e @ iris_store::Error::Watch(_) => Error::Query(e.to_string()),
             e => Error::Store(e),
         }
     }
@@ -112,6 +117,8 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/policy/remove", post(post_remove))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
+        .route("/api/watches", get(get_watches).post(post_watch))
+        .route("/api/watches/{id}/remove", post(post_watch_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -486,6 +493,35 @@ async fn post_dismiss(
 ) -> Result<Response> {
     let b = body(b)?;
     Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
+}
+
+async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(watches(&s)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct WatchBody {
+    text: String,
+}
+
+/// Add a watch. The answer is the new watch.
+async fn post_watch(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<WatchBody>, JsonRejection>,
+) -> Result<Response> {
+    let id = add_watch(&s, &body(b)?.text, now_ms())?;
+    let new = watches(&s)?.into_iter().find(|w| w.id == id);
+    Ok((StatusCode::CREATED, Json(new)).into_response())
+}
+
+async fn post_watch_remove(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    if !remove_watch(&s, &id)? {
+        return Ok(not_found());
+    }
+    Ok(Json(serde_json::json!({ "removed": id })).into_response())
 }
 
 fn now_s() -> i64 {
