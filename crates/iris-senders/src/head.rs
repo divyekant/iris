@@ -176,6 +176,17 @@ mod tests {
     }
 
     #[test]
+    fn reads_group_syntax() {
+        let h = Head::parse(
+            b"To: Friends: Ana <ana@example.org>, bob@example.org;, cy@example.net\r\nCc: Empty:;\r\n\r\n",
+        );
+        assert_eq!(
+            h.recipients(),
+            ["ana@example.org", "bob@example.org", "cy@example.net"]
+        );
+    }
+
+    #[test]
     fn automated_headers() {
         let auto = |s: &str| Head::parse(s.as_bytes()).automated();
         assert!(auto("List-Id: <x.example.com>\r\n\r\n"));
@@ -187,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_top_gmail_authentication_results_counts() {
+    fn only_the_top_gmail_authentication_results_header_counts() {
         let gmail = "Authentication-Results: mx.google.com;\r\n dkim=pass (fake: dkim=pass header.d=evil.example) header.i=@mail.shop.example.com;\r\n dmarc=pass\r\n\r\n";
         let h = Head::parse(gmail.as_bytes());
         assert!(h.dkim_pass("mail.shop.example.com"));
@@ -196,8 +207,11 @@ mod tests {
         // The text in a comment does not count.
         assert!(!h.dkim_pass("evil.example"));
 
-        let forged = "Authentication-Results: mx.evil.example; dkim=pass header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";
-        assert!(!Head::parse(forged.as_bytes()).dkim_pass("shop.example.com"));
+        // Another provider's header above Gmail's does not hide Gmail's result.
+        let other = "Authentication-Results: mx.other.example; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";
+        assert!(Head::parse(other.as_bytes()).dkim_pass("shop.example.com"));
+        let none = "Authentication-Results: mx.other.example; dkim=pass header.d=shop.example.com\r\n\r\n";
+        assert!(!Head::parse(none.as_bytes()).dkim_pass("shop.example.com"));
         // Gmail puts its header on top. A header lower down is the sender's.
         let fail = "Authentication-Results: mx.google.com; dkim=fail header.d=shop.example.com\r\nAuthentication-Results: mx.google.com; dkim=pass header.d=shop.example.com\r\n\r\n";
         assert!(!Head::parse(fail.as_bytes()).dkim_pass("shop.example.com"));
