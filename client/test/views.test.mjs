@@ -295,7 +295,9 @@ test("a mail shows as escaped text, with a warning when it is hostile", async ()
   assert.doesNotMatch(html, /<script>alert|<img/);
   assert.match(html, /&lt;script>alert\(1\)&lt;\/script>/);
   assert.match(text(html), /This mail looks hostile \(dmarc\)/);
-  assert.match(html, /href="\/api\/messages\/m-55210\/raw" download/);
+  // The raw source needs the sign-in token, so a plain link cannot work: a button fetches it.
+  assert.match(html, /<button[^>]*class="raw"[^>]*>Download the original</);
+  assert.doesNotMatch(html, /href="\/api\/messages\/m-55210\/raw"/);
   assert.match(html, /href="#\/item\/c-311"/);
 });
 
@@ -370,6 +372,53 @@ test("a conversation line names a party that is not you", async () => {
   const sam = talk.participants.find((p) => p.kind !== "self");
   assert.deepEqual(other({ ...talk, latest: { ...talk.latest, from: { kind: "self" } } }), sam);
   assert.deepEqual(other(talk), talk.latest.from);
+});
+
+test("the client trades the code of the sign-in address for a token, and sends the token", async () => {
+  const { get, signIn, download, SIGN_IN_FAILED } = await load("/src/api.ts");
+  const saved = globalThis.fetch;
+  const calls = [];
+  const memory = new Map();
+  const store = { getItem: (k) => memory.get(k) ?? null, setItem: (k, v) => memory.set(k, v), removeItem: (k) => memory.delete(k) };
+  const loc = { hash: "#code=abc%2B1", pathname: "/", search: "" };
+  const urls = [];
+  const hist = { replaceState: (_s, _t, url) => urls.push(url) };
+  try {
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ url, init });
+      if (url === "/api/session") return new Response(JSON.stringify({ token: "t-1" }), { status: 200 });
+      return new Response(JSON.stringify({ ok: 1 }), { status: 200 });
+    };
+    await signIn(loc, hist, store);
+    // The code leaves the address bar before the exchange, and the browser never sends it to a server.
+    assert.deepEqual(urls, ["/#/"]);
+    assert.equal(calls[0].init.method, "POST");
+    assert.deepEqual(JSON.parse(calls[0].init.body), { code: "abc+1" });
+    assert.equal(memory.get("iris.token"), "t-1");
+    await get("status");
+    assert.equal(calls[1].init.headers.authorization, "Bearer t-1");
+    // A used or wrong code gives 403: say so, and keep no token.
+    memory.clear();
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "used" }), { status: 403 });
+    await assert.rejects(signIn({ ...loc }, hist, store), { message: SIGN_IN_FAILED });
+    assert.equal(memory.size, 0);
+    // With no code in the address, nothing is sent.
+    calls.length = 0;
+    globalThis.fetch = async (url, init) => (calls.push({ url, init }), new Response("{}"));
+    await signIn({ hash: "#/brief", pathname: "/", search: "" }, hist, store);
+    assert.equal(calls.length, 0);
+    // The download of the original sends the token too.
+    await signIn(loc, hist, store).catch(() => {});
+    globalThis.fetch = async (url, init) => (calls.push({ url, init }), new Response("From: a@example.com\r\n\r\nHi", { status: 200 }));
+    const saved_ = [];
+    await download("m-55210", (blob, name) => saved_.push([blob, name]));
+    assert.equal(calls.at(-1).url, "/api/messages/m-55210/raw");
+    assert.match(calls.at(-1).init.headers.authorization, /^Bearer /);
+    assert.equal(saved_[0][1], "m-55210.eml");
+    assert.equal(await saved_[0][0].text(), "From: a@example.com\r\n\r\nHi");
+  } finally {
+    globalThis.fetch = saved;
+  }
 });
 
 test("the API client asks for the sign-in address on 401 and gives the API error text", async () => {
