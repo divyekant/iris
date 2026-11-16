@@ -152,8 +152,8 @@ export const RECORD_FIELDS: Record<string, string[]> = {
 };
 
 const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
-const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
-const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
+export const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+export const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
 
 /** The start of the next local day, as an ISO date-time. */
 export function nextDay(now = new Date()): string {
@@ -177,6 +177,8 @@ export async function copyText(text: string, clipboard: Pick<Clipboard, "writeTe
 }
 
 /** The first lines of the brief: what needs you, in words. */
+export const NOTHING = "Nothing needs you now.";
+
 export function summary(brief: Brief): string {
   // Use the section counts, not the items: the API gives at most 200 items of a section.
   const talks = brief.conversations.count;
@@ -191,7 +193,7 @@ export function summary(brief: Brief): string {
   const odd = brief.strangers.count;
   if (gate) parts.push(`${capital(count(gate, "sender that you do not know waits", "senders that you do not know wait"))} for an answer.`);
   else if (odd && gate === undefined) parts.push(`${capital(count(odd, "item is from a sender", "items are from senders"))} you do not know.`);
-  return parts.length ? parts.join(" ") : "Nothing needs you now.";
+  return parts.length ? parts.join(" ") : NOTHING;
 }
 
 /** The accounts whose first sync is not complete (spec 1 section 4.2): the brief then covers only the mail fetched so far. */
