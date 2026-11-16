@@ -147,21 +147,24 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                     .unwrap_or_default();
                 let mut done = HashSet::new();
                 for (a, name) in to.into_iter().chain(cc).chain(bcc) {
-                    if own.contains(&a) || !done.insert(a.clone()) {
+                    if own.contains(&a) {
                         continue;
                     }
                     let s = stats.entry(a.clone()).or_default();
-                    s.seen.push(Seen {
-                        message,
-                        thread,
-                        date,
-                        from_them: false,
-                    });
+                    // Each occurrence can give a name. The message counts one time.
                     if let Some(n) = name {
                         let d = s.names.entry(n).or_insert(date);
                         *d = (*d).max(date);
                     }
-                    known.insert(a);
+                    if done.insert(a.clone()) {
+                        s.seen.push(Seen {
+                            message,
+                            thread,
+                            date,
+                            from_them: false,
+                        });
+                        known.insert(a);
+                    }
                 }
             } else if let Some(a) = from.filter(|a| !own.contains(a)) {
                 let s = stats.entry(a.clone()).or_default();
