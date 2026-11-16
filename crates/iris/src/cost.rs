@@ -816,7 +816,10 @@ mod tests {
         let live: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         assert_eq!(reachable(&[dead, live]), live);
         assert_eq!(reachable(&[live, dead]), live);
+        // Another test can bind the freed port on 127.0.0.1 (#325), so the
+        // case "none listens" uses two addresses where no test binds.
+        let other: SocketAddr = format!("127.0.0.3:{port}").parse().unwrap();
+        assert_eq!(reachable(&[dead, other]), dead, "none listens: the first");
         drop(l);
-        assert_eq!(reachable(&[dead, live]), dead, "none listens: the first");
     }
 }
