@@ -79,29 +79,58 @@ Triggers:
 `Ref::Item(row)`. It refuses `By::Agent`. An add of a ref that is in the
 scope already does nothing. `iris_job::scope(store, job)` gives the refs.
 
-### What the scope gives
+### What the scope grants
 
-The build reads the scope in one read transaction:
+A message is clean when the conversation rule counts it as clean
+(`iris_talk`: understood, not a draft, not hostile mail) and it is not gone.
+The rule of hostile mail is the rule of spec 1 section 6.7: a hostile mark,
+or a sender of the kind `hostile` on a message that you did not send. A
+message that is not understood yet is not clean, because the engine has not
+checked it for hostile marks. The build checks each message again on each
+build, so a message that became hostile mail after the grant leaves the
+workspace.
 
-1. The threads: each thread of the scope, and the thread of each source
-   message (`item_source`) of each item of the scope.
-2. The messages: each message of these threads that the conversation rule
-   counts as clean (`iris_talk`: understood, not a draft, not hostile mail)
-   and that is not gone. The rule of hostile mail is the rule of spec 1
-   section 6.7: a hostile mark, or a sender of the kind `hostile` on a
-   message that you did not send. A message that is not understood yet is
-   left out, because the engine has not checked it for hostile marks.
-3. The items: each item of the scope, and each item with a source message in
-   the threads of step 1, of the forms `commitment` and `record`, that is not
-   `gone`. The forms `feed`, `signal` and `conversation` never go into a
-   workspace: a signal can hold a security code, the feed is not about the
-   job, and the conversation is the thread file.
-4. The people: each address in `From`, `To` or `Cc` of the messages of step
-   2 that has the sender kind `person`, except your own address. Each field
-   of a person file comes only from the messages of step 2, so a person file
-   shows no mail outside the scope.
+The granted messages of a job:
+
+- A thread of the scope grants each clean message of the thread.
+- An item of the scope grants each clean source message (`item_source`) of
+  the item, and no other message of its thread. Gmail can put two subjects
+  in one thread (spec 1), so an item does not grant its whole thread.
+
+The build reads the scope in one read transaction, and writes only data of
+the granted messages:
+
+1. The thread files: one file for each thread with a granted message. The
+   file holds only the granted messages, and says how many messages of the
+   thread are not in it.
+2. The items: each item of the forms `commitment` and `record`, that is not
+   `gone`, whose source messages are all granted. An item of the scope and an
+   item with a source in a granted thread both pass this check. An item with
+   one source that is not granted (for example a source that became hostile
+   mail after a correction pinned the item) is not in the workspace, because
+   its document can quote that source. The forms `feed`, `signal` and
+   `conversation` never go into a workspace: a signal can hold a security
+   code, the feed is not about the job, and the conversation is the thread
+   file.
+3. The people: each address in `From`, `To` or `Cc` of the granted messages
+   that has the sender kind `person`, except your own address. Each field of
+   a person file comes only from the granted messages.
 
 The build reads nothing else from the mailbox.
+
+### The read verbs in a session
+
+The same grant limits the read verbs of a session (spec 2 section 8.2,
+session mode). The session verbs come with R4-03 and R4-04, and must keep
+this rule:
+
+- `iris search`, `iris show` and `iris list` see only the granted messages
+  and the items of the workspace. A search never adds a thread to the
+  workspace.
+- `iris brief` is a host verb only: the brief covers the whole mailbox.
+- `iris status` in a session shows the job, not the mailbox counts.
+
+This PR changes spec 2 section 8.2 to say this.
 
 ### The layout
 
@@ -224,6 +253,8 @@ Markdown and JSON with `serde_json`.
 | A signal, a feed item or a conversation with a source in the scope | No file | Unit test |
 | An item or a thread of the scope that is gone from the store | Left out, no error | Unit test |
 | A thread of another job, or mail of no job | Not in the folder | Unit test: the folder lists only the scope files |
+| An item of the scope in a thread with other subjects | Only the item and its source messages are in the folder, not the other messages and items of the thread | Unit test |
+| An item (also a pinned item) with a source that is hostile mail, a draft or gone | The item is not in the folder | Unit test |
 | An agent symbolic link at `threads`, `people`, `JOB.md` or another owned path, to a folder or a file outside | The link is removed, the target does not change | Unit test |
 | `dir` is a symbolic link or a file | `Error::Refused`, nothing written | Unit test |
 | An agent file in `drafts/`, `notes.md` or another path | Kept as it is | Unit test |
@@ -242,6 +273,8 @@ Markdown and JSON with `serde_json`.
 - `crates/iris-talk`: the clean messages of a thread become public, so the
   build uses the same rule of hostile mail as the conversation.
 - New crate `crates/iris-workspace`.
+- `docs/spec/02-changeset-policy-ledger.md` section 8.2: the session read
+  verbs see only the grant of the job, and `iris brief` is a host verb.
 - No change to a screen, the API or the command.
 
 ## Assumptions
@@ -269,13 +302,16 @@ None.
    files of the layout, and no file for another thread, item or person. Red
    if a file of mail outside the scope is in the folder, or if a person file
    counts a message outside the scope.
-2. Hostile mail, a draft and a signal of the scope threads are in no file.
-   Red if their text is in any file of the folder.
-3. A second build after a new message in a scope thread has the new message,
+2. Hostile mail, a draft and a signal of the scope threads are in no file,
+   and no item with such a source is in the folder. Red if their text is in
+   any file of the folder.
+3. An item of the scope grants only its source messages. Red if another
+   message of its thread is in the folder.
+4. A second build after a new message in a scope thread has the new message,
    and keeps `drafts/` and `notes.md`. Red if the agent files change.
-4. A link that the agent made does not make the build change a file outside
+5. A link that the agent made does not make the build change a file outside
    the folder. Red if the target changes.
-5. An agent cannot add to a scope. Red if the store takes the row.
+6. An agent cannot add to a scope. Red if the store takes the row.
 
 ## Verify
 
