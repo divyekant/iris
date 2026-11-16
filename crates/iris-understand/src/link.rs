@@ -4,95 +4,154 @@
 //! text. Mail text is data: the code only compares host names.
 
 use iris_senders::{near_copy, registrable};
-
-/// The most bytes in front of `](` that can hold the shown text. A longer
-/// text is not a web address that a person reads. The bound keeps the scan
-/// linear in the length of the text.
-const SHOWN_LIMIT: usize = 512;
+use url::{Host, Url};
 
 /// True when the clean text `text` has a deceptive link: the link text is a
-/// web address with the host `S`, the target is an `http` or `https` URL
-/// with the host `T`, and `S` and `T` have different registrable domains.
-/// Such a link is deceptive when one of these is true:
-/// - DMARC does not pass for the `From` domain (`authenticated` is false).
-/// - `T` is a near copy of `S` (`login.shop-secure.example.net` for
-///   `www.shop.example.com`).
-///
-/// A sender that DMARC proves to own the domain of `S` can link through any
-/// redirect, for example a click counter of its mail service.
+/// web address with the host `S`, and the target is an `http` or `https`
+/// URL that a browser opens on another owner. Iris reads the target with
+/// the WHATWG URL standard, as a browser does. The link is deceptive in
+/// each of these cases, unless DMARC proves that the sender owns the domain
+/// of `S` (then it can link through any redirect, for example a click
+/// counter of its mail service):
+/// - The target host is an IP address, or Iris cannot read it (for
+///   example a host that is not ASCII), or the target has a user part, a
+///   backslash or a percent sign in front of its path.
+/// - The target host `T` has another registrable domain than `S`, and DMARC
+///   does not pass for the `From` domain (`authenticated` is false).
+/// - `T` has another registrable domain than `S` and looks like `S`: a near
+///   copy (`login.shop-secure.example.net` for `www.shop.example.com`), or
+///   a host with the name of `S` in front of another domain
+///   (`shop.example.com.evil.example.net`).
 pub fn deceptive(text: &str, from_domain: &str, authenticated: bool) -> bool {
     let owner = registrable(&from_domain.to_ascii_lowercase());
-    let mut at = 0;
-    while let Some(i) = text[at..].find("](") {
-        let mid = at + i;
-        at = mid + 2;
-        let Some(shown) = shown_text(&text[..mid]).and_then(shown_host) else {
-            continue;
-        };
-        let end = text[at..]
-            .find(|c: char| c == ')' || c.is_whitespace())
-            .map_or(text.len(), |j| at + j);
-        let Some(target) = target_host(&text[at..end]) else {
+    for (shown, target) in links(text) {
+        let Some(shown) = shown_host(shown) else {
             continue;
         };
         let theirs = registrable(&shown);
-        if theirs == registrable(&target) || (authenticated && theirs == owner) {
+        if authenticated && theirs == owner {
             continue;
         }
-        if !authenticated || near_copy(&target, &shown) {
-            return true;
+        match target_host(target) {
+            Target::NotWeb => {}
+            Target::Suspect => return true,
+            Target::Host(t) if registrable(&t) == theirs => {}
+            Target::Host(t) => {
+                if !authenticated || near_copy(&t, &shown) || embeds(&t, &theirs) {
+                    return true;
+                }
+            }
         }
     }
     false
 }
 
-/// The text between the last `[` of `before` and its end, on one line.
-fn shown_text(before: &str) -> Option<&str> {
-    let mut from = before.len().saturating_sub(SHOWN_LIMIT);
-    while !before.is_char_boundary(from) {
-        from += 1;
-    }
-    let tail = &before[from..];
-    let open = tail.rfind('[')?;
-    let shown = &tail[open + 1..];
-    (!shown.contains([']', '\n'])).then_some(shown)
+/// Each `[shown](target)` of the text, in one pass. The shown text has no
+/// `[`, `]` or line end. The target ends at `)` or at white space:
+/// `iris-clean` percent-encodes both in a link target.
+fn links(text: &str) -> impl Iterator<Item = (&str, &str)> {
+    let mut open = None;
+    let mut it = text.char_indices().peekable();
+    std::iter::from_fn(move || {
+        while let Some((i, c)) = it.next() {
+            match c {
+                '[' => open = Some(i + 1),
+                '\n' => open = None,
+                ']' => {
+                    let Some(o) = open.take() else { continue };
+                    if it.peek().map(|&(_, n)| n) != Some('(') {
+                        continue;
+                    }
+                    let from = i + 2;
+                    let end = text[from..]
+                        .find(|c: char| c == ')' || c.is_whitespace())
+                        .map_or(text.len(), |j| from + j);
+                    // A target is not a link text: the scan goes on after
+                    // it, so each character is read once.
+                    while it.next_if(|&(j, _)| j < end).is_some() {}
+                    return Some((&text[o..i], &text[from..end]));
+                }
+                _ => {}
+            }
+        }
+        None
+    })
 }
 
 /// The host of a link text that is a web address: `https://www.x.com/a`,
 /// `www.x.com` or `x.com`. A text with other words is not a web address.
 fn shown_host(shown: &str) -> Option<String> {
-    let s = shown.trim();
-    let lower = s.to_ascii_lowercase();
+    let lower = shown.trim().to_ascii_lowercase();
     let rest = ["https://", "http://"]
         .iter()
         .find_map(|p| lower.strip_prefix(p))
         .unwrap_or(&lower);
-    let host = rest.split(['/', '?', '#', ':']).next()?;
+    let host = rest
+        .split(['/', '?', '#', ':'])
+        .next()?
+        .trim_end_matches('.');
     // A host name has letters in its last label: `1.5` is a number.
     let last = host.rsplit('.').next()?;
-    (host_ok(host) && last.len() >= 2 && last.bytes().all(|b| b.is_ascii_alphabetic()))
-        .then(|| host.trim_end_matches('.').to_string())
-}
-
-/// The host of an `http` or `https` target, after a user part
-/// (`https://shop.example.com@other.example.net/` goes to `other`).
-fn target_host(target: &str) -> Option<String> {
-    let lower = target.to_ascii_lowercase();
-    let rest = ["https://", "http://"]
-        .iter()
-        .find_map(|p| lower.strip_prefix(p))?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?.split(':').next()?;
-    host_ok(host).then(|| host.trim_end_matches('.').to_string())
-}
-
-/// Letters, digits, `-` and `.`, with at least one inner dot.
-fn host_ok(host: &str) -> bool {
-    let h = host.trim_end_matches('.');
-    h.contains('.')
-        && h.split('.').all(|l| !l.is_empty())
-        && h.bytes()
+    let ok = host.contains('.')
+        && host.split('.').all(|l| !l.is_empty())
+        && host
+            .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+        && last.len() >= 2
+        && last.bytes().all(|b| b.is_ascii_alphabetic());
+    ok.then(|| host.to_string())
+}
+
+/// What a browser opens for a link target.
+enum Target {
+    /// Not an `http` or `https` URL, for example `mailto:`.
+    NotWeb,
+    /// An IP address, or a web URL that Iris cannot read.
+    Suspect,
+    /// The host name, lowercase, with no end dot.
+    Host(String),
+}
+
+fn target_host(target: &str) -> Target {
+    // The URL standard drops leading control characters and spaces.
+    let target = target.trim_start_matches(|c: char| c <= ' ');
+    let lower = target.to_ascii_lowercase();
+    let web = lower.starts_with("http:") || lower.starts_with("https:");
+    // A user part, a backslash or a percent sign in front of the path
+    // makes a browser open a host that the text does not show
+    // (`https://shop.com@evil.net`, `https://evil.net\@shop.com`). A real
+    // link never needs them.
+    let after = lower.split_once(':').map_or("", |(_, a)| a);
+    let rest = after.trim_start_matches(['/', '\\']);
+    let slashes = &after[..after.len() - rest.len()];
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if web && (slashes.contains('\\') || authority.contains(['@', '\\', '%'])) {
+        return Target::Suspect;
+    }
+    match Url::parse(target) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") => match u.host() {
+            Some(Host::Domain(d)) => Target::Host(d.trim_end_matches('.').to_string()),
+            _ => Target::Suspect,
+        },
+        Ok(_) => Target::NotWeb,
+        Err(_) if web => Target::Suspect,
+        Err(_) => Target::NotWeb,
+    }
+}
+
+/// True when the name label of the registrable domain `theirs` (`shop` of
+/// `shop.com`) is a label, or a hyphen part of a label, of `target` in front
+/// of its own registrable domain (`shop.com.evil.net`, `shop.evil.net`).
+fn embeds(target: &str, theirs: &str) -> bool {
+    let Some(name) = theirs.split('.').next().filter(|n| n.len() >= 3) else {
+        return false;
+    };
+    let own = registrable(target);
+    let front = target
+        .strip_suffix(own.as_str())
+        .unwrap_or("")
+        .trim_end_matches('.');
+    front.split(['.', '-']).any(|part| part == name)
 }
 
 #[cfg(test)]
@@ -132,6 +191,63 @@ mod tests {
     fn a_user_part_does_not_hide_the_target() {
         let t = "[https://www.shop.example.com](https://www.shop.example.com@evil.example.net/)";
         assert!(deceptive(t, "evil.example.net", false));
+    }
+
+    #[test]
+    fn the_target_is_the_host_that_a_browser_opens() {
+        // Each target opens evil.example.net, or a host that Iris cannot read.
+        for target in [
+            "https://evil.example.net\\@shop.example.com/",
+            "https://evil%2eexample%2enet/",
+            "HTTPS://EVIL.EXAMPLE.NET./",
+            "https:evil.example.net/x",
+            "https://192.0.2.7/login",
+            "https://0xc0.0.2.7/login",
+            "https://[2001:db8::1]/login",
+            "https://p\u{430}ypal.example.net/",
+        ] {
+            let t = format!("[shop.example.com]({target})");
+            assert!(deceptive(&t, "evil.example.net", false), "{target}");
+        }
+        // An IP or an unreadable host is deceptive also from a sender that
+        // passes DMARC for another domain.
+        for target in [
+            "https://192.0.2.7/login",
+            "https://p\u{430}ypal.example.net/",
+            "https://shop.example.com@evil.example.net/",
+            "https://evil.example.net\\@shop.example.com/",
+            "https://evil%2eexample%2enet/",
+            "https:\\\\evil.example.net\\@shop.example.com/",
+            "\u{1}https://shop.example.com@evil.example.net/",
+        ] {
+            let t = format!("[shop.example.com]({target})");
+            assert!(deceptive(&t, "mx.example.org", true), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_shown_host_in_front_of_another_domain_is_deceptive() {
+        for target in [
+            "https://shop.example.com.evil.example.net/",
+            "https://shop.evil.example.net/",
+            "https://login-shop.evil.example.net/",
+        ] {
+            let t = format!("[www.shop.com]({target})");
+            assert!(deceptive(&t, "evil.example.net", true), "{target}");
+        }
+        // A longer word that holds the name is another name.
+        assert!(!deceptive(
+            "[shop.com](https://shopping.example.net/)",
+            "example.net",
+            true
+        ));
+    }
+
+    #[test]
+    fn a_long_shown_address_counts() {
+        let shown = format!("https://www.shop.example.com/{}", "a".repeat(2000));
+        let t = format!("Go: [{shown}](https://evil.example.net/x)");
+        assert!(deceptive(&t, "evil.example.net", false));
     }
 
     #[test]

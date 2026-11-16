@@ -254,3 +254,49 @@ fn the_cut_mark_stays_after_the_repeated_end_goes_out() {
         &a.text.text[..200.min(a.text.text.len())]
     );
 }
+
+/// HTML mail from a sender that passes DMARC for `evil.example.net`, with
+/// one link that shows `www.shop.com` and goes to `target`.
+fn html_link(target: &str) -> String {
+    format!(
+        "Authentication-Results: mx.google.com; dkim=pass header.i=@evil.example.net; dmarc=pass (p=NONE) header.from=evil.example.net
+From: Shop <alerts@evil.example.net>
+Subject: Your account
+Content-Type: text/html; charset=utf-8
+
+<p>Verify your account: <a href=\"{target}\">https://www.shop.com/account</a></p>
+"
+    )
+}
+
+#[test]
+fn a_link_that_shows_a_brand_and_goes_elsewhere_is_a_mark() {
+    for target in [
+        "https://login.shop-secure.example.net/v",
+        "https://shop.com.evil.example.net/v",
+        "https://evil.example.net\\@www.shop.com/v",
+        "https://192.0.2.7/v",
+    ] {
+        assert_eq!(
+            run(&html_link(target), &[], &[], &[]),
+            vec![Mark::Link],
+            "{target}"
+        );
+        // Your sent mail never gets the mark.
+        assert!(
+            run(&html_link(target), &["SENT"], &[], &[]).is_empty(),
+            "{target}"
+        );
+    }
+    // The real target of the shown address.
+    assert!(run(&html_link("https://www.shop.com/account"), &[], &[], &[]).is_empty());
+    // An authenticated sender of an unrelated domain with a plain redirect:
+    // the model decides, not this mark.
+    assert!(run(
+        &html_link("https://click.evil.example.net/r/1"),
+        &[],
+        &[],
+        &[]
+    )
+    .is_empty());
+}
