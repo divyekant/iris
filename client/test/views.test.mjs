@@ -734,3 +734,22 @@ test("the brief loads each page of Signals when the API cuts the section, so a l
     globalThis.fetch = saved;
   }
 });
+
+test("the full Signals section leaves out a signal after its expiry, and wakes at the next one", async () => {
+  const { nextExpiry } = await load("/src/format.ts");
+  const code = item("s-901");
+  const later = { ...code, id: "s-2", code: undefined, title: "Delivery window", expires: "2026-11-16T10:00:00Z" };
+  const page = { items: [code, later], next: null };
+  const props = { title: "Signals", page, more: "brief/signals?limit=50", cursor: "after", expiring: true };
+  const open = text(await render("/src/views/List.svelte", { ...props, now: NOW }));
+  assert.match(open, /Login code for Example Bank/);
+  assert.match(open, /Delivery window/);
+  const after = text(await render("/src/views/List.svelte", { ...props, now: new Date(Date.parse(code.expires) + 1000) }));
+  assert.doesNotMatch(after, /Login code for Example Bank/);
+  assert.match(after, /Delivery window/);
+  assert.equal(nextExpiry([code, later], NOW), code.expires);
+  assert.equal(nextExpiry([later], new Date("2026-11-16T10:00:01Z")), undefined);
+  // A list of a form keeps its items: it shows the history of the form.
+  const form = text(await render("/src/views/List.svelte", { title: "Signals", page, now: new Date(Date.parse(code.expires) + 1000) }));
+  assert.match(form, /Login code for Example Bank/);
+});
