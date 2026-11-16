@@ -869,3 +869,32 @@ test("a bundle has a route, and a bad rule number opens the brief", async () => 
     assert.notEqual(parse(bad).view, "bundle", bad);
   }
 });
+
+test("the Records view counts from /api/records, so a record type that a rule hides still shows, and a bundle page reads its bundle", async () => {
+  const saved = globalThis.fetch;
+  const asked = [];
+  // Keep each call pending: the test checks only the address of each call.
+  globalThis.fetch = (url) => {
+    asked.push(String(url));
+    return new Promise(() => {});
+  };
+  try {
+    for (const hash of ["#/records", "#/records/receipt", "#/brief/bundle/3"]) {
+      asked.length = 0;
+      globalThis.location = { hash, pathname: "/", search: "" };
+      await render("/src/App.svelte");
+      // The call waits for the sign-in state first.
+      await new Promise((r) => setTimeout(r, 50));
+      const api = asked.filter((u) => !/\/api\/(status|session)/.test(u));
+      if (hash.startsWith("#/records")) {
+        assert.ok(api.includes("/api/records"), `${hash}: ${api}`);
+        assert.ok(!api.some((u) => u.startsWith("/api/brief")), `${hash}: ${api}`);
+      } else {
+        assert.ok(api.includes("/api/brief/bundle-3?limit=50"), `${hash}: ${api}`);
+      }
+    }
+  } finally {
+    globalThis.fetch = saved;
+    delete globalThis.location;
+  }
+});
