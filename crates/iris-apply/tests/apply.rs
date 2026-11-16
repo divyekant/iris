@@ -738,3 +738,94 @@ fn the_apply_refuses_what_was_not_approved() {
     assert_eq!(b.state(label).0, "approved");
     assert_eq!(b.calls("messages"), 0);
 }
+
+/// Release 2 exit criterion C7, the apply half (specification 2, section
+/// 10): 100 actions of each verb, on random messages, are correct at Gmail
+/// and in the mirror, and change no other message. The undo half waits for
+/// the ledger (R2-03).
+#[test]
+fn hundred_actions_are_correct() {
+    let b = setup("hundred", 60, Some(APPLY_POLICY));
+    let pool = b.messages("1", 60);
+    // A fixed seed: a failure repeats.
+    let mut seed: u64 = 0x1215_2013;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let changes = |verb: &str| -> (&[&str], &[&str]) {
+        match verb {
+            "archive" => (&[], &["INBOX"]),
+            "inbox" => (&["INBOX"], &[]),
+            "read" => (&[], &["UNREAD"]),
+            "unread" => (&["UNREAD"], &[]),
+            // The fake trash also removes `INBOX` (see iris-fakegmail).
+            "trash" => (&["TRASH"], &["INBOX"]),
+            _ => unreachable!(),
+        }
+    };
+    let mut verbs_seen = std::collections::BTreeMap::new();
+    for i in 0..100 {
+        let before: Vec<Vec<String>> = pool.iter().map(|&m| b.gmail_labels(m)).collect();
+        // A message in the trash leaves the test until its undo exists.
+        let live: Vec<usize> = (0..pool.len())
+            .filter(|&k| !before[k].iter().any(|l| l == "TRASH"))
+            .collect();
+        // Few trash actions, so the pool stays large.
+        let verb = [
+            "archive", "inbox", "read", "unread", "archive", "inbox", "read", "unread", "trash",
+        ][next(9) as usize];
+        let mut picked: Vec<usize> = Vec::new();
+        for _ in 0..=next(4) {
+            let k = live[next(live.len() as u64) as usize];
+            if !picked.contains(&k) {
+                picked.push(k);
+            }
+        }
+        picked.sort();
+        let ms: Vec<i64> = picked.iter().map(|&k| pool[k]).collect();
+        let (add, remove) = changes(verb);
+        let expected = |labels: &[String]| -> Vec<String> {
+            let mut l: Vec<String> = labels
+                .iter()
+                .filter(|x| !remove.contains(&x.as_str()))
+                .cloned()
+                .collect();
+            for a in add {
+                if !l.iter().any(|x| x == a) {
+                    l.push((*a).to_string());
+                }
+            }
+            l.sort();
+            l
+        };
+        let need = picked
+            .iter()
+            .filter(|&&k| expected(&before[k]) != before[k])
+            .count() as u64;
+
+        let a = b.approved(verb, &ms, PERSON);
+        let c = applied(b.apply(a));
+        assert_eq!(
+            (c.changed, c.unchanged, c.gone.len()),
+            (need, ms.len() as u64 - need, 0),
+            "action {i}: {verb} {ms:?}"
+        );
+        assert_eq!(b.state(a).0, "applied", "action {i}");
+        for (k, &m) in pool.iter().enumerate() {
+            let at_gmail = b.gmail_labels(m);
+            let want = if picked.contains(&k) {
+                expected(&before[k])
+            } else {
+                before[k].clone()
+            };
+            assert_eq!(at_gmail, want, "action {i}: {verb}, message {m}");
+            assert_eq!(b.mirror_labels(m), at_gmail, "action {i}: mirror of {m}");
+        }
+        *verbs_seen.entry(verb).or_insert(0) += 1;
+    }
+    // Each verb ran, so the test covers each one.
+    assert_eq!(verbs_seen.len(), 5, "{verbs_seen:?}");
+}
