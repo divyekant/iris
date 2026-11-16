@@ -1,0 +1,5 @@
+# The policy of Iris (spec 2, section 6). Iris keeps the comments in this file.
+version = 0
+
+# observe: Iris applies nothing. apply: rules decide, and the rest goes to review.
+mode = "observe"

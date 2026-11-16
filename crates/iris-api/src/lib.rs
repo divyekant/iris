@@ -26,8 +26,10 @@ use serde::Deserialize;
 mod auth;
 pub mod policy;
 mod read;
+mod review;
 pub use auth::{Auth, SIGN_IN};
 pub use read::*;
+pub use review::*;
 
 #[derive(Debug)]
 pub enum Error {
@@ -93,6 +95,9 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
         .route("/api/search", get(get_search))
+        .route("/api/changesets", get(get_changesets))
+        .route("/api/changesets/{id}", get(get_changeset))
+        .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
         .route("/api/policy", get(get_policy))
@@ -126,16 +131,53 @@ async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
 }
 
 async fn get_proposal(State(s): State<Arc<Store>>) -> Response {
-    // The changeset streams from a blocking thread through a channel of a
-    // few parts, so memory stays flat for a large proposal.
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
     let now = now_ms();
+    stream(move |w| write_proposal(&s, now, w)).await
+}
+
+async fn get_changesets(State(s): State<Arc<Store>>) -> Response {
+    stream(move |w| write_open_changesets(&s, w)).await
+}
+
+async fn get_changeset(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(
+        stream(move |w| {
+            iris_changeset::write_document(&s, row, w).map_err(review::changeset_error)
+        })
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct IdsQuery {
+    ids: String,
+}
+
+async fn get_messages(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<IdsQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let messages = messages_by_id(&s, &q.ids)?;
+    Ok(Json(serde_json::json!({ "messages": messages })).into_response())
+}
+
+/// Stream the JSON that `write` makes from a blocking thread, through a
+/// channel of a few parts, so memory stays flat for a large answer.
+async fn stream<F>(write: F) -> Response
+where
+    F: FnOnce(&mut ChanWriter) -> Result<()> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
     tokio::task::spawn_blocking(move || {
         let mut w = ChanWriter {
             buf: Vec::with_capacity(CHUNK),
             tx,
         };
-        let res = write_proposal(&s, now, &mut w)
+        let res = write(&mut w)
             .and_then(|()| std::io::Write::flush(&mut w).map_err(|e| Error::Store(e.into())));
         if let Err(e) = res {
             // The status is sent; an error ends the body, so the JSON is cut.
@@ -148,7 +190,7 @@ async fn get_proposal(State(s): State<Arc<Store>>) -> Response {
     let first = match rx.recv().await {
         Some(Ok(part)) => part,
         Some(Err(e)) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        None => return error(StatusCode::INTERNAL_SERVER_ERROR, "the proposal stopped"),
+        None => return error(StatusCode::INTERNAL_SERVER_ERROR, "the answer stopped"),
     };
     let rest = futures_util::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|part| (part, rx))

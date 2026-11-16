@@ -391,7 +391,8 @@ fn the_spec_examples_are_valid_and_a_bad_item_is_not() {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         let name = p.file_name().unwrap().to_str().unwrap().to_string();
-        if !name.ends_with(".json") || name.starts_with("sender") {
+        // The sender and the changeset are not items.
+        if !name.ends_with(".json") || name.starts_with("sender") || name.starts_with("changeset") {
             continue;
         }
         let v: serde_json::Value =

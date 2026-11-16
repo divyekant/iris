@@ -184,6 +184,9 @@ pub struct Brief {
     pub bundles: Vec<Bundle>,
     /// The count of items that a `hide` rule leaves out of the brief.
     pub hidden: i64,
+    /// The open changesets and their actions that wait for a person
+    /// (specification 2, section 5.5).
+    pub review: crate::review::Review,
 }
 
 /// The items of one `bundle` rule: the count, and the newest
@@ -885,6 +888,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             proposal: None,
             bundles,
             hidden,
+            review: crate::review::review_counts(c)?,
         })
     })?;
     brief.proposal = Some(proposal);
@@ -1008,7 +1012,10 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
 
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
-fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
+pub(crate) fn message_row(
+    c: &Connection,
+    row: i64,
+) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,

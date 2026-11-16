@@ -1,0 +1,38 @@
+{
+  "model": "iris/0",
+  "id": "cs-95",
+  "revision": 1,
+  "author": {
+    "kind": "local",
+    "name": "iris",
+    "session": "tty-3"
+  },
+  "why": null,
+  "created": "2026-11-16T12:00:00Z",
+  "submitted": null,
+  "state": "withdrawn",
+  "actions": [
+    {
+      "n": 1,
+      "revision": 1,
+      "verb": "unlabel",
+      "targets": {
+        "messages": [
+          "x"
+        ]
+      },
+      "resolved": {
+        "messages": []
+      },
+      "args": {},
+      "why": null,
+      "flags": [],
+      "hash": null,
+      "decision": {
+        "state": "cancelled",
+        "by": "author",
+        "at": "2026-11-16T12:01:00Z"
+      }
+    }
+  ]
+}
