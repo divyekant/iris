@@ -5,7 +5,7 @@
 <script lang="ts">
   import type { Item } from "../api";
   import { watch } from "../clock";
-  import { due, field, money, other, party, RECORD_FIELDS, when } from "../format";
+  import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
   import Code from "./Code.svelte";
 
@@ -76,7 +76,7 @@
     <figure>
       <blockquote>{quoted.quote}</blockquote>
       <figcaption>
-        {party(other(item))}, in the mail that made this item.
+        From the mail that made this item.
         <a href={href.mail(quoted.message)}>Open the mail</a>
       </figcaption>
     </figure>

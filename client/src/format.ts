@@ -54,7 +54,9 @@ export function due(item: Item, now = new Date()): Due | null {
   if (!value || Number.isNaN(toDate(value).getTime())) return null;
   const days = daysFrom(value, now);
   const words = relative.format(days, "day");
-  if (days < 0) return { text: `was due ${words}`, tone: "late" };
+  // A due time earlier today has passed, although its day is today.
+  const at = item.due?.at ? Date.parse(item.due.at) : NaN;
+  if (days < 0 || at <= now.getTime()) return { text: `was due ${words}`, tone: "late" };
   return { text: `due ${words}`, tone: days <= 2 ? "soon" : "" };
 }
 
@@ -85,7 +87,10 @@ export function other(item: Item): Party | undefined {
     case "commitment":
       return item.direction === "you_owe" ? item.counterparty : item.owner;
     case "conversation":
-      return item.latest?.from ?? item.participants?.find((p) => p.kind !== "self");
+      // The latest sender can be you: then name another participant.
+      return item.latest?.from && item.latest.from.kind !== "self"
+        ? item.latest.from
+        : item.participants?.find((p) => p.kind !== "self");
     case "record":
     case "signal":
       return item.issuer;

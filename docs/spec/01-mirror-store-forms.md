@@ -836,7 +836,9 @@ In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
 applied.") is a list that the engine computes when the brief opens, in the
 changeset format of specification 2, with each action in the state
-`proposed`. Release 1 does not store it. From release 2, triage stores it as
+`proposed`. The brief gives only the totals of the proposal: the count of
+actions, and the count for each verb. The local API gives the full list
+separately. Release 1 does not store it. From release 2, triage stores it as
 a changeset in the mode `observe`.
 
 ## 9. Memory
