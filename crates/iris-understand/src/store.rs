@@ -123,6 +123,9 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     if row.gone {
         // A gone message leaves the conversation of its thread (section 4.5),
         // if a sync did not restore it after the first read.
+        // Sync gives its items the status `gone` when it marks the message
+        // gone, and the saved status again when the message returns
+        // (`iris-sync`, section 4.5). This step does not change items.
         // Its sender evidence goes too: a sent message can be the only
         // evidence that its recipient is a person (section 6.7).
         let done = store.write(|tx| {
