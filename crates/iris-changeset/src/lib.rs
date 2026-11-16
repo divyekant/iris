@@ -434,7 +434,7 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
 
 /// Expire each open action 14 days or more after its submit (section 5.5):
 /// `proposed`, `in_review` and `approved`, by `expiry`. An action whose
-/// provider calls started (`applying`) continues to its end. `held`
+/// provider calls started (a ledger row in `writing`) continues to its end. `held`
 /// (release 3) does not expire. Gives the count of expired actions. The
 /// engine runs it on each tick.
 pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
@@ -443,12 +443,12 @@ pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
 
 /// [`expire`] in a write transaction of the caller.
 pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
-    // shortcut: R2-03 replaces `applying` with the ledger row in `writing`
-    // (issue #169); then this query checks the ledger.
     Ok(c.execute(
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = 'no decision or apply in 14 days', decided_at = ?1
-         WHERE state IN ('proposed', 'in_review', 'approved') AND applying = 0
+         WHERE state IN ('proposed', 'in_review', 'approved')
+           AND NOT EXISTS (SELECT 1 FROM ledger l
+                           WHERE l.action_id = changeset_action.id AND l.state = 'writing')
            AND submitted_at <= ?1 - ?2",
         params![now_ms, EXPIRY_MS],
     )?)

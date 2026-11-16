@@ -1391,12 +1391,14 @@ fn an_open_action_pins_its_items() {
     }
 }
 
-/// Mark an approved action as `applying`, as the apply (R2-02) does before
-/// its first write call.
+/// Claim an approved action with a ledger row in `writing`, as the apply
+/// does before its first write call (migration 11).
 fn mark_applying(s: &Store, cs: i64, n: i64) {
     s.write(|tx| {
         Ok(tx.execute(
-            "UPDATE changeset_action SET applying = 1 WHERE changeset_id = ?1 AND n = ?2",
+            "INSERT INTO ledger(action_id, ops, state, undo, at)
+             SELECT id, '{}', 'writing', 'inverse', 1 FROM changeset_action
+             WHERE changeset_id = ?1 AND n = ?2",
             rusqlite::params![cs, n],
         )?)
     })
