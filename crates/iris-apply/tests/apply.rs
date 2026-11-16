@@ -391,6 +391,26 @@ fn an_old_action_expires() {
     assert_eq!(b.calls("messages"), 0);
 }
 
+/// Two applies of one action at the same time: only the one with the
+/// mark makes a write call.
+#[test]
+fn two_applies_make_one_write() {
+    let b = setup("two", 60, Some(APPLY_POLICY));
+    for round in 0..5 {
+        let verb = if round % 2 == 0 { "archive" } else { "inbox" };
+        let ms = b.messages("1", 20);
+        let a = b.approved(verb, &ms, PERSON);
+        let before = b.calls("batchModify");
+        let results: Vec<_> = std::thread::scope(|sc| {
+            let t: Vec<_> = (0..2).map(|_| sc.spawn(|| b.apply(a))).collect();
+            t.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        assert!(ok >= 1, "{results:?}");
+        assert!(b.calls("batchModify") - before <= 1, "{results:?}");
+    }
+}
+
 /// More than 1,000 messages: one batchModify call for each 1,000.
 #[test]
 fn a_large_action_streams_in_pages() {

@@ -38,7 +38,7 @@ pub enum Error {
     Gmail(iris_gmail::Error),
     /// The action is not `approved`: it does not exist, or another write
     /// changed its state before its first provider call (for example a
-    /// withdraw).
+    /// withdraw), or another apply of the action has the mark.
     NotApproved(i64),
     /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
     /// and the state verbs.
@@ -299,14 +299,17 @@ impl Run<'_, '_> {
         }
     }
 
-    /// Mark the action before its first write call.
+    /// Mark the action before its first write call. The mark is a claim:
+    /// only one apply sets it, so a second apply of the same action at the
+    /// same time makes no write call.
     fn mark(&mut self) -> Result<()> {
         if self.marked {
             return Ok(());
         }
         let n = self.store.write(|tx| {
             Ok(tx.execute(
-                "UPDATE changeset_action SET applying = 1 WHERE id = ?1 AND state = 'approved'
+                "UPDATE changeset_action SET applying = 1
+                 WHERE id = ?1 AND state = 'approved' AND applying = 0
                    AND (SELECT state FROM changeset c WHERE c.id = changeset_id) <> 'withdrawn'",
                 [self.action],
             )?)
