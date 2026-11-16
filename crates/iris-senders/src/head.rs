@@ -11,6 +11,7 @@ pub(crate) struct Head(Vec<(String, String)>);
 
 impl Head {
     pub(crate) fn parse(raw: &[u8]) -> Head {
+        let raw = &raw[..raw.len().min(HEAD_MAX)];
         let end = raw
             .windows(4)
             .position(|w| w == b"\r\n\r\n")

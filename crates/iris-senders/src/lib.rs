@@ -65,6 +65,14 @@ pub struct Decision {
     pub rerun: Vec<i64>,
 }
 
+/// What one call of [`decide`] changed: the rows for [`Decision::rerun`],
+/// and the domains that became known or stopped being known.
+#[derive(Default)]
+struct Changes {
+    rerun: Vec<i64>,
+    domains: Vec<String>,
+}
+
 /// Decide the sender kind of the stored message `message`, with its raw
 /// bytes `raw`, and write the kind to the `sender` row of the address.
 ///
@@ -82,6 +90,41 @@ pub fn decide(
     message: i64,
     raw: &[u8],
     now_ms: i64,
+) -> rusqlite::Result<Decision> {
+    let mut ch = Changes::default();
+    let mut d = decide_message(conn, message, raw, now_ms, &mut ch)?;
+    // A row that the near-copy rule compares with a domain that became known
+    // or stopped being known is decided again.
+    // shortcut: this reads each sender row once for each such domain, and
+    // goes one level deep (a row that this changes does not start another
+    // pass); keep a domain index if a large mailbox makes it slow.
+    let domains = std::mem::take(&mut ch.domains);
+    if !domains.is_empty() {
+        let rows: Vec<String> = conn
+            .prepare_cached("SELECT address FROM sender WHERE decided_by IS NOT 'person'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for a in rows
+            .iter()
+            .filter(|a| domains.iter().any(|d| near_copy(domain_of(a), d)))
+        {
+            recheck(conn, a, now_ms, &mut ch)?;
+        }
+    }
+    for id in ch.rerun {
+        if !d.rerun.contains(&id) {
+            d.rerun.push(id);
+        }
+    }
+    Ok(d)
+}
+
+fn decide_message(
+    conn: &Connection,
+    message: i64,
+    raw: &[u8],
+    now_ms: i64,
+    ch: &mut Changes,
 ) -> rusqlite::Result<Decision> {
     let head = Head::parse(raw);
     let (date, sha, account): (Option<i64>, Option<String>, String) = conn.query_row(
@@ -109,17 +152,16 @@ pub fn decide(
         .collect::<rusqlite::Result<_>>()?;
     conn.prepare_cached("DELETE FROM sender_evidence WHERE message_id = ?1")?
         .execute([message])?;
-    let mut rerun = Vec::new();
     if !has("SENT") || has("DRAFT") {
         for a in &old {
-            recheck(conn, a, now_ms, &mut rerun)?;
+            recheck(conn, a, now_ms, ch)?;
         }
     }
 
     if has("DRAFT") {
         // A draft does not count for the `person` rule.
         return Ok(Decision {
-            rerun,
+            rerun: Vec::new(),
             ..own(if has("SENT") { "sent" } else { "draft" })
         });
     }
@@ -139,7 +181,7 @@ pub fn decide(
         // Old recipients first: a domain that loses its only known sender is
         // not known for the new recipients.
         for a in old.iter().filter(|a| !recipients.contains(a)) {
-            recheck(conn, a, now_ms, &mut rerun)?;
+            recheck(conn, a, now_ms, ch)?;
         }
         let mut known = known_domains(conn, "")?;
         for to in &recipients {
@@ -150,7 +192,7 @@ pub fn decide(
             .execute(params![message, to, sha])?;
             match near(to, &known) {
                 Some(k) => upsert(
-                    &mut rerun,
+                    ch,
                     conn,
                     to,
                     None,
@@ -160,7 +202,7 @@ pub fn decide(
                 )
                 .map(drop)?,
                 None => {
-                    upsert(&mut rerun, conn, to, None, Kind::Person, "sent", now_ms)?;
+                    upsert(ch, conn, to, None, Kind::Person, "sent", now_ms)?;
                     // A row that a person set keeps its kind: only a known
                     // sender adds its domain.
                     let kind: Option<String> =
@@ -175,7 +217,7 @@ pub fn decide(
         }
 
         return Ok(Decision {
-            rerun,
+            rerun: Vec::new(),
             ..own("sent")
         });
     }
@@ -186,7 +228,7 @@ pub fn decide(
             sender: None,
             basis: "no from address".into(),
             previous: None,
-            rerun,
+            rerun: Vec::new(),
         });
     };
     // (id, kind, decided_by)
@@ -210,24 +252,16 @@ pub fn decide(
                     sender: Some(*id),
                     basis: "set by a person".into(),
                     previous,
-                    rerun,
+                    rerun: Vec::new(),
                 });
             }
         }
     }
 
     let (kind, basis) = rules(conn, &addr, Some((&head, message, sha.as_deref(), date)))?;
-    let id = upsert(
-        &mut rerun,
-        conn,
-        &addr,
-        name.as_deref(),
-        kind,
-        &basis,
-        now_ms,
-    )?;
+    let id = upsert(ch, conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
     Ok(Decision {
-        rerun,
+        rerun: Vec::new(),
         kind,
         sender: Some(id),
         basis,
@@ -264,14 +298,9 @@ fn own(basis: &str) -> Decision {
 
 /// Decide the address `addr` again with no message from it: a sent message
 /// that named it lost its `sent` evidence row.
-fn recheck(
-    conn: &Connection,
-    addr: &str,
-    now_ms: i64,
-    rerun: &mut Vec<i64>,
-) -> rusqlite::Result<()> {
+fn recheck(conn: &Connection, addr: &str, now_ms: i64, ch: &mut Changes) -> rusqlite::Result<()> {
     let (kind, basis) = rules(conn, addr, None)?;
-    upsert(rerun, conn, addr, None, kind, &basis, now_ms)?;
+    upsert(ch, conn, addr, None, kind, &basis, now_ms)?;
     Ok(())
 }
 
@@ -379,7 +408,7 @@ fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<
 /// the kind, and keeps its name.
 #[allow(clippy::too_many_arguments)]
 fn upsert(
-    rerun: &mut Vec<i64>,
+    ch: &mut Changes,
     conn: &Connection,
     addr: &str,
     name: Option<&str>,
@@ -408,8 +437,16 @@ fn upsert(
     )?;
     // A missing row or a NULL kind counts as not hostile.
     let hostile = |k: Option<&str>| k == Some(Kind::Hostile.name());
-    if hostile(before.flatten().as_deref()) != hostile(after.as_deref()) {
-        rerun.push(id);
+    let before = before.flatten();
+    if hostile(before.as_deref()) != hostile(after.as_deref()) {
+        ch.rerun.push(id);
+    }
+    let known = |k: Option<&str>| matches!(k, Some("person" | "service"));
+    if known(before.as_deref()) != known(after.as_deref()) {
+        let d = domain_of(addr).to_string();
+        if !ch.domains.contains(&d) {
+            ch.domains.push(d);
+        }
     }
     Ok(id)
 }
@@ -451,27 +488,13 @@ const COMMON: [&str; 26] = [
 ///   at 6 characters or more, by one edit (short real names such as
 ///   `gmail` and `email` must not match).
 ///
-/// Domains with the same registrable domain usually have one owner, so the
-/// rules above do not apply to them. But a shared domain that is not in
-/// [`HOSTED`] (for example `duckdns.org`) gives each subdomain another
-/// owner. So under one registrable domain, the labels just in front of it
-/// are near copies when they differ only by look-alike characters
-/// (`paypa1.duckdns.org` from `paypal.duckdns.org`). Equal labels under
+/// Domains with the same registrable domain have one owner, so they are
+/// never near copies. A shared domain (in [`HOSTED`]) is a public suffix, so
+/// each name under it is its own registrable domain. Equal labels under
 /// another top-level domain are not near copies (`shop.de` and `shop.com`).
 pub fn near_copy(domain: &str, known: &str) -> bool {
-    if domain == known {
+    if domain == known || base(domain) == base(known) {
         return false;
-    }
-    let (b, kb) = (base(domain), base(known));
-    if b == kb {
-        let sub = |d: &str| {
-            let l: Vec<&str> = d.split('.').collect();
-            l.len().checked_sub(b.len() + 1).map(|i| l[i].to_string())
-        };
-        return match (sub(domain), sub(known)) {
-            (Some(x), Some(y)) => x != y && fold(&x) == fold(&y),
-            _ => false,
-        };
     }
     let (mine, theirs) = (names(domain), names(known));
     let telling: Vec<&String> = theirs
@@ -493,7 +516,11 @@ pub fn near_copy(domain: &str, known: &str) -> bool {
 
 /// Hosting suffixes under which each name has another owner, so each one
 /// is a public suffix (as in the public suffix list).
-const HOSTED: [&str; 14] = [
+const HOSTED: [&str; 18] = [
+    "duckdns.org",
+    "ddns.net",
+    "no-ip.org",
+    "dynu.net",
     "github.io",
     "gitlab.io",
     "herokuapp.com",
@@ -594,7 +621,6 @@ mod tests {
             ("paypall.co.uk", "paypal.co.uk"),
             ("paypal-verify.co.uk", "paypal.co.uk"),
             ("paypa1.duckdns.org", "paypal.duckdns.org"),
-            ("rnicrosoft.example.net", "microsoft.example.net"),
         ];
         for (d, k) in yes {
             assert!(near_copy(d, k), "{d} {k}");
@@ -618,6 +644,7 @@ mod tests {
             ("eu.shop.com", "us.shop.com"),
             ("a.b.shop.com", "b.shop.com"),
             ("bi1ling.example.com", "billing.example.com"),
+            ("rnicrosoft.example.net", "microsoft.example.net"),
         ];
         for (d, k) in no {
             assert!(!near_copy(d, k), "{d} {k}");

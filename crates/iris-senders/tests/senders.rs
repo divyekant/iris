@@ -634,18 +634,17 @@ fn a_sent_message_reports_each_hostile_change_of_a_recipient() {
             })
             .unwrap()
     };
-    for t in ["t2", "t3", "t4"] {
-        c.put(t, &[], &service_mail());
-    }
-    // The service is known now, so the next sent message makes the
-    // recipient hostile. The caller must run understanding again on its mail.
-    let d = c.put(
-        "t5",
-        &["SENT"],
-        &format!("From: {OWNER}\r\nTo: alerts@shop-secure.example.net"),
-    );
-    assert_eq!(d.kind, Kind::SelfOwner);
+    c.put("t2", &[], &service_mail());
+    c.put("t3", &[], &service_mail());
+    // The service becomes known, so the recipient becomes hostile in the
+    // same call. The caller must run understanding again on its mail.
+    let d = c.put("t4", &[], &service_mail());
+    assert_eq!(d.kind, Kind::Service);
     assert_eq!(d.rerun, vec![id(&c)]);
+    assert_eq!(
+        c.row("alerts@shop-secure.example.net").1.as_deref(),
+        Some("hostile")
+    );
     // No change: nothing to run again.
     let d = c.put(
         "t6",
@@ -750,8 +749,10 @@ fn a_changed_sent_message_compares_new_recipients_after_the_old_ones_go() {
     m.content_sha256 = Some(c.store.put_content(raw.as_bytes()).unwrap());
     c.store.put_messages(c.acc, &[m]).unwrap();
     again(&c, 1, &raw);
-    assert_eq!(c.row("bob@paypal.com").1.as_deref(), Some("stranger"));
     assert_eq!(c.row("alice@paypa1.com").1.as_deref(), Some("person"));
+    // Bob has no evidence now, and his domain is a near copy of the known
+    // domain of Alice (spec 1 section 6.7: the first known domain wins).
+    assert_eq!(c.row("bob@paypal.com").1.as_deref(), Some("hostile"));
 }
 
 #[test]
@@ -769,13 +770,14 @@ fn a_look_alike_that_came_first_is_hostile_when_its_domain_becomes_known() {
     );
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
     assert_eq!(d.rerun, vec![id]);
-    // paypal.com stops being known (a person sets it): the row goes back.
-    set(&c, "UPDATE sender SET kind = 'stranger', decided_by = 'person' WHERE address = 'support@paypal.com'");
-    let d = c.put(
-        "t3",
-        &["SENT"],
-        &format!("From: {OWNER}\r\nTo: support@paypal.com"),
-    );
+    // paypal.com stops being known: its only sent message loses SENT. The
+    // look-alike row goes back.
+    let raw =
+        format!("From: {OWNER}\r\nTo: support@paypal.com\r\nSubject: x\r\n\r\nBody text.\r\n");
+    let m = new_message("m2", "t2", 2000, &["INBOX"], raw.as_bytes());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    let d = again(&c, 2, &raw);
+    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("stranger"));
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("stranger"));
     assert_eq!(d.rerun, vec![id]);
 }
