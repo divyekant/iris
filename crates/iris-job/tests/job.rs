@@ -438,3 +438,32 @@ fn job_id_parser() {
     }
     assert_eq!(parse_job_id("j-99999999999999999999"), None);
 }
+
+/// SQLite stores text that is not UTF-8 from raw SQL, and has no check of
+/// it. Each reader of such a row fails closed with an error.
+#[test]
+fn a_reader_refuses_text_that_is_not_utf8() {
+    let dir = TempDir::new("utf8");
+    let store = Store::open(&dir.0).unwrap();
+    assert!(sql(
+        &store,
+        "INSERT INTO job (goal, created_at, state, updated_at)
+           VALUES (CAST(x'41ff42' AS TEXT), 1, 'working', 1)"
+    ));
+    assert!(sql(
+        &store,
+        "INSERT INTO job_event (job_id, at, state, by, question)
+           VALUES (1, 2, 'needs_you', 'agent', CAST(x'80' AS TEXT))"
+    ));
+    assert!(matches!(get(&store, 1), Err(Error::Store(_))));
+    assert!(matches!(
+        list(&store, State::NeedsYou),
+        Err(Error::Store(_))
+    ));
+    assert!(matches!(events(&store, 1), Err(Error::Store(_))));
+    let mut out = Vec::new();
+    assert!(matches!(
+        write_document(&store, 1, &mut out),
+        Err(Error::Store(_))
+    ));
+}

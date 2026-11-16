@@ -10,6 +10,8 @@
 -- Each value fits the job document (docs/spec/schema/job.schema.json):
 -- text with no NUL character (SQLite length() stops at a NUL), an integer
 -- time from 1970 to the year 9999 in milliseconds, and positive IDs.
+-- SQLite has no check of UTF-8. The crate iris-job binds only Rust strings,
+-- which are UTF-8. A reader refuses a row with text that is not UTF-8.
 --
 -- The triggers hold for each SQL path. They are not a security boundary
 -- (issue #158): an agent session has no SQL access.
