@@ -936,3 +936,31 @@ fn encoded_headers_are_decoded() {
     assert_eq!(doc["sources"][0]["quote"], "Café on Friday");
     assert_eq!(doc["participants"][1]["name"], "Renée Bo");
 }
+
+#[test]
+fn a_gone_origin_with_a_live_service_update_keeps_the_status() {
+    let b = Box_::new("goneorigin");
+    let v = validator();
+    b.kind("news@shop.example", "service");
+    let p = b.put(M {
+        id: "a",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    b.put(M {
+        id: "s",
+        from: ("Shop", "news@shop.example"),
+        ..M::default()
+    });
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW} WHERE id = {p}"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(
+        doc["status"], "active",
+        "section 4.5: only a part of the sources is gone"
+    );
+    assert_eq!(doc["sources"][0]["message"], format!("m-{p}"));
+}
