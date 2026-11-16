@@ -113,7 +113,8 @@ It expires soon.
 
 #[test]
 fn an_old_code_is_expired() {
-    let raw = "From: Bank <no-reply@bank.example>\nSubject: Your code 482913\n\nUse it now.\n";
+    let raw =
+        "From: Bank <no-reply@bank.example>\nSubject: Your code 482913\n\nUse it to sign in now.\n";
     let labels: Vec<String> = Vec::new();
     let none = |_: &str| Vec::new();
     let cx = Context {
@@ -298,7 +299,7 @@ fn a_year_shaped_code_bound_to_its_word_counts() {
 
 #[test]
 fn an_unclear_code_in_a_list_message_goes_to_the_model() {
-    let raw = LIST.replace("Read the news.", "Your code is 1234 or 5678");
+    let raw = LIST.replace("Read the news.", "Your sign-in code is 1234 or 5678");
     assert_ne!(raw, LIST);
     assert!(drafts(&raw, Kind::Service, &[]).is_none());
 }
@@ -315,6 +316,23 @@ fn a_long_line_of_codes_is_read_in_linear_time() {
         "{:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn a_payment_notice_in_a_list_message_goes_to_the_model() {
+    let raw = LIST
+        .replace("This week in mail standards", "Your payment is due")
+        .replace("Read the news.", "Pay $42 by Friday.");
+    assert!(drafts(&raw, Kind::Service, &[]).is_none());
+}
+
+#[test]
+fn a_promotion_code_is_no_sign_in_code() {
+    let raw = "From: Shop <deals@shop.example>\nSubject: Your discount code\n\nUse code 1234 at checkout. Log in to see more.\n";
+    assert!(drafts(raw, Kind::Service, &[]).is_none());
+    // In a list message, it is a feed item.
+    let list = format!("List-Id: <deals.shop.example>\n{raw}");
+    assert_eq!(one(&list, Kind::Service, &[]).item["form"], "feed");
 }
 
 #[test]

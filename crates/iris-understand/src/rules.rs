@@ -24,6 +24,45 @@ const RECORD_WORDS: [&str; 8] = [
     "order #",
     "total:",
 ];
+/// Whole words of a request to pay or to act: the model reads the message.
+const ACTION_WORDS: [&str; 9] = [
+    "pay",
+    "payment",
+    "due",
+    "overdue",
+    "bill",
+    "balance",
+    "renew",
+    "renewal",
+    "action required",
+];
+/// Whole words of a sign-in. A code counts only in a message with one.
+const LOGIN_WORDS: [&str; 12] = [
+    "sign in",
+    "sign-in",
+    "log in",
+    "login",
+    "log-in",
+    "verify",
+    "verification",
+    "two-factor",
+    "2fa",
+    "authentication",
+    "one-time",
+    "passcode",
+];
+/// Whole words of a promotion: its code is not a sign-in code.
+// shortcut: the word lists are short and in English, issue #95.
+const PROMO_WORDS: [&str; 8] = [
+    "discount",
+    "coupon",
+    "promo",
+    "promotion",
+    "voucher",
+    "gift",
+    "referral",
+    "sale",
+];
 
 /// The items of the first rule that matches, or `None` if no rule matches
 /// and the message goes to the model. Hostile mail (a hostile mark or a
@@ -69,7 +108,11 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         return Some(vec![Draft::rule(item, "invitation", quote)]);
     }
     if cx.kind == Kind::Service {
-        let found = find_code(subject, &a.text.text);
+        let found = if is_login(a) {
+            find_code(subject, &a.text.text)
+        } else {
+            None
+        };
         // A code word with no clear code: the model reads it, also when the
         // list rule could match.
         if found == Some(None) {
@@ -125,8 +168,16 @@ fn or_none(s: &str) -> &str {
 
 fn looks_like_record(a: &Analysis) -> bool {
     // The whole clean text: it is bounded, and a receipt can come late.
-    let hay = format!("{}\n{}", a.text.subject, a.text.text).to_lowercase();
-    RECORD_WORDS.iter().any(|w| hay.contains(w))
+    let hay = format!("{}\n{}", a.text.subject, a.text.text);
+    let low = hay.to_lowercase();
+    RECORD_WORDS.iter().any(|w| low.contains(w)) || !words(&hay, &ACTION_WORDS).is_empty()
+}
+
+/// The message is about a sign-in, and not a promotion: a code in it is a
+/// sign-in code (specification 1, section 6.6).
+fn is_login(a: &Analysis) -> bool {
+    let hay = format!("{}\n{}", a.text.subject, a.text.text);
+    !words(&hay, &LOGIN_WORDS).is_empty() && words(&hay, &PROMO_WORDS).is_empty()
 }
 
 /// The one code of the message. A code is a run of 4 to 8 digits:
@@ -266,10 +317,16 @@ fn bind(line: &str, num: (usize, usize), cue: (usize, usize)) -> Bind {
 /// The byte ranges of the code words in `line`, as whole words: "barcode"
 /// does not hold the word "code".
 fn cues(line: &str) -> Vec<(usize, usize)> {
-    // ASCII lowercase keeps the byte offsets of `line`.
-    let low = line.to_ascii_lowercase();
+    words(line, &CODE_WORDS)
+}
+
+/// The byte ranges of `list` in `text` as whole words, in order. The words
+/// of `list` are lowercase ASCII.
+fn words(text: &str, list: &[&str]) -> Vec<(usize, usize)> {
+    // ASCII lowercase keeps the byte offsets of `text`.
+    let low = text.to_ascii_lowercase();
     let mut out = Vec::new();
-    for w in CODE_WORDS {
+    for w in list {
         for (i, _) in low.match_indices(w) {
             let before = low[..i].chars().next_back();
             let after = low[i + w.len()..].chars().next();
