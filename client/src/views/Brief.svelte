@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, loadBrief, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
+  import { across, copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
@@ -91,9 +91,9 @@
   <div class="copying" role="status">
     <p>
       {#if stopped}
-        Iris copied {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages, then Google stopped the sign-in.
+        Iris copied {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages{across(status)}, then Google stopped the sign-in.
       {:else}
-        Iris still copies your mailbox: {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages.
+        Iris still copies your mailbox: {progress.fetched.toLocaleString("en-US")} of {progress.total ? progress.total.toLocaleString("en-US") : "all"} messages{across(status)}.
       {/if}
       {brief.oldest_fetched ? `This brief covers the mail since ${when(brief.oldest_fetched)}.` : stopped ? "This brief covers the mail that Iris copied." : "The brief grows as the copy continues."}
     </p>

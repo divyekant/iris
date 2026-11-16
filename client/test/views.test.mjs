@@ -667,7 +667,7 @@ test("the brief and setup show the first sync while any account still copies", a
   const copying = { ...fx.status.accounts[0], id: 2, address: "b@example.com", mirror_ready_at: null, sync: { kind: "first", step: 2 } };
   const status = { accounts: [ready, copying], messages: { total: 84212, fetched: 20000, understood: 500, gone: 0 } };
   const brief = { ...fx.brief, oldest_fetched: "2026-09-01T00:00:00Z" };
-  assert.match(text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 })), /Iris still copies your mailbox: 20,000 of 84,212 messages\. This brief covers the mail since/);
+  assert.match(text(await render("/src/views/Brief.svelte", { brief, status, now: NOW, poll: 0 })), /Iris still copies your mailbox: 20,000 of 84,212 messages from all accounts\. This brief covers the mail since/);
   assert.match(text(await render("/src/views/Setup.svelte", { status, poll: 0 })), /Iris copies b@example\.com/);
   const done = { ...status, accounts: [ready, { ...copying, mirror_ready_at: "2026-11-16T08:00:00Z" }] };
   assert.doesNotMatch(text(await render("/src/views/Brief.svelte", { brief, status: done, now: NOW, poll: 0 })), /Iris still copies/);
@@ -685,7 +685,7 @@ test("the brief and setup say that the copy stopped for an account that needs si
   assert.doesNotMatch(early, /copy continues/);
   const t = text(await render("/src/views/Setup.svelte", { status, poll: 0 }));
   assert.doesNotMatch(t, /Iris copies|copy continues/);
-  assert.match(t, /The copy of b@example\.com stopped at 20,000 of 84,212 messages\./);
+  assert.match(t, /The copy of b@example\.com stopped\. Iris copied 20,000 of 84,212 messages\./);
   const { copying } = await load("/src/format.ts");
   assert.deepEqual(copying(status), []);
 });
@@ -709,7 +709,7 @@ test("a record field shows a party as a person, also in a list and with no name"
   const sender = { kind: "sender", sender: "p-3", address: "x@example.com" };
   assert.equal(field(sender), "x@example.com");
   assert.equal(field([{ kind: "self" }, sender, { kind: "sender", name: "Acme Legal", address: "legal@acme.example" }]), "You, x@example.com, Acme Legal");
-  assert.equal(field({ value: 12.5, currency: "USD" }).includes("12.50"), true);
+  assert.equal(field({ value: 12.5, currency: "USD" }), "12.5 USD");
 });
 
 test("an old 401 that ends after a new sign-in keeps the new token", async () => {

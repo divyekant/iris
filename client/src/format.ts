@@ -127,7 +127,9 @@ export function other(item: Item): Party | undefined {
 export function field(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "object" && "value" in value && "currency" in value) return money(value as Money);
-  if (Array.isArray(value)) return value.map((v) => (typeof v === "object" && v && "name" in v ? String(v.name) : field(v))).join(", ");
+  if (Array.isArray(value)) return value.map(field).filter(Boolean).join(", ");
+  // A party (spec 1 section 6.4) shows as a person: its name, else its address.
+  if (typeof value === "object" && ("kind" in value || "name" in value)) return party(value as Party);
   if (typeof value === "object") return Object.values(value).map(field).filter(Boolean).join(", ");
   const text = String(value);
   return /^\d{4}-\d{2}-\d{2}(T|$)/.test(text) ? when(text) : text;
@@ -190,6 +192,11 @@ export function unfinished(status: Status | null): Account[] {
 /** The accounts that still copy in their first sync. A refused sign-in stops the sync (spec 1 section 4.7). */
 export function copying(status: Status | null): Account[] {
   return unfinished(status).filter((a) => a.state !== "needs_sign_in");
+}
+
+/** The API counts the messages of all accounts together: say so when there are two or more. */
+export function across(status: Status | null): string {
+  return status && status.accounts.length > 1 ? " from all accounts" : "";
 }
 
 /** The home view: the setup flow until there is something to show, then the brief. */

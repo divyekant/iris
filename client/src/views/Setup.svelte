@@ -5,7 +5,7 @@
 <script lang="ts">
   import { get, type Status } from "../api";
   import { poll as every } from "../clock";
-  import { copying, unfinished } from "../format";
+  import { across, copying, unfinished } from "../format";
 
   let { status: initial, poll = 2000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
@@ -55,14 +55,14 @@
   {:else if stage === 1 && stopped}
     <section>
       <h1>The copy stopped</h1>
-      <p class="big">The copy of {account.address} stopped at {number(m.fetched)} of {m.total ? number(m.total) : "all"} messages.</p>
+      <p class="big">The copy of {account.address} stopped. Iris copied {number(m.fetched)} of {m.total ? number(m.total) : "all"} messages{across(status)}.</p>
       <p class="quiet">Iris continues the copy after you sign in again. Nothing in your mailbox changed.</p>
       {#if m.understood > 0}<a class="go" href="#/brief">Open the brief</a>{/if}
     </section>
   {:else if stage === 1}
     <section>
       <h1>Iris copies {account.address}</h1>
-      <p class="big"><strong>{number(m.fetched)}</strong> of {m.total ? number(m.total) : "all"} messages copied.</p>
+      <p class="big"><strong>{number(m.fetched)}</strong> of {m.total ? number(m.total) : "all"} messages copied{across(status)}.</p>
       <progress max={m.total || 1} value={m.fetched} aria-label="Messages copied"></progress>
       <p class="quiet">Iris only reads. Nothing in your mailbox changes. You can close this page: the copy continues.</p>
       {#if m.understood > 0}
@@ -73,7 +73,7 @@
   {:else}
     <section>
       <h1>Mirror ready.</h1>
-      <p class="big">{number(m.fetched)} messages. Nothing in your mailbox changed.</p>
+      <p class="big">{number(m.fetched)} messages{across(status)}. Nothing in your mailbox changed.</p>
       {#if m.understood < m.fetched}
         <progress max={m.fetched || 1} value={m.understood} aria-label="Messages read"></progress>
         <p class="quiet">Iris reads the mail to make your brief: {number(m.understood)} of {number(m.fetched)} messages.</p>
