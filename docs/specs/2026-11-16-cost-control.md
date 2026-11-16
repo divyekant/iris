@@ -67,6 +67,13 @@ The runner reads the pending rule again for each message, just before the
 call, not only when it selects the batch. So an older message that failed
 in the same batch holds the later messages of its thread.
 
+The runner works thread by thread. It takes the next thread in the order
+below that has a pending message, and runs the pending messages of that
+thread, oldest first, until the thread has none that is pending. Then it
+takes the next thread. So the runner finishes a newer thread before it
+starts an older one. A batch ends after the thread that brings it to
+`Limits::batch` messages or more.
+
 ### Resets
 
 A reset makes a message pending again. One function of `iris-store`,
@@ -80,8 +87,13 @@ A reset makes a message pending again. One function of `iris-store`,
   earlier one as thread context (spec 1 section 7.4), so its items can
   depend on it.
 
-So an old item of a message that became spam never stays visible, also
-when the run stops before it reaches the message. Step 0 of the next run
+So an old unpinned item of a message that became spam never stays
+visible, also when the run stops before it reaches the message.
+
+A pinned item (with a correction) keeps its ID and its corrections. While
+its origin message has a hostile mark or the label `SPAM`, the local API and
+the brief do not show it. When the hostile state clears, the item shows
+again. The store does not change it. Step 0 of the next run
 computes the conversation again for each thread with a message that got a
 reset after its conversation was computed (`understood_at` NULL and a
 source of the conversation item). R1-28 starts a run after each sync. The retry state belongs
@@ -115,8 +127,13 @@ A message with no `internal_date` sorts as the oldest.
 
 ### Batch runner
 
-`iris_understand::batch::run(store, model, &Limits, now) -> Report` does
-these steps:
+`iris_understand::batch::run(store, connect, &Limits, now) -> Report` does
+these steps. The caller does not give a model. The runner reads the row of
+`model_setting`, checks the approval against that row, and makes the model
+with `connect(&row)`. The program passes a `connect` that builds the
+`iris-model` client; tests pass a fake. Any change of the row clears the
+approval (`iris model set`), so the approval and the price limit always
+belong to the model that makes the calls.
 
 One run at a time: the runner first takes the run lock, an OS file lock on
 the file `understand.lock` in the data folder (`File::try_lock`, the same
@@ -128,8 +145,8 @@ cost limit of the one run covers all calls.
 
 0. Once at the start of each run, also with no pending message and before
    the approval check: `batch::refresh` (below). It makes no model call.
-1. Read the next batch: at most `Limits::batch` (default 50) pending message
-   IDs, in the order above. Only the IDs stay in memory.
+1. Take the next batch of threads, as above. Only the message IDs of the
+   current thread stay in memory.
 2. For each message that is still pending, call `store::understand`. Then
    add its calls, tokens and cost to the run row, in one small write.
 3. After the batch, in one write, call `iris_senders::refresh` and apply its
@@ -356,6 +373,9 @@ No parser or protocol code is new. The model client is `iris-model`.
 | An earlier message of an understood thread gets new content or `SPAM` | Later items used it as context | The reset covers the later messages of the thread. | Store test. |
 | Sync removes the only sent evidence of a person, and no paid run is approved | The kind stays `person` | Sync calls `batch::refresh`, which needs no approval. | Batch test: refresh with a priced model and no approval. |
 | `iris rebuild` with a priced model and no approval, or while a run holds the lock | Items deleted with no replacement | `batch::run` refuses before the reset, so no item changes. | Batch test: a refused rebuild leaves each item. |
+| A pinned item whose origin message gets `SPAM` | A corrected item of hostile mail shows | The API and the brief hide it while the origin is hostile. It keeps its ID and corrections and shows again when the state clears. | API test. |
+| A library caller passes another paid model after the approval | The approval and the limit of another price | The runner makes the model from `model_setting` itself; the caller gives no model. | Batch test: a changed row clears the approval. |
+| Two threads with pending mail, the newer one with two messages | An older thread runs between the messages of a newer one | The runner finishes the newer thread first. | Batch test of the order. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
 | A `SPAM` label comes or goes on an understood message | The hostile mark is stale | The label write resets the message, so the next run checks it again. | Store test. |
@@ -372,6 +392,8 @@ No parser or protocol code is new. The model client is `iris-model`.
 - `crates/iris-understand`: new module `batch` (pending query, order,
   runner, estimate, run lock). `Decision`, `Outcome` and `Error::Model`
   carry the known usage, `unknown_calls` and `unknown_bound`.
+- `crates/iris-api`: the item reads hide a pinned item whose origin
+  message is hostile.
 - `crates/iris-model`: `Usage::known`; errors after the request carry the
   request bytes.
 - `crates/iris-senders`: `decide` and `refresh` give each changed row, with
