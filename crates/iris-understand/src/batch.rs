@@ -4,7 +4,6 @@
 //! each run. [`estimate`] gives the size of the work and changes nothing.
 
 use std::fmt;
-use std::fs::{File, OpenOptions, TryLockError};
 
 use iris_model::{cost, Usage};
 use iris_store::Store;
@@ -92,21 +91,14 @@ impl From<rusqlite::Error> for Error {
 /// The run lock: an OS file lock on [`LOCK_FILE`]. While a value exists, no
 /// other runner can start, in this process or in another one. The OS
 /// releases it when the process ends, also after a crash.
-pub struct RunLock(#[allow(dead_code)] File);
+pub struct RunLock(#[allow(dead_code)] iris_store::FileLock);
 
 /// Takes the run lock, or gives [`Error::Busy`].
 pub fn lock(store: &Store) -> Result<RunLock, Error> {
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(store.dir().join(LOCK_FILE))
-        .map_err(|e| Error::Store(e.into()))?;
-    match f.try_lock() {
-        Ok(()) => Ok(RunLock(f)),
-        Err(TryLockError::WouldBlock) => Err(Error::Busy),
-        Err(TryLockError::Error(e)) => Err(Error::Store(e.into())),
+    match iris_store::FileLock::try_take(&store.dir().join(LOCK_FILE)) {
+        Ok(Some(l)) => Ok(RunLock(l)),
+        Ok(None) => Err(Error::Busy),
+        Err(e) => Err(Error::Store(e.into())),
     }
 }
 

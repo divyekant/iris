@@ -7,6 +7,7 @@
 
 mod backup;
 mod content;
+mod file_lock;
 mod id;
 mod search;
 mod secret;
@@ -22,6 +23,7 @@ use rusqlite::{params, Connection, OpenFlags, Transaction};
 
 pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
+pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
 
