@@ -123,7 +123,10 @@ fn show_drafts_and_withdraw_go_through_the_socket() {
     assert_eq!(list, json!({ "changesets": [id] }));
     let doc = socket::request(&d, "withdraw", json!({ "changeset": id })).unwrap();
     assert_eq!(doc["state"], json!("withdrawn"));
-    assert_eq!(socket::request(&d, "drafts", json!({})).unwrap(), json!({ "changesets": [] }));
+    assert_eq!(
+        socket::request(&d, "drafts", json!({})).unwrap(),
+        json!({ "changesets": [] })
+    );
 
     // A changeset of another author: code 2, and it stays.
     let other = format!("cs-{}", draft(&store, &agent()));
@@ -133,7 +136,10 @@ fn show_drafts_and_withdraw_go_through_the_socket() {
     assert_ne!(doc["state"], json!("withdrawn"));
     // No such changeset: code 2.
     let e = socket::request(&d, "show", json!({ "changeset": "cs-999" })).unwrap_err();
-    assert_eq!((e.code, e.error.as_str()), (code::USAGE, "no changeset cs-999"));
+    assert_eq!(
+        (e.code, e.error.as_str()),
+        (code::USAGE, "no changeset cs-999")
+    );
 }
 
 /// Random lines that are not a valid request give code 2 and write nothing.
@@ -159,7 +165,9 @@ fn a_request_that_is_not_valid_writes_nothing() {
     for _ in 0..300 {
         let mut line: Vec<u8> = (0..(seed % 80))
             .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 b"{}[]\":,v1verbargschangesetcs-0123456789 \\"[(seed >> 33) as usize % 40]
             })
             .collect();
@@ -167,13 +175,24 @@ fn a_request_that_is_not_valid_writes_nothing() {
         fixed.push(line);
     }
     for line in &fixed {
-        let a = socket::answer(&store, line);
+        let mut a = Vec::new();
+        socket::answer(&store, line, &mut a).unwrap();
         let a: Value = serde_json::from_slice(&a).unwrap();
         if a["ok"] == json!(true) {
             // Only a valid drafts request can pass, and it reads.
-            assert_eq!(a["result"], json!({ "changesets": [] }), "{}", String::from_utf8_lossy(line));
+            assert_eq!(
+                a["result"],
+                json!({ "changesets": [] }),
+                "{}",
+                String::from_utf8_lossy(line)
+            );
         } else {
-            assert_eq!(a["code"], json!(code::USAGE), "{}", String::from_utf8_lossy(line));
+            assert_eq!(
+                a["code"],
+                json!(code::USAGE),
+                "{}",
+                String::from_utf8_lossy(line)
+            );
         }
     }
     assert_eq!(changesets(&store), 0);
@@ -214,7 +233,10 @@ fn the_command_exits_4_with_no_engine_and_shows_a_changeset_with_one() {
     std::fs::create_dir_all(&d).unwrap();
     let iris = || {
         let mut c = Command::new(env!("CARGO_BIN_EXE_iris"));
-        c.arg("--data").arg(&d).stdout(Stdio::piped()).stderr(Stdio::piped());
+        c.arg("--data")
+            .arg(&d)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         c
     };
     let out = iris().args(["withdraw", "cs-1"]).output().unwrap();
@@ -233,17 +255,31 @@ fn the_command_exits_4_with_no_engine_and_shows_a_changeset_with_one() {
     }
     let store = Store::open(&d).unwrap();
     let cs = draft(&store, &socket::local());
-    let out = iris().args(["changeset", &format!("cs-{cs}")]).output().unwrap();
+    let out = iris()
+        .args(["changeset", &format!("cs-{cs}")])
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(text.starts_with(&format!("ID: cs-{cs}\n")), "{text}");
-    assert!(text.contains("1.1 close draft"), "{text}");
+    assert!(text.contains("1.1 close c-1 draft"), "{text}");
     let out = iris().args(["changeset", "--drafts"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), format!("cs-{cs}\n"));
-    let out = iris().args(["withdraw", &format!("cs-{cs}")]).output().unwrap();
+    let out = iris()
+        .args(["withdraw", &format!("cs-{cs}")])
+        .output()
+        .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("State: withdrawn"));
     // A second engine on the same folder stops.
-    let out = iris().args(["serve", "--addr", "127.0.0.1:0"]).output().unwrap();
+    let out = iris()
+        .args(["serve", "--addr", "127.0.0.1:0"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("another engine runs"));
     serve.kill().unwrap();
@@ -256,6 +292,7 @@ fn a_slow_request_is_closed_and_the_connections_are_bounded() {
     use std::time::{Duration, Instant};
     let limits = socket::Limits {
         read_wait: Duration::from_millis(300),
+        write_wait: Duration::from_secs(5),
         connections: 1,
     };
     let (_store, d) = engine_with("slow", limits);
@@ -264,9 +301,161 @@ fn a_slow_request_is_closed_and_the_connections_are_bounded() {
     let start = Instant::now();
     // While the quiet connection holds the one slot, the next request waits.
     let a = raw(&d, b"{\"v\":1,\"verb\":\"drafts\",\"args\":{}}\n");
-    assert!(start.elapsed() >= Duration::from_millis(250), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() >= Duration::from_millis(250),
+        "{:?}",
+        start.elapsed()
+    );
     assert_eq!(a["ok"], json!(true));
     let mut rest = Vec::new();
     quiet.read_to_end(&mut rest).unwrap();
     assert!(rest.is_empty(), "no answer to a connection with no request");
+}
+
+/// A store with the commitment c-1 (open) and the message m-1.
+fn mailbox(store: &Store) {
+    let a = store.add_account("gmail", "owner@example.com").unwrap();
+    let m = iris_store::NewMessage {
+        provider_id: "g1".into(),
+        thread_provider_id: "gt1".into(),
+        ..Default::default()
+    };
+    store.put_messages(a, &[m]).unwrap();
+    let mut doc = iris_spec::read_json(
+        &iris_spec::schema_dir()
+            .join("examples")
+            .join("commitment-you-owe.json"),
+    );
+    doc["id"] = json!("c-1");
+    doc["status"] = json!("open");
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', ?1, 'open', ?2, 0, 0)",
+                rusqlite::params![a, doc.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn add(d: &std::path::Path, verb: &str, targets: &[&str], args: Value, cs: Option<&str>) -> Value {
+    let mut r = json!({ "verb": verb, "targets": targets, "args": args });
+    if let Some(cs) = cs {
+        r["changeset"] = json!(cs);
+    }
+    socket::request(d, "add", r).unwrap()
+}
+
+#[test]
+fn add_and_submit_give_the_codes_of_section_8_4() {
+    let (store, d) = engine("submit");
+    mailbox(&store);
+    // A valid close waits for the person: code 5.
+    let r = add(&d, "close", &["c-1"], json!({ "reason": "Sent it." }), None);
+    assert_eq!(r["n"], json!(1));
+    let cs = r["changeset"].as_str().unwrap().to_string();
+    // A second action in the same draft.
+    let r2 = add(&d, "read", &["m-1"], json!({}), Some(&cs));
+    assert_eq!(
+        (r2["changeset"].as_str(), r2["n"].as_i64()),
+        (Some(cs.as_str()), Some(2))
+    );
+    let doc = socket::request(&d, "submit", json!({ "changeset": cs, "why": "Tidy up." })).unwrap();
+    assert_eq!(iris::submit_code(&doc), code::OPEN, "{doc}");
+    assert_eq!(doc["actions"][0]["decision"]["state"], json!("proposed"));
+
+    // A target of the wrong kind is denied by the engine: code 2, not 3.
+    let r = add(&d, "close", &["m-1"], json!({ "reason": "x" }), None);
+    let cs2 = r["changeset"].as_str().unwrap();
+    let doc = socket::request(&d, "submit", json!({ "changeset": cs2, "why": "x" })).unwrap();
+    assert_eq!(
+        doc["actions"][0]["decision"]["by"],
+        json!("engine"),
+        "{doc}"
+    );
+    assert_eq!(iris::submit_code(&doc), code::USAGE);
+
+    // Hostile mail: a hard limit denies `read` by `local`, also in the mode observe.
+    store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE message SET hostile = '[\"dmarc\"]' WHERE id = 1",
+                [],
+            )?)
+        })
+        .unwrap();
+    let r = add(&d, "read", &["m-1"], json!({}), None);
+    let cs3 = r["changeset"].as_str().unwrap();
+    let doc = socket::request(&d, "submit", json!({ "changeset": cs3, "why": "x" })).unwrap();
+    let decision = &doc["actions"][0]["decision"];
+    assert_eq!(
+        (decision["state"].as_str(), decision["by"].as_str()),
+        (Some("denied"), Some("limit")),
+        "{doc}"
+    );
+    assert_eq!(iris::submit_code(&doc), code::DENIED);
+    // `archive` stays allowed on hostile mail: it waits for the person.
+    let r = add(&d, "archive", &["m-1"], json!({}), None);
+    let cs4 = r["changeset"].as_str().unwrap();
+    let doc = socket::request(&d, "submit", json!({ "changeset": cs4, "why": "x" })).unwrap();
+    assert_eq!(iris::submit_code(&doc), code::OPEN, "{doc}");
+}
+
+#[test]
+fn the_submit_code_reads_only_the_new_revision() {
+    let doc = json!({ "revision": 2, "actions": [
+        { "revision": 1, "n": 1, "decision": { "state": "denied", "by": "rule" } },
+        { "revision": 1, "n": 2, "decision": { "state": "failed", "by": "person" } },
+        { "revision": 2, "n": 1, "decision": { "state": "proposed" } },
+    ]});
+    assert_eq!(iris::submit_code(&doc), code::OPEN);
+}
+
+#[test]
+fn a_large_document_streams_and_a_stalled_reader_frees_its_slot() {
+    use std::time::Duration;
+    let limits = socket::Limits {
+        read_wait: Duration::from_secs(5),
+        write_wait: Duration::from_millis(300),
+        connections: 1,
+    };
+    let (store, d) = engine_with("large", limits);
+    let me = socket::local();
+    let cs = iris_changeset::create(&store, &me, 0).unwrap();
+    let why = "w".repeat(1000);
+    let mut args = Map::new();
+    args.insert("reason".into(), "Done.".into());
+    for _ in 0..3000 {
+        iris_changeset::add_action(&store, cs, &me, Verb::Close, &["c-1"], &args, Some(&why))
+            .unwrap();
+    }
+    let id = format!("cs-{cs}");
+    // About 3 MB: the whole document comes through.
+    let doc = socket::request(&d, "show", json!({ "changeset": id })).unwrap();
+    assert_eq!(doc["actions"].as_array().unwrap().len(), 3000);
+    // A peer that sends the request and never reads holds the one slot
+    // only until the write deadline.
+    let mut stalled = UnixStream::connect(d.join(socket::SOCKET)).unwrap();
+    stalled
+        .write_all(
+            format!("{{\"v\":1,\"verb\":\"show\",\"args\":{{\"changeset\":\"{id}\"}}}}\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let start = std::time::Instant::now();
+    let list = socket::request(&d, "drafts", json!({})).unwrap();
+    assert_eq!(list, json!({ "changesets": [id] }));
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    drop(stalled);
 }

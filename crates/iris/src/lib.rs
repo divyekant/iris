@@ -103,6 +103,70 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
+    Close {
+        id: String,
+        /// The reason. The default is "Done.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Decline a commitment in a draft changeset. Needs the engine.
+    Decline {
+        id: String,
+        /// The reason. The default is "Declined.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Defer a commitment to a date in a draft changeset. Needs the engine.
+    Defer {
+        id: String,
+        /// The day it opens again, YYYY-MM-DD.
+        #[arg(long)]
+        date: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Correct one field of an item in a draft changeset. Needs the engine.
+    Correct {
+        id: String,
+        /// The field, a dotted path, for example due.date.
+        #[arg(long)]
+        field: String,
+        /// The new value, as JSON. A value that is not JSON is a text.
+        #[arg(long)]
+        value: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Archive threads or messages in a draft changeset. Needs the engine.
+    Archive(Targets),
+    /// Move threads or messages to the inbox in a draft changeset.
+    Inbox(Targets),
+    /// Mark threads or messages read in a draft changeset.
+    Read(Targets),
+    /// Mark threads or messages unread in a draft changeset.
+    Unread(Targets),
+    /// Move threads or messages to the trash in a draft changeset.
+    Trash(Targets),
+    /// Add a label in a draft changeset.
+    Label(LabelTargets),
+    /// Remove a label in a draft changeset.
+    Unlabel(LabelTargets),
+    /// Submit a draft changeset. Prints the state of each action. Needs the engine.
+    Submit {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// The reason of the changeset, for the person.
+        #[arg(long)]
+        why: String,
+        /// Print the changeset document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
     #[command(arg_required_else_help = true)]
     Changeset {
@@ -163,6 +227,73 @@ pub enum WatchCommand {
     },
     /// Remove a watch (`w-3`): one that waits, or one that you saw.
     Remove { id: String },
+}
+
+/// The draft changeset of a verb that adds an action.
+#[derive(clap::Args, Clone)]
+pub struct Draft {
+    /// Add to this draft changeset. Without it, the command makes a new one.
+    #[arg(long)]
+    pub changeset: Option<String>,
+    /// The reason of the action.
+    #[arg(long)]
+    pub why: Option<String>,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct Targets {
+    /// Thread (`t-3`) or message (`m-42`) IDs.
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    #[command(flatten)]
+    pub to: Draft,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct LabelTargets {
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    /// The label name.
+    #[arg(long)]
+    pub label: String,
+    #[command(flatten)]
+    pub to: Draft,
+}
+
+/// The action of a verb that adds one: the verb, the targets, the
+/// arguments and the draft.
+fn action(c: &Command) -> Option<(&'static str, Vec<String>, serde_json::Value, &Draft)> {
+    use serde_json::json;
+    let reason = |r: &Option<String>, default: &str| json!({ "reason": r.clone().unwrap_or_else(|| default.into()) });
+    Some(match c {
+        Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
+        Command::Decline { id, reason: r, to } => {
+            ("decline", vec![id.clone()], reason(r, "Declined."), to)
+        }
+        Command::Defer { id, date, to } => ("defer", vec![id.clone()], json!({ "date": date }), to),
+        Command::Correct {
+            id,
+            field,
+            value,
+            to,
+        } => {
+            let value = serde_json::from_str(value).unwrap_or_else(|_| json!(value));
+            (
+                "correct",
+                vec![id.clone()],
+                json!({ "field": field, "value": value }),
+                to,
+            )
+        }
+        Command::Archive(t) => ("archive", t.ids.clone(), json!({}), &t.to),
+        Command::Inbox(t) => ("inbox", t.ids.clone(), json!({}), &t.to),
+        Command::Read(t) => ("read", t.ids.clone(), json!({}), &t.to),
+        Command::Unread(t) => ("unread", t.ids.clone(), json!({}), &t.to),
+        Command::Trash(t) => ("trash", t.ids.clone(), json!({}), &t.to),
+        Command::Label(t) => ("label", t.ids.clone(), json!({ "label": t.label }), &t.to),
+        Command::Unlabel(t) => ("unlabel", t.ids.clone(), json!({ "label": t.label }), &t.to),
+        _ => return None,
+    })
 }
 
 #[derive(Subcommand)]
@@ -275,8 +406,37 @@ pub fn version_line() -> String {
 pub fn run(cli: Cli) -> Result<(), socket::Failure> {
     // The verbs that change changesets go through the engine socket, never
     // through the store (specification 2, section 8.1).
-    let data = engine::data_dir(cli.data.clone())
-        .map_err(|e| socket::Failure { code: socket::code::ERROR, error: e.to_string() });
+    let data = engine::data_dir(cli.data.clone()).map_err(|e| socket::Failure {
+        code: socket::code::ERROR,
+        error: e.to_string(),
+    });
+    if let Some((verb, targets, args, to)) = action(&cli.command) {
+        let mut request = serde_json::json!({ "verb": verb, "targets": targets, "args": args });
+        if let Some(cs) = &to.changeset {
+            request["changeset"] = cs.clone().into();
+        }
+        if let Some(why) = &to.why {
+            request["why"] = why.clone().into();
+        }
+        let r = socket::request(&data?, "add", request)?;
+        println!("{} {}", r["changeset"].as_str().unwrap_or_default(), r["n"]);
+        return Ok(());
+    }
+    if let Command::Submit { id, why, json } = &cli.command {
+        let doc = socket::request(
+            &data?,
+            "submit",
+            serde_json::json!({ "changeset": id, "why": why }),
+        )?;
+        print!("{}", changeset_text(&doc, *json));
+        return match submit_code(&doc) {
+            0 => Ok(()),
+            code => Err(socket::Failure {
+                code,
+                error: format!("{id}: not each action is applied (exit code {code})"),
+            }),
+        };
+    }
     let text = match &cli.command {
         Command::Changeset { id, drafts, json } => {
             let dir = data?;
@@ -303,6 +463,34 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// The exit code of `iris submit` (specification 2, section 8.4), from the
+/// actions of the revision that it submitted, in the order 2, 1, 3, 5, 0.
+pub fn submit_code(doc: &serde_json::Value) -> u8 {
+    let mut codes = Vec::new();
+    for a in doc["actions"].as_array().into_iter().flatten() {
+        if a["revision"] != doc["revision"] {
+            continue;
+        }
+        let d = &a["decision"];
+        codes.push(match (d["state"].as_str(), d["by"].as_str()) {
+            (Some("denied"), Some("engine")) => socket::code::USAGE,
+            (Some("failed"), _) => socket::code::ERROR,
+            (Some("denied"), _) => socket::code::DENIED,
+            (Some("applied"), _) => 0,
+            _ => socket::code::OPEN,
+        });
+    }
+    [
+        socket::code::USAGE,
+        socket::code::ERROR,
+        socket::code::DENIED,
+        socket::code::OPEN,
+    ]
+    .into_iter()
+    .find(|c| codes.contains(c))
+    .unwrap_or(0)
 }
 
 /// `iris changeset --drafts`: one changeset ID on each line.
@@ -338,9 +526,25 @@ pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
     }
     for a in doc["actions"].as_array().into_iter().flatten() {
         let state = a["decision"]["state"].as_str().unwrap_or("draft");
-        let mut line = format!("{}.{} {} {state}", a["revision"], a["n"], s(&a["verb"]));
+        let targets: Vec<String> = a["targets"]
+            .as_object()
+            .into_iter()
+            .flat_map(|t| t.values())
+            .flat_map(|v| v.as_array().cloned().unwrap_or_default())
+            .map(|v| verbs::field(v.as_str().unwrap_or_default()))
+            .collect();
+        let mut line = format!(
+            "{}.{} {} {} {state}",
+            a["revision"],
+            a["n"],
+            s(&a["verb"]),
+            targets.join(",")
+        );
+        if let Some(why) = a["why"].as_str() {
+            line.push_str(&format!(" why: {}", verbs::field(why)));
+        }
         if let Some(reason) = a["decision"]["reason"].as_str() {
-            line.push_str(&format!(": {}", verbs::field(reason)));
+            line.push_str(&format!(" reason: {}", verbs::field(reason)));
         }
         out.push_str(&line);
         out.push('\n');
@@ -420,9 +624,20 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{text}");
             Ok(())
         }
-        Command::Changeset { .. } | Command::Withdraw { .. } => {
-            unreachable!("run() sends these verbs to the socket")
-        }
+        Command::Changeset { .. }
+        | Command::Withdraw { .. }
+        | Command::Submit { .. }
+        | Command::Close { .. }
+        | Command::Decline { .. }
+        | Command::Defer { .. }
+        | Command::Correct { .. }
+        | Command::Archive(_)
+        | Command::Inbox(_)
+        | Command::Read(_)
+        | Command::Unread(_)
+        | Command::Trash(_)
+        | Command::Label(_)
+        | Command::Unlabel(_) => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,

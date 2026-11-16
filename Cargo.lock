@@ -704,6 +704,7 @@ dependencies = [
  "iris-model",
  "iris-policy",
  "iris-service",
+ "iris-spec",
  "iris-store",
  "iris-sync",
  "iris-synth",

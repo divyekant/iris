@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use iris_changeset::{format_changeset_id, parse_changeset_id, Author, AuthorKind};
+use iris_changeset::{format_changeset_id, parse_changeset_id, Author, AuthorKind, Verb};
 use iris_store::{FileLock, Store};
 use serde_json::{json, Value};
 
@@ -111,9 +111,8 @@ pub fn bind(dir: &Path) -> std::io::Result<Bound> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let listener = std::os::unix::net::UnixListener::bind(&path).map_err(|e| {
-        std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))
-    })?;
+    let listener = std::os::unix::net::UnixListener::bind(&path)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
     // The data folder has the mode 0700, so no other user reaches the file
     // before this change.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
@@ -129,6 +128,7 @@ pub fn bind(dir: &Path) -> std::io::Result<Bound> {
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub read_wait: Duration,
+    pub write_wait: Duration,
     pub connections: usize,
 }
 
@@ -136,6 +136,7 @@ impl Default for Limits {
     fn default() -> Limits {
         Limits {
             read_wait: READ_WAIT,
+            write_wait: WRITE_WAIT,
             connections: MAX_CONNECTIONS,
         }
     }
@@ -159,7 +160,7 @@ pub async fn serve_with(bound: &Bound, store: Arc<Store>, limits: Limits) -> std
         let store = store.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            let _ = connection(stream, store, uid, limits.read_wait).await;
+            let _ = connection(stream, store, uid, limits).await;
         });
     }
 }
@@ -173,30 +174,48 @@ async fn connection(
     stream: tokio::net::UnixStream,
     store: Arc<Store>,
     uid: u32,
-    read_wait: Duration,
+    limits: Limits,
 ) -> std::io::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     // Another user: close with no answer.
     if !same_user(stream.peer_cred()?.uid(), uid) {
         return Ok(());
     }
-    let (read, mut write) = stream.into_split();
     let mut line = Vec::new();
-    let mut limited = tokio::io::BufReader::new(read.take(MAX_LINE as u64));
-    let got = tokio::time::timeout(read_wait, limited.read_until(b'\n', &mut line)).await;
-    let answer = match got {
+    let mut limited = tokio::io::BufReader::new(stream.take(MAX_LINE as u64));
+    let got = tokio::time::timeout(limits.read_wait, limited.read_until(b'\n', &mut line)).await;
+    // One request on each connection: bytes after the line are dropped.
+    let stream = limited.into_inner().into_inner();
+    match got {
         Err(_) => return Ok(()),
         Ok(Err(e)) => return Err(e),
-        Ok(Ok(_)) if line.last() != Some(&b'\n') => {
-            failure_line(&Failure::new(code::USAGE, "the request is longer than 64 KiB, or has no newline"))
+        Ok(Ok(_)) => {}
+    }
+    // The work and the answer run on a blocking thread, with a write
+    // deadline: the answer streams, so memory stays at one buffer, and a
+    // peer that stops reading cannot hold the slot for more than WRITE_WAIT.
+    let stream = stream.into_std()?;
+    tokio::task::spawn_blocking(move || {
+        stream.set_nonblocking(false)?;
+        stream.set_write_timeout(Some(limits.write_wait))?;
+        let mut out = std::io::BufWriter::new(&stream);
+        if line.last() != Some(&b'\n') {
+            out.write_all(&failure_line(&usage(
+                "the request is longer than 64 KiB, or has no newline",
+            )))?;
+        } else {
+            answer(&store, &line, &mut out)?;
         }
-        Ok(Ok(_)) => tokio::task::spawn_blocking(move || answer(&store, &line))
-            .await
-            .unwrap_or_else(|_| failure_line(&Failure::new(code::ERROR, "the engine failed"))),
-    };
-    write.write_all(&answer).await?;
-    write.shutdown().await
+        out.flush()?;
+        drop(out);
+        stream.shutdown(std::net::Shutdown::Write)
+    })
+    .await
+    .unwrap_or_else(|_| Err(std::io::Error::other("the engine failed")))
 }
+
+/// The longest time that the engine writes an answer to a peer.
+pub const WRITE_WAIT: Duration = Duration::from_secs(30);
 
 fn failure_line(f: &Failure) -> Vec<u8> {
     let mut v = serde_json::to_vec(&json!({"ok": false, "code": f.code, "error": f.error}))
@@ -205,19 +224,57 @@ fn failure_line(f: &Failure) -> Vec<u8> {
     v
 }
 
-fn ok_line(result: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(result.len() + 16);
-    v.extend_from_slice(b"{\"ok\":true,\"result\":");
-    v.extend_from_slice(result);
-    v.extend_from_slice(b"}\n");
-    v
+/// The result of a request: a changeset document, which streams from the
+/// store, or a small JSON value.
+enum Done {
+    Document(i64),
+    Value(Value),
 }
 
-/// The answer line for one request line. Each request is one transaction.
-pub fn answer(store: &Store, line: &[u8]) -> Vec<u8> {
+/// Writes `prefix` before the first byte, so a document that fails before
+/// its first byte leaves `out` empty and the answer can be a failure.
+struct Prefixed<'a, W: Write> {
+    out: &'a mut W,
+    prefix: Option<&'static [u8]>,
+}
+
+impl<W: Write> Write for Prefixed<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(p) = self.prefix.take() {
+            self.out.write_all(p)?;
+        }
+        self.out.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+
+const OK: &[u8] = b"{\"ok\":true,\"result\":";
+
+/// Write the answer line for one request line to `out`. Each request is one
+/// transaction. A changeset document streams. If a document fails after its
+/// first byte, the error ends the connection, and the command says that the
+/// result is not known.
+pub fn answer(store: &Store, line: &[u8], out: &mut impl Write) -> std::io::Result<()> {
     match work(store, line) {
-        Ok(result) => ok_line(&result),
-        Err(f) => failure_line(&f),
+        Err(f) => out.write_all(&failure_line(&f)),
+        Ok(Done::Value(v)) => {
+            out.write_all(OK)?;
+            serde_json::to_writer(&mut *out, &v)?;
+            out.write_all(b"}\n")
+        }
+        Ok(Done::Document(cs)) => {
+            let mut w = Prefixed {
+                out: &mut *out,
+                prefix: Some(OK),
+            };
+            match iris_changeset::write_document(store, cs, &mut w) {
+                Ok(()) => out.write_all(b"}\n"),
+                Err(e) if w.prefix.is_some() => out.write_all(&failure_line(&failure(e, cs))),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
+            }
+        }
     }
 }
 
@@ -225,13 +282,27 @@ fn usage(why: impl Into<String>) -> Failure {
     Failure::new(code::USAGE, why)
 }
 
-fn work(store: &Store, line: &[u8]) -> Result<Vec<u8>, Failure> {
+fn text<'a>(
+    args: &'a serde_json::Map<String, Value>,
+    name: &str,
+) -> Result<Option<&'a str>, Failure> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err(usage(format!("{name} must be a text"))),
+    }
+}
+
+fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
     let request: Value =
         serde_json::from_slice(line).map_err(|e| usage(format!("the request is not JSON: {e}")))?;
     let Some(fields) = request.as_object() else {
         return Err(usage("the request is not a JSON object"));
     };
-    if fields.keys().any(|k| !matches!(k.as_str(), "v" | "verb" | "args")) {
+    if fields
+        .keys()
+        .any(|k| !matches!(k.as_str(), "v" | "verb" | "args"))
+    {
         return Err(usage("the request has an unknown field"));
     }
     if request["v"] != json!(1) {
@@ -246,26 +317,78 @@ fn work(store: &Store, line: &[u8]) -> Result<Vec<u8>, Failure> {
             None => Ok(()),
         }
     };
-    let changeset = || -> Result<i64, Failure> {
-        let text = args["changeset"]
-            .as_str()
-            .ok_or_else(|| usage("give the changeset ID, for example cs-12"))?;
-        parse_changeset_id(text).ok_or_else(|| usage(format!("{text} is not a changeset ID")))
+    let changeset = || -> Result<Option<i64>, Failure> {
+        text(args, "changeset")?
+            .map(|t| {
+                parse_changeset_id(t).ok_or_else(|| usage(format!("{t} is not a changeset ID")))
+            })
+            .transpose()
     };
+    let need = || changeset()?.ok_or_else(|| usage("give the changeset ID, for example cs-12"));
+    let me = local();
     match request["verb"].as_str() {
         Some("show") => {
             only(&["changeset"])?;
-            document(store, changeset()?)
+            Ok(Done::Document(need()?))
         }
         Some("withdraw") => {
             only(&["changeset"])?;
-            let cs = changeset()?;
-            iris_changeset::withdraw(store, cs, Some(&local())).map_err(|e| failure(e, cs))?;
-            document(store, cs)
+            let cs = need()?;
+            iris_changeset::withdraw(store, cs, Some(&me)).map_err(|e| failure(e, cs))?;
+            Ok(Done::Document(cs))
         }
         Some("drafts") => {
             only(&[])?;
-            drafts(store)
+            drafts(store).map(Done::Value)
+        }
+        Some("add") => {
+            only(&["verb", "targets", "args", "why", "changeset"])?;
+            let verb = text(args, "verb")?
+                .and_then(Verb::parse)
+                .ok_or_else(|| usage("verb must be a verb of specification 2, section 4"))?;
+            let targets: Vec<&str> = args["targets"]
+                .as_array()
+                .filter(|t| !t.is_empty())
+                .and_then(|t| t.iter().map(Value::as_str).collect())
+                .ok_or_else(|| usage("targets must be a list of one or more IDs"))?;
+            let action_args = match args.get("args") {
+                None => serde_json::Map::new(),
+                Some(Value::Object(m)) => m.clone(),
+                Some(_) => return Err(usage("args of the action must be a JSON object")),
+            };
+            let why = text(args, "why")?;
+            let given = changeset()?;
+            let now = crate::engine::now_ms();
+            let (cs, n) = iris_changeset::transaction(store, |c| {
+                let cs = match given {
+                    Some(cs) => cs,
+                    None => iris_changeset::create_in(c, &me, now)?,
+                };
+                let n =
+                    iris_changeset::add_action_in(c, cs, &me, verb, &targets, &action_args, why)?;
+                Ok((cs, n))
+            })
+            .map_err(|e| failure(e, given.unwrap_or_default()))?;
+            Ok(Done::Value(
+                json!({ "changeset": format_changeset_id(cs), "n": n }),
+            ))
+        }
+        Some("submit") => {
+            only(&["changeset", "why"])?;
+            let cs = need()?;
+            let why = text(args, "why")?.ok_or_else(|| usage("give the reason with --why"))?;
+            let now = crate::engine::now_ms();
+            // The submit and the decisions of the policy in one transaction.
+            iris_changeset::transaction(store, |c| {
+                iris_changeset::submit_in(c, cs, &me, why, now)?;
+                let revision: i64 =
+                    c.query_row("SELECT revision FROM changeset WHERE id = ?1", [cs], |r| {
+                        r.get(0)
+                    })?;
+                iris_triage::decide_submitted(c, cs, revision, iris_policy::Author::Local, now)
+            })
+            .map_err(|e| failure(e, cs))?;
+            Ok(Done::Document(cs))
         }
         Some(other) => Err(usage(format!("unknown verb {other}"))),
         None => Err(usage("the request has no verb")),
@@ -274,21 +397,16 @@ fn work(store: &Store, line: &[u8]) -> Result<Vec<u8>, Failure> {
 
 fn failure(e: iris_changeset::Error, cs: i64) -> Failure {
     match e {
-        iris_changeset::Error::NotFound => usage(format!("no changeset {}", format_changeset_id(cs))),
+        iris_changeset::Error::NotFound => {
+            usage(format!("no changeset {}", format_changeset_id(cs)))
+        }
         iris_changeset::Error::Refused(why) => usage(why),
         iris_changeset::Error::Store(e) => Failure::new(code::ERROR, format!("store: {e}")),
     }
 }
 
-/// The changeset document (specification 2, section 5.1).
-fn document(store: &Store, cs: i64) -> Result<Vec<u8>, Failure> {
-    let mut out = Vec::new();
-    iris_changeset::write_document(store, cs, &mut out).map_err(|e| failure(e, cs))?;
-    Ok(out)
-}
-
 /// The drafts of the author `local`, the newest first.
-fn drafts(store: &Store) -> Result<Vec<u8>, Failure> {
+fn drafts(store: &Store) -> Result<Value, Failure> {
     let ids: Vec<i64> = store
         .read(|c| {
             let mut st = c.prepare(
@@ -302,8 +420,11 @@ fn drafts(store: &Store) -> Result<Vec<u8>, Failure> {
         })
         .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))?;
     let ids: Vec<String> = ids.into_iter().map(format_changeset_id).collect();
-    Ok(serde_json::to_vec(&json!({ "changesets": ids })).expect("plain JSON"))
+    Ok(json!({ "changesets": ids }))
 }
+
+/// The most bytes of an answer that the command reads.
+pub const MAX_ANSWER: u64 = 64 * 1024 * 1024;
 
 /// The command side: send one request to the engine of `dir`, and give the
 /// result. Code 4 when no engine answers the connect. Code 1 when the
@@ -326,7 +447,8 @@ pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| "--drafts".into());
-    let mut line = serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
+    let mut line =
+        serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
     line.push(b'\n');
     stream
         .set_read_timeout(Some(ANSWER_WAIT))
@@ -334,7 +456,8 @@ pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
         .and_then(|()| stream.write_all(&line))
         .map_err(|_| unknown(&hint))?;
     let mut answer = Vec::new();
-    BufReader::new(&mut stream)
+    // The command reads at most MAX_ANSWER: a larger answer is an error.
+    BufReader::new(std::io::Read::take(&mut stream, MAX_ANSWER))
         .read_until(b'\n', &mut answer)
         .map_err(|_| unknown(&hint))?;
     let answer: Value = serde_json::from_slice(&answer).map_err(|_| unknown(&hint))?;
@@ -348,6 +471,9 @@ pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
         .unwrap_or(code::ERROR);
     Err(Failure::new(
         code,
-        answer["error"].as_str().unwrap_or("the engine failed").to_string(),
+        answer["error"]
+            .as_str()
+            .unwrap_or("the engine failed")
+            .to_string(),
     ))
 }

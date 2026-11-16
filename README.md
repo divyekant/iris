@@ -126,6 +126,27 @@ the data folder. They do not read the store. Start the engine with
 | `iris changeset <cs-id>` | Shows a changeset and the state of each action. Add `--json` for the document. |
 | `iris changeset --drafts` | Lists your draft changesets, newest first. |
 | `iris withdraw <cs-id>` | Withdraws a changeset that the command made. Applied actions stay. |
+| `iris close <c-id>` | Adds `close` of a commitment to a draft changeset. `--reason` is optional. |
+| `iris decline <c-id>` | Adds `decline` of a commitment to a draft changeset. `--reason` is optional. |
+| `iris defer <c-id> --date <YYYY-MM-DD>` | Adds `defer` of a commitment to a draft changeset. |
+| `iris correct <id> --field <path> --value <json>` | Adds a correction of one field of an item to a draft changeset. |
+| `iris archive`, `inbox`, `read`, `unread`, `trash <ids>` | Adds the mail action on threads (`t-3`) or messages (`m-42`) to a draft changeset. |
+| `iris label`, `unlabel <ids> --label <name>` | Adds or removes a label in a draft changeset. |
+| `iris submit <cs-id> --why <text>` | Submits the draft. The policy decides each action. Prints the state of each action. |
+
+Each add command makes a new draft changeset and prints its ID. Add
+`--changeset <cs-id>` to add to a draft that exists, and `--why <text>` to
+give the reason of the action. A draft does nothing until you submit it.
+
+`iris submit` exits with one of these codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Each action of the new revision is applied. |
+| 5 | One or more actions are open: they wait for your approval in the web client, or for the apply. |
+| 3 | The policy or a hard limit denied one or more actions. |
+| 2 | The request is not correct, or the engine refused an action, for example a wrong target. |
+| 1 | An error. Run `iris changeset <cs-id>` to see the state. |
 
 The sync stores the raw messages only. After each sync, `iris serve` and
 `iris mirror sync` run the understanding step, so words and the `from:` and
