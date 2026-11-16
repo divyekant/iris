@@ -54,8 +54,10 @@ impl Head {
     /// Spec 1 section 6.7: `List-Unsubscribe`, `List-Id`, `Precedence: bulk`,
     /// or `Auto-Submitted` other than `no`.
     pub(crate) fn automated(&self) -> bool {
+        // The value without comments and parameters.
         let first_word = |v: &str| {
-            v.split(';')
+            strip_comments(v)
+                .split(';')
                 .next()
                 .unwrap_or("")
                 .trim()

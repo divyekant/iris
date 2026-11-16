@@ -286,7 +286,9 @@ fn rules(
     // So only a `person` row needs the check that the sent message is still
     // there, with the same bytes, and names the address in `To`, `Cc` or
     // `Bcc`: first the message of the basis, then each sent message.
-    if previous == Some(Kind::Person) {
+    // A hostile row also gets the check: the hostile decision replaced the
+    // basis of an earlier sent message.
+    if matches!(previous, Some(Kind::Person | Kind::Hostile)) {
         if let Some((rule, m, old_sha)) = old_basis.and_then(parse_evidence) {
             let to = if rule == "sent" {
                 to_addr(3)
@@ -483,11 +485,35 @@ pub fn near_copy(domain: &str, known: &str) -> bool {
     }
 }
 
+/// Hosting suffixes under which each name has another owner, so each one
+/// is a public suffix (as in the public suffix list).
+const HOSTED: [&str; 14] = [
+    "github.io",
+    "gitlab.io",
+    "herokuapp.com",
+    "vercel.app",
+    "netlify.app",
+    "pages.dev",
+    "workers.dev",
+    "web.app",
+    "firebaseapp.com",
+    "appspot.com",
+    "blogspot.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "s3.amazonaws.com",
+];
+
 /// The number of labels at the end of `d` that form its public suffix.
-/// shortcut: a two-letter country domain with a common second level
-/// (`co.uk`, `com.au`) has 2, each other domain has 1; use the public suffix
-/// list if other suffixes give wrong results.
+/// shortcut: a hosting suffix of [`HOSTED`] counts its labels, a two-letter
+/// country domain with a common second level (`co.uk`, `com.au`) has 2, each
+/// other domain has 1; use the public suffix list if other suffixes give
+/// wrong results.
 fn suffix_len(labels: &[&str]) -> usize {
+    let joined = labels.join(".");
+    if let Some(h) = HOSTED.iter().find(|h| joined.ends_with(&format!(".{h}"))) {
+        return h.split('.').count();
+    }
     match labels {
         [.., second, tld]
             if tld.len() == 2
