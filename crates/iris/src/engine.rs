@@ -308,6 +308,22 @@ fn understand_loop(store: Arc<Store>) {
     }
 }
 
+/// The time between two turns of the attention thread.
+pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
+
+/// The attention thread (spec 2 section 6.4): each [`ATTENTION_EVERY`], the
+/// attention of the items whose origin message changed, and each hour of
+/// each item ([`iris_policy::refresh_attention`]). It is apart from the
+/// understanding thread, because one understanding run can take hours.
+fn attention_loop(store: Arc<Store>) {
+    loop {
+        if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
+            say!("iris: attention: {e}");
+        }
+        std::thread::sleep(ATTENTION_EVERY);
+    }
+}
+
 /// The schedule: one sync thread for each account, so a long first sync of
 /// one account does not stop the syncs of the other accounts.
 pub struct Engine {
@@ -318,6 +334,7 @@ pub struct Engine {
     workers: HashMap<i64, JoinHandle<()>>,
     last_clean: Option<Instant>,
     understander: Option<JoinHandle<()>>,
+    attention: Option<JoinHandle<()>>,
 }
 
 impl Engine {
@@ -333,6 +350,7 @@ impl Engine {
             workers: HashMap::new(),
             last_clean: None,
             understander: None,
+            attention: None,
         }
     }
 
@@ -368,6 +386,14 @@ impl Engine {
                 .spawn(move || understand_loop(store))
                 .map_err(iris_store::Error::Io)?;
             self.understander = Some(handle);
+        }
+        if self.attention.as_ref().is_none_or(|h| h.is_finished()) {
+            let store = self.store.clone();
+            let handle = std::thread::Builder::new()
+                .name("attention".into())
+                .spawn(move || attention_loop(store))
+                .map_err(iris_store::Error::Io)?;
+            self.attention = Some(handle);
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");

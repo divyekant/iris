@@ -226,6 +226,29 @@ pub fn run(cli: Cli) -> Result<(), String> {
     let data = || engine::data_dir(cli.data.clone()).map_err(|e| e.to_string());
     let open =
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
+    let result = command(&cli, &open);
+    // The commands that write items or the facts of their messages: write the
+    // attention of each changed item before the exit, also after an error
+    // (spec 2 section 6.4). `iris serve` does it in its own thread.
+    if matches!(
+        cli.command,
+        Command::Mirror { .. } | Command::Understand { .. }
+    ) {
+        let attention = open().and_then(|s| {
+            iris_policy::refresh_attention(&s, engine::now_ms().div_euclid(1000))
+                .map_err(|e| format!("attention: {e}"))
+        });
+        if let Err(e) = attention {
+            return Err(match result {
+                Err(first) => format!("{first}\n{e}"),
+                Ok(()) => e,
+            });
+        }
+    }
+    result
+}
+
+fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), String> {
     match &cli.command {
         Command::Serve { addr } => {
             // Check before the store opens, so a refused address makes no data folder.

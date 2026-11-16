@@ -143,6 +143,34 @@ fn mirror_sync_runs_understanding_so_search_finds_words_and_senders() {
         assert!(ok, "{err}");
         assert!(!out.trim().is_empty(), "no result for {query}");
     }
+    // A new item gets its attention at the next sync (spec 2 section 6.4).
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT 'feed', account_id, 'new', '{}', 0, 0 FROM message LIMIT 1",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), min(id), 'origin' FROM message",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (ok, _, err) = iris(&dir, &fake, &tokens, &["mirror", "sync"]);
+    assert!(ok, "{err}");
+    let state: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT json_extract(doc, '$.attention.state') FROM item",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "shown");
 }
 
 #[test]
