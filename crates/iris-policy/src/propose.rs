@@ -121,14 +121,53 @@ pub(crate) fn current(tx: &Connection, id: i64, now: i64) -> Result<Option<Propo
     }))
 }
 
-/// Marks the open proposal `id` as accepted with the rule `rule`. Only the
-/// accept of [`crate::change`] calls this, in its transaction.
-pub(crate) fn accepted(tx: &Connection, id: i64, rule: u32, now: i64) -> Result<bool> {
-    Ok(tx.execute(
-        "UPDATE rule_proposal SET state = 'accepted', rule = ?2, updated_at = ?3
-         WHERE id = ?1 AND state = 'open'",
-        params![id, rule, now],
-    )? == 1)
+/// Marks as accepted each open proposal whose rule the policy has with
+/// `by = "proposal"`. [`crate::active::record`] calls this for each policy
+/// that becomes active, so an accept from the web client and a confirmed
+/// file both mark it, also after a crash between the file write and the
+/// commit of an accept.
+pub(crate) fn accepted(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
+    for r in &policy.rules {
+        if r.by != By::Proposal
+            || r.effect != Effect::Allow
+            || r.verbs.len() != 1
+            || r.job.is_some()
+        {
+            continue;
+        }
+        let (cond, value) = match &r.when {
+            w if *w
+                == When {
+                    sender: w.sender.clone(),
+                    ..When::default()
+                }
+                && w.sender.is_some() =>
+            {
+                ("sender", w.sender.clone().unwrap_or_default())
+            }
+            w if *w
+                == When {
+                    sender_kind: w.sender_kind,
+                    ..When::default()
+                }
+                && w.sender_kind.is_some() =>
+            {
+                (
+                    "sender_kind",
+                    w.sender_kind
+                        .map(|k| k.name().to_string())
+                        .unwrap_or_default(),
+                )
+            }
+            _ => continue,
+        };
+        tx.execute(
+            "UPDATE rule_proposal SET state = 'accepted', rule = ?4, updated_at = ?5
+             WHERE state = 'open' AND verb = ?1 AND cond = ?2 AND value = ?3",
+            params![r.verbs[0].name(), cond, value, r.id, now],
+        )?;
+    }
+    Ok(())
 }
 
 /// Dismisses the open proposal `id`. Iris does not propose the same rule

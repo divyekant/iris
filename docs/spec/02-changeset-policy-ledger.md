@@ -637,6 +637,15 @@ changes:
   no file. Iris never proposes an accepted or a dismissed rule again.
 - An open row that no longer has the pattern goes away.
 
+Failure list of the proposals:
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A decision after the last pass | An accept adds a rule that a new refusal contradicts | The accept counts again in its transaction, and refuses (409). |
+| A crash after the file write of an accept, before its commit | The file has the rule, and the row stays open | The file is a change of section 6.3. Each policy that becomes active (an accept, a confirmation) marks as accepted each open row whose rule it has with `by = "proposal"`. A discard leaves the row open. |
+| A failed commit of a pass | The pass is lost | The engine keeps the mark of a pass only after its commit, so the next tick runs it again. |
+| A message of a decided action that the cleanup changed | A refusal does not count | A refusal that the engine cannot read again stops each proposal of its verb. |
+
 ## 7. The ledger
 
 ### 7.1 What the ledger holds

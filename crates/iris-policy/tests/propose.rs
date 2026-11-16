@@ -392,3 +392,40 @@ fn hostile_approvals_do_not_count() {
     }
     assert!(find(&refresh(&store), "deals@shop.example").is_none());
 }
+
+/// A crash after the file write of an accept and before its commit leaves
+/// the rule in the file and the proposal open. The confirmation of that
+/// file marks the proposal accepted, so it does not come back.
+#[test]
+fn a_confirmed_file_with_the_rule_accepts_the_proposal() {
+    let (dir, store) = store("crash");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided(&store, "archive", &[m], "approved");
+    }
+    let ps = refresh(&store);
+    let p = find(&ps, "deals@shop.example").unwrap();
+    let text = edit_text(DEFAULT_TEXT, Change::Mode(Mode::Observe)).unwrap().unwrap()
+        + "\n[[rule]]\nid = 1\nname = \"Archive mail from deals@shop.example\"\neffect = \"allow\"\n\
+           verbs = [\"archive\"]\nwhen = { sender = \"deals@shop.example\" }\nby = \"proposal\"\nadded = 2027-01-15\n";
+    std::fs::write(dir.0.join(FILE), &text).unwrap();
+    let FileState::Changed(l) = file_state(&store).unwrap() else {
+        panic!("the file is a change")
+    };
+    assert!(matches!(
+        confirm(&store, &l.sha256, NOW).unwrap(),
+        Confirm::Done { .. }
+    ));
+    assert!(store
+        .read(propose::open)
+        .unwrap()
+        .iter()
+        .all(|q| q.id != p.id));
+    // The person removes the rule: Iris does not propose it again.
+    let v = store.read(active).unwrap().version;
+    assert!(matches!(
+        change(&store, v, Change::Remove(1), NOW).unwrap(),
+        Edited::Done { .. }
+    ));
+    assert!(find(&refresh(&store), "deals@shop.example").is_none());
+}

@@ -125,10 +125,8 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
         }
         // If the commit fails after the write, the file is a change that the
         // person confirms or discards; it is not active.
+        // `record` marks the proposal accepted, from the rule in the text.
         let version = record(tx, &text, &sha256_hex(&text), &policy, now)?;
-        if let Some((id, rule, _)) = added {
-            crate::propose::accepted(tx, id, rule.id, now)?;
-        }
         Ok(Edited::Done { version, policy })
     })
 }
