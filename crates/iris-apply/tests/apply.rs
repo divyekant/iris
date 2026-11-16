@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iris_apply::{apply, hash, Error, Outcome};
+use iris_apply::{apply, hash, Error, Outcome, Token};
 use iris_fakegmail::FakeGmail;
 use iris_gmail::{Config, Gmail};
 use iris_store::Store;
@@ -125,7 +125,32 @@ impl Box {
     }
 
     fn apply(&self, action: i64) -> iris_apply::Result<Outcome> {
-        apply(&self.store, &self.gmail, TOKEN, self.account, action)
+        self.apply_as(self.account, action, &mut || Some(TOKEN.into()))
+    }
+
+    fn apply_as(
+        &self,
+        account: i64,
+        action: i64,
+        renew: &mut dyn FnMut() -> Option<String>,
+    ) -> iris_apply::Result<Outcome> {
+        let mut token = Token {
+            token: TOKEN.into(),
+            renew,
+        };
+        apply(&self.store, &self.gmail, &mut token, account, action)
+    }
+
+    fn applying(&self, action: i64) -> bool {
+        self.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT applying FROM changeset_action WHERE id = ?1",
+                    [action],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
     }
 
     fn state(&self, action: i64) -> (String, String) {
@@ -281,29 +306,35 @@ fn the_mirror_gets_the_labels_of_gmail() {
     }
 }
 
-/// A withdraw after the first call keeps the action approved: the next
-/// apply ends it, also in the mode observe.
+/// A withdraw after the mark keeps the action approved. An apply that
+/// finds the mark of an apply that stopped sets failed, with no call, also
+/// in the mode observe.
 #[test]
 fn a_withdraw_during_the_apply_keeps_the_action() {
     let b = setup("withdraw", 60, Some(APPLY_POLICY));
     let ms = b.messages(IN_INBOX, 2);
     let a = b.approved("trash", &ms, PERSON);
-    b.fake.fail_next_write(&[0, 503], true);
-    assert!(matches!(b.apply(a), Err(Error::Gmail(_))));
+    // The engine stopped after the mark.
     b.store
         .write(|tx| {
+            tx.execute(
+                "UPDATE changeset_action SET applying = 1 WHERE id = ?1",
+                [a],
+            )?;
             tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
             tx.execute(
-                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('version = 0\nmode = \"observe\"\n', 'h3', 3)",
+                "INSERT INTO policy_version(text, sha256, confirmed_at)
+                 VALUES ('version = 0\nmode = \"observe\"\n', 'h3', 3)",
                 [],
             )?;
             Ok(())
         })
         .unwrap();
     assert_eq!(b.state(a).0, "approved");
-    let c = applied(b.apply(a));
-    assert_eq!((c.changed, c.unchanged), (0, 2));
-    assert_eq!(b.state(a), ("applied".into(), "person".into()));
+    let before = b.fake.requests().len();
+    assert!(matches!(b.apply(a), Ok(Outcome::Failed { .. })));
+    assert_eq!(b.state(a), ("failed".into(), "person".into()));
+    assert_eq!(b.fake.requests().len(), before);
 }
 
 /// More than 1,000 messages: one batchModify call for each 1,000.
@@ -354,32 +385,58 @@ fn a_refusal_fails_the_action() {
     }
 }
 
-/// An unknown result (the call applied, the answer was lost) and HTTP 401
-/// leave the action approved. The next apply makes no call again.
+/// An unknown result (the call applied, the answer was lost) fails the
+/// action, and no apply calls Gmail again: the person can reverse the
+/// change in Gmail, and Iris keeps it.
 #[test]
-fn an_unknown_result_stays_approved_until_the_next_apply() {
+fn an_unknown_result_fails_and_no_call_repeats() {
     let b = setup("unknown", 60, Some(APPLY_POLICY));
     let ms = b.messages(IN_INBOX, 3);
     let a = b.approved("archive", &ms, PERSON);
     b.fake.fail_next_write(&[503], true);
-    assert!(matches!(b.apply(a), Err(Error::Gmail(e)) if e.write_result_unknown()));
-    assert_eq!(b.state(a).0, "approved");
-    let c = applied(b.apply(a));
-    assert_eq!((c.changed, c.unchanged), (0, 3));
+    match b.apply(a) {
+        Ok(Outcome::Failed { error, .. }) => assert!(error.contains("not known"), "{error}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.state(a), ("failed".into(), "person".into()));
+    // The person moves a message back to the inbox.
+    b.fake.modify_labels(&b.provider_id(ms[0]), &["INBOX"], &[]);
+    assert!(matches!(b.apply(a), Err(Error::NotApproved(_))));
     assert_eq!(b.calls("batchModify"), 1);
+    assert!(b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+}
 
+/// HTTP 401: one new token and one call again. With no new token before
+/// the first write call, the action stays as it was.
+#[test]
+fn a_refused_token_gets_one_new_token() {
+    let b = setup("token", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
     let t = b.approved("trash", &ms, PERSON);
     b.fake.fail_next_write(&[401], false);
-    assert!(matches!(
-        b.apply(t),
-        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
-    ));
-    assert_eq!(b.state(t).0, "approved");
-    let c = applied(b.apply(t));
-    assert_eq!(c.changed, 3);
+    let mut renewed = 0;
+    let c = match b.apply_as(b.account, t, &mut || {
+        renewed += 1;
+        Some(TOKEN.into())
+    }) {
+        Ok(Outcome::Applied(c)) => c,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((c.changed, renewed), (3, 1));
     for &m in &ms {
         assert_eq!(b.mirror_labels(m), b.gmail_labels(m));
     }
+
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved("archive", &ms, PERSON);
+    b.fake.fail_next(&[401]);
+    assert!(matches!(
+        b.apply_as(b.account, a, &mut || None),
+        Err(Error::Gmail(iris_gmail::Error::Unauthorized))
+    ));
+    assert_eq!(b.state(a).0, "approved");
+    assert!(!b.applying(a));
+    applied(b.apply(a));
 }
 
 /// The mode observe: nothing applies, and the action waits.
@@ -452,7 +509,7 @@ fn the_apply_refuses_what_was_not_approved() {
 
     let other = b.approved("archive", &ms, PERSON);
     assert!(matches!(
-        apply(&b.store, &b.gmail, TOKEN, b.account + 1, other),
+        b.apply_as(b.account + 1, other, &mut || None),
         Ok(Outcome::Denied(_))
     ));
 

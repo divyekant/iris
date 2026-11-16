@@ -272,7 +272,9 @@ that a rule approved at the same time cannot together go past the limit of
   author of the changeset: the same `kind`, `name` and `session`. The person
   can withdraw each changeset in the web client. Each open action becomes
   `cancelled`, except an action with a ledger row in the state `writing`,
-  which continues to its end. Applied actions stay.
+  which continues to its end. Before the ledger (R2-02), the mark
+  `applying` of migration 8 has this effect in place of the `writing` row
+  (section 7.2). Applied actions stay.
 - 14 days after submit, each open action that is not `held`, and has no
   ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
 
@@ -314,7 +316,7 @@ section 5.1) keep other users out.
 | The submit of a new revision while older actions are `proposed` or `in_review` | An action that the author revised gets an approval | The trigger `changeset_submit` replaces them in the same write. Only that submit replaces an action, with no check of the clock (the marker `changeset.replacing` is set once for each revision, in its submit): an older action that comes back to review after the submit stays for the person. |
 | A new revision with a new reason | The reason that the person saw for an older revision is lost | The table `changeset_revision` keeps the reason and the submit time of each submitted revision. Its rows do not change. |
 | A withdraw while an action is open | A withdrawn changeset applies an action | The trigger `changeset_withdraw` cancels each open action and each draft action in the same write. A withdrawn changeset stays withdrawn. |
-| A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | Migration 7 has no ledger, so no action has such a row and the apply cannot start. The migration of the ledger (R2-03) changes `changeset_withdraw` and `action_state` in the same migration: the withdraw keeps such an action `approved`, and its recovery can then write `applied` or `failed`. |
+| A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | Migration 7 has no ledger and no apply. Migration 8 (R2-02) adds the mark `applying`, which the apply sets before its first write call: the withdraw keeps a marked action `approved`, and the action can then only become `applied` or `failed`. The migration of the ledger (R2-03) replaces the mark with the ledger row in `writing`. |
 | A move to `applied`, `failed` or `undone` | A state with no ledger entry, or an apply that changes the decision | Migration 8 (R2-02) adds the moves `approved` to `applied` and `approved` to `failed`, and keeps on them the decision that approved the action. The ledger migration (R2-03) adds the check of the ledger entry to these moves, and the moves to `undone` (section 7.1). |
 | An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
 | Two writers at the same time | Two moves of one action | The engine has one write connection. Each request is one transaction, and the trigger checks the state at the time of the write. |
@@ -623,10 +625,11 @@ action that has a message of that row. The other action waits.
 
 The crate `iris-apply` applies the verbs `archive`, `inbox`, `read`,
 `unread` and `trash`. It comes before the ledger (R2-03), so it has no
-`writing` row and no recovery. Each of these verbs is idempotent: a call
-again on a message with the target state changes nothing. Step 2 reads
-the labels at Gmail at each apply. So an apply again after a stop makes
-only the calls that Gmail did not make.
+`writing` row, no list of the messages of each call and no recovery. In
+place of the `writing` row, migration 8 adds the mark `applying` to the
+action. The apply sets it before the first write call of the action. No
+provider call of an action is made two times: after the mark, each end
+other than success is `failed`.
 
 | Input or event | Failure mode | Safe result |
 |---|---|---|
@@ -636,10 +639,12 @@ only the calls that Gmail did not make.
 | A message of another account | One token changes two mailboxes | The engine denies the action, by `engine`. |
 | A message that is gone in the mirror, or HTTP 404 in step 2 | A call on a message that does not exist | The apply skips it, and lists it in the result. |
 | A message that already has the target state | A call that changes nothing, and an undo that changes the message | The apply skips it, and counts it. |
-| HTTP 401, or a read that fails | Gmail did not run the call | The action stays `approved`. The caller gets a new access token and applies again. |
-| An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call | The action stays `approved`. The next apply reads the labels again (step 2), and changes only the messages that do not have the target state. |
+| HTTP 401 | Gmail did not run the call | The apply gets a new access token one time, and makes the call one time again. If there is no new token or a second 401: before the mark, the action stays as it was; after the mark, it is `failed`. |
+| A read that fails | No label state for step 2 | Before the mark, the action stays as it was, and the next apply does each check again. After the mark, it is `failed`. |
+| An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call, and the person can reverse the change before a call again | The action is `failed`, and the error says that the result is not known. Iris does not call Gmail again for the action. The next sync writes the labels to the mirror. |
+| A stop of the engine after the mark | The result of a call is not known | The next apply finds the mark and sets `failed`, with no call. |
 | A clear refusal (HTTP 400, another 4xx) | The rest of the action is not valid | The action becomes `failed`. The messages of the earlier calls keep the change. The result has the error. |
-| A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | Before step 2, the apply marks the action `applying` (migration 8). A withdraw keeps a marked action `approved`, and no move other than `applied` or `failed` is possible for it. The next apply ends it, also in the mode `observe`. The ledger row in `writing` replaces the mark in R2-03 (section 5.5). |
+| A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | A withdraw keeps a marked action `approved`, and it cancels an action with no mark. A marked action can only become `applied` or `failed`. The apply that set the mark ends it. The ledger row in `writing` replaces the mark in R2-03 (section 5.5). |
 | A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of step 2 for each message: as read for a message with the target state, with the change of the call for a changed message, and as the `trash` answer gives them. |
 | A store error after a provider call | The mirror does not have the new labels | The next sync writes the labels from the history of Gmail. |
 

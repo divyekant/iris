@@ -5,8 +5,8 @@
 //! The steps of [`apply`]:
 //!
 //! 1. Wait while the active policy has the mode `observe`. Send an action
-//!    that a rule approved to review (no ledger yet for the bulk count). Deny an action
-//!    whose hash does not agree with its rows.
+//!    that a rule approved to review (no ledger yet for the bulk count).
+//!    Deny an action whose hash does not agree with its rows.
 //! 2. Read the labels of each message at Gmail (`format=minimal`), 1,000
 //!    messages at a time. Skip a gone message and a message that already
 //!    has the target state.
@@ -15,14 +15,11 @@
 //!    after each call.
 //! 4. Set the state `applied`, or `failed` after a clear refusal.
 //!
-//! Before step 2, the apply marks the action `applying` (migration 8). A
-//! withdraw then keeps it approved, and an apply again ends it, also in
-//! the mode `observe`.
-//!
-//! This release has no ledger (R2-03). Each verb here is idempotent, and
-//! step 2 reads the labels again at each apply. So after HTTP 401 or an
-//! unknown result, the action stays `approved`, and the next apply makes
-//! only the calls that Gmail did not make. See the failure list in
+//! This release has no ledger (R2-03). Before the first write call, the
+//! apply marks the action `applying` (migration 8). A withdraw keeps a
+//! marked action approved. After the mark, no call is made again: an
+//! unknown result, a refusal, a read that fails, or the mark of an earlier
+//! apply that stopped gives `failed`. See the failure list in
 //! specification 2, section 7.2.
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
@@ -34,9 +31,9 @@ use sha2::{Digest, Sha256};
 #[derive(Debug)]
 pub enum Error {
     Store(iris_store::Error),
-    /// A Gmail call failed, and the action stays `approved`: HTTP 401 (get
-    /// a new access token, then apply again), an unknown result of a write,
-    /// or a read that failed. An apply again is safe.
+    /// A Gmail call failed before the first write call, and the action
+    /// stays as it was: HTTP 401 with no new token, or a read that failed.
+    /// An apply again does each check again.
     Gmail(iris_gmail::Error),
     /// The action is not `approved`: it does not exist, or another write
     /// changed its state before its first provider call (for example a
@@ -154,13 +151,26 @@ pub fn hash(c: &Connection, action: i64) -> rusqlite::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Apply the approved action `action` to the mailbox `account` at Gmail,
-/// with the access token `token`. Run one apply at a time, on the one
-/// engine thread that writes.
+/// The access token of the mailbox. `renew` gives a new token after HTTP
+/// 401, or `None` if there is none (the account needs a sign-in).
+pub struct Token<'a> {
+    pub token: String,
+    pub renew: &'a mut dyn FnMut() -> Option<String>,
+}
+
+/// Apply the approved action `action` to the mailbox `account` at Gmail.
+/// Run one apply at a time, on the one engine thread that writes.
+///
+/// No provider call of an action is made two times. Before the first write
+/// call, the apply marks the action `applying` (migration 8). After that,
+/// each end other than success is `failed`: an unknown result, a refusal,
+/// a read that fails, and an apply that finds the mark of an earlier apply
+/// that stopped. Before the first write call, an error leaves the action
+/// as it was, and the next apply does each check again.
 pub fn apply(
     store: &Store,
     gmail: &Gmail,
-    token: &str,
+    token: &mut Token<'_>,
     account: i64,
     action: i64,
 ) -> Result<Outcome> {
@@ -174,27 +184,32 @@ pub fn apply(
         .optional()?)
     })?;
     let (verb, approved_hash, decided_by, applying) = head.ok_or(Error::NotApproved(action))?;
-    let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
-    // The calls of an earlier apply started: the checks passed then, and
-    // the action ends as applied or failed (migration 8), in each mode.
-    if !applying {
-        if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
-            return Ok(o);
-        }
+    if applying {
+        // An earlier apply stopped after a write call started. Its result
+        // is not known, so no call is made again (section 7.3).
+        return failed(
+            store,
+            action,
+            Counts::default(),
+            "An earlier apply stopped after a call to Gmail started. Iris does not call \
+             Gmail again for this action. The next sync shows the labels.",
+        );
     }
-    let marked = store.write(|tx| {
-        Ok(tx.execute(
-            "UPDATE changeset_action SET applying = 1 WHERE id = ?1 AND state = 'approved'
-               AND (applying = 1 OR (SELECT state FROM changeset c WHERE c.id = changeset_id)
-                                    <> 'withdrawn')",
-            [action],
-        )?)
-    })?;
-    if marked == 0 {
-        return Err(Error::NotApproved(action));
+    let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
+    if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
+        return Ok(o);
     }
 
-    let mut counts = Counts::default();
+    let mut run = Run {
+        store,
+        gmail,
+        token,
+        renewed: false,
+        account,
+        action,
+        marked: false,
+        counts: Counts::default(),
+    };
     let mut after = 0;
     loop {
         // A gone message has no provider ID here.
@@ -220,31 +235,141 @@ pub fn apply(
         let mut same: Vec<(i64, Vec<String>)> = Vec::new();
         for (id, provider_id) in page {
             let Some(provider_id) = provider_id else {
-                counts.gone.push(id);
+                run.counts.gone.push(id);
                 continue;
             };
-            match gmail.minimal(token, &provider_id) {
+            match run.call(|g, t| g.minimal(t, &provider_id)) {
                 Ok(m) if change.needed(&m.label_ids) => todo.push((id, provider_id, m.label_ids)),
                 Ok(m) => same.push((id, m.label_ids)),
-                Err(iris_gmail::Error::NotFound) => counts.gone.push(id),
-                Err(e) => return Err(Error::Gmail(e)),
+                Err(iris_gmail::Error::NotFound) => run.counts.gone.push(id),
+                Err(e) => return run.stop(e),
             }
         }
-        counts.unchanged += same.len() as u64;
+        run.counts.unchanged += same.len() as u64;
         mirror(store, account, &same);
-        if let Err(e) = change_page(store, gmail, token, account, &change, &todo, &mut counts) {
-            if e.write_result_unknown() || matches!(e, iris_gmail::Error::Unauthorized) {
-                return Err(Error::Gmail(e));
-            }
-            finish(store, action, "failed")?;
-            return Ok(Outcome::Failed {
-                counts,
-                error: e.to_string(),
-            });
+        if !todo.is_empty() {
+            run.mark()?;
+        }
+        if let Err(e) = run.change(&change, &todo) {
+            return run.stop(e);
         }
     }
     finish(store, action, "applied")?;
-    Ok(Outcome::Applied(counts))
+    Ok(Outcome::Applied(run.counts))
+}
+
+/// One apply in progress.
+struct Run<'a, 'b> {
+    store: &'a Store,
+    gmail: &'a Gmail,
+    token: &'a mut Token<'b>,
+    renewed: bool,
+    account: i64,
+    action: i64,
+    /// True after the mark `applying`: a write call can have started.
+    marked: bool,
+    counts: Counts,
+}
+
+impl Run<'_, '_> {
+    /// One Gmail call. After HTTP 401, Gmail did not run the call: get a
+    /// new token one time for the apply, and call one time again.
+    fn call<T>(
+        &mut self,
+        f: impl Fn(&Gmail, &str) -> iris_gmail::Result<T>,
+    ) -> iris_gmail::Result<T> {
+        match f(self.gmail, &self.token.token) {
+            Err(iris_gmail::Error::Unauthorized) if !self.renewed => {
+                self.renewed = true;
+                match (self.token.renew)() {
+                    Some(t) => {
+                        self.token.token = t;
+                        f(self.gmail, &self.token.token)
+                    }
+                    None => Err(iris_gmail::Error::Unauthorized),
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Mark the action before its first write call.
+    fn mark(&mut self) -> Result<()> {
+        if self.marked {
+            return Ok(());
+        }
+        let n = self.store.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE changeset_action SET applying = 1 WHERE id = ?1 AND state = 'approved'
+                   AND (SELECT state FROM changeset c WHERE c.id = changeset_id) <> 'withdrawn'",
+                [self.action],
+            )?)
+        })?;
+        if n == 0 {
+            return Err(Error::NotApproved(self.action));
+        }
+        self.marked = true;
+        Ok(())
+    }
+
+    /// The end after a Gmail error. Before the mark, the action stays as it
+    /// was. After the mark, it is failed: no call is made again.
+    fn stop(self, e: iris_gmail::Error) -> Result<Outcome> {
+        if !self.marked {
+            return Err(Error::Gmail(e));
+        }
+        let error = if e.write_result_unknown() {
+            format!("The result of a call is not known, and Iris does not call again: {e}")
+        } else {
+            e.to_string()
+        };
+        failed(self.store, self.action, self.counts, &error)
+    }
+
+    /// The write calls of one page, each with its mirror write.
+    fn change(
+        &mut self,
+        change: &Change,
+        todo: &[(i64, String, Vec<String>)],
+    ) -> std::result::Result<(), iris_gmail::Error> {
+        if todo.is_empty() {
+            return Ok(());
+        }
+        if change.trash {
+            for (id, provider_id, _) in todo {
+                let m = self.call(|g, t| g.trash(t, provider_id))?;
+                mirror(self.store, self.account, &[(*id, m.label_ids)]);
+                self.counts.changed += 1;
+            }
+            return Ok(());
+        }
+        let ids: Vec<&str> = todo.iter().map(|(_, p, _)| p.as_str()).collect();
+        self.call(|g, t| g.batch_modify(t, &ids, change.add, change.remove))?;
+        // The labels after the call: the labels of step 2 with the change.
+        let after: Vec<(i64, Vec<String>)> = todo
+            .iter()
+            .map(|(id, _, labels)| {
+                let mut l: Vec<String> = labels
+                    .iter()
+                    .filter(|l| !change.remove.contains(&l.as_str()))
+                    .cloned()
+                    .collect();
+                l.extend(change.add.iter().map(|a| a.to_string()));
+                (*id, l)
+            })
+            .collect();
+        mirror(self.store, self.account, &after);
+        self.counts.changed += todo.len() as u64;
+        Ok(())
+    }
+}
+
+fn failed(store: &Store, action: i64, counts: Counts, error: &str) -> Result<Outcome> {
+    finish(store, action, "failed")?;
+    Ok(Outcome::Failed {
+        counts,
+        error: error.to_string(),
+    })
 }
 
 /// The checks before the first provider call of an action. Gives the
@@ -292,47 +417,6 @@ fn check(
     }
 
     Ok(None)
-}
-
-/// The provider calls of one page, each with its mirror write.
-fn change_page(
-    store: &Store,
-    gmail: &Gmail,
-    token: &str,
-    account: i64,
-    change: &Change,
-    todo: &[(i64, String, Vec<String>)],
-    counts: &mut Counts,
-) -> std::result::Result<(), iris_gmail::Error> {
-    if change.trash {
-        for (id, provider_id, _) in todo {
-            let m = gmail.trash(token, provider_id)?;
-            mirror(store, account, &[(*id, m.label_ids)]);
-            counts.changed += 1;
-        }
-        return Ok(());
-    }
-    if todo.is_empty() {
-        return Ok(());
-    }
-    let ids: Vec<&str> = todo.iter().map(|(_, p, _)| p.as_str()).collect();
-    gmail.batch_modify(token, &ids, change.add, change.remove)?;
-    // The labels after the call: the labels of step 2 with the change.
-    let after: Vec<(i64, Vec<String>)> = todo
-        .iter()
-        .map(|(id, _, labels)| {
-            let mut l: Vec<String> = labels
-                .iter()
-                .filter(|l| !change.remove.contains(&l.as_str()))
-                .cloned()
-                .collect();
-            l.extend(change.add.iter().map(|a| a.to_string()));
-            (*id, l)
-        })
-        .collect();
-    mirror(store, account, &after);
-    counts.changed += todo.len() as u64;
-    Ok(())
 }
 
 /// Write the labels of messages to the mirror, in one transaction. A label

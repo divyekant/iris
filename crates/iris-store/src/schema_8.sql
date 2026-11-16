@@ -5,10 +5,11 @@
 -- approved it, so the actor of an applied action is the rule or the person
 -- that approved it.
 --
--- `applying` marks an approved action whose provider calls started. It is
--- the `writing` exception of section 5.5 before the ledger: a withdraw
--- keeps such an action approved, it does not expire and gets no other
--- decision, and the next apply ends it as applied or failed.
+-- `applying` marks an approved action whose write calls can have started:
+-- the apply sets it before the first write call. It is the `writing`
+-- exception of section 5.5 before the ledger: a withdraw keeps such an
+-- action approved, it does not expire and gets no other decision, and it
+-- ends as applied or failed.
 --
 -- The ledger migration (R2-03) replaces `applying` with the ledger row in
 -- `writing`, adds the ledger entry check to these two moves, and the moves
