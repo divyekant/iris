@@ -1,6 +1,6 @@
 [package]
 name = "iris-api"
-description = "The local API of Iris: JSON for the web client and the read verbs, and the policy changes of the web client."
+description = "The local API of Iris: JSON for the web client and the read verbs, the policy changes and the state verbs of the web client."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ publish.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
+iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
@@ -20,6 +21,7 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [dev-dependencies]
+iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }
 iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
