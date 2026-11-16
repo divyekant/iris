@@ -549,8 +549,11 @@ fn test_token_uri(client: iris_auth::Client) -> Result<iris_auth::Client, String
 
 /// Return all the routes of the engine.
 pub fn app(store: Arc<Store>, auth: Arc<iris_api::Auth>) -> axum::Router {
+    // The model client of `POST /api/ask`, from the model row of each call.
+    let model_store = store.clone();
+    let connect: iris_api::Connect = Arc::new(move |row| cost::connect(&model_store, row));
     // The API routes come before the fallback of the web client.
-    iris_api::router(store, auth).merge(iris_web::router())
+    iris_api::router_with_model(store, auth, connect).merge(iris_web::router())
 }
 
 /// The API has no TLS, so only this machine may connect (specification 2,

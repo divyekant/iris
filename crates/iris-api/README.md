@@ -200,3 +200,27 @@ another site cannot read the API through DNS rebinding. A request with no
 A dev server of the client must forward `/api` with the `Host` and the
 `Origin` of the engine (in Vite: `changeOrigin: true`, and set `Origin` to the
 target in `headers`).
+
+## Ask
+
+A question of the person about their mail (card R5-09). The engine searches
+the mail for the words of the question, gives the best 12 messages to the
+model as data, and answers with the messages that the answer comes from.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/ask` | Body `{"question"}`, 1 to 500 characters. The answer is `{"answer", "sources", "read", "cost_micro_usd"}`. |
+
+| Field | Content |
+|---|---|
+| `answer` | The answer, with a mark `[n]` after each fact, or `null` when the mail does not answer the question. |
+| `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
+| `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
+| `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
+
+The search leaves out gone mail, hostile mail, the mail of a hostile sender,
+SPAM and TRASH. The call takes from the one model budget (see
+`docs/specs/2026-11-16-cost-control.md`). With no model, or with a budget
+that cannot pay the worst case of the call, the answer is a 503. A failed
+model call, or a model answer that is not valid, is a 502. The text of the
+answer is data: show it as text, never as markup.
