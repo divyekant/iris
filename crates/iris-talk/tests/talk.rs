@@ -1159,3 +1159,27 @@ fn a_live_origin_that_becomes_hostile_gives_way_to_the_next_message() {
         [(r, "origin".into())]
     );
 }
+
+#[test]
+fn a_reply_to_an_alias_is_your_turn() {
+    let b = Box_::new("aliasturn");
+    let v = validator();
+    let alias = ("Avel", "avel@alias.example");
+    b.put(M {
+        id: "a",
+        at: NOW - 2 * DAY,
+        from: alias,
+        to: "sam@fabrikam.example",
+        labels: &["SENT"],
+        ..M::default()
+    });
+    b.put(M {
+        id: "b",
+        to: "avel@alias.example",
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["your_turn"], true);
+    assert_eq!(doc["role"], "direct");
+}
