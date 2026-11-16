@@ -937,6 +937,18 @@ fn a_refresh_after_a_person_sets_a_known_sender_finds_its_look_alikes() {
 }
 
 #[test]
+fn own_sent_mail_is_not_a_reply_to_received_mail() {
+    for from in [OWNER, "alias@example.org"] {
+        let mut c = Case::new("own-sent");
+        c.put("t1", &["SENT"], &format!("From: {from}"));
+        c.put("t1", &["SENT"], &format!("From: {from}"));
+        // Received mail that writes the same From address is not a person.
+        let d = c.put("t1", &["INBOX"], &format!("From: {from}"));
+        assert_eq!(d.kind, Kind::Stranger, "{from}");
+    }
+}
+
+#[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
     // Messages 3 and 4 each have 2 earlier messages.
