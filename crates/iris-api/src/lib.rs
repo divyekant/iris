@@ -24,11 +24,13 @@ use iris_store::Store;
 use serde::Deserialize;
 
 mod auth;
+mod export;
 pub mod policy;
 mod read;
 mod review;
 mod verbs;
 pub use auth::{Auth, SIGN_IN};
+pub use export::{export, Exported};
 pub use read::*;
 pub use review::*;
 pub use verbs::*;

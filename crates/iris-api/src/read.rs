@@ -349,24 +349,27 @@ fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary
 /// One message by its `m-` ID, also when it is gone.
 pub fn message(store: &Store, id: &str) -> Result<Option<Message>> {
     let row = row_of(id, Kind::Message)?;
-    Ok(store.read(|c| {
-        let Some((summary, mut more)) = message_row(c, row)? else {
-            return Ok(None);
-        };
-        more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
-        let mut st = c.prepare(
-            "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
-             WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
-        )?;
-        let items = st
-            .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Some(Message {
-            summary,
-            items: items.into_iter().flatten().collect(),
-            ..more
-        }))
-    })?)
+    Ok(store.read(|c| Ok(message_in(c, row)?))?)
+}
+
+/// One message by its row ID, in the transaction of `c`.
+pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Message>> {
+    let Some((summary, mut more)) = message_row(c, row)? else {
+        return Ok(None);
+    };
+    more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
+    let mut st = c.prepare_cached(
+        "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
+         WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
+    )?;
+    let items = st
+        .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(Message {
+        summary,
+        items: items.into_iter().flatten().collect(),
+        ..more
+    }))
 }
 
 /// The path of the raw source (RFC 5322) of one message, or `None` if the
@@ -1107,7 +1110,7 @@ fn empty_summary() -> MessageSummary {
 
 /// The document of an item row (id, form, status, doc). The row is the true
 /// copy of the ID and the status, so they replace the values of the document.
-fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let id: i64 = r.get(0)?;
     let form: String = r.get(1)?;
     let text: String = r.get(3)?;
