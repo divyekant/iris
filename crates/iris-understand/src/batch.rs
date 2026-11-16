@@ -622,8 +622,9 @@ pub fn retry_after(c: &Connection) -> rusqlite::Result<Option<i64>> {
 /// stop on `model`, `unknown` or `error` starts or doubles the wait; a run
 /// that made a call and did not stop on an error ends it and clears the
 /// marks of that wait (`WAITS_RETRY` only: a budget refusal of the same
-/// run keeps its mark). A run that made no call changes nothing.
-fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
+/// run keeps its mark). A run that made no call changes nothing. A draft
+/// run of `iris write` calls it too.
+pub fn end_wait(tx: &Transaction, stop: &Stop, r: &Report, ended: i64) -> rusqlite::Result<()> {
     if matches!(stop, Stop::Model | Stop::Unknown | Stop::Error) {
         tx.execute(
             "UPDATE model_setting SET retry_failures = retry_failures + 1,

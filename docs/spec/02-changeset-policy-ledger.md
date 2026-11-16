@@ -831,6 +831,7 @@ write to the local store, but none of them changes the mailbox:
 | `backup` | A copy of the data folder at the given path | Specification 1, section 5.1 |
 | `model set` | The model setting and its sealed key | `docs/specs/2026-11-16-cost-control.md` |
 | `understand` | Items, run rows, estimate receipts and the budget | `docs/specs/2026-11-16-cost-control.md`. The budget approval needs an estimate receipt and a terminal (a TTY). It is not a mailbox action. See the exception below. |
+| `write` (release 3, card R3-05) | One reply draft of a thread (table `reply_draft`), a run row, and the cost of one model call from the approved budget | `crates/iris-voice`. It is not a mailbox action: the draft stays in the store. It holds the run lock of `understand`. It moves to the socket with the other verbs. |
 
 The policy governs mailbox actions (sections 4 to 6). The writes in
 the table are not mailbox actions, so they do not go through the policy.

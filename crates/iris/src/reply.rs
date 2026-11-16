@@ -88,11 +88,23 @@ pub fn write(
     } else {
         "error"
     };
+    // The wait after a model error is shared with understanding: only
+    // evidence of the model changes it. An error of the draft itself (a
+    // hostile thread, an invalid answer) is no evidence against the model.
+    let wait = match stop {
+        "budget" => batch::Stop::Budget,
+        "unknown" => batch::Stop::Unknown,
+        "model" => batch::Stop::Model,
+        _ => batch::Stop::Done,
+    };
     let end = store.write(|tx| {
+        let ended = now_ms.max(crate::engine::now_ms());
         tx.execute(
             "UPDATE understand_run SET ended_at = ?2, stop = ?3 WHERE id = ?1",
-            params![run, now_ms.max(crate::engine::now_ms()), stop],
+            params![run, ended, stop],
         )?;
+        let r = batch::report(tx, run)?;
+        batch::end_wait(tx, &wait, &r, ended)?;
         Ok(())
     });
     if let Some(e) = budgeted.take_error() {
@@ -279,6 +291,86 @@ mod tests {
         let _lock = batch::lock(&store).unwrap();
         let e = write(&store, "t-1", None, &connect, 60).unwrap_err();
         assert!(e.contains("in progress"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A model that fails with a server error, or answers a valid draft.
+    struct Flaky(bool);
+
+    impl Model for Flaky {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+
+        fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
+            if self.0 {
+                return Err(iris_model::Error::Server(500));
+            }
+            Ok(Reply {
+                text: r#"{"body": "ok"}"#.into(),
+                usage: Usage {
+                    known: true,
+                    ..Usage::default()
+                },
+                stop: Stop::End,
+            })
+        }
+    }
+
+    #[test]
+    fn a_draft_call_updates_the_shared_model_wait() {
+        let dir = std::env::temp_dir().join(format!("iris-reply-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "me@example.com").unwrap();
+        store
+            .put_labels(account, &[("INBOX", "INBOX", "system")])
+            .unwrap();
+        store
+            .put_messages(
+                account,
+                &[NewMessage {
+                    provider_id: "in".into(),
+                    thread_provider_id: "t1".into(),
+                    labels: vec!["INBOX".into()],
+                    body: Some(Body {
+                        subject: "Hi".into(),
+                        sender: "ana@example.org".into(),
+                        text: "Lunch?".into(),
+                    }),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.execute("UPDATE message SET understood_at = 1", [])?;
+                tx.execute(
+                    "INSERT INTO model_setting(id, provider, base_url, model, version,
+                       max_tokens, timeout_s)
+                     VALUES (1, 'local', 'http://127.0.0.1:1/v1', 'm', 1, 1000, 60)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let wait = |store: &Store| {
+            store
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT retry_failures, retry_at IS NOT NULL FROM model_setting",
+                        [],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                    )?)
+                })
+                .unwrap()
+        };
+        let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Ok(Box::new(Flaky(true))) };
+        assert!(write(&store, "t-1", None, &fail, 10).is_err());
+        assert_eq!(wait(&store), (1, true));
+        let ok = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Ok(Box::new(Flaky(false))) };
+        write(&store, "t-1", None, &ok, 20).unwrap();
+        assert_eq!(wait(&store), (0, false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
