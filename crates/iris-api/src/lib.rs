@@ -25,15 +25,20 @@ use serde::Deserialize;
 
 mod ask;
 mod auth;
+mod export;
+pub mod gate;
 pub mod policy;
 mod read;
 mod review;
 mod verbs;
+mod watch;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
+pub use export::{export, Exported};
 pub use read::*;
 pub use review::*;
 pub use verbs::*;
+pub use watch::*;
 
 #[derive(Debug)]
 pub enum Error {
@@ -70,6 +75,7 @@ impl From<iris_store::Error> for Error {
     fn from(e: iris_store::Error) -> Error {
         match e {
             iris_store::Error::Query(why) => Error::Query(why),
+            e @ iris_store::Error::Watch(_) => Error::Query(e.to_string()),
             e => Error::Store(e),
         }
     }
@@ -119,6 +125,9 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/handled", get(get_handled))
+        .route("/api/gate", get(get_gate))
+        .route("/api/gate/declined", get(get_declined))
+        .route("/api/senders/{id}/{answer}", post(post_answer))
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
@@ -136,6 +145,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/policy/discard", post(post_discard))
         .route("/api/policy/mode", post(post_mode))
         .route("/api/policy/remove", post(post_remove))
+        .route("/api/watches", get(get_watches).post(post_watch))
+        .route("/api/watches/{id}/remove", post(post_watch_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -400,6 +411,48 @@ async fn post_verb(
         .map_or_else(not_found, |d| Json(d).into_response()))
 }
 
+/// The senders that wait at the stranger gate.
+async fn get_gate(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        false,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The senders that the person declined at the gate.
+async fn get_declined(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    let page = gate::gate_page(
+        &s,
+        now_ms(),
+        true,
+        q.limit.unwrap_or(50),
+        q.after.as_deref(),
+    )?;
+    Ok(Json(page).into_response())
+}
+
+/// The answer of the person at the stranger gate: `accept`, `decline` or
+/// `reopen` (specification 1, section 6.7). The answer is the sender row.
+async fn post_answer(
+    State(s): State<Arc<Store>>,
+    Path((id, answer)): Path<(String, String)>,
+) -> Result<Response> {
+    Ok(gate::answer(&s, &id, &answer, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
@@ -503,6 +556,35 @@ async fn post_remove(
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
     Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(watches(&s)?).into_response())
+}
+
+#[derive(Deserialize)]
+struct WatchBody {
+    text: String,
+}
+
+/// Add a watch. The answer is the new watch.
+async fn post_watch(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<WatchBody>, JsonRejection>,
+) -> Result<Response> {
+    let id = add_watch(&s, &body(b)?.text, now_ms())?;
+    let new = watches(&s)?.into_iter().find(|w| w.id == id);
+    Ok((StatusCode::CREATED, Json(new)).into_response())
+}
+
+async fn post_watch_remove(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+) -> Result<Response> {
+    if !remove_watch(&s, &id)? {
+        return Ok(not_found());
+    }
+    Ok(Json(serde_json::json!({ "removed": id })).into_response())
 }
 
 fn now_s() -> i64 {

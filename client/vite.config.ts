@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { answer, decide, raw, withdraw } from "./dev/fixtures.ts";
+import { act, answer, decide, raw, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -33,6 +33,29 @@ export default defineConfig(({ mode }) => {
               res.statusCode = done ? 200 : 404;
               res.setHeader("content-type", "application/json");
               res.end(JSON.stringify(done ?? { error: "Not found." }));
+            });
+            return;
+          }
+          const verb = url.match(/^\/items\/([^/?]+)\/(close|decline|defer)$/);
+          if (verb && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              const done = act(decodeURIComponent(verb[1]), verb[2], JSON.parse(text || "{}"));
+              res.statusCode = done ? 200 : 404;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(done ?? { error: "Not found." }));
+            });
+            return;
+          }
+          if (url.startsWith("/watches") && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              const [code, out] = watchPost(url, JSON.parse(text || "{}"));
+              res.statusCode = code;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(out));
             });
             return;
           }

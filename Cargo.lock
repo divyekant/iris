@@ -728,6 +728,7 @@ dependencies = [
  "iris-model",
  "iris-observe",
  "iris-policy",
+ "iris-senders",
  "iris-spec",
  "iris-store",
  "iris-synth",
@@ -827,6 +828,17 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "iris-job"
+version = "0.0.0"
+dependencies = [
+ "iris-spec",
+ "iris-store",
+ "iris-talk",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

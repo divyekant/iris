@@ -32,6 +32,8 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
 | `/api/brief/{section}?limit=&after=` | One page of a list section of the brief (`you_owe`, `owed_to_you`, `conversations`, `feed`, `signals` or `strangers`), of the bundle of rule N (`bundle-N`, newest first), or of the items that a `hide` rule leaves out (`hidden`, newest first; each item has the rule and the reason in `attention`): `{"count", "items", "next"}`, in the same order and with the same filter as the brief. The page has `duplicates` only when an item of the page has a duplicate, as in the brief. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. With no `after`, the page starts at the first item. `next` is a text value that holds the section name and the sort keys of the last item of the page. Do not make or change it. The API does not sign it, so a made cursor gives the items after its keys. The next page starts after these keys in the order of the section. An item that leaves the section, or that changes its sort key behind these keys, moves no other item. An item whose sort key moves across these keys between two pages can show twice or not show. For a new view, read the section again from the start. An empty `after`, or an `after` that is not a cursor of the same section, is a 400. An unknown section is a 404. `bundle-N` is a 404 when the active policy has no `bundle` rule N and no item of the brief is in its bundle. |
 | `/api/handled?limit=&after=` | `{"count", "actions": [...], "next"}`: each action that a rule decided without the person, in its state now (`approved`, `held`, `applied`, `failed`, `undone` or `denied`; not `in_review`, which the review lists), the newest first. A `failed` action can have changed some of its messages. `count` is the count of all such actions. Each action is `{"changeset", "revision", "n", "verb", "args", "messages", "state", "rule", "policy", "why", "reason", "at"}`. `messages` is the count of its messages. `why` is the reason of the author, and `reason` is the reason of the decision. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. An `after` that is not such a value is a 400. |
+| `/api/gate?limit=&after=` | The senders that wait at the stranger gate. See [Stranger gate](#stranger-gate). |
+| `/api/gate/declined?limit=&after=` | The senders that the person declined at the gate, with their items that would wait there. See [Stranger gate](#stranger-gate). |
 | `/api/changesets` | `{"changesets": [...]}`: each open changeset (specification 2, section 5.1), the newest changeset first. A changeset is open while one or more of its actions is `proposed`, `in_review`, `approved` or `held`. The answer streams in parts of 64 KiB. |
 | `/api/changesets/{id}` | One changeset (`cs-77`) in each state, as the document of specification 2, section 5.1. The answer streams. An ID that no changeset has is a 404. |
 | `/api/messages?ids=` | `{"messages": [...]}`: the summary of each message of `ids` (`m-1,m-2`, 1 to 200 IDs), in the order of `ids`, with `"gone": false`. A message that is gone, or that is not in the mirror, is `{"id", "gone": true}`. A text that is not a message ID is a 400. The review shows the real messages of each action with it. |
@@ -40,6 +42,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
+| `/api/watches` | `[watch]`, newest first. A watch is `{"id", "text", "created", "state", "arrived", "message"}`. `state` is `waits`, or `arrived` after its one notice. `message` is the summary of the first new message that matched, or `null` while the watch waits or when the message is gone. See [Watches](#watches). |
 
 A message summary is `{"id", "thread", "date", "from": {"name", "address"},
 "subject", "labels"}`.
@@ -55,11 +58,13 @@ The text of a message is data. Show it as text, never as markup.
 |---|---|
 | `you_owe` | Open commitments with the direction `you_owe`, where the counterparty is a `person` or a `service`. Order: by `due`, an item with no `due` last, then by created. |
 | `owed_to_you` | Open commitments with the direction `owed_to_you`, where the owner is a `person` or a `service`. Oldest first. |
-| `conversations` | Active conversations with `new` greater than 0 or `your_turn` true, and with no stranger participant. A conversation with a stranger is only in `strangers`. Newest `latest.at` first. |
+| `conversations` | Active conversations with `new` greater than 0 or `your_turn` true, and with no stranger participant and no declined participant. A conversation with a stranger is only in `strangers`. A conversation with a declined stranger and no other stranger is in no section. Newest `latest.at` first. |
 | `records` | The count of each record type that is not gone, for example `{"receipt": 3}`. |
 | `feed` | Feed items with the status `new`, in the order of the publisher address, then newest first. |
 | `signals` | Active signals whose `expires` time is later than now. The time that expires first comes first. |
-| `strangers` | Open commitments whose counterparty or owner is a stranger, and active conversations with a stranger participant. Newest first. |
+| `strangers` | Open commitments whose counterparty or owner is a stranger, and active conversations with a stranger participant. A stranger that the person declined at the gate does not count here. Newest first. |
+| `gate` | The first 20 senders of `/api/gate`: `{"count", "senders", "next"}`. |
+| `declined` | The count of senders of `/api/gate/declined`. |
 | `hostile` | The count of hostile mail of the last 7 days. |
 | `not_understood` | The count of messages that the model failed 3 times. |
 | `proposal` | The triage proposal: `{"count", "verbs": {"archive": 412}}`, the count of messages of the actions of the open triage changesets that are `proposed` or `in_review` (specification 2, section 5.4). The engine stores these changesets (`iris-triage`), and `/api/changesets` lists them. |
@@ -155,6 +160,48 @@ ledger keeps a `failed` entry. A body that is not valid (for example, a date
 that is not valid) is a 400, and nothing is written. An ID that no item has,
 or another verb, is a 404.
 
+## Stranger gate
+
+The gate is the `strangers` section of the brief, by sender (specification
+1, section 6.7). A `hide` or a `bundle` rule takes an item out of the
+section, so a rule decides before the gate asks the person.
+
+`GET /api/gate` and `GET /api/gate/declined` give one page of senders:
+`{"count", "senders": [...], "next"}`. `count` is the count of all senders of
+the list. Each sender is `{"id", "address", "name", "count", "items"}`:
+`count` is the count of its items in the list, and `items` holds its newest 3
+items. The newest sender comes first, by the time of its newest item: the
+`latest.at` of a conversation, else the date of the origin message. `limit`
+is 1 to 200, default 50. `after` is the `next` value of the page before of
+the same list. Another `after` is a 400.
+
+- `/api/gate`: each sender of the kind `stranger` (or with no kind yet) that
+  the person did not decline, with its items of `strangers`. A conversation
+  is under each of its strangers.
+- `/api/gate/declined`: each declined sender, with its open commitments and
+  active conversations that would wait at the gate. A conversation that has
+  another stranger waits at the gate under that stranger, not here. These
+  items are in no section of the brief.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/senders/{id}/accept` | The kind becomes `person`, decided by the person. The engine never changes it. Its items go to their sections. A second accept is no change. |
+| `POST /api/senders/{id}/decline` | The sender leaves the gate, and its items leave the brief. The engine keeps the kind, so a declined sender can become `hostile` or known. The decline applies only while the kind is `stranger`. |
+| `POST /api/senders/{id}/reopen` | Removes the accept or the decline. The engine decides the kind again from the mail of now. |
+
+There is no body. The answer is the sender row: `{"id", "address", "name",
+"kind", "decided_by", "declined"}`. Accept and decline apply only to a
+sender whose kind is `stranger` (or no kind yet) and whose mail of now gives
+`stranger` too. For another sender, the answer is a 409 and nothing is
+written. A `p-` ID that no sender has, or another answer, is a 404.
+
+An accept makes the domain of the sender known, and a reopen of an accept
+can make it unknown. So the engine decides the near copies of the domain
+again (specification 1, section 6.7). In the same transaction, it deletes
+the items from the mail of each sender that becomes `hostile` or stops being
+`hostile`, and marks that mail for understanding again. The understanding
+worker runs the model later.
+
 ## Errors
 
 An error is `{"error": "<reason>"}`:
@@ -166,7 +213,7 @@ An error is `{"error": "<reason>"}`:
 | 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
-| 409 | A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
+| 409 | A gate answer is for a sender that is not at the gate now: its kind is not `stranger`, or a rule took its items out. A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
 | 500 | The store failed. |
 
 ## Sign-in
@@ -228,3 +275,18 @@ model, with a budget that cannot pay the worst case of the call, or while a
 run of understanding holds the lock, the answer is a 503. A failed
 model call, or a model answer that is not valid, is a 502. The text of the
 answer is data: show it as text, never as markup.
+
+## Watches
+
+A watch is a search text (specification 1, section 5.6) that gives one notice
+when a new mail matches (card R5-07, `docs/specs/2026-11-16-watch.md`).
+
+| Route | Effect |
+|---|---|
+| `POST /api/watches` | Body `{"text"}`. Adds a watch and gives it with the status 201. An empty text, a text over 500 characters, a text that is not a valid search, or a 101st watch that waits is a 400. |
+| `POST /api/watches/{id}/remove` | Removes the watch (`w-3`) and gives `{"removed"}`. A watch that is not there is a 404. An ID that is not a `w-` ID is a 400. |
+
+Only a message that the mirror gets after the watch can match. It must also
+have its clean text, no hostile mark, no hostile sender, no label `SENT` or
+`DRAFT`, and a date at most 1 hour before the watch. The engine checks each
+minute. Each watch matches one time only.

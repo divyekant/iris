@@ -4,19 +4,23 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, newest, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { across, copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
+  import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
+  import Arrived from "./Arrived.svelte";
+  import Watches from "./Watches.svelte";
+  import { arrivedLine, loadWatches, type Watch } from "../watches";
 
   let {
     brief: firstBrief,
     status: firstStatus = null,
+    watches: firstWatches,
     now: start = new Date(),
     poll = 5000,
-  }: { brief: Brief; status?: Status | null; now?: Date; poll?: number } = $props();
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -24,7 +28,31 @@
   // svelte-ignore state_referenced_locally
   let status = $state(firstStatus);
   // svelte-ignore state_referenced_locally
+  let watches = $state(firstWatches ?? []);
+  // svelte-ignore state_referenced_locally
   let now = $state(start);
+  let arrived = $derived(watches.filter((w) => w.state === "arrived"));
+  let waiting = $derived(watches.filter((w) => w.state === "waits"));
+  // A watched mail that came leads the brief. With nothing else, it is the whole sentence.
+  let opening = $derived.by(() => {
+    const rest = summary(brief);
+    if (!arrived.length) return rest;
+    return rest === NOTHING ? arrivedLine(arrived) : `${arrivedLine(arrived)} ${rest}`;
+  });
+  // Each watch load and each change takes a ticket. A load applies only while its ticket is the newest,
+  // so an older answer never undoes a newer change. A failed load keeps the last list.
+  const ticket = newest();
+  async function reloadWatches() {
+    const fresh = ticket();
+    try {
+      const w = await loadWatches();
+      if (fresh()) watches = w;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  const change = (next: (w: Watch[]) => Watch[]) => (ticket(), (watches = next(watches)));
+  const removed = (id: string) => change((w) => w.filter((x) => x.id !== id));
   const ready = (s: Status | null) => copying(s).length === 0;
 
   // Load the brief again while it is open: every 5 seconds while the first sync
@@ -38,6 +66,14 @@
       syncing ? poll : poll * 12,
     );
   });
+  // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
+  // svelte-ignore state_referenced_locally
+  if (firstWatches === undefined) reloadWatches();
+  $effect(() => {
+    if (!poll) return;
+    const timer = setInterval(reloadWatches, poll * 12);
+    return () => clearInterval(timer);
+  });
 
   const SHOWN = 7;
 
@@ -48,8 +84,11 @@
   let until = $derived([signal.next, nextDay(now)].filter((t): t is string => !!t).sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
   $effect(() => watch(until, (d) => (now = d)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
+  // What you owe that is due in 2 days or less, or late, leads the brief (R3-08). It shows only there, so You owe counts the rest.
+  // shortcut: the API gives at most 200 items of You owe, so a due item past them stays in You owe; page the API if one person owes more.
+  let soon = $derived(dueSoon(brief.you_owe.items, now));
   let parts = $derived([
-    { key: "you_owe", title: "You owe", ...brief.you_owe },
+    { key: "you_owe", title: "You owe", count: brief.you_owe.count - soon.length, items: brief.you_owe.items.filter((i) => !soon.includes(i)), duplicates: brief.you_owe.duplicates, total: brief.you_owe.count },
     { key: "owed_to_you", title: "Owed to you", ...brief.owed_to_you },
     { key: "conversations", title: "Conversations", ...brief.conversations },
     { key: "strangers", title: "From senders you do not know", ...brief.strangers },
@@ -90,8 +129,14 @@
 
 <div class="opening">
   <p class="day">{greeting(now)} It is {day}.</p>
-  <h1>{summary(brief)}</h1>
+  <h1>{opening}</h1>
 </div>
+
+{#if arrived.length}
+  <div class="arrivals">
+    {#each arrived as w (w.id)}<Arrived watch={w} ondone={removed} />{/each}
+  </div>
+{/if}
 
 
 {#if progress}
@@ -114,6 +159,16 @@
   </div>
 {/if}
 
+{#if soon.length}
+  <section class="soon" aria-labelledby="soon">
+    <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
+    <ul>
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} />{/each}
+    </ul>
+    {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
+  </section>
+{/if}
+
 {#if brief.review?.actions}
   <section aria-labelledby="review">
     <h2 id="review"><span>Waits for your review</span> <span class="count">{brief.review.actions}</span></h2>
@@ -134,7 +189,7 @@
           {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
         </ul>
       {/if}
-      <a class="all" href={`#/brief/${part.key}`}>All {part.count}</a>
+      <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
     </section>
   {/if}
 {/each}
@@ -155,6 +210,12 @@
     <a class="all" href="#/handled">See what and why</a>
   </section>
 {/if}
+
+<!-- Watches (R5-07, option A of the owner): the watches that wait, and the quiet button that starts one. -->
+<section class="watching" aria-labelledby={waiting.length ? "watching" : undefined} aria-label={waiting.length ? undefined : "Watches"}>
+  {#if waiting.length}<h2 id="watching"><span>Iris watches for</span> <span class="count">{waiting.length}</span></h2>{/if}
+  <Watches watches={waiting} onadded={(w) => (w ? change((all) => [w, ...all.filter((x) => x.id !== w.id)]) : reloadWatches())} onstopped={removed} />
+</section>
 
 {#if publishers.length || records.length}
   <section class="also" aria-labelledby="also">
@@ -223,6 +284,12 @@
     width: 100%;
     height: var(--space-1);
     accent-color: var(--color-primary);
+  }
+  .arrivals {
+    display: grid;
+    gap: var(--space-3);
+    margin-bottom: var(--space-12);
+    animation: arrive var(--transition-normal) both;
   }
   .codes {
     display: grid;
@@ -304,6 +371,10 @@
   footer p {
     margin: 0 0 var(--space-2);
   }
+  .soon {
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
+  }
   .warning {
     color: var(--color-text);
     border-left: 4px solid var(--color-warning);
@@ -318,6 +389,7 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .arrivals,
     .opening {
       animation: none;
     }
