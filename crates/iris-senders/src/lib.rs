@@ -281,8 +281,9 @@ fn decide_message(
             .prepare_cached(&format!(
                 "SELECT DISTINCT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
                   WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
-                    AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL AND {RECEIVED}
-                    AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)"
+                    AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL AND {}
+                    AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)",
+                received("m")
             ))?
             .query_map(params![message, date.unwrap_or(i64::MIN), account], |r| {
                 r.get(0)
@@ -367,10 +368,14 @@ const SENT_NOT_DRAFT: &str =
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
-/// True when the message `m` is received mail: no label `SENT` or `DRAFT`.
-const RECEIVED: &str =
-    "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                  WHERE ml.message_id = m.id AND l.provider_id IN ('SENT', 'DRAFT'))";
+/// SQL that is true when the message with the alias `m` is received mail:
+/// no label `SENT` or `DRAFT`.
+fn received(m: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                      WHERE ml.message_id = {m}.id AND l.provider_id IN ('SENT', 'DRAFT'))"
+    )
+}
 
 /// SQL that is true when the header `h` names the address of parameter
 /// `?n` in `To` or `Cc`.
@@ -441,8 +446,9 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
                SELECT 1 FROM header hm JOIN message m ON m.id = hm.message_id
                  JOIN message s ON s.thread_id = m.thread_id AND s.id != m.id
                  JOIN header h ON h.message_id = s.id
-                WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {RECEIVED} AND {SENT_NOT_DRAFT}
+                WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {} AND {SENT_NOT_DRAFT}
                   AND (s.internal_date > m.internal_date OR {}))",
+            received("m"),
             to_addr(1)
         ),
         [addr],
@@ -456,12 +462,16 @@ fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
     // it is there with the same bytes (so the same automated and DKIM
     // headers) and has 2 earlier messages from the address.
     let service: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sender_evidence ev JOIN message q ON q.id = ev.message_id
-          WHERE ev.address = ?1 AND ev.rule = 'service' AND q.content_sha256 IS ev.content_sha256
-            AND q.gone_at IS NULL
-            AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
-                  WHERE h.from_addr = ?1 AND e.internal_date < q.internal_date
-                    AND e.gone_at IS NULL LIMIT 2)) >= 2)",
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM sender_evidence ev JOIN message q ON q.id = ev.message_id
+              WHERE ev.address = ?1 AND ev.rule = 'service' AND q.content_sha256 IS ev.content_sha256
+                AND q.gone_at IS NULL AND {}
+                AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
+                      WHERE h.from_addr = ?1 AND e.internal_date < q.internal_date
+                        AND e.gone_at IS NULL AND {} LIMIT 2)) >= 2)",
+            received("q"),
+            received("e")
+        ),
         [addr],
         |r| r.get(0),
     )?;
