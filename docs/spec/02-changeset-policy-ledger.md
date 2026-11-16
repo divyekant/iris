@@ -600,6 +600,33 @@ store, not a line in the file. When the person accepts it, the engine adds the
 rule to the file with `by = "proposal"`. A proposal never changes the file
 without the person.
 
+The proposal is a row of the table `rule_proposal` (store migration 12).
+The engine (crate `iris-policy`, module `propose`) writes the open rows
+again when a decision of the person, an undo, the active policy or the hour
+changes:
+
+- It reads the newest 2,000 actions of an author other than `person`, with
+  the verb `archive`, `read`, `unread`, `inbox` or `trash`, that the person
+  approved (the states `approved`, `held`, `applied` and `failed`) or
+  refused (`denied` by the person, or `undone`). `label` and `unlabel` are
+  not in the list, because a rule cannot name the label. The state verbs
+  change items, not mail.
+- A candidate is one verb and one condition: the `sender` address or the
+  `sender_kind` that each message of one approved action has. An action on
+  hostile mail gives no candidate, and `hostile` is never a candidate.
+- The candidate rule is added to the active policy. An action counts for it
+  only when the rule changes the decision of that action to approved
+  (section 6.4). The engine proposes the rule when 10 or more approvals
+  count and no refusal counts.
+- A refusal that the engine cannot read again (a message row is gone)
+  stops each proposal of its verb.
+- The person accepts or dismisses a proposal in the web client. An accept
+  is a change of section 6.3: the engine adds the rule at the end of the
+  file, with the next rule ID, `by = "proposal"`, the date and a comment,
+  and marks the row `accepted` in the same transaction. A dismiss changes
+  no file. Iris never proposes an accepted or a dismissed rule again.
+- An open row that no longer has the pattern goes away.
+
 ## 7. The ledger
 
 ### 7.1 What the ledger holds
