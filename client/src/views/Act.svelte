@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { get, post, type Item } from "../api";
-  import { day, first, firstName, hold, HOLD, nextWeek, said, type Verb } from "../act";
+  import { day, first, firstName, hold, HOLD, nextWeek, said, started, type Verb } from "../act";
 
   // `delay`: the time for Undo, shorter in tests. `clock`: the time now.
   let {
@@ -38,9 +38,9 @@
     later = !later;
   }
 
-  function defer(date: string) {
+  function defer(date: string | null) {
     // A page kept open past midnight: a day that started in UTC would open the item again at once.
-    if (!date || date < first(clock())) {
+    if (!date || started(date, clock())) {
       now = clock();
       picked = "";
       return;
@@ -62,6 +62,13 @@
 
   async function send(verb: Verb, date?: string) {
     pending = undefined;
+    // The day can start in UTC during the hold: then send nothing, and offer the days again.
+    if (date && started(date, clock())) {
+      now = clock();
+      later = true;
+      phase = { at: "idle" };
+      return;
+    }
     phase = { at: "sending", verb, date };
     try {
       const next = await post<Item>(`items/${encodeURIComponent(item.id)}/${verb}`, date ? { date } : {});
@@ -132,7 +139,7 @@
     {#if later}
       <div class="when">
         <button class="chip" type="button" onclick={() => defer(soon)}>{firstName(now)} <span>{day(soon)}</span></button>
-        {#if week !== soon}<button class="chip" type="button" onclick={() => defer(week)}>Next week <span>{day(week)}</span></button>{/if}
+        {#if week && week !== soon}<button class="chip" type="button" onclick={() => defer(week)}>Next week <span>{day(week)}</span></button>{/if}
         <label class="chip">
           Pick a date
           <input type="date" min={soon} bind:value={picked} onchange={() => defer(picked)} />

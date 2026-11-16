@@ -29,11 +29,18 @@ export function first(now: Date): string {
   return local > utc ? local : utc;
 }
 
-/** The Monday after `now`. On a Monday, the Monday a week later. Never before `first(now)`. */
-export function nextWeek(now: Date): string {
+/**
+ * The Monday after `now`. On a Monday, the Monday a week later. Null when
+ * that Monday already started in UTC (a Sunday evening west of UTC).
+ */
+export function nextWeek(now: Date): string | null {
   const monday = ymd(plus(now, ((8 - now.getDay()) % 7) || 7));
-  const min = first(now);
-  return monday > min ? monday : min;
+  return started(monday, now) ? null : monday;
+}
+
+/** True when the day `date` (`YYYY-MM-DD`) started in UTC at `now`, so a defer to it would open the item again at once. */
+export function started(date: string, now: Date): boolean {
+  return date < first(now);
 }
 
 /** The name of the first day of Later: "Tomorrow", or the day after when tomorrow already started in UTC. */
