@@ -1079,7 +1079,7 @@ forms, labels and senders in the store.
 |---|---|---|
 | A crash, an error or a refusal in a run | A draft revision that blocks each approval (spec 2, section 5.5), or half a proposal | The transaction rolls back. No changeset, revision or action of the run stays. |
 | Two runs for one account at the same time, in one process or in two | Two open triage changesets for one account | Each run reads and writes in one transaction. In one process, the write lock of the store puts the runs in order. Across processes, SQLite refuses the write of the run whose snapshot is old, and that run gives an error. |
-| A proposal with no action, while a triage changeset is open | A revision with no action | The run writes nothing. The open actions stay until withdraw and expiry are built (R2-01 part 3). |
+| A proposal with no action, while a triage changeset is open | A revision with no action, or open actions that triage no longer proposes | The run withdraws the changeset: its proposed and in_review actions become cancelled. If the changeset has an approved or held action, the run writes nothing, because a withdraw cancels that action too (issue #220). The open actions then wait for a person or the expiry. |
 | A proposal with no action, and no open changeset | An empty changeset | The run writes nothing. |
 | A large inbox | Memory that grows with the mailbox | The run keeps the IDs of one action (500 at most) in memory. |
 | A message that leaves the inbox between the run and an apply | The apply changes a message that triage did not propose | Submit resolves the targets in the run. The apply (R2-02) checks each message again. |
