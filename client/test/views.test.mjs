@@ -55,9 +55,9 @@ test("the Signals heading keeps the exact count of the API when a live code show
   const t = text(await render("/src/views/Brief.svelte", { brief, now: NOW }));
   assert.match(t, /Signals 9/);
   assert.match(t, /All 9/);
-  // With only the live code, the code shows at the top and no empty Signals section shows.
+  // With only the live code, the code shows at the top, and the Signals section has its heading and link but no empty list.
   const only = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, signals: { count: 1, items: [code] } }, now: NOW });
-  assert.doesNotMatch(only, /id="signals"/);
+  assert.match(only, /<h2 id="signals"[^>]*><span>Signals<\/span> <span[^>]*>1<\/span><\/h2> <!--\[-1--><!--\]--> <a class="all/);
 });
 
 test("the dev proxy sends the Host of the engine, and changes only the dev page's own Origin", async () => {

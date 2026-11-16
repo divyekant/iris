@@ -59,7 +59,6 @@
       // The count of the API, less the signals that expired since. The live codes show at the top, so only the rows leave them out.
       count: signal.count,
       items: signal.rows,
-      hidden: codes.length,
     },
   ]);
 
@@ -109,12 +108,15 @@
 {/if}
 
 {#each parts as part (part.key)}
-  {#if part.count > ("hidden" in part ? part.hidden : 0)}
+  {#if part.count > 0}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
-      <ul>
-        {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
-      </ul>
+      <!-- Live login codes show above the sections, so the Signals list can be empty. -->
+      {#if part.items.length}
+        <ul>
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
+        </ul>
+      {/if}
       <a class="all" href={`#/brief/${part.key}`}>All {part.count}</a>
     </section>
   {/if}
