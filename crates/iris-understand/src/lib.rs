@@ -7,7 +7,7 @@
 //!
 //! Mail text is data, never instructions. Code only compares the text.
 
-mod head;
+pub mod head;
 pub mod time;
 
 use serde_json::Value;
@@ -154,8 +154,19 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
     let head = Head::parse(raw);
     let mut text = Text::of(raw);
     if !cx.same_sender.is_empty() {
-        let earlier: Vec<&str> = cx.same_sender.iter().map(String::as_str).collect();
-        text.text = iris_clean::remove_repeated_end(&text.text, &earlier);
+        // The cut mark is not part of the text: it stays at the end.
+        let strip = |t: &str| {
+            t.strip_suffix(iris_clean::CUT_MARK)
+                .unwrap_or(t)
+                .to_string()
+        };
+        let earlier: Vec<String> = cx.same_sender.iter().map(|t| strip(t)).collect();
+        let earlier: Vec<&str> = earlier.iter().map(String::as_str).collect();
+        let had_mark = text.text.ends_with(iris_clean::CUT_MARK);
+        text.text = iris_clean::remove_repeated_end(&strip(&text.text), &earlier);
+        if had_mark {
+            text.text.push_str(iris_clean::CUT_MARK);
+        }
     }
     let mut marks = Vec::new();
     let from = head.from_addr.as_deref().unwrap_or("");

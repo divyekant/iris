@@ -224,3 +224,23 @@ Total due: 77.00 USD.
         .1
         .contains("Total due: 77.00 USD."));
 }
+
+#[test]
+fn the_cut_mark_stays_after_the_repeated_end_goes_out() {
+    let filler: String = (0..4_000)
+        .map(|i| format!("line {i} of the report\n"))
+        .collect();
+    let mk = |first: &str| {
+        format!("From: Bo Ren <bo@example.org>\nSubject: Report\n\n{first}\n\n{filler}")
+    };
+    let earlier = iris_understand::Text::of(&crlf(&mk("The first report."))).text;
+    assert!(earlier.ends_with(iris_clean::CUT_MARK));
+    let a = analysis(&mk("The second report."), &[], &[], &[&earlier]);
+    assert!(a.text.cut);
+    assert!(a.text.text.starts_with("The second report."));
+    assert!(
+        a.text.text.ends_with(iris_clean::CUT_MARK),
+        "{}",
+        &a.text.text[..200.min(a.text.text.len())]
+    );
+}
