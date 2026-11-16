@@ -129,6 +129,26 @@ async fn each_verb_changes_the_commitment() {
     );
 }
 
+/// Each request acts on its own new action, also in a store with earlier
+/// changesets: defer, then close the same commitment.
+#[tokio::test]
+async fn each_request_applies_its_own_action() {
+    let s = store("two", "open");
+    let (code, item) = post(&s, "/api/items/c-1/defer", r#"{"date":"2099-01-05"}"#).await;
+    assert_eq!(code, StatusCode::OK, "{item}");
+    let (code, item) = post(&s, "/api/items/c-1/close", "{}").await;
+    assert_eq!(code, StatusCode::OK, "{item}");
+    assert_eq!(item["status"], json!("done"));
+    assert_eq!(
+        one(
+            &s,
+            "SELECT group_concat(a.verb || ' ' || l.state, ', ') FROM changeset_action a
+             JOIN ledger l ON l.action_id = a.id"
+        ),
+        "defer applied, close applied"
+    );
+}
+
 /// A commitment that the verb cannot change gives 409 with the reason, and
 /// a failed ledger entry. The item does not change.
 #[tokio::test]

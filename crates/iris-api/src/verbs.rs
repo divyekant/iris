@@ -50,12 +50,15 @@ pub fn apply_verb(
     // submit denies the action, nothing stays.
     let action = iris_changeset::transaction(store, |c| {
         let cs = iris_changeset::create_in(c, &person, now_ms)?;
-        let row = iris_changeset::add_action_in(c, cs, &person, verb, &[id], &args, None)?;
+        // `add_action_in` gives the action number in the changeset, not
+        // the row ID.
+        let n = iris_changeset::add_action_in(c, cs, &person, verb, &[id], &args, None)?;
         iris_changeset::submit_in(c, cs, &person, &why, now_ms)?;
-        let (state, reason, revision, n): (Option<String>, Option<String>, i64, i64) = c
+        let (row, state, reason, revision): (i64, Option<String>, Option<String>, i64) = c
             .query_row(
-                "SELECT state, reason, revision, n FROM changeset_action WHERE id = ?1",
-                [row],
+                "SELECT id, state, reason, revision FROM changeset_action
+                 WHERE changeset_id = ?1 AND n = ?2",
+                [cs, n],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
         if state.as_deref() != Some("proposed") {
