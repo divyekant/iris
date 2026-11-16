@@ -42,6 +42,19 @@ test("#/ask opens the Ask view, which has a link in the header", () => {
   assert.ok(NAV.some(([link, label]) => link === "#/ask" && label === "Ask"));
 });
 
+test("each source of a fixture answer opens its mail, with the same head and the quote", () => {
+  for (const q of ["Q4 numbers?", "When does my flight leave?", "What is the weather?"]) {
+    for (const source of fx.askAnswer(q).sources) {
+      const mail = fx.answer(`messages/${source.message.id}`);
+      assert.ok(mail, `${q}: ${source.message.id}`);
+      for (const key of ["id", "thread", "date", "from", "subject", "labels"]) {
+        assert.deepEqual(mail[key], source.message[key], `${q}: ${source.message.id} ${key}`);
+      }
+      if (source.quote) assert.ok(mail.text.includes(source.quote), `${q}: ${source.quote}`);
+    }
+  }
+});
+
 // Answer POST /api/ask from `answers`, in order. Keep each question.
 function serve(answers) {
   const asked = [];
@@ -116,5 +129,30 @@ test("questions and answers stack, and each mark opens its source mail", async (
   } finally {
     again.destroy();
     thread.turns.length = 0;
+  }
+});
+
+test("a question that fails after the view closed comes back to the box", async () => {
+  thread.turns.length = 0;
+  thread.draft = "";
+  let release;
+  const waits = new Promise((r) => (release = r));
+  serve([async () => (await waits, [503, { error: "The budget cannot pay for this question." }])]);
+  const view = await mount("/src/views/Ask.svelte");
+  await send(view, "Where is my passport?");
+  assert.equal(view.target.querySelector("input").value, "");
+  // The person opens a source mail while the question waits.
+  view.destroy();
+  release();
+  await until(() => !thread.busy);
+  const again = await mount("/src/views/Ask.svelte");
+  try {
+    again.flushSync();
+    assert.equal(again.target.querySelector("input").value, "Where is my passport?");
+    assert.equal(text(again.target.querySelector("[role=alert]")), "The budget cannot pay for this question.");
+  } finally {
+    again.destroy();
+    thread.turns.length = 0;
+    thread.draft = "";
   }
 });

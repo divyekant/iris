@@ -116,7 +116,7 @@ export const handled: HandledPage = { count: 0, next: null, actions: [] };
 
 export function message(id: string): Message | undefined {
   const item = items.find((i) => i.sources.some((s) => s.message === id));
-  if (!item) return undefined;
+  if (!item) return askMail(id);
   const source = item.sources.find((s) => s.message === id)!;
   return {
     id,
@@ -125,9 +125,11 @@ export function message(id: string): Message | undefined {
     from: { name: "Example Sender", address: "sender@example.com" },
     subject: item.title,
     labels: ["INBOX"],
+    // A mail with a fixed head has the head of its summary everywhere.
+    ...(HEADS[id] ? (summaryOf(id) as Summary) : {}),
     to: "you@example.com",
     cc: null,
-    text: `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
+    text: ASK_MAIL[id] ?? `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
     gone: false,
     hostile: [],
     items: items.filter((i) => i.sources.some((s) => s.message === id)).map((i) => i.id),
@@ -215,6 +217,21 @@ const PUBLISHERS = [
   ["The Verge", "newsletter@theverge.example", "Verge Deals of the day"],
   ["Product Hunt Daily", "hello@producthunt.example", "Top launches of the day"],
 ] as const;
+
+/** The text of each mail that a fixture answer of Ask cites. */
+const ASK_MAIL: Record<string, string> = {
+  "m-55210": "Hi,\n\nCould you review section 4 by Tuesday? The board meets on Wednesday.\n\nPriya",
+  "m-55211": "Thanks, Priya. I will send it on Monday.",
+  "m-53500": "Booking reference QX7K2P\n\nYour flight to Tokyo leaves on 20 November. The gate shows 24 hours before departure.",
+};
+
+/** A mail that Ask cites, with the head of its summary, so its link opens it. */
+function askMail(id: string): Message | undefined {
+  const text = ASK_MAIL[id];
+  if (text === undefined) return undefined;
+  const s = summaryOf(id) as Summary;
+  return { ...s, to: "you@example.com", cc: null, text, gone: false, hostile: [], items: [] };
+}
 
 /** POST /api/ask: a fixed answer for each kind of question, with no model. */
 export function askAnswer(question: string): AskAnswer {

@@ -452,8 +452,9 @@ test("the next day starts at local midnight", async () => {
 
 test("the fixture server gives the original of a mail", () => {
   const source = fx.raw("m-55210");
-  assert.match(source, /^From: Example Sender <sender@example\.com>\r\n/);
-  assert.match(source, /\r\nSubject: Review contract section 4\r\n/);
+  // m-55210 has a fixed head: the head of its summary.
+  assert.match(source, /^From: Priya Raman <priya@northwind\.example>\r\n/);
+  assert.match(source, /\r\nSubject: Q4 numbers for the board\r\n/);
   assert.equal(fx.raw("m-0"), undefined);
 });
 

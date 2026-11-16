@@ -9,23 +9,17 @@
   import type { AskSource } from "../api";
   import { href } from "../route";
 
-  let question = $state("");
   let end: HTMLElement | undefined = $state();
 
   const from = (s: AskSource) => s.message.from.name || s.message.from.address || "Unknown sender";
   const label = (s: AskSource) => `${from(s)}: ${s.message.subject || "No subject"}`;
 
+  // ask() gives the question back to the box after an error.
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    const sent = question;
-    question = "";
-    if (!(await ask(sent))) {
-      question = sent;
-      return;
-    }
-    // After an error, give the question back, so the person can send it again.
-    const last = thread.turns[thread.turns.length - 1];
-    if (last.error && !question) question = sent;
+    const sent = thread.draft;
+    thread.draft = "";
+    if (!(await ask(sent)) && !thread.draft) thread.draft = sent;
   }
 
   // Show the newest question and its answer.
@@ -98,12 +92,12 @@
     <div class="field">
       <input
         id="ask-question"
-        bind:value={question}
+        bind:value={thread.draft}
         maxlength="500"
         autocomplete="off"
         placeholder={thread.turns.length ? "Ask another question" : "When does my flight leave?"}
       />
-      <button class="go" type="submit" aria-label="Ask" disabled={thread.busy || !question.trim()}>
+      <button class="go" type="submit" aria-label="Ask" disabled={thread.busy || !thread.draft.trim()}>
         <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
           <path d="M4 10h11M11 5.5 15.5 10 11 14.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
         </svg>

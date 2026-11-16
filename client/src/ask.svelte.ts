@@ -5,7 +5,9 @@ import { own, post, type AskAnswer, type AskSource } from "./api";
 
 export type Turn = { question: string; answer?: AskAnswer; error?: string };
 
-export const thread = $state({ turns: [] as Turn[], busy: false });
+/** `draft` is the text of the question box. It lives here too, so a failed
+ * question comes back to the box also after the view closed and opened. */
+export const thread = $state({ turns: [] as Turn[], busy: false, draft: "" });
 
 /** Ask one question. Gives false if a question waits for its answer, or the question is empty. */
 export async function ask(question: string): Promise<boolean> {
@@ -19,6 +21,8 @@ export async function ask(question: string): Promise<boolean> {
   } catch (e) {
     // own() gives "" when App.svelte shows the error already as the access state.
     turn.error = own(e) || "Iris could not answer. The notice above says why.";
+    // Give the question back, so the person can send it again. Keep new text.
+    if (!thread.draft) thread.draft = question;
   } finally {
     thread.busy = false;
   }
