@@ -35,6 +35,10 @@ and shows a warning. macOS users then build from source (section 5).
 
 To build the programs of a release again, open Actions, select `deploy`,
 click Run workflow, and give the tag.
+The run replaces the files of the same name, then removes the archives that
+the new `SHA256SUMS` does not name. If the run stops partway, `install.sh`
+refuses each archive whose sum does not match. Run the workflow again to
+repair the release.
 
 ## 3. Secrets
 

@@ -189,12 +189,27 @@ pub fn write(system: System, program: &Path, home: &Path, config: &Path) -> io::
 pub fn install(program: &Path) -> io::Result<PathBuf> {
     let system = unsupported(System::current())?;
     let (home, config) = folders()?;
+    let old = std::fs::read(system.file(&home, &config)).ok();
     let file = write(system, program, &home, &config)?;
+    if let Err(e) = activate(system, &file) {
+        // Put back the file of before the install (or no file), so that a
+        // failed install leaves no new service file. A second install retries.
+        let _ = match old {
+            Some(text) => std::fs::write(&file, text),
+            None => std::fs::remove_file(&file),
+        };
+        return Err(e);
+    }
+    Ok(file)
+}
+
+/// Tell the service manager to load the service file and start the service.
+fn activate(system: System, file: &Path) -> io::Result<()> {
     match system {
         System::Launchd => {
             let domain = format!("gui/{}", uid()?);
             stop_agent(&domain)?;
-            run("launchctl", &["bootstrap", &domain, path_str(&file)?])?;
+            run("launchctl", &["bootstrap", &domain, path_str(file)?])?;
         }
         System::Systemd => {
             run("systemctl", &["--user", "daemon-reload"])?;
@@ -202,7 +217,7 @@ pub fn install(program: &Path) -> io::Result<PathBuf> {
             run("systemctl", &["--user", "restart", UNIT])?;
         }
     }
-    Ok(file)
+    Ok(())
 }
 
 /// Stop the service and delete its file. Return the path of the deleted file,

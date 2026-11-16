@@ -60,11 +60,16 @@ jobs:
             fi
           done
           cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
-      # Remove the program files of an earlier run first, so that the release
-      # never keeps an archive that the new SHA256SUMS does not name.
+      # Replace the files of the same name first, then remove the archives
+      # that the new SHA256SUMS does not name. If an upload stops partway,
+      # install.sh refuses each archive whose sum does not match, so nothing
+      # wrong is installed. A rerun from the same tag repairs the release.
       - name: Attach the programs to the release
         run: |
+          gh release upload "$TAG" dist/*.tar.gz --clobber
+          gh release upload "$TAG" dist/SHA256SUMS --clobber
           gh release view "$TAG" --json assets --jq '.assets[].name' |
-            { grep -E '^(iris-.*\.tar\.gz|SHA256SUMS)$' || true; } |
-            while read -r name; do gh release delete-asset "$TAG" "$name" --yes; done
-          gh release upload "$TAG" dist/*
+            { grep -E '^iris-.*\.tar\.gz$' || true; } |
+            while read -r name; do
+              [ -f "dist/$name" ] || gh release delete-asset "$TAG" "$name" --yes
+            done

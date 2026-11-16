@@ -632,8 +632,8 @@ and goes through the policy as an agent changeset does. A rule with
 | Command | Does | Mode | Release |
 |---|---|---|---|
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
-| `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. | host | 1 |
-| `iris service remove` | Stops the background service and removes its file. If the stop fails, the file stays. | host | 1 |
+| `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails, it puts back the service file of before the install (or removes the new file) and returns the error. A second install tries again. | host | 1 |
+| `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. | host | 1 |
 | `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
 | `iris sync` | Runs an incremental sync now. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
