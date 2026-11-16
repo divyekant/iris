@@ -825,6 +825,18 @@ name = "iris-synth"
 version = "0.0.0"
 
 [[package]]
+name = "iris-talk"
+version = "0.0.0"
+dependencies = [
+ "iris-clean",
+ "iris-store",
+ "iris-synth",
+ "jsonschema",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-web"
 version = "0.0.0"
 dependencies = [
