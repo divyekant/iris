@@ -297,6 +297,27 @@ fn a_year_shaped_code_bound_to_its_word_counts() {
 }
 
 #[test]
+fn an_unclear_code_in_a_list_message_goes_to_the_model() {
+    let raw = LIST.replace("Read the news.", "Your code is 1234 or 5678");
+    assert_ne!(raw, LIST);
+    assert!(drafts(&raw, Kind::Service, &[]).is_none());
+}
+
+#[test]
+fn a_long_line_of_codes_is_read_in_linear_time() {
+    // About 300 KB on one line: a slow search takes minutes, not seconds.
+    let line = "code 1234 ".repeat(30_000);
+    let raw = format!("From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{line}\n");
+    let start = std::time::Instant::now();
+    assert!(drafts(&raw, Kind::Service, &[]).is_none());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn an_invoice_with_a_code_goes_to_the_model() {
     let raw = "From: Shop <billing@shop.example>\nSubject: Your invoice\n\nVerification code: 482913\nTotal: 12.50 USD\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());

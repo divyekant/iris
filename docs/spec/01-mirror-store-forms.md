@@ -766,7 +766,7 @@ matches gives the result, and the next rules do not run.
 | 1 | Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
 | 2 | The subject or the body matches a receipt or a statement pattern | No fixed rule. The model reads the message, so that the record and the payment commitment (section 6.4) are not lost. This applies also to an invitation, a code and a list message. |
 | 3 | A calendar invitation (`text/calendar` with `METHOD:REQUEST`), not from you | Commitment of kind `invitation`. A request from you is your own invitation: the model reads it. |
-| 4 | A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. A code comes before the list rule: a login code from a list sender is a signal that you need now. If the line with the code word has more than one number that can be the code, the rule does not match, and the model reads the message. |
+| 4 | A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. A code comes before the list rule: a login code from a list sender is a signal that you need now. A number binds to a code word when at most 3 words and at most 100 bytes are between them. If the line with the code word has more than one bound number, or a weakly bound number next to other numbers, the code is not clear: no fixed rule matches (also not the list rule), and the model reads the message. |
 | 5 | `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item. |
 
 The conversation rule runs for each message that is not hostile mail:
