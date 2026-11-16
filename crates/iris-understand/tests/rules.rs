@@ -405,6 +405,22 @@ fn an_invitation_for_another_person_goes_to_the_model() {
 }
 
 #[test]
+fn an_invitation_or_a_code_with_a_file_goes_to_the_model() {
+    let file = "--a\nContent-Type: application/pdf; name=\"booking.pdf\"\nContent-Disposition: attachment; filename=\"booking.pdf\"\nContent-Transfer-Encoding: base64\n\nAAAA\n--a--";
+    let mixed = INVITE.replace("multipart/alternative", "multipart/mixed");
+    // In a mixed message, the calendar part alone is no file.
+    assert_eq!(one(&mixed, Kind::Person, &[]).item["kind"], "invitation");
+    let invite = mixed.replacen("--a--", file, 1);
+    assert_ne!(invite, mixed);
+    assert!(drafts(&invite, Kind::Person, &[]).is_none());
+    let code = "From: Bank <no-reply@bank.example>\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=a\n\n--a\nContent-Type: text/plain\n\nYour code: 482913\n".to_string() + file + "\n";
+    assert!(drafts(&code, Kind::Service, &[]).is_none());
+    // The same mail with no file gives the code.
+    let plain = code.replace(file, "--a--");
+    assert_eq!(one(&plain, Kind::Service, &[]).item["code"], "482913");
+}
+
+#[test]
 fn an_invoice_with_a_code_goes_to_the_model() {
     let raw = "From: Shop <billing@shop.example>\nSubject: Your invoice\n\nVerification code: 482913\nTotal: 12.50 USD\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());

@@ -89,7 +89,14 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     // A receipt or a statement can hold a code, a calendar request or a
     // List-Id too: the model reads it, so that the record and the payment
     // are not lost.
-    if looks_like_record(a) {
+    // A file can hold a record that no word of the text names. The
+    // calendar part of an invitation is no such file.
+    let file = a
+        .text
+        .attachments
+        .iter()
+        .any(|(_, mime, _)| !mime.eq_ignore_ascii_case("text/calendar"));
+    if looks_like_record(a) || file {
         return None;
     }
     let subject = a.text.subject.as_str();
@@ -148,9 +155,7 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
             });
             return Some(vec![Draft::rule(item, "code", line)]);
         }
-        // A file can hold a record that no word of the text names.
-        let list = a.head.list_id.is_some() || a.head.list_unsubscribe;
-        if list && a.text.attachments.is_empty() {
+        if a.head.list_id.is_some() || a.head.list_unsubscribe {
             let mut item = json!({
                 "form": "feed",
                 "status": feed_status(cx),
@@ -289,17 +294,17 @@ fn binds(line: &str, num: (usize, usize), cue: (usize, usize)) -> bool {
     if gap.len() > CODE_GAP {
         return false;
     }
-    let mut words = gap
-        .split(|c: char| c.is_whitespace() || matches!(c, ':' | '-' | '=' | '#'))
-        .filter(|w| !w.is_empty())
-        .map(str::to_ascii_lowercase);
     if after {
-        matches!(
-            (words.next().as_deref(), words.next()),
-            (None | Some("is"), None)
-        )
+        let mut words = gap
+            .split(|c: char| c.is_whitespace() || matches!(c, ':' | '-' | '=' | '#'))
+            .filter(|w| !w.is_empty());
+        let first = words.next();
+        words.next().is_none() && first.is_none_or(|w| w.eq_ignore_ascii_case("is"))
     } else {
-        words.all(|w| matches!(w.as_str(), "is" | "your" | "the" | "a"))
+        // Before the code word, only white space and these words, with no
+        // punctuation: "Account: 123456 - code expires" has no code.
+        gap.split_whitespace()
+            .all(|w| matches!(w.to_ascii_lowercase().as_str(), "is" | "your" | "the" | "a"))
     }
 }
 
@@ -409,7 +414,7 @@ mod tests {
         // Two values: no clear code.
         assert_eq!(code("Your code is 1234 or code 5678", ""), None);
         assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
-        assert_eq!(code("Account 123456: your code is 482913", ""), None);
+        assert_eq!(code("Account 123456: your code is 482913", ""), six);
         // A number with other words between it and the code word.
         assert_eq!(
             code("Verification for account 123456", "Your code: 482913"),
@@ -435,6 +440,10 @@ mod tests {
         );
         // No code word, or no code-shaped number.
         assert_eq!(code("Weekly news", "Read 2024 stories"), None);
+        assert_eq!(
+            code("Sign in", "Your account number: 123456 - code expires soon"),
+            None
+        );
         assert_eq!(code("Order 123456789 code", ""), None);
         assert_eq!(code("Code: total 1234.50 or 1,2345", ""), None);
         assert_eq!(code("code ab1234", ""), None);
