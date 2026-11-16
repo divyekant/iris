@@ -130,7 +130,9 @@ Use these steps if the release has no program for your system:
    curl -fsS http://127.0.0.1:4800/ >/dev/null && echo ok
    ```
 
-4. Make sure that `iris --version` shows the new version.
+4. Make sure that `iris --version` shows the release tag, for example
+   `iris v2026.11.16.1`. `deploy.yml` sets the tag in the program at build
+   time (`IRIS_RELEASE`). A build from source shows `iris 0.0.0`.
 
 ## 7. Roll back
 

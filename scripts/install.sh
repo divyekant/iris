@@ -82,7 +82,7 @@ elif "$dir/iris" help service >/dev/null 2>&1; then
     # A system with no service manager (for example, Linux with no systemd)
     # keeps the program, and the user starts the engine by hand.
     "$dir/iris" service install || {
-        echo "iris install: the program is installed, but the background service is not (see the error above)." >&2
+        echo "iris install: the program is installed, but the background service did not start (see the error above)." >&2
         echo "iris install: start the engine with: iris serve" >&2
     }
 else

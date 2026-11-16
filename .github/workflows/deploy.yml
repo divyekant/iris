@@ -45,6 +45,8 @@ jobs:
       - name: Build the programs
         env:
           IRIS_REQUIRE_CLIENT: "1"
+          # `iris --version` shows the release tag.
+          IRIS_RELEASE: ${{ env.TAG }}
         run: |
           mkdir dist
           for t in $LINUX $MACOS; do
@@ -59,6 +61,8 @@ jobs:
               echo "::warning::the build for $t failed; the release has no program for $t"
             fi
           done
+          # The runner can run the x86_64 Linux program: check its version line.
+          test "$(target/x86_64-unknown-linux-musl/release/iris --version)" = "iris $TAG"
           cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
       # Replace the files of the same name first, then remove the archives
       # that the new SHA256SUMS does not name. If an upload stops partway,

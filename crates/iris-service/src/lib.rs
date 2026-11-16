@@ -186,20 +186,15 @@ pub fn write(system: System, program: &Path, home: &Path, config: &Path) -> io::
 /// Install the service for `program` (an absolute path to the iris program)
 /// and start it now. A second install replaces the first. Return the path of
 /// the service file.
+///
+/// If a call to the service manager fails, the service file stays and the
+/// error comes back. The state of the service manager is then not known: run
+/// `install` again to finish, or [`remove`] to undo. Both are safe to repeat.
 pub fn install(program: &Path) -> io::Result<PathBuf> {
     let system = unsupported(System::current())?;
     let (home, config) = folders()?;
-    let old = std::fs::read(system.file(&home, &config)).ok();
     let file = write(system, program, &home, &config)?;
-    if let Err(e) = activate(system, &file) {
-        // Put back the file of before the install (or no file), so that a
-        // failed install leaves no new service file. A second install retries.
-        let _ = match old {
-            Some(text) => std::fs::write(&file, text),
-            None => std::fs::remove_file(&file),
-        };
-        return Err(e);
-    }
+    activate(system, &file)?;
     Ok(file)
 }
 
@@ -237,8 +232,14 @@ pub fn remove() -> io::Result<Option<PathBuf>> {
         }
         System::Systemd => {
             // If the stop fails, keep the file, so that a second remove can try again.
-            // The unit file exists, so a failure here is a real failure.
-            run("systemctl", &["--user", "disable", "--now", UNIT])?;
+            // With no systemctl at all, no systemd can run the unit: delete the file.
+            match run("systemctl", &["--user", "disable", "--now", UNIT]) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    std::fs::remove_file(&file)?;
+                    return Ok(Some(file));
+                }
+                other => other?,
+            };
             std::fs::remove_file(&file)?;
             run("systemctl", &["--user", "daemon-reload"])?;
         }

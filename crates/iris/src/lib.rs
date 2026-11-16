@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 pub const DEFAULT_ADDR: &str = "127.0.0.1:4800";
 
 #[derive(Parser)]
-#[command(name = "iris", version, about = "Iris: local, agent-first email.")]
+#[command(name = "iris", version = VERSION, about = "Iris: local, agent-first email.")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -57,9 +57,16 @@ pub fn service(action: ServiceAction) -> std::io::Result<String> {
     }
 }
 
+/// The version of the program: the release tag that `deploy.yml` sets in
+/// `IRIS_RELEASE` at build time, or the crate version for other builds.
+pub const VERSION: &str = match option_env!("IRIS_RELEASE") {
+    Some(tag) => tag,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Return the version line that `iris --version` prints.
 pub fn version_line() -> String {
-    format!("iris {}", env!("CARGO_PKG_VERSION"))
+    format!("iris {VERSION}")
 }
 
 /// Return all the routes of the engine.
