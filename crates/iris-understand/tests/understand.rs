@@ -96,6 +96,7 @@ fn store(name: &str) -> Box_ {
                 ("SENT", "SENT", "system"),
                 ("SPAM", "SPAM", "system"),
                 ("DRAFT", "DRAFT", "system"),
+                ("UNREAD", "UNREAD", "system"),
             ],
         )
         .unwrap();
@@ -108,6 +109,10 @@ fn store(name: &str) -> Box_ {
 
 impl Box_ {
     fn add(&self, id: &str, raw: &str, labels: &[&str]) -> i64 {
+        self.add_in(id, &format!("t{id}"), NOW - DAY, raw, labels)
+    }
+
+    fn add_in(&self, id: &str, thread: &str, date: i64, raw: &str, labels: &[&str]) -> i64 {
         let raw = raw.replace('\n', "\r\n");
         let sha = self.store.put_content(raw.as_bytes()).unwrap();
         self.store
@@ -115,9 +120,9 @@ impl Box_ {
                 self.account,
                 &[NewMessage {
                     provider_id: id.into(),
-                    thread_provider_id: format!("t{id}"),
+                    thread_provider_id: thread.into(),
                     content_sha256: Some(sha),
-                    internal_date: Some(NOW - DAY),
+                    internal_date: Some(date),
                     labels: labels.iter().map(|l| l.to_string()).collect(),
                     ..NewMessage::default()
                 }],
@@ -679,4 +684,140 @@ fn a_refusal_is_an_error_and_counts_no_try() {
         b.col::<i64>("SELECT tries FROM message WHERE id = ?1", m),
         0
     );
+}
+
+/// One rule for the retry state: the hostile check and the fixed rules always
+/// run. Only the model call waits for `retry_at` and stops after 3 tries.
+#[test]
+fn the_retry_state_holds_only_the_model_call() {
+    // (tries, retry_at, mail, labels, sender kind, model call, items, understood)
+    let rows: &[(i64, Option<i64>, &str, &str, Option<&str>, usize, usize, bool)] = &[
+        (0, None, ASK, "INBOX", None, 1, 1, true),
+        (1, Some(NOW + DAY), ASK, "INBOX", None, 0, 0, false),
+        (3, None, ASK, "INBOX", None, 0, 0, false),
+        (0, None, FEED, "INBOX", Some("service"), 0, 1, true),
+        (1, Some(NOW + DAY), FEED, "INBOX", Some("service"), 0, 1, true),
+        (3, None, FEED, "INBOX", Some("service"), 0, 1, true),
+        (3, None, ASK, "SPAM", None, 0, 0, true),
+        (1, Some(NOW + DAY), ASK, "SPAM", None, 0, 0, true),
+    ];
+    for (n, &(tries, retry, raw, label, kind, calls, items, understood)) in
+        rows.iter().enumerate()
+    {
+        let b = store(&format!("state-{n}"));
+        if let Some(k) = kind {
+            b.kind("news@notes.example.com", "Daily Notes", k);
+        }
+        let m = b.add("1", raw, &[label]);
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE message SET tries = ?2, retry_at = ?3 WHERE id = ?1",
+                    rusqlite::params![m, tries, retry],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let fake = Fake::with(&[COMMITMENT]);
+        let out = understand(&b.store, m, &fake, NOW).unwrap();
+        assert_eq!(fake.calls.borrow().len(), calls, "row {n}");
+        assert_eq!(b.items().len(), items, "row {n}");
+        assert_eq!(out.waiting, !understood, "row {n}");
+        let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+        assert_eq!(at.is_some(), understood, "row {n}");
+        if understood {
+            let r: Option<i64> = b.col("SELECT retry_at FROM message WHERE id = ?1", m);
+            assert!(r.is_none(), "row {n}");
+        }
+    }
+}
+
+#[test]
+fn a_failed_new_run_leaves_the_message_not_understood() {
+    let b = store("fail-understood");
+    let m = b.add("1", ASK, &["INBOX"]);
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    let out = understand(&b.store, m, &Fake::with(&["bad", "bad"]), NOW).unwrap();
+    assert!(out.failed);
+    let at: Option<i64> = b.col("SELECT understood_at FROM message WHERE id = ?1", m);
+    assert!(at.is_none());
+    let r: Option<i64> = b.col("SELECT retry_at FROM message WHERE id = ?1", m);
+    assert_eq!(r, Some(NOW + DAY));
+}
+
+#[test]
+fn a_feed_follows_the_unread_label() {
+    let b = store("feed-read");
+    b.kind("news@notes.example.com", "Daily Notes", "service");
+    let m = b.add("1", FEED, &["INBOX"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    assert_eq!(b.items()[0]["status"], "read");
+    b.add("1", FEED, &["INBOX", "UNREAD"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let items = b.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["status"], "new");
+    let status: String = b.col("SELECT status FROM item WHERE id = (SELECT max(id) FROM item)", 0);
+    assert_eq!(status, "new");
+}
+
+#[test]
+fn a_feed_from_the_model_follows_the_unread_label() {
+    let b = store("feed-model");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let feed = r#"{"items": [{"form": "feed", "status": "new", "title": "Notes",
+      "quote": "Can you send me the signed lease by Friday?", "confidence": 0.5}]}"#;
+    understand(&b.store, m, &Fake::with(&[feed]), NOW).unwrap();
+    assert_eq!(b.items()[0]["status"], "read");
+}
+
+#[test]
+fn the_model_gets_the_earlier_messages_of_the_thread() {
+    let b = store("thread");
+    let first = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: The lease
+Date: Mon, 29 Dec 2025 09:00:00 +0000
+
+Can you send the signed lease to the bank by Friday?
+";
+    let reply = "From: Owner <owner@example.com>
+To: bo@example.org
+Subject: Re: The lease
+Date: Tue, 30 Dec 2025 09:00:00 +0000
+
+Yes, I can do that.
+";
+    let a = b.add_in("1", "t1", NOW - 3 * DAY, first, &["INBOX"]);
+    let r = b.add_in("2", "t1", NOW - 2 * DAY, reply, &["SENT"]);
+    // A later message of the thread is not context.
+    let later = "From: Bo Ren <bo@example.org>\nTo: owner@example.com\nSubject: Re: The lease\n\nLater words.\n";
+    let l = b.add_in("3", "t1", NOW - DAY, later, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, a, &fake, NOW).unwrap();
+    understand(&b.store, l, &fake, NOW).unwrap();
+    understand(&b.store, r, &fake, NOW).unwrap();
+    let calls = fake.calls.borrow();
+    let data = &calls[2].1;
+    assert!(data.contains("to the bank by Friday"), "{data}");
+    assert!(!data.contains("Later words"), "{data}");
+    // The current message comes after its context.
+    assert!(data.find("to the bank").unwrap() < data.find("Yes, I can do that").unwrap());
+}
+
+#[test]
+fn a_shared_name_of_two_known_people_is_not_a_spoof() {
+    let b = store("spoof-shared");
+    b.kind("ana@example.org", "Ana Lee", "person");
+    b.kind("ana.lee@example.net", "Ana Lee", "person");
+    let raw = "From: Ana Lee <ana.lee@example.net>
+To: owner@example.com
+Subject: Hi
+
+Can you call me?
+";
+    let m = b.add("1", raw, &["INBOX"]);
+    let fake = Fake::default();
+    assert!(!understand(&b.store, m, &fake, NOW).unwrap().hostile);
+    assert_eq!(fake.calls.borrow().len(), 1);
 }
