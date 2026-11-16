@@ -102,7 +102,8 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
         let mut st = c.prepare(&format!(
             "SELECT m.id, m.thread_id, coalesce(m.internal_date, h.date, 0), h.from_addr,
                h.from_name, h.to_addrs, h.cc_addrs, {sent}, {draft},
-               (m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR {spam}
+               (m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR {spam},
+               m.content_sha256
              FROM message m JOIN header h ON h.message_id = m.id
              WHERE m.account_id = ?1 AND m.gone_at IS NULL",
             sent = flag("SENT"),
@@ -112,8 +113,8 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
         // Pass 1: your addresses (with aliases) and the threads where you sent mail.
         let mut your_threads: HashSet<i64> = HashSet::new();
         for row in st.query_map([account], row)? {
-            let (_, thread, _, from, _, _, _, sent, draft, _) = row?;
-            if sent && !draft {
+            let (_, thread, _, from, _, _, _, sent, draft, bad, _) = row?;
+            if sent && !draft && !bad {
                 your_threads.insert(thread);
                 if let Some(f) = from.and_then(|f| one_address(&f)) {
                     own.insert(f);
@@ -126,7 +127,7 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
         let mut known: HashSet<String> = HashSet::new();
         let mut tainted: HashSet<String> = HashSet::new();
         for row in st.query_map([account], row)? {
-            let (message, thread, date, from, name, to, cc, sent, draft, bad) = row?;
+            let (message, thread, date, from, name, to, cc, sent, draft, bad, sha) = row?;
             let from = from.and_then(|f| one_address(&f));
             if draft {
                 continue;
@@ -138,8 +139,14 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
             if sent {
                 let to = to.as_deref().map(addresses).unwrap_or_default();
                 let cc = cc.as_deref().map(addresses).unwrap_or_default();
+                // The header table has no Bcc. Gmail keeps it in the raw sent message.
+                let bcc = sha
+                    .and_then(|sha| store.content_path(&sha))
+                    .and_then(|p| head_field(&p, "bcc"))
+                    .map(|b| addresses(&b))
+                    .unwrap_or_default();
                 let mut done = HashSet::new();
-                for a in to.into_iter().chain(cc) {
+                for a in to.into_iter().chain(cc).chain(bcc) {
                     if own.contains(&a) || !done.insert(a.clone()) {
                         continue;
                     }
@@ -276,7 +283,7 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
 }
 
 /// One message row: ID, thread, date, `From` address and name, `To`, `Cc`,
-/// and the flags sent, draft and hostile-or-spam.
+/// the flags sent, draft and hostile-or-spam, and the content file.
 type Row = (
     i64,
     i64,
@@ -288,7 +295,44 @@ type Row = (
     bool,
     bool,
     bool,
+    Option<String>,
 );
+
+/// The largest header block that [`head_field`] reads.
+const HEAD_LIMIT: u64 = 1 << 20;
+
+/// The value of the first header `name` (lower case) of a raw message file,
+/// unfolded. Reads only the header block, up to [`HEAD_LIMIT`] bytes.
+fn head_field(path: &std::path::Path, name: &str) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let mut out: Option<String> = None;
+    let mut inside = false;
+    for line in std::io::BufReader::new(file.take(HEAD_LIMIT)).split(b'\n') {
+        let line = line.ok()?;
+        let line = String::from_utf8_lossy(&line);
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        if line.starts_with([' ', '\t']) {
+            if inside {
+                out.as_mut()?.push_str(line);
+            }
+            continue;
+        }
+        if out.is_some() {
+            break;
+        }
+        if let Some((n, v)) = line.split_once(':') {
+            inside = n.trim().eq_ignore_ascii_case(name);
+            if inside {
+                out = Some(v.trim().to_string());
+            }
+        }
+    }
+    out
+}
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
     Ok((
@@ -302,6 +346,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
         r.get(7)?,
         r.get(8)?,
         r.get(9)?,
+        r.get(10)?,
     ))
 }
 
