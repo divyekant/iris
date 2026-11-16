@@ -242,13 +242,16 @@ Stop conditions, checked before each message:
   can pass this limit by the cost of one message.
 - `Limits::max_messages` messages are done: `stop = messages`. The next run
   goes on in the same thread.
-- After a model refusal of the call (HTTP 401, 403 or 429): `stop = model`.
-  The message stays pending. Such a refusal is a definite rejection with no
-  charge: the provider did not run the model. The settle write gives back
-  the whole reservation, and the call counts in `calls` with zero tokens,
-  not in `unknown_calls`. This holds also when the answer has no usage.
+- After a refused key (HTTP 401 or 403): `stop = model`. The message stays
+  pending. The provider refuses the key before it runs the model, so this
+  is a definite rejection with no charge: the settle write gives back the
+  whole reservation, and the call counts in `calls` with zero tokens.
+- Every other answer with no reliable usage, also HTTP 429, counts as an
+  unknown charge (spec 1 section 7.4 groups 429 with the results that are
+  not known): the worst case stays taken, and the call counts in
+  `unknown_calls`.
 - After a call with an unknown result or unknown usage (a time-out, a lost
-  response, HTTP 5xx, an answer with no usage): `stop = unknown`.
+  response, HTTP 429, HTTP 5xx, an answer with no usage): `stop = unknown`.
 - Another error: `stop = error`, and the error goes to the caller.
 
 ### Counts
@@ -422,7 +425,8 @@ more calls.
 | Automatic runs after each sync | Each run spends again | All runs take from one budget. | Batch test: two runs, one budget. |
 | A changed model row after the approval | The approval of another price | `iris model set` clears the budget; the runner makes its own model from the row. | Batch test. |
 | A second runner | Two runs pay twice | "a run is in progress", no call. | Two runners on one store. |
-| HTTP 401, 403, 429 (with or without usage) | No call can work now; no charge | `stop = model`, the message stays pending, the whole reservation goes back, zero tokens. | Fake model error. |
+| HTTP 401, 403 | The key is refused; no charge | `stop = model`, the message stays pending, the whole reservation goes back, zero tokens. | Fake model error. |
+| HTTP 429 with no usage | The provider can charge | Unknown charge: the worst case stays, `stop = unknown`. | Fake model error. |
 | A time-out, a lost response, 5xx, an answer with no usage | Unknown charge | Worst case in `unknown_cost_micro_usd`, `stop = unknown`. | Fake model error and a reply with no usage. |
 | A bad first answer, a good second one | The first call loses its usage | Both calls count. | Fake model. |
 | An older message fails in this run | A later reply runs without its context | The later reply waits. | Batch test. |
