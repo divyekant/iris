@@ -1589,3 +1589,48 @@ See you soon.
     assert_eq!(tries, 0);
     assert!(b.items().is_empty(), "its unpinned items are gone");
 }
+
+#[test]
+fn a_rerun_resets_a_sender_with_many_threads() {
+    let b = store("rerun-many");
+    b.kind("ana@example.org", "Ana", "hostile");
+    // More threads than one page of rerun_senders.
+    let n = iris_understand::store::RERUN_PAGE as usize * 2 + 7;
+    let raw = "From: Ana <ana@example.org>\r\nSubject: Hi\r\n\r\nHello.\r\n";
+    let sha = b.store.put_content(raw.as_bytes()).unwrap();
+    let new: Vec<NewMessage> = (0..n)
+        .map(|i| NewMessage {
+            provider_id: format!("m{i}"),
+            thread_provider_id: format!("t{i}"),
+            content_sha256: Some(sha.clone()),
+            internal_date: Some(NOW - DAY),
+            labels: vec!["INBOX".into()],
+            header: iris_store::Header {
+                from_addr: Some("ana@example.org".into()),
+                ..iris_store::Header::default()
+            },
+            ..NewMessage::default()
+        })
+        .collect();
+    b.store.put_messages(b.account, &new).unwrap();
+    let sender: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'ana@example.org' AND ?1 = ?1",
+        0,
+    );
+    let reset = b
+        .store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET understood_at = 1, tries = 3, retry_at = 9",
+                [],
+            )?;
+            iris_understand::store::rerun_senders(tx, &[sender], NOW)
+        })
+        .unwrap();
+    assert_eq!(reset, n as u64);
+    let left: i64 = b.col(
+        "SELECT count(*) FROM message WHERE ?1 = ?1 AND (understood_at IS NOT NULL OR tries > 0 OR retry_at IS NOT NULL)",
+        0,
+    );
+    assert_eq!(left, 0);
+}

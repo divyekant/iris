@@ -85,6 +85,9 @@ pub struct State {
     pub server_failed: bool,
     /// A known cost was larger than its reservation.
     pub overrun: bool,
+    /// A reservation or a settle write failed: the counts of a call can be
+    /// missing, so no later call goes out.
+    pub store_failed: bool,
 }
 
 /// The model that `store::understand` gets from the runner (spec
@@ -141,7 +144,8 @@ impl<'a> Budgeted<'a> {
     }
 
     /// The first store error of a reservation or a settle write. The run
-    /// must stop: the counts of a call can be missing.
+    /// must stop: the counts of a call can be missing. `State::store_failed`
+    /// stays set after this call.
     pub fn take_error(&self) -> Option<iris_store::Error> {
         self.error.take()
     }
@@ -155,7 +159,8 @@ impl<'a> Budgeted<'a> {
     /// Writes the counts of a call, and gives `give_back` to the budget
     /// (it can be negative: an overrun) and takes `reserved` from the
     /// reservation of the run.
-    fn settle(&self, reserved: i64, give_back: i64, n: Counts) {
+    /// Gives false if the write failed: the caller must not use the reply.
+    fn settle(&self, reserved: i64, give_back: i64, n: Counts) -> bool {
         let r = self.store.write(|tx| {
             if reserved != 0 || give_back != 0 {
                 tx.execute(
@@ -183,9 +188,18 @@ impl<'a> Budgeted<'a> {
             )?;
             Ok(())
         });
-        if let Err(e) = r {
-            self.error.borrow_mut().get_or_insert(e);
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                self.fail(e);
+                false
+            }
         }
+    }
+
+    fn fail(&self, e: iris_store::Error) {
+        self.error.borrow_mut().get_or_insert(e);
+        self.set(|s| s.store_failed = true);
     }
 
     fn ask_free(
@@ -221,7 +235,9 @@ impl<'a> Budgeted<'a> {
             Err(iris_model::Error::NoKey | iris_model::Error::NotJson) => {}
         }
         // The cost columns are NULL for a model with no price: `+ 0` keeps NULL.
-        self.settle(0, 0, n);
+        if !self.settle(0, 0, n) {
+            return Err(refuse("the counts of the call were not saved"));
+        }
         r
     }
 }
@@ -236,6 +252,10 @@ impl Model for Budgeted<'_> {
     }
 
     fn ask(&self, instruction: &str, data: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        // After a failed store write, the runner must stop: no call.
+        if self.state.get().store_failed {
+            return Err(refuse("a store write of this run failed"));
+        }
         let Some(price) = self.price else {
             return self.ask_free(instruction, data);
         };
@@ -282,7 +302,7 @@ impl Model for Budgeted<'_> {
                 return Err(refuse("the budget cannot pay the worst case of the call"));
             }
             Err(e) => {
-                self.error.borrow_mut().get_or_insert(e);
+                self.fail(e);
                 return Err(refuse("the reservation failed"));
             }
         }
@@ -322,7 +342,11 @@ impl Model for Budgeted<'_> {
                 worst
             }
         };
-        self.settle(worst, worst - spent, n);
+        // A reply whose counts are not saved is not used: write 3 must not
+        // save items of a call that the run row does not count.
+        if !self.settle(worst, worst - spent, n) {
+            return Err(refuse("the counts of the call were not saved"));
+        }
         r
     }
 }

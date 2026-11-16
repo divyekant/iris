@@ -453,7 +453,8 @@ more calls.
 - `crates/iris-understand`: module `batch` (pending query, order, lock,
   runner, estimate). `Decision`, `Outcome`, `Error::Model` carry usage
   status.
-- `crates/iris-model`: `Usage::known`; request bytes on errors.
+- `crates/iris-model`: `Usage::known`; `Client::request_bytes` before the
+  call (the `Budgeted` wrapper keeps the worst case of a call that fails).
 - `crates/iris-store`: `schema_3.sql`.
 - `crates/iris`: `iris model`, `iris understand`.
 - `crates/iris-model`: no redirects; the loopback check of a local model.

@@ -710,43 +710,70 @@ fn put_header(tx: &Transaction, message: i64, a: &Analysis) -> rusqlite::Result<
 /// `retry_at`, because the new hostile state is new input. Then computes the
 /// conversation of each thread again, so no conversation shows reset mail.
 /// Call it in the transaction that changed the kinds.
-/// Gives the threads of the reset messages.
-pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store::Result<Vec<i64>> {
-    let mut threads = Vec::new();
+///
+/// Set-based writes and thread pages of [`RERUN_PAGE`], so the work is
+/// linear in the mail of the sender and the memory is bounded. Gives the
+/// count of reset messages.
+pub fn rerun_senders(tx: &Transaction, rows: &[i64], now_ms: i64) -> iris_store::Result<u64> {
+    let mut reset = 0;
     for &row in rows {
-        let messages: Vec<(i64, i64)> = tx
-            .prepare_cached(
-                "SELECT m.id, m.thread_id FROM sender s
-                 JOIN header h ON h.from_addr = s.address
-                 JOIN message m ON m.id = h.message_id
-                 WHERE s.id = ?1 AND m.gone_at IS NULL",
-            )?
-            .query_map([row], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (m, t) in messages {
-            drop_old_items(tx, m)?;
-            tx.execute(
-                "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL WHERE id = ?1",
-                [m],
-            )?;
-            if !threads.contains(&t) {
-                threads.push(t);
+        tx.execute(
+            &format!(
+                "DELETE FROM item WHERE id IN (
+                   SELECT i.id FROM sender s
+                   JOIN header h ON h.from_addr = s.address
+                   JOIN message m ON m.id = h.message_id
+                   JOIN item_source src ON src.message_id = m.id
+                   JOIN item i ON i.id = src.item_id
+                   WHERE s.id = ?1 AND m.gone_at IS NULL AND {DROPPABLE})"
+            ),
+            [row],
+        )?;
+        reset += tx.execute(
+            "UPDATE message SET understood_at = NULL, tries = 0, retry_at = NULL
+             WHERE gone_at IS NULL AND id IN (
+               SELECT h.message_id FROM sender s JOIN header h ON h.from_addr = s.address
+               WHERE s.id = ?1)",
+            [row],
+        )? as u64;
+        let mut after = i64::MIN;
+        loop {
+            let page: Vec<i64> = tx
+                .prepare_cached(
+                    "SELECT DISTINCT m.thread_id FROM sender s
+                     JOIN header h ON h.from_addr = s.address
+                     JOIN message m ON m.id = h.message_id
+                     WHERE s.id = ?1 AND m.gone_at IS NULL AND m.thread_id > ?2
+                     ORDER BY m.thread_id LIMIT ?3",
+                )?
+                .query_map(params![row, after, RERUN_PAGE], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let Some(&last) = page.last() else { break };
+            for t in page {
+                iris_talk::update(tx, t, None, now_ms)?;
             }
+            after = last;
         }
     }
-    for &t in &threads {
-        iris_talk::update(tx, t, None, now_ms)?;
-    }
-    Ok(threads)
+    Ok(reset)
 }
+
+/// Threads in one page of [`rerun_senders`].
+pub const RERUN_PAGE: i64 = 500;
+
+/// The items of an origin message `src` that a new run replaces: not the
+/// conversation, made by a rule or the model, and with no correction.
+const DROPPABLE: &str = "src.role = 'origin' AND i.form <> 'conversation'
+  AND i.derived_by IN ('rule', 'model')
+  AND NOT EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id)";
 
 fn drop_old_items(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
-        "DELETE FROM item WHERE id IN (
-           SELECT i.id FROM item_source s JOIN item i ON i.id = s.item_id
-           WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form <> 'conversation'
-             AND i.derived_by IN ('rule', 'model')
-             AND NOT EXISTS (SELECT 1 FROM correction c WHERE c.item_id = i.id))",
+        &format!(
+            "DELETE FROM item WHERE id IN (
+               SELECT i.id FROM item_source src JOIN item i ON i.id = src.item_id
+               WHERE src.message_id = ?1 AND {DROPPABLE})"
+        ),
         [message],
     )?;
     Ok(())

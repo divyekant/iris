@@ -41,13 +41,16 @@ fn usage(input: u64, output: u64) -> Usage {
 struct Fake {
     answers: RefCell<VecDeque<Result<Usage, ModelError>>>,
     calls: RefCell<u32>,
+    /// A data folder whose run table the call drops, so the settle write
+    /// after the call fails.
+    drop_runs: RefCell<Option<PathBuf>>,
 }
 
 impl Fake {
     fn with(answers: Vec<Result<Usage, ModelError>>) -> Fake {
         Fake {
             answers: RefCell::new(answers.into()),
-            calls: RefCell::default(),
+            ..Fake::default()
         }
     }
 }
@@ -63,6 +66,12 @@ impl Model for Fake {
 
     fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
         *self.calls.borrow_mut() += 1;
+        if let Some(dir) = self.drop_runs.borrow().as_ref() {
+            rusqlite::Connection::open(dir.join("iris.db"))
+                .unwrap()
+                .execute_batch("DROP TABLE understand_run")
+                .unwrap();
+        }
         let usage = self
             .answers
             .borrow_mut()
@@ -328,4 +337,21 @@ fn no_model_refuses_each_call() {
     let m = Budgeted::new(&NoModel, &r.store, r.run, None);
     assert!(is_budget(m.ask("i", "d")));
     assert!(m.state().refused);
+}
+
+#[test]
+fn a_failed_settle_write_drops_the_reply_and_refuses_later_calls() {
+    for priced in [true, false] {
+        let r = setup("settlefail", priced, priced.then_some(10_000));
+        let fake = Fake::default();
+        *fake.drop_runs.borrow_mut() = Some(r._dir.0.clone());
+        let m = r.model(&fake);
+        assert!(is_budget(m.ask("i", "d")), "a reply with no saved counts");
+        assert!(m.state().store_failed);
+        assert!(m.take_error().is_some());
+        *fake.drop_runs.borrow_mut() = None;
+        assert!(is_budget(m.ask("i", "d")), "no call after the failure");
+        assert!(m.state().store_failed);
+        assert_eq!(*fake.calls.borrow(), 1);
+    }
 }
