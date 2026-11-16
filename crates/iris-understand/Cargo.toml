@@ -1,0 +1,13 @@
+[package]
+name = "iris-understand"
+description = "Understanding: turn one mail message into items of the five forms, with fixed rules first and the model second."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-clean = { version = "0.0.0", path = "../iris-clean" }
+iris-senders = { version = "0.0.0", path = "../iris-senders" }
+serde_json = "1"

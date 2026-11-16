@@ -871,6 +871,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-understand"
+version = "0.0.0"
+dependencies = [
+ "iris-clean",
+ "iris-senders",
+ "serde_json",
+]
+
+[[package]]
 name = "iris-web"
 version = "0.0.0"
 dependencies = [

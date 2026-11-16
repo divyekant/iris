@@ -77,6 +77,10 @@ pub struct Clean {
     /// True if text went out because of a limit. Then `text` ends with [`CUT_MARK`].
     pub cut: bool,
     pub attachments: Vec<Attachment>,
+    /// True if a `text/calendar` part of the top message is a request
+    /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
+    /// decoded body has a `METHOD:REQUEST` line.
+    pub invitation: bool,
 }
 
 /// One attachment: a name, a type and a size, and the text if there is one.
@@ -102,6 +106,7 @@ pub fn clean(raw: &[u8]) -> Clean {
             text: CUT_MARK.to_string(),
             cut: true,
             attachments: Vec::new(),
+            invitation: false,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -110,8 +115,10 @@ pub fn clean(raw: &[u8]) -> Clean {
             text: String::new(),
             cut: false,
             attachments: Vec::new(),
+            invitation: false,
         };
     };
+    let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
     let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
@@ -122,6 +129,7 @@ pub fn clean(raw: &[u8]) -> Clean {
         text,
         cut,
         attachments,
+        invitation,
     }
 }
 
@@ -284,6 +292,95 @@ fn message<'a>(
         text.push_str(CUT_MARK);
     }
     (subject, text, w.cut, w.files)
+}
+
+/// True if a `text/calendar` part in the MIME tree of `part` is a request.
+/// The check visits every part in the tree, in any order and apart from the
+/// choice of the text, inside the limits of the walker ([`MAX_PARTS`],
+/// [`MAX_DEPTH`]). It does not go into an attached message: a calendar in
+/// an attached message is not an invitation to the user.
+fn calendar_request(part: MessagePart<'_>, depth: usize, seen: &mut usize) -> bool {
+    *seen += 1;
+    if *seen > MAX_PARTS || depth > MAX_DEPTH {
+        return false;
+    }
+    let ct_field = field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
+    let Some(ct) = ct_field.as_ref().and_then(|f| f.value().as_content_type()) else {
+        return false;
+    };
+    let (t, sub) = (ct.ctype(), ct.subtype().unwrap_or(""));
+    if t.eq_ignore_ascii_case("multipart") {
+        return part.is_multipart()
+            && part
+                .children()
+                .any(|child| calendar_request(child, depth + 1, seen));
+    }
+    if !(t.eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar")) {
+        return false;
+    }
+    if ct
+        .attribute("method")
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"))
+    {
+        return true;
+    }
+    let cte = field(part, HeaderName::ContentTransferEncoding)
+        .map(|v| String::from_utf8_lossy(v).trim().to_ascii_lowercase());
+    let enc = match cte.as_deref() {
+        Some("base64") => Encoding::Base64,
+        Some("quoted-printable") => Encoding::QuotedPrintable,
+        _ => Encoding::None,
+    };
+    // The whole body, decoded in chunks of about 64 KiB, through a matcher
+    // of constant memory.
+    let mut m = MethodLine::default();
+    let body = part.raw_body();
+    match enc {
+        Encoding::Base64 => base64_chunks(body, |b| m.feed(b)),
+        Encoding::QuotedPrintable => qp_chunks(body, |b| {
+            m.feed(b);
+            !m.found
+        }),
+        Encoding::None => m.feed(body),
+    }
+    m.feed(b"\n");
+    m.found
+}
+
+/// Finds a line that is `METHOD:REQUEST` (any case, white space around it)
+/// in bytes that come in parts. It keeps at most 14 bytes of a line.
+#[derive(Default)]
+struct MethodLine {
+    /// The bytes of the line after its leading white space.
+    line: Vec<u8>,
+    /// The line has white space after its first word.
+    space: bool,
+    /// The line can no longer match.
+    over: bool,
+    found: bool,
+}
+
+impl MethodLine {
+    const WORD: &'static [u8] = b"METHOD:REQUEST";
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            if self.found {
+                return;
+            }
+            if b == b'\n' {
+                self.found = !self.over && self.line.eq_ignore_ascii_case(Self::WORD);
+                (self.space, self.over) = (false, false);
+                self.line.clear();
+            } else if b.is_ascii_whitespace() {
+                self.space |= !self.line.is_empty();
+            } else if self.space || self.line.len() == Self::WORD.len() {
+                self.over = true;
+            } else {
+                self.line.push(b);
+            }
+        }
+    }
 }
 
 /// An attachment that step 1 found. Step 2 reads it.
@@ -601,27 +698,60 @@ fn decoded_len(body: &[u8], enc: Encoding) -> u64 {
 }
 
 /// Decode quoted-printable with the `mail-parser` decoder, in chunks of at
-/// most about 64 KiB, and give each decoded chunk to `f` until it returns
-/// false. A chunk ends after a line end, or in a long line at a byte that is
-/// not one of the 2 bytes after an `=`. An escape never crosses a line end,
-/// so each chunk decodes as in the decode of the whole body.
+/// most [`QP_CHUNK`] + 2 bytes, and give each decoded chunk to `f` until it
+/// returns false. Each chunk ends at a boundary where the decode keeps no
+/// state (see [`qp_chunk_end`]), so the chunks decode as the whole body does.
 fn qp_chunks(body: &[u8], mut f: impl FnMut(&[u8]) -> bool) {
-    const CHUNK: usize = 64 * 1024;
     let mut start = 0;
     while start < body.len() {
-        let window = &body[start..body.len().min(start + CHUNK)];
-        let mut end = match window.iter().position(|&b| b == b'\n') {
-            Some(n) => start + n + 1,
-            None => start + window.len(),
-        };
-        while end < body.len() && body[end.saturating_sub(2)..end].contains(&b'=') {
-            end += 1;
-        }
+        let end = qp_chunk_end(body, start);
         if !f(&Encoding::QuotedPrintable.decode(&body[start..end])) {
             return;
         }
         start = end;
     }
+}
+
+/// The encoded bytes of one quoted-printable chunk, before its boundary.
+const QP_CHUNK: usize = 64 * 1024;
+
+/// The end of the chunk that starts at `start`, a boundary.
+///
+/// A boundary is after a line end, or else after the last token in the
+/// first [`QP_CHUNK`] bytes that leaves no state: an escape `=XY` (two hex
+/// digits), a pair `=X` that the decoder keeps as it is (`X` is not white
+/// space, CR or LF), or a byte that is not `=`, white space or CR. After
+/// white space, a CR or `=` with white space, the decode depends on the
+/// next bytes (a line end deletes white space and makes a soft break).
+fn qp_chunk_end(body: &[u8], start: usize) -> usize {
+    let limit = body.len().min(start + QP_CHUNK);
+    if let Some(n) = body[start..limit].iter().position(|&b| b == b'\n') {
+        return start + n + 1;
+    }
+    if limit == body.len() {
+        return limit;
+    }
+    let hex = |i: usize| body.get(i).is_some_and(u8::is_ascii_hexdigit);
+    let (mut i, mut safe) = (start, None);
+    while i < limit {
+        let (len, keeps_no_state) = match body[i] {
+            b'=' if hex(i + 1) && hex(i + 2) => (3, true),
+            b'=' => (
+                2,
+                !matches!(body.get(i + 1), Some(b' ' | b'\t' | b'\r' | b'\n') | None),
+            ),
+            b' ' | b'\t' | b'\r' => (1, false),
+            _ => (1, true),
+        };
+        i += len;
+        if keeps_no_state {
+            safe = Some(i.min(body.len()));
+        }
+    }
+    // shortcut: a line of more than QP_CHUNK bytes of only white space, CR
+    // and `=` with white space splits at the limit, so its white space can
+    // differ from the whole decode; upgrade if real mail has such lines (#90).
+    safe.unwrap_or(limit)
 }
 
 /// Decode base64 and give the bytes to `f`, in parts. The `mail-parser`
@@ -724,6 +854,114 @@ fn tidy(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// For generated bodies of lines that match, almost match or do not
+    /// match, fed in parts split at random points, `MethodLine` agrees with
+    /// a whole-body line matcher.
+    #[test]
+    fn method_line_agrees_with_a_whole_body_matcher() {
+        const LINES: [&[u8]; 14] = [
+            b"METHOD:REQUEST",
+            b"method:request",
+            b"  METHOD:REQUEST \t",
+            b"\tMethod:Request\r",
+            b"METHOD:REQUESTS",
+            b"METHOD:REQUES",
+            b"METHOD: REQUEST",
+            b"X-METHOD:REQUEST",
+            b"METHOD:REQUEST X",
+            b"METHOD:CANCEL",
+            b"",
+            b" ",
+            b"BEGIN:VCALENDAR",
+            b"DESCRIPTION:METHOD:REQUEST",
+        ];
+        let whole = |body: &[u8]| {
+            body.split(|&c| c == b'\n')
+                .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
+        };
+        let mut x: u64 = 0x5851_f42d_4c95_7f2d;
+        let mut next = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..5000 {
+            let mut body = Vec::new();
+            for _ in 0..next(6) {
+                body.extend_from_slice(LINES[next(LINES.len())]);
+                if next(4) > 0 {
+                    body.push(b'\n');
+                }
+            }
+            let mut m = MethodLine::default();
+            let mut at = 0;
+            while at < body.len() {
+                let end = (at + 1 + next(8)).min(body.len());
+                m.feed(&body[at..end]);
+                at = end;
+            }
+            m.feed(b"\n");
+            assert_eq!(
+                m.found,
+                whole(&body),
+                "{:?}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+    }
+
+    /// For any quoted-printable body: each chunk has at most QP_CHUNK + 2
+    /// bytes, and the chunks decode to the decode of the whole body.
+    #[test]
+    fn qp_chunks_stay_bounded_and_decode_as_the_whole() {
+        const PIECES: [&[u8]; 12] = [
+            b"=", b"A", b"3", b"=4", b"1", b"\r\n", b" ", b"=\r\n", b"\t", b"\r", b"G", b"= ",
+        ];
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        for round in 0..40 {
+            let mut body = Vec::new();
+            // Long lines with no line end, so the token rule decides.
+            while body.len() < 3 * QP_CHUNK {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let p = PIECES[(x % PIECES.len() as u64) as usize];
+                if round % 2 == 0 && p.contains(&b'\n') {
+                    continue;
+                }
+                body.extend_from_slice(p);
+            }
+            let (mut out, mut max, mut at) = (Vec::new(), 0, 0);
+            while at < body.len() {
+                let end = qp_chunk_end(&body, at);
+                max = max.max(end - at);
+                at = end;
+            }
+            qp_chunks(&body, |b| {
+                out.extend_from_slice(b);
+                true
+            });
+            assert!(max <= QP_CHUNK + 2, "chunk of {max} bytes");
+            assert_eq!(
+                out,
+                Encoding::QuotedPrintable.decode(&body),
+                "round {round}"
+            );
+        }
+        for b in *b"= " {
+            let run = vec![b; 4 * 1024 * 1024];
+            assert!(qp_chunk_end(&run, 0) <= QP_CHUNK + 2);
+        }
+        let eq = vec![b'='; 4 * 1024 * 1024 + 1];
+        let mut out = Vec::new();
+        qp_chunks(&eq, |b| {
+            out.extend_from_slice(b);
+            true
+        });
+        assert_eq!(out, Encoding::QuotedPrintable.decode(&eq));
+    }
 
     /// The invariant of `decode_capped`, for each cap: the bytes are the first
     /// `min(cap, full)` bytes of the full decode, and the cut flag is true
