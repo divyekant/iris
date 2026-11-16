@@ -1,13 +1,12 @@
 //! The review of the web client (specification 2, section 5.5): the open
 //! changesets as JSON documents of section 5.1, and the message summaries
-//! of their actions. Read only. The approval comes with the decisions of
-//! the changeset store (R2-01 part 3).
+//! of their actions, and the decision of the person on one changeset.
 
 use std::io::Write;
 
 use iris_store::{format_id, parse_id, Kind, Store};
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::read::message_row;
@@ -97,6 +96,94 @@ fn write_open_paged(store: &Store, out: &mut impl Write, page: i64) -> Result<()
         before = last;
     }
     out.write_all(b"]}").map_err(io)
+}
+
+/// The decision of the person on one action, as the review showed it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Decision {
+    pub revision: i64,
+    pub n: i64,
+    /// `true` approves, `false` denies.
+    pub approve: bool,
+    /// The hash of the action that the review showed. An approval needs it
+    /// (section 5.5).
+    pub hash: Option<String>,
+}
+
+/// The most decisions in one request. A changeset has few actions.
+pub const MAX_DECISIONS: usize = 500;
+
+/// The reason of a denial from the review. The store needs a reason for
+/// each denial (section 5.2), and the review asks for no text.
+pub const DENIED: &str = "The person denied it in the review.";
+
+/// Approve and deny the actions of one changeset in one transaction
+/// (section 5.5). Each action must wait for a person (`proposed` or
+/// `in_review`). If one decision is refused, for example a hash that
+/// changed after the review, nothing is written, and the answer is
+/// [`Error::Conflict`].
+pub fn decide(store: &Store, changeset: i64, decisions: &[Decision], now_ms: i64) -> Result<()> {
+    if decisions.is_empty() || decisions.len() > MAX_DECISIONS {
+        return Err(Error::Query(format!("give 1 to {MAX_DECISIONS} decisions")));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for d in decisions {
+        if !seen.insert((d.revision, d.n)) {
+            return Err(Error::Query(format!(
+                "action {}.{} is named twice",
+                d.revision, d.n
+            )));
+        }
+        if d.approve && d.hash.is_none() {
+            return Err(Error::Query(
+                "an approval needs the hash of the action".into(),
+            ));
+        }
+    }
+    use iris_changeset::{ActionId, By, Error as Cs, State};
+    iris_changeset::transaction(store, |c| {
+        for d in decisions {
+            let action = ActionId {
+                changeset,
+                revision: d.revision,
+                n: d.n,
+            };
+            let state: Option<Option<String>> = c
+                .query_row(
+                    "SELECT state FROM changeset_action
+                     WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+                    [changeset, d.revision, d.n],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // Only an action that waits for a person: the review shows the others
+            // as decided, and the store refuses most moves from them.
+            if !matches!(state.flatten().as_deref(), Some("proposed" | "in_review")) {
+                return Err(Cs::Refused(format!(
+                    "action {}.{} does not wait for a decision now",
+                    d.revision, d.n
+                )));
+            }
+            match &d.hash {
+                Some(hash) if d.approve => iris_changeset::approve_in(c, action, hash, now_ms)?,
+                _ => iris_changeset::decide_in(
+                    c,
+                    action,
+                    State::Denied,
+                    By::Person,
+                    Some(DENIED),
+                    now_ms,
+                )?,
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| match e {
+        Cs::Store(e) => Error::Store(e),
+        Cs::NotFound => Error::Conflict("the action is not in this changeset".into()),
+        Cs::Refused(why) => Error::Conflict(why),
+    })
 }
 
 /// The row ID of the changeset `id` (`cs-77`), or `None` when no changeset

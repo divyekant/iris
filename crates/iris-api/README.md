@@ -109,6 +109,20 @@ A rule is `{"id", "name", "effect", "verbs", "when", "by", "added", "job",
 "line"}`. `when` holds only the conditions that the rule sets. `line` is the
 line of the rule in its file, from 1.
 
+## Review
+
+The person decides the actions of one changeset in one request
+(specification 2, section 5.5).
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/changesets/{id}/decide` | Body `{"actions": [{"revision", "n", "approve", "hash"}]}`: 1 to 500 decisions, each action once. `approve` `true` approves the action and needs the `hash` that the review showed. `false` denies it, with the reason "The person denied it in the review.". The answer is the changeset document after the decision. |
+
+Each action must wait for a person (`proposed` or `in_review`). The
+decisions write in one transaction. If one is refused (a hash that changed,
+an action that has a decision, a new revision that is a draft, or an action
+that is not in the changeset), nothing is written and the answer is a 409.
+
 ## Errors
 
 An error is `{"error": "<reason>"}`:
@@ -120,7 +134,7 @@ An error is `{"error": "<reason>"}`:
 | 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
-| 409 | A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. |
+| 409 | A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
 | 500 | The store failed. |
 
 ## Sign-in
