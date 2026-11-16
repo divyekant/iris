@@ -207,8 +207,9 @@ fn is_promo(a: &Analysis) -> bool {
 /// word, the next line continues it ("Your code:" then "482913").
 ///
 /// Each line with a code word gives no code or its bound numbers. The
-/// message gives a code only if all bound numbers have one value. Else there
-/// is no clear code, and the result is `None`.
+/// message gives a code only if all bound numbers have one value, and each
+/// code-shaped number on a line with a code word has that value too. Else
+/// there is no clear code, and the result is `None`.
 fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
     // Empty lines do not count: HTML paragraphs give empty lines between lines.
     let lines: Vec<&str> = std::iter::once(subject)
@@ -218,12 +219,16 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         .collect();
     // The code, its line and its range: the quote is cut once, at the end.
     let mut found: Option<(&str, &str, usize, usize)> = None;
+    // Every code-shaped number on a line with a code word, bound or not:
+    // "Your old code was 5678" next to the code makes it not clear.
+    let mut near: Vec<&str> = Vec::new();
     for (i, &l) in lines.iter().enumerate() {
         let cues = cues(l);
         if cues.is_empty() {
             continue;
         }
         let nums = numbers(l);
+        near.extend(nums.iter().map(|&(s, e)| &l[s..e]));
         let bound: Vec<(&str, &str, usize, usize)> = if !nums.is_empty() {
             bound(l, &cues, &nums, 0)
                 .map(|(s, e)| (&l[s..e], l, s, e))
@@ -255,7 +260,11 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
             }
         }
     }
-    found.map(|(code, line, s, e)| (code.to_string(), excerpt(line, s, e - s)))
+    let (code, line, s, e) = found?;
+    if near.iter().any(|&v| v != code) {
+        return None;
+    }
+    Some((code.to_string(), excerpt(line, s, e - s)))
 }
 
 /// The numbers of `nums` (moved by `shift` in `text`) that bind to one of
@@ -406,7 +415,9 @@ mod tests {
             code("Your verification code is 2026", ""),
             Some("2026".into())
         );
-        assert_eq!(code("Your code", "482913\nVerification help 2026"), six);
+        // Any other number on a line with a code word: not clear.
+        assert_eq!(code("Your code", "482913\nVerification help 2026"), None);
+        assert_eq!(code("Your code: 482913", "Your old code was 5678"), None);
         // Two values: no clear code.
         assert_eq!(code("Your code is 1234 or code 5678", ""), None);
         assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
@@ -415,7 +426,7 @@ mod tests {
         // A number with other words between it and the code word.
         assert_eq!(
             code("Verification for account 123456", "Your code: 482913"),
-            six
+            None
         );
         assert_eq!(
             code("Your verification code for account 123456 is 482913", ""),

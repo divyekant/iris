@@ -780,7 +780,7 @@ A code is a run of 4 to 8 digits bound to a code word ("code",
 - On the next line, if the line with the code word has no number and the
   next line has no code word: "Your code:" then "482913".
 
-The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a bound number has that value.
+The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a code word, or on a line with a bound number, has that value ("Your old code was 5678" makes the code not clear).
 Two values, or no bound number, give no clear code. A number with other
 words between it and the code word is not bound.
 
@@ -799,7 +799,7 @@ the message. A fixed rule never guesses.
 | A calendar request | An invitation is lost | The model reads the message (rule 2, issue #97). |
 | A list message (`List-Id` or `List-Unsubscribe`) | A code signal or a feed item hides other content | The model reads the message (rule 2, issue #96). |
 | Sign-in mail with two code values (an account number, an old code, "1234 5678" on one line) | The wrong number becomes the code | No clear code: the model reads the message (rule 3). |
-| Sign-in mail with an account number, a duration, a year or another number near the code word, with a word or punctuation between them ("Account: 123456 - code expires") | A date or a duration becomes the code | The number is not bound. With no clear code, the model reads the message (rule 3). |
+| Sign-in mail with an account number, a duration, a year or another number on a line with a code word ("Account: 123456 - code expires", "Your old code was 5678") | Another number becomes the code, or the wrong code is kept | No clear code: the model reads the message (rule 3). |
 | Sign-in mail with the code in a form that the binding does not know ("Use 482913 to sign in") | The code is missed | No clear code: the model reads the message (rule 3). |
 | A promotion code, or sign-in mail with a promotion word | A promotion becomes a sign-in code signal | The model reads the message (rule 3). |
 | A request in words that the built-in word lists do not have, or in another language | A code signal hides the request | Known limit: the lists are short and in English (issue #95). |

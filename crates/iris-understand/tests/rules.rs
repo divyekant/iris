@@ -189,19 +189,22 @@ Code: 7731
 }
 
 #[test]
-fn a_year_after_the_code_does_not_compete() {
-    let raw = "From: Bank <no-reply@bank.example>
-Subject: Your verification code
-
-7731
-Verification help updated 2026
-";
-    let d = one(raw, Kind::Service, &[]);
-    assert_eq!(d.item["code"], "7731");
+fn another_number_on_a_code_line_goes_to_the_model() {
+    // A year or an old code on a line with a code word makes the code not
+    // clear (spec 1 section 7.3).
+    for line in ["Verification help updated 2026", "Your old code was 5678"] {
+        let raw = format!(
+            "From: Bank <no-reply@bank.example>\nSubject: Your verification code\n\n7731\n{line}\n"
+        );
+        assert!(drafts(&raw, Kind::Service, &[]).is_none(), "{line}");
+    }
+    // The same code again is no other number.
+    let same = "From: Bank <no-reply@bank.example>\nSubject: Your verification code\n\n7731\nCode 7731 ends in 10 minutes.\n";
+    assert_eq!(one(same, Kind::Service, &[]).item["code"], "7731");
 }
 
-/// For generated lines with one planted code, the rule finds that code when
-/// no earlier cue line gives a candidate.
+/// For generated lines with one planted code, the rule finds that code. A
+/// line with a code word and another number makes the code not clear.
 #[test]
 fn a_planted_code_is_found_in_message_order() {
     const FILL: [&str; 6] = [
@@ -230,8 +233,11 @@ fn a_planted_code_is_found_in_message_order() {
         } else {
             vec!["Your verification code".to_string(), code.clone()]
         };
-        // A later cue line with another number must not win.
-        lines.push("Code help updated 2026".to_string());
+        // A later line with a code word and another number.
+        let other = next(2) == 0;
+        if other {
+            lines.push("Code help updated 2026".to_string());
+        }
         for (k, l) in planted.into_iter().enumerate() {
             lines.insert(at + k, l);
         }
@@ -239,8 +245,12 @@ fn a_planted_code_is_found_in_message_order() {
             "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{}\n",
             lines.join("\n")
         );
-        let d = one(&raw, Kind::Service, &[]);
-        assert_eq!(d.item["code"], code.as_str(), "{raw:?}");
+        if other {
+            assert!(drafts(&raw, Kind::Service, &[]).is_none(), "{raw:?}");
+        } else {
+            let d = one(&raw, Kind::Service, &[]);
+            assert_eq!(d.item["code"], code.as_str(), "{raw:?}");
+        }
     }
 }
 

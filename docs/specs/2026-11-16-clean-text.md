@@ -119,8 +119,10 @@ Each budget only goes down. No step gives budget back.
 
 ### Invitation
 
-`Clean.invitation` gives the input of the fixed invitation rule
-(specification 1, section 7.3). It is true if a `text/calendar` part of the
+`Clean.invitation` gives the input of the guard of the fixed rules
+(specification 1, section 7.3): a message with a calendar request goes to
+the model. Release 1 has no fixed invitation rule (issue #97).
+It is true if a `text/calendar` part of the
 top message is a request:
 
 - its `method` parameter is `REQUEST` (any case), or
