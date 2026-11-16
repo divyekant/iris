@@ -1,7 +1,8 @@
 import { access } from "./access.svelte.ts";
 import { addPage } from "./format";
 // The client reads the local API of the engine (crates/iris-api/README.md).
-// The form documents follow docs/spec/schema. The client only reads.
+// The form documents follow docs/spec/schema. The client only reads, except
+// the policy changes of the policy view (spec 2 section 6.3).
 
 export type Party = { kind: "self" | "sender"; sender?: string; name?: string; address?: string };
 export type Money = { value: string; currency: string };
@@ -75,6 +76,33 @@ export type Status = {
   mode?: string;
   accounts: Account[];
   messages: { total: number; fetched: number; understood: number; gone: number };
+};
+
+/** A rule of policy.toml (spec 2 section 6.2). `when` holds only the conditions that the rule sets. */
+export type Rule = {
+  id: number;
+  name: string;
+  effect: "allow" | "review" | "deny" | "hide" | "bundle";
+  verbs: string[];
+  when: Record<string, string | number>;
+  by: "person" | "proposal";
+  added: string;
+  job: string | null;
+  line: number;
+};
+
+export type Mode = "observe" | "apply";
+
+/** GET /api/policy: the active policy and the file on disk, compared to it. */
+export type Policy = {
+  mode: Mode;
+  version: number | null;
+  rules: Rule[];
+  error: { line: number; message: string } | null;
+  file:
+    | { state: "same" | "missing" }
+    | { state: "invalid"; error: { line: number; message: string } }
+    | { state: "changed"; sha256: string; text: string; mode: Mode; added: Rule[]; removed: Rule[]; changed: { before: Rule; after: Rule }[] };
 };
 
 // `next` goes back unchanged as `before=` (a form list) or `after=` (a brief section, an opaque cursor). Null on the last page.
@@ -220,13 +248,15 @@ export function newest(): () => () => boolean {
 }
 
 // Each request of each view goes through here, so the access state covers every path.
-async function call(path: string, accept: string): Promise<Response> {
+async function call(path: string, accept: string, body?: unknown): Promise<Response> {
   // A failed sign-in does not stop a token that this page has from an earlier sign-in.
   const signInError = await ready.then(() => null, (e: Error) => e);
   const headers: Record<string, string> = { accept };
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
-  const response = await fetch(`/api/${path}`, { headers }).catch(() => fail(UNREACHABLE));
+  const init: RequestInit =
+    body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+  const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).
     // A sign-in during the request gave a new token: keep that one.
@@ -234,7 +264,7 @@ async function call(path: string, accept: string): Promise<Response> {
       token = null;
       quiet(() => session()?.removeItem(KEY));
     }
-    if (token) return call(path, accept);
+    if (token) return call(path, accept, body);
     fail(signInError?.message ?? SIGN_IN);
   }
   access.problem = "";
@@ -253,6 +283,14 @@ export async function get<T>(path: string): Promise<T> {
     access.none = accounts.length === 0;
   }
   return body as T;
+}
+
+/** Send a policy change (POST with a JSON body). Throws an Error with the API's error text. */
+export async function post<T>(path: string, body: unknown): Promise<T> {
+  const response = await call(path, "application/json", body);
+  const answer = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(answer?.error ?? `The engine answered ${response.status}.`);
+  return answer as T;
 }
 
 function save(blob: Blob, name: string) {
