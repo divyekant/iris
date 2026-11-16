@@ -780,8 +780,9 @@ The conversation rule runs for each message that is not hostile mail:
 - A thread with only `service` messages has no conversation. If the
   messages from you, a person or a stranger become hostile mail, and only
   `service` messages stay, the conversation also gets the status `gone`.
-  While such a message is only gone, the conversation keeps its status
-  (section 4.5), and the messages that stay give its fields.
+  While the origin message is only gone, the conversation keeps its status
+  (section 4.5), and the messages that stay give its fields. A gone message
+  that gets a hostile mark stops being a source.
 
 `derived.by` is `rule`, and `derived.rule` names the rule.
 

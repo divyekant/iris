@@ -132,12 +132,12 @@ pub fn update(
         status = None;
     }
     // The conversation is gone when each of its messages is gone (section
-    // 7.3). It also ends when service mail is all that is left because the
-    // other messages became hostile mail or drafts: service mail alone makes
-    // no conversation. While a message from a party is only gone, the item
-    // keeps its status (section 4.5).
-    let gone =
-        mails.is_empty() || (mails.iter().all(|m| m.service) && !gone_party_source(conn, old.id)?);
+    // 7.3). It also ends when only service mail is left, because service mail
+    // alone makes no conversation. While the origin is only gone, the item
+    // keeps its status (section 4.5). The origin row stays through the
+    // content cleanup, so the rule does not need its header.
+    let gone = mails.is_empty()
+        || (mails.iter().all(|m| m.service) && !origin_only_gone(conn, old.origin)?);
     let mut doc = match doc(
         conn,
         thread,
@@ -226,9 +226,12 @@ fn save(
     )?;
     if existed.is_some() {
         conn.execute(
-            // A source whose message is gone stays (section 4.5).
-            "DELETE FROM item_source WHERE item_id = ?1 AND role <> 'origin'
-             AND message_id IN (SELECT id FROM message WHERE gone_at IS NULL)",
+            // A source whose message is gone stays (section 4.5), unless it
+            // is hostile mail.
+            &format!(
+                "DELETE FROM item_source WHERE item_id = ?1 AND role <> 'origin'
+                 AND message_id IN (SELECT m.id FROM message m WHERE m.gone_at IS NULL OR {MARKED})"
+            ),
             [id],
         )?;
     }
@@ -241,26 +244,23 @@ fn save(
     Ok(())
 }
 
-/// True if a source of the item is a gone message from you, a person or a
-/// stranger, that is not hostile mail.
-fn gone_party_source(conn: &Connection, item: i64) -> rusqlite::Result<bool> {
-    conn.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM item_source s JOIN message m ON m.id = s.message_id
-           LEFT JOIN header h ON h.message_id = m.id
-           WHERE s.item_id = ?1 AND m.gone_at IS NOT NULL
-             AND (m.hostile IS NULL OR trim(m.hostile) IN ('', '[]'))
-             AND COALESCE((SELECT kind FROM sender WHERE address = lower(h.from_addr)), '')
-                 NOT IN ('service', 'hostile'))",
-    )?
-    .query_row([item], |r| r.get(0))
+/// True if the origin message is gone and is not hostile mail.
+fn origin_only_gone(conn: &Connection, origin: i64) -> rusqlite::Result<bool> {
+    conn.prepare_cached(&format!(
+        "SELECT m.gone_at IS NOT NULL AND NOT {MARKED} FROM message m WHERE m.id = ?1"
+    ))?
+    .query_row([origin], |r| r.get(0))
 }
+
+/// The SQL test for a message `m` with one or more hostile marks. Same rule as [`marked`].
+const MARKED: &str = "(m.hostile IS NOT NULL AND trim(m.hostile) NOT IN ('', '[]'))";
 
 /// The update sources of the item whose message is gone, as (time, row).
 fn gone_sources(conn: &Connection, item: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
-    let mut q = conn.prepare_cached(
+    let mut q = conn.prepare_cached(&format!(
         "SELECT COALESCE(m.internal_date, 0), m.id FROM item_source s JOIN message m ON m.id = s.message_id
-         WHERE s.item_id = ?1 AND s.role = 'update' AND m.gone_at IS NOT NULL",
-    )?;
+         WHERE s.item_id = ?1 AND s.role = 'update' AND m.gone_at IS NOT NULL AND NOT {MARKED}"
+    ))?;
     let rows = q.query_map([item], |r| Ok((r.get(0)?, r.get(1)?)))?;
     rows.collect()
 }
@@ -413,7 +413,10 @@ fn doc(
             .chain(m.to.iter().map(String::as_str))
             .chain(m.cc.iter().map(String::as_str))
         {
-            if a != me && !aliases.contains(&a) && !order.contains(&a) {
+            // An alias is you in the From of sent mail and in To or Cc. A
+            // received message from the same address is from a party.
+            let from_party = from == Some(a);
+            if a != me && (from_party || !aliases.contains(&a)) && !order.contains(&a) {
                 order.push(a);
             }
         }
