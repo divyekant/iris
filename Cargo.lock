@@ -738,6 +738,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-people"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
+ "rusqlite",
+]
+
+[[package]]
 name = "iris-service"
 version = "0.0.0"
 
