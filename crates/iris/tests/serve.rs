@@ -17,7 +17,8 @@ fn version_flag_prints_the_version_line() {
 #[test]
 fn serve_shows_a_page() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_iris"))
-        .args(["serve", "--addr", "127.0.0.1:0"])
+        .args(["serve", "--addr", "127.0.0.1:0", "--data"])
+        .arg(std::env::temp_dir().join(format!("iris-serve-page-{}", std::process::id())))
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();

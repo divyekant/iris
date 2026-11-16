@@ -200,6 +200,8 @@ gets its saved status again.
 
 - The engine runs an incremental sync each 60 seconds, and at once when a
   person opens the brief.
+- Each account has its own sync thread and its own quota count, so a long
+  first sync of one account does not delay the syncs of another account.
 - Gmail push notifications need Google Cloud Pub/Sub and a public endpoint.
   A self-hosted engine often has no public endpoint, so release 1 does not use
   push. A later release can add push as an option.
@@ -218,8 +220,12 @@ gets its saved status again.
   The wait starts at 1 second, doubles each time to a maximum of 5 minutes,
   and has a random part of up to 50 percent.
 - On HTTP 401, the engine gets a new access token with the refresh token, one
-  time. If that fails, the account goes to the state "needs sign-in", and the
-  brief shows it.
+  time. If the new token gets HTTP 401 too, or Google refuses the refresh
+  token (`invalid_grant`), the account goes to the state "needs sign-in", and
+  the brief shows it. A network error or a server error of the token endpoint
+  keeps the state: the next sync tries again. A refusal changes the state only
+  while the stored sign-in is the one that failed, so a new sign-in in the
+  meantime keeps its state.
 - A message that gives an error that a new try does not fix (a bad answer,
   or HTTP 400) does not stop the sync. The engine records the message in the
   sync log with the kind `fetch`, keeps it as "known, not fetched", and
@@ -248,10 +254,24 @@ content:
    that the history is too old.
 7. Compare the message IDs, the thread IDs, the label sets and the label list
    with the mirror. Compare only the messages of the mirror that are not gone.
+   A message that is not fetched (section 4.7) has no label set yet, so its
+   labels are not compared. Step 8 fetches it. A list can miss a message
+   when a delete moves the list pages. For each mirror message that the list
+   does not have, call `messages.get` (`format=raw`). Only HTTP 404 makes it
+   a difference. Otherwise, compare its thread ID and its labels from that
+   answer. A label list can also miss a message when a delete moves its
+   pages. Before you report a label difference, get the labels of the
+   message (`format=minimal`). Report it only if those labels are not the
+   labels of the mirror.
 8. For each message that is not gone, read its content file and compute the
    SHA-256 hash. A missing file, or a hash that is not `content_sha256`, is a
-   difference.
+   difference. Fetch the message again to repair the file. If a fetch gets
+   an error that stops each fetch (for example HTTP 401), start no more
+   fetches. Save the result, then give the error to the caller.
 9. Print each difference, and the total. Save the result in the sync log.
+
+If an error ends the compare, save the differences found before the error,
+and start a full resync if one of them is a difference of step 7.
 
 However verify ends (a result, an error or a crash), the engine starts the
 sync of the account again. After a crash, the next start does this. A
@@ -270,8 +290,10 @@ The exit criterion of release 1 is 0 differences each day for 7 days.
   loopback redirect (`http://127.0.0.1:<port>/oauth/callback`) and PKCE.
 - Release 1 asks only for the scope `https://www.googleapis.com/auth/gmail.readonly`.
   Release 2 asks for `gmail.modify` when the person turns on writes.
-- The engine stores the refresh token encrypted in the store (section 5.4). It
-  keeps the access token only in memory.
+- The engine stores the refresh token encrypted in the store (section 5.4),
+  together with the OAuth client file that got it, in `account.token`. So each
+  account has its own client, and a backup has a matching client and token.
+  The engine keeps the access token only in memory.
 - The OAuth client ID is a setting. Each user gives the JSON file of an own
   OAuth client of the type "Desktop app", published to "In production".
   Do not use the "Testing" status: its refresh tokens expire after 7 days.
@@ -830,10 +852,10 @@ status is `gone`.
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
-| Signals | Signals with `status` `active`. |
+| Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
 | Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. |
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |
@@ -844,6 +866,20 @@ applied.") is a list that the engine computes when the brief opens, in the
 changeset format of specification 2, with each action in the state
 `proposed`. Release 1 does not store it. From release 2, triage stores it as
 a changeset in the mode `observe`.
+
+The triage proposal of release 1 (crate `iris-observe`) has these rules:
+
+- Each rule gives one `archive` action on the messages with the label `INBOX`
+  that are not gone. The rules are, in order: hostile mail, signals with the
+  status `expired`, feed items, and records. A message goes only to the first
+  rule that matches it.
+- The engine reads the counts and the message IDs in one read transaction.
+- Because release 1 does not store the proposal, its ID is an exception to
+  the rule "unique in one install" of specification 2, section 5.1. The ID is
+  `cs-` and the first 63 bits of the SHA-256 of the account and the message
+  IDs of each rule. So the ID names the content: the same content gives the
+  same ID, also at a later time, and a different content gives a different
+  ID. A client must not use this ID as the ID of a stored changeset.
 
 ## 9. Memory
 

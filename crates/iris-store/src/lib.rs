@@ -151,6 +151,29 @@ pub struct Header {
     pub auth: Option<String>,
 }
 
+impl Header {
+    /// True if no field is known, as after a raw fetch that is not parsed.
+    pub fn is_empty(&self) -> bool {
+        let Header {
+            date,
+            from_addr,
+            from_name,
+            to_addrs,
+            cc_addrs,
+            subject,
+            message_id_hdr,
+            in_reply_to,
+            list_id,
+            auth,
+        } = self;
+        date.is_none()
+            && [from_addr, from_name, to_addrs, cc_addrs, subject]
+                .iter()
+                .chain(&[message_id_hdr, in_reply_to, list_id, auth])
+                .all(|f| f.is_none())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Body {
     pub subject: String,
@@ -264,7 +287,9 @@ impl Store {
     /// new values and keeps its ID. A message that was gone comes back, and
     /// its `understood_at` is cleared, so understanding runs on it again
     /// (specification 1, section 4.4). A message with a new `content_sha256`
-    /// loses its old clean text and its `understood_at`. Gives the row ID of each message.
+    /// loses its old clean text and its `understood_at`. A message with the
+    /// same content and an empty header keeps its saved header. Gives the row
+    /// ID of each message.
     ///
     /// Write each content file before the message that refers to it. If a
     /// content file is not there, nothing of the batch is written, and the
@@ -309,10 +334,18 @@ impl Store {
                    message_id_hdr = excluded.message_id_hdr, in_reply_to = excluded.in_reply_to,
                    list_id = excluded.list_id, auth = excluded.auth",
             )?;
+            let mut same_content = tx.prepare_cached(
+                "SELECT 1 FROM message WHERE account_id = ?1 AND provider_id = ?2
+                   AND content_sha256 IS ?3 AND gone_at IS NULL",
+            )?;
             let mut ids = Vec::with_capacity(batch.len());
             for m in batch {
                 let thread_id: i64 =
                     thread.query_row(params![account, m.thread_provider_id], |r| r.get(0))?;
+                // A fetch of the same bytes (a repair) has no parsed header:
+                // keep the saved one, as `understood_at` stays too.
+                let keep_header = m.header.is_empty()
+                    && same_content.exists(params![account, m.provider_id, m.content_sha256])?;
                 stale_body.execute(params![account, m.provider_id, m.content_sha256])?;
                 let id: i64 = message.query_row(
                     params![
@@ -342,7 +375,7 @@ impl Store {
                     label.execute(params![id, account, l])?;
                 }
                 let h = &m.header;
-                header.execute(params![
+                if !keep_header { header.execute(params![
                     id,
                     h.date,
                     h.from_addr,
@@ -354,7 +387,7 @@ impl Store {
                     h.in_reply_to,
                     h.list_id,
                     h.auth
-                ])?;
+                ])?; }
                 if let Some(b) = &m.body {
                     put_body(tx, id, b)?;
                 }

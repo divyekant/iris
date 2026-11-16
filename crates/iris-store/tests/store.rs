@@ -552,6 +552,41 @@ fn new_content_without_a_body_removes_the_old_text() {
 }
 
 #[test]
+fn the_same_content_with_an_empty_header_keeps_the_saved_header() {
+    let dir = TempDir::new("keepheader");
+    let (store, acc) = setup(&dir);
+    let mut m = msg("a", "t1", 1, &[], "Taxes 2026", "apple");
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
+    let a = store.put_messages(acc, &[m.clone()]).unwrap()[0];
+    store
+        .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 4 WHERE id = ?1", [a])?))
+        .unwrap();
+    let saved = |store: &Store| -> (Option<String>, Option<i64>) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT h.subject, m.understood_at FROM message m
+                     JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
+                    [a],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+
+    // A repair: the same bytes, fetched again, with no parsed header.
+    m.header = Header::default();
+    m.body = None;
+    store.put_messages(acc, &[m.clone()]).unwrap();
+    assert_eq!(saved(&store), (Some("Taxes 2026".into()), Some(4)));
+
+    // New bytes: the old header is wrong, and understanding runs again.
+    m.content_sha256 = Some(store.put_content(b"raw b").unwrap());
+    store.put_messages(acc, &[m]).unwrap();
+    assert_eq!(saved(&store), (None, None));
+}
+
+#[test]
 fn a_missing_key_with_a_database_is_an_error() {
     let dir = TempDir::new("nokey");
     drop(Store::open(&dir.0).unwrap());

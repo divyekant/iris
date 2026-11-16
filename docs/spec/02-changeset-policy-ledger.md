@@ -632,6 +632,8 @@ and goes through the policy as an agent changeset does. A rule with
 | Command | Does | Mode | Release |
 |---|---|---|---|
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
+| `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
+| `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
 | `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
 | `iris sync` | Runs an incremental sync now. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
@@ -701,11 +703,15 @@ agent that does not work in a folder. The rules for the MCP interface:
 The web client is the only place to approve, deny, undo and change the
 policy. The engine protects its web interface:
 
-- At each start, the engine makes a random web secret of 32 bytes. `iris
-  serve` opens a one-time sign-in address in the browser, and prints it. The
-  client exchanges the one-time code for a cookie with `HttpOnly` and
-  `SameSite=Strict`. The engine refuses each request of the web interface
-  without that cookie.
+- At each start, the engine makes a random web secret of 32 bytes and a
+  one-time code. `iris serve` opens a one-time sign-in address in the
+  browser, and prints it: `http://<address>/#code=<code>`. The browser does
+  not send the fragment to a server. The client exchanges the code one time
+  (`POST /api/session`) for the web secret, keeps the secret in the storage
+  of its origin, and sends it as `Authorization: Bearer <secret>`. The engine
+  refuses each request of the web interface without that header. The engine
+  does not use a cookie: a browser sends a cookie to each port of the host, so
+  a server of another OS user on another loopback port could get it.
 - The engine refuses a request whose `Host` header is not the bound address,
   and a request whose `Origin` header is another origin. So a web page cannot
   send a request to the engine, also through DNS rebinding.

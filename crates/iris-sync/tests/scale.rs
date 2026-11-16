@@ -1,4 +1,4 @@
-//! The peak memory of a first sync and a full resync of 100,000 messages (specification 1,
+//! The peak memory of a first sync, a full resync and a verify of 100,000 messages (specification 1,
 //! section 9).
 //!
 //! The fake Gmail server runs in a child process, so the peak memory of this
@@ -40,7 +40,7 @@ fn status_kb(field: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
-fn report(what: &str, time: Duration, before: Option<u64>) {
+fn report_line(what: &str, time: Duration, before: Option<u64>) {
     println!("{what}: {COUNT} messages in {time:?}");
     if let (Some(rss), Some(peak), Some(before)) =
         (status_kb("VmRSS:"), status_kb("VmHWM:"), before)
@@ -85,7 +85,7 @@ fn peak_memory_of_a_first_sync() {
     let before = status_kb("VmRSS:");
     let start = Instant::now();
     let done = iris_sync::sync(&store, &gmail, account, "test-token").unwrap();
-    report("first sync", start.elapsed(), before);
+    report_line("first sync", start.elapsed(), before);
     assert_eq!(done.fetched as usize, COUNT);
 
     // A full resync of the same mailbox (specification 1, section 4.4).
@@ -100,9 +100,17 @@ fn peak_memory_of_a_first_sync() {
     let before = status_kb("VmRSS:");
     let start = Instant::now();
     let done = iris_sync::sync(&store, &gmail, account, "test-token").unwrap();
-    report("full resync", start.elapsed(), before);
+    report_line("full resync", start.elapsed(), before);
     assert!(done.resync);
     assert_eq!(done.fetched, 0);
+
+    // Verify of the same mailbox (specification 1, section 4.8).
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+    let before = status_kb("VmRSS:");
+    let start = Instant::now();
+    let report = iris_sync::verify(&store, &gmail, account, "test-token").unwrap();
+    report_line("verify", start.elapsed(), before);
+    assert_eq!(report.differences, vec![]);
     drop(child.stdin.take());
     let _ = child.wait();
     drop(out);
