@@ -319,3 +319,24 @@ fn the_bulk_flag_starts_above_500_messages_in_one_action_or_in_all() {
     assert_eq!(flags_for(250, 250), vec![none.clone(), none]);
     assert_eq!(flags_for(250, 251), vec![bulk.clone(), bulk]);
 }
+
+#[test]
+fn each_proposal_has_its_own_changeset_id() {
+    let dir = std::env::temp_dir().join(format!("iris-observe-id-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    let id = || {
+        let mut out = Vec::new();
+        write_changeset(&store, account, "2026-11-16T09:00:00Z", &mut out).unwrap();
+        let cs: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        cs["id"].as_str().unwrap().to_string()
+    };
+    let (a, b) = (id(), id());
+    assert!(
+        a.starts_with("cs-") && a[3..].parse::<u64>().unwrap() > 0,
+        "{a}"
+    );
+    assert_ne!(a, b);
+    let _ = std::fs::remove_dir_all(&dir);
+}
