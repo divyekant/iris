@@ -28,8 +28,20 @@ export default defineConfig(({ mode }) => {
             req.on("data", (part: Buffer) => (text += part));
             req.on("end", () => {
               res.setHeader("content-type", "application/json");
+              let question: unknown;
+              try {
+                question = JSON.parse(text)?.question;
+              } catch {
+                question = undefined;
+              }
+              // As the engine: a body with no question text is a 400.
+              if (typeof question !== "string" || !question.trim()) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: "A question has 1 to 500 characters." }));
+                return;
+              }
               // A pause, so the wait of the view shows.
-              setTimeout(() => res.end(JSON.stringify(askAnswer(JSON.parse(text).question ?? ""))), 900);
+              setTimeout(() => res.end(JSON.stringify(askAnswer(question))), 900);
             });
             return;
           }
