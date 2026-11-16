@@ -337,7 +337,7 @@ export async function get<T>(path: string): Promise<T> {
 export async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await call(path, "application/json", body);
   const answer = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(answer?.error ?? `The engine answered ${response.status}.`);
+  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status });
   return answer as T;
 }
 

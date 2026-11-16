@@ -1,13 +1,16 @@
 <!--
   One changeset in the review (R2-06, spec 2 section 5.5): who asks, why, and
   each action with its real targets (messages or items) and the arguments
-  that set its effect. Read only: approve and deny come in the next part.
+  that set its effect. Each waiting change starts ticked. The person unticks
+  what they do not want, and one button approves the ticked changes and
+  denies the others.
 -->
 <script lang="ts">
-  import { get, type Changeset, type Item, type Target } from "../api";
-  import { author, detail, FLAGS, itemRow, key, messageRow, outcome, pages, short, shown, target, targets, verb, waits, type Row } from "../review";
+  import { get, post, type Changeset, type Item, type Target } from "../api";
+  import { author, detail, FLAGS, itemRow, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
 
-  let { changeset: c }: { changeset: Changeset } = $props();
+  // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
+  let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
 
   const FIRST = 3;
   const PAGE = 200;
@@ -15,6 +18,13 @@
   let actions = $derived(shown(c));
   let open = $derived(actions.filter(waits));
   let decided = $derived(actions.filter((a) => !waits(a)));
+  // The unticked changes. A change that is not in this list is ticked, also one that comes with a new revision.
+  let off: Record<string, boolean> = $state({});
+  let chosen = $derived(open.filter((a) => !off[key(a)]));
+  // "more" only beside changes that wait.
+  let more = $derived(open.length ? "more " : "");
+  let busy = $state(false);
+  let saved = $state("");
   let who = $derived(author(c));
   let mark = $derived(who.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join(""));
 
@@ -47,6 +57,28 @@
   $effect(() => {
     for (const a of actions) if (!(key(a) in rows)) load(a, FIRST);
   });
+
+  // One request for each decision: the engine approves the ticked changes, with the hash that
+  // this screen showed, and denies the others. If one is refused, it writes nothing (409).
+  async function decide() {
+    const yes = chosen.length;
+    const no = open.length - yes;
+    busy = true;
+    problem = saved = "";
+    try {
+      const body = { actions: open.map((a) => ({ revision: a.revision, n: a.n, approve: !off[key(a)], hash: a.hash })) };
+      onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/decide`, body));
+      saved = [yes && `You approved ${yes === 1 ? "one change" : `${yes} changes`}.`, no && `You denied ${no === 1 ? "one change" : `${no} changes`}.`].filter(Boolean).join(" ");
+    } catch (e) {
+      if ((e as { status?: number }).status !== 409) problem = e instanceof Error ? e.message : String(e);
+      else {
+        problem = "This request changed after you opened it, so Iris saved nothing. Check it as it is now, then decide again.";
+        await get<Changeset>(`changesets/${encodeURIComponent(c.id)}`).then(onchange, () => {});
+      }
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 {#snippet lines(a: (typeof actions)[number])}
@@ -95,24 +127,31 @@
   {#if open.length}
     <ol class="actions">
       {#each open as a (key(a))}
-        <li>
+        {@const id = `${c.id}-${key(a)}`}
+        <li class:off={off[key(a)]}>
+          <input type="checkbox" {id} checked={!off[key(a)]} disabled={busy} onchange={(e) => (off[key(a)] = !e.currentTarget.checked)} />
           <div class="body">
-            <p class="what"><b>{verb(a)}</b> {target(a)}</p>
+            <label class="what" for={id}><b>{verb(a)}</b> {target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
             {#each a.flags as flag (flag)}<p class="flag">{FLAGS[flag] ?? flag}</p>{/each}
+            {#if off[key(a)]}<p class="denied">Iris will deny this change.</p>{/if}
             {@render lines(a)}
           </div>
         </li>
       {/each}
     </ol>
-    <p class="decide">Iris makes none of these changes before you approve them. Approve and deny come to this screen in the next update.</p>
+    <div class="decide">
+      <button type="button" class="primary" class:deny={!chosen.length} disabled={busy} onclick={decide}>{plan(chosen.length, open.length)}</button>
+      <p>Iris makes none of these changes before you approve them.</p>
+    </div>
   {/if}
   {#if problem}<p role="alert">{problem}</p>{/if}
+  {#if saved}<p class="saved" role="status">{saved}</p>{/if}
 
   {#if decided.length}
     <details open={!open.length}>
-      <summary>{decided.length === 1 ? "One more change has a decision" : `${decided.length} more changes have a decision`}</summary>
+      <summary>{decided.length === 1 ? `One ${more}change has a decision` : `${decided.length} ${more}changes have a decision`}</summary>
       <ul class="decided">
         {#each decided as a (key(a))}
           <li><span><b>{verb(a)}</b> {target(a)}</span> <span class="outcome">{outcome(a)}</span></li>
@@ -185,19 +224,64 @@
     padding: var(--space-4) 0;
     border-top: 1px solid var(--color-border-subtle);
   }
+  .actions > li.off .body > :not(.denied) {
+    opacity: 0.5;
+    transition: opacity var(--transition-normal);
+  }
+  input[type="checkbox"] {
+    appearance: none;
+    flex: none;
+    position: relative;
+    width: var(--space-6);
+    height: var(--space-6);
+    margin: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: var(--color-background-elevated);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  input[type="checkbox"]:checked {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  input[type="checkbox"]:focus-visible,
+  .primary:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  /* A tick drawn with two borders, in the color of text on primary. */
+  input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    top: 4px;
+    width: 5px;
+    height: 10px;
+    border: solid var(--color-on-primary);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
   .body {
     flex: 1;
     min-width: 0;
   }
   .what {
+    display: block;
     margin: 0;
+    cursor: pointer;
+    line-height: var(--space-6);
   }
   .what b {
     font-weight: 600;
   }
-  .because {
+  .because,
+  .denied {
     margin: var(--space-1) 0 0;
     color: var(--color-text-muted);
+  }
+  .denied {
+    font-size: var(--font-size--1);
   }
   .flag {
     margin: var(--space-2) 0 0;
@@ -271,11 +355,39 @@
     color: var(--color-text);
   }
   .decide {
-    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3) var(--space-4);
     padding-top: var(--space-4);
     border-top: 1px solid var(--color-border-subtle);
+  }
+  .decide p {
+    margin: 0;
     color: var(--color-text-faint);
     font-size: var(--font-size--1);
+  }
+  .primary {
+    padding: var(--space-2) var(--space-6);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-full);
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+    font-weight: 600;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+  .primary.deny {
+    background: transparent;
+    color: var(--color-text);
+    border-color: var(--color-border);
+  }
+  .primary:disabled {
+    cursor: progress;
+    opacity: 0.6;
+  }
+  .saved {
+    margin: var(--space-4) 0 0;
+    color: var(--color-text-muted);
   }
   details {
     margin-top: var(--space-6);
@@ -311,7 +423,10 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .request,
-    .actions > li {
+    .actions > li,
+    .actions > li.off .body > :not(.denied),
+    input[type="checkbox"],
+    .primary {
       animation: none;
       transition: none;
     }

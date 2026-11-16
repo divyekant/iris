@@ -11,10 +11,11 @@ const text = (el) => el.textContent.replace(/\s+/g, " ");
 // Answer each API call from `routes` (status and body), else from the fixtures. Keep a list of the paths.
 function serve(routes = {}) {
   const asked = [];
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init) => {
     const path = String(url).replace(/^\/api\//, "");
-    asked.push(path);
-    const [status, body] = routes[path] ?? [200, fx.answer(`/${path}`)];
+    asked.push(init?.body ? [path, JSON.parse(init.body)] : path);
+    const route = routes[path];
+    const [status, body] = typeof route === "function" ? route(JSON.parse(init.body)) : (route ?? [200, fx.answer(`/${path}`)]);
     return new Response(JSON.stringify(body ?? { error: "Not found." }), { status: body === undefined ? 404 : status, headers: { "content-type": "application/json" } });
   };
   return asked;
@@ -79,6 +80,77 @@ test("the review shows an open request whose actions all have a decision, with t
     assert.ok(details.open, "the decided changes show open when nothing in the request waits");
     assert.match(text(details), /Archive 1 message/i);
     assert.equal(view.target.querySelector(".decide"), null);
+  } finally {
+    view.destroy();
+  }
+});
+
+const three = () =>
+  changeset([
+    act({ n: 1, hash: "h1", resolved: { messages: ["m-1"] } }),
+    act({ n: 2, hash: "h2", verb: "label", args: { label: "Finance" }, resolved: { messages: ["m-2"] } }),
+    act({ n: 3, hash: "h3", verb: "read", resolved: { messages: ["m-3"] } }),
+  ]);
+
+test("each change starts ticked; the button approves the ticked changes and denies the others", async () => {
+  const before = three();
+  const asked = serve({
+    "changesets/cs-9/decide": (body) => [
+      200,
+      { ...before, state: "closed", actions: before.actions.map((a) => ({ ...a, decision: body.actions.find((d) => d.n === a.n).approve ? { state: "approved", by: "person" } : { state: "denied", by: "person", reason: "The person denied it in the review." } })) },
+    ],
+  });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    const button = () => view.target.querySelector("button.primary");
+    const boxes = () => [...view.target.querySelectorAll("input[type=checkbox]")];
+    assert.match(text(view.target), /Claude Code asks for 3 changes\./);
+    assert.ok(boxes().every((b) => b.checked));
+    assert.equal(button().textContent, "Approve all 3");
+
+    // A click on the words of a change unticks it too: the label belongs to the box.
+    view.target.querySelectorAll("label.what")[1].click();
+    view.flushSync();
+    assert.equal(boxes()[1].checked, false);
+    assert.equal(button().textContent, "Approve 2, deny 1");
+    assert.match(text(view.target), /Iris will deny this change\./);
+
+    button().click();
+    await until(() => view.target.querySelector("[role=status]"));
+    const [, body] = asked.find((x) => Array.isArray(x));
+    assert.deepEqual(body.actions, [
+      { revision: 1, n: 1, approve: true, hash: "h1" },
+      { revision: 1, n: 2, approve: false, hash: "h2" },
+      { revision: 1, n: 3, approve: true, hash: "h3" },
+    ]);
+    view.flushSync();
+    const page = text(view.target);
+    assert.match(page, /You approved 2 changes\. You denied one change\./);
+    assert.match(page, /Nothing waits for your review\./);
+    assert.equal(button(), null);
+    assert.match(text(view.target.querySelector("details")), /You approved it/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("all unticked denies all; a request that changed saves nothing and shows the request as it is now", async () => {
+  const before = three();
+  const after = { ...before, revision: 2, why: "Tidy the inbox, without the labels.", actions: [...before.actions.map((a) => ({ ...a, decision: { state: "replaced", by: "author" } })), act({ n: 1, revision: 2, hash: "h4", resolved: { messages: ["m-1"] } })] };
+  serve({ "changesets/cs-9/decide": () => [409, { error: "the hash changed" }], "changesets/cs-9": [200, after] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    for (const box of view.target.querySelectorAll("input[type=checkbox]")) box.click();
+    view.flushSync();
+    assert.equal(view.target.querySelector("button.primary").textContent, "Deny all 3");
+    view.target.querySelector("button.primary").click();
+    const alert = await until(() => view.target.querySelector("[role=alert]"));
+    assert.match(alert.textContent, /changed after you opened it, so Iris saved nothing/);
+    await until(() => text(view.target).includes("without the labels"));
+    view.flushSync();
+    assert.match(text(view.target), /Claude Code asks for one change\./);
+    assert.equal(view.target.querySelector("button.primary").textContent, "Approve the change");
+    assert.equal(view.target.querySelector("[role=status]"), null);
   } finally {
     view.destroy();
   }

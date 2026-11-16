@@ -194,6 +194,17 @@ export const changesets: Changeset[] = [
 ];
 
 /** The answer for one API path (no `/api/` prefix), or undefined for a 404. */
+/** The decide endpoint on the fixtures: each named action gets the decision of the person. */
+export function decide(id: string, body: { actions: { revision: number; n: number; approve: boolean }[] }): Changeset | undefined {
+  const c = changesets.find((x) => x.id === id);
+  if (!c) return undefined;
+  for (const d of body.actions) {
+    const a = c.actions.find((x) => x.revision === d.revision && x.n === d.n);
+    if (a) a.decision = d.approve ? { state: "approved", by: "person" } : { state: "denied", by: "person", reason: "The person denied it in the review." };
+  }
+  return c;
+}
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
