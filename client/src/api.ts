@@ -59,6 +59,8 @@ export type Brief = {
   oldest_fetched?: string | null;
   /** The release 1 triage proposal (spec 1 section 8): computed, not stored, nothing applied. */
   proposal?: { count: number; verbs: Record<string, number> } | null;
+  /** The open changesets, and their actions that wait for a person (spec 2 section 5.5). */
+  review?: { changesets: number; actions: number };
 };
 
 export type Account = {
@@ -133,6 +135,43 @@ export type Message = Summary & {
   sender_kind?: "person" | "service" | "stranger" | "hostile";
   items: string[];
 };
+
+/** A changeset (spec 2 section 5.1): a request to change the mailbox, which a person reviews. */
+export type Decision = {
+  state: "proposed" | "in_review" | "approved" | "held" | "applied" | "failed" | "denied" | "expired" | "cancelled" | "replaced" | "undone";
+  by?: "rule" | "person" | "policy" | "limit" | "engine" | "author" | "expiry";
+  rule?: number;
+  policy?: number;
+  reason?: string;
+  at?: string;
+};
+
+export type Action = {
+  n: number;
+  revision: number;
+  verb: string;
+  targets: { threads?: string[]; messages?: string[]; items?: string[] };
+  resolved: { messages: string[] };
+  args: Record<string, unknown>;
+  why: string | null;
+  flags: string[];
+  hash: string | null;
+  decision: Decision | null;
+};
+
+export type Changeset = {
+  id: string;
+  revision: number;
+  author: { kind: "person" | "agent" | "triage" | "local"; name?: string; session?: string; job?: string };
+  why: string | null;
+  created: string;
+  submitted: string | null;
+  state: "draft" | "open" | "closed" | "withdrawn";
+  actions: Action[];
+};
+
+/** A message summary, or only the ID of a message that is not in the mirror any more. */
+export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
 
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";

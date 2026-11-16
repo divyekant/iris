@@ -1,0 +1,80 @@
+// The review screen (R2-06): the words of a changeset, and server renders with the fixtures.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { load, render } from "./render.mjs";
+
+const fx = await load("/dev/fixtures.ts");
+const r = await load("/src/review.ts");
+const { parse } = await load("/src/route.ts");
+const text = (html) => html.replace(/<!--[^>]*-->/g, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+const act = (a) => ({ n: 1, revision: 1, verb: "archive", targets: {}, resolved: { messages: [] }, args: {}, why: null, flags: [], hash: null, decision: { state: "in_review" }, ...a });
+
+test("each verb reads as the start of a sentence, with its argument", () => {
+  assert.equal(r.verb(act({ verb: "label", args: { label: "Finance" } })), "Add the label “Finance” to");
+  assert.equal(r.verb(act({ verb: "unlabel", args: { label: "Old" } })), "Remove the label “Old” from");
+  assert.equal(r.verb(act({ verb: "trash" })), "Move to the trash");
+  // An argument that is not text shows nothing, never markup or an object.
+  assert.equal(r.verb(act({ verb: "label", args: { label: { x: 1 } } })), "Add the label “” to");
+});
+
+test("the target counts the real messages, and names the threads only when there are two or more", () => {
+  const ids = (n) => Array.from({ length: n }, (_, i) => `m-${i}`);
+  assert.equal(r.target(act({ resolved: { messages: ids(1) } })), "1 message");
+  assert.equal(r.target(act({ targets: { threads: ["t-1"] }, resolved: { messages: ids(2) } })), "2 messages");
+  assert.equal(r.target(act({ targets: { threads: ["t-1", "t-2"] }, resolved: { messages: ids(1200) } })), "1,200 messages in 2 threads");
+  assert.equal(r.target(act({ verb: "close", targets: { items: ["c-1"] } })), "1 item");
+});
+
+test("the review shows the newest revision and the open actions of an older one, never a replaced or draft action", () => {
+  const c = {
+    revision: 2,
+    actions: [
+      act({ n: 1, decision: { state: "replaced", by: "author" } }),
+      act({ n: 2, decision: { state: "denied", by: "engine", reason: "x" } }),
+      act({ n: 3, decision: { state: "approved", by: "rule", rule: 1 } }),
+      act({ n: 1, revision: 2 }),
+      act({ n: 2, revision: 2, decision: { state: "denied", by: "limit", reason: "Too many." } }),
+      act({ n: 3, revision: 2, decision: null }),
+    ],
+  };
+  assert.deepEqual(r.shown(c).map((a) => `${a.revision}.${a.n}`), ["1.3", "2.1", "2.2"]);
+  assert.deepEqual(r.shown(c).filter(r.waits).map((a) => `${a.revision}.${a.n}`), ["2.1"]);
+  assert.equal(r.outcome(c.actions[2]), "Approved by rule 1");
+  assert.equal(r.outcome(c.actions[4]), "Denied: Too many.");
+});
+
+test("the review route opens the review", () => {
+  assert.deepEqual(parse("#/review"), { view: "review" });
+});
+
+test("the review says who asks and why, and each change with its count and flags", async () => {
+  const t = text(await render("/src/views/Review.svelte", { changesets: fx.changesets, mode: "observe" }));
+  assert.match(t, /2 requests ask for 4 changes\./);
+  assert.match(t, /Iris is in observe mode/);
+  assert.match(t, /Claude Code .*Priya needs the Q4 numbers by Friday/);
+  assert.match(t, /Add the label “Finance” to 2 messages The Q4 thread/);
+  assert.match(t, /Archive 3 messages in 2 threads/);
+  assert.match(t, /The thread is with a sender you do not know/);
+  assert.match(t, /Iris triage .*Archive 612 messages Changes more than 500 messages/);
+  // The action that a rule approved is not a question: it shows under the decisions.
+  assert.match(t, /One more change has a decision Archive 1 message Approved by rule 1/);
+  assert.match(t, /Nothing changes in your mailbox before you approve\./);
+});
+
+test("one request names its author, and a review with nothing to decide says so", async () => {
+  const one = text(await render("/src/views/Review.svelte", { changesets: [fx.changesets[0]], mode: "apply" }));
+  assert.match(one, /Claude Code asks for 3 changes\./);
+  assert.doesNotMatch(one, /observe mode/);
+  const closed = { ...fx.changesets[1], actions: [act({ decision: { state: "denied", by: "person", reason: "No." } })] };
+  const none = text(await render("/src/views/Review.svelte", { changesets: [closed], mode: "apply" }));
+  assert.match(none, /Nothing waits for your review\./);
+  assert.doesNotMatch(none, /Iris triage/);
+});
+
+test("the brief says how many changes wait for review and links the review", async () => {
+  const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: new Date("2026-11-16T09:05:00Z") });
+  assert.match(text(html), /Four changes wait for your review\./);
+  assert.match(html, /href="#\/review"/);
+  const none = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, review: { changesets: 0, actions: 0 } }, now: new Date("2026-11-16T09:05:00Z") });
+  assert.doesNotMatch(none, /#\/review|for your review/);
+});
