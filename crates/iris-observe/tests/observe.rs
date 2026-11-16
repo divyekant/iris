@@ -199,3 +199,68 @@ fn an_empty_store_gives_a_closed_changeset_with_no_action() {
     assert_eq!(cs["actions"], serde_json::json!([]));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A writer that changes the store through a second handle at its first
+/// write, as a sync can do while the brief reads.
+struct ChangeOnWrite<'a> {
+    other: Option<&'a Store>,
+    out: Vec<u8>,
+}
+
+impl std::io::Write for ChangeOnWrite<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(store) = self.other.take() {
+            store
+                .write(|tx| {
+                    tx.execute("DELETE FROM message_label", [])?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        self.out.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_changeset_comes_from_one_snapshot_when_the_store_changes() {
+    let dir = std::env::temp_dir().join(format!("iris-observe-snap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO label(account_id, provider_id, name, kind) VALUES (1, 'INBOX', 'INBOX', 'system');
+                 INSERT INTO thread(account_id, provider_id) VALUES (1, 't1');
+                 INSERT INTO message(account_id, thread_id, provider_id) VALUES (1, 1, 'a'), (1, 1, 'b');
+                 INSERT INTO message_label(message_id, label_id) VALUES (1, 1), (2, 1);
+                 INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                   VALUES ('feed', 1, 'new', '{}', 0, 0);
+                 INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin'), (1, 2, 'update');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let other = Store::open(&dir).unwrap();
+    let mut w = ChangeOnWrite {
+        other: Some(&other),
+        out: Vec::new(),
+    };
+    write_changeset(&store, account, "2026-11-16T09:00:00Z", &mut w).unwrap();
+    let cs: serde_json::Value = serde_json::from_slice(&w.out).unwrap();
+    assert_eq!(
+        cs["actions"][0]["resolved"]["messages"],
+        serde_json::json!(["m-1", "m-2"]),
+        "{cs}"
+    );
+    // After the run, the change is visible.
+    assert!(counts(&store, account)
+        .unwrap()
+        .iter()
+        .all(|(_, n)| *n == 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
