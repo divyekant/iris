@@ -226,14 +226,17 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
     store.write(|tx| {
         let mut kind =
             tx.prepare_cached("SELECT id, kind, decided_by FROM sender WHERE address = ?1")?;
-        // A new row, or a row with no kind, gets the person rule that matched
-        // (specification 1, section 6.7). A row with a kind keeps it.
+        // A new row, or a row that the engine did not set to `person`, gets
+        // the person rule that matched (specification 1, section 6.7). The
+        // engine checks `hostile` first, and a kind that a person set wins,
+        // so those rows never get here.
         let mut add = tx.prepare_cached(
             "INSERT INTO sender(address, name, kind, basis, decided_by, decided_at)
              VALUES (?1, ?2, 'person', ?3, 'engine', ?4)
              ON CONFLICT(address) DO UPDATE SET kind = 'person', basis = excluded.basis,
                decided_by = 'engine', decided_at = excluded.decided_at
-             WHERE sender.kind IS NULL",
+             WHERE sender.kind IS NULL
+               OR (sender.kind NOT IN ('person', 'hostile') AND sender.decided_by IS NOT 'person')",
         )?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -257,7 +260,7 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                 continue;
             }
             let id = match row {
-                Some((id, Some(_), _)) => id,
+                Some((id, Some(k), _)) if k == "person" || by == Some("person") => id,
                 _ => {
                     let basis = if stats[a].seen.iter().any(|s| !s.from_them) {
                         "sent"
