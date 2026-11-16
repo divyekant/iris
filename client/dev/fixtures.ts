@@ -36,13 +36,16 @@ export const brief: Brief = {
   owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you")),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },
-  feed: of(byForm("feed")),
+  // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
+  feed: of([]),
   signals: of(byForm("signal")),
   strangers: of([]),
   hostile: 2,
   not_understood: 1,
   oldest_fetched: null,
   proposal: { count: 447, verbs: { archive: 412, label: 35 } },
+  bundles: [{ rule: 3, name: "Bundle the feed", ...of(byForm("feed")) }],
+  hidden: 4,
   review: { changesets: 2, actions: 4 },
 };
 
@@ -196,6 +199,11 @@ export function answer(path: string): unknown {
   const q = url.searchParams;
   const [name, id] = url.pathname.slice(1).split("/");
   if (name === "status") return status;
+  if (name === "brief" && id?.startsWith("bundle-")) {
+    const bundle = brief.bundles?.find((b) => `bundle-${b.rule}` === id);
+    return bundle ? { count: bundle.count, items: bundle.items, next: null } : undefined;
+  }
+  if (name === "records") return { receipt: 1, booking: 1 };
   if (name === "brief" && id) {
     const section = brief[id as "you_owe"];
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;

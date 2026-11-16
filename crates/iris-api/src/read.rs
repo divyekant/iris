@@ -179,10 +179,30 @@ pub struct Brief {
     /// changes that observe mode would propose, with nothing applied.
     /// Computed from `iris_observe::counts` for each account; not stored.
     pub proposal: Option<Proposal>,
+    /// The items of each `bundle` rule (specification 2, section 6.4), by
+    /// rule ID. A bundled item is in no other section and in no count.
+    pub bundles: Vec<Bundle>,
+    /// The count of items that a `hide` rule leaves out of the brief.
+    pub hidden: i64,
     /// The open changesets and their actions that wait for a person
     /// (specification 2, section 5.5).
     pub review: crate::review::Review,
 }
+
+/// The items of one `bundle` rule: the count, and the newest
+/// [`BUNDLE_ITEMS`] items.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Bundle {
+    pub rule: u32,
+    /// The name of the rule in the active policy.
+    pub name: String,
+    #[serde(flatten)]
+    pub section: Section,
+}
+
+/// The most items of each bundle in the brief: enough for the client to
+/// name who sent them. `/api/brief/bundle-<rule>` gives all.
+pub const BUNDLE_ITEMS: u32 = 20;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Page {
@@ -438,9 +458,84 @@ pub const SECTIONS: [&str; 6] = [
     "strangers",
 ];
 
+/// The condition of an item that the brief shows in its section: no `hide`
+/// or `bundle` rule matches it (specification 2, section 6.4). An item with
+/// no `attention` field yet counts as shown.
+const SHOWN: &str = "coalesce(json_extract(doc, '$.attention.state'), 'shown') = 'shown'";
+
 /// The filter and the order of each list section of the brief, in the
-/// order of [`SECTIONS`].
+/// order of [`SECTIONS`]. Each filter leaves out hidden and bundled items.
 fn section_sql(now: i64) -> [(String, String); 6] {
+    base_sql(now).map(|(filter, order)| (format!("{} AND {SHOWN}", head(&filter)), order))
+}
+
+/// The filter of each record that the brief counts: not gone.
+const RECORD: &str = "form = 'record' AND status != 'gone'";
+
+/// The filter of the head of each pair in the place `filter`: an item of the
+/// place that is not a possible duplicate of an item of the same place
+/// (specification 1, section 7.5). The attention of the head decides where
+/// the pair goes, so a pair counts once in the brief, whatever the attention
+/// of the duplicate. The inner `item` of the subquery is the original.
+fn head(filter: &str) -> String {
+    format!(
+        "(({filter}) AND NOT (duplicate_of IS NOT NULL
+             AND duplicate_of IN (SELECT id FROM item WHERE {filter})))"
+    )
+}
+
+/// The places of the brief before the attention: the list sections and the
+/// records. No item is in two places.
+fn places(now: i64) -> Vec<String> {
+    base_sql(now)
+        .into_iter()
+        .map(|(filter, _)| filter)
+        .chain([RECORD.to_string()])
+        .collect()
+}
+
+/// The filter of the head of each pair of the brief, in any place.
+fn heads(now: i64) -> String {
+    places(now)
+        .iter()
+        .map(|f| head(f.as_str()))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// The filter of each possible duplicate that goes with its original: an
+/// item of the brief that is not a head.
+fn tails(now: i64) -> String {
+    let all = places(now)
+        .iter()
+        .map(|f| format!("({f})"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("({all}) AND NOT ({})", heads(now))
+}
+
+/// The filter and the order of the bundle of rule `rule`: newest first.
+fn bundle_sql(now: i64, rule: u32) -> (String, String) {
+    (
+        format!(
+            "({}) AND json_extract(doc, '$.attention.state') = 'bundled'
+             AND json_extract(doc, '$.attention.rule') = {rule}",
+            heads(now)
+        ),
+        "created_at DESC, id DESC".to_string(),
+    )
+}
+
+/// The rule of a bundle section name: `bundle-3` is rule 3.
+fn bundle_rule(name: &str) -> Option<u32> {
+    let n = name.strip_prefix("bundle-")?;
+    // Only the canonical form, so one bundle has one cursor name.
+    n.parse().ok().filter(|r: &u32| r.to_string() == n)
+}
+
+/// The filter and the order of each list section of the brief, with no
+/// attention condition.
+fn base_sql(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
@@ -609,17 +704,11 @@ fn seek_sql(keys: &[(String, bool)]) -> String {
 /// gives the sort keys of each item of the page.
 fn read_section(
     c: &Connection,
-    (filter, order): &(String, String),
+    (shown, order): &(String, String),
+    tails: &str,
     limit: u32,
     after: Option<&[SqlValue]>,
 ) -> iris_store::Result<(Section, Vec<Vec<SqlValue>>)> {
-    // A possible duplicate whose original is in the same section
-    // shows with the original, not as a line of its own. The inner
-    // `item` of the subquery is the original.
-    let shown = format!(
-        "{filter} AND NOT (duplicate_of IS NOT NULL
-               AND duplicate_of IN (SELECT id FROM item WHERE {filter}))"
-    );
     let count = c.query_row(
         &format!("SELECT count(*) FROM item WHERE {shown}"),
         [],
@@ -650,9 +739,10 @@ fn read_section(
         .into_iter()
         .unzip();
     let mut duplicates = serde_json::Map::new();
-    // Only a duplicate that this section would show is part of the pair.
+    // A possible duplicate whose original is in the same place shows with
+    // the original, not as a line of its own.
     let mut st = c.prepare(&format!(
-        "SELECT id, form FROM item WHERE duplicate_of = ?1 AND {filter} ORDER BY id"
+        "SELECT id, form FROM item WHERE duplicate_of = ?1 AND ({tails}) ORDER BY id"
     ))?;
     for doc in &items {
         let Some(id) = doc["id"].as_str() else {
@@ -680,6 +770,32 @@ fn read_section(
     ))
 }
 
+/// The count of each record type that is not gone and whose head matches
+/// `cond`. A possible duplicate pair counts once (specification 1, section
+/// 7.5).
+fn count_records(c: &Connection, cond: &str) -> iris_store::Result<serde_json::Map<String, Value>> {
+    let mut records = serde_json::Map::new();
+    let mut st = c.prepare(&format!(
+        "SELECT json_extract(doc, '$.type'), count(*) FROM item
+         WHERE {} AND {cond}
+         GROUP BY 1 ORDER BY 1",
+        head(RECORD)
+    ))?;
+    for row in st.query_map([], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+    })? {
+        let (kind, n) = row?;
+        records.insert(kind.unwrap_or_else(|| "other".into()), n.into());
+    }
+    Ok(records)
+}
+
+/// The count of each record type that is not gone, also of the records
+/// that a rule hides or bundles: the counts of the Records view.
+pub fn records(store: &Store) -> Result<serde_json::Map<String, Value>> {
+    Ok(store.read(|c| count_records(c, "1"))?)
+}
+
 pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     let [you_owe, owed, conversations, feed, signals, strangers] = section_sql(now);
     // Outside the read of the brief: a nested read can wait for the
@@ -697,24 +813,11 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             *verb = (verb.as_i64().unwrap_or(0) + n as i64).into();
         }
     }
+    let tails = tails(now);
     let mut brief = store.read(|c| {
         let section =
-            |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, None).map(|(s, _)| s);
-        let mut records = serde_json::Map::new();
-        let mut st = c.prepare(
-            "SELECT json_extract(doc, '$.type'), count(*) FROM item
-             WHERE form = 'record' AND status != 'gone'
-               -- A possible duplicate pair counts once (section 7.5).
-               AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
-                 (SELECT i.id FROM item i WHERE i.form = 'record' AND i.status != 'gone'))
-             GROUP BY 1 ORDER BY 1",
-        )?;
-        for row in st.query_map([], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
-        })? {
-            let (kind, n) = row?;
-            records.insert(kind.unwrap_or_else(|| "other".into()), n.into());
-        }
+            |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
+        let records = count_records(c, SHOWN)?;
         let hostile = c.query_row(
             "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
              WHERE m.gone_at IS NULL AND m.internal_date >= ?1
@@ -738,6 +841,39 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
                 |r| r.get::<_, Option<i64>>(0),
             )?
             .map(rfc3339);
+        let all = heads(now);
+        let hidden = c.query_row(
+            &format!(
+                "SELECT count(*) FROM item
+                 WHERE ({all}) AND json_extract(doc, '$.attention.state') = 'hidden'"
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        let rules: Vec<u32> = c
+            .prepare(&format!(
+                "SELECT DISTINCT json_extract(doc, '$.attention.rule') FROM item
+                 WHERE ({all}) AND json_extract(doc, '$.attention.state') = 'bundled'
+                   AND json_extract(doc, '$.attention.rule') IS NOT NULL
+                 ORDER BY 1"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let policy = iris_policy::active(c)?.policy;
+        let mut bundles = Vec::new();
+        for rule in rules {
+            let (section, _) = read_section(c, &bundle_sql(now, rule), &tails, BUNDLE_ITEMS, None)?;
+            let name = policy
+                .rules
+                .iter()
+                .find(|r| r.id == rule)
+                .map_or_else(|| format!("Rule {rule}"), |r| r.name.clone());
+            bundles.push(Bundle {
+                rule,
+                name,
+                section,
+            });
+        }
         Ok(Brief {
             you_owe: section(&you_owe)?,
             owed_to_you: section(&owed)?,
@@ -750,6 +886,8 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             not_understood,
             oldest_fetched,
             proposal: None,
+            bundles,
+            hidden,
             review: crate::review::review_counts(c)?,
         })
     })?;
@@ -767,8 +905,9 @@ pub struct SectionPage {
     pub next: Option<String>,
 }
 
-/// One page of the list section `name` (one of [`SECTIONS`]) of the brief at
-/// the time `now`, with the same filter and order as [`brief`]. `after` is
+/// One page of the list section `name` (one of [`SECTIONS`], or
+/// `bundle-<rule>` for the bundle of a rule) of the brief at the time `now`,
+/// with the same filter and order as [`brief`]. `after` is
 /// the ID of the last item of the page before. The page starts after the
 /// place of that item in the order, also when the item left the section.
 pub fn brief_section(
@@ -779,15 +918,35 @@ pub fn brief_section(
     after: Option<&str>,
 ) -> Result<Option<SectionPage>> {
     check_limit(limit)?;
-    let Some(index) = SECTIONS.iter().position(|n| *n == name) else {
-        return Ok(None);
+    let sql = &match (SECTIONS.iter().position(|n| *n == name), bundle_rule(name)) {
+        (Some(index), _) => section_sql(now)[index].clone(),
+        (None, Some(rule)) => bundle_sql(now, rule),
+        (None, None) => return Ok(None),
     };
-    let sql = &section_sql(now)[index];
     let after = after
         .map(|token| decode_cursor(token, name, sort_keys(&sql.1).len()))
         .transpose()?;
-    let (mut section, mut page_keys) =
-        store.read(|c| read_section(c, sql, limit + 1, after.as_deref()))?;
+    let rule = bundle_rule(name);
+    let read = store.read(|c| {
+        let page = read_section(c, sql, &tails(now), limit + 1, after.as_deref())?;
+        // A bundle is there while the active policy has its `bundle` rule,
+        // or while an item is in it (until the next attention refresh).
+        let known = |r: u32| -> iris_store::Result<bool> {
+            Ok(page.0.count > 0
+                || iris_policy::active(c)?
+                    .policy
+                    .rules
+                    .iter()
+                    .any(|x| x.id == r && x.effect == iris_policy::Effect::Bundle))
+        };
+        Ok(match rule {
+            Some(r) if !known(r)? => None,
+            _ => Some(page),
+        })
+    })?;
+    let Some((mut section, mut page_keys)) = read else {
+        return Ok(None);
+    };
     let more = section.items.len() > limit as usize;
     section.items.truncate(limit as usize);
     page_keys.truncate(limit as usize);
@@ -982,6 +1141,55 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bundle_name_is_canonical_or_no_bundle() {
+        // Property: `bundle_rule(s)` is `Some(r)` exactly when `s` is
+        // `bundle-{r}` for a `u32` `r`. Each rule has one name.
+        for r in [0, 1, 9, 10, 99, u32::MAX - 1, u32::MAX] {
+            assert_eq!(bundle_rule(&format!("bundle-{r}")), Some(r));
+        }
+        let parts = [
+            "bundle-",
+            "bundle",
+            "-",
+            "+",
+            "0",
+            "1",
+            "9",
+            "42",
+            "4294967295",
+            "4294967296",
+            " ",
+            "\u{0663}",
+            "é",
+            "%33",
+            "x",
+            "/",
+            "",
+        ];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..20_000 {
+            let mut name = String::new();
+            for _ in 0..(x % 5) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                name.push_str(parts[(x % parts.len() as u64) as usize]);
+            }
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let canonical = name
+                .strip_prefix("bundle-")
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|r| format!("bundle-{r}") == name);
+            assert_eq!(bundle_rule(&name), canonical, "{name:?}");
+            if let Some(r) = bundle_rule(&name) {
+                assert_eq!(format!("bundle-{r}"), name);
+            }
+        }
+    }
 
     #[test]
     fn summaries_leave_out_a_message_that_became_gone() {

@@ -1001,6 +1001,14 @@ the kind of a party from the sender row of its `p-` ID (the counterparty, the
 issuer or the publisher), when the query runs. No query shows an item whose
 status is `gone`.
 
+Each query shows only an item whose `attention` state is `shown` or missing
+(specification 2, section 6.4). The brief shows each `bundle` rule as one
+line with the count of its items, and gives the count of the hidden items.
+Each item of the brief is in one place only: its section, its bundle, or the
+hidden count. A possible duplicate pair in one section goes where the
+attention of the original puts it, and counts once there. The duplicate shows
+with the original, whatever its own attention.
+
 | Section | Query |
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |

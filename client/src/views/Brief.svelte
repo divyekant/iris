@@ -8,6 +8,7 @@
   import { poll as every, watch } from "../clock";
   import { across, copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
+  import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
 
   let {
@@ -75,6 +76,8 @@
   });
   // Counts for each sender are exact only when the API gave every feed item.
   let feedComplete = $derived(brief.feed.items.length >= brief.feed.count);
+  let bundles = $derived(brief.bundles ?? []);
+  let hidden = $derived(brief.hidden ?? 0);
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
   let progress = $derived(status && unfinished(status).length ? status.messages : null);
   let stopped = $derived(copying(status).length === 0);
@@ -129,6 +132,15 @@
   {/if}
 {/each}
 
+{#if bundles.length}
+  <section aria-labelledby="bundles">
+    <h2 id="bundles"><span>Bundled by your rules</span> <span class="count">{bundles.reduce((n, b) => n + b.count, 0)}</span></h2>
+    <ul>
+      {#each bundles as bundle (bundle.rule)}<Bundle {bundle} />{/each}
+    </ul>
+  </section>
+{/if}
+
 {#if proposal}
   <section class="proposal" aria-labelledby="proposal">
     <h2 id="proposal"><span>Triage proposal</span> <span class="count">{proposal.count}</span></h2>
@@ -166,6 +178,9 @@
   {/if}
   {#if brief.not_understood > 0}
     <p>Iris could not read {brief.not_understood} messages. They stay in your mailbox as they are.</p>
+  {/if}
+  {#if hidden > 0}
+    <p>Your rules hide {hidden.toLocaleString("en-US")} {hidden === 1 ? "item" : "items"} from this brief. <a href="#/rules">See the rules</a></p>
   {/if}
   <p>Iris only observes. It changed nothing in your mailbox.</p>
 </footer>
@@ -286,6 +301,12 @@
   }
   footer p {
     margin: 0 0 var(--space-2);
+  }
+  footer a {
+    color: var(--color-text-muted);
+  }
+  footer a:hover {
+    color: var(--color-text);
   }
   .warning {
     color: var(--color-text);

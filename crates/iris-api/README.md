@@ -28,7 +28,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 |---|---|
 | `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
-| `/api/brief/{section}?limit=&after=` | One page of a list section of the brief (`you_owe`, `owed_to_you`, `conversations`, `feed`, `signals` or `strangers`): `{"count", "items", "next"}`, in the same order and with the same filter as the brief. The page has `duplicates` only when an item of the page has a duplicate, as in the brief. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. With no `after`, the page starts at the first item. `next` is a text value that holds the section name and the sort keys of the last item of the page. Do not make or change it. The API does not sign it, so a made cursor gives the items after its keys. The next page starts after these keys in the order of the section. An item that leaves the section, or that changes its sort key behind these keys, moves no other item. An item whose sort key moves across these keys between two pages can show twice or not show. For a new view, read the section again from the start. An empty `after`, or an `after` that is not a cursor of the same section, is a 400. An unknown section is a 404. |
+| `/api/brief/{section}?limit=&after=` | One page of a list section of the brief (`you_owe`, `owed_to_you`, `conversations`, `feed`, `signals` or `strangers`), or of the bundle of rule N (`bundle-N`, newest first): `{"count", "items", "next"}`, in the same order and with the same filter as the brief. The page has `duplicates` only when an item of the page has a duplicate, as in the brief. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. With no `after`, the page starts at the first item. `next` is a text value that holds the section name and the sort keys of the last item of the page. Do not make or change it. The API does not sign it, so a made cursor gives the items after its keys. The next page starts after these keys in the order of the section. An item that leaves the section, or that changes its sort key behind these keys, moves no other item. An item whose sort key moves across these keys between two pages can show twice or not show. For a new view, read the section again from the start. An empty `after`, or an `after` that is not a cursor of the same section, is a 400. An unknown section is a 404. `bundle-N` is a 404 when the active policy has no `bundle` rule N and no item of the brief is in its bundle. |
 | `/api/proposal` | `{"changesets": [...]}`: the triage proposal of the brief, one changeset for each account, in the format of specification 2, section 5.1. The answer streams in parts of 64 KiB. Each action has its message IDs and the state `proposed`. Nothing is applied or stored. |
 | `/api/changesets` | `{"changesets": [...]}`: each open changeset (specification 2, section 5.1), the newest changeset first. A changeset is open while one or more of its actions is `proposed`, `in_review`, `approved` or `held`. The answer streams in parts of 64 KiB. |
 | `/api/changesets/{id}` | One changeset (`cs-77`) in each state, as the document of specification 2, section 5.1. The answer streams. An ID that no changeset has is a 404. |
@@ -63,13 +63,21 @@ The text of a message is data. Show it as text, never as markup.
 | `proposal` | The triage proposal of specification 1, section 8: `{"count", "verbs": {"archive": 412}}`, from `iris_observe::counts` for each account when the brief opens. Nothing is applied or stored. `/api/proposal` gives the full list of actions. |
 | `review` | `{"changesets", "actions"}`: the count of the actions that wait for a person (`proposed` or `in_review`, specification 2, section 5.5) in the open changesets of `/api/changesets`, and of those changesets. A changeset whose new revision is a draft is not open, so it is not counted. |
 | `oldest_fetched` | The date of the oldest fetched message that is not gone, or `null`. While the first sync continues, the brief covers only the mail from this date (specification 1, section 4.2). |
+| `bundles` | One entry for each `bundle` rule that bundles one or more items of the brief, in the order of the rule ID: `{"rule", "name", "count", "items"}`. `name` is the name of the rule in the active policy, or `Rule <id>` if the active policy has no such rule. `items` holds the newest 20 items. `/api/brief/bundle-<rule>` gives all. |
+| `hidden` | The count of items of the brief that a `hide` rule leaves out. |
 
 Each list field is `{"count", "items"}`. `count` is the full count. `items`
 holds at most 200 items. Times sort as instants, not as text, so a time
 offset does not change the order. A list field can also have `duplicates`:
 for an item in `items`, the IDs of the newer items whose `duplicate_of` is that
 item (specification 1, section 7.5). The brief shows such a pair once, so the
-newer item is not in `items` and not in `count`. The feed sorts by the address of
+newer item is not in `items` and not in `count`.
+
+The attention of an item (specification 2, section 6.4) decides where it
+shows. Each item that a list field or `records` would have is in exactly one
+place: its list field or `records` when its `attention.state` is `shown` or
+missing, the bundle of its rule when it is `bundled`, and only the count
+`hidden` when it is `hidden`. The feed sorts by the address of
 the sender row of the publisher, so the items of one publisher stay together. A sender with no sender row, or with no kind yet, is
 a stranger.
 

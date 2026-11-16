@@ -833,3 +833,68 @@ test("the full Signals section leaves out a signal after its expiry, and wakes a
   const soon = text(await render("/src/views/List.svelte", { title: "Signals", page: { items: [later], next: null }, now: new Date(Date.parse(later.expires) - 5 * 60_000) }));
   assert.match(soon, /in 5 minutes/);
 });
+
+test("the brief shows each bundle as one line and counts the hidden items (spec 2 section 6.4)", async () => {
+  const feed = (n, sender, name) => ({ ...item("f-5001"), id: `f-${n}`, publisher: { kind: "sender", sender, name } });
+  const items = [feed(1, "p-1", "Mail Weekly"), feed(2, "p-1", "Mail Weekly"), feed(3, "p-2", "Rust Digest"), feed(4, "p-3", "The Batch"), feed(5, "p-4", "City News"), feed(6, "p-5", "News")];
+  const bundles = [
+    { rule: 3, name: "Bundle the feed", count: 6, items },
+    { rule: 8, name: "Bundle the school", count: 40, items: items.slice(0, 2) },
+  ];
+  const html = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, bundles, hidden: 23 }, now: NOW });
+  const t = text(html);
+  assert.match(t, /Bundled by your rules 46/);
+  // Each sender once, at most 3 names, and the count of the others when the API gave every item.
+  assert.match(t, /Bundle the feed , 6 items From Mail Weekly, Rust Digest, The Batch and 2 others/);
+  // Not every item: the count of the other senders is not known.
+  assert.match(t, /Bundle the school , 40 items From Mail Weekly and others/);
+  assert.match(html, /href="#\/brief\/bundle\/3"/);
+  assert.match(html, /href="#\/brief\/bundle\/8"/);
+  assert.match(t, /Your rules hide 23 items from this brief\. See the rules/);
+  assert.match(html, /href="#\/rules"/);
+  // One hidden item, no bundle: no section, and the words fit one.
+  const one = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, bundles: [], hidden: 1 }, now: NOW }));
+  assert.doesNotMatch(one, /Bundled by your rules/);
+  assert.match(one, /Your rules hide 1 item from this brief\./);
+  // An API from before bundles: no section and no hidden line.
+  const old = text(await render("/src/views/Brief.svelte", { brief: { ...fx.brief, bundles: undefined, hidden: undefined }, now: NOW }));
+  assert.doesNotMatch(old, /Bundled by your rules|Your rules hide/);
+});
+
+test("a bundle has a route, and a bad rule number opens the brief", async () => {
+  const { parse, href } = await load("/src/route.ts");
+  assert.deepEqual(parse("#/brief/bundle/3"), { view: "bundle", rule: 3 });
+  assert.equal(href.bundle(3), "#/brief/bundle/3");
+  for (const bad of ["#/brief/bundle/", "#/brief/bundle/0", "#/brief/bundle/03", "#/brief/bundle/x", "#/brief/bundle/-1"]) {
+    assert.notEqual(parse(bad).view, "bundle", bad);
+  }
+});
+
+test("the Records view counts from /api/records, so a record type that a rule hides still shows, and a bundle page reads its bundle", async () => {
+  const saved = globalThis.fetch;
+  const asked = [];
+  // Keep each call pending: the test checks only the address of each call.
+  globalThis.fetch = (url) => {
+    asked.push(String(url));
+    return new Promise(() => {});
+  };
+  try {
+    for (const hash of ["#/records", "#/records/receipt", "#/brief/bundle/3"]) {
+      asked.length = 0;
+      globalThis.location = { hash, pathname: "/", search: "" };
+      await render("/src/App.svelte");
+      // The call waits for the sign-in state first.
+      await new Promise((r) => setTimeout(r, 50));
+      const api = asked.filter((u) => !/\/api\/(status|session)/.test(u));
+      if (hash.startsWith("#/records")) {
+        assert.ok(api.includes("/api/records"), `${hash}: ${api}`);
+        assert.ok(!api.some((u) => u.startsWith("/api/brief")), `${hash}: ${api}`);
+      } else {
+        assert.ok(api.includes("/api/brief/bundle-3?limit=50"), `${hash}: ${api}`);
+      }
+    }
+  } finally {
+    globalThis.fetch = saved;
+    delete globalThis.location;
+  }
+});
