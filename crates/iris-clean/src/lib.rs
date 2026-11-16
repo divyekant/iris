@@ -77,9 +77,12 @@ pub struct Clean {
     /// True if text went out because of a limit. Then `text` ends with [`CUT_MARK`].
     pub cut: bool,
     pub attachments: Vec<Attachment>,
-    /// True if a `text/calendar` part of the top message is a request
-    /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
-    /// decoded body has a `METHOD:REQUEST` line.
+    /// True if the top message has a calendar part that is a request, and
+    /// each calendar part of it is a request (spec 1 section 7.3). A calendar
+    /// part is `text/calendar` or `application/ics`. A request has the
+    /// `method` parameter `REQUEST`, or a decoded body with a
+    /// `METHOD:REQUEST` line. Another calendar file (for example
+    /// `METHOD:PUBLISH`) next to a request makes this false.
     pub invitation: bool,
 }
 
@@ -118,7 +121,9 @@ pub fn clean(raw: &[u8]) -> Clean {
             invitation: false,
         };
     };
-    let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
+    let mut cal = Calendars::default();
+    calendar_parts(parsed.root().root_part(), 0, &mut cal);
+    let invitation = cal.requests > 0 && cal.others == 0;
     let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
@@ -294,30 +299,60 @@ fn message<'a>(
     (subject, text, w.cut, w.files)
 }
 
-/// True if a `text/calendar` part in the MIME tree of `part` is a request.
-/// The check visits every part in the tree, in any order and apart from the
-/// choice of the text, inside the limits of the walker ([`MAX_PARTS`],
-/// [`MAX_DEPTH`]). It does not go into an attached message: a calendar in
-/// an attached message is not an invitation to the user.
-fn calendar_request(part: MessagePart<'_>, depth: usize, seen: &mut usize) -> bool {
-    *seen += 1;
-    if *seen > MAX_PARTS || depth > MAX_DEPTH {
-        return false;
+/// The calendar parts of a MIME tree.
+#[derive(Default)]
+struct Calendars {
+    /// Parts seen, for the limit [`MAX_PARTS`].
+    seen: usize,
+    requests: usize,
+    /// Calendar parts that are not a request, and parts past a limit of the
+    /// walker: a part that is not read can be a calendar file.
+    others: usize,
+}
+
+/// Counts the calendar parts (`text/calendar`, `application/ics`) in the
+/// MIME tree of `part`: requests and others. The check visits every part in
+/// the tree, in any order and apart from the choice of the text, inside the
+/// limits of the walker ([`MAX_PARTS`], [`MAX_DEPTH`]). It does not go into
+/// an attached message: a calendar in an attached message is not an
+/// invitation to the user.
+fn calendar_parts(part: MessagePart<'_>, depth: usize, cal: &mut Calendars) {
+    cal.seen += 1;
+    if cal.seen > MAX_PARTS || depth > MAX_DEPTH {
+        cal.others += 1;
+        return;
     }
     let ct_field = field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
     let Some(ct) = ct_field.as_ref().and_then(|f| f.value().as_content_type()) else {
-        return false;
+        return;
     };
     let (t, sub) = (ct.ctype(), ct.subtype().unwrap_or(""));
     if t.eq_ignore_ascii_case("multipart") {
-        return part.is_multipart()
-            && part
-                .children()
-                .any(|child| calendar_request(child, depth + 1, seen));
+        if part.is_multipart() {
+            for child in part.children() {
+                calendar_parts(child, depth + 1, cal);
+                if cal.seen > MAX_PARTS {
+                    break;
+                }
+            }
+        }
+        return;
     }
-    if !(t.eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar")) {
-        return false;
+    let calendar = (t.eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar"))
+        || (t.eq_ignore_ascii_case("application") && sub.eq_ignore_ascii_case("ics"));
+    if !calendar {
+        return;
     }
+    if is_request(part, &ct) {
+        cal.requests += 1;
+    } else {
+        cal.others += 1;
+    }
+}
+
+/// The calendar part is a request: its `method` parameter or a line of its
+/// decoded body is `REQUEST`.
+fn is_request(part: MessagePart<'_>, ct: &mail_parser::ContentType<'_>) -> bool {
     if ct
         .attribute("method")
         .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"))

@@ -127,11 +127,12 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     // A file can hold a record that no word of the text names. The
     // calendar part of an invitation is no such file. A cut text can hold a
     // record after the cut.
-    let file = a
-        .text
-        .attachments
-        .iter()
-        .any(|(_, mime, _)| !(a.text.invitation && mime.eq_ignore_ascii_case("text/calendar")));
+    let file = a.text.attachments.iter().any(|(_, mime, _)| {
+        // `invitation` holds only if each calendar part is a request.
+        let calendar = mime.eq_ignore_ascii_case("text/calendar")
+            || mime.eq_ignore_ascii_case("application/ics");
+        !(a.text.invitation && calendar)
+    });
     if a.text.cut || file || looks_like_record(a) {
         return None;
     }

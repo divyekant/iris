@@ -120,8 +120,11 @@ Each budget only goes down. No step gives budget back.
 ### Invitation
 
 `Clean.invitation` gives the input of the fixed invitation rule
-(specification 1, section 7.3). It is true if a `text/calendar` part of the
-top message is a request:
+(specification 1, section 7.3). It is true if the top message has a
+calendar part that is a request, and each calendar part of the top message
+is a request. A calendar part is `text/calendar` or `application/ics`.
+Another calendar file (for example `METHOD:PUBLISH`), or a part past a limit
+of the walker, makes it false. A calendar part is a request if:
 
 - its `method` parameter is `REQUEST` (any case), or
 - its decoded body has a line that is `METHOD:REQUEST` (any case, with white

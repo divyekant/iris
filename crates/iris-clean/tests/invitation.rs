@@ -164,3 +164,27 @@ fn a_method_line_across_each_quoted_printable_chunk_boundary_counts() {
         }
     }
 }
+
+#[test]
+fn every_calendar_part_must_be_a_request() {
+    // The form of a common calendar service: an inline request and the same
+    // request as an `application/ics` file.
+    let google = b"Content-Type: multipart/mixed; boundary=m\r\n\r\n--m\r\n\
+Content-Type: multipart/alternative; boundary=a\r\n\r\n--a\r\n\
+Content-Type: text/plain\r\n\r\nJoin.\r\n--a\r\n\
+Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n--a--\r\n--m\r\n\
+Content-Type: application/ics; name=\"invite.ics\"\r\n\
+Content-Disposition: attachment; filename=\"invite.ics\"\r\n\r\n\
+BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n--m--\r\n";
+    assert!(inv(google));
+    // Another calendar file next to the request: not only a request.
+    let publish = String::from_utf8_lossy(google).replacen(
+        "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n--m--",
+        "BEGIN:VCALENDAR\r\nMETHOD:PUBLISH\r\nEND:VCALENDAR\r\n--m--",
+        1,
+    );
+    assert_ne!(publish.as_bytes(), &google[..]);
+    assert!(!inv(publish.as_bytes()));
+    let text_cal = publish.replace("application/ics", "text/calendar");
+    assert!(!inv(text_cal.as_bytes()));
+}
