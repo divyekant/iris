@@ -408,12 +408,27 @@ const COMMON: [&str; 26] = [
 ///   at 6 characters or more, by one edit (short real names such as
 ///   `gmail` and `email` must not match).
 ///
-/// Domains with the same last two labels have one owner, so they are never
-/// near copies. Neither are equal labels under another top-level domain
-/// (`shop.de` and `shop.com`).
+/// Domains with the same registrable domain usually have one owner, so the
+/// rules above do not apply to them. But a shared domain that is not in
+/// [`HOSTED`] (for example `duckdns.org`) gives each subdomain another
+/// owner. So under one registrable domain, the labels just in front of it
+/// are near copies when they differ only by look-alike characters
+/// (`paypa1.duckdns.org` from `paypal.duckdns.org`). Equal labels under
+/// another top-level domain are not near copies (`shop.de` and `shop.com`).
 pub fn near_copy(domain: &str, known: &str) -> bool {
-    if domain == known || base(domain) == base(known) {
+    if domain == known {
         return false;
+    }
+    let (b, kb) = (base(domain), base(known));
+    if b == kb {
+        let sub = |d: &str| {
+            let l: Vec<&str> = d.split('.').collect();
+            l.len().checked_sub(b.len() + 1).map(|i| l[i].to_string())
+        };
+        return match (sub(domain), sub(known)) {
+            (Some(x), Some(y)) => x != y && fold(&x) == fold(&y),
+            _ => false,
+        };
     }
     let (mine, theirs) = (names(domain), names(known));
     let telling: Vec<&String> = theirs
