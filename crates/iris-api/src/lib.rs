@@ -2,9 +2,8 @@
 //! for the web client and the read verbs. `crates/iris-api/README.md` gives
 //! the endpoints.
 //!
-//! Release 1 has no sign-in on the API, so the router refuses each request
-//! whose `Host` or `Origin` is not local. A web page on another site cannot
-//! read the API through DNS rebinding.
+//! The guard of [`Auth`] refuses each request whose `Host` is not the bound
+//! address, or that has no bearer token of the sign-in.
 
 use std::fmt;
 use std::sync::Arc;
@@ -74,8 +73,8 @@ fn not_found() -> Response {
 }
 
 /// The routes of the API, under `/api`. Merge them before the fallback of
-/// `iris_web::router()`. Each request needs the cookie of the sign-in
-/// address of `auth` (see [`Auth`]).
+/// `iris_web::router()`. Each request needs the bearer token of the sign-in
+/// of `auth` (see [`Auth`]).
 pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
     Router::new()
         .route("/api/status", get(get_status))
