@@ -56,9 +56,9 @@ The script does these steps:
 3. It checks the SHA-256 sum. If the sum is wrong, it stops and installs
    nothing.
 4. It installs the program to `~/.local/bin/iris`. It needs no sudo.
-5. It installs the background service with `iris service install`. If the
-   program has no `service` command yet, it tells you to start
-   `iris serve` yourself.
+5. It installs and starts the background service with
+   `iris service install`. If the program is an older version with no
+   `service` command, it tells you to start `iris serve` yourself.
 
 The script connects only to `github.com` (and the GitHub download host that
 `github.com` sends it to). It sends no data about you or your computer.
@@ -70,6 +70,7 @@ These environment variables change the script:
 | `IRIS_VERSION` | Install this release tag, for example `v2026.11.16.1`, not the latest release. |
 | `IRIS_INSTALL_DIR` | Install the program to this folder, not `~/.local/bin`. |
 | `IRIS_NO_SERVICE=1` | Do not install the background service. |
+| `IRIS_DOWNLOAD_URL` | Download the release files from this folder URL, not from GitHub. The tests use it with a `file://` URL. |
 
 ### The background service
 
