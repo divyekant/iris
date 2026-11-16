@@ -3,10 +3,10 @@
 //!
 //! An author makes a draft changeset ([`create`]), adds actions
 //! ([`add_action`]) and submits it ([`submit`]). Submit resolves each target
-//! to message IDs from the mirror, adds the flag `bulk`, and gives each action
-//! the state `proposed`, or `denied` with a reason. The policy, the review,
-//! the apply and the ledger move the action on with [`decide`] and
-//! [`approve`].
+//! to message IDs from the mirror, adds the flags `bulk` and `first_contact`,
+//! and gives each action the state `proposed`, or `denied` with a reason.
+//! This crate does not yet move an action after submit. The policy and the
+//! review decisions come in R2-01 part 3.
 //!
 //! The SQL trigger `action_state` (migration 7) allows only the moves of
 //! section 5.2, so no caller can make a move that the specification does not
