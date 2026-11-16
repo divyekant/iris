@@ -582,8 +582,8 @@ const COMMON: [&str; 26] = [
 ///   `gmail` and `email` must not match).
 ///
 /// Domains with the same registrable domain have one owner, so they are
-/// never near copies. A shared domain (in [`HOSTED`]) is a public suffix, so
-/// each name under it is its own registrable domain. Equal labels under
+/// never near copies. A shared domain (a public suffix such as `github.io`)
+/// has a registrable domain for each name under it. Equal labels under
 /// another top-level domain are not near copies (`shop.de` and `shop.com`).
 pub fn near_copy(domain: &str, known: &str) -> bool {
     if domain == known || base(domain) == base(known) {
@@ -646,26 +646,25 @@ const HOSTED: [&str; 34] = [
     "s3.amazonaws.com",
 ];
 
-/// The number of labels at the end of `d` that form its public suffix.
-/// shortcut: a hosting suffix of [`HOSTED`] (a short list of the common
-/// hosts of the public suffix list) counts its labels, a two-letter
-/// country domain with a common second level (`co.uk`, `com.au`) has 2, each
-/// other domain has 1; use the public suffix list if other suffixes give
-/// wrong results.
+/// The number of labels at the end of `d` that form its public suffix: the
+/// longer of the suffix of the public suffix list (with its private part,
+/// for example `github.io`) and a hosting suffix of [`HOSTED`]. The list
+/// has no rule for some hosts of [`HOSTED`], for example `wordpress.com`.
+/// A domain with no known suffix has a suffix of one label.
 fn suffix_len(labels: &[&str]) -> usize {
     let joined = labels.join(".");
-    if let Some(h) = HOSTED.iter().find(|h| joined.ends_with(&format!(".{h}"))) {
-        return h.split('.').count();
-    }
-    match labels {
-        [.., second, tld]
-            if tld.len() == 2
-                && ["co", "com", "net", "org", "ac", "gov", "edu", "ne", "or"].contains(second) =>
-        {
-            2
-        }
-        _ => 1,
-    }
+    let listed = psl::suffix_str(&joined).map_or(1, |s| s.split('.').count());
+    let hosted = HOSTED
+        .iter()
+        .find(|h| joined.ends_with(&format!(".{h}")))
+        .map_or(0, |h| h.split('.').count());
+    listed.max(hosted)
+}
+
+/// The registrable domain of `d`: the public suffix and one label more.
+/// Two domains with the same registrable domain have one owner.
+pub fn registrable(d: &str) -> String {
+    base(d).join(".")
 }
 
 /// The registrable domain: the suffix and one label more.
@@ -732,6 +731,8 @@ mod tests {
             ("paypal-verify.co.uk", "paypal.co.uk"),
             ("paypa1.duckdns.org", "paypal.duckdns.org"),
             ("paypa1.wordpress.com", "paypal.wordpress.com"),
+            ("paypa1.me.uk", "paypal.me.uk"),
+            ("paypal-login.pages.dev", "paypal.pages.dev"),
         ];
         for (d, k) in yes {
             assert!(near_copy(d, k), "{d} {k}");
@@ -756,6 +757,8 @@ mod tests {
             ("a.b.shop.com", "b.shop.com"),
             ("bi1ling.example.com", "billing.example.com"),
             ("rnicrosoft.example.net", "microsoft.example.net"),
+            ("other.me.uk", "shop.me.uk"),
+            ("mail.shop.me.uk", "shop.me.uk"),
         ];
         for (d, k) in no {
             assert!(!near_copy(d, k), "{d} {k}");
