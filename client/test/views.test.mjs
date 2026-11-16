@@ -142,6 +142,9 @@ test("the home view is the brief as soon as the first sync has understood mail",
   assert.equal(home({ accounts: [account], messages: msgs(0) }), "setup");
   assert.equal(home({ accounts: [account], messages: msgs(3) }), "brief");
   assert.equal(home(fx.status), "brief");
+  // The Brief link of the header: the brief while the first sync runs, and setup only when there is no account.
+  assert.equal(home({ accounts: [], messages: msgs(0) }, "brief"), "setup");
+  assert.equal(home({ accounts: [account], messages: msgs(0) }, "brief"), "brief");
 });
 
 test("the setup flow asks for the account when there is none", async () => {
@@ -601,6 +604,32 @@ test("each status answer sets the accounts that need sign-in, and the app shows 
     globalThis.fetch = saved;
     delete globalThis.location;
     access.locked = [];
+  }
+});
+
+test("each status answer sets if there is no account, and the app then shows the setup link above the other views", async () => {
+  const { get } = await load("/src/api.ts");
+  const { access } = await load("/src/access.svelte.ts");
+  const saved = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...fx.status, accounts: [] }));
+    await get("status");
+    assert.equal(access.none, true);
+    globalThis.fetch = () => new Promise(() => {});
+    for (const hash of ["#/commitments", "#/records", "#/brief/you_owe", "#/mail/m-55210", "#/measures"]) {
+      globalThis.location = { hash, pathname: "/", search: "" };
+      assert.match(text(await render("/src/App.svelte")), /Iris has no account yet\. Set up Iris to copy your mail\./, hash);
+    }
+    globalThis.fetch = async () => new Response(JSON.stringify(fx.status));
+    await get("status");
+    assert.equal(access.none, false);
+    globalThis.fetch = () => new Promise(() => {});
+    globalThis.location = { hash: "#/records", pathname: "/", search: "" };
+    assert.doesNotMatch(text(await render("/src/App.svelte")), /no account yet/);
+  } finally {
+    globalThis.fetch = saved;
+    delete globalThis.location;
+    access.none = false;
   }
 });
 
