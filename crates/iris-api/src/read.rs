@@ -21,7 +21,41 @@ const FORMS: [(&str, Kind); 5] = [
     ("signal", Kind::Signal),
 ];
 
+/// The status values of each form (the schemas of `docs/spec/schema/`).
+const STATUSES: [(&str, &[&str]); 5] = [
+    (
+        "commitment",
+        &["open", "done", "declined", "deferred", "cancelled", "gone"],
+    ),
+    ("conversation", &["active", "quiet", "muted", "gone"]),
+    ("record", &["kept", "corrected", "gone"]),
+    ("feed", &["new", "read", "skipped", "gone"]),
+    (
+        "signal",
+        &["active", "used", "dismissed", "expired", "gone"],
+    ),
+];
+
+const RECORD_TYPES: [&str; 7] = [
+    "receipt",
+    "booking",
+    "statement",
+    "ticket",
+    "contract",
+    "event",
+    "other",
+];
+
 const DAY_MS: i64 = 86_400_000;
+
+/// A limit must be 1 to [`MAX_LIMIT`].
+fn check_limit(limit: u32) -> Result<()> {
+    if (1..=MAX_LIMIT).contains(&limit) {
+        Ok(())
+    } else {
+        Err(Error::Query(format!("limit must be 1 to {MAX_LIMIT}")))
+    }
+}
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Status {
@@ -102,6 +136,11 @@ pub struct Message {
 pub struct Section {
     pub count: i64,
     pub items: Vec<Value>,
+    /// Possible duplicates (specification 1, section 7.5): for an item of
+    /// `items`, the IDs of the newer items with `duplicate_of` set to it. The
+    /// brief shows the pair once, so the newer items are not in `items`.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub duplicates: serde_json::Map<String, Value>,
 }
 
 /// The first brief (specification 1, section 8).
@@ -119,6 +158,9 @@ pub struct Brief {
     pub hostile: i64,
     /// The count of messages that the model failed 3 times.
     pub not_understood: i64,
+    /// The date of the oldest fetched message that is not gone: the brief
+    /// covers the mail from this date (specification 1, section 4.2).
+    pub oldest_fetched: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -195,7 +237,8 @@ pub fn status(store: &Store) -> Result<Status> {
 /// Search the messages that are not gone, newest first (specification 1,
 /// section 5.6). A search text that is not valid gives [`Error::Query`].
 pub fn search(store: &Store, text: &str, limit: u32) -> Result<Vec<MessageSummary>> {
-    let ids = store.search(text, limit.min(MAX_LIMIT))?;
+    check_limit(limit)?;
+    let ids = store.search(text, limit)?;
     Ok(store.read(|c| {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
@@ -273,14 +316,28 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
             return Err(Error::Query(format!("unknown form {form}")));
         }
     }
-    if filter.kind.is_some() && filter.form != Some("record") {
-        return Err(Error::Query("type needs form=record".into()));
+    if let Some(status) = filter.status {
+        let known = STATUSES
+            .iter()
+            .filter(|(f, _)| filter.form.is_none_or(|form| form == *f))
+            .any(|(_, list)| list.contains(&status));
+        if !known {
+            return Err(Error::Query(format!("unknown status {status}")));
+        }
     }
+    if let Some(kind) = filter.kind {
+        if filter.form != Some("record") {
+            return Err(Error::Query("type needs form=record".into()));
+        }
+        if !RECORD_TYPES.contains(&kind) {
+            return Err(Error::Query(format!("unknown record type {kind}")));
+        }
+    }
+    check_limit(limit)?;
     let before = match filter.before {
         Some(id) => Some(parse_id(id).ok_or_else(|| bad_id(id))?.1),
         None => None,
     };
-    let limit = limit.clamp(1, MAX_LIMIT);
     let items = store.read(|c| {
         let mut st = c.prepare(
             "SELECT id, form, status, doc FROM item
@@ -329,51 +386,90 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         kind_sql("p.value", "$.sender")
     );
     let commitment = "form = 'commitment' AND status = 'open'";
-    let you_owe = format!(
-        "{commitment} AND json_extract(doc, '$.direction') = 'you_owe' AND {counter} {known}
-         ORDER BY coalesce(json_extract(doc, '$.due.at'), json_extract(doc, '$.due.date')) IS NULL,
-                  coalesce(json_extract(doc, '$.due.at'), json_extract(doc, '$.due.date')),
-                  created_at, id"
+    // Times are compared as instants: RFC 3339 text with an offset does
+    // not sort in time order. A date with no time is midnight UTC.
+    let due = "unixepoch(coalesce(json_extract(doc, '$.due.at'), json_extract(doc, '$.due.date')), 'subsec')";
+    let you_owe = (
+        format!(
+            "{commitment} AND json_extract(doc, '$.direction') = 'you_owe' AND {counter} {known}"
+        ),
+        format!("{due} IS NULL, {due}, created_at, id"),
     );
-    let owed = format!(
-        "{commitment} AND json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} {known}
-         ORDER BY created_at, id"
+    let owed = (
+        format!(
+            "{commitment} AND json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} {known}"
+        ),
+        "created_at, id".to_string(),
     );
-    let conversations = format!(
-        "form = 'conversation' AND status = 'active'
-         AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-         AND NOT {stranger_participant}
-         ORDER BY json_extract(doc, '$.latest.at') DESC, id DESC"
+    let conversations = (
+        format!(
+            "form = 'conversation' AND status = 'active'
+             AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
+             AND NOT {stranger_participant}"
+        ),
+        "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );
-    let feed = "form = 'feed' AND status = 'new'
-         ORDER BY json_extract(doc, '$.publisher.address'), json_extract(doc, '$.published') DESC, id DESC"
-        .to_string();
-    let signals = format!(
-        "form = 'signal' AND status = 'active' AND unixepoch(json_extract(doc, '$.expires'), 'subsec') * 1000 > {now}
-         ORDER BY unixepoch(json_extract(doc, '$.expires'), 'subsec'), id"
+    // Group by the sender row of the publisher, then by its address.
+    let feed = (
+        "form = 'feed' AND status = 'new'".to_string(),
+        "CAST(substr(json_extract(doc, '$.publisher.sender'), 3) AS INTEGER),
+         json_extract(doc, '$.publisher.address'),
+         unixepoch(json_extract(doc, '$.published'), 'subsec') DESC, id DESC"
+            .to_string(),
     );
-    let strangers = format!(
-        "(({commitment} AND (
-             (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'stranger')
-          OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'stranger')))
-          OR (form = 'conversation' AND status = 'active' AND {stranger_participant}))
-         ORDER BY created_at DESC, id DESC"
+    let signals = (
+        format!(
+            "form = 'signal' AND status = 'active'
+             AND unixepoch(json_extract(doc, '$.expires'), 'subsec') * 1000 > {now}"
+        ),
+        "unixepoch(json_extract(doc, '$.expires'), 'subsec'), id".to_string(),
+    );
+    let strangers = (
+        format!(
+            "(({commitment} AND (
+                 (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'stranger')
+              OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'stranger')))
+              OR (form = 'conversation' AND status = 'active' AND {stranger_participant}))"
+        ),
+        "created_at DESC, id DESC".to_string(),
     );
     Ok(store.read(|c| {
-        let section = |cond: &str| -> iris_store::Result<Section> {
-            let (filter, _) = cond.split_once("ORDER BY").unwrap_or((cond, ""));
+        let section = |(filter, order): &(String, String)| -> iris_store::Result<Section> {
+            // A possible duplicate whose original is in the same section
+            // shows with the original, not as a line of its own. The inner
+            // `item` of the subquery is the original.
+            let shown = format!(
+                "{filter} AND NOT (duplicate_of IS NOT NULL
+                   AND duplicate_of IN (SELECT id FROM item WHERE {filter}))"
+            );
             let count = c.query_row(
-                &format!("SELECT count(*) FROM item WHERE {filter}"),
+                &format!("SELECT count(*) FROM item WHERE {shown}"),
                 [],
                 |r| r.get(0),
             )?;
             let mut st = c.prepare(&format!(
-                "SELECT id, form, status, doc FROM item WHERE {cond} LIMIT {MAX_LIMIT}"
+                "SELECT id, form, status, doc FROM item WHERE {shown} ORDER BY {order} LIMIT {MAX_LIMIT}"
             ))?;
             let items = st
                 .query_map([], doc_of)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(Section { count, items })
+            let mut duplicates = serde_json::Map::new();
+            let mut st = c.prepare_cached(
+                "SELECT id, form FROM item WHERE duplicate_of = ?1 AND status != 'gone' ORDER BY id",
+            )?;
+            for doc in &items {
+                let Some(id) = doc["id"].as_str() else { continue };
+                let Some((_, row)) = parse_id(id) else { continue };
+                let dups: Vec<Value> = st
+                    .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
+                    .filter_map(|d| d.transpose())
+                    .map(|d| d.map(Value::String))
+                    .collect::<rusqlite::Result<_>>()?;
+                if !dups.is_empty() {
+                    duplicates.insert(id.to_string(), dups.into());
+                }
+            }
+            Ok(Section { count, items, duplicates })
         };
         let mut records = serde_json::Map::new();
         let mut st = c.prepare(
@@ -401,6 +497,14 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             [],
             |r| r.get(0),
         )?;
+        let oldest_fetched = c
+            .query_row(
+                "SELECT min(internal_date) FROM message
+                 WHERE fetched_at IS NOT NULL AND gone_at IS NULL",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )?
+            .map(rfc3339);
         Ok(Brief {
             you_owe: section(&you_owe)?,
             owed_to_you: section(&owed)?,
@@ -411,6 +515,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             strangers: section(&strangers)?,
             hostile,
             not_understood,
+            oldest_fetched,
         })
     })?)
 }

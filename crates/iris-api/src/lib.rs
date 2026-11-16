@@ -174,10 +174,11 @@ fn now_ms() -> i64 {
 
 /// Refuse each request with a `Host` or an `Origin` that is not local.
 async fn local_only(req: Request, next: Next) -> Response {
-    if !is_local(req.headers()) {
-        return error(StatusCode::FORBIDDEN, "only local requests are allowed");
-    }
-    let mut res = next.run(req).await;
+    let mut res = if is_local(req.headers()) {
+        next.run(req).await
+    } else {
+        error(StatusCode::FORBIDDEN, "only local requests are allowed")
+    };
     let h = res.headers_mut();
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,

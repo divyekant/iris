@@ -24,9 +24,9 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 |---|---|
 | `/api/status` | `{"accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
-| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. |
+| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
 | `/api/items/{id}` | One item (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone. |
-| `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is at most 200, default 50. |
+| `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
 
@@ -51,9 +51,15 @@ The text of a message is data. Show it as text, never as markup.
 | `strangers` | Open commitments whose counterparty or owner is a stranger, and active conversations with a stranger participant. Newest first. |
 | `hostile` | The count of hostile mail of the last 7 days. |
 | `not_understood` | The count of messages that the model failed 3 times. |
+| `oldest_fetched` | The date of the oldest fetched message that is not gone, or `null`. While the first sync continues, the brief covers only the mail from this date (specification 1, section 4.2). |
 
 Each list field is `{"count", "items"}`. `count` is the full count. `items`
-holds at most 200 items. A sender with no sender row, or with no kind yet, is
+holds at most 200 items. Times sort as instants, not as text, so a time
+offset does not change the order. A list field can also have `duplicates`:
+for an item in `items`, the IDs of the newer items whose `duplicate_of` is that
+item (specification 1, section 7.5). The brief shows such a pair once, so the
+newer item is not in `items` and not in `count`. The feed sorts by the sender
+row of the publisher, so the items of one publisher stay together. A sender with no sender row, or with no kind yet, is
 a stranger.
 
 ## Errors
@@ -73,5 +79,5 @@ Release 1 has no sign-in on the API. So the API refuses each request whose
 `Host` is not `127.0.0.1`, `localhost` or `[::1]` (with an optional port), and
 each request with an `Origin` that does not have one of these hosts. A web page
 on another site cannot read the API through DNS rebinding. A request with no
-`Origin` header is allowed. Each answer has `X-Content-Type-Options: nosniff`
+`Origin` header is allowed. Each answer, also a refusal, has `X-Content-Type-Options: nosniff`
 and `Cache-Control: no-store`.
