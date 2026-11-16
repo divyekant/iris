@@ -15,6 +15,18 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Links: <card, spec, PR, before/after page>
 ```
 
+## D4 (2026-11-16): The client uses the "Iris" palette, not the gold
+
+- Decided by: dk, on the before/after page of card R1-27
+- Why: The violet gives Iris its own color and an iris for the mark. It is
+  never a state color, so the accent does not look like a warning or a
+  success. Cool ink neutrals keep the brief quiet. The semantic colors are now
+  set for each palette: the old light `success` was text with a contrast of
+  2.8 to 3.1.
+- Options not chosen: "Sage" (sage green, near the success color), "Ink" (no
+  hue), and the old gold.
+- Links: card R1-27, https://claude.ai/artifact/3kpABqULbCJqgjzTkHSD7k
+
 ## D3 (2026-11-16): A library reads MIME and mail addresses
 
 - Decided by: dk
