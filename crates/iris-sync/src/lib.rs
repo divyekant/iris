@@ -107,11 +107,11 @@ struct State {
 /// again: the sync continues where it stopped.
 ///
 /// An account with a complete first sync gives `Done` with zero counts and
-/// calls Gmail only for the labels.
+/// calls Gmail for nothing.
 pub fn first_sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Done> {
     let s = state(store, account)?;
-    let start = match (s.kind.as_deref(), s.start.as_deref(), s.step) {
-        (Some(KIND_FIRST), Some(h0), Some(_)) => parse_history(h0)?,
+    match (s.kind.as_deref(), s.start.as_deref(), s.step) {
+        (Some(KIND_FIRST), Some(_), Some(_)) => {}
         (Some(_), _, _) => return Err(Error::OtherSync),
         (None, _, _) if s.history_id.is_some() => {
             return Ok(Done {
@@ -120,12 +120,18 @@ pub fn first_sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Re
                 gone: 0,
             })
         }
-        (None, _, _) => {
+        (None, _, _) => {}
+    }
+    // On each call, also a resume: a token of another mailbox gives 404 for
+    // each fetch, and the sync would mark the messages of the account gone.
+    let profile = gmail.profile(token)?;
+    if !profile.email_address.eq_ignore_ascii_case(&s.address) {
+        return Err(Error::WrongMailbox);
+    }
+    let start = match s.start.as_deref() {
+        Some(h0) => parse_history(h0)?,
+        None => {
             // Step 1: H0 before the list, so that no change after it is lost.
-            let profile = gmail.profile(token)?;
-            if !profile.email_address.eq_ignore_ascii_case(&s.address) {
-                return Err(Error::WrongMailbox);
-            }
             set_step(store, account, Some(profile.history_id), STEP_LIST)?;
             profile.history_id
         }
