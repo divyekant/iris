@@ -750,7 +750,9 @@ at a low rate, so that the first brief comes early (requirement M4). A
 rebuild uses the same order.
 
 The batch runner, the run counts, the cost limit and the estimate before the
-first run are in `docs/specs/2026-11-16-cost-control.md` (R1-15).
+first run are in `docs/specs/2026-11-16-cost-control.md` (R1-15). One exception to oldest first: mail with the label `SPAM` or from
+a `hostile` sender needs no thread context, so it does not wait for the
+older messages of its thread.
 
 ### 7.2 Clean text
 

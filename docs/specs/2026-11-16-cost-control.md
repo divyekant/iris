@@ -65,6 +65,14 @@ A message is pending when all of these are true:
   `MAX_TRIES` tries stopped for good (spec 1 section 7.4), so it does not
   hold its thread.
 
+Exception: the thread rule does not hold a message with the label `SPAM`
+or whose `From` sender has the kind `hostile`. Such a message is hostile
+mail, which never goes to a model and needs no thread context (spec 1
+section 6.7), so it gets its hostile marks also while an older message
+waits for the budget or for its `retry_at`. A message whose hostile state
+depends on its own headers (marks `dmarc`, `spoof`) is not known before
+write 1, so it waits like other mail.
+
 So a message gets the thread context of each older message that can still
 be understood (spec 1 sections 7.1 and 7.4). `store::understand` keeps its
 own check of the retry state.
@@ -374,6 +382,7 @@ more calls.
 | A provider bills more input tokens than the body bytes | Settle passes the reservation | The budget can go below zero once; the run stops with `stop = budget` and shows the overrun. | Fake model with a large usage. |
 | The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
 | A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
+| A new `SPAM` message after an older message that waits for the budget | Its hostile mark is missing | The thread rule does not hold `SPAM` mail or mail from a hostile sender. | Batch test. |
 | A first reply with no usage and an answer that is not valid | The second try pays again before the run stops | The wrapper refuses each call after a call with unknown usage. The message stays pending, no try counts. | Batch test. |
 | The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
