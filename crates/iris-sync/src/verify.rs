@@ -103,7 +103,10 @@ impl Report {
 /// the process stops, the operating system frees the lock.
 ///
 /// A difference of step 7 starts a full resync: the next [`sync`] runs it.
-/// Each difference of the content is fetched again in this call. If the
+/// Each difference of the content is fetched again in this call. If a
+/// repair fetch gets an error that stops each fetch (for example
+/// [`iris_gmail::Error::Unauthorized`]), the log and the resync are saved and
+/// the result is that error: get a new token and call again. If the
 /// history of `V` is too old at the end, the result is
 /// [`iris_gmail::Error::HistoryExpired`]. Verify adds one row to `sync_log`.
 pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Report> {
@@ -113,7 +116,7 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
     let started = now_ms();
     let result = compare(store, gmail, account, token, v);
     let text = match &result {
-        Ok(r) => {
+        Ok((r, _)) => {
             let mut t = format!("{} differences, {} skipped", r.total, r.skipped);
             for d in r.differences.iter().take(100) {
                 t.push_str(&format!("\n{d}"));
@@ -122,7 +125,7 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
         }
         Err(e) => format!("error: {e}"),
     };
-    let resync = result.as_ref().is_ok_and(|r| r.resync);
+    let resync = result.as_ref().is_ok_and(|(r, _)| r.resync);
     // One transaction: a logged sync difference always has its resync.
     let saved = store.write(|tx| {
         tx.execute(
@@ -138,12 +141,24 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
         }
         Ok(())
     });
-    let report = result?;
+    let (report, stop) = result?;
     saved?;
-    Ok(report)
+    // The log and the resync are saved. The caller must see the error that
+    // stopped the repair, for example HTTP 401, to get a new token.
+    match stop {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
 }
 
-fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> Result<Report> {
+/// The report, and the error that stopped the content repair, if any.
+fn compare(
+    store: &Store,
+    gmail: &Gmail,
+    account: i64,
+    token: &str,
+    v: u64,
+) -> Result<(Report, Option<Error>)> {
     // Steps 2 to 5.
     let before = gmail.labels(token)?;
     store.write(|tx| {
@@ -249,8 +264,30 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
             }
             // A list can miss a message when another message leaves an
             // earlier page between two page calls. Gmail has the last word.
-            match gmail.minimal(token, &id) {
-                Ok(_) => {}
+            // The raw answer also gives the thread and the labels to compare.
+            // The bytes go to a sink: this path is rare, and memory stays flat.
+            match gmail.raw(token, &id, &mut std::io::sink()) {
+                Ok(m) => {
+                    let (thread, fetched, labels) = mirror_message(store, account, &id)?;
+                    if thread != m.thread_id {
+                        report.push(Difference::Thread(id));
+                    } else if fetched {
+                        let gmail_labels: BTreeSet<&str> = m
+                            .label_ids
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|l| !label_changed.contains(*l))
+                            .collect();
+                        let mirror: BTreeSet<&str> = labels
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|l| !label_changed.contains(*l))
+                            .collect();
+                        if gmail_labels != mirror {
+                            report.push(Difference::Labels(id));
+                        }
+                    }
+                }
                 Err(iris_gmail::Error::NotFound) => report.push(Difference::ExtraMessage(id)),
                 Err(e) => return Err(e.into()),
             }
@@ -328,7 +365,7 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
             Ok(())
         },
     )?;
-    if let Some(e) = stop {
+    if let Some(e) = &stop {
         log(
             store,
             account,
@@ -341,7 +378,25 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
         tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
         Ok(())
     })?;
-    Ok(report)
+    Ok((report, stop))
+}
+
+/// The thread, the fetched state and the labels of a message in the mirror.
+fn mirror_message(store: &Store, account: i64, id: &str) -> Result<(String, bool, Vec<String>)> {
+    Ok(store.read(|c| {
+        let (row, thread, fetched): (i64, String, bool) = c.query_row(
+            "SELECT m.id, t.provider_id, m.fetched_at IS NOT NULL FROM message m
+             JOIN thread t ON t.id = m.thread_id WHERE m.account_id = ?1 AND m.provider_id = ?2",
+            params![account, id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let mut st = c.prepare_cached(
+            "SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+             WHERE ml.message_id = ?1",
+        )?;
+        let labels = st.query_map([row], |r| r.get(0))?;
+        Ok((thread, fetched, labels.collect::<rusqlite::Result<_>>()?))
+    })?)
 }
 
 /// Fetch one message again to repair its content file. Gives true if the
