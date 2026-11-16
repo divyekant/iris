@@ -87,10 +87,13 @@ To add a tool, a test command or a new folder, change `starter.json`.
    and run it again. Do not open the PR before the proof commit is pushed.
 6. Open the PR into `develop` as a draft, with the template
    (`.github/pull_request_template.md`). Fill in `## Summary` (with
-   `Card: <ID>` (for example `Card: R0-09`)), `## Verification` and `## Release Notes`. Move the card
-   to `doing` if it is not there yet.
+   `Card: <ID>` (for example `Card: R0-09`)), `## Verification`,
+   `## Known limits and deferred findings` and `## Release Notes`. Move the
+   card to `doing` if it is not there yet.
 7. Run the review loop:
    `python3 scripts/review/review.py --pr <number> --merge`.
+   - Before the round that can merge, file the issues of
+     [Known limits and deferred findings](#known-limits-and-deferred-findings).
    - Exit 0: the review is clean and the PR is merged. The work is done.
    - Exit 2, review blocked: fix each P0, P1 and P2 finding with the steps of
      "Fix the class" below. Run local CI, then run the review again.
@@ -104,7 +107,8 @@ To add a tool, a test command or a new folder, change `starter.json`.
 
    After the first round, a P2 finding on code that did not change since the
    last reviewed head does not block. The review comment marks it
-   `P2 (older code)`. Put these findings on one follow-up card.
+   `P2 (older code)`. File one issue for each of these findings (see
+   [Known limits and deferred findings](#known-limits-and-deferred-findings)).
 
    A PR that changes a file in `review.spec_paths` (default `docs/spec/**` and
    `docs/specs/**`) gets the spec rules of `scripts/review/spec.md`. Under these
@@ -112,8 +116,32 @@ To add a tool, a test command or a new folder, change `starter.json`.
 9. While the review runs, do not comment on the PR and do not edit its body. A
    change makes the review stale, and the command posts nothing.
 
-P3 findings are advice. They do not block the merge. Add a board card for a P3
-finding only when the follow-up is worth tracking.
+P3 findings are advice. They do not block the merge. If you do not fix a P3
+finding, file an issue for it.
+
+### Known limits and deferred findings
+
+Each known limit and each finding that a PR does not fix gets one GitHub
+issue before the PR merges. This applies to:
+
+- A known limit: a case that the change does not handle on purpose. Examples:
+  a size limit, a short built-in list, a `shortcut:` comment, a "Known
+  limits" entry in a spec, a residual risk in the clean review.
+- A deferred finding: a P3 finding that you do not fix, a `P2 (older code)`
+  finding, and a follow-up that the PR names.
+
+Do these steps:
+
+1. Search the open issues first. Do not file a duplicate.
+2. Give the issue the label `limit` or `deferred`. Start the title with
+   `limit(<area>):` or `deferred(<area>):`.
+3. In the body, write what the limit or the finding is, its effect, why the PR
+   leaves it, when to change it, and `Source: #<PR>`.
+4. List the issue numbers in `## Known limits and deferred findings` of the
+   PR. If there is none, write `None.`
+
+The issues record limits and findings only. The board stays the tracker of
+the work. A card that fixes a limit names its issue.
 
 ### Fix the class
 
@@ -194,7 +222,9 @@ deploy by hand. Do not change production without the owner's approval.
 
 - The board is the only tracker. It is a claude.ai artifact. Its URL is `board`
   in `starter.json`. Do not keep a to-do list or a status table in a file, and
-  do not use GitHub Issues or another tool as a tracker.
+  do not use GitHub Issues or another tool as a tracker. GitHub Issues hold
+  only known limits and deferred findings (see
+  [Known limits and deferred findings](#known-limits-and-deferred-findings)).
 - Each change has a card, except a small fix that the user asks for in the
   session. Each card gets one PR. Iris uses its own tracker (the "Iris tracker"
   artifact), not the kit board. Its columns are `todo`, `doing`, `blocked` and
