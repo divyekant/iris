@@ -47,9 +47,12 @@ pending state that the store gives. Each one has an issue:
   spec only says that rebuild runs through the runner.
 - The run after each sync in `iris serve` and `iris mirror sync` (R1-28). It
   calls the runner of this spec. R1-28 note: `iris serve` runs it in one
-  understanding thread apart from the sync threads. After each sync, the
-  thread runs only if its input changed since its last run: the history ID
-  of an account, the model row and its budget, or the count of due retries.
+  understanding thread apart from the sync threads. After each sync (also
+  a failed one), the thread runs only if its input changed since its last
+  good run: the pending set (`batch::pending_key`, the count and the sum of
+  the IDs), the model row or its budget. A run that stopped on `model`,
+  `unknown` or `error` runs again after a wait that doubles from 60 seconds
+  to 1 hour.
 - The estimate on a screen of the web client.
 - Prices from the network. The person gives the price of the model.
 

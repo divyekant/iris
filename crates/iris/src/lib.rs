@@ -407,7 +407,7 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
         let mut said = false;
         loop {
             match cost::after_sync(&store) {
-                Ok(cost::AfterSync::Ran(report)) => {
+                Ok(cost::AfterSync::Ran { report, .. }) => {
                     print!("{}", prefix_lines("understand: ", &report))
                 }
                 Ok(cost::AfterSync::Idle) => println!("understand: no message to read"),

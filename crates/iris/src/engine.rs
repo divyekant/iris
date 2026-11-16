@@ -271,12 +271,13 @@ impl Worker {
     /// [`sync_accounts`]. Each error goes to standard error.
     pub fn run(mut self) {
         loop {
-            match self.sync() {
-                Ok(_) => {
-                    if let Some(signal) = &self.signal {
-                        signal.set();
-                    }
-                }
+            let synced = self.sync();
+            // A sync that failed can still have saved mail: signal each time.
+            if let Some(signal) = &self.signal {
+                signal.set();
+            }
+            match synced {
+                Ok(_) => {}
                 // Another process syncs the account: not an error.
                 Err(Error::Sync(iris_sync::Error::OtherSync)) => {}
                 Err(e) => say!("iris: account {}: {e}", self.account),
@@ -317,52 +318,84 @@ impl Signal {
     }
 }
 
-/// The run of understanding after the syncs (R1-28). It runs only when
-/// its input changed since its last run: the history ID of an account
-/// (each mailbox change, labels too), the model row and its budget, or the
-/// count of due retries. So an unchanged mailbox with no model makes no run.
-#[derive(Default)]
+/// The longest wait before a new try of a run that stopped on an error.
+pub const RETRY_MAX: Duration = Duration::from_secs(3600);
+
+/// The run of understanding after the syncs (R1-28). It runs when its
+/// input changed since its last good run: the pending set
+/// ([`iris_understand::batch::pending_key`]), the model row or its budget.
+/// So an unchanged store makes no run, and each change of the pending set
+/// (new, repaired or reset mail, a due retry) gets one. A run that stopped
+/// on an error, or that the lock blocked, runs again: after an error, after
+/// a wait that doubles from [`SYNC_EVERY`] to [`RETRY_MAX`].
 pub struct Understander {
     last: Option<String>,
+    not_before: Option<Instant>,
+    wait: Option<Duration>,
+    first_wait: Duration,
+}
+
+impl Default for Understander {
+    fn default() -> Self {
+        Understander::new(SYNC_EVERY)
+    }
 }
 
 impl Understander {
-    /// One turn: `None` if the input did not change since the last run.
-    /// After [`AfterSync::Busy`](crate::cost::AfterSync::Busy) the next
-    /// turn runs.
+    /// `first_wait` is the wait after the first error; tests give 0.
+    pub fn new(first_wait: Duration) -> Understander {
+        Understander {
+            last: None,
+            not_before: None,
+            wait: None,
+            first_wait,
+        }
+    }
+
+    /// One turn: `None` if no run was due.
     pub fn turn(
         &mut self,
         store: &Store,
     ) -> std::result::Result<Option<crate::cost::AfterSync>, String> {
-        let key = store
+        if self.not_before.is_some_and(|t| Instant::now() < t) {
+            return Ok(None);
+        }
+        let now = now_ms();
+        let (count, sum) =
+            iris_understand::batch::pending_key(store, now).map_err(|e| e.to_string())?;
+        use rusqlite::OptionalExtension;
+        let model: Option<String> = store
             .read(|c| {
                 Ok(c.query_row(
-                    "SELECT (SELECT group_concat(id || ':' || coalesce(history_id, ''), ',')
-                               FROM account),
-                            (SELECT version || ':' || coalesce(budget_micro_usd, '')
-                               FROM model_setting),
-                            (SELECT count(*) FROM message WHERE understood_at IS NULL
-                               AND retry_at IS NOT NULL AND retry_at <= ?1)",
-                    [now_ms()],
-                    |r| {
-                        Ok(format!(
-                            "{}|{}|{}",
-                            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                            r.get::<_, i64>(2)?
-                        ))
-                    },
-                )?)
+                    "SELECT version || ':' || coalesce(budget_micro_usd, '') FROM model_setting",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?)
             })
             .map_err(|e| e.to_string())?;
+        let key = format!("{count}:{sum}|{}", model.unwrap_or_default());
         if self.last.as_ref() == Some(&key) {
             return Ok(None);
         }
-        let r = crate::cost::after_sync(store)?;
-        if r != crate::cost::AfterSync::Busy {
-            self.last = Some(key);
+        let r = crate::cost::after_sync(store);
+        match &r {
+            Ok(crate::cost::AfterSync::Busy) => {}
+            Ok(crate::cost::AfterSync::Ran { retry: true, .. }) | Err(_) => {
+                let wait = self
+                    .wait
+                    .map_or(self.first_wait, |w| (w * 2).min(RETRY_MAX));
+                self.wait = Some(wait);
+                self.not_before = Some(Instant::now() + wait);
+                self.last = None;
+            }
+            Ok(_) => {
+                self.wait = None;
+                self.not_before = None;
+                self.last = Some(key);
+            }
         }
-        Ok(Some(r))
+        r.map(Some)
     }
 }
 

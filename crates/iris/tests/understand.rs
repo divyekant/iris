@@ -90,6 +90,47 @@ fn model_server() -> (String, Arc<AtomicUsize>) {
     (url, count)
 }
 
+/// As [`model_server`], but the first `fail` requests get HTTP 500.
+fn flaky_model_server(fail: usize) -> (String, Arc<AtomicUsize>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", l.local_addr().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { continue };
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut len = 0;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            let (status, answer) = if n < fail {
+                ("500 Internal Server Error", "{}")
+            } else {
+                (
+                    "200 OK",
+                    r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"{\"items\": [], \"phishing\": false}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":5}}"#,
+                )
+            };
+            let _ = write!(
+                s,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                answer.len()
+            );
+        }
+    });
+    (url, count)
+}
+
 fn col(store: &Store, sql: &str) -> Option<i64> {
     store
         .read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
@@ -358,4 +399,34 @@ fn a_receipt_that_gets_old_while_the_prompt_waits_does_not_approve() {
         col(&store, "SELECT budget_micro_usd FROM model_setting"),
         Some(5_000_000)
     );
+}
+
+#[test]
+fn the_run_after_a_sync_tries_again_after_a_model_error() {
+    let (store, _fake) = synced("retry");
+    let (url, _calls) = flaky_model_server(1);
+    let (ok, _, err) = iris(&store, &["model", "set", "local", &url, "local-1"]);
+    assert!(ok, "{err}");
+    let pending = "SELECT count(*) FROM message WHERE understood_at IS NULL";
+    let before = col(&store, pending).unwrap();
+    let mut u = iris::engine::Understander::new(std::time::Duration::ZERO);
+    // The server fails: the run stops and asks for a retry.
+    let r = u.turn(&store).unwrap();
+    assert!(
+        matches!(r, Some(iris::cost::AfterSync::Ran { retry: true, .. })),
+        "{r:?}"
+    );
+    // The mailbox and the model do not change; the server works again. The
+    // next turn runs, and the pending mail is read.
+    let r = u.turn(&store).unwrap();
+    assert!(
+        matches!(r, Some(iris::cost::AfterSync::Ran { retry: false, .. })),
+        "{r:?}"
+    );
+    assert!(col(&store, pending).unwrap() < before);
+    // The key is read before each run, so mail that a sync saves during a
+    // run gets a run. One idle run (no row) follows a run that changed the
+    // pending set, then no run.
+    assert_eq!(u.turn(&store).unwrap(), Some(iris::cost::AfterSync::Idle));
+    assert_eq!(u.turn(&store).unwrap(), None, "nothing changed");
 }

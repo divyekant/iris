@@ -528,6 +528,20 @@ fn from_of(path: &std::path::Path) -> Option<String> {
     crate::Head::parse(&raw).from_addr
 }
 
+/// A fingerprint of the pending set (each pending condition but the thread
+/// rule): the count and the sum of the message IDs. A change of the set
+/// changes it: new or repaired mail, a due retry, a reset by a sender
+/// change. The run after a sync (R1-28) compares it with its last run.
+pub fn pending_key(store: &Store, now_ms: i64) -> Result<(i64, i64), Error> {
+    let sql = format!("SELECT count(*), coalesce(sum(m.id), 0) FROM message m WHERE {BASE}");
+    Ok(store.read(|c| {
+        Ok(c.prepare_cached(&sql)?.query_row(
+            rusqlite::named_params! { ":now": now_ms, ":max_tries": MAX_TRIES },
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    })?)
+}
+
 /// The size of the work before a run (spec "Estimate").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Estimate {
