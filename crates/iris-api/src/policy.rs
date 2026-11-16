@@ -26,6 +26,7 @@ pub fn policy(store: &Store) -> Result<Value> {
     Ok(json!({
         "mode": active.policy.mode.name(),
         "version": active.version,
+        "next_id": store.read(iris_policy::next_rule_id)?,
         "rules": active.policy.rules.iter().map(rule).collect::<Vec<_>>(),
         "error": active.error.as_ref().map(error),
         "file": file,

@@ -100,7 +100,7 @@ async fn the_first_start_has_no_rules_and_no_file() {
     let v = d.get().await;
     assert_eq!(
         v,
-        json!({ "mode": "observe", "version": null, "rules": [], "error": null, "file": { "state": "missing" } })
+        json!({ "mode": "observe", "version": null, "next_id": 1, "rules": [], "error": null, "file": { "state": "missing" } })
     );
     let (code, status) = d.call("GET", "/api/status", None, true).await;
     assert_eq!((code, &status["mode"]), (StatusCode::OK, &json!("observe")));
@@ -191,6 +191,9 @@ async fn a_change_writes_the_file_and_needs_the_version_that_the_person_saw() {
         [json!(2)]
     );
     assert_eq!(v["file"], json!({ "state": "same" }));
+    // A new rule takes an ID that no rule had.
+    assert_eq!(v["next_id"], 3);
+
     let disk = std::fs::read_to_string(d.0.join(iris_policy::FILE)).unwrap();
     assert!(
         !disk.contains("Acme") && disk.contains("Archive newsletters"),
@@ -219,6 +222,13 @@ async fn a_change_writes_the_file_and_needs_the_version_that_the_person_saw() {
     let (code, e) = d.post("remove", json!({ "id": "one" })).await;
     assert_eq!(code, StatusCode::BAD_REQUEST, "{e}");
     assert!(e["error"].is_string());
+
+    // With the last rule gone, a new rule still takes an ID that no rule had.
+    let (_, v) = d.post("remove", json!({ "version": 3, "id": 2 })).await;
+    assert_eq!(
+        (v["rules"].clone(), v["next_id"].clone()),
+        (json!([]), json!(3))
+    );
 }
 
 #[tokio::test]

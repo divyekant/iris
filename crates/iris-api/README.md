@@ -96,6 +96,7 @@ The policy object:
 |---|---|
 | `mode` | The mode of the active policy: `observe` or `apply`. |
 | `version` | The active version, or `null` at the first start. |
+| `next_id` | The lowest rule ID that no rule had. A new rule uses it, because the ID of a removed rule is never used again. |
 | `rules` | The rules of the active policy, in the order of the file. |
 | `error` | `{"line", "message"}` when the active text is not valid any more (for example after a program update), else `null`. The active policy then applies nothing. |
 | `file` | The file on disk, compared to the active policy. `state` is `same`, `missing`, `invalid` (with `error`) or `changed`. A `changed` file has `sha256`, `text`, `mode`, and the rules that it `added`, `removed` and `changed` (`{"before", "after"}`). A rule that keeps its ID and changes any field other than `line` is changed. |

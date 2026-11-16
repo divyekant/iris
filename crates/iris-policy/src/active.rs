@@ -189,6 +189,16 @@ pub(crate) fn record(
     Ok(version)
 }
 
+/// The lowest rule ID that no rule has had: a new rule can use it, because
+/// the ID of a removed rule is never used again.
+pub fn next_rule_id(conn: &Connection) -> Result<u32> {
+    Ok(conn.query_row(
+        "SELECT coalesce(max(id), 0) + 1 FROM policy_rule_id",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 /// The text of a confirmed version, so that the ledger and the review can
 /// show the rule that decided. `None` if there is no such version.
 pub fn version_text(conn: &Connection, version: i64) -> Result<Option<String>> {
