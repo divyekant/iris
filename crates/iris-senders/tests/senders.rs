@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use iris_eval::{run, Answer};
-use iris_senders::{decide, Decision, Kind};
+use iris_senders::{decide, refresh, Decision, Kind};
 use iris_store::{Header, NewMessage, Store};
 use iris_synth::{Mailbox, Sender};
 use rusqlite::OptionalExtension;
@@ -780,6 +780,55 @@ fn a_look_alike_that_came_first_is_hostile_when_its_domain_becomes_known() {
     assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("stranger"));
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("stranger"));
     assert_eq!(d.rerun, vec![id]);
+}
+
+/// Run [`refresh`], as the engine does after each batch.
+fn refreshed(c: &Case) -> Vec<i64> {
+    c.store.write(|tx| Ok(refresh(tx, 7)?)).unwrap()
+}
+
+#[test]
+fn a_refresh_after_a_change_of_evidence_keeps_known_domains_true() {
+    // The qualifying message of a service is fetched again from another
+    // address. No decision runs on it before the refresh.
+    let mut c = Case::new("refresh-service");
+    for t in ["t1", "t2", "t3"] {
+        c.put(t, &[], &service_mail());
+    }
+    let raw = "From: zed@example.org\r\nSubject: x\r\n\r\nBody.\r\n";
+    let mut m = new_message("m3", "t3", 3000, &[], raw.as_bytes());
+    m.content_sha256 = Some(c.store.put_content(raw.as_bytes()).unwrap());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    refreshed(&c);
+    assert_eq!(
+        c.row("no-reply@shop.example.com").1.as_deref(),
+        Some("stranger")
+    );
+    assert_eq!(
+        c.put("t4", &[], "From: ann@shop-secure.example.net").kind,
+        Kind::Stranger
+    );
+
+    // Sync marks the only sent message to an address gone.
+    let mut c = Case::new("refresh-gone");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: bob@paypal.com"),
+    );
+    let look_alike = c.put("t2", &[], "From: alerts@paypa1.com");
+    assert_eq!(look_alike.kind, Kind::Hostile);
+    set(&c, "UPDATE message SET gone_at = 1 WHERE id = 1");
+    let rerun = refreshed(&c);
+    assert_eq!(c.row("bob@paypal.com").1.as_deref(), Some("stranger"));
+    assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("stranger"));
+    assert_eq!(rerun, vec![look_alike.sender.unwrap()]);
+    assert_eq!(
+        c.put("t3", &[], "From: alerts@paypa1.com").kind,
+        Kind::Stranger
+    );
+    // Nothing changed: a second refresh changes nothing.
+    assert!(refreshed(&c).is_empty());
 }
 
 #[test]

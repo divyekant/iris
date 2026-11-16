@@ -651,3 +651,8 @@ mod tests {
         }
     }
 }
+
+/// Derive each stored engine kind again (stub).
+pub fn refresh(_conn: &Connection, _now_ms: i64) -> rusqlite::Result<Vec<i64>> {
+    Ok(Vec::new())
+}
