@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
+iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 # Same version as iris-store, so the program has one copy of SQLite.
