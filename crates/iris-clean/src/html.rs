@@ -163,16 +163,21 @@ impl Writer {
         if text.is_empty() || text == plain {
             return;
         }
-        // Percent-encode the characters that end a link target, so that the
-        // URL step reads the whole target. The URL stays the same URL.
+        // Percent-encode the characters that end a link target, and each
+        // white space or control character, so that the target is one
+        // token with each character of the href in it. A reader of the text
+        // (the URL step, the link check) then reads the whole target.
         let href: String = href
             .chars()
             .map(|c| match c {
-                ' ' => "%20".to_string(),
-                '(' => "%28".to_string(),
-                ')' => "%29".to_string(),
-                '<' => "%3C".to_string(),
-                '>' => "%3E".to_string(),
+                '(' | ')' | '<' | '>' => format!("%{:02X}", c as u32),
+                c if c.is_whitespace() || c.is_control() => {
+                    let mut b = [0; 4];
+                    c.encode_utf8(&mut b)
+                        .bytes()
+                        .map(|x| format!("%{x:02X}"))
+                        .collect()
+                }
                 c => c.to_string(),
             })
             .collect();
@@ -1044,6 +1049,10 @@ mod tests {
         assert_eq!(
             md("<a href='https://a.example.com/'>https://a.example.com/</a>"),
             "https://a.example.com/"
+        );
+        assert_eq!(
+            md("<a href=\"https://bank.example.com&#9;@evil.example.net/x y\u{a0}z\">Bank</a>"),
+            "[Bank](https://bank.example.com%09@evil.example.net/x%20y%C2%A0z)"
         );
         assert_eq!(md("<a href=\"javascript:run()\">Click</a>"), "Click");
         assert_eq!(
