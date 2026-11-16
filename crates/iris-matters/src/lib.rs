@@ -6,11 +6,14 @@
 //! the one validity rule of a proposal as the view `matter_valid`. This
 //! crate writes through these rules: it never decides validity in Rust.
 //!
-//! This part has the writes of the person ([`confirm`], [`decline`]), the
-//! write of a proposal ([`insert_proposal`]) and the clean-up of step 0 of
-//! the proposal step ([`clean`]). The model call comes in the next part.
+//! The crate has the writes of the person ([`confirm`], [`decline`]), and
+//! the proposal step ([`propose`]) with its write ([`insert_proposal`]) and
+//! its clean-up ([`clean`]).
 
 use std::fmt;
+
+pub mod propose;
+pub use propose::{propose, Gate, Outcome, Skip};
 
 use iris_store::Store;
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -34,6 +37,10 @@ pub enum Error {
     Conflict(&'static str),
     /// The request is not valid (HTTP 400).
     Bad(&'static str),
+    /// Understanding, or another proposal step, holds the run lock.
+    Busy,
+    /// The program could not make the model from the model row.
+    Model(String),
 }
 
 impl fmt::Display for Error {
@@ -42,6 +49,8 @@ impl fmt::Display for Error {
             Error::Store(e) => write!(f, "store: {e}"),
             Error::NotFound => f.write_str("no such matter"),
             Error::Conflict(why) | Error::Bad(why) => f.write_str(why),
+            Error::Busy => f.write_str("a run is in progress"),
+            Error::Model(e) => write!(f, "model: {e}"),
         }
     }
 }
