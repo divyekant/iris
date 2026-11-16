@@ -770,6 +770,7 @@ dependencies = [
  "iris-spec",
  "iris-store",
  "iris-talk",
+ "iris-understand",
  "rusqlite",
  "serde_json",
  "sha2",
