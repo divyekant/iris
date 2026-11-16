@@ -148,6 +148,8 @@ export function summary(brief: Brief): string {
   if (brief.you_owe.count) parts.push(`You owe ${count(brief.you_owe.count, "thing", "things")}.`);
   if (brief.owed_to_you.count) parts.push(`${capital(count(brief.owed_to_you.count, "thing is", "things are"))} owed to you.`);
   if (talks) parts.push(`${capital(count(talks, "conversation waits", "conversations wait"))} for you.`);
+  const odd = brief.strangers.count;
+  if (odd) parts.push(`${capital(count(odd, "item is from a sender", "items are from senders"))} you do not know.`);
   return parts.length ? parts.join(" ") : "Nothing needs you now.";
 }
 

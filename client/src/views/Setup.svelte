@@ -37,10 +37,15 @@
       <ol class="todo">
         <li>
           Open the <a href="https://console.cloud.google.com/auth/clients" rel="noreferrer" target="_blank">Google Auth Platform</a>.
-          Make a project with the Gmail API, the scope <code>gmail.readonly</code>, and a client of the type "Desktop app".
+          Make a project and turn on the Gmail API.
         </li>
-        <li>Download the JSON file of the client. Google shows its secret only one time.</li>
-        <li>On the machine that runs Iris, run <code>iris account add client.json</code> and sign in.</li>
+        <li>On the Branding page, fill in the fields. On the Audience page, select "External". On the Data Access page, add the scope <code>gmail.readonly</code>.</li>
+        <li>On the Clients page, make a client of the type "Desktop app". Download its JSON file at once: Google shows its secret only one time.</li>
+        <li>On the Audience page, click "Publish app". In the "Testing" status, Google stops the sign-in after 7 days.</li>
+        <li>
+          On the machine that runs Iris, run <code>iris account add client.json</code> and sign in. If Google says that it has not verified
+          the app, click "Advanced", then go to your app.
+        </li>
       </ol>
       <p class="quiet">This page goes to the next step when the account is connected.</p>
     </section>
