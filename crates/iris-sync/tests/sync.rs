@@ -166,11 +166,13 @@ fn a_full_copy_has_the_messages_and_labels_of_the_fake() {
     assert_eq!(history, None);
     assert_eq!(temp_files(&dir.join("content")), 0);
 
-    // A call again fetches nothing.
-    let before = raw_requests(&fake);
+    // A call again calls Gmail for nothing, so a refused token does not matter.
+    let before = fake.requests().len();
+    fake.fail_next(&[401]);
     let again = first_sync(&store, &gmail, account, TOKEN).unwrap();
     assert_eq!((again.fetched, again.gone), (0, 0));
-    assert_eq!(raw_requests(&fake), before);
+    assert_eq!(again.history_start, h0);
+    assert_eq!(fake.requests().len(), before);
 }
 
 #[test]
