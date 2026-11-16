@@ -25,9 +25,8 @@
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
-use iris_store::{format_id, Kind, Store};
+use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
 pub enum Error {
@@ -139,31 +138,6 @@ impl Change {
         let has = |l: &str| labels.iter().any(|x| x == l);
         self.add.iter().any(|l| !has(l)) || self.remove.iter().any(|l| has(l))
     }
-}
-
-/// The approval hash of an action, from its rows (specification 2, section
-/// 5.1): the verb, the targets text and the args text, each with its length
-/// in bytes first (8 bytes, big-endian), then each resolved message ID in
-/// the order of the row IDs, with a comma after it.
-pub fn hash(c: &Connection, action: i64) -> rusqlite::Result<String> {
-    let (verb, targets, args): (String, String, String) = c.query_row(
-        "SELECT verb, targets, args FROM changeset_action WHERE id = ?1",
-        [action],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    let mut h = Sha256::new();
-    for text in [&verb, &targets, &args] {
-        h.update((text.len() as u64).to_be_bytes());
-        h.update(text.as_bytes());
-    }
-    let mut st =
-        c.prepare("SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY 1")?;
-    let mut rows = st.query([action])?;
-    while let Some(r) = rows.next()? {
-        h.update(format_id(Kind::Message, r.get(0)?).as_bytes());
-        h.update(b",");
-    }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// True if `token` is a token of the mailbox `address` (Gmail profile).
@@ -527,7 +501,14 @@ fn check(
             |r| r.get(0),
         )?)
     })?;
-    let reason = if store.read(|c| Ok(hash(c, action)?))? != approved_hash.unwrap_or_default() {
+    // The hash of submit (iris-changeset), from the rows of now.
+    let now_hash = store.read(|c| {
+        iris_changeset::hash(c, action).map_err(|e| match e {
+            iris_changeset::Error::Store(e) => e,
+            other => iris_store::Error::Query(other.to_string()),
+        })
+    })?;
+    let reason = if now_hash.1 != approved_hash.unwrap_or_default() {
         Some("The action changed after its approval.")
     } else if other_account {
         Some("The action has messages of another account.")

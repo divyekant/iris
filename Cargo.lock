@@ -748,7 +748,6 @@ dependencies = [
  "iris-synth",
  "rusqlite",
  "serde_json",
- "sha2",
 ]
 
 [[package]]

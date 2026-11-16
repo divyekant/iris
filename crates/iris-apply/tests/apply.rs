@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iris_apply::{apply, hash, Error, Outcome, Token};
+use iris_apply::{apply, Error, Outcome, Token};
 use iris_fakegmail::FakeGmail;
 use iris_gmail::{Config, Gmail};
 use iris_store::Store;
@@ -115,7 +115,7 @@ impl Box {
                         params![a, m],
                     )?;
                 }
-                let h = hash(tx, a)?;
+                let (_, h) = iris_changeset::hash(tx, a).unwrap();
                 tx.execute(
                     "UPDATE changeset_action SET hash = ?2 WHERE id = ?1",
                     params![a, h],
