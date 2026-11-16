@@ -1,6 +1,6 @@
 <!--
   Above the brief: the policy file changed and waits for a confirmation, or
-  it has an error (spec 2 section 6.3). Nothing shows while the file is the
+  it has an error, or a confirmed file is gone (spec 2 section 6.3). Nothing shows while the file is the
   active policy, or when the API does not answer.
 -->
 <script lang="ts">
@@ -21,6 +21,8 @@
   <p class="notice bad">
     Your policy file has an error{file.error.line ? ` on line ${file.error.line}` : ""}. Iris uses the rules from before. <a href="#/rules">Open the rules</a>
   </p>
+{:else if file?.state === "missing" && current?.version !== null}
+  <p class="notice">Your policy file is missing. Iris uses the rules from before. <a href="#/rules">Open the rules</a></p>
 {:else if file?.state === "changed"}
   <p class="notice">Your policy file changed. Iris uses it after you confirm the change. <a href="#/rules">Review the change</a></p>
 {/if}

@@ -44,7 +44,7 @@ test("a changed file shows its difference, and blocks the changes from here unti
   const t = text(html);
   assert.match(t, /Your policy file changed/);
   assert.match(t, /Mode Observe to Apply/);
-  assert.match(t, /New Mark receipts as read Mark as read Records Receipts/);
+  assert.match(t, /New Mark receipts as read Allowed Mark as read Records Receipts/);
   assert.match(t, /Changed Archive newsletters after 5 days .* Before: Archive newsletters after 3 days, Archive and mark as read, Feed, From services, Older than 3 days/);
   assert.match(t, /Confirm the change Discard/);
   assert.match(t, /Confirm or discard the change of your file first/);
@@ -68,7 +68,34 @@ test("with no rules, the view shows how to add one", async () => {
   const none = { mode: "observe", version: null, rules: [], error: null, file: { state: "missing" } };
   const t = text(await render("/src/views/Rules.svelte", { policy: none }));
   assert.match(t, /No rules yet/);
-  assert.match(t, /effect = "bundle"/);
+  assert.match(t, /Make policy\.toml/);
+  // At the first start the example is a complete file: the parser needs version and mode.
+  assert.match(t, /version = 0 mode = "observe" \[\[rule\]\] id = 1 .* effect = "bundle"/);
+  const empty = { ...none, version: 1, file: { state: "same" } };
+  const u = text(await render("/src/views/Rules.svelte", { policy: empty }));
+  assert.match(u, /Add a rule to the end of policy\.toml .* \[\[rule\]\] id = 1/);
+  assert.doesNotMatch(u, /version = 0/);
+  assert.doesNotMatch(await render("/src/views/Rules.svelte", { policy: none }), /disabled/);
+});
+
+test("a confirmed file that is gone blocks the changes from here, and the view can put it back", async () => {
+  const gone = { ...same, file: { state: "missing" } };
+  const html = await render("/src/views/Rules.svelte", { policy: gone });
+  const t = text(html);
+  assert.match(t, /Your policy file is missing .* Put the file back/);
+  assert.match(t, /Put your policy file back first/);
+  assert.equal(html.match(/class="quiet remove[^"]*"[^>]*disabled/g)?.length, 4);
+  assert.match(text(await render("/src/views/PolicyNotice.svelte", { policy: gone })), /Your policy file is missing/);
+});
+
+test("the difference names the effect of each rule, also when only the effect changed", async () => {
+  const [rule] = fx.policy.rules;
+  const deny = { ...rule, effect: "deny" };
+  const file = { ...fx.policy.file, mode: same.mode, added: [{ ...rule, id: 9, effect: "allow" }], removed: [deny], changed: [{ before: deny, after: rule }] };
+  const t = text(await render("/src/views/Rules.svelte", { policy: { ...same, file } }));
+  assert.match(t, new RegExp(`New ${rule.name} Allowed`));
+  assert.match(t, new RegExp(`Changed ${rule.name} Allowed .* Before: Never`));
+  assert.match(t, new RegExp(`Removed ${rule.name} Never`));
 });
 
 test("the brief shows a notice when the policy file waits or has an error", async () => {

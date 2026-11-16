@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { get, own, post, type Mode, type Policy, type Rule } from "../api";
-  import { conditions, GROUPS, MODES, verbs } from "../rules";
+  import { conditions, example, GROUPS, MODES, verbs } from "../rules";
 
   let { policy: initial }: { policy: Policy } = $props();
   // svelte-ignore state_referenced_locally
@@ -20,8 +20,10 @@
   let saved: string | null = $state(null);
 
   let file = $derived(policy.file);
+  // A confirmed file that is gone. At the first start there is no file, and changes from here make it.
+  let gone = $derived(file.state === "missing" && policy.version !== null);
   // Spec 2 section 6.3: a change from here waits until the file on disk is the active policy.
-  let blocked = $derived(file.state === "changed" || file.state === "invalid" || policy.error !== null);
+  let blocked = $derived(file.state === "changed" || file.state === "invalid" || gone || policy.error !== null);
   let empty = $derived(file.state === "changed" && file.mode === policy.mode && !file.added.length && !file.removed.length && !file.changed.length);
 
   async function send(path: string, body: unknown) {
@@ -52,6 +54,10 @@
     [b.name !== a.name && b.name, b.effect !== a.effect && title(b), verbs(b), ...conditions(b)].filter(Boolean).join(", ");
   const meta = (r: Rule) => `Rule ${r.id} · line ${r.line}${r.by === "proposal" ? " · Iris proposed it" : ""}`;
 </script>
+
+{#snippet change(rule: Rule)}
+  <b>{rule.name}</b> <span class="effect">{title(rule)}</span>
+{/snippet}
 
 {#snippet sentence(rule: Rule)}
   {#if rule.verbs.length}<span class="verbs">{verbs(rule)}</span>{/if}
@@ -93,19 +99,19 @@
         <li><span class="tag">Mode</span><span>{MODES[policy.mode].title} to {MODES[file.mode].title}</span></li>
       {/if}
       {#each file.added as rule (rule.id)}
-        <li><span class="tag add">New</span><span><b>{rule.name}</b> {@render sentence(rule)}</span></li>
+        <li><span class="tag add">New</span><span>{@render change(rule)} {@render sentence(rule)}</span></li>
       {/each}
       {#each file.changed as { before, after } (after.id)}
         <li>
           <span class="tag edit">Changed</span>
           <span>
-            <b>{after.name}</b> {@render sentence(after)}
+            {@render change(after)} {@render sentence(after)}
             <span class="was">Before: {was(before, after)}</span>
           </span>
         </li>
       {/each}
       {#each file.removed as rule (rule.id)}
-        <li><span class="tag del">Removed</span><span><b>{rule.name}</b></span></li>
+        <li><span class="tag del">Removed</span><span>{@render change(rule)}</span></li>
       {/each}
       {#if empty}<li class="muted">Only comments or spaces changed.</li>{/if}
     </ul>
@@ -118,6 +124,14 @@
       <button type="button" class="quiet" onclick={discard} disabled={busy}>Discard</button>
     </div>
     <p class="small">A discard keeps a copy of your file in the data folder.</p>
+  </section>
+{:else if gone}
+  <section class="notice change" aria-labelledby="file-gone">
+    <h2 id="file-gone">Your policy file is missing</h2>
+    <p class="muted">Iris uses the rules below. Put the file back to change them here or in the file.</p>
+    <div class="actions">
+      <button type="button" class="primary" onclick={discard} disabled={busy}>Put the file back</button>
+    </div>
   </section>
 {/if}
 
@@ -138,21 +152,21 @@
       <button type="button" class="quiet" onclick={() => (choice = policy.mode)} disabled={busy}>Cancel</button>
     </div>
   {:else if blocked}
-    <p class="small">Confirm or discard the change of your file first. Then you can change the mode and the rules here.</p>
+    <p class="small">
+      {gone ? "Put your policy file back first" : "Confirm or discard the change of your file first"}. Then you can change the mode and the rules here.
+    </p>
   {/if}
 </section>
 
 {#if policy.rules.length === 0}
   <section class="none" aria-labelledby="no-rules">
     <h2 id="no-rules">No rules yet</h2>
-    <p class="muted">Add a rule to <code>policy.toml</code>, then confirm the change here. For example, this rule shows the feed as one line in the brief:</p>
-    <pre>{`[[rule]]
-id = 1
-name = "Bundle the feed"
-effect = "bundle"
-when = { form = "feed" }
-by = "person"
-added = ${new Date().toISOString().slice(0, 10)}`}</pre>
+    {#if file.state === "missing"}
+      <p class="muted">Make <code>policy.toml</code> in the data folder of Iris, then confirm it here. For example, this file shows the feed as one line in the brief:</p>
+    {:else}
+      <p class="muted">Add a rule to the end of <code>policy.toml</code>, then confirm the change here. For example, this rule shows the feed as one line in the brief:</p>
+    {/if}
+    <pre>{example(new Date().toISOString().slice(0, 10), file.state === "missing" ? policy.mode : null)}</pre>
   </section>
 {/if}
 
@@ -286,6 +300,10 @@ added = ${new Date().toISOString().slice(0, 10)}`}</pre>
   }
   .tag.del::before {
     background: var(--color-error);
+  }
+  .effect {
+    font-size: var(--font-size--1);
+    color: var(--color-text-muted);
   }
   .was {
     display: block;

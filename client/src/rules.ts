@@ -1,6 +1,6 @@
 // Words for the rules of policy.toml (spec 2 section 6.2), so that the policy
 // view reads as sentences, not as fields.
-import type { Rule } from "./api";
+import type { Mode, Rule } from "./api";
 
 const VERBS: Record<string, string> = {
   archive: "archive",
@@ -77,3 +77,18 @@ export const MODES = {
   observe: { title: "Observe", note: "Iris changes nothing. It shows what it would do." },
   apply: { title: "Apply", note: "Iris makes the changes that your rules allow. All other changes wait for you." },
 } as const;
+
+/**
+ * An example rule that shows the feed as one line in the brief. With `mode`
+ * (no file yet), a complete first file: the parser needs `version` and `mode`.
+ */
+export function example(date: string, mode: Mode | null): string {
+  const rule = `[[rule]]
+id = 1
+name = "Bundle the feed"
+effect = "bundle"
+when = { form = "feed" }
+by = "person"
+added = ${date}`;
+  return mode ? `version = 0\nmode = "${mode}"\n\n${rule}` : rule;
+}
