@@ -30,3 +30,9 @@ export function arrivedLine(arrived: Watch[]): string {
   if (!arrived.length) return "";
   return arrived.length === 1 ? "The mail that you watched for came." : `${capital(count(arrived.length, "mail", "mails"))} that you watched for came.`;
 }
+
+/** The local day of a date-time, for example "Nov 16, 2026". The API gives UTC, so the day can differ from its first 10 characters. */
+export function day(value: string): string {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString(undefined, { dateStyle: "medium" });
+}

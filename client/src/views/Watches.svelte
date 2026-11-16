@@ -4,8 +4,7 @@
 -->
 <script lang="ts">
   import { own } from "../api";
-  import { when } from "../format";
-  import { addWatch, removeWatch, type Watch } from "../watches";
+  import { addWatch, day, removeWatch, type Watch } from "../watches";
 
   let { watches, onchange }: { watches: Watch[]; onchange: () => void } = $props();
 
@@ -63,7 +62,7 @@
       <li>
         {@render ring()}
         <span class="text">{w.text}</span>
-        <span class="since">since {when(w.created.slice(0, 10))}</span>
+        <span class="since">since {day(w.created)}</span>
         <button type="button" class="stop" onclick={() => stop(w.id)} disabled={busy} aria-label={`Stop the watch for ${w.text}`}>Stop</button>
       </li>
     {/each}

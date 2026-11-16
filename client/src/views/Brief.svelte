@@ -48,11 +48,13 @@
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([loadBrief(), get<Status>("status"), loadWatches()]),
-      ([b, s, w]) => ((brief = b), (status = s), (watches = w)),
+      () => Promise.all([loadBrief(), get<Status>("status")]),
+      ([b, s]) => ((brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });
+  // The watches load apart, so a failed watch load never keeps the brief old. A failure keeps the last list.
+  $effect(() => (poll ? every(loadWatches, (w) => (watches = w), poll * 12) : undefined));
 
   const SHOWN = 7;
 

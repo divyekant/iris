@@ -1,11 +1,13 @@
 // Watches in the brief (card R5-07): the one notice of a mail that came, the
 // list of the watches that wait, and the field that starts a watch.
+// A zone west of UTC: there, a UTC date-time after midnight is still the day before.
+process.env.TZ = "America/Los_Angeles";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { load, mount, until } from "./mount.mjs";
 
 const fx = await load("/dev/fixtures.ts");
-const { arrivedLine } = await load("/src/watches.ts");
+const { arrivedLine, day } = await load("/src/watches.ts");
 const text = (el) => el.textContent.replace(/\s+/g, " ");
 const copy = (x) => JSON.parse(JSON.stringify(x));
 const arrived = () => copy(fx.watches.find((w) => w.state === "arrived"));
@@ -143,5 +145,25 @@ test("the brief leads with the mail that came, and lists the watches that wait",
     assert.doesNotMatch(text(alone.target), /Iris watches for/);
   } finally {
     alone.destroy();
+  }
+});
+
+test("the start day of a watch is the local day of the viewer", () => {
+  assert.equal(day("2026-11-16T00:30:00Z"), new Date(2026, 10, 15).toLocaleDateString(undefined, { dateStyle: "medium" }));
+  assert.equal(day("not a date"), "not a date");
+});
+
+test("a failed watch load keeps the last watches and does not stop the brief", async () => {
+  const changed = { ...copy(fx.brief), review: { changesets: 0, actions: 0 } };
+  serve((path) => (path === "watches" ? [500, { error: "database: locked" }] : path === "status" ? [200, fx.status] : path.startsWith("brief/signals") ? [200, { items: [], next: null }] : [200, changed]));
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, status: fx.status, watches: copy(fx.watches), poll: 5 });
+  try {
+    await until(() => !text(view.target.querySelector("h1")).includes("for your review"));
+    assert.match(text(view.target.querySelector("h1")), /^The mail that you watched for came\. You owe/);
+    // Wait for more than one failed watch load: the list stays.
+    await new Promise((r) => setTimeout(r, 150));
+    assert.match(text(view.target), /Iris watches for 2/);
+  } finally {
+    view.destroy();
   }
 });
