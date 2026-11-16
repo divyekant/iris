@@ -280,65 +280,117 @@ fn correct_changes_one_field() {
         json!("cs-1")
     );
 
-    // A correction of a record changes its status to `corrected`: the
-    // entry holds that change too, so the undo can set it back.
-    let mut doc = iris_spec::read_json(
-        &iris_spec::schema_dir()
-            .join("examples")
-            .join("record-receipt.json"),
-    );
-    doc["id"] = json!("r-2");
-    b.store
-        .write(|tx| {
-            Ok(tx.execute(
-                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
-                 VALUES ('record', 1, 'kept', ?1, 0, 0)",
-                [doc.to_string()],
-            )?)
-        })
-        .unwrap();
-    let author = Author {
-        kind: AuthorKind::Person,
-        name: None,
-        session: None,
-        job: None,
-    };
-    let args = json!({ "field": "fields.order", "value": "EB-1" });
-    let s = &b.store;
-    let cs = iris_changeset::create(s, &author, now()).unwrap();
-    let verb = Verb::Correct;
-    iris_changeset::add_action(
-        s,
-        cs,
-        &author,
-        verb,
-        &["r-2"],
-        args.as_object().unwrap(),
-        None,
-    )
-    .unwrap();
-    iris_changeset::submit(s, cs, &author, "Fix the order.", now()).unwrap();
-    let a = b
-        .one("SELECT max(id) FROM changeset_action")
-        .as_i64()
-        .unwrap();
-    let hash = b.one(&format!("SELECT hash FROM changeset_action WHERE id = {a}"));
-    let action = ActionId {
-        changeset: cs,
-        revision: 1,
-        n: 1,
-    };
-    iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
-    assert!(matches!(apply_state(s, a), Ok(Outcome::Applied(_))));
-    let (_, _, pre, post) = b.entry(a);
+    // The due date is the only change: no `status` correction.
     assert_eq!(
-        pre,
-        json!({ "r-2": { "fields.order": "EB-20931", "status": "kept" } })
+        b.one("SELECT count(*) FROM correction WHERE field = 'status'"),
+        json!(0)
     );
-    assert_eq!(
-        post,
-        json!({ "r-2": { "fields.order": "EB-1", "status": "corrected" } })
-    );
+
+    // A correction can change the status too. The entry holds that change,
+    // so the undo can set it back, and a `status` correction records it
+    // (spec 1 section 7.5): a record becomes `corrected`, and a signal
+    // follows its new `expires`.
+    for (example, form, status, id, field, old, value, new) in [
+        (
+            "record-receipt",
+            "record",
+            "kept",
+            "r-2",
+            "fields.order",
+            "EB-20931",
+            "EB-1",
+            "corrected",
+        ),
+        (
+            "signal-code",
+            "signal",
+            "expired",
+            "s-3",
+            "expires",
+            "2026-11-16T09:15:00Z",
+            "2099-01-01T00:00:00Z",
+            "active",
+        ),
+    ] {
+        let a = b.correct_example(example, form, status, id, field, value);
+        assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+        let (_, _, pre, post) = b.entry(a);
+        assert_eq!(pre, json!({ id: { field: old, "status": status } }));
+        assert_eq!(post, json!({ id: { field: value, "status": new } }));
+        let cs = b.one(&format!(
+            "SELECT 'cs-' || changeset_id FROM changeset_action WHERE id = {a}"
+        ));
+        let rows = b.one(&format!(
+            "SELECT json_group_array(json_array(field, json(value), by)) FROM (
+               SELECT c.* FROM correction c JOIN item i ON i.id = c.item_id
+               WHERE json_extract(i.doc, '$.id') = '{id}' ORDER BY c.id)"
+        ));
+        let rows: Value = serde_json::from_str(rows.as_str().unwrap()).unwrap();
+        assert_eq!(rows, json!([[field, value, cs], ["status", new, cs]]));
+    }
+}
+
+impl Box {
+    /// Insert the schema example `example` as the item `id` with the status
+    /// `status`, and give a person-approved `correct` action of `field`.
+    fn correct_example(
+        &self,
+        example: &str,
+        form: &str,
+        status: &str,
+        id: &str,
+        field: &str,
+        value: &str,
+    ) -> i64 {
+        let mut doc = iris_spec::read_json(
+            &iris_spec::schema_dir()
+                .join("examples")
+                .join(format!("{example}.json")),
+        );
+        doc["id"] = json!(id);
+        doc["status"] = json!(status);
+        self.store
+            .write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                     VALUES (?1, 1, ?2, ?3, 0, 0)",
+                    rusqlite::params![form, status, doc.to_string()],
+                )?)
+            })
+            .unwrap();
+        let author = Author {
+            kind: AuthorKind::Person,
+            name: None,
+            session: None,
+            job: None,
+        };
+        let args = json!({ "field": field, "value": value });
+        let s = &self.store;
+        let cs = iris_changeset::create(s, &author, now()).unwrap();
+        iris_changeset::add_action(
+            s,
+            cs,
+            &author,
+            Verb::Correct,
+            &[id],
+            args.as_object().unwrap(),
+            None,
+        )
+        .unwrap();
+        iris_changeset::submit(s, cs, &author, "Fix it.", now()).unwrap();
+        let a = self
+            .one("SELECT max(id) FROM changeset_action")
+            .as_i64()
+            .unwrap();
+        let hash = self.one(&format!("SELECT hash FROM changeset_action WHERE id = {a}"));
+        let action = ActionId {
+            changeset: cs,
+            revision: 1,
+            n: 1,
+        };
+        iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
+        a
+    }
 }
 
 /// In the mode `observe`, an action that a person did not approve waits.

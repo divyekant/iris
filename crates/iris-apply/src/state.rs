@@ -331,7 +331,7 @@ fn write(
     for p in items {
         if verb == "correct" {
             let field = args["field"].as_str().unwrap_or_default();
-            if let Err(why) = iris_understand::correct::correct(
+            let doc = match iris_understand::correct::correct(
                 tx,
                 &p.id,
                 field,
@@ -339,7 +339,18 @@ fn write(
                 by,
                 now_ms,
             )? {
-                return Ok(Err(format!("{}: {why}", p.id)));
+                Ok(doc) => doc,
+                Err(why) => return Ok(Err(format!("{}: {why}", p.id))),
+            };
+            // The correction can change the status too (a record becomes
+            // `corrected`, a signal follows `expires`). Spec 1 section 7.5
+            // records each status change by an applied action as a correction.
+            if doc["status"] != p.pre["status"] {
+                tx.execute(
+                    "INSERT INTO correction(item_id, field, value, by, at)
+                     VALUES (?1, 'status', ?2, ?3, ?4)",
+                    params![p.item, doc["status"].to_string(), by, now_ms],
+                )?;
             }
             continue;
         }
