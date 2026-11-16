@@ -122,6 +122,14 @@ with no provider call. These rules apply:
   understanding closed it after the submit), the ledger row is `failed` with
   the reason and the undo `none`, and no item changes.
 
+When the person closes, declines or defers a commitment in the web client,
+the engine makes a changeset with the author `person` and one action, as for
+an undo (section 7.4). The choice of the person is the approval. The engine
+submits and approves the action in one transaction, and then applies it in
+the same request. If the submit denies the action (for example, a date that
+is not valid), nothing stays. If the engine stops before the apply, the next
+tick applies the approved action.
+
 The undo of the action sets the old values and deletes the correction row, in
 one transaction, with its own ledger row. If the current value is not the
 `post` value of the entry (a later action changed it), the undo changes

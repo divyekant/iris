@@ -3,8 +3,9 @@
 The local API of Iris (tracker item R1-17). The API gives the web client
 and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
-[Policy](#policy)) and the review of the person: decisions and withdraws
-(see [Review](#review)).
+[Policy](#policy)), the review of the person: decisions and withdraws
+(see [Review](#review)), and the state verbs of the person (see
+[State verbs](#state-verbs)).
 
 ## Use
 
@@ -133,6 +134,26 @@ The changeset must be open for each decision. Each action of a decision must wai
 decisions write in one transaction. If one is refused (a hash that changed,
 an action that has a decision, a new revision that is a draft, or an action
 that is not in the changeset), nothing is written and the answer is a 409.
+
+## State verbs
+
+The person closes, declines or defers one commitment (specification 2,
+section 4). The engine makes a changeset with the author `person` and one
+action, submits and approves it in one transaction, and applies it in the
+same request.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/items/{id}/close` | Body `{}` or `{"reason"}`. Sets the status `done`. The default reason is "Done.". |
+| `POST /api/items/{id}/decline` | Body `{}` or `{"reason"}`. Sets the status `declined`. The default reason is "Declined.". |
+| `POST /api/items/{id}/defer` | Body `{"date": "YYYY-MM-DD"}`, with an optional `reason`. Sets the status `deferred` and `deferred_until`. The commitment opens again on that date (UTC). |
+
+A `reason` is 1 to 500 characters and not blank. The answer is the item
+after the change. The verb changes only a commitment with the status `open`
+or `deferred`. For another item, the answer is a 409 with the reason, and the
+ledger keeps a `failed` entry. A body that is not valid (for example, a date
+that is not valid) is a 400, and nothing is written. An ID that no item has,
+or another verb, is a 404.
 
 ## Errors
 
