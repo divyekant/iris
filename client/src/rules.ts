@@ -75,16 +75,20 @@ export const GROUPS: { effect: Rule["effect"]; title: string; note: string }[] =
 
 export const MODES = {
   observe: { title: "Observe", note: "Iris changes nothing. It shows what it would do." },
-  apply: { title: "Apply", note: "Iris makes the changes that your rules allow. All other changes wait for you." },
+  apply: {
+    title: "Apply",
+    note: "Iris makes the changes that your rules allow. It never makes a change that a Never rule or a safety limit forbids. All other changes wait for you.",
+  },
 } as const;
 
 /**
- * An example rule that shows the feed as one line in the brief. With `mode`
- * (no file yet), a complete first file: the parser needs `version` and `mode`.
+ * An example rule that shows the feed as one line in the brief, with the ID
+ * `id` that no rule had. With `mode` (no file yet), a complete first file:
+ * the parser needs `version` and `mode`.
  */
-export function example(date: string, mode: Mode | null): string {
+export function example(date: string, mode: Mode | null, id: number): string {
   const rule = `[[rule]]
-id = 1
+id = ${id}
 name = "Bundle the feed"
 effect = "bundle"
 when = { form = "feed" }

@@ -5,12 +5,14 @@
 -->
 <script lang="ts">
   import { get, type Policy } from "../api";
+  import { follow } from "../clock";
 
-  let { policy = null }: { policy?: Policy | null } = $props();
+  let { policy = null, every = 30_000 }: { policy?: Policy | null; every?: number } = $props();
   // svelte-ignore state_referenced_locally
   let current = $state(policy);
+  // The person can edit the file while the brief is open: look again each `every` ms.
   $effect(() => {
-    if (!policy) get<Policy>("policy").then((p) => (current = p), () => {});
+    if (!policy) return follow(() => get<Policy>("policy"), (p) => (current = p), every);
   });
   let file = $derived(current?.file);
 </script>

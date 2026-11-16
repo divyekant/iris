@@ -41,3 +41,14 @@ export function poll<T>(load: () => Promise<T>, apply: (value: T) => void, ms: n
     clearTimeout(timer);
   };
 }
+
+/** Like `poll`, but loads once at the start too. */
+export function follow<T>(load: () => Promise<T>, apply: (value: T) => void, ms: number): () => void {
+  let stopped = false;
+  load().then((v) => stopped || apply(v), () => {});
+  const stop = poll(load, apply, ms);
+  return () => {
+    stopped = true;
+    stop();
+  };
+}

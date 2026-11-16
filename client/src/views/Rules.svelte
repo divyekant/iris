@@ -49,9 +49,12 @@
   const setMode = () => send("mode", { version: policy.version, mode: choice });
   const remove = (id: number) => send("remove", { version: policy.version, id });
   const title = (r: Rule) => GROUPS.find((g) => g.effect === r.effect)?.title ?? r.effect;
-  // The old rule in one line: its name, group and verbs only where they changed, then its conditions.
+  const author = (r: Rule) => (r.by === "proposal" ? "Iris proposed it" : "You wrote it");
+  // Each field that can make a rule changed, and that the rule sentence does not show.
+  const facts = (b: Rule, a: Rule, r: Rule) => [b.by !== a.by && author(r), b.added !== a.added && `Added ${r.added}`];
+  // The old rule in one line: its name, group, author and date only where they changed, then its verbs and conditions.
   const was = (b: Rule, a: Rule) =>
-    [b.name !== a.name && b.name, b.effect !== a.effect && title(b), verbs(b), ...conditions(b)].filter(Boolean).join(", ");
+    [b.name !== a.name && b.name, b.effect !== a.effect && title(b), ...facts(b, a, b), verbs(b), ...conditions(b)].filter(Boolean).join(", ");
   const meta = (r: Rule) => `Rule ${r.id} · line ${r.line}${r.by === "proposal" ? " · Iris proposed it" : ""}`;
 </script>
 
@@ -106,6 +109,7 @@
           <span class="tag edit">Changed</span>
           <span>
             {@render change(after)} {@render sentence(after)}
+            {#each facts(before, after, after).filter(Boolean) as f (f)}<span class="chip">{f}</span>{/each}
             <span class="was">Before: {was(before, after)}</span>
           </span>
         </li>
@@ -166,7 +170,7 @@
     {:else}
       <p class="muted">Add a rule to the end of <code>policy.toml</code>, then confirm the change here. For example, this rule shows the feed as one line in the brief:</p>
     {/if}
-    <pre>{example(new Date().toISOString().slice(0, 10), file.state === "missing" ? policy.mode : null)}</pre>
+    <pre>{example(new Date().toISOString().slice(0, 10), file.state === "missing" ? policy.mode : null, policy.next_id)}</pre>
   </section>
 {/if}
 

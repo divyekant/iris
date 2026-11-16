@@ -101,6 +101,7 @@ const rules: Rule[] = [
 export const policy: Policy = {
   mode: "observe",
   version: 3,
+  next_id: 6,
   rules,
   error: null,
   file: {

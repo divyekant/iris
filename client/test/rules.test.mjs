@@ -1,5 +1,5 @@
 // The policy view (R2-08): words for rules, each state of the file, and the POST of a change.
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { load, render } from "./render.mjs";
 
@@ -65,15 +65,16 @@ test("a file that is not valid shows its line, and an active text that is not va
 });
 
 test("with no rules, the view shows how to add one", async () => {
-  const none = { mode: "observe", version: null, rules: [], error: null, file: { state: "missing" } };
+  const none = { mode: "observe", version: null, next_id: 1, rules: [], error: null, file: { state: "missing" } };
   const t = text(await render("/src/views/Rules.svelte", { policy: none }));
   assert.match(t, /No rules yet/);
   assert.match(t, /Make policy\.toml/);
   // At the first start the example is a complete file: the parser needs version and mode.
   assert.match(t, /version = 0 mode = "observe" \[\[rule\]\] id = 1 .* effect = "bundle"/);
-  const empty = { ...none, version: 1, file: { state: "same" } };
+  // After the last rule went, the example takes an ID that no rule had.
+  const empty = { ...none, version: 4, next_id: 3, file: { state: "same" } };
   const u = text(await render("/src/views/Rules.svelte", { policy: empty }));
-  assert.match(u, /Add a rule to the end of policy\.toml .* \[\[rule\]\] id = 1/);
+  assert.match(u, /Add a rule to the end of policy\.toml .* \[\[rule\]\] id = 3 /);
   assert.doesNotMatch(u, /version = 0/);
   assert.doesNotMatch(await render("/src/views/Rules.svelte", { policy: none }), /disabled/);
 });
@@ -96,6 +97,41 @@ test("the difference names the effect of each rule, also when only the effect ch
   assert.match(t, new RegExp(`New ${rule.name} Allowed`));
   assert.match(t, new RegExp(`Changed ${rule.name} Allowed .* Before: Never`));
   assert.match(t, new RegExp(`Removed ${rule.name} Never`));
+});
+
+test("the difference shows a change of the author or the date of a rule", async () => {
+  const [rule] = fx.policy.rules;
+  const after = { ...rule, by: "proposal", added: "2026-11-12" };
+  const file = { ...fx.policy.file, mode: same.mode, added: [], removed: [], changed: [{ before: rule, after }] };
+  const t = text(await render("/src/views/Rules.svelte", { policy: { ...same, file } }));
+  assert.match(t, new RegExp(`Changed ${rule.name} Allowed .* Iris proposed it Added 2026-11-12 Before: You wrote it, Added ${rule.added}, Archive`));
+});
+
+test("the apply mode says what Iris does not do", async () => {
+  const t = text(await render("/src/views/Rules.svelte", { policy: same }));
+  assert.match(t, /Apply Iris makes the changes that your rules allow\. It never makes a change that a Never rule or a safety limit forbids\. All other changes wait for you\./);
+});
+
+test("the notice above the brief looks at the policy again while it shows", async () => {
+  const { follow } = await load("/src/clock.ts");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = () => new Promise((r) => setImmediate(r));
+  try {
+    const answers = [Promise.resolve("same"), Promise.resolve("invalid")];
+    const seen = [];
+    const stop = follow(() => answers.shift() ?? Promise.resolve("stop"), (v) => seen.push(v), 30000);
+    await flush();
+    assert.deepEqual(seen, ["same"]);
+    mock.timers.tick(30000);
+    await flush();
+    assert.deepEqual(seen, ["same", "invalid"]);
+    stop();
+    mock.timers.tick(60000);
+    await flush();
+    assert.deepEqual(seen, ["same", "invalid"]);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("the brief shows a notice when the policy file waits or has an error", async () => {
