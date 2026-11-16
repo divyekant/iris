@@ -700,6 +700,7 @@ dependencies = [
  "iris-fakegmail",
  "iris-gmail",
  "iris-model",
+ "iris-policy",
  "iris-service",
  "iris-store",
  "iris-sync",
@@ -756,6 +757,17 @@ dependencies = [
  "serde_json",
  "sha2",
  "ureq",
+]
+
+[[package]]
+name = "iris-changeset"
+version = "0.0.0"
+dependencies = [
+ "iris-store",
+ "iris-talk",
+ "rusqlite",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

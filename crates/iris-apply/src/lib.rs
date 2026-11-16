@@ -4,7 +4,8 @@
 //!
 //! The steps of [`apply`]:
 //!
-//! 1. Wait while the active policy has the mode `observe`. Send an action
+//! 1. Expire an action 14 days after its submit. Wait while the active
+//!    policy has the mode `observe`. Send an action
 //!    that a rule approved to review (no ledger yet for the bulk count).
 //!    Deny an action whose hash does not agree with its rows.
 //! 2. Read the labels of each message at Gmail (`format=minimal`), 1,000
@@ -16,7 +17,7 @@
 //! 4. Set the state `applied`, or `failed` after a clear refusal.
 //!
 //! This release has no ledger (R2-03). Before the first write call, the
-//! apply marks the action `applying` (migration 8). A withdraw keeps a
+//! apply marks the action `applying` (migration 9). A withdraw keeps a
 //! marked action approved. After the mark, no call is made again: an
 //! unknown result, a refusal, a read that fails, or the mark of an earlier
 //! apply that stopped gives `failed`. See the failure list in
@@ -96,7 +97,12 @@ pub enum Outcome {
     Review(String),
     /// The mode is `observe`. The action stays `approved` and waits.
     Waiting,
+    /// 14 days passed after the submit: the state is `expired`.
+    Expired,
 }
+
+/// An open action expires 14 days after its submit (section 5.5).
+const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
 /// The label change of a verb.
 struct Change {
@@ -162,7 +168,7 @@ pub struct Token<'a> {
 /// Run one apply at a time, on the one engine thread that writes.
 ///
 /// No provider call of an action is made two times. Before the first write
-/// call, the apply marks the action `applying` (migration 8). After that,
+/// call, the apply marks the action `applying` (migration 9). After that,
 /// each end other than success is `failed`: an unknown result, a refusal,
 /// a read that fails, and an apply that finds the mark of an earlier apply
 /// that stopped. Before the first write call, an error leaves the action
@@ -381,6 +387,20 @@ fn check(
     decided_by: &str,
     approved_hash: Option<String>,
 ) -> Result<Option<Outcome>> {
+    // 14 days after its submit, an open action expires (section 5.5).
+    let expired = store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
+               policy = NULL, reason = NULL,
+               decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+             WHERE id = ?1 AND state = 'approved'
+               AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
+            params![action, EXPIRY_MS],
+        )?)
+    })?;
+    if expired > 0 {
+        return Ok(Some(Outcome::Expired));
+    }
     let active = store.read(iris_policy::active)?;
     if active.policy.mode == Mode::Observe {
         return Ok(Some(Outcome::Waiting));
@@ -427,16 +447,32 @@ fn mirror(store: &Store, account: i64, messages: &[(i64, Vec<String>)]) {
     if messages.is_empty() {
         return;
     }
+    // Only the rows that differ change, so the triggers on message_label
+    // (the model wait, the attention) see only real changes.
     let _ = store.write(|tx| {
-        let mut clear = tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1")?;
+        let mut now = tx.prepare_cached(
+            "SELECT l.id, l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
+             WHERE ml.message_id = ?1",
+        )?;
+        let mut remove =
+            tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1 AND label_id = ?2")?;
         let mut add = tx.prepare_cached(
             "INSERT OR IGNORE INTO message_label(message_id, label_id)
              SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
         )?;
         for (id, labels) in messages {
-            clear.execute([id])?;
+            let have: Vec<(i64, String)> = now
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (label, provider_id) in &have {
+                if !labels.contains(provider_id) {
+                    remove.execute(params![id, label])?;
+                }
+            }
             for l in labels {
-                add.execute(params![id, account, l])?;
+                if !have.iter().any(|(_, p)| p == l) {
+                    add.execute(params![id, account, l])?;
+                }
             }
         }
         Ok(())
@@ -444,7 +480,7 @@ fn mirror(store: &Store, account: i64, messages: &[(i64, Vec<String>)]) {
 }
 
 /// Move an approved action to `applied` or `failed`. The decision that
-/// approved it stays (migration 8).
+/// approved it stays (migration 9).
 fn finish(store: &Store, action: i64, state: &str) -> Result<()> {
     let n = store.write(|tx| {
         Ok(tx.execute(

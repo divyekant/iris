@@ -85,6 +85,15 @@ impl Box {
     /// An action of `verb` on `messages`, submitted and approved by
     /// `decision`. Gives the action ID.
     fn approved(&self, verb: &str, messages: &[i64], decision: &str) -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        self.approved_at(verb, messages, decision, now)
+    }
+
+    /// As `approved`, with the submit time `submitted` (milliseconds).
+    fn approved_at(&self, verb: &str, messages: &[i64], decision: &str, submitted: i64) -> i64 {
         self.store
             .write(|tx| {
                 tx.execute(
@@ -110,8 +119,8 @@ impl Box {
                     params![a, h],
                 )?;
                 tx.execute(
-                    "UPDATE changeset SET why = 'w', submitted_at = 1 WHERE id = ?1",
-                    [cs],
+                    "UPDATE changeset SET why = 'w', submitted_at = ?2 WHERE id = ?1",
+                    params![cs, submitted],
                 )?;
                 tx.execute(
                     &format!(
@@ -335,6 +344,51 @@ fn a_withdraw_during_the_apply_keeps_the_action() {
     assert!(matches!(b.apply(a), Ok(Outcome::Failed { .. })));
     assert_eq!(b.state(a), ("failed".into(), "person".into()));
     assert_eq!(b.fake.requests().len(), before);
+}
+
+/// A mirror write changes only the labels that differ: a message with the
+/// target state keeps its model wait.
+#[test]
+fn an_unchanged_message_keeps_its_rows() {
+    let b = setup("rows", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "DELETE FROM message_label WHERE message_id = ?1 AND label_id =
+                   (SELECT id FROM label WHERE provider_id = 'INBOX')",
+                [ms[0]],
+            )?;
+            tx.execute("UPDATE message SET waits_model = 1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let a = b.approved("archive", &ms, PERSON);
+    applied(b.apply(a));
+    let waits = |m: i64| -> i64 {
+        b.store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT waits_model FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!((waits(ms[0]), waits(ms[1])), (1, 0));
+}
+
+/// 14 days after the submit, the action expires and applies nothing.
+#[test]
+fn an_old_action_expires() {
+    let b = setup("expire", 40, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved_at("archive", &ms, PERSON, 1);
+    assert_eq!(b.apply(a).unwrap(), Outcome::Expired);
+    assert_eq!(b.state(a), ("expired".into(), "expiry".into()));
+    assert_eq!(b.calls("messages"), 0);
 }
 
 /// More than 1,000 messages: one batchModify call for each 1,000.

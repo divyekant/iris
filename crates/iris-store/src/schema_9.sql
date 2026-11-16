@@ -1,4 +1,4 @@
--- Migration 8: the apply of an approved action (specification 2, section
+-- Migration 9: the apply of an approved action (specification 2, section
 -- 7.2, card R2-02). The trigger action_state of migration 7 gets the moves
 -- approved to applied and approved to failed. The engine writes them after
 -- the provider calls of the action. The action keeps the decision that

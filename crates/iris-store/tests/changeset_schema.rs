@@ -53,7 +53,7 @@ fn allowed(from: Option<&str>) -> &'static [&'static str] {
             "replaced",
         ],
         Some("in_review") => &["approved", "denied", "expired", "cancelled", "replaced"],
-        // approved to held comes with release 3. Migration 8 adds applied
+        // approved to held comes with release 3. Migration 9 adds applied
         // and failed (R2-02). The ledger migration (R2-03) adds undone.
         Some("approved") => &[
             "in_review",
@@ -840,7 +840,7 @@ fn a_submitted_action_does_not_change() {
     );
 }
 
-/// Migration 8: an approved action becomes applied or failed, and keeps
+/// Migration 9: an approved action becomes applied or failed, and keeps
 /// the decision that approved it. No undo before the ledger (R2-03), and
 /// no flag on a closed action.
 #[test]
