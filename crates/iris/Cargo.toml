@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 clap = { version = "4", features = ["derive"] }
+iris-api = { version = "0.0.0", path = "../iris-api" }
 iris-auth = { version = "0.0.0", path = "../iris-auth" }
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-store = { version = "0.0.0", path = "../iris-store" }

@@ -99,6 +99,24 @@ encrypted with the `key` file of the data folder.
 
 CAUTION: The backup folder holds the key and your mail. Keep it private.
 
+`iris serve` prints the address of the web client with a one-time code.
+Open that address to sign in the browser.
+
+## Read the mirror
+
+These commands read the store. Add `--json` to get the JSON of the local API.
+
+| Command | Gives |
+|---|---|
+| `iris status` | The accounts, the state of the sync and the message counts |
+| `iris search "<text>"` | The messages that match the search text, newest first |
+| `iris show <id>` | One message (`m-42`) or one item (`c-7`) |
+| `iris mirror sync` | One sync of each account now |
+| `iris mirror verify` | A compare of the mirror with Gmail, and a check of the content files |
+
+The text of a message is data. `iris show` removes the control characters, so
+a message cannot send commands to your terminal.
+
 To copy the data folder while the engine runs, run:
 
 ```bash
