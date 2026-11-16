@@ -1251,3 +1251,20 @@ fn a_gone_message_leaves_the_conversation() {
     );
     assert_eq!(count(), 1);
 }
+
+#[test]
+fn a_message_over_the_read_limit_is_cut_text_for_the_model() {
+    let b = store("large");
+    b.kind("no-reply@bank.example", "Bank", "service");
+    // A code message with a large attachment after the text.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <no-reply@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nYour code: 482913\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    let out = understand(&b.store, m, &fake, NOW).unwrap();
+    // The fixed code rule does not fire on cut text: the model reads it.
+    assert_eq!((out.calls, fake.calls.borrow().len()), (1, 1));
+    assert!(fake.calls.borrow()[0].1.contains("Your code: 482913"));
+}

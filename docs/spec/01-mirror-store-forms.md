@@ -754,6 +754,9 @@ rebuild uses the same order.
   size.
 - The clean text has a limit of 32,000 characters for each message. The engine
   cuts longer text and marks the cut.
+- The engine reads at most 8 MiB of the raw message, so that one message
+  stays inside the memory budget (M3). A longer message counts as cut text
+  (section 7.3, rule 2), and parts after the limit are lost.
 
 ### 7.3 Fixed rules
 
