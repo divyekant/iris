@@ -69,6 +69,8 @@ struct Msg {
     labels: Vec<String>,
     /// `None`: the message has no date.
     date: Option<i64>,
+    /// The date of the message row, which counts when there is no header date.
+    internal: Option<i64>,
     items: Vec<(i64, Item)>,
 }
 
@@ -157,6 +159,7 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                     };
                     items.push((item, it));
                 }
+                let internal = if in_header { None } else { Some(date) };
                 // With no header, a date only in the header is no date.
                 let date = if addr.is_empty() && in_header { None } else { Some(date) };
                 out.push(Msg {
@@ -170,6 +173,7 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                     hostile,
                     labels,
                     date,
+                    internal,
                     items,
                 });
             }
@@ -461,11 +465,11 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
         let mut mail = mailbox(&s, &mut rng);
         // Each new item marks its message.
         assert_eq!(due(&s).len(), mail.len(), "seed {seed}: new items");
+        // A store from before migration 7 has items and no mark: the
+        // first refresh evaluates each item.
+        sql(&s, "DELETE FROM attention_due", []);
         // With no policy, each item is shown.
-        assert_eq!(
-            refresh_attention(&s, NOW, false).unwrap(),
-            mail.len() as u64
-        );
+        assert_eq!(refresh_attention(&s, NOW).unwrap(), mail.len() as u64);
         assert!(stored(&s)
             .iter()
             .all(|(_, f)| f.0.as_deref() == Some("shown")));
@@ -544,6 +548,7 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                                 "UPDATE message SET internal_date = ?2 WHERE id = ?1",
                                 [id, d * 1000],
                             );
+                            m.internal = Some(d);
                         } else {
                             sql(
                                 &s,
@@ -659,7 +664,8 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                             marked.push(msg_id(j));
                         }
                     }
-                    // A header that comes after the items.
+                    // A header that comes after the items, or the cleanup of
+                    // gone mail that deletes the header.
                     8 => {
                         let m = &mut mail[i];
                         if m.sender.is_empty() {
@@ -667,8 +673,12 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
                             sql(&s, "INSERT INTO header(message_id, date, from_addr) VALUES (?1, ?2, 'ann@friends.example')", [id, d * 1000]);
                             m.sender = "ann@friends.example".into();
                             m.date = Some(d);
-                            marked.push(id);
+                        } else {
+                            sql(&s, "DELETE FROM header WHERE message_id = ?1", [id]);
+                            m.sender = String::new();
+                            m.date = m.internal;
                         }
+                        marked.push(id);
                     }
                     // A new name of a label: each message with it.
                     _ => {
@@ -716,7 +726,7 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
             for id in &marked {
                 assert!(now_due.contains(id), "{what}: message {id} is not marked");
             }
-            refresh_attention(&s, t, false).unwrap();
+            refresh_attention(&s, t).unwrap();
             assert!(due(&s).is_empty(), "{what}: a refresh clears each mark");
             for ((id, g), (_, w)) in stored(&s).iter().zip(expected(&policy, &mail, t)) {
                 assert!(agrees(g, w, &policy), "{what} item {id}: {g:?} != {w:?}");
@@ -728,13 +738,12 @@ fn each_fact_change_gets_the_attention_of_the_policy_after_a_refresh() {
             due(&s).is_empty(),
             "seed {seed}: the attention write marked a message"
         );
-        // With `all`, each item, also with no mark: a rule with
+        // Each hour, each item, also with no mark: a rule with
         // `older_than_days` matches more items as time goes on.
+        assert_eq!(refresh_attention(&s, t + PASS_EVERY - 1).unwrap(), 0);
         let later = NOW + 40 * DAY;
-        assert_eq!(
-            refresh_attention(&s, later, true).unwrap(),
-            mail.len() as u64
-        );
+        assert_eq!(refresh_attention(&s, later).unwrap(), mail.len() as u64);
+        assert_eq!(refresh_attention(&s, later + 60).unwrap(), 0);
         for ((id, g), (_, w)) in stored(&s).iter().zip(expected(&policy, &mail, later)) {
             assert!(
                 agrees(g, w, &policy),

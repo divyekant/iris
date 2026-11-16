@@ -9,7 +9,7 @@
 
 mod active;
 mod attention;
-pub use attention::refresh as refresh_attention;
+pub use attention::{refresh as refresh_attention, PASS_EVERY};
 mod edit;
 mod eval;
 

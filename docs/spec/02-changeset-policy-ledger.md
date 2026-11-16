@@ -468,11 +468,15 @@ The engine evaluates the attention of an item again at these times:
 - When a fact that a rule reads changes: a new item or a new origin of an
   item, the form, the record type or the commitment kind of the item, or the
   labels, a label name, the hostile marks, the date or the sender kind of
-  its origin message. A store trigger marks the message, and the engine
-  evaluates its items within about 10 seconds. Until then, an item keeps its
-  last attention, and a new item has no `attention` field.
-- Each hour, for each item: an `older_than_days` rule matches more items as
-  time goes on, with no change in the store.
+  its origin message, also when the cleanup of gone mail deletes the header.
+  A store trigger marks the message. `iris serve` evaluates its items within
+  about 10 seconds, and `iris mirror` and `iris understand` before they exit.
+  Until then, an item keeps its last attention, and a new item has no
+  `attention` field.
+- One hour after the last evaluation of each item, for each item: an
+  `older_than_days` rule matches more items as time goes on, with no change
+  in the store. The store keeps the time of that evaluation, so the first
+  evaluation after an upgrade is for each item.
 
 ### 6.5 Hard limits
 

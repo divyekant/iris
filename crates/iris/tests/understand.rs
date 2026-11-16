@@ -536,3 +536,50 @@ fn mail_refused_for_the_budget_waits_until_an_approval() {
         iris::cost::AfterSync::Ran { .. }
     ));
 }
+
+#[test]
+fn iris_understand_writes_the_attention_of_new_items() {
+    let (store, _fake) = synced("understand-attention");
+    // An active `hide` rule for the feed (spec 2 section 6.4).
+    std::fs::write(
+        store.dir().join(iris_policy::FILE),
+        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 1\nname = \"Hide the feed\"\neffect = \"hide\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-16\n",
+    )
+    .unwrap();
+    let sha = match iris_policy::file_state(&store).unwrap() {
+        iris_policy::FileState::Changed(l) => l.sha256,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        iris_policy::confirm(&store, &sha, 1_800_000_000).unwrap(),
+        iris_policy::Confirm::Done { .. }
+    ));
+    // A new item after the confirmation, as an understanding run makes it.
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT 'feed', account_id, 'new', '{}', 0, 0 FROM message LIMIT 1",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), min(id), 'origin' FROM message",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // With no model, the run fails. The attention is written all the same.
+    let _ = iris(&store, &["understand"]);
+    let state: Option<String> = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT json_extract(doc, '$.attention.state') FROM item WHERE form = 'feed'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state.as_deref(), Some("hidden"));
+}

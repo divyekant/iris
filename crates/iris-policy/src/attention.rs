@@ -24,6 +24,11 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
     evaluate_messages(tx, policy, now, &messages)?;
     // Each item is current now.
     tx.execute("DELETE FROM attention_due", [])?;
+    tx.execute(
+        "INSERT INTO attention_pass(id, at) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET at = excluded.at",
+        [now],
+    )?;
     Ok(())
 }
 
@@ -31,22 +36,37 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
 /// sync does not wait long for the write lock.
 const BATCH: i64 = 1000;
 
+/// The time between two evaluations of each item by [`refresh`], in seconds.
+pub const PASS_EVERY: i64 = 3600;
+
 /// Writes the attention of the items of each message in `attention_due`,
 /// with the active policy, at the time `now` (seconds since 1970-01-01 UTC),
-/// in transactions of at most [`BATCH`] messages. With `all`, each item:
-/// this is for the rules with `older_than_days`, whose match changes with
-/// time. Gives the number of messages.
-pub fn refresh(store: &Store, now: i64, all: bool) -> Result<u64> {
-    if all {
-        store.write(|tx| {
+/// in transactions of at most [`BATCH`] messages. If the last evaluation of
+/// each item is [`PASS_EVERY`] or more from `now`, or there is none, first
+/// marks each message: a rule with `older_than_days` matches more items as
+/// time goes on. Gives the number of messages.
+pub fn refresh(store: &Store, now: i64) -> Result<u64> {
+    store.write(|tx| {
+        let last: Option<i64> = tx
+            .query_row("SELECT at FROM attention_pass WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        // Also a clock that went back.
+        if last.is_none_or(|at| (now - at).abs() >= PASS_EVERY) {
             tx.execute(
                 "INSERT OR IGNORE INTO attention_due(message_id)
                  SELECT DISTINCT message_id FROM item_source WHERE role = 'origin'",
                 [],
             )?;
-            Ok(())
-        })?;
-    }
+            tx.execute(
+                "INSERT INTO attention_pass(id, at) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET at = excluded.at",
+                [now],
+            )?;
+        }
+        Ok(())
+    })?;
     let mut done = 0;
     loop {
         let n = store.write(|tx| {

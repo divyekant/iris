@@ -7,6 +7,15 @@ CREATE TABLE attention_due (
   message_id INTEGER PRIMARY KEY REFERENCES message(id) ON DELETE CASCADE
 );
 
+-- The time of the last evaluation of each item (seconds since 1970-01-01
+-- UTC). A rule with `older_than_days` matches more items as time goes on,
+-- with no change in the store, so the engine evaluates each item again each
+-- hour. No row: each item is due, as after this migration.
+CREATE TABLE attention_pass (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  at INTEGER NOT NULL
+);
+
 -- A new item of the message (an origin source).
 CREATE TRIGGER attention_due_source AFTER INSERT ON item_source
   WHEN NEW.role = 'origin'
@@ -88,6 +97,13 @@ CREATE TRIGGER attention_due_header AFTER UPDATE OF from_addr, date ON header
 BEGIN
   INSERT OR IGNORE INTO attention_due(message_id) SELECT NEW.message_id
     WHERE EXISTS (SELECT 1 FROM item_source WHERE message_id = NEW.message_id AND role = 'origin');
+END;
+
+-- The cleanup of gone mail deletes the header: no sender, and maybe another date.
+CREATE TRIGGER attention_due_header_remove AFTER DELETE ON header
+BEGIN
+  INSERT OR IGNORE INTO attention_due(message_id) SELECT OLD.message_id
+    WHERE EXISTS (SELECT 1 FROM item_source WHERE message_id = OLD.message_id AND role = 'origin');
 END;
 
 -- The kind of a sender: each message from that address. `from_addr` is the

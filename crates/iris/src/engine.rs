@@ -311,23 +311,14 @@ fn understand_loop(store: Arc<Store>) {
 /// The time between two turns of the attention thread.
 pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 
-/// The time between two evaluations of each item by the attention thread.
-/// A rule with `older_than_days` matches more items as time goes on, with
-/// no change in the store.
-pub const ATTENTION_ALL_EVERY: Duration = Duration::from_secs(3600);
-
 /// The attention thread (spec 2 section 6.4): each [`ATTENTION_EVERY`], the
-/// attention of the items whose origin message changed, and each
-/// [`ATTENTION_ALL_EVERY`] the attention of each item. It is apart from the
+/// attention of the items whose origin message changed, and each hour of
+/// each item ([`iris_policy::refresh_attention`]). It is apart from the
 /// understanding thread, because one understanding run can take hours.
 fn attention_loop(store: Arc<Store>) {
-    let mut last_all: Option<Instant> = None;
     loop {
-        let all = last_all.is_none_or(|t| t.elapsed() >= ATTENTION_ALL_EVERY);
-        match iris_policy::refresh_attention(&store, now_ms().div_euclid(1000), all) {
-            Ok(_) if all => last_all = Some(Instant::now()),
-            Ok(_) => {}
-            Err(e) => say!("iris: attention: {e}"),
+        if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
+            say!("iris: attention: {e}");
         }
         std::thread::sleep(ATTENTION_EVERY);
     }
