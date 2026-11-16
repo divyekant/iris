@@ -2160,4 +2160,20 @@ mod tests {
         assert!(d.maps.is_empty());
         assert_eq!(d.map_left, MAP_BUDGET);
     }
+
+    #[test]
+    fn a_tj_gap_in_a_cid_font_is_a_space() {
+        let content = b"BT /F1 12 Tf [<00010002000300030005> -300 <00060005000700030008>] TJ ET";
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< >>", Some(content)),
+            (5, TYPE0, None),
+            (6, "<< >>", Some(CMAP)),
+        ]);
+        assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
+    }
 }
