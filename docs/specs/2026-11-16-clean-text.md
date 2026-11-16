@@ -1,7 +1,7 @@
 # Spec: Clean text of one message
 
 - Date: 2026-11-16
-- Card: R1-08
+- Card: R1-08 (CID fonts and `ToUnicode`: R1-25)
 - Status: Built
 
 ## Problem
@@ -25,7 +25,8 @@ each input.
 
 - The full CSS cascade, CSS layout and CSS selectors other than the subset in
   [Hidden HTML](#hidden-html).
-- PDF fonts with their own code map (CID fonts, `ToUnicode`). Card R1-25.
+- PDF font encodings other than Windows-1252 and a `ToUnicode` map:
+  `/Differences`, `/MacRomanEncoding`, and the predefined CMaps of CID fonts.
 - The model and the fixed rules (specification 1, sections 7.3 and 7.4).
 - The detection of hostile mail (specification 1, section 6.7).
 
@@ -253,8 +254,9 @@ history go out.
 A PDF gives text only if its decoded size is at most `PDF_LIMIT` (10 MiB) and
 its first 1 KiB holds `%PDF`.
 
-- Streams: the reader reads the PDF once from the start, outside strings
-  and comments, and finds each `stream` keyword. Its dictionary is the text
+- Streams: the reader reads the PDF once from the start, outside strings,
+  comments and names (`/stream` is a name), and finds each `stream` keyword.
+  The `<<` of a dictionary is not the start of a hex string. Its dictionary is the text
   after the last object header (`<number> <number> obj`) before it. A
   dictionary longer than 4 KiB is not read. The data ends at the direct
   `/Length` key (not `/Length1` or another key that starts with `/Length`)
@@ -266,12 +268,48 @@ its first 1 KiB holds `%PDF`.
   `/FlateDecode` or `[/FlateDecode]` is inflated, at most 4 MiB for each stream and 32 MiB for each PDF. A
   stream with another filter is skipped.
 - Streams with `/Image`, `/Length1`, `/Length2`, `/Metadata`, `/XRef`,
-  `/ObjStm`, `/FontFile` or `/EmbeddedFile` are skipped.
+  `/ObjStm`, `/FontFile` or `/EmbeddedFile` are not read as content.
+- Objects: the reader keeps the body of each object without a stream
+  (`<number> <number> obj` to `endobj`) of at most 16 KiB, and of each
+  object in an object stream (`/Type /ObjStm`, `/N`, `/First`). It keeps
+  at most 4 MiB of bodies for each PDF, with 64 bytes more for each body.
+  A later object or stream of the same number replaces the earlier body
+  and code map. If the later object is not kept, the earlier one goes out
+  too.
+- Code maps: a stream whose data holds `begincmap` is a code map of its
+  object number. The reader reads its `begincodespacerange` (at most 16),
+  `beginbfchar` and `beginbfrange` entries, with a direct destination or an
+  array of destinations (at most 255 items). Each map costs 376 bytes (on a 64-bit system, with its code space), each
+  entry 16 bytes and each UTF-16 unit 2 bytes of a budget of 1 MiB for
+  each PDF. A map that does not fit in the rest of the budget is not
+  kept, also not in part, and gives its cost back. A replaced map gives its
+  cost back. A
+  destination has at most 64 units. Entries can overlap: of the 64
+  entries with the nearest start codes at or before a code, the nearest
+  entry that holds the code gives its text. The keyword `begincmap` counts only
+  outside the strings and comments of the stream.
+- Text waits in one buffer of at most two times the text budget, with the
+  font of each string. The fonts and the maps can come after the content.
+- Font of a string: the name of the last `Tf`, also from the stream before.
+  The reader finds the font in the `/Resources` of the stream dictionary
+  (a form), else in the `/Resources` of the page (`/Type /Page`) whose
+  `/Contents` holds the stream, else in the nearest `/Parent` of the page
+  that has them. A loop of parents ends at the first node that comes
+  again. A resources dictionary, its `/Font` dictionary and the font
+  can each be direct or a reference. At most 4,096 fonts (a stream and a
+  name) for each PDF. The strings of more fonts read as Windows-1252.
+- Decode: a font with a `/ToUnicode` map reads codes through the map. The
+  code length comes from the code space. Without a code space, it is the
+  shortest code with an entry, else 2 bytes for a `/Type0` font and 1 byte
+  for another font. A code without an entry gives no text in a `/Type0`
+  font and Windows-1252 in another font. A `/Type0` font without a map
+  gives no text. A font that the reader does not find, or a font that is
+  not `/Type0` and has no map, reads as Windows-1252.
 - The reader reads the names of a stream dictionary (`/Length`, `/Filter`
   and the names above) only outside its strings, comments and inner
   dictionaries.
 - Text: the strings of `Tj`, `TJ`, `'` and `"`, only between `BT` and `ET`,
-  as Windows-1252. A text rendering mode (`Tr`) of 3 or 7 hides the strings
+  decoded as the font says (see Decode above). A text rendering mode (`Tr`) of 3 or 7 hides the strings
   until the next `Tr`. `T*`, `Tm`, `ET`, `'`, `"`, and `Td` or `TD` with a
   vertical move start a new line. A gap of more than 200 units in a `TJ`
   array is a space.
@@ -280,8 +318,10 @@ its first 1 KiB holds `%PDF`.
   `.,;:!?'"()-/%&@€$£#*+=`. If not, `text` is `None`.
 - The check reads at least 4,096 bytes of text, also when less budget is
   left. Then the text is clipped to the budget. If the reader stops at a
-  limit before the end of the PDF (the text budget, the stream limit or
-  the 32 MiB inflate limit of each PDF), the text gets `CUT_MARK`, also when
+  limit before the end of the PDF (the text budget, also when it cuts off
+  part of a character, the string buffer, the
+  stream limit of a content stream or the 32 MiB inflate limit of each PDF.
+  Code maps and object streams count in the 32 MiB), the text gets `CUT_MARK`, also when
   trimmed white space makes the text shorter than the budget.
 
 ### Known limits
@@ -305,8 +345,11 @@ client. They are not defects of this design:
   `remove_repeated_end` finds it in a thread.
 - PDF: text hidden by a white fill, by clipping, by a position off the page,
   by a small font or by an object on top of it stays. A content stream that
-  no page uses gives its text too. Text in a font with its own code map
-  fails the quality check (card R1-25). An encrypted PDF gives no text.
+  no page uses gives its text too. A form without its own `/Resources`
+  reads as Windows-1252. A font with another encoding than Windows-1252 or
+  a `ToUnicode` map (see Not in scope) can fail the quality check. An
+  object stream with a `/DecodeParms` predictor gives wrong objects. An
+  encrypted PDF gives no text.
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
 
@@ -370,7 +413,8 @@ None.
   limit table, the cascade order, the reply rules, the link targets and the
   attachment budget order. A change of one of these rules makes a test go red.
 - `tests/bounds.rs` measures the heap peak: below 8 MiB for a 36 MB message
-  with HTML and an attachment, below 16 MiB for a PDF of 9 MiB. A copy of a
+  with HTML and an attachment, below 16 MiB for a PDF of 9 MiB, below
+  12 MiB for a PDF with a dense code map of 4 MiB. A copy of a
   whole part or of an attachment makes it go red.
 
 ## Verify
