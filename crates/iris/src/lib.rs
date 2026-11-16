@@ -89,6 +89,9 @@ pub fn run(cli: Cli) -> Result<(), String> {
 fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Result<(), String> {
     let json = std::fs::read(client_path).map_err(|e| format!("{}: {e}", client_path.display()))?;
     let client = test_token_uri(iris_auth::Client::from_json(&json).map_err(|e| e.to_string())?)?;
+    // Check the Gmail settings before the sign-in, so a bad setting fails
+    // before a token exists.
+    let gmail = gmail()?;
     let sign_in = client.sign_in().map_err(|e| e.to_string())?;
     eprintln!(
         "iris: open this address in a browser and sign in:\n{}",
@@ -107,7 +110,7 @@ fn account_add(store: &Store, client_path: &std::path::Path, paste: bool) -> Res
     }
     .map_err(|e| e.to_string())?;
     let (_, address) =
-        engine::save_sign_in(store, &gmail()?, &json, &tokens).map_err(|e| e.to_string())?;
+        engine::save_sign_in(store, &gmail, &json, &tokens).map_err(|e| e.to_string())?;
     println!("iris: added {address}");
     if tokens.refresh_expires_in.is_some() {
         eprintln!(

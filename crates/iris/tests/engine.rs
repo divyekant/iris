@@ -313,11 +313,16 @@ fn test_overrides_refuse_an_address_that_is_not_local() {
     let dir = data_dir("override");
     let client = dir.with_extension("client.json");
     std::fs::write(&client, client_json()).unwrap();
-    for (var, value) in [
-        ("IRIS_TEST_TOKEN_URI", "https://attacker.example/token"),
+    for (var, value, error) in [
+        (
+            "IRIS_TEST_TOKEN_URI",
+            "https://attacker.example/token",
+            "iris: the OAuth client file is not usable: a test endpoint must be http://127.0.0.1:<port>/",
+        ),
         (
             "IRIS_TEST_GMAIL_URL",
             "http://127.0.0.1:80@attacker.example/gmail/v1",
+            "iris: IRIS_TEST_GMAIL_URL must be http://127.0.0.1:<port>",
         ),
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_iris"))
@@ -328,11 +333,10 @@ fn test_overrides_refuse_an_address_that_is_not_local() {
             .stdin(Stdio::null())
             .output()
             .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{var}");
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("127.0.0.1"),
-            "{var}: {out:?}"
-        );
+        // The command stops before the sign-in starts: no token can exist.
+        assert_eq!(stderr.trim(), error, "{var}");
     }
 }
 
