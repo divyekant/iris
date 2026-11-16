@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { greeting, liveCode, party, partyKey, summary, when } from "../format";
+  import { greeting, liveCode, party, partyKey, placeStrangers, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
@@ -18,21 +18,23 @@
   }: { brief: Brief; status?: Status | null; now?: Date; poll?: number } = $props();
 
   // svelte-ignore state_referenced_locally
-  let brief = $state(firstBrief);
+  let loaded = $state(firstBrief);
+  let brief = $derived(placeStrangers(loaded));
   // svelte-ignore state_referenced_locally
   let status = $state(firstStatus);
   // svelte-ignore state_referenced_locally
   let now = $state(start);
   const ready = (s: Status | null) => !s || s.accounts.some((a) => a.mirror_ready_at);
 
-  // Spec 1 section 4.2: the brief grows while the first sync runs. Load it again until the mirror is ready.
+  // Load the brief again while it is open: every 5 seconds while the first sync
+  // runs (spec 1 section 4.2), then every minute for new mail.
+  let syncing = $derived(!ready(status));
   $effect(() => {
-    if (!poll || ready(status)) return;
+    if (!poll) return;
     return every(
       () => Promise.all([get<Brief>("brief"), get<Status>("status")]),
-      ([b, s]) => ((brief = b), (status = s)),
-      poll,
-      ([, s]) => ready(s),
+      ([b, s]) => ((loaded = b), (status = s)),
+      syncing ? poll : poll * 12,
     );
   });
 
@@ -42,20 +44,12 @@
   // At the expiry of the first live code, the code moves from the top to Signals.
   let nextExpiry = $derived(codes.map((i) => i.expires!).sort()[0]);
   $effect(() => (nextExpiry ? watch(nextExpiry, (d) => (now = d)) : undefined));
-  let shown = $derived(new Set(brief.conversations.items.map((i) => i.id)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
   let parts = $derived([
     { key: "you_owe", title: "You owe", ...brief.you_owe },
     { key: "owed_to_you", title: "Owed to you", ...brief.owed_to_you },
     { key: "conversations", title: "Conversations", ...brief.conversations },
-    // A conversation with a stranger is in both sections of the API. It shows once, under Conversations.
-    {
-      key: "strangers",
-      title: "From senders you do not know",
-      ...brief.strangers,
-      count: brief.strangers.count - brief.strangers.items.filter((i) => shown.has(i.id)).length,
-      items: brief.strangers.items.filter((i) => !shown.has(i.id)),
-    },
+    { key: "strangers", title: "From senders you do not know", ...brief.strangers },
     {
       key: "signals",
       title: "Signals",

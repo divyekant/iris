@@ -217,11 +217,22 @@ test("the brief shows the triage proposal and says that nothing is applied", asy
   assert.doesNotMatch(none, /Triage proposal/);
 });
 
-test("a stranger conversation shows once in the brief", async () => {
+test("a stranger conversation shows once, under strangers", async () => {
   const brief = { ...fx.brief, strangers: { count: 1, items: [item("v-88")] } };
-  const html = await render("/src/views/Brief.svelte", { brief, now: NOW });
+  const html = await render("/src/views/Brief.svelte", { brief, now: NOW, poll: 0 });
   assert.equal((html.match(/href="#\/item\/v-88"/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /id="strangers"/);
+  assert.match(html, /id="strangers"/);
+  assert.doesNotMatch(html, /id="conversations"/);
+  assert.doesNotMatch(text(html), /conversation waits/);
+});
+
+test("copy says so when the browser refuses the clipboard", async () => {
+  const { copyText } = await load("/src/format.ts");
+  const written = [];
+  assert.equal(await copyText("482913", { writeText: async (t) => written.push(t) }), true);
+  assert.deepEqual(written, ["482913"]);
+  assert.equal(await copyText("482913", { writeText: () => Promise.reject(new DOMException("denied", "NotAllowedError")) }), false);
+  assert.equal(await copyText("482913", undefined), false);
 });
 
 test("the setup flow opens the first brief while the copy continues", async () => {

@@ -5,20 +5,19 @@
 <script lang="ts">
   import type { Item } from "../api";
   import { watch } from "../clock";
-  import { liveCode, party, timeLeft } from "../format";
+  import { copyText, liveCode, party, timeLeft } from "../format";
   import { href } from "../route";
 
   let { item, now: start = new Date() }: { item: Item; now?: Date } = $props();
   // svelte-ignore state_referenced_locally
   let now = $state(start);
-  let copied = $state(false);
+  let copied = $state<"" | "done" | "failed">("");
 
   $effect(() => (item.expires ? watch(item.expires, (d) => (now = d)) : undefined));
 
   async function copy() {
-    await navigator.clipboard.writeText(item.code ?? "");
-    copied = true;
-    setTimeout(() => (copied = false), 2000);
+    copied = (await copyText(item.code ?? "")) ? "done" : "failed";
+    setTimeout(() => (copied = ""), 4000);
   }
 </script>
 
@@ -29,7 +28,8 @@
       <a href={href.item(item.id)}>{party(item.issuer)}</a>
       <span>Ends {timeLeft(item.expires, now)}</span>
     </div>
-    <button type="button" onclick={copy}>{copied ? "Copied" : "Copy"}</button>
+    <button type="button" onclick={copy}>{copied === "done" ? "Copied" : "Copy"}</button>
+    {#if copied === "failed"}<p class="failed" role="status">The browser did not allow the copy. Select the code and copy it.</p>{/if}
   </div>
 {/if}
 
@@ -44,7 +44,14 @@
     border-radius: var(--radius-lg);
     background: var(--color-background-elevated);
   }
+  .failed {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
   .digits {
+    user-select: all;
     margin: 0;
     font-family: var(--font-family-mono);
     font-size: var(--font-size-3);
