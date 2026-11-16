@@ -2112,4 +2112,33 @@ mod tests {
         ]);
         assert_eq!(text(&pdf, 1000).as_deref(), Some("Hello World"));
     }
+
+    #[test]
+    fn a_map_past_the_budget_is_not_kept() {
+        // The codes of `CODES` come first, then more entries than the budget.
+        let mut big = CMAP.to_vec();
+        big.truncate(
+            big.len() - b"endcmap CMapName currentdict /CMap defineresource pop end end".len(),
+        );
+        big.extend_from_slice(b"1 beginbfrange");
+        for n in 0..70_000u32 {
+            big.extend(format!(" <{:08X}> <{:08X}> <0041>", n, n).bytes());
+        }
+        big.extend_from_slice(b" endbfrange endcmap");
+        let pdf = doc(&[
+            (
+                2,
+                "<< /Type /Page /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+                None,
+            ),
+            (3, "<< >>", Some(CODES)),
+            (5, TYPE0, None),
+            (6, "<< >>", Some(&big)),
+        ]);
+        assert_eq!(text(&pdf, 1000), None);
+        let mut d = Doc::new(100);
+        d.add_map(6, &big);
+        assert!(d.maps.is_empty());
+        assert_eq!(d.map_left, MAP_BUDGET);
+    }
 }
