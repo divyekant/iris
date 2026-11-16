@@ -103,8 +103,7 @@ const PROMO_WORDS: [&str; 8] = [
 /// and the message goes to the model. Hostile mail (a hostile mark or a
 /// `hostile` sender) matches the hostile rule: no item and no model call.
 ///
-/// The quote of a rule item is the line that the rule matched: the subject
-/// for a list and an invitation (`(no subject)` if it is empty), the code
+/// The quote of a rule item is the line that the rule matched: the code
 /// line for a code (spec 1 section 7.5).
 pub fn apply(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     let drafts = matched(a, cx)?;
@@ -121,51 +120,24 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     if cx.kind == Kind::Hostile || !a.marks.is_empty() {
         return Some(Vec::new());
     }
-    // A receipt or a statement can hold a code, a calendar request or a
-    // List-Id too: the model reads it, so that the record and the payment
-    // are not lost.
-    // A file can hold a record that no word of the text names. The
-    // calendar part of an invitation is no such file. A cut text can hold a
-    // record after the cut.
-    let file = a.text.attachments.iter().any(|(_, mime, _)| {
-        // `invitation` holds only if each calendar part is a request.
-        let calendar = mime.eq_ignore_ascii_case("text/calendar")
-            || mime.eq_ignore_ascii_case("application/ics");
-        !(a.text.invitation && calendar)
-    });
-    // A calendar part that is not a request, also in an alternative that
-    // gives no text and no attachment.
-    let other_calendar = a.text.has_calendar && !a.text.invitation;
-    if a.text.cut || a.text.calendar_cut || file || other_calendar || looks_like_record(a) {
+    // Only one rule makes an item: an exact sign-in code from a service.
+    // Each sign of other content sends the message to the model:
+    // - a cut text, or any file: they can hold a record that no word of the
+    //   text names;
+    // - a calendar request: an invitation for the model;
+    // - a list header: list mail can hold any content (issue #96);
+    // - a word of a record, a payment, a booking, a ticket or an event.
+    let list = a.head.list_id.is_some() || a.head.list_unsubscribe;
+    if a.text.cut
+        || !a.text.attachments.is_empty()
+        || a.text.invitation
+        || list
+        || looks_like_record(a)
+        || !words(&full_text(a), &BOOKING_WORDS).is_empty()
+    {
         return None;
     }
     let subject = a.text.subject.as_str();
-    let quote = or_none(subject);
-    // You owe an answer only to a request that names you as a recipient.
-    let to_me = a
-        .head
-        .to
-        .iter()
-        .chain(&a.head.cc)
-        .any(|r| r.eq_ignore_ascii_case(cx.me));
-    if a.text.invitation && cx.kind != Kind::SelfOwner && to_me {
-        let owner = json!({ "kind": "self" });
-        let item = json!({
-            "form": "commitment",
-            "status": "open",
-            "title": cut(&format!("Invitation: {}", or_none(subject)), 200),
-            "direction": "you_owe",
-            "owner": owner,
-            "counterparty": party_sender(a),
-            "kind": "invitation",
-        });
-        return Some(vec![Draft::rule(item, "invitation", quote)]);
-    }
-    // Any other calendar request, and a booking, a ticket or an event: the
-    // model decides, not the code rule.
-    if a.text.invitation || !words(&full_text(a), &BOOKING_WORDS).is_empty() {
-        return None;
-    }
     if cx.kind == Kind::Service {
         // A sign-in message gives a code signal or goes to the model.
         if is_login(a) {
@@ -198,29 +170,14 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
     None
 }
 
-/// The subject, or `(no subject)` if it is empty.
-fn or_none(s: &str) -> &str {
-    if s.trim().is_empty() {
-        "(no subject)"
-    } else {
-        s
-    }
-}
-
-/// The subject, the clean text, the calendar text and the attachment text,
-/// one per line: all the text that iris-clean gives.
+/// The subject and the clean text. A message with a file never reaches a
+/// rule, so the attachment text does not count.
 fn full_text(a: &Analysis) -> String {
-    let mut hay = format!("{}\n{}\n{}", a.text.subject, a.text.text, a.text.calendar);
-    for (_, t) in &a.text.attachment_text {
-        hay.push('\n');
-        hay.push_str(t);
-    }
-    hay
+    format!("{}\n{}", a.text.subject, a.text.text)
 }
 
 fn looks_like_record(a: &Analysis) -> bool {
-    // The whole clean text and the attachment text: both are bounded, and a
-    // receipt can come late or only in an attached PDF.
+    // The whole clean text: it is bounded, and a receipt can come late.
     let hay = full_text(a);
     let low = hay.to_lowercase();
     RECORD_WORDS.iter().any(|w| low.contains(w)) || !words(&hay, &MODEL_WORDS).is_empty()

@@ -53,8 +53,6 @@ pub const MAX_PARTS: usize = 500;
 pub const MAX_DEPTH: usize = 8;
 /// The most decoded bytes of an attached message that the parser reads.
 pub const INNER_LIMIT: usize = 2 * 1024 * 1024;
-/// The most bytes of decoded calendar text in [`Clean::calendar_text`].
-pub const CALENDAR_TEXT_LIMIT: usize = 16 * 1024;
 /// The largest PDF attachment (decoded bytes) that gives text (spec 1 section 9).
 pub const PDF_LIMIT: u64 = 10 * 1024 * 1024;
 /// The least bytes of PDF text that the quality check reads, whatever the
@@ -79,23 +77,10 @@ pub struct Clean {
     /// True if text went out because of a limit. Then `text` ends with [`CUT_MARK`].
     pub cut: bool,
     pub attachments: Vec<Attachment>,
-    /// True if the top message has a calendar part that is a request, and
-    /// each calendar part of it is a request (spec 1 section 7.3). A calendar
-    /// part is `text/calendar` or `application/ics`. A request has the
-    /// `method` parameter `REQUEST`, or a decoded body with a
-    /// `METHOD:REQUEST` line. Another calendar file (for example
-    /// `METHOD:PUBLISH`) next to a request makes this false.
+    /// True if a `text/calendar` part of the top message is a request
+    /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
+    /// decoded body has a `METHOD:REQUEST` line.
     pub invitation: bool,
-    /// True if the top message has a calendar part (`text/calendar` or
-    /// `application/ics`) anywhere in its MIME tree, also in an alternative
-    /// that does not give the text.
-    pub calendar: bool,
-    /// The decoded text of the calendar parts of the top message, at most
-    /// [`CALENDAR_TEXT_LIMIT`] bytes, so that a rule can read it.
-    pub calendar_text: String,
-    /// True if calendar text went out because of [`CALENDAR_TEXT_LIMIT`] or a
-    /// limit of the walker.
-    pub calendar_cut: bool,
 }
 
 /// One attachment: a name, a type and a size, and the text if there is one.
@@ -122,9 +107,6 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: true,
             attachments: Vec::new(),
             invitation: false,
-            calendar: false,
-            calendar_text: String::new(),
-            calendar_cut: false,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -134,18 +116,9 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: false,
             attachments: Vec::new(),
             invitation: false,
-            calendar: false,
-            calendar_text: String::new(),
-            calendar_cut: false,
         };
     };
-    let mut cal = Calendars::default();
-    calendar_parts(parsed.root().root_part(), 0, &mut cal);
-    let invitation = cal.requests > 0 && cal.others == 0;
-    // Lossy UTF-8 can grow the text: cut it again at a character boundary.
-    let mut calendar_text = String::from_utf8_lossy(&cal.text).into_owned();
-    let calendar_cut = cal.cut || calendar_text.len() > CALENDAR_TEXT_LIMIT;
-    calendar_text.truncate(mime::floor_char(&calendar_text, CALENDAR_TEXT_LIMIT));
+    let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
     let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
     let mut attachments = Vec::new();
     for f in files {
@@ -157,9 +130,6 @@ pub fn clean(raw: &[u8]) -> Clean {
         cut,
         attachments,
         invitation,
-        calendar: cal.requests + cal.others > 0,
-        calendar_text,
-        calendar_cut,
     }
 }
 
@@ -324,83 +294,36 @@ fn message<'a>(
     (subject, text, w.cut, w.files)
 }
 
-/// The calendar parts of a MIME tree.
-#[derive(Default)]
-struct Calendars {
-    /// Parts seen, for the limit [`MAX_PARTS`].
-    seen: usize,
-    requests: usize,
-    /// Calendar parts that are not a request, and parts past a limit of the
-    /// walker: a part that is not read can be a calendar file.
-    others: usize,
-    /// The decoded bodies of the calendar parts, at most
-    /// [`CALENDAR_TEXT_LIMIT`] bytes.
-    text: Vec<u8>,
-    /// Calendar text went out at a limit.
-    cut: bool,
-}
-
-impl Calendars {
-    fn push(&mut self, bytes: &[u8]) {
-        let room = CALENDAR_TEXT_LIMIT - self.text.len();
-        if bytes.len() > room {
-            self.cut = true;
-        }
-        self.text.extend_from_slice(&bytes[..bytes.len().min(room)]);
-    }
-}
-
-/// Counts the calendar parts (`text/calendar`, `application/ics`) in the
-/// MIME tree of `part`: requests and others. The check visits every part in
-/// the tree, in any order and apart from the choice of the text, inside the
-/// limits of the walker ([`MAX_PARTS`], [`MAX_DEPTH`]). It does not go into
-/// an attached message: a calendar in an attached message is not an
-/// invitation to the user.
-fn calendar_parts(part: MessagePart<'_>, depth: usize, cal: &mut Calendars) {
-    cal.seen += 1;
-    if cal.seen > MAX_PARTS || depth > MAX_DEPTH {
-        cal.others += 1;
-        cal.cut = true;
-        return;
+/// True if a `text/calendar` part in the MIME tree of `part` is a request.
+/// The check visits every part in the tree, in any order and apart from the
+/// choice of the text, inside the limits of the walker ([`MAX_PARTS`],
+/// [`MAX_DEPTH`]). It does not go into an attached message: a calendar in
+/// an attached message is not an invitation to the user.
+fn calendar_request(part: MessagePart<'_>, depth: usize, seen: &mut usize) -> bool {
+    *seen += 1;
+    if *seen > MAX_PARTS || depth > MAX_DEPTH {
+        return false;
     }
     let ct_field = field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
     let Some(ct) = ct_field.as_ref().and_then(|f| f.value().as_content_type()) else {
-        return;
+        return false;
     };
     let (t, sub) = (ct.ctype(), ct.subtype().unwrap_or(""));
     if t.eq_ignore_ascii_case("multipart") {
-        if part.is_multipart() {
-            for child in part.children() {
-                calendar_parts(child, depth + 1, cal);
-                if cal.seen > MAX_PARTS {
-                    break;
-                }
-            }
-        }
-        return;
+        return part.is_multipart()
+            && part
+                .children()
+                .any(|child| calendar_request(child, depth + 1, seen));
     }
-    let calendar = (t.eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar"))
-        || (t.eq_ignore_ascii_case("application") && sub.eq_ignore_ascii_case("ics"));
-    if !calendar {
-        return;
+    if !(t.eq_ignore_ascii_case("text") && sub.eq_ignore_ascii_case("calendar")) {
+        return false;
     }
-    if is_request(part, &ct, cal) {
-        cal.requests += 1;
-    } else {
-        cal.others += 1;
-    }
-}
-
-/// The calendar part is a request: its `method` parameter or a line of its
-/// decoded body is `REQUEST`. The decoded body also goes into `cal.text`.
-fn is_request(
-    part: MessagePart<'_>,
-    ct: &mail_parser::ContentType<'_>,
-    cal: &mut Calendars,
-) -> bool {
-    let param = ct
+    if ct
         .attribute("method")
-        .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"));
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"))
+    {
+        return true;
+    }
     let cte = field(part, HeaderName::ContentTransferEncoding)
         .map(|v| String::from_utf8_lossy(v).trim().to_ascii_lowercase());
     let enc = match cte.as_deref() {
@@ -409,29 +332,19 @@ fn is_request(
         _ => Encoding::None,
     };
     // The whole body, decoded in chunks of about 64 KiB, through a matcher
-    // of constant memory and the bounded calendar text. A separator keeps
-    // the text of two parts apart.
+    // of constant memory.
     let mut m = MethodLine::default();
     let body = part.raw_body();
-    cal.push(b"\n");
     match enc {
-        Encoding::Base64 => base64_chunks(body, |b| {
-            m.feed(b);
-            cal.push(b);
-        }),
+        Encoding::Base64 => base64_chunks(body, |b| m.feed(b)),
         Encoding::QuotedPrintable => qp_chunks(body, |b| {
             m.feed(b);
-            cal.push(b);
-            // Stop when the decision and the text are both complete.
-            !((param || m.found) && cal.cut)
+            !m.found
         }),
-        Encoding::None => {
-            m.feed(body);
-            cal.push(body);
-        }
+        Encoding::None => m.feed(body),
     }
     m.feed(b"\n");
-    param || m.found
+    m.found
 }
 
 /// Finds a line that is `METHOD:REQUEST` (any case, white space around it)

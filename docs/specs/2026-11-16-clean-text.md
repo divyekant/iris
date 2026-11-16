@@ -36,12 +36,11 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub calendar: bool, pub calendar_text: String, pub calendar_cut: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
 pub const TEXT_LIMIT: usize = 32_000;           // characters of `text`
 pub const ATTACHMENT_TEXT_LIMIT: usize = 1_000_000; // bytes of all attachment text
-pub const CALENDAR_TEXT_LIMIT: usize = 16 * 1024; // bytes of `calendar_text`
 pub const CUT_MARK: &str = "\n\n[Iris cut the text here.]";
 ```
 
@@ -121,11 +120,8 @@ Each budget only goes down. No step gives budget back.
 ### Invitation
 
 `Clean.invitation` gives the input of the fixed invitation rule
-(specification 1, section 7.3). It is true if the top message has a
-calendar part that is a request, and each calendar part of the top message
-is a request. A calendar part is `text/calendar` or `application/ics`.
-Another calendar file (for example `METHOD:PUBLISH`), or a part past a limit
-of the walker, makes it false. A calendar part is a request if:
+(specification 1, section 7.3). It is true if a `text/calendar` part of the
+top message is a request:
 
 - its `method` parameter is `REQUEST` (any case), or
 - its decoded body has a line that is `METHOD:REQUEST` (any case, with white
@@ -139,13 +135,6 @@ of about 64 KiB, with a line matcher that keeps at most 14 bytes, so the
 memory stays bounded for a calendar of any size. The check stays inside
 `MAX_PARTS` and `MAX_DEPTH`. It does not go into an attached message: a
 calendar in an attached message is not an invitation to the user.
-
-
-`Clean.calendar_text` holds the decoded bodies of the calendar parts, at most
-`CALENDAR_TEXT_LIMIT` (16 KiB) bytes in all, so that the fixed rules can read
-a record or a payment request in a calendar description.
-`Clean.calendar_cut` is true if text went out at that limit or at a limit of
-the walker. Then the fixed rules give no item.
 
 ### A reply
 
@@ -466,7 +455,7 @@ input: no panic, bounded memory and time, and a `Clean` with less text (and
 | A header block over 256 KiB, a value over 16 KiB | Header memory grows | The rest is not read | `a_header_after_the_header_limit_does_not_count`, `a_subject_past_the_value_limit_is_cut` |
 | Hostile HTML or CSS (hidden text, many elements) | Hidden text stays, or time grows | Hidden text of the closed list goes out; time stays linear | `many_elements_with_one_class_stay_fast` |
 | A hostile PDF | Panic or memory | No panic; a PDF over `PDF_LIMIT` gives no text | `a_simple_pdf_attachment_gives_text` |
-| A calendar part | False or missed invitation | A parsed `text/calendar` or `application/ics` part with `method=REQUEST` or a `METHOD:REQUEST` line is a request, at any size and in any order. `invitation` is true only if each calendar part is a request. `calendar` is true for any calendar part, also in an alternative that gives no text. | `crates/iris-clean/tests/invitation.rs` |
+| A calendar part | False or missed invitation | Only a parsed `text/calendar` part with `method=REQUEST` or a `METHOD:REQUEST` line counts, at any size and in any order | `crates/iris-clean/tests/invitation.rs` |
 | Text that reads as an instruction | The model follows it | The text stays data; the code never runs it | Specification 1, section 7.4 |
 
 ## Options not chosen

@@ -85,8 +85,8 @@ fn a_rule_item_that_fails_the_schema_goes_to_the_model() {
 }
 
 #[test]
-fn a_receipt_word_late_in_a_list_mail_goes_to_the_model() {
-    let late = format!("{}{}\nTotal: 12.50 USD\n", LIST, "Line.\n".repeat(200));
+fn a_receipt_word_late_in_the_mail_goes_to_the_model() {
+    let late = format!("{}{}\nTotal: 12.50 USD\n", CODE, "Line.\n".repeat(200));
     assert!(drafts(&late, Kind::Service, &[]).is_none());
 }
 
@@ -156,24 +156,10 @@ END:VCALENDAR
 ";
 
 #[test]
-fn a_calendar_request_is_an_invitation() {
-    let d = one(INVITE, Kind::Person, &[]);
-    assert_eq!(d.by, By::Rule("invitation"));
-    assert_eq!(d.item["kind"], "invitation");
-    assert_eq!(d.item["direction"], "you_owe");
-    assert_eq!(d.item["title"], "Invitation: Planning");
-    assert_eq!(d.quote, "Planning");
-    // Your own invitation is not one that you owe.
-    assert!(drafts(INVITE, Kind::SelfOwner, &[]).is_none());
-}
-
-#[test]
-fn a_rule_quote_is_the_matched_line() {
-    // No subject: the quote and the title say "(no subject)" (spec 1 section 7.5).
-    let raw = INVITE.replace("Subject: Planning\n", "");
-    let d = one(&raw, Kind::Person, &[]);
-    assert_eq!(d.item["title"], "Invitation: (no subject)");
-    assert_eq!(d.quote, "(no subject)");
+fn a_calendar_request_goes_to_the_model() {
+    // The fixed invitation rule is out of the fixed rules (issue #97).
+    assert!(drafts(INVITE, Kind::Person, &[]).is_none());
+    assert!(drafts(INVITE, Kind::Service, &[]).is_none());
 }
 
 #[test]
@@ -281,22 +267,28 @@ fn a_code_late_in_a_long_line_keeps_its_quote() {
     );
 }
 
-#[test]
-fn a_year_shaped_code_bound_to_its_word_counts() {
-    let raw = "From: Bank <no-reply@bank.example>\nList-Id: <b.example>\nSubject: Sign in\n\nYour verification code is 2026\n";
-    let d = one(raw, Kind::Service, &[]);
-    assert_eq!(d.item["form"], "signal");
-    assert_eq!(d.item["code"], "2026");
+/// A sign-in message that gives a code signal. Each test below adds one
+/// sign of other content, and the message goes to the model.
+const CODE: &str = "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code: 482913\n";
+
+fn with_line(line: &str) -> String {
+    format!("{CODE}{line}\n")
 }
 
 #[test]
-fn an_unclear_code_in_a_list_message_goes_to_the_model() {
-    let raw = LIST.replace(
-        "Read the news.",
-        "Your sign-in code is 1234\nYour code: 5678",
-    );
-    assert_ne!(raw, LIST);
-    assert!(drafts(&raw, Kind::Service, &[]).is_none());
+fn the_code_base_gives_a_signal() {
+    assert_eq!(one(CODE, Kind::Service, &[]).item["code"], "482913");
+}
+
+#[test]
+fn a_year_shaped_code_bound_to_its_word_counts() {
+    let raw = CODE.replace("Your code: 482913", "Your verification code is 2026");
+    assert_eq!(one(&raw, Kind::Service, &[]).item["code"], "2026");
+}
+
+#[test]
+fn a_second_code_value_goes_to_the_model() {
+    assert!(drafts(&with_line("Your code: 5678"), Kind::Service, &[]).is_none());
 }
 
 #[test]
@@ -329,138 +321,45 @@ fn a_long_line_of_codes_is_read_in_linear_time() {
 }
 
 #[test]
-fn a_payment_notice_in_a_list_message_goes_to_the_model() {
-    let raw = LIST
-        .replace("This week in mail standards", "Your payment is due")
-        .replace("Read the news.", "Pay $42 by Friday.");
-    assert!(drafts(&raw, Kind::Service, &[]).is_none());
-}
-
-#[test]
-fn a_promotion_code_is_no_sign_in_code() {
-    let raw = "From: Shop <deals@shop.example>\nSubject: Your discount code\n\nUse code 1234 at checkout. Log in to see more.\n";
-    assert!(drafts(raw, Kind::Service, &[]).is_none());
-    // Sign-in mail with a promotion word: the model reads it.
-    let mixed = "From: Shop <no-reply@shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Sign in\n\nYour code: 482913\nShop our sale.\n";
-    assert!(drafts(mixed, Kind::Service, &[]).is_none());
-}
-
-#[test]
-fn an_invoice_only_in_an_attachment_goes_to_the_model() {
-    let raw = "From: Mail Weekly <news@weekly.example>
-List-Id: <weekly.news.example>
-Subject: Your documents
-MIME-Version: 1.0
-Content-Type: multipart/mixed; boundary=\"b\"
-
---b
-Content-Type: text/plain
-
-See the file.
---b
-Content-Type: text/plain; name=\"doc.txt\"
-Content-Disposition: attachment; filename=\"doc.txt\"
-
-Invoice 77. Amount 12.50 USD.
---b--
-";
-    assert!(drafts(raw, Kind::Service, &[]).is_none());
-    // List mail with any file goes to the model: a file name or a file
-    // without record words can hold a receipt too.
-    let plain = raw.replace("Invoice 77. Amount 12.50 USD.", "Order 73, $42");
-    assert!(drafts(&plain, Kind::Service, &[]).is_none());
-}
-
-#[test]
-fn an_invitation_for_another_person_goes_to_the_model() {
-    let other = INVITE.replace(
-        "To: Owner <Owner@Example.com>",
-        "To: Team <team@example.org>",
-    );
-    assert_ne!(other, INVITE);
-    assert!(drafts(&other, Kind::Person, &[]).is_none());
-    // A list header does not change it: the request is not a feed item.
-    let list = format!("List-Id: <team.example.org>\n{other}");
+fn signs_of_other_content_send_a_code_to_the_model() {
+    for line in [
+        "Pay $42 by Friday.",
+        "Invoice 77. Total: 12.50 USD",
+        "Flight itinerary: reservation ABC123 for 12 Dec.",
+        "Shop our sale.",
+    ] {
+        assert!(
+            drafts(&with_line(line), Kind::Service, &[]).is_none(),
+            "{line}"
+        );
+    }
+    // A list header: list mail goes to the model (issue #96).
+    let list = format!("List-Id: <bank.example>\n{CODE}");
     assert!(drafts(&list, Kind::Service, &[]).is_none());
-    let cc = INVITE.replace(
-        "To: Owner <Owner@Example.com>",
-        "To: team@example.org\nCc: owner@example.com",
-    );
-    assert_eq!(one(&cc, Kind::Person, &[]).item["kind"], "invitation");
+    // A promotion code with a sign-in word.
+    let promo = "From: Shop <deals@shop.example>\nSubject: Your discount code\n\nUse code 1234 at checkout. Log in to see more.\n";
+    assert!(drafts(promo, Kind::Service, &[]).is_none());
 }
 
 #[test]
-fn an_invitation_or_a_code_with_a_file_goes_to_the_model() {
-    let file = "--a\nContent-Type: application/pdf; name=\"booking.pdf\"\nContent-Disposition: attachment; filename=\"booking.pdf\"\nContent-Transfer-Encoding: base64\n\nAAAA\n--a--";
-    let mixed = INVITE.replace("multipart/alternative", "multipart/mixed");
-    // In a mixed message, the calendar part alone is no file.
-    assert_eq!(one(&mixed, Kind::Person, &[]).item["kind"], "invitation");
-    let invite = mixed.replacen("--a--", file, 1);
-    assert_ne!(invite, mixed);
-    assert!(drafts(&invite, Kind::Person, &[]).is_none());
-    let code = "From: Bank <no-reply@bank.example>\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=a\n\n--a\nContent-Type: text/plain\n\nYour code: 482913\n".to_string() + file + "\n";
-    assert!(drafts(&code, Kind::Service, &[]).is_none());
-    // The same mail with no file gives the code.
-    let plain = code.replace(file, "--a--");
+fn a_file_or_a_calendar_request_sends_a_code_to_the_model() {
+    let head = "From: Bank <no-reply@bank.example>\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=a\n\n--a\nContent-Type: text/plain\n\nYour code: 482913\n";
+    let plain = format!("{head}--a--\n");
     assert_eq!(one(&plain, Kind::Service, &[]).item["code"], "482913");
+    // Any file: a file name or a file without record words can hold a record.
+    let file = format!("{head}--a\nContent-Type: text/plain; name=\"doc.txt\"\nContent-Disposition: attachment; filename=\"doc.txt\"\n\nOrder 73, $42\n--a--\n");
+    assert!(drafts(&file, Kind::Service, &[]).is_none());
+    // A calendar request: an invitation for the model (issue #97).
+    let cal = format!("{head}--a\nContent-Type: text/calendar; method=REQUEST\n\nBEGIN:VCALENDAR\nMETHOD:REQUEST\nEND:VCALENDAR\n--a--\n");
+    assert!(drafts(&cal, Kind::Service, &[]).is_none());
 }
 
 #[test]
-fn a_cut_text_or_a_calendar_file_goes_to_the_model() {
+fn a_cut_text_sends_a_code_to_the_model() {
     // A record after the limit of the clean text.
-    let long = LIST.replace(
-        "Read the news.",
-        &format!("{}\nInvoice 77.", "Read the news. ".repeat(4_000)),
-    );
+    let long = with_line(&format!("{}\nInvoice 77.", "Thanks. ".repeat(5_000)));
     assert!(iris_understand::Text::of(long.replace('\n', "\r\n").as_bytes()).cut);
     assert!(drafts(&long, Kind::Service, &[]).is_none());
-    // A calendar file that is no request is a file.
-    let publish = "From: Mail Weekly <news@weekly.example>\nList-Id: <weekly.news.example>\nSubject: Events\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=a\n\n--a\nContent-Type: text/plain\n\nThe events.\n--a\nContent-Type: text/calendar; method=PUBLISH; name=\"e.ics\"\nContent-Disposition: attachment; filename=\"e.ics\"\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--\n";
-    assert!(drafts(publish, Kind::Service, &[]).is_none());
-    // A PUBLISH calendar in an alternative that gives no text.
-    let alt = LIST.replace(
-        "Subject: This week in mail standards\n\nRead the news.\n",
-        "Subject: News\nContent-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\nRead the news.\n--a\nContent-Type: text/calendar; method=PUBLISH\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--\n",
-    );
-    assert_ne!(alt, LIST);
-    assert!(drafts(&alt, Kind::Service, &[]).is_none());
-    // A request with a second calendar file that is no request.
-    let both = INVITE
-        .replace("multipart/alternative", "multipart/mixed")
-        .replacen("--a--", "--a\nContent-Type: text/calendar; name=\"e.ics\"\nContent-Disposition: attachment; filename=\"e.ics\"\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--", 1);
-    assert!(drafts(&both, Kind::Person, &[]).is_none());
-    // A payment request only in the text of the calendar request.
-    let pay = INVITE.replace(
-        "METHOD:REQUEST\n",
-        "METHOD:REQUEST\nDESCRIPTION:Invoice 77\\; payment due.\n",
-    );
-    assert_ne!(pay, INVITE);
-    assert!(drafts(&pay, Kind::Person, &[]).is_none());
-}
-
-#[test]
-fn a_booking_in_a_list_message_goes_to_the_model() {
-    let raw = LIST
-        .replace("This week in mail standards", "Flight itinerary")
-        .replace("Read the news.", "Reservation ABC123 for 12 Dec.");
-    assert!(drafts(&raw, Kind::Service, &[]).is_none());
-    // An invitation to a meeting is still an invitation.
-    let meeting = INVITE.replace("Planning", "Team meeting");
-    assert_eq!(one(&meeting, Kind::Person, &[]).item["kind"], "invitation");
-}
-
-#[test]
-fn an_invoice_with_a_code_goes_to_the_model() {
-    let raw = "From: Shop <billing@shop.example>\nSubject: Your invoice\n\nVerification code: 482913\nTotal: 12.50 USD\n";
-    assert!(drafts(raw, Kind::Service, &[]).is_none());
-}
-
-#[test]
-fn an_invoice_with_a_calendar_request_goes_to_the_model() {
-    let raw = INVITE.replace("Join us.", "Invoice 77. Total: 12.50 USD");
-    assert_ne!(raw, INVITE);
-    assert!(drafts(&raw, Kind::Service, &[]).is_none());
-    assert!(drafts(&raw, Kind::Person, &[]).is_none());
 }
 
 #[test]

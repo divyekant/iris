@@ -764,10 +764,11 @@ matches gives the result, and the next rules do not run.
 | Order | Rule | Result |
 |---|---|---|
 | 1 | Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
-| 2 | The clean text or the calendar text is cut at its limit (section 7.2), or the message has an attachment (other than the calendar parts of an invitation, `text/calendar` or `application/ics`), or a calendar part that is not a request anywhere in its MIME tree, or the subject, the body, the calendar text or the text of an attachment matches a receipt or a statement pattern, or has a word of a request to pay or to act, or of a contract (for example "pay", "due", "bill", "renew", "contract") | No fixed rule. The model reads the message, so that the record and the payment commitment (section 6.4) are not lost. A file, or the text after the cut, can hold a record that no rule sees. This applies also to an invitation and a code. |
-| 3 | A calendar invitation: each calendar part (`text/calendar` or `application/ics`) has `METHOD:REQUEST` | If it is not from you and your address is in `To` or `Cc`: commitment of kind `invitation`. Else no fixed rule (also not rule 4), and the model reads the message: a request from you is your own invitation, and a request that does not name you (a group or a forward) can be for another person. |
-| 3a | A word of a booking, a ticket or an event (for example "reservation", "itinerary", "ticket", "event", "appointment") | No fixed rule (also not rule 4), and the model reads the message, so that the record (section 6.4) is not lost. This rule runs after rule 3, because an invitation uses these words too. |
-| 4 | A message from a `service` with a sign-in word (for example "sign in", "login", "verify", "passcode") | If the message has no promotion word (for example "discount", "coupon", "promo", "sale") and one clear code: signal of kind `code`. Else no fixed rule, and the model reads the message. |
+| 2 | Any sign that the message can hold other content: the clean text is cut at its limit (section 7.2); the message has an attachment; it has a calendar request (`text/calendar` with `METHOD:REQUEST`); it has `List-Id` or `List-Unsubscribe`; or the subject or the body matches a receipt or a statement pattern, or has a word of a request to pay or to act, of a contract, of a booking, of a ticket or of an event (for example "pay", "due", "contract", "reservation", "ticket", "event") | No fixed rule. The model reads the message, so that no record, request, invitation or feed item is lost. |
+| 3 | A message from a `service` with a sign-in word (for example "sign in", "login", "verify", "passcode") | If the message has no promotion word (for example "discount", "coupon", "promo", "sale") and one clear code: signal of kind `code`. Else no fixed rule, and the model reads the message. |
+
+Release 1 has no fixed list rule (issue #96) and no fixed invitation rule
+(issue #97): list mail and invitations go to the model.
 
 A code is a run of 4 to 8 digits bound to a code word ("code",
 "verification", "one-time", "passcode"):
@@ -792,23 +793,18 @@ the message. A fixed rule never guesses.
 | Input | Failure mode | Result |
 |---|---|---|
 | A message with a hostile mark | A rule acts on text from an attacker | No item and no model call (rule 1). |
-| A receipt, a statement or a payment request, also with a calendar request or a code | A fixed item hides the record or the payment | The model reads the message (rule 2). |
-| A receipt or an invoice only in the text of an attachment | A fixed item hides the record | The model reads the message (rule 2). |
-| A calendar request from you, or one that does not name you in `To` or `Cc` | A commitment that you do not owe | The model reads the message (rule 3). |
-| Sign-in mail with two code values (an account number, an old code, "1234 5678" on one line) | The wrong number becomes the code | No clear code: the model reads the message (rule 4). |
-| Sign-in mail with an account number, a duration, a year or another number near the code word, with a word or punctuation between them ("Account: 123456 - code expires") | A date or a duration becomes the code | The number is not bound. With no clear code, the model reads the message (rule 4). |
-| Sign-in mail with the code in a form that the binding does not know ("Use 482913 to sign in") | The code is missed | No clear code: the model reads the message (rule 4). |
-| A promotion code with no sign-in word | A promotion becomes a sign-in code signal | No code rule: the model reads the message (rule 4). |
-| Sign-in mail with a promotion word (for example a footer) | A promotion code becomes a signal | The model reads the message (rule 4). |
-| A request in words that the built-in word lists do not have, or in another language | A fixed item hides the request | Known limit: the lists are short and in English (issue #95). |
-| A message with an attachment, also an invitation or sign-in mail | A fixed item hides a record in the file | The model reads the message (rule 2). |
-| A booking, a ticket or an event, also with a calendar request or a code | A fixed item hides the record | The model reads the message (rule 3a). |
-| A payment request or a record only in the description of a calendar request | The invitation hides the payment | The model reads the message (rule 2). |
-| A message with a clean text cut at its limit | A fixed item hides a record after the cut | The model reads the message (rule 2). |
-| A calendar file that is no request (for example `METHOD:PUBLISH`), also next to a request | A fixed item hides the events | It is a file: the model reads the message (rule 2). |
+| A receipt, a statement, a payment request, a contract, a booking, a ticket or an event, also with a code | A code signal hides the record or the request | The model reads the message (rule 2). |
+| A message with an attachment | A code signal hides a record in the file | The model reads the message (rule 2). |
+| A message with a clean text cut at its limit | A code signal hides a record after the cut | The model reads the message (rule 2). |
+| A calendar request | An invitation is lost | The model reads the message (rule 2, issue #97). |
+| A list message (`List-Id` or `List-Unsubscribe`) | A code signal or a feed item hides other content | The model reads the message (rule 2, issue #96). |
+| Sign-in mail with two code values (an account number, an old code, "1234 5678" on one line) | The wrong number becomes the code | No clear code: the model reads the message (rule 3). |
+| Sign-in mail with an account number, a duration, a year or another number near the code word, with a word or punctuation between them ("Account: 123456 - code expires") | A date or a duration becomes the code | The number is not bound. With no clear code, the model reads the message (rule 3). |
+| Sign-in mail with the code in a form that the binding does not know ("Use 482913 to sign in") | The code is missed | No clear code: the model reads the message (rule 3). |
+| A promotion code, or sign-in mail with a promotion word | A promotion becomes a sign-in code signal | The model reads the message (rule 3). |
+| A request in words that the built-in word lists do not have, or in another language | A code signal hides the request | Known limit: the lists are short and in English (issue #95). |
 | A very long line with many code words and numbers | The search takes too long | Only code words within 100 bytes of a number count, so the search is linear in the length of the line. |
 | A rule item that fails the schema | An invalid item goes to the store | The rule gives no item, and the model reads the message. |
-| A list message (`List-Id` or `List-Unsubscribe`) | A feed item hides a request, a record or a code | No fixed list rule: the model reads each list message (issue #96). |
 | All other input | | No fixed rule matches, and the model reads the message. |
 
 The conversation rule runs for each message that is not hostile mail:
