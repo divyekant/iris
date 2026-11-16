@@ -168,7 +168,8 @@ export function outcome(a: Action): string {
     case "expired":
       return "Expired: no decision in 14 days";
     case "cancelled":
-      return "The author withdrew it";
+      // by is always "author" here: it names the event (a withdraw or a new revision), not who withdrew (issue 221).
+      return "Withdrawn";
     default:
       return "";
   }

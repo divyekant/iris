@@ -275,3 +275,61 @@ test("the button waits for every row of a change of more than one page", async (
     view.destroy();
   }
 });
+
+test("withdraw asks once, then cancels each change that Iris did not make", async () => {
+  // One change waits, one is approved and waits for apply mode, one is done.
+  const before = changeset([
+    act({ n: 1, resolved: { messages: ["m-1"] } }),
+    act({ n: 2, decision: { state: "approved", by: "person" } }),
+    act({ n: 3, decision: { state: "applied", by: "person" } }),
+  ]);
+  const after = { ...before, state: "withdrawn", actions: before.actions.map((a) => (a.n < 3 ? { ...a, decision: { state: "cancelled", by: "author" } } : a)) };
+  const asked = serve({ "changesets/cs-9/withdraw": [200, after] });
+  const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+  try {
+    const control = () => [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw");
+    // "Keep it" closes the question and sends nothing.
+    control().click();
+    view.flushSync();
+    assert.match(text(view.target.querySelector(".question")), /Withdraw this request\? Iris cancels the 2 changes that it did not make\. The change that Iris made stays\. You cannot undo a withdraw\./);
+    view.target.querySelector(".question button.quiet").click();
+    view.flushSync();
+    assert.equal(view.target.querySelector(".question"), null);
+    assert.equal(asked.filter((x) => Array.isArray(x)).length, 0);
+
+    control().click();
+    view.flushSync();
+    view.target.querySelector(".question button.outline").click();
+    await until(() => text(view.target).includes("This request is withdrawn."));
+    assert.deepEqual(asked.filter((x) => Array.isArray(x)).map(([p]) => p), ["changesets/cs-9/withdraw"]);
+    assert.equal(control(), undefined, "a withdrawn request has no control");
+    assert.match(text(view.target), /Nothing waits for your review\./);
+    assert.equal(view.target.querySelectorAll(".decided li").length, 3);
+    assert.match(text(view.target.querySelector(".decided")), /Withdrawn.*Withdrawn.*Done/);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("a withdraw that is refused or has no answer loads the request again and says so", async () => {
+  const before = three();
+  const gone = { ...before, state: "withdrawn", actions: before.actions.map((a) => ({ ...a, decision: { state: "cancelled", by: "author" } })) };
+  for (const [route, words] of [
+    [() => [409, { error: "the changeset is withdrawn" }], /Iris did not withdraw the request, because it changed after you opened it\./],
+    [() => { throw new TypeError("The connection closed."); }, /Iris does not know if it withdrew the request\./],
+  ]) {
+    serve({ "changesets/cs-9/withdraw": route, "changesets/cs-9": [200, gone] });
+    const view = await mount("/src/views/Review.svelte", { changesets: [before] });
+    try {
+      [...view.target.querySelectorAll("header button")].find((b) => b.textContent === "Withdraw").click();
+      view.flushSync();
+      view.target.querySelector(".question button.outline").click();
+      const alert = await until(() => view.target.querySelector("[role=alert]"));
+      await until(() => text(view.target).includes("This request is withdrawn."));
+      assert.match(alert.textContent, words);
+      assert.match(text(view.target.querySelector(".decided")), /Withdrawn/);
+    } finally {
+      view.destroy();
+    }
+  }
+});

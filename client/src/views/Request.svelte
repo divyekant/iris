@@ -3,7 +3,8 @@
   each action with its real targets (messages or items) and the arguments
   that set its effect. Each waiting change starts ticked. The person unticks
   what they do not want, and one button approves the ticked changes and
-  denies the others.
+  denies the others. The person can also withdraw the whole request, after
+  one question in the page.
 -->
 <script lang="ts">
   import { get, post, type Changeset, type Item, type Target } from "../api";
@@ -92,6 +93,31 @@
 
   // One request for each decision: the engine approves the ticked changes, with the hash that
   // this screen showed, and denies the others. If one is refused, it writes nothing (409).
+  // Spec 2 section 5.5: the person can withdraw an open request. Each change that Iris did not
+  // finish becomes cancelled, and changes that Iris made stay. A withdraw cannot be undone,
+  // so the page asks once.
+  // The states that the withdraw cancels (trigger changeset_withdraw of the store).
+  let unfinished = $derived(actions.filter((a) => ["proposed", "in_review", "approved"].includes(a.decision?.state ?? "")));
+  let made = $derived(actions.filter((a) => a.decision?.state === "applied").length);
+  let asking = $state(false);
+  async function withdraw() {
+    if (busy || stale) return;
+    busy = true;
+    problem = saved = "";
+    try {
+      onchange(await post<Changeset>(`changesets/${encodeURIComponent(c.id)}/withdraw`, {}));
+      asking = false;
+    } catch (e) {
+      const status = (e as { status?: number }).status;
+      asking = false;
+      if (status === 409) await refresh("Iris did not withdraw the request, because it changed after you opened it. Here it is as it is now.");
+      else if (status === undefined || status >= 500) await refresh("Iris does not know if it withdrew the request. Here it is as it is now.");
+      else problem = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function decide() {
     const yes = chosen.length;
     const no = open.length - yes;
@@ -140,6 +166,21 @@
   {/if}
 {/snippet}
 
+{#snippet question()}
+  <div class="question" role="group" aria-labelledby={`${c.id}-ask`}>
+    <p id={`${c.id}-ask`}><b>Withdraw this request?</b></p>
+    <p>
+      Iris cancels {unfinished.length === 1 ? "the one change" : `the ${unfinished.length} changes`} that it did not make.
+      {made ? `${made === 1 ? "The change" : `The ${made} changes`} that Iris made stay${made === 1 ? "s" : ""}.` : ""}
+      You cannot undo a withdraw.
+    </p>
+    <div class="answers">
+      <button type="button" class="outline" disabled={busy} onclick={withdraw}>Withdraw the request</button>
+      <button type="button" class="quiet" disabled={busy} onclick={() => (asking = false)}>Keep it</button>
+    </div>
+  </div>
+{/snippet}
+
 <article class="request" aria-labelledby={`${c.id}-who`}>
   <header>
     {#if c.author.kind === "triage"}
@@ -153,7 +194,11 @@
     {/if}
     <p id={`${c.id}-who`}><b>{who}</b> <span class="time">{short(c.submitted)}</span></p>
     <span class="id">{c.id}{c.revision > 1 ? `, revision ${c.revision}` : ""}</span>
+    {#if c.state === "open" && !asking}
+      <button type="button" class="quiet" disabled={busy || stale} onclick={() => (asking = true)}>Withdraw</button>
+    {/if}
   </header>
+  {#if asking}{@render question()}{/if}
   {#if c.why}<blockquote>{c.why}</blockquote>{/if}
 
   {#if open.length}
@@ -179,6 +224,7 @@
       {#if missing.length && !problem}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
     </div>
   {/if}
+  {#if c.state === "withdrawn"}<p class="saved">This request is withdrawn. Iris cancelled each change that it did not make.</p>{/if}
   {#if problem}
     <p role="alert">
       {problem}
@@ -427,6 +473,62 @@
   .primary:disabled {
     cursor: progress;
     opacity: 0.6;
+  }
+  .quiet {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--color-text-faint);
+    font-size: var(--font-size--1);
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+  }
+  .quiet:hover,
+  .quiet:focus-visible {
+    color: var(--color-text);
+    text-decoration-color: currentColor;
+  }
+  .quiet:disabled {
+    cursor: default;
+    opacity: 0.6;
+  }
+  /* The withdraw question: a notice with a warning line, as the observe note of the review. */
+  .question {
+    margin: var(--space-4) 0 var(--space-6);
+    padding-left: var(--space-4);
+    border-left: 4px solid var(--color-warning);
+    animation: arrive var(--transition-normal) both;
+  }
+  .question p {
+    margin: 0 0 var(--space-2);
+    max-width: 60ch;
+    color: var(--color-text-muted);
+  }
+  .question p b {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+  .answers {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+    margin-top: var(--space-3);
+  }
+  .outline {
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-text);
+    font-weight: 500;
+    transition: border-color var(--transition-fast);
+  }
+  .outline:hover,
+  .outline:focus-visible {
+    border-color: var(--color-text-muted);
   }
   .saved {
     margin: var(--space-4) 0 0;
