@@ -334,18 +334,30 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
     let m = Fake::with(vec![answer(record)]);
     let (_, d) = run(alias, Kind::SelfOwner, &["SENT"], &[], Some(&m));
     assert_eq!(d.unwrap().drafts[0].item["issuer"], json!({"kind": "self"}));
-    // Sent mail with Bcc only: the parties of the model make the item.
-    let bcc = "From: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    // Sent mail with Bcc only: the Bcc recipient is the other party.
+    let bcc = "From: owner@example.com\nBcc: Bo <bo@example.org>\nSubject: Slides\n\nI will send the slides by Friday.\n";
     let promise = json!([{"form": "commitment", "title": "Send", "quote": "I will send the slides",
-                          "direction": "you_owe", "kind": "task",
-                          "counterparty": {"address": "bo@example.org", "name": "Bo"}}]);
-    let m = Fake::with(vec![answer(promise)]);
+                          "direction": "you_owe", "kind": "task"}]);
+    let m = Fake::with(vec![answer(promise.clone())]);
     let (_, d) = run(bcc, Kind::SelfOwner, &["SENT"], &[], Some(&m));
     let d = d.unwrap();
     assert_eq!((d.calls, d.drafts.len()), (1, 1));
     let c = &d.drafts[0].item;
     assert_eq!(c["owner"], json!({"kind": "self"}));
     assert_eq!(c["counterparty"]["address"], "bo@example.org");
+    assert!(m.calls.borrow()[0].1.contains("Bcc: bo@example.org\n"));
+    // With no recipient at all, only the parties of the model count.
+    let none = "From: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
+    let mut named = promise;
+    named[0]["counterparty"] = json!({"address": "cy@example.org"});
+    let m = Fake::with(vec![answer(named)]);
+    let d = run(none, Kind::SelfOwner, &["SENT"], &[], Some(&m))
+        .1
+        .unwrap();
+    assert_eq!(
+        d.drafts[0].item["counterparty"]["address"],
+        "cy@example.org"
+    );
 }
 
 /// The data of one model call stays within `prompt::MAX_DATA` for the

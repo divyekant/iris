@@ -73,6 +73,9 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     if !h.cc.is_empty() {
         field("Cc", &h.cc.join(", "));
     }
+    if !h.bcc.is_empty() {
+        field("Bcc", &h.bcc.join(", "));
+    }
     // A list message goes to the model (section 7.3, rule 2): the model needs
     // the list headers to find a feed item.
     if let Some(l) = &h.list_id {
@@ -256,14 +259,15 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     match form.as_str() {
         "commitment" => {
             let you_owe = src.get("direction").and_then(Value::as_str) == Some("you_owe");
-            // In sent mail the other party is the first To or Cc recipient.
-            // With none (Bcc only), only the parties of the model can make
+            // In sent mail the other party is the first To, Cc or Bcc
+            // recipient. With none, only the parties of the model can make
             // the item valid: the schema check refuses a missing party.
             let other = if cx.kind == crate::Kind::SelfOwner {
                 a.head
                     .to
                     .iter()
                     .chain(&a.head.cc)
+                    .chain(&a.head.bcc)
                     .next()
                     .map(|to| json!({"kind": "sender", "address": to}))
             } else {

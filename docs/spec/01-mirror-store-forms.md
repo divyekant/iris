@@ -860,8 +860,10 @@ The conversation rule runs for each message that is not hostile mail:
 - The engine, not the model, sets the fields that the headers give: the
   `issuer` of a record or a signal, and the `publisher`, `published` and
   `list` of a feed. In sent mail, the party of the sender is the
-  owner, also when `From` is an alias. With no `To` and no `Cc` (Bcc only),
-  only the parties in the model answer can make a commitment valid.
+  owner, also when `From` is an alias. The other party of a commitment in
+  sent mail is the first `To`, `Cc` or `Bcc` recipient (sent mail keeps
+  `Bcc`). With no recipient, only the parties in the model answer can make
+  a commitment valid.
 - The answer must have a boolean `phishing`. Each party in the answer must
   be the owner or have an address. Else the answer is not valid.
 - The model has no tools. It returns one JSON document: a list of items
