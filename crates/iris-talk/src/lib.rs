@@ -472,8 +472,10 @@ fn doc(
     }
 
     let sent = mails.iter().any(|m| m.mine);
-    let in_to = mails.iter().any(|m| m.to.iter().any(|a| a == me));
-    let in_cc = mails.iter().any(|m| m.cc.iter().any(|a| a == me));
+    // You are the account address and each alias of your sent mail.
+    let is_me = |a: &String| a == me || aliases.contains(&a.as_str());
+    let in_to = mails.iter().any(|m| m.to.iter().any(is_me));
+    let in_cc = mails.iter().any(|m| m.cc.iter().any(is_me));
     let role = if !sent && !in_to && in_cc {
         "cc"
     } else if order.len() >= 2 {
@@ -510,7 +512,7 @@ fn doc(
         "latest": { "at": rfc3339(last.at), "from": from, "snippet": cut(&line(&text), SNIPPET_CHARS) },
         "messages": mails.len(),
         "new": mails.iter().filter(|m| viewed_at.is_none_or(|v| m.at > v)).count(),
-        "your_turn": !last.mine && last.to.iter().any(|a| a == me),
+        "your_turn": !last.mine && last.to.iter().any(is_me),
         "derived": { "by": "rule", "rule": RULE },
     })))
 }
