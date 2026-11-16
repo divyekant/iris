@@ -100,10 +100,20 @@ INSERT INTO action_transition VALUES
 -- Section 5.2 also allows failed to undone, but only when the ledger lists
 -- a changed message. The ledger (R2-03) adds that move with its check.
 
+-- An action enters only the draft revision of its changeset, with no state.
 CREATE TRIGGER action_insert BEFORE INSERT ON changeset_action
 WHEN new.state IS NOT NULL
+  OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
+                 AND revision = new.revision AND submitted_at IS NULL
+                 AND state <> 'withdrawn')
 BEGIN
-  SELECT RAISE(ABORT, 'iris: a new action has no state');
+  SELECT RAISE(ABORT, 'iris: a new action goes into the draft revision, with no state');
+END;
+
+-- An action stays in its changeset, revision and place.
+CREATE TRIGGER action_place BEFORE UPDATE OF changeset_id, revision, n ON changeset_action
+BEGIN
+  SELECT RAISE(ABORT, 'iris: an action stays in its changeset and revision');
 END;
 
 -- Only submit gives a draft action a state other than 'cancelled': it sets
@@ -112,7 +122,10 @@ CREATE TRIGGER action_state BEFORE UPDATE OF state ON changeset_action
 WHEN NOT EXISTS (SELECT 1 FROM action_transition
                  WHERE from_state IS old.state AND to_state = new.state)
   OR (old.state IS NULL AND new.state <> 'cancelled'
-      AND (new.hash IS NULL OR new.submitted_at IS NULL))
+      AND (new.hash IS NULL OR new.submitted_at IS NULL
+           OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
+                          AND revision = new.revision
+                          AND submitted_at IS new.submitted_at)))
   -- No approval while a new revision is a draft (section 5.5): its submit
   -- replaces the older actions with no decision.
   OR (new.state = 'approved'
@@ -155,21 +168,37 @@ END;
 
 -- A submitted action does not change: its approval hash covers the targets,
 -- the arguments and the resolved messages (section 5.5).
-CREATE TRIGGER action_fixed BEFORE UPDATE OF changeset_id, revision, n, verb, targets,
-  args, why, hash, submitted_at ON changeset_action
+CREATE TRIGGER action_fixed BEFORE UPDATE OF verb, targets, args, why, hash,
+  submitted_at ON changeset_action
 WHEN old.state IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'iris: a submitted action does not change');
 END;
 
--- The engine can add a flag before apply, for example bulk (section 5.4). A
--- flag does not go away.
-CREATE TRIGGER action_flags BEFORE UPDATE OF flags ON changeset_action
-WHEN old.state IS NOT NULL
-  AND EXISTS (SELECT 1 FROM json_each(old.flags) o
-              WHERE o.value NOT IN (SELECT value FROM json_each(new.flags)))
+-- Flags are a JSON array of the names of section 5.3.
+CREATE TRIGGER action_flags_insert BEFORE INSERT ON changeset_action
+WHEN json_type(new.flags) IS NOT 'array'
+  OR EXISTS (SELECT 1 FROM json_each(new.flags)
+             WHERE type <> 'text' OR value NOT IN ('new_recipient', 'outside_thread', 'money', 'date', 'attachment',
+                   'first_contact', 'untrusted_content', 'bulk'))
 BEGIN
-  SELECT RAISE(ABORT, 'iris: a flag of a submitted action stays');
+  SELECT RAISE(ABORT, 'iris: the flags are not valid');
+END;
+
+-- The engine can add a flag to an open action before apply, for example
+-- bulk (section 5.4). A flag does not go away.
+CREATE TRIGGER action_flags BEFORE UPDATE OF flags ON changeset_action
+WHEN json_type(new.flags) IS NOT 'array'
+  OR EXISTS (SELECT 1 FROM json_each(new.flags)
+             WHERE type <> 'text' OR value NOT IN ('new_recipient', 'outside_thread', 'money', 'date', 'attachment',
+                   'first_contact', 'untrusted_content', 'bulk'))
+  OR (old.state IS NOT NULL
+      AND (old.state NOT IN ('proposed', 'in_review', 'approved')
+           OR EXISTS (SELECT 1 FROM json_each(old.flags) o
+                      WHERE NOT EXISTS (SELECT 1 FROM json_each(new.flags) f
+                                        WHERE f.value IS o.value))))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: the flags are not valid, or a flag of a submitted action goes away');
 END;
 
 CREATE TRIGGER action_message_insert BEFORE INSERT ON action_message

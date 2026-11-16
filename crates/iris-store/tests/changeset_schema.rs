@@ -158,10 +158,11 @@ fn only_the_moves_of_section_5_2() {
                     [from],
                 )?;
                 tx.execute_batch(&trigger)?;
-                // A newer revision is submitted: the event of replaced.
+                // The submit. For replaced, a newer revision is submitted.
                 tx.execute(
-                    "UPDATE changeset SET revision = 2, submitted_at = 0, why = 'w'",
-                    [],
+                    "UPDATE changeset SET revision = iif(?1 = 'replaced', 2, 1),
+                       submitted_at = 0, why = 'w'",
+                    [to],
                 )?;
                 // The event of cancelled: a withdraw.
                 if to == "cancelled" {
@@ -197,12 +198,20 @@ fn a_move_needs_its_event() {
          VALUES (1, 1, 9, 'archive', '{}', '{}', 'approved')",
     );
     s.write(|tx| Ok(draft(tx)?)).unwrap();
-    // Only submit moves a draft action: no state without the hash and the time.
+    // Only submit moves a draft action: no state without the hash and the
+    // time, and not while the changeset is a draft.
     fails(&s, "UPDATE changeset_action SET state = 'proposed'");
     fails(
         &s,
         "UPDATE changeset_action SET state = 'proposed', hash = 'h'",
     );
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'proposed', hash = 'h', submitted_at = 0",
+    );
+    // An action stays in its changeset and revision.
+    fails(&s, "UPDATE changeset_action SET revision = 2");
+    fails(&s, "UPDATE changeset_action SET n = 2");
     // A draft is cancelled only with a withdraw.
     fails(
         &s,
@@ -216,6 +225,22 @@ fn a_move_needs_its_event() {
         "INSERT INTO changeset(author_kind, created_at, submitted_at) VALUES ('agent', 0, 0)",
     );
     s.write(|tx| Ok(submit(tx, 1)?)).unwrap();
+    // A new action goes into the draft revision only: not after the submit,
+    // not into another revision.
+    let insert = |revision: i64| {
+        format!(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (1, {revision}, 2, 'archive', '{{}}', '{{}}')"
+        )
+    };
+    fails(&s, &insert(1));
+    fails(&s, &insert(2));
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 2, submitted_at = NULL", [])?))
+        .unwrap();
+    works(&s, &insert(2));
+    fails(&s, &insert(1));
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 1, submitted_at = 0", [])?))
+        .unwrap();
     for sql in [
         // Expired only 14 days after the submit.
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry',
@@ -337,6 +362,19 @@ fn a_submitted_action_does_not_change() {
     s.write(|tx| Ok(tx.execute("UPDATE changeset_action SET flags = '[\"bulk\"]'", [])?))
         .unwrap();
     fails(&s, "UPDATE changeset_action SET flags = '[]'");
+    for flags in [
+        "[null]",
+        "[\"bulk\",null]",
+        "{\"bulk\":1}",
+        "\"bulk\"",
+        "[1]",
+        "[\"bulk\",\"other\"]",
+    ] {
+        fails(
+            &s,
+            &format!("UPDATE changeset_action SET flags = '{flags}'"),
+        );
+    }
     fails(
         &s,
         "UPDATE changeset_action SET flags = '[\"first_contact\"]'",
@@ -376,6 +414,12 @@ fn the_apply_keeps_who_approved() {
         }
         works(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
     }
+    // After the apply, no flag is added.
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'applied';
+         UPDATE changeset_action SET flags = '[\"bulk\"]';",
+    );
     // A newer policy does not change the approval of rule 3 in version 1.
     s.write(|tx| {
         Ok(tx.execute_batch(
