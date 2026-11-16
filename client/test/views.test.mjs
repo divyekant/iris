@@ -722,6 +722,10 @@ test("a download of an original that Iris has not copied yet says so", async () 
 test("each brief section that shows has its All link, also with fewer than 8 items", async () => {
   const html = await render("/src/views/Brief.svelte", { brief: fx.brief, now: NOW, poll: 0 });
   assert.match(html, /href="#\/brief\/you_owe"[^>]*>All 2</);
+  // A Signals section of live login codes only: the codes show above the sections, and the section keeps its link.
+  const codes = { items: [item("s-901")], count: 1 };
+  const only = await render("/src/views/Brief.svelte", { brief: { ...fx.brief, signals: codes }, now: NOW, poll: 0 });
+  assert.match(only, /href="#\/brief\/signals"[^>]*>All 1</);
 });
 
 test("the signals of an open brief leave at their expiry, and the count follows", async () => {
