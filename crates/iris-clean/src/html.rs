@@ -207,6 +207,7 @@ impl Writer {
 /// Convert HTML to Markdown. If `drop_quotes` is true (the message is a
 /// reply), quoted history of common mail clients goes out too.
 /// Return the Markdown and true if the output reached [`OUT_LIMIT`].
+#[cfg(test)]
 pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     let (out, full, _) = convert(html, drop_quotes);
     (out, full)
