@@ -309,8 +309,9 @@ impl Engine {
         }
     }
 
-    /// Start a sync thread for each account that has none, and run the
-    /// content cleanup if [`CLEAN_EVERY`] passed. So an account that
+    /// Start a sync thread for each account that has none, open the
+    /// deferred commitments whose date came, and run the content cleanup if
+    /// [`CLEAN_EVERY`] passed. So an account that
     /// `iris account add` adds or signs in again starts to sync without a
     /// restart. Gives the accounts that got a new thread.
     pub fn tick(&mut self) -> Result<Vec<i64>> {
@@ -332,6 +333,9 @@ impl Engine {
                 .map_err(iris_store::Error::Io)?;
             self.workers.insert(account, handle);
             started.push(account);
+        }
+        if let Err(e) = self.store.reopen_deferred(now_ms()) {
+            say!("iris: deferred commitments: {e}");
         }
         if self.last_clean.is_none_or(|t| t.elapsed() >= CLEAN_EVERY) {
             self.last_clean = Some(Instant::now());

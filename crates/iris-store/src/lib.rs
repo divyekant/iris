@@ -268,6 +268,21 @@ impl Store {
         f(&conn)
     }
 
+    /// Open each deferred commitment again on its `deferred_until` date, in
+    /// UTC (specification 1, section 6.8). A gone item keeps its status.
+    /// Gives the number of commitments that opened.
+    pub fn reopen_deferred(&self, now: i64) -> Result<usize> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE item SET status = 'open', updated_at = ?1,
+                   doc = json_remove(json_set(doc, '$.status', 'open'), '$.deferred_until')
+                 WHERE form = 'commitment' AND status = 'deferred'
+                   AND json_extract(doc, '$.deferred_until') <= date(?1 / 1000, 'unixepoch')",
+                [now],
+            )?)
+        })
+    }
+
     /// Add a mailbox, or give the ID of the mailbox with this address.
     pub fn add_account(&self, provider: &str, address: &str) -> Result<i64> {
         self.write(|tx| {
