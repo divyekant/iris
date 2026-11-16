@@ -34,7 +34,7 @@ pub fn status(store: &Store, as_json: bool) -> Output {
             out,
             "account {} {} ({}): {state}, {mirror}",
             a.id,
-            clean(&a.address),
+            field(&a.address),
             a.provider
         );
         if let Some(run) = &a.last_sync {
@@ -43,7 +43,7 @@ pub fn status(store: &Store, as_json: bool) -> Output {
                 "  last sync: {} at {}: {}",
                 run.kind,
                 run.started,
-                clean(run.result.as_deref().unwrap_or("running"))
+                field(run.result.as_deref().unwrap_or("running"))
             );
         }
     }
@@ -79,7 +79,7 @@ pub fn search(store: &Store, text: &str, limit: u32, as_json: bool) -> Output {
 }
 
 pub fn show(store: &Store, id: &str, as_json: bool) -> Output {
-    let not_found = || format!("no object has the ID {}", clean(id));
+    let not_found = || format!("no object has the ID {}", field(id));
     if id.starts_with("m-") {
         let m = iris_api::message(store, id)
             .map_err(|e| e.to_string())?
@@ -92,16 +92,16 @@ pub fn show(store: &Store, id: &str, as_json: bool) -> Output {
         let _ = writeln!(out, "ID:      {} (thread {})", s.id, s.thread);
         let _ = writeln!(out, "Date:    {}", s.date.as_deref().unwrap_or("-"));
         let _ = writeln!(out, "From:    {}", address(&s.from));
-        let _ = writeln!(out, "To:      {}", clean(m.to.as_deref().unwrap_or("-")));
+        let _ = writeln!(out, "To:      {}", field(m.to.as_deref().unwrap_or("-")));
         if let Some(cc) = &m.cc {
-            let _ = writeln!(out, "Cc:      {}", clean(cc));
+            let _ = writeln!(out, "Cc:      {}", field(cc));
         }
         let _ = writeln!(
             out,
             "Subject: {}",
-            clean(s.subject.as_deref().unwrap_or("-"))
+            field(s.subject.as_deref().unwrap_or("-"))
         );
-        let _ = writeln!(out, "Labels:  {}", clean(&s.labels.join(", ")));
+        let _ = writeln!(out, "Labels:  {}", field(&s.labels.join(", ")));
         if m.gone {
             out.push_str("Gone:    yes\n");
         }
@@ -134,15 +134,15 @@ fn summary_line(m: &iris_api::MessageSummary) -> String {
         m.id,
         m.date.as_deref().map_or("-", |d| d.get(..10).unwrap_or(d)),
         address(&m.from),
-        clean(m.subject.as_deref().unwrap_or("-"))
+        field(m.subject.as_deref().unwrap_or("-"))
     )
 }
 
 fn address(a: &iris_api::Address) -> String {
     match (&a.name, &a.address) {
-        (Some(n), Some(x)) => clean(&format!("{n} <{x}>")),
-        (None, Some(x)) => clean(x),
-        (Some(n), None) => clean(n),
+        (Some(n), Some(x)) => field(&format!("{n} <{x}>")),
+        (None, Some(x)) => field(x),
+        (Some(n), None) => field(n),
         (None, None) => "-".into(),
     }
 }
@@ -161,6 +161,15 @@ pub fn clean(text: &str) -> String {
         .collect()
 }
 
+/// A header or a summary field must stay on its line: change each line
+/// break or other white space to a space, then remove control characters.
+pub fn field(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -168,6 +177,28 @@ mod tests {
         assert_eq!(
             super::clean("a\x1b]0;x\x07b\u{9b}2Jc\nd\te"),
             "a]0;xb2Jc\nd\te"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_header_stays_on_the_line_of_its_message() {
+        let m = iris_api::MessageSummary {
+            id: "m-1".into(),
+            thread: "t-1".into(),
+            date: Some("2026-11-16T00:00:00Z".into()),
+            from: iris_api::Address {
+                name: Some("Dana\nm-2  2026-11-16".into()),
+                address: Some("dana@example.test".into()),
+            },
+            subject: Some("Hello\r\nm-3  fake\u{2028}line\tx".into()),
+            labels: vec![],
+        };
+        let line = super::summary_line(&m);
+        assert_eq!(line.lines().count(), 1, "{line:?}");
+        assert!(line.starts_with("m-1  "), "{line:?}");
+        assert_eq!(
+            super::field("a\nb\r\tc\u{2028}d\u{2029}e\x1b"),
+            "a b  c d e"
         );
     }
 }

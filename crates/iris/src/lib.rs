@@ -225,7 +225,7 @@ fn mirror(store: Arc<Store>, command: &MirrorCommand) -> Result<(), String> {
                     }
                 );
                 for d in &r.differences {
-                    text.push_str(&format!("\n  {}", verbs::clean(&d.to_string())));
+                    text.push_str(&format!("\n  {}", verbs::field(&d.to_string())));
                 }
                 text
             }),
