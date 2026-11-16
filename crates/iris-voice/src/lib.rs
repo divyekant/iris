@@ -122,7 +122,10 @@ struct Msg {
     from_name: Option<String>,
     to_addrs: Option<String>,
     subject: String,
-    /// The clean text. `None` if understanding did not read the message yet.
+    /// Understanding saved the clean text.
+    has_body: bool,
+    /// The clean text, only for the newest [`THREAD_MESSAGES`] messages, so
+    /// a long thread does not fill the memory.
     text: Option<String>,
     sent: bool,
     hostile: bool,
@@ -143,7 +146,10 @@ const HOSTILE: &str = "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
 /// oldest first.
 fn thread_messages(c: &Connection, thread: i64) -> rusqlite::Result<Vec<Msg>> {
     let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, b.subject, b.text,
+        "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, b.subject,
+           CASE WHEN row_number() OVER (ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC) <= ?2
+                THEN b.text END,
+           b.message_id IS NOT NULL,
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
            {HOSTILE},
@@ -156,7 +162,7 @@ fn thread_messages(c: &Connection, thread: i64) -> rusqlite::Result<Vec<Msg>> {
                            WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
          ORDER BY coalesce(m.internal_date, 0), m.id"
     ))?;
-    let rows = st.query_map([thread], |r| {
+    let rows = st.query_map([thread, THREAD_MESSAGES as i64], |r| {
         let text: Option<String> = r.get(5)?;
         Ok(Msg {
             id: r.get(0)?,
@@ -165,9 +171,10 @@ fn thread_messages(c: &Connection, thread: i64) -> rusqlite::Result<Vec<Msg>> {
             to_addrs: r.get(3)?,
             subject: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
             text,
-            sent: r.get(6)?,
-            hostile: r.get(7)?,
-            understood: r.get(8)?,
+            has_body: r.get(6)?,
+            sent: r.get(7)?,
+            hostile: r.get(8)?,
+            understood: r.get(9)?,
         })
     })?;
     rows.collect()
@@ -180,23 +187,23 @@ fn check(msgs: &[Msg]) -> Result<&Msg> {
     }
     // Understanding writes the clean text first and the phishing answer of
     // the model last: only a message that it finished passed each check.
-    if msgs.iter().any(|m| m.text.is_none() || !m.understood) {
+    if msgs.iter().any(|m| !m.has_body || !m.understood) {
         return Err(Error::NotReady);
     }
     msgs.last().ok_or(Error::NotReady)
 }
 
-/// The person that the reply goes to: the sender of the newest message that
-/// the owner did not send, else the first recipient of the newest message.
+/// The person that the reply goes to, from the newest message: its sender,
+/// or its first recipient if the owner sent it.
 fn recipient(msgs: &[Msg]) -> Option<String> {
-    let addr = match msgs.iter().rev().find(|m| !m.sent) {
-        Some(m) => m.from_addr.clone(),
-        None => msgs
-            .last()?
-            .to_addrs
+    let last = msgs.last()?;
+    let addr = if last.sent {
+        last.to_addrs
             .as_deref()
             .and_then(|t| t.split(',').next())
-            .map(str::to_string),
+            .map(str::to_string)
+    } else {
+        last.from_addr.clone()
     };
     addr.map(|a| a.trim().to_lowercase())
         .filter(|a| !a.is_empty())
@@ -265,8 +272,7 @@ fn data(
             cut(text, SAMPLE_CHARS)
         );
     }
-    let skip = msgs.len().saturating_sub(THREAD_MESSAGES);
-    for m in &msgs[skip..] {
+    for m in msgs.iter().filter(|m| m.text.is_some()) {
         let from = match (&m.from_name, &m.from_addr) {
             (Some(n), Some(a)) => format!("{n} <{a}>"),
             (_, Some(a)) => a.clone(),
@@ -298,8 +304,14 @@ fn read_answer(reply: &iris_model::Reply) -> Result<String> {
     let body = v
         .get("body")
         .and_then(Value::as_str)
-        .ok_or(Error::BadAnswer("the answer has no text \"body\""))?
-        .trim();
+        .ok_or(Error::BadAnswer("the answer has no text \"body\""))?;
+    // The answer can repeat text of the mail: no control character but a
+    // line break and a tab, so no escape sequence reaches a terminal.
+    let body: String = body
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect();
+    let body = body.trim();
     if body.is_empty() {
         return Err(Error::BadAnswer("the body is empty"));
     }
@@ -342,6 +354,9 @@ pub fn write(
         })?
         .ok_or(Error::NoThread(thread))?;
     let based_on = check(&msgs)?.id;
+    // shortcut: a sync that marks a message hostile after this read and
+    // before the call does not stop the call (as in understanding, which
+    // reads each message once before its call). Issue #250.
     let to = recipient(&msgs);
 
     let reply = model

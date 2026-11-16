@@ -105,11 +105,18 @@ pub fn write(
         _ => e.to_string(),
     })?;
     end.map_err(|e| e.to_string())?;
-    Ok(format!(
+    let mut out = format!(
         "{}\n\nIris saved this draft for t-{thread}. {} of your sent messages showed your voice. \
          Nothing was sent.\n",
         saved.body, saved.samples
-    ))
+    );
+    if s.unknown {
+        out += "Warning: the cost of the call is not known. Iris kept its worst case from the budget.\n";
+    }
+    if s.overrun {
+        out += "Warning: the call cost more than its reservation. The budget left can be below zero.\n";
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -243,7 +250,8 @@ mod tests {
             known: false,
             ..usage.get()
         });
-        write(&store, "t-1", None, &connect, 40).unwrap();
+        let out = write(&store, "t-1", None, &connect, 40).unwrap();
+        assert!(out.contains("cost of the call is not known"), "{out}");
         usage.set(Usage {
             input_tokens: 1000,
             output_tokens: 10_000_000,
@@ -256,7 +264,8 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        write(&store, "t-1", None, &connect, 50).unwrap();
+        let out = write(&store, "t-1", None, &connect, 50).unwrap();
+        assert!(out.contains("more than its reservation"), "{out}");
         let stops: Vec<String> = store
             .read(|c| {
                 let mut st = c.prepare("SELECT stop FROM understand_run ORDER BY id")?;

@@ -499,8 +499,9 @@ fn cut_keeps_a_prefix_of_at_most_the_limit() {
 /// answer is refused.
 #[test]
 fn read_answer_accepts_only_a_valid_body() {
-    const PIECES: [&str; 16] = [
+    const PIECES: [&str; 17] = [
         " ", "a", "\\n", "3", "é", "{", "}", "\"", "body", ":", ",", "\\", "[", "]", "null", "```",
+        "\\u001b",
     ];
     // The first 5 pieces are safe inside a JSON string.
     const SAFE: u64 = 5;
@@ -537,9 +538,13 @@ fn read_answer_accepts_only_a_valid_body() {
             .json()
             .ok()
             .and_then(|v| {
-                v.get("body")
-                    .and_then(Value::as_str)
-                    .map(|b| b.trim().to_string())
+                v.get("body").and_then(Value::as_str).map(|b| {
+                    let b: String = b
+                        .chars()
+                        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+                        .collect();
+                    b.trim().to_string()
+                })
             })
             .filter(|b| !b.is_empty() && b.chars().count() <= MAX_BODY);
         match read_answer(&reply) {
@@ -552,4 +557,50 @@ fn read_answer_accepts_only_a_valid_body() {
         }
     }
     assert!(accepted > 100, "too few valid answers: {accepted}");
+}
+
+#[test]
+fn the_newest_message_names_the_recipient_and_only_six_texts_go_in() {
+    let (b, t) = mailbox("newest");
+    // The owner wrote to Bo last in the thread of Ana, after 9 more
+    // messages of Ana.
+    let mut batch = Vec::new();
+    for i in 0..9 {
+        let text = format!("ANA{i}");
+        batch.push(msg(
+            &format!("a{i}"),
+            "t1",
+            410 + i,
+            "INBOX",
+            "ana@example.org",
+            "me@example.com",
+            Some(&text),
+        ));
+    }
+    batch.push(msg(
+        "tobo",
+        "t1",
+        500,
+        "SENT",
+        "me@example.com",
+        "bo@example.org,ana@example.org",
+        Some("Bo, see below"),
+    ));
+    b.store.put_messages(1, &batch).unwrap();
+    understood(&b.store);
+    let fake = Fake::new(r#"{"body": "ok"}"#);
+    write(&b.store, t, None, &fake, 1).unwrap();
+    let data = &fake.calls.borrow()[0].1;
+    assert!(data.contains("Reply to: bo@example.org\n"), "{data}");
+    // The newest 6: ANA4 to ANA8 and the mail to Bo.
+    assert!(
+        !data.contains("ANA3") && !data.contains("Can we meet"),
+        "{data}"
+    );
+    assert!(data.contains("ANA4") && data.contains("ANA8"), "{data}");
+    // The sample to Bo comes first.
+    assert!(
+        data.find("Yo Bo").unwrap() < data.find("sure thing").unwrap(),
+        "{data}"
+    );
 }
