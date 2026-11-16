@@ -169,10 +169,7 @@ fn sent_mail_makes_each_recipient_a_person() {
     );
     assert_eq!((d.kind, d.sender), (Kind::SelfOwner, None));
     assert_eq!(c.row("ana@example.org").1.as_deref(), Some("person"));
-    assert_eq!(
-        c.row("bo@example.net").2.as_deref(),
-        Some("sent: m-1 sha:-")
-    );
+    assert_eq!(c.row("bo@example.net").2.as_deref(), Some("sent"));
     // A new thread from Ana: still a person.
     let d = c.put(
         "t2",
@@ -556,10 +553,6 @@ fn a_bcc_person_whose_sent_message_changed_is_decided_again() {
     // another Bcc, and a new content hash).
     set(
         &c,
-        "UPDATE header SET bcc_addrs = 'zed@example.org' WHERE message_id = 1",
-    );
-    set(
-        &c,
         "UPDATE message SET content_sha256 = 'other' WHERE id = 1",
     );
     assert_eq!(
@@ -598,16 +591,12 @@ fn a_person_whose_sent_message_is_gone_or_changed_is_decided_again() {
         &format!("From: {OWNER}\r\nTo: bo@example.net"),
     );
     let head = "From: Bo <bo@example.net>\r\nTo: owner@example.com";
-    // The sent message now names another recipient, and keeps SENT.
-    c.store
-        .write(|tx| {
-            tx.execute(
-                "UPDATE header SET to_addrs = 'zed@example.net' WHERE message_id = 1",
-                [],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    // The sent message now has other bytes (a new content hash), and keeps
+    // SENT.
+    set(
+        &c,
+        "UPDATE message SET content_sha256 = 'other' WHERE id = 1",
+    );
     assert_eq!(c.put("t2", &["INBOX"], head).kind, Kind::Stranger);
 
     c.put(

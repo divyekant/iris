@@ -332,9 +332,7 @@ impl Store {
                    date = excluded.date, from_addr = excluded.from_addr, from_name = excluded.from_name,
                    to_addrs = excluded.to_addrs, cc_addrs = excluded.cc_addrs, subject = excluded.subject,
                    message_id_hdr = excluded.message_id_hdr, in_reply_to = excluded.in_reply_to,
-                   list_id = excluded.list_id, auth = excluded.auth,
-                   -- The sender step writes bcc_addrs again from the new bytes.
-                   bcc_addrs = NULL",
+                   list_id = excluded.list_id, auth = excluded.auth",
             )?;
             let mut same_content = tx.prepare_cached(
                 "SELECT 1 FROM message WHERE account_id = ?1 AND provider_id = ?2

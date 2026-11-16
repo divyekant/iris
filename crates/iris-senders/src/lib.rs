@@ -10,7 +10,6 @@
 //!
 //! Mail text is data: this crate only compares header bytes.
 
-use iris_store::{format_id, parse_id, Kind as IdKind};
 use rusqlite::{params, Connection, OptionalExtension};
 
 mod head;
@@ -100,6 +99,9 @@ pub fn decide(
         .collect::<rusqlite::Result<_>>()?;
     let has = |l: &str| labels.iter().any(|x| x == l);
     let from = head.from();
+    // This decision writes the evidence of this message again.
+    conn.prepare_cached("DELETE FROM sender_evidence WHERE message_id = ?1")?
+        .execute([message])?;
 
     if has("DRAFT") {
         // A draft does not count for the `person` rule.
@@ -109,40 +111,36 @@ pub fn decide(
     // address in `From`, so such mail goes through the rules for received
     // mail.
     if has("SENT") {
-        let known = known_domains(conn, "")?;
-        let mut rerun = Vec::new();
-        // The store keeps `Bcc` only for the sender rule: save it here.
-        let bcc: Vec<String> = head
+        let recipients: Vec<String> = head
             .recipients()
             .into_iter()
-            .filter_map(|(a, b)| b.then_some(a))
+            .map(|(a, _)| a)
+            .filter(|a| !a.eq_ignore_ascii_case(&account))
             .collect();
-        conn.prepare_cached("UPDATE header SET bcc_addrs = ?1 WHERE message_id = ?2")?
-            .execute(params![(!bcc.is_empty()).then(|| bcc.join(",")), message])?;
-        for (to, _) in head.recipients() {
-            if to.eq_ignore_ascii_case(&account) {
-                continue;
-            }
-            // The `hostile` rule comes before the `person` rule.
-            match near(&to, &known) {
+        // The `hostile` rule comes before the `person` rule. It also compares
+        // each recipient with the other recipients of this message: when two
+        // domains of one message are near copies of each other, the message
+        // proves neither one.
+        let mut known = known_domains(conn, "")?;
+        known.extend(recipients.iter().map(|a| domain_of(a).to_string()));
+        let mut rerun = Vec::new();
+        for to in &recipients {
+            conn.prepare_cached(
+                "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
+                 VALUES (?1, ?2, 'sent', ?3)",
+            )?
+            .execute(params![message, to, sha])?;
+            match near(to, &known) {
                 Some(k) => upsert(
                     &mut rerun,
                     conn,
-                    &to,
+                    to,
                     None,
                     Kind::Hostile,
                     &format!("near copy of {k}"),
                     now_ms,
                 )?,
-                None => upsert(
-                    &mut rerun,
-                    conn,
-                    &to,
-                    None,
-                    Kind::Person,
-                    &evidence("sent", message, sha.as_deref()),
-                    now_ms,
-                )?,
+                None => upsert(&mut rerun, conn, to, None, Kind::Person, "sent", now_ms)?,
             };
         }
         return Ok(Decision {
@@ -160,20 +158,20 @@ pub fn decide(
             rerun: Vec::new(),
         });
     };
-    // (id, kind, decided_by, basis)
-    type Row = (i64, Option<String>, Option<String>, Option<String>);
+    // (id, kind, decided_by)
+    type Row = (i64, Option<String>, Option<String>);
     let row: Option<Row> = conn
         .query_row(
-            "SELECT id, kind, decided_by, basis FROM sender WHERE address = ?1",
+            "SELECT id, kind, decided_by FROM sender WHERE address = ?1",
             [&addr],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
     let previous = row
         .as_ref()
         .and_then(|r| r.1.as_deref())
         .and_then(Kind::parse);
-    if let Some((id, Some(kind), Some(by), _)) = &row {
+    if let Some((id, Some(kind), Some(by))) = &row {
         if by == "person" {
             if let Some(kind) = Kind::parse(kind) {
                 return Ok(Decision {
@@ -187,17 +185,7 @@ pub fn decide(
         }
     }
 
-    let old_basis = row.as_ref().and_then(|r| r.3.as_deref());
-    let (kind, basis) = rules(
-        conn,
-        &head,
-        &addr,
-        message,
-        sha.as_deref(),
-        date,
-        previous,
-        old_basis,
-    )?;
+    let (kind, basis) = rules(conn, &head, &addr, message, sha.as_deref(), date)?;
     let mut rerun = Vec::new();
     let id = upsert(
         &mut rerun,
@@ -226,31 +214,12 @@ const SENT_NOT_DRAFT: &str =
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
 /// SQL that is true when the header `h` names the address of parameter
-/// `?n` in `To`, `Cc` or `Bcc`.
+/// `?n` in `To` or `Cc`.
 fn to_addr(n: u8) -> String {
     format!(
-        "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ','
-                || coalesce(h.bcc_addrs, '') || ',', ',' || ?{n} || ',') > 0"
+        "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
+               ',' || ?{n} || ',') > 0"
     )
-}
-
-/// The `basis` of a rule that one message proves: the rule, the `m-` ID and
-/// the content hash, for example `sent: m-12 sha:ab12...`. A raw message
-/// does not change, so the same hash means the same headers.
-fn evidence(rule: &str, message: i64, sha: Option<&str>) -> String {
-    format!(
-        "{rule}: {} sha:{}",
-        format_id(IdKind::Message, message),
-        sha.unwrap_or("-")
-    )
-}
-
-/// Read a basis that [`evidence`] wrote: (rule, message row, hash).
-fn parse_evidence(basis: &str) -> Option<(&str, i64, Option<&str>)> {
-    let (rule, rest) = basis.split_once(": ")?;
-    let (id, sha) = rest.split_once(" sha:")?;
-    let (kind, row) = parse_id(id)?;
-    (kind == IdKind::Message).then_some((rule, row, (sha != "-").then_some(sha)))
 }
 
 fn own(basis: &str) -> Decision {
@@ -265,7 +234,6 @@ fn own(basis: &str) -> Decision {
 
 /// The engine rules in the order of spec 1 section 6.7: `hostile`, then
 /// `person`, then `service`, else `stranger`.
-#[allow(clippy::too_many_arguments)]
 fn rules(
     conn: &Connection,
     head: &Head,
@@ -273,61 +241,30 @@ fn rules(
     message: i64,
     sha: Option<&str>,
     date: Option<i64>,
-    previous: Option<Kind>,
-    old_basis: Option<&str>,
 ) -> rusqlite::Result<(Kind, String)> {
     let domain = domain_of(addr);
     if let Some(k) = near(addr, &known_domains(conn, addr)?) {
         return Ok((Kind::Hostile, format!("near copy of {k}")));
     }
 
-    // The `sent` rule. Each sent message makes its recipients `person` when
-    // it is decided, and `basis` names the message and its content hash.
-    // So only a `person` row needs the check that the sent message is still
-    // there, with the same bytes, and names the address in `To`, `Cc` or
-    // `Bcc`: first the message of the basis, then each sent message.
-    // A hostile row also gets the check: the hostile decision replaced the
-    // basis of an earlier sent message.
-    // A new or stranger row needs no scan: the understanding step saves the
-    // header row of a message just before this decision, so a sent message
-    // that waits for understanding has no header row to find. Its own
+    // The `sent` rule: the decision of each sent message writes a `sent`
+    // evidence row for each recipient. A row counts while its message is a
+    // sent message with the same bytes.
+    // A sent message that waits for its own decision has no row yet. Its
     // decision makes the recipients `person`. Spec 1 section 6.7 accepts
     // this: "The first sync fetches newest first, so a known person can be a
-    // stranger for some time." A scan for each message would also read every
-    // stored sent message (4.5 ms for each message at 20,000 messages).
-    if matches!(previous, Some(Kind::Person | Kind::Hostile)) {
-        if let Some((rule, m, old_sha)) = old_basis.and_then(parse_evidence) {
-            let to = if rule == "sent" {
-                to_addr(3)
-            } else {
-                "?3 IS NULL".to_string()
-            };
-            let still: bool = conn.query_row(
-                &format!(
-                    "SELECT EXISTS (SELECT 1 FROM message s JOIN header h ON h.message_id = s.id
-                      WHERE s.id = ?1 AND s.content_sha256 IS ?2 AND {to} AND {SENT_NOT_DRAFT})"
-                ),
-                params![m, old_sha, addr],
-                |r| r.get(0),
-            )?;
-            if still {
-                return Ok((Kind::Person, old_basis.unwrap_or_default().to_string()));
-            }
-        }
-        let found: Option<(i64, Option<String>)> = conn
-            .query_row(
-                &format!(
-                    "SELECT s.id, s.content_sha256 FROM message s JOIN header h ON h.message_id = s.id
-                      WHERE {} AND {SENT_NOT_DRAFT} LIMIT 1",
-                    to_addr(1)
-                ),
-                [addr],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((m, m_sha)) = found {
-            return Ok((Kind::Person, evidence("sent", m, m_sha.as_deref())));
-        }
+    // stranger for some time."
+    let sent: bool = conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM sender_evidence e JOIN message s ON s.id = e.message_id
+              WHERE e.address = ?1 AND e.rule = 'sent' AND s.content_sha256 IS e.content_sha256
+                AND {SENT_NOT_DRAFT})"
+        ),
+        [addr],
+        |r| r.get(0),
+    )?;
+    if sent {
+        return Ok((Kind::Person, "sent".into()));
     }
     // shortcut: this query reads each message from the address, so its cost
     // grows with the history of the address (about 1.7 ms for each message on the
@@ -363,29 +300,33 @@ fn rules(
             |r| r.get(0),
         )?;
         if earlier >= 2 {
-            return Ok((Kind::Service, evidence("service", message, sha)));
+            conn.prepare_cached(
+                "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
+                 VALUES (?1, ?2, 'service', ?3)",
+            )?
+            .execute(params![message, addr, sha])?;
+            return Ok((
+                Kind::Service,
+                "automated, dkim pass, 2 earlier messages".into(),
+            ));
         }
     }
-    // The kind belongs to the address. A newer message already made it a
-    // service, and an older message (read later, newest first) keeps it
-    // while the qualifying message of the basis is there with the same
-    // bytes (so the same automated and DKIM headers), and still has 2
-    // earlier messages from the address.
-    if previous == Some(Kind::Service) {
-        if let Some(("service", m, old_sha)) = old_basis.and_then(parse_evidence) {
-            let still: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM message q JOIN header hq ON hq.message_id = q.id
-                  WHERE q.id = ?1 AND q.content_sha256 IS ?2 AND hq.from_addr = ?3 AND q.gone_at IS NULL
-                    AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
-                          WHERE h.from_addr = ?3 AND e.internal_date < q.internal_date
-                            AND e.gone_at IS NULL LIMIT 2)) >= 2)",
-                params![m, old_sha, addr],
-                |r| r.get(0),
-            )?;
-            if still {
-                return Ok((Kind::Service, old_basis.unwrap_or_default().to_string()));
-            }
-        }
+    // The kind belongs to the address. Another message from the address can
+    // qualify (an older message is read later, newest first). It counts
+    // while it is there with the same bytes (so the same automated and DKIM
+    // headers), and still has 2 earlier messages from the address.
+    let other: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sender_evidence ev JOIN message q ON q.id = ev.message_id
+          WHERE ev.address = ?1 AND ev.rule = 'service' AND q.content_sha256 IS ev.content_sha256
+            AND q.gone_at IS NULL
+            AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
+                  WHERE h.from_addr = ?1 AND e.internal_date < q.internal_date
+                    AND e.gone_at IS NULL LIMIT 2)) >= 2)",
+        [addr],
+        |r| r.get(0),
+    )?;
+    if other {
+        return Ok((Kind::Service, "another message qualifies".into()));
     }
     Ok((Kind::Stranger, "no rule matched".into()))
 }
