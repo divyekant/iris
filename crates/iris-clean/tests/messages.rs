@@ -698,3 +698,10 @@ fn an_attached_message_at_the_depth_limit_is_cut() {
         .expect("listed");
     assert_eq!(inner.text.as_deref(), Some(CUT_MARK));
 }
+
+#[test]
+fn a_part_with_too_many_lines_is_cut() {
+    let lines = "a\n".repeat(iris_clean::MAX_LINES + 10);
+    let c = clean(&crlf(&format!("Subject: Lines\n\n{lines}")));
+    assert!(c.cut);
+}

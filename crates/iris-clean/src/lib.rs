@@ -51,6 +51,9 @@ pub const PDF_LIMIT: u64 = 10 * 1024 * 1024;
 /// The least bytes of PDF text that the quality check reads, whatever the
 /// budget that is left.
 const PDF_CHECK_TEXT: usize = 4096;
+/// The most lines of one body part that the quote and signature steps read.
+/// More lines are cut. 2 MiB of lines of 20 bytes is about 100,000 lines.
+pub const MAX_LINES: usize = 100_000;
 /// The most characters of an attachment name.
 const NAME_LIMIT: usize = 255;
 
@@ -260,7 +263,12 @@ impl<'a> Walker<'a> {
         } else {
             text
         };
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut text = text.replace("\r\n", "\n").replace('\r', "\n");
+        // The quote and signature steps keep a list of the lines. Bound it.
+        if let Some((i, _)) = text.match_indices('\n').nth(MAX_LINES) {
+            text.truncate(i);
+            self.cut = true;
+        }
         let text = quote::strip_signature(&quote::strip_quotes(&text, self.is_reply));
         let mut text = tidy(&url::clean_urls(&text));
         if text.is_empty() {

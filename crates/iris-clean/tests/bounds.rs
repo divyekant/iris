@@ -164,6 +164,15 @@ fn memory_and_time_stay_bounded() {
     eprintln!("peak: {peak} bytes (PDF with many strings before one operator)");
     assert!(peak < 10 * 1024 * 1024, "peak {peak}");
 
+    // A plain body part of 2 MiB of empty lines and of short quote lines.
+    for line in ["\n", "> a\n", "-- \n"] {
+        let mut raw = b"Subject: Re: Lines\r\nIn-Reply-To: <a@b>\r\n\r\nHi\n".to_vec();
+        raw.extend(line.repeat(2 * 1024 * 1024 / line.len()).bytes());
+        let (peak, _, _) = peak_of(&raw);
+        eprintln!("peak: {peak} bytes (2 MiB of {line:?} lines)");
+        assert!(peak < 12 * 1024 * 1024, "peak {peak}");
+    }
+
     // Base64 with a few characters and very much white space.
     let mut raw = message(1000, 0);
     raw.truncate(raw.len() - b"--m--\r\n".len());

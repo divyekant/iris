@@ -92,7 +92,8 @@ The steps, in order:
 1. Decode at most `PART_LIMIT` (2 MiB) bytes. If bytes stay, the text is cut.
 2. HTML to Markdown (see [HTML](#html)). The output has at most 512 KiB. If
    the output is full, the text is cut.
-3. Remove quoted history (see [Quoted history](#quoted-history)).
+3. Keep at most `MAX_LINES` lines. If lines stay, the text is cut. Then
+   remove quoted history (see [Quoted history](#quoted-history)).
 4. Remove the signature (see [Signatures](#signatures)).
 5. Remove tracking parameters from URLs (see [URLs](#urls)).
 6. Tidy: remove the characters U+200B, U+200C, U+200D, U+2060, U+FEFF,
@@ -288,6 +289,7 @@ client. They are not defects of this design:
 | `TEXT_LIMIT` | 32,000 characters | The body text stops, with `CUT_MARK` if clean text goes out. |
 | `PART_LIMIT` | 2 MiB | One body part decodes no more, with `CUT_MARK`. |
 | HTML output | 512 KiB | The Markdown of one part stops, with `CUT_MARK`. |
+| `MAX_LINES` | 100,000 lines | The quote and signature steps read no more lines of one part, with `CUT_MARK`. |
 | `MAX_PARTS` | 500 parts | Later parts are not read, with `CUT_MARK`. |
 | `MAX_DEPTH` | 8 levels | Deeper parts are not read, with `CUT_MARK`. |
 | `ATTACHMENT_TEXT_LIMIT` | 1,000,000 bytes | Attachment text stops, with `CUT_MARK` on that text. |
