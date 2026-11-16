@@ -196,9 +196,10 @@ pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, b
     if items.len() > MAX_ITEMS {
         return None;
     }
-    // Phishing gives no item, so the items do not need to be valid.
+    // A phishing answer has no item (the instruction says so). An answer
+    // with both is not clear: not valid.
     if phishing {
-        return Some((Vec::new(), true));
+        return items.is_empty().then(|| (Vec::new(), true));
     }
     let mut out = Vec::with_capacity(items.len());
     for it in items {

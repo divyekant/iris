@@ -155,12 +155,15 @@ fn a_quote_that_the_mail_does_not_hold_is_not_valid() {
 
 #[test]
 fn phishing_is_hostile_with_no_item() {
-    let m = Fake::with(vec![Ok(text(
-        r#"{"items": [{"form": "x"}], "phishing": true}"#,
-    ))]);
+    let m = Fake::with(vec![Ok(text(r#"{"items": [], "phishing": true}"#))]);
     let (_, d) = run(ASK, Kind::Stranger, &[], &[], Some(&m));
     let d = d.unwrap();
     assert!(d.phishing && d.hostile && d.drafts.is_empty());
+    // Phishing with items is not clear: one more try, and no mark.
+    let both = Ok(text(r#"{"items": [{"form": "x"}], "phishing": true}"#));
+    let m = Fake::with(vec![both, answer(task())]);
+    let d = run(ASK, Kind::Stranger, &[], &[], Some(&m)).1.unwrap();
+    assert_eq!((d.calls, d.hostile, d.drafts.len()), (2, false, 1));
 }
 
 #[test]
@@ -625,7 +628,7 @@ fn read_holds_for_generated_answers() {
         assert!(ans["phishing"].is_boolean(), "{ans}");
         some += 1;
         if phishing {
-            assert!(drafts.is_empty());
+            assert!(drafts.is_empty() && ans["items"] == json!([]), "{ans}");
         }
         for d in drafts {
             assert!(
