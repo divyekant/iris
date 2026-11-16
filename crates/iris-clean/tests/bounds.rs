@@ -233,7 +233,8 @@ fn memory_and_time_stay_bounded() {
     let (peak, _, c) = peak_of(raw.as_bytes());
     eprintln!("peak: {peak} bytes (200,000 parts)");
     assert!(c.cut);
-    assert!(peak < 1024 * 1024, "peak {peak}");
+    // mail-parser stops at PARSE_PARTS parts. Measured: about 140 bytes for each part.
+    assert!(peak < 200 * iris_clean::PARSE_PARTS, "peak {peak}");
 }
 
 fn b64_line(chunk: &[u8]) -> String {

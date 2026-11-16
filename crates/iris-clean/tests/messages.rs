@@ -906,3 +906,31 @@ fn a_quoted_printable_escape_at_the_cap_decodes() {
         assert!(t.ends_with("aaaA"), "tail {tail}: {:?}", &t[t.len() - 8..]);
     }
 }
+
+#[test]
+fn a_many_part_attached_message_leaves_the_outer_text() {
+    let mut inner = String::from("Subject: Inner\nContent-Type: multipart/mixed; boundary=i\n\n");
+    for k in 0..iris_clean::MAX_PARTS + 50 {
+        inner.push_str(&format!("--i\nContent-Type: application/x-{k}\n\nx\n"));
+    }
+    inner.push_str("--i--\n");
+    let raw = format!(
+        "Subject: Outer\nContent-Type: multipart/mixed; boundary=o\n\n\
+         --o\nContent-Type: message/rfc822\n\n{inner}\n--o\nContent-Type: text/plain\n\nOuter text.\n--o--\n"
+    );
+    assert!(clean(raw.as_bytes()).text.contains("Outer text."));
+}
+
+#[test]
+fn the_base64_size_counts_each_padded_group() {
+    let raw = "Subject: Pad\nContent-Type: multipart/mixed; boundary=m\n\n--m\n\nHi\n--m\n\
+               Content-Type: application/octet-stream; name=a.bin\nContent-Transfer-Encoding: base64\n\n\
+               QQ==QQ==\n--m--\n";
+    assert_eq!(clean(raw.as_bytes()).attachments[0].size, 2);
+}
+
+#[test]
+fn a_quoted_printable_equals_sign_at_the_end_is_a_soft_break() {
+    let raw = "Subject: QP\nContent-Transfer-Encoding: quoted-printable\n\nHi= there=zz=";
+    assert_eq!(clean(raw.as_bytes()).text, "Hi= there=zz");
+}
