@@ -15,7 +15,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
     Json, Router,
 };
 use iris_store::Store;
@@ -82,7 +82,9 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/api/search", get(get_search))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
-        .fallback(|| async { not_found() })
+        // No fallback: `iris_web::router()` has the fallback of the server.
+        .route("/api", any(|| async { not_found() }))
+        .route("/api/{*rest}", any(|| async { not_found() }))
         .with_state(store)
         .layer(middleware::from_fn(local_only))
 }

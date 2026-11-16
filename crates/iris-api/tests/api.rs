@@ -755,3 +755,29 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(code, StatusCode::OK);
     assert_eq!(http["records"], b["records"]);
 }
+
+#[tokio::test]
+async fn merges_with_the_web_client_router() {
+    let dir = temp("merge");
+    let store = Arc::new(Store::open(&dir.0).unwrap());
+    let app = iris_api::router(store).merge(iris_web::router());
+    let send = |uri: &str| {
+        let req = Request::get(uri)
+            .header("host", "127.0.0.1:4800")
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req)
+    };
+    assert_eq!(send("/api/status").await.unwrap().status(), StatusCode::OK);
+    // An unknown API path is the 404 of the API, not the web page.
+    let res = send("/api/nothing/here").await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(res.headers()["content-type"], "application/json");
+    // Each other path goes to the web client.
+    let res = send("/").await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+}

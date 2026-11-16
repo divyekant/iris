@@ -649,6 +649,7 @@ dependencies = [
  "futures-util",
  "iris-store",
  "iris-synth",
+ "iris-web",
  "rusqlite",
  "serde",
  "serde_json",
