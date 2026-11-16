@@ -672,8 +672,13 @@ engine before `submit`.
 
 ### 8.3 Output
 
-- The default output is short text for a person or an agent to read. Each
-  line starts with an ID, so the next command can use it.
+- The default output is short text for a person or an agent to read. In a
+  list (for example `iris search`), each line starts with an ID, so the next
+  command can use it. A command that prints one object or a summary (for
+  example `iris show`, `iris status` and `iris mirror`) starts each line with
+  a label: a field name, such as `ID:` or `Mode:`, or `account <ID>` for a
+  line about one account. The text of a message comes after its fields. A
+  program reads these commands with `--json`, where the command has it.
 - `--json` prints the open model documents (specification 1, section 6, and
   section 5.1 here). One JSON document for one object, and JSON Lines for a
   list.
