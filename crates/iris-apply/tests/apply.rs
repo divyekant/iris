@@ -1604,3 +1604,42 @@ fn a_second_step_needs_its_first_step() {
         assert!(e.to_string().contains("iris:"), "{e}");
     }
 }
+
+/// Only an undo of the entry targets a ledger entry: submit denies each
+/// other action that names one.
+#[test]
+fn only_an_undo_targets_an_entry() {
+    let b = setup("undo-target", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    let a = b.approved("archive", &ms, PERSON);
+    applied(b.apply(a));
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let cs = iris_changeset::create(&b.store, &person, now()).unwrap();
+    let targets = format!("{{\"ledger\":[\"l-{}\"]}}", b.entry(a));
+    b.store
+        .write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (?1, 1, 1, 'inbox', ?2, '{}')",
+                params![cs, targets],
+            )?)
+        })
+        .unwrap();
+    iris_changeset::submit(&b.store, cs, &person, "u", now()).unwrap();
+    let state: String = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state FROM changeset_action WHERE changeset_id = ?1",
+                [cs],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "denied");
+}

@@ -758,6 +758,11 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return bad();
     };
     let state = STATE_VERBS.contains(&verb.as_str());
+    // The undo of a ledger entry (section 7.4) names the entry. Its
+    // messages come from the ledger in SQL, never as a list in memory.
+    if group == "ledger" && !state {
+        return resolve_undo(c, action, ids);
+    }
     match (state, group.as_str()) {
         (false, "threads" | "messages") | (true, "items") => {}
         (false, _) => return Ok(Some("a mailbox verb takes threads or messages".into())),
@@ -858,6 +863,43 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return Ok(Some("the targets are in two or more accounts".into()));
     }
     Ok(None)
+}
+
+/// The messages of an undo: the messages with `done` of the ledger entry
+/// that the action undoes, that are not gone (migration 12). Step 2 of the
+/// undo of a `trash` takes only those with no `INBOX` in `pre`.
+fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<String>> {
+    let ledger = match ids {
+        [Value::String(id)] => id
+            .strip_prefix("l-")
+            .and_then(|n| n.parse::<i64>().ok())
+            .filter(|n| *n > 0 && format!("l-{n}") == *id),
+        _ => None,
+    };
+    let Some(ledger) = ledger else {
+        return Ok(Some("the targets are not valid".into()));
+    };
+    let linked: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1 AND ledger_id = ?2)",
+        params![action, ledger],
+        |r| r.get(0),
+    )?;
+    if !linked {
+        return Ok(Some(
+            "only an undo of the entry targets a ledger entry".into(),
+        ));
+    }
+    let n = c.execute(
+        "INSERT INTO action_message(action_id, message_id)
+         SELECT ?1, lm.message_id FROM ledger_undo u
+         JOIN ledger_message lm ON lm.ledger_id = u.ledger_id
+         JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+         WHERE u.action_id = ?1 AND lm.done = 1
+           AND (u.step = 1
+                OR NOT EXISTS (SELECT 1 FROM json_each(lm.pre) WHERE value = 'INBOX'))",
+        [action],
+    )?;
+    Ok((n == 0).then(|| "the targets have no message to change".into()))
 }
 
 /// `correct` (section 4): the rules of a correction (`iris_understand::correct`)

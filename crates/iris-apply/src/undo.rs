@@ -1,9 +1,8 @@
 //! The undo of a ledger entry (specification 2, section 7.4).
 
 use iris_changeset::{ActionId, Author, AuthorKind, Verb};
-use iris_store::{format_id, Kind, Store};
+use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{Map, Value};
 
 use crate::{Error, Result};
 
@@ -33,7 +32,8 @@ fn inverse(verb: &str) -> Option<Verb> {
 /// waits for step 1. The undo of `trash` has two actions: `untrash`, then
 /// `archive` of each message that had no `INBOX` before the trash.
 ///
-/// The inverse names each message with `done` that is not gone. The apply
+/// The target of each action is the entry (`{"ledger": ["l-N"]}`): submit
+/// resolves the messages with `done` that are not gone. The apply
 /// reads the labels at Gmail again, and skips each message that changed
 /// after the entry. When step 1 applies, the entry becomes `undone`.
 ///
@@ -80,32 +80,17 @@ fn make(
         return Err(refused(format!("an undo of l-{ledger} is open")));
     }
     let verb_back = inverse(&verb).ok_or_else(|| refused(format!("{verb} has no undo")))?;
-    let targets = done(c, ledger, false)?;
-    if targets.is_empty() {
+    if !done(c, ledger, false)? {
         return Err(refused(format!(
             "l-{ledger} changed no message that is in the mirror"
         )));
     }
-    // The arguments of a mailbox verb: none, or the label name.
-    let args: Map<String, Value> = serde_json::from_str(&args).unwrap_or_default();
     let why = format!("Undo of l-{ledger}");
     let cs = iris_changeset::create_in(c, author, now_ms)?;
-    add(c, cs, author, verb_back, &targets, &args, &why, ledger, 1)?;
-    if verb == "trash" {
-        let back = done(c, ledger, true)?;
-        if !back.is_empty() {
-            add(
-                c,
-                cs,
-                author,
-                Verb::Archive,
-                &back,
-                &Map::new(),
-                &why,
-                ledger,
-                2,
-            )?;
-        }
+    // The same arguments: none, or the label name.
+    add(c, cs, 1, verb_back, &args, &why, ledger)?;
+    if verb == "trash" && done(c, ledger, true)? {
+        add(c, cs, 2, Verb::Archive, "{}", &why, ledger)?;
     }
     iris_changeset::submit_in(c, cs, author, &why, now_ms)?;
     #[allow(clippy::type_complexity)]
@@ -146,41 +131,40 @@ fn make(
     Ok(ids)
 }
 
-/// The short IDs of the messages of the entry with `done` that are not
-/// gone. With `no_inbox`, only the messages whose `pre` has no `INBOX`.
-fn done(c: &Connection, ledger: i64, no_inbox: bool) -> rusqlite::Result<Vec<String>> {
-    let mut st = c.prepare(
-        "SELECT lm.message_id FROM ledger_message lm
-         JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
-         WHERE lm.ledger_id = ?1 AND lm.done = 1
-           AND (NOT ?2 OR NOT EXISTS (SELECT 1 FROM json_each(lm.pre) WHERE value = 'INBOX'))
-         ORDER BY 1",
-    )?;
-    let rows = st.query_map(params![ledger, no_inbox], |r| {
-        Ok(format_id(Kind::Message, r.get(0)?))
-    })?;
-    rows.collect()
+/// True if the entry has a message with `done` that is not gone. With
+/// `no_inbox`, a message whose `pre` has no `INBOX`.
+fn done(c: &Connection, ledger: i64, no_inbox: bool) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_message lm
+           JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+           WHERE lm.ledger_id = ?1 AND lm.done = 1
+             AND (NOT ?2 OR NOT EXISTS (SELECT 1 FROM json_each(lm.pre) WHERE value = 'INBOX')))",
+        params![ledger, no_inbox],
+        |r| r.get(0),
+    )
 }
 
-/// Add one action of the undo, with its link to the entry (migration 12).
-#[allow(clippy::too_many_arguments)]
+/// Add action `n` of the undo to the draft `cs`, with its link to the entry
+/// (migration 12). The target is the entry: submit takes its messages from
+/// the ledger, so no list of message IDs is in memory (section 9).
 fn add(
     c: &Connection,
     cs: i64,
-    author: &Author,
+    n: i64,
     verb: Verb,
-    targets: &[String],
-    args: &Map<String, Value>,
+    args: &str,
     why: &str,
     ledger: i64,
-    step: i64,
 ) -> iris_changeset::Result<()> {
-    let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-    let n = iris_changeset::add_action_in(c, cs, author, verb, &targets, args, Some(why))?;
+    let targets = serde_json::json!({ "ledger": [format!("l-{ledger}")] }).to_string();
     c.execute(
-        "INSERT INTO ledger_undo(action_id, ledger_id, step)
-         SELECT id, ?3, ?4 FROM changeset_action WHERE changeset_id = ?1 AND n = ?2",
-        params![cs, n, ledger, step],
+        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
+         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6)",
+        params![cs, n, verb.as_str(), targets, args, why],
+    )?;
+    c.execute(
+        "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, ?2, ?3)",
+        params![c.last_insert_rowid(), ledger, n],
     )?;
     Ok(())
 }

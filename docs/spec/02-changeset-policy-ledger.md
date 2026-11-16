@@ -735,7 +735,10 @@ applies it.
 2. The engine (`iris_apply::undo`) makes a changeset with author `person`
    and one action: the inverse of the entry (`archive` and `inbox`, `read`
    and `unread`, `label` and `unlabel` of the same name, `trash` and
-   `untrash`). Its targets are the messages with `done` that are not gone.
+   `untrash`). Its target is the entry (`{"ledger": ["l-N"]}`), and submit
+   resolves the messages with `done` that are not gone, in SQL, so no list
+   of message IDs is in memory (section 9). Only an action with the link
+   of migration 12 to that entry can target an entry.
    One transaction submits it, and the person approves it: the choice of
    the person is the approval. The table `ledger_undo` (migration 12) links
    the action to the entry. The rules, the mode `observe` and the flag

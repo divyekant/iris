@@ -914,7 +914,7 @@
       ]
     },
     "targets": {
-      "$comment": "IDs of one kind: threads, messages or items. A sender is not a target (section 5.6).",
+      "$comment": "IDs of one kind: threads, messages or items. A sender is not a target (section 5.6). Only an undo targets a ledger entry (section 7.4).",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
@@ -942,6 +942,16 @@
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/itemId"
+          }
+        },
+        "ledger": {
+          "$comment": "The ledger entry that the undo reverses. Submit resolves its messages with done.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^l-[1-9][0-9]*$"
           }
         }
       }
