@@ -5,8 +5,8 @@
 //! ([`add_action`]) and submits it ([`submit`]). Submit resolves each target
 //! to message IDs from the mirror, adds the flags `bulk` and `first_contact`,
 //! and gives each action the state `proposed`, or `denied` with a reason.
-//! This crate does not yet move an action after submit. The policy and the
-//! review decisions come in R2-01 part 3.
+//! The policy and the review move the action on with [`decide`] and
+//! [`approve`]. A person approves an action only with its current hash.
 //!
 //! The SQL trigger `action_state` (migration 7) allows only the moves of
 //! section 5.2, so no caller can make a move that the specification does not
@@ -132,6 +132,51 @@ impl State {
     }
 }
 
+/// Who decided an action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum By {
+    /// An `allow` or `deny` rule of the active policy: its ID, and the
+    /// confirmed policy version. A rule can change and keep its ID, so the two
+    /// together name one rule text. The policy of the first start has no rule.
+    Rule { id: i64, policy: i64 },
+    /// The person, in the web client.
+    Person,
+    /// The policy with no rule: its default, or the mode.
+    Policy,
+    /// A hard limit (section 6.5).
+    Limit,
+    /// The engine: a target or an argument that is not valid, or a check
+    /// before the apply.
+    Engine,
+    /// The author withdrew the changeset.
+    Author,
+    /// 14 days with no decision or no apply.
+    Expiry,
+}
+
+impl By {
+    /// The column values: `decided_by`, `rule` and `policy`.
+    fn parts(self) -> (&'static str, Option<i64>, Option<i64>) {
+        match self {
+            By::Rule { id, policy } => ("rule", Some(id), Some(policy)),
+            By::Person => ("person", None, None),
+            By::Policy => ("policy", None, None),
+            By::Limit => ("limit", None, None),
+            By::Engine => ("engine", None, None),
+            By::Author => ("author", None, None),
+            By::Expiry => ("expiry", None, None),
+        }
+    }
+}
+
+/// One action: the changeset, the revision and the action number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActionId {
+    pub changeset: i64,
+    pub revision: i64,
+    pub n: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Author {
     pub kind: AuthorKind,
@@ -154,8 +199,13 @@ pub fn parse_changeset_id(text: &str) -> Option<i64> {
     n.parse().ok().filter(|row| *row > 0)
 }
 
-/// Run `f` in a write transaction. A refusal after a write in `f` also rolls
-/// back, because the transaction commits only when `f` gives `Ok`.
+/// Run `f` in one write transaction, for example a create, its actions and
+/// the submit with the `_in` functions. A refusal after a write in `f` also
+/// rolls back, because the transaction commits only when `f` gives `Ok`.
+pub fn transaction<T>(store: &Store, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    write(store, f)
+}
+
 fn write<T>(store: &Store, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
     let mut out = None;
     let r = store.write(|tx| {
@@ -187,14 +237,24 @@ fn finish<T>(r: iris_store::Result<()>, out: Option<Result<T>>) -> Result<T> {
 
 /// Make a draft changeset. Gives its row ID.
 pub fn create(store: &Store, author: &Author, now_ms: i64) -> Result<i64> {
-    write(store, |c| {
-        c.execute(
-            "INSERT INTO changeset(author_kind, author_name, author_session, author_job, created_at)
+    write(store, |c| create_in(c, author, now_ms))
+}
+
+/// [`create`] in a write transaction of the caller, with the same checks.
+/// Use [`transaction`] to run more than one step in one transaction.
+pub fn create_in(c: &Connection, author: &Author, now_ms: i64) -> Result<i64> {
+    c.execute(
+        "INSERT INTO changeset(author_kind, author_name, author_session, author_job, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![author.kind.as_str(), author.name, author.session, author.job, now_ms],
-        )?;
-        Ok(c.last_insert_rowid())
-    })
+        params![
+            author.kind.as_str(),
+            author.name,
+            author.session,
+            author.job,
+            now_ms
+        ],
+    )?;
+    Ok(c.last_insert_rowid())
 }
 
 /// Add an action to the draft revision of a changeset. `targets` are short
@@ -209,31 +269,45 @@ pub fn add_action(
     args: &Map<String, Value>,
     why: Option<&str>,
 ) -> Result<i64> {
-    let targets = targets_json(targets)?;
     write(store, |c| {
-        check_author(c, changeset, author)?;
-        let revision = draft_revision(c, changeset)?;
-        let n: i64 = c.query_row(
-            "SELECT coalesce(max(n), 0) + 1 FROM changeset_action
-             WHERE changeset_id = ?1 AND revision = ?2",
-            params![changeset, revision],
-            |r| r.get(0),
-        )?;
-        c.execute(
-            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                changeset,
-                revision,
-                n,
-                verb.as_str(),
-                targets,
-                Value::Object(args.clone()).to_string(),
-                why
-            ],
-        )?;
-        Ok(n)
+        add_action_in(c, changeset, author, verb, targets, args, why)
     })
+}
+
+/// [`add_action`] in a write transaction of the caller, with the same checks.
+/// Use [`transaction`] to run more than one step in one transaction.
+pub fn add_action_in(
+    c: &Connection,
+    changeset: i64,
+    author: &Author,
+    verb: Verb,
+    targets: &[&str],
+    args: &Map<String, Value>,
+    why: Option<&str>,
+) -> Result<i64> {
+    let targets = targets_json(targets)?;
+    check_author(c, changeset, author)?;
+    let revision = draft_revision(c, changeset)?;
+    let n: i64 = c.query_row(
+        "SELECT coalesce(max(n), 0) + 1 FROM changeset_action
+             WHERE changeset_id = ?1 AND revision = ?2",
+        params![changeset, revision],
+        |r| r.get(0),
+    )?;
+    c.execute(
+        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            changeset,
+            revision,
+            n,
+            verb.as_str(),
+            targets,
+            Value::Object(args.clone()).to_string(),
+            why
+        ],
+    )?;
+    Ok(n)
 }
 
 /// The targets as JSON: `{"threads": [...]}`, `{"messages": [...]}` or
@@ -291,29 +365,33 @@ fn draft_revision(c: &Connection, changeset: i64) -> Result<i64> {
 /// that are still `proposed` or `in_review` become `replaced` when the new
 /// revision is submitted.
 pub fn revise(store: &Store, changeset: i64, author: &Author) -> Result<i64> {
-    write(store, |c| {
-        check_author(c, changeset, author)?;
-        let (state, submitted): (String, Option<i64>) = c.query_row(
-            "SELECT state, submitted_at FROM changeset WHERE id = ?1",
-            [changeset],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        if state == "withdrawn" {
-            return Err(refused("the changeset is withdrawn".into()));
-        }
-        if submitted.is_none() {
-            return Err(refused("the newest revision is not submitted".into()));
-        }
-        c.execute(
-            "UPDATE changeset SET revision = revision + 1, submitted_at = NULL WHERE id = ?1",
-            [changeset],
-        )?;
-        Ok(c.query_row(
-            "SELECT revision FROM changeset WHERE id = ?1",
-            [changeset],
-            |r| r.get(0),
-        )?)
-    })
+    write(store, |c| revise_in(c, changeset, author))
+}
+
+/// [`revise`] in a write transaction of the caller, with the same checks.
+/// Use [`transaction`] to run more than one step in one transaction.
+pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64> {
+    check_author(c, changeset, author)?;
+    let (state, submitted): (String, Option<i64>) = c.query_row(
+        "SELECT state, submitted_at FROM changeset WHERE id = ?1",
+        [changeset],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if state == "withdrawn" {
+        return Err(refused("the changeset is withdrawn".into()));
+    }
+    if submitted.is_none() {
+        return Err(refused("the newest revision is not submitted".into()));
+    }
+    c.execute(
+        "UPDATE changeset SET revision = revision + 1, submitted_at = NULL WHERE id = ?1",
+        [changeset],
+    )?;
+    Ok(c.query_row(
+        "SELECT revision FROM changeset WHERE id = ?1",
+        [changeset],
+        |r| r.get(0),
+    )?)
 }
 
 /// The same `kind`, `name` and `session` (section 5.5).
@@ -349,91 +427,101 @@ pub fn submit(
     why: &str,
     now_ms: i64,
 ) -> Result<()> {
+    write(store, |c| submit_in(c, changeset, author, why, now_ms))
+}
+
+/// [`submit`] in a write transaction of the caller, with the same checks.
+/// Use [`transaction`] to run more than one step in one transaction.
+pub fn submit_in(
+    c: &Connection,
+    changeset: i64,
+    author: &Author,
+    why: &str,
+    now_ms: i64,
+) -> Result<()> {
     if why.trim().is_empty() {
         return Err(refused("a changeset needs a reason".into()));
     }
-    write(store, |c| {
-        check_author(c, changeset, author)?;
-        let revision = draft_revision(c, changeset)?;
-        let any: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = ?1 AND revision = ?2)",
-            params![changeset, revision],
-            |r| r.get(0),
-        )?;
-        if !any {
-            return Err(refused("the revision has no action".into()));
-        }
-        // Pass 1: check and resolve each action, one at a time. An action
-        // that is not valid keeps no message row, and its reason waits here.
-        // shortcut: one reason string for each denied action is in memory
-        // until the end of the submit; stream the reasons if an author can
-        // send a very large number of actions.
-        let mut denials = Vec::new();
-        let mut last = 0;
-        while let Some((id, n, verb, targets, args)) = next_action(c, changeset, revision, last)? {
-            last = n;
-            let verb = Verb::parse(&verb).expect("the CHECK of the table");
-            // Only the targets give the messages: drop rows of another writer.
+    check_author(c, changeset, author)?;
+    let revision = draft_revision(c, changeset)?;
+    let any: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = ?1 AND revision = ?2)",
+        params![changeset, revision],
+        |r| r.get(0),
+    )?;
+    if !any {
+        return Err(refused("the revision has no action".into()));
+    }
+    // Pass 1: check and resolve each action, one at a time. An action
+    // that is not valid keeps no message row, and its reason waits here.
+    // shortcut: one reason string for each denied action is in memory
+    // until the end of the submit; stream the reasons if an author can
+    // send a very large number of actions.
+    let mut denials = Vec::new();
+    let mut last = 0;
+    while let Some((id, n, verb, targets, args)) = next_action(c, changeset, revision, last)? {
+        last = n;
+        let verb = Verb::parse(&verb).expect("the CHECK of the table");
+        // Only the targets give the messages: drop rows of another writer.
+        c.execute("DELETE FROM action_message WHERE action_id = ?1", [id])?;
+        let denial = match supported(verb, &args) {
+            Err(why) => Some(why),
+            Ok(()) => resolve(c, id, &targets)?,
+        };
+        if let Some(why) = denial {
             c.execute("DELETE FROM action_message WHERE action_id = ?1", [id])?;
-            let denial = match supported(verb, &args) {
-                Err(why) => Some(why),
-                Ok(()) => resolve(c, id, &targets)?,
-            };
-            if let Some(why) = denial {
-                c.execute("DELETE FROM action_message WHERE action_id = ?1", [id])?;
-                denials.push((id, why));
-            }
+            denials.push((id, why));
         }
-        // Pass 2: the hash and the flags of each action. The flags need the
-        // count of the changeset (section 5.3): the valid actions of this
-        // revision (a denied one has no message row), and the approved, held
-        // and applied actions of older revisions. The submit replaces the
-        // older proposed and in_review actions, so they do not count. Each
-        // action counts its own
-        // messages: ten actions on the same 100 messages count 1,000
-        // (section 10).
-        let total: i64 = c.query_row(
-            "SELECT count(*) FROM action_message m
+    }
+    // Pass 2: the hash and the flags of each action. The flags need the
+    // count of the changeset (section 5.3): the valid actions of this
+    // revision (a denied one has no message row), and the approved, held
+    // and applied actions of older revisions. The submit replaces the
+    // older proposed and in_review actions, so they do not count. Each
+    // action counts its own
+    // messages: ten actions on the same 100 messages count 1,000
+    // (section 10).
+    let total: i64 = c.query_row(
+        "SELECT count(*) FROM action_message m
              JOIN changeset_action a ON a.id = m.action_id
              WHERE a.changeset_id = ?1
                AND (a.state IS NULL
                     OR a.state IN ('approved', 'held', 'applied'))
                AND a.verb NOT IN ('close', 'defer', 'decline', 'correct')",
-            [changeset],
-            |r| r.get(0),
-        )?;
-        let mut last = 0;
-        while let Some((id, n, ..)) = next_action(c, changeset, revision, last)? {
-            last = n;
-            let (count, hash) = hash(c, id)?;
-            let valid = count > 0;
-            let mut flags = Vec::new();
-            if valid && (count > BULK || total > BULK) {
-                flags.push("bulk");
-            }
-            if valid && first_contact(c, id)? {
-                flags.push("first_contact");
-            }
-            c.execute(
-                "UPDATE changeset_action SET hash = ?2, flags = ?3 WHERE id = ?1",
-                params![id, hash, serde_json::to_string(&flags).expect("strings")],
-            )?;
+        [changeset],
+        |r| r.get(0),
+    )?;
+    let mut last = 0;
+    while let Some((id, n, ..)) = next_action(c, changeset, revision, last)? {
+        last = n;
+        let (count, hash) = hash(c, id)?;
+        let valid = count > 0;
+        let mut flags = Vec::new();
+        if valid && (count > BULK || total > BULK) {
+            flags.push("bulk");
         }
-        // The submit: the store proposes each action of the revision.
+        if valid && first_contact(c, id)? {
+            flags.push("first_contact");
+        }
         c.execute(
-            "UPDATE changeset SET why = ?2, submitted_at = ?3 WHERE id = ?1",
-            params![changeset, why, now_ms],
+            "UPDATE changeset_action SET hash = ?2, flags = ?3 WHERE id = ?1",
+            params![id, hash, serde_json::to_string(&flags).expect("strings")],
         )?;
-        for (id, why) in denials {
-            c.execute(
-                "UPDATE changeset_action SET state = 'denied', decided_by = 'engine',
+    }
+    // The submit: the store proposes each action of the revision.
+    c.execute(
+        "UPDATE changeset SET why = ?2, submitted_at = ?3 WHERE id = ?1",
+        params![changeset, why, now_ms],
+    )?;
+    for (id, why) in denials {
+        c.execute(
+            "UPDATE changeset_action SET state = 'denied', decided_by = 'engine',
                    reason = ?2, decided_at = ?3
                  WHERE id = ?1",
-                params![id, why, now_ms],
-            )?;
-        }
-        Ok(())
-    })
+            params![id, why, now_ms],
+        )?;
+    }
+    Ok(())
 }
 
 type ActionRow = (i64, i64, String, String, String);
@@ -599,6 +687,157 @@ fn hash(c: &Connection, action: i64) -> Result<(i64, String)> {
     }
     let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok((count, hex))
+}
+
+/// Move an action to `to`. The trigger `action_state` refuses a move that
+/// section 5.2 does not allow. A person approves only with [`approve`].
+pub fn decide(
+    store: &Store,
+    action: ActionId,
+    to: State,
+    by: By,
+    reason: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    write(store, |c| decide_in(c, action, to, by, reason, now_ms))
+}
+
+/// [`decide`] in a write transaction of the caller, with the same checks.
+/// Use [`transaction`] to run more than one step in one transaction.
+pub fn decide_in(
+    c: &Connection,
+    action: ActionId,
+    to: State,
+    by: By,
+    reason: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    if to == State::Approved && by == By::Person {
+        return Err(refused(
+            "a person approves with the hash that the review showed".into(),
+        ));
+    }
+    // The policy and the review move an action. Each other state has its
+    // own path, with the check of its event: submit (replaced), withdraw
+    // (cancelled), expiry (expired), the apply (R2-02) and the ledger (R2-03)
+    // in the transaction of the ledger entry, a send (held, release 3).
+    if !matches!(to, State::InReview | State::Approved | State::Denied) {
+        return Err(refused(format!("decide does not set {}", to.as_str())));
+    }
+    if to == State::Denied && reason.is_none_or(|r| r.trim().is_empty()) {
+        return Err(refused("a denial needs a reason".into()));
+    }
+    // Who decides each state (section 5.2). A person approves with
+    // `approve`, and does not send an action to review.
+    let allowed = match to {
+        State::Approved => matches!(by, By::Rule { .. }),
+        State::InReview => matches!(by, By::Rule { .. } | By::Policy | By::Limit | By::Engine),
+        _ => !matches!(by, By::Author | By::Expiry),
+    };
+    if !allowed {
+        return Err(refused(format!(
+            "{} does not set {}",
+            by.parts().0,
+            to.as_str()
+        )));
+    }
+    let state: Option<Option<String>> = c
+            .query_row(
+                "SELECT state FROM changeset_action WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+                params![action.changeset, action.revision, action.n],
+                |r| r.get(0),
+            )
+            .optional()?;
+    match state {
+        None => Err(Error::NotFound),
+        Some(None) => Err(refused("the action is a draft: submit it first".into())),
+        Some(Some(_)) => set_state(c, action, to, by, reason, now_ms),
+    }
+}
+
+/// The time from the submit of an action to its expiry (section 5.5), the
+/// same as in the trigger `action_state` of migration 7.
+const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+
+fn set_state(
+    c: &Connection,
+    a: ActionId,
+    to: State,
+    by: By,
+    reason: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    // An open action expires 14 days after its submit (section 5.5). Both
+    // decide and approve come here, so no decision lands after the deadline.
+    let submitted: Option<i64> = c
+        .query_row(
+            "SELECT submitted_at FROM changeset_action
+             WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+            params![a.changeset, a.revision, a.n],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(Error::NotFound)?;
+    if submitted.is_some_and(|t| now_ms >= t + EXPIRY_MS) {
+        return Err(refused(
+            "the action expired 14 days after its submit".into(),
+        ));
+    }
+    let (by, rule, policy) = by.parts();
+    let changed = c.execute(
+        "UPDATE changeset_action SET state = ?4, decided_by = ?5, rule = ?6, reason = ?7,
+           decided_at = ?8, policy = ?9
+         WHERE changeset_id = ?1 AND revision = ?2 AND n = ?3",
+        params![
+            a.changeset,
+            a.revision,
+            a.n,
+            to.as_str(),
+            by,
+            rule,
+            reason,
+            now_ms,
+            policy
+        ],
+    )?;
+    if changed == 0 {
+        return Err(Error::NotFound);
+    }
+    Ok(())
+}
+
+/// The approval of a person (section 5.5). It names the revision, the
+/// action number, and the hash that the review showed. The engine refuses
+/// it for an old revision or another hash.
+pub fn approve(store: &Store, action: ActionId, hash: &str, now_ms: i64) -> Result<()> {
+    let ActionId {
+        changeset,
+        revision,
+        n,
+    } = action;
+    write(store, |c| {
+        let row: Option<(i64, Option<i64>, Option<String>)> = c
+            .query_row(
+                "SELECT c.revision, c.submitted_at, a.hash FROM changeset c
+                 JOIN changeset_action a ON a.changeset_id = c.id
+                 WHERE c.id = ?1 AND a.revision = ?2 AND a.n = ?3",
+                params![changeset, revision, n],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (_, submitted, seen) = row.ok_or(Error::NotFound)?;
+        // The submit of a new revision replaces each older action with no
+        // decision, and the trigger refuses to approve a replaced action. An
+        // older action that stays open was approved, and can come back to
+        // review (section 5.4): the person approves it with its hash.
+        if submitted.is_none() {
+            return Err(refused("a new revision is a draft".into()));
+        }
+        if seen.as_deref() != Some(hash) {
+            return Err(refused("the action changed after the review".into()));
+        }
+        set_state(c, action, State::Approved, By::Person, None, now_ms)
+    })
 }
 
 /// Write a changeset as JSON (section 5.1). The message IDs stream from the
