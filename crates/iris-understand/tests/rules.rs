@@ -258,10 +258,13 @@ fn a_planted_code_is_found_in_message_order() {
 }
 
 #[test]
-fn a_year_is_not_a_code() {
+fn a_year_is_not_a_code_and_sign_in_mail_is_no_feed() {
+    // A sign-in message with no clear code goes to the model, also with a
+    // list header.
     let raw = "From: News <news@shop.example>\nList-Id: <n.example>\nSubject: Verification in 2026\n\nRead.\n";
-    let d = one(raw, Kind::Service, &[]);
-    assert_eq!(d.item["form"], "feed");
+    assert!(drafts(raw, Kind::Service, &[]).is_none());
+    let news = raw.replace("Verification in 2026", "News of 2026");
+    assert_eq!(one(&news, Kind::Service, &[]).item["form"], "feed");
 }
 
 #[test]
@@ -300,7 +303,10 @@ fn a_year_shaped_code_bound_to_its_word_counts() {
 
 #[test]
 fn an_unclear_code_in_a_list_message_goes_to_the_model() {
-    let raw = LIST.replace("Read the news.", "Your sign-in code is 1234 or 5678");
+    let raw = LIST.replace(
+        "Read the news.",
+        "Your sign-in code is 1234\nYour code: 5678",
+    );
     assert_ne!(raw, LIST);
     assert!(drafts(&raw, Kind::Service, &[]).is_none());
 }
@@ -308,7 +314,7 @@ fn an_unclear_code_in_a_list_message_goes_to_the_model() {
 #[test]
 fn a_long_line_of_codes_is_read_in_linear_time() {
     // About 300 KB on one line: a slow search takes minutes, not seconds.
-    let line = "code 1234 ".repeat(30_000);
+    let line = "code 1234 code 5678 ".repeat(15_000);
     let raw = format!("From: Bank <no-reply@bank.example>\nSubject: Sign in\n\n{line}\n");
     let start = std::time::Instant::now();
     assert!(drafts(&raw, Kind::Service, &[]).is_none());
@@ -370,6 +376,9 @@ fn an_invitation_for_another_person_goes_to_the_model() {
     );
     assert_ne!(other, INVITE);
     assert!(drafts(&other, Kind::Person, &[]).is_none());
+    // A list header does not change it: the request is not a feed item.
+    let list = format!("List-Id: <team.example.org>\n{other}");
+    assert!(drafts(&list, Kind::Service, &[]).is_none());
     let cc = INVITE.replace(
         "To: Owner <Owner@Example.com>",
         "To: team@example.org\nCc: owner@example.com",

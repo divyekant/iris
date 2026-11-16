@@ -114,18 +114,16 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         });
         return Some(vec![Draft::rule(item, "invitation", quote)]);
     }
+    // Any other calendar request: the model decides, not the code or the
+    // list rule.
+    if a.text.invitation {
+        return None;
+    }
     if cx.kind == Kind::Service {
-        let found = if is_login(a) {
-            find_code(subject, &a.text.text)
-        } else {
-            None
-        };
-        // A code word with no clear code: the model reads it, also when the
-        // list rule could match.
-        if found == Some(None) {
-            return None;
-        }
-        if let Some(Some((code, line))) = found {
+        // A sign-in message gives a code signal or goes to the model: it is
+        // never a feed item.
+        if is_login(a) {
+            let (code, line) = find_code(subject, &a.text.text)?;
             let at = a.date(cx);
             let expires = at + CODE_LIFE_MS;
             let issuer = party_sender(a);
@@ -194,37 +192,26 @@ fn is_login(a: &Analysis) -> bool {
     !words(&hay, &LOGIN_WORDS).is_empty() && words(&hay, &PROMO_WORDS).is_empty()
 }
 
-/// The one code of the message. A code is a run of 4 to 8 digits:
-/// - strong: the code word, then only `:`, `-`, `=`, `#` or `is`, then the
-///   code;
-/// - weak: at most 3 other words, and at most [`CODE_GAP`] bytes, between the
-///   code and the code word, before or after it. A weak code that looks like a year (1900 to 2099) does not
-///   count (shortcut: issue #94).
+/// The one code of the message, with the line that has it (at most 500
+/// characters). A code is a run of 4 to 8 digits bound to a code word:
+/// - after the word, with only `:`, `-`, `=`, `#` or `is` between them
+///   ("Your code: 482913", "Your code is 482913");
+/// - before the word, with only "is", "your", "the" or "a" between them
+///   ("482913 is your code").
 ///
-/// A line gives one code only if one number binds, and that number is
-/// strong or is the only number of the line. Another line with a bound
-/// number is not clear. The message gives a code only if each line that
-/// gives a code gives the same value, and no line is unclear. Else the
-/// result is `Some(None)`, and the model reads the message.
+/// If a line has a code word and no number, and the next line has no code
+/// word, the next line continues it ("Your code:" then "482913").
 ///
-/// If a line has a code word and no number, the next line continues it: a
-/// number there binds to the code word with the words of both lines in the
-/// gap. Across the line break only a strong code counts, like a line of only
-/// the code. A weak one is not clear. A next line with its own code word is
-/// read as its own line, not as a continuation.
-///
-/// Gives the code and the line that has the code (at most 500 characters),
-/// `Some(None)` if the code is not clear, or `None` if there is no code.
-#[allow(clippy::option_option)]
-fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<Option<(String, &'a str)>> {
+/// Each line with a code word gives no code or its bound numbers. The
+/// message gives a code only if all bound numbers have one value. Else there
+/// is no clear code, and the result is `None`.
+fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
     // Empty lines do not count: HTML paragraphs give empty lines between lines.
     let lines: Vec<&str> = std::iter::once(subject)
         .chain(text.lines())
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    // Each cue line gives no code, an unclear code or one code. The message
-    // gives a code only if all cue lines agree on one value.
     let mut found: Option<(String, &str)> = None;
     for (i, &l) in lines.iter().enumerate() {
         let cues = cues(l);
@@ -232,108 +219,76 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<Option<(String, &'a 
             continue;
         }
         let nums = numbers(l);
-        let pick = if !nums.is_empty() {
-            the_code(l, &cues, &nums, None)
-                .map(|o| o.map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s))))
+        let bound: Vec<(String, &str)> = if !nums.is_empty() {
+            bound(l, &cues, &nums, 0)
+                .map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s)))
+                .collect()
         } else if let Some(&next) = lines.get(i + 1).filter(|n| self::cues(n).is_empty()) {
-            // A next line with its own code word is a cue line of its own.
             // The cue line and the next line as one text, with the cues at
             // their own offsets and the numbers after the line break.
             let both = format!("{l}\n{next}");
             let shift = l.len() + 1;
-            the_code(&both, &cues, &numbers(next), Some(shift)).map(|o| {
-                o.map(|(s, e)| {
-                    let (s, e) = (s - shift, e - shift);
-                    (next[s..e].to_string(), excerpt(next, s, e - s))
-                })
-            })
+            bound(&both, &cues, &numbers(next), shift)
+                .map(|(s, e)| (s - shift, e - shift))
+                .map(|(s, e)| (next[s..e].to_string(), excerpt(next, s, e - s)))
+                .collect()
         } else {
-            None
+            Vec::new()
         };
-        match (pick, &found) {
-            (None, _) => {}
-            (Some(Some(c)), None) => found = Some(c),
-            (Some(Some(c)), Some(f)) if c.0 == f.0 => {}
-            _ => return Some(None),
-        }
-    }
-    found.map(Some)
-}
-
-/// The code among `nums` (moved by `shift` in `text`) for the `cues` of
-/// `text`, as a range of `text`:
-/// - `None`: no number binds;
-/// - `Some(None)`: numbers bind, but not one clear code;
-/// - `Some(Some(range))`: one clear code.
-///
-/// With `next`, the numbers are on the line after the cues, at `next` in
-/// `text`. Across a line break only a strong number is clear: a weak one
-/// gives `Some(None)`.
-#[allow(clippy::option_option)]
-fn the_code(
-    text: &str,
-    cues: &[(usize, usize)],
-    nums: &[(usize, usize)],
-    next: Option<usize>,
-) -> Option<Option<(usize, usize)>> {
-    let shift = next.unwrap_or(0);
-    // Only the cues near a number can bind to it: `cues` is in order.
-    let level = |(s, e): (usize, usize)| {
-        let year = e - s == 4 && matches!(&text[s..s + 2], "19" | "20");
-        let from = cues.partition_point(|c| c.1 + CODE_GAP < s);
-        let near = cues[from..].iter().take_while(|c| c.0 <= e + CODE_GAP);
-        let mut best = Bind::None;
-        for &cue in near {
-            match bind(text, (s, e), cue) {
-                Bind::Strong => return Bind::Strong,
-                Bind::Weak if !year => best = Bind::Weak,
-                _ => {}
+        for c in bound {
+            match &found {
+                None => found = Some(c),
+                Some(f) if f.0 == c.0 => {}
+                Some(_) => return None,
             }
         }
-        best
-    };
-    let all: Vec<_> = nums.iter().map(|&(s, e)| (s + shift, e + shift)).collect();
-    let bound: Vec<_> = all
-        .iter()
-        .map(|&n| (n, level(n)))
-        .filter(|&(_, b)| b != Bind::None)
-        .collect();
-    match bound.as_slice() {
-        [] => None,
-        [(n, Bind::Strong)] => Some(Some(*n)),
-        [(n, _)] if all.len() == 1 && next.is_none() => Some(Some(*n)),
-        _ => Some(None),
     }
+    found
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Bind {
-    Strong,
-    Weak,
-    None,
+/// The numbers of `nums` (moved by `shift` in `text`) that bind to one of
+/// the `cues` of `text`, as ranges of `text`.
+fn bound<'t>(
+    text: &'t str,
+    cues: &'t [(usize, usize)],
+    nums: &'t [(usize, usize)],
+    shift: usize,
+) -> impl Iterator<Item = (usize, usize)> + 't {
+    nums.iter()
+        .map(move |&(s, e)| (s + shift, e + shift))
+        .filter(move |&(s, e)| {
+            // Only the cues near a number can bind to it: `cues` is in order.
+            let from = cues.partition_point(|c| c.1 + CODE_GAP < s);
+            cues[from..]
+                .iter()
+                .take_while(|c| c.0 <= e + CODE_GAP)
+                .any(|&cue| binds(text, (s, e), cue))
+        })
 }
 
-/// How a number at `num` is bound to a code word at `cue` in `line`.
-fn bind(line: &str, num: (usize, usize), cue: (usize, usize)) -> Bind {
+/// The number at `num` is bound to the code word at `cue` in `line`.
+fn binds(line: &str, num: (usize, usize), cue: (usize, usize)) -> bool {
     let (gap, after) = if num.0 >= cue.1 {
         (&line[cue.1..num.0], true)
     } else if cue.0 >= num.1 {
         (&line[num.1..cue.0], false)
     } else {
-        return Bind::None;
+        return false;
     };
     if gap.len() > CODE_GAP {
-        return Bind::None;
+        return false;
     }
-    let words: Vec<&str> = gap
+    let mut words = gap
         .split(|c: char| c.is_whitespace() || matches!(c, ':' | '-' | '=' | '#'))
         .filter(|w| !w.is_empty())
-        .collect();
-    match words.as_slice() {
-        [] if after => Bind::Strong,
-        [w] if after && w.eq_ignore_ascii_case("is") => Bind::Strong,
-        w if w.len() <= 3 => Bind::Weak,
-        _ => Bind::None,
+        .map(str::to_ascii_lowercase);
+    if after {
+        matches!(
+            (words.next().as_deref(), words.next()),
+            (None | Some("is"), None)
+        )
+    } else {
+        words.all(|w| matches!(w.as_str(), "is" | "your" | "the" | "a"))
     }
 }
 
@@ -422,67 +377,57 @@ mod tests {
 
     #[test]
     fn codes() {
-        let code = |s: &str, t: &str| find_code(s, t).flatten().map(|(c, _)| c);
-        let unclear = |s: &str| find_code(s, "") == Some(None);
-        assert!(unclear("Your code is 1234 or 5678"));
-        assert!(unclear("Your code is 482913, old code is 123456"));
-        assert!(unclear("Account 123456: your code is 482913"));
+        let code = |s: &str, t: &str| find_code(s, t).map(|(c, _)| c);
+        let six = Some("482913".to_string());
+        // Clear codes.
+        assert_eq!(code("Your code is 482913.", ""), six);
+        assert_eq!(code("Your code: 482913", ""), six);
+        assert_eq!(code("482913 is your code", ""), six);
+        assert_eq!(code("Your code is 482913", "Your code: 482913"), six);
+        assert_eq!(code("Your verification code", "Code: 482913"), six);
+        assert_eq!(code("Your code is", "482913"), six);
         assert_eq!(
-            find_code("Verification for account 123456", "Your code: 482913"),
-            Some(None)
+            code("Sign in", "Your verification code:\n  482913\nThanks"),
+            six
         );
-        assert_eq!(
-            code("Your code is 482913", "Your code: 482913"),
-            Some("482913".into())
-        );
-        assert_eq!(code("Your code is 482913.", ""), Some("482913".into()));
         assert_eq!(
             code("Your verification code is 2026", ""),
             Some("2026".into())
         );
-        assert_eq!(code("Verification in 2026", ""), None);
-        assert_eq!(code("482913 is your code", ""), Some("482913".into()));
-        assert_eq!(code("Order 123456789 code", ""), None);
-        assert_eq!(code("Code: total 1234.50 or 1,2345", ""), None);
-        assert_eq!(code("code ab1234", ""), None);
+        assert_eq!(code("Your code", "482913\nVerification help 2026"), six);
+        // Two values: no clear code.
+        assert_eq!(code("Your code is 1234 or code 5678", ""), None);
+        assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
+        assert_eq!(code("Account 123456: your code is 482913", ""), None);
+        // A number with other words between it and the code word.
         assert_eq!(
-            code("Sign in", "Your verification code:\n  7731\nThanks"),
-            Some("7731".into())
+            code("Verification for account 123456", "Your code: 482913"),
+            six
         );
-        assert_eq!(code("Weekly news", "Read 2024 stories"), None);
-        // An account number next to the code makes the line not clear.
         assert_eq!(
             code("Your verification code for account 123456 is 482913", ""),
             None
         );
-        assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
         assert_eq!(
-            code("Your verification code", "Code: 123456"),
-            Some("123456".into())
-        );
-        // Across a line break, only a strong code is clear.
-        assert_eq!(
-            find_code("Your verification code", "Use 482913 to sign in"),
-            Some(None)
+            code("Your verification code", "Use 482913 to sign in"),
+            None
         );
         assert_eq!(
-            find_code(
-                "Sign in",
-                "Your verification code:\nExpires in 3600 seconds\nUse 482913 to sign in"
-            ),
-            Some(None)
+            code("Sign in", "Your code expires after 3600 seconds\n7731"),
+            None
         );
         assert_eq!(code("Your code", "Expires in 2026"), None);
-        assert_eq!(code("Your code is", "2026"), Some("2026".into()));
-        assert_eq!(
-            code("Your code", "7731\nVerification help 2026"),
-            Some("7731".into())
-        );
-        assert_eq!(code("barcode 123456", ""), None);
-        assert_eq!(code("decode 123456", ""), None);
+        assert_eq!(code("Verification in 2026", ""), None);
         assert_eq!(
             code("Your code", "for the shop of the town hall 7731"),
             None
         );
+        // No code word, or no code-shaped number.
+        assert_eq!(code("Weekly news", "Read 2024 stories"), None);
+        assert_eq!(code("Order 123456789 code", ""), None);
+        assert_eq!(code("Code: total 1234.50 or 1,2345", ""), None);
+        assert_eq!(code("code ab1234", ""), None);
+        assert_eq!(code("barcode 123456", ""), None);
+        assert_eq!(code("decode 123456", ""), None);
     }
 }
