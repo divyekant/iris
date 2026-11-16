@@ -1127,3 +1127,35 @@ fn an_empty_mark_list_with_spaces_is_no_mark() {
         ]
     );
 }
+
+#[test]
+fn a_live_origin_that_becomes_hostile_gives_way_to_the_next_message() {
+    let b = Box_::new("hostileorigin");
+    let v = validator();
+    let a = b.put(M {
+        id: "a",
+        at: NOW - 2 * DAY,
+        subject: "First",
+        ..M::default()
+    });
+    let r = b.put(M {
+        id: "b",
+        subject: "Re: First",
+        ..M::default()
+    });
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = {a}"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["status"], "active");
+    assert_eq!(doc["messages"], 1);
+    assert_eq!(doc["title"], "Re: First");
+    assert_eq!(doc["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["sources"][0]["message"], format!("m-{r}"));
+    assert_eq!(
+        b.sources(doc["id"].as_str().unwrap()),
+        [(r, "origin".into())]
+    );
+}
