@@ -257,31 +257,8 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     };
     let at = a.date(cx);
     match form.as_str() {
-        "commitment" => {
-            let you_owe = src.get("direction").and_then(Value::as_str) == Some("you_owe");
-            // In sent mail the other party is the first To, Cc or Bcc
-            // recipient. With none, only the parties of the model can make
-            // the item valid: the schema check refuses a missing party.
-            let other = if cx.kind == crate::Kind::SelfOwner {
-                a.head
-                    .to
-                    .iter()
-                    .chain(&a.head.cc)
-                    .chain(&a.head.bcc)
-                    .next()
-                    .map(|to| json!({"kind": "sender", "address": to}))
-            } else {
-                Some(sender)
-            };
-            let me = Some(json!({"kind": "self"}));
-            let (owner, other) = if you_owe { (me, other) } else { (other, me) };
-            if let Some(o) = owner {
-                put("owner", o);
-            }
-            if let Some(o) = other {
-                put("counterparty", o);
-            }
-        }
+        // The parties of a commitment are set after the party check.
+        "commitment" => {}
         "record" => {
             // The headers give the fields of the sender and the list, not
             // the model (section 6.7).
@@ -316,26 +293,53 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
     }
     let mut item = Value::Object(m);
     parties(&mut item, cx.me)?;
-    if form == "commitment" && cx.kind == crate::Kind::SelfOwner {
-        recipients_only(&mut item, a);
+    if form == "commitment" {
+        commitment_sides(&mut item, src, a, cx)?;
     }
     Some(Draft::model(item, &quote))
 }
 
-/// In sent mail with recipients, the other party of a commitment is one of
-/// them: the model can choose among the recipients, and another address
-/// becomes the first recipient (section 7.4).
-fn recipients_only(item: &mut Value, a: &Analysis) {
+/// The two sides of a commitment (section 7.4): the direction gives the
+/// side of the owner of the mailbox, and the other side is never the owner.
+/// The other side is the party of the model if it has an address, else the
+/// sender. In sent mail with recipients, it must be a `To`, `Cc` or `Bcc`
+/// recipient: any other party becomes the first recipient. `None` if no
+/// other party has an address.
+fn commitment_sides(
+    item: &mut Value,
+    src: &Map<String, Value>,
+    a: &Analysis,
+    cx: &Context,
+) -> Option<()> {
+    let you_owe = src.get("direction").and_then(Value::as_str) == Some("you_owe");
+    let (mine, other) = if you_owe {
+        ("owner", "counterparty")
+    } else {
+        ("counterparty", "owner")
+    };
+    let chosen = item
+        .get(other)
+        .and_then(|p| p.get("address"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let h = &a.head;
-    let all: Vec<&String> = h.to.iter().chain(&h.cc).chain(&h.bcc).collect();
-    let Some(first) = all.first() else { return };
-    for key in ["owner", "counterparty"] {
-        let Some(p) = item.get_mut(key) else { continue };
-        let ad = p.get("address").and_then(Value::as_str);
-        if ad.is_some_and(|ad| !all.iter().any(|r| r.as_str() == ad)) {
-            *p = json!({"kind": "sender", "address": first});
+    let party = if cx.kind == crate::Kind::SelfOwner {
+        let all: Vec<&String> = h.to.iter().chain(&h.cc).chain(&h.bcc).collect();
+        match (all.first(), chosen) {
+            (Some(_), Some(c)) if all.iter().any(|r| **r == c) => item[other].clone(),
+            (Some(first), _) => json!({"kind": "sender", "address": first}),
+            (None, Some(_)) => item[other].clone(),
+            (None, None) => return None,
         }
-    }
+    } else if chosen.is_some() {
+        item[other].clone()
+    } else {
+        h.from_addr.as_ref()?;
+        party_sender(a)
+    };
+    item[mine] = json!({"kind": "self"});
+    item[other] = party;
+    Some(())
 }
 
 /// The quote occurs in the subject, the clean text or the attachment text,

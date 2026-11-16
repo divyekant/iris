@@ -860,8 +860,12 @@ The conversation rule runs for each message that is not hostile mail:
 - The engine, not the model, sets the fields that the headers give: the
   `issuer` of a record or a signal, and the `publisher`, `published` and
   `list` of a feed. In sent mail, the party of the sender is the
-  owner, also when `From` is an alias. The other party of a commitment in
-  sent mail is a `To`, `Cc` or `Bcc` recipient (sent mail keeps `Bcc`).
+  owner, also when `From` is an alias.
+- The `direction` of a commitment gives the side of the owner (`owner` for
+  `you_owe`, else `counterparty`). The other side is never the owner: it is
+  the party of the model if that party has an address, else the sender.
+  In sent mail, the other side is a `To`, `Cc` or `Bcc` recipient (sent
+  mail keeps `Bcc`).
   The model can choose among the recipients. If the model gives no party
   or another address, the engine uses the first recipient. With no
   recipient, only the parties in the model answer can make a commitment

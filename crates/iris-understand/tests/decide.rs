@@ -350,19 +350,31 @@ fn sent_mail_from_an_alias_or_to_bcc_only_keeps_the_owner_and_the_model_parties(
     // the first recipient, in both directions.
     let two = "From: owner@example.com\nTo: ana@example.org, cy@example.org\nSubject: Slides\n\nI will send the slides by Friday.\n";
     for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {
-        for (pick, want) in [
-            ("cy@example.org", "cy@example.org"),
-            ("bo@evil.example", "ana@example.org"),
-        ] {
+        let picks = [
+            (json!({"address": "cy@example.org"}), "cy@example.org"),
+            (json!({"address": "bo@evil.example"}), "ana@example.org"),
+            (json!({"kind": "self"}), "ana@example.org"),
+        ];
+        for (pick, want) in picks {
             let mut p = promise.clone();
             p[0]["direction"] = json!(dir);
-            p[0][key] = json!({"address": pick});
+            p[0][key] = pick.clone();
             let m = Fake::with(vec![answer(p)]);
             let d = run(two, Kind::SelfOwner, &["SENT"], &[], Some(&m))
                 .1
                 .unwrap();
             assert_eq!(d.drafts[0].item[key]["address"], want, "{dir} {pick}");
         }
+    }
+    // In received mail too, the other side is never the owner: the sender
+    // takes the place of a model party with no address.
+    for (dir, key) in [("you_owe", "counterparty"), ("owed_to_you", "owner")] {
+        let mut t = task();
+        t[0]["direction"] = json!(dir);
+        t[0][key] = json!({"kind": "self"});
+        let m = Fake::with(vec![answer(t)]);
+        let d = run(ASK, Kind::Person, &[], &[], Some(&m)).1.unwrap();
+        assert_eq!(d.drafts[0].item[key]["address"], "ana@example.org", "{dir}");
     }
     // With no recipient at all, only the parties of the model count.
     let none = "From: owner@example.com\nSubject: Slides\n\nI will send the slides by Friday.\n";
