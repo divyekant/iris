@@ -121,6 +121,7 @@ struct Msg {
     from_addr: Option<String>,
     from_name: Option<String>,
     to_addrs: Option<String>,
+    cc_addrs: Option<String>,
     subject: String,
     text: Option<String>,
     sent: bool,
@@ -168,7 +169,7 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
         ))?
         .query_row([thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut st = c.prepare_cached(&format!(
-        "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, b.subject, b.text,
+        "SELECT m.id, h.from_addr, h.from_name, h.to_addrs, h.cc_addrs, b.subject, b.text,
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
@@ -181,9 +182,10 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
             from_addr: r.get(1)?,
             from_name: r.get(2)?,
             to_addrs: r.get(3)?,
-            subject: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            text: r.get(5)?,
-            sent: r.get(6)?,
+            cc_addrs: r.get(4)?,
+            subject: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            text: r.get(6)?,
+            sent: r.get(7)?,
         })
     })?;
     let mut newest = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -208,19 +210,78 @@ fn check(s: &Snapshot) -> Result<&Msg> {
 }
 
 /// The person that the reply goes to, from the newest message: its sender,
-/// or its first recipient if the owner sent it.
-fn recipient(msgs: &[Msg]) -> Option<String> {
+/// or, if the owner sent it, its first recipient in `To` then `Cc` that is
+/// not an address of the owner (`me`, or the `From` of that message).
+fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
     let last = msgs.last()?;
-    let addr = if last.sent {
-        last.to_addrs
+    if !last.sent {
+        return last
+            .from_addr
             .as_deref()
-            .and_then(|t| t.split(',').next())
-            .map(str::to_string)
-    } else {
-        last.from_addr.clone()
-    };
-    addr.map(|a| a.trim().to_lowercase())
-        .filter(|a| !a.is_empty())
+            .map(|a| a.trim().to_lowercase())
+            .filter(|a| !a.is_empty());
+    }
+    let owners = [Some(me), last.from_addr.as_deref()];
+    first_other(
+        &[last.to_addrs.as_deref(), last.cc_addrs.as_deref()],
+        &owners,
+    )
+}
+
+/// The first address of the comma lists that is not empty and not one of
+/// `owners`, in lower case.
+fn first_other(lists: &[Option<&str>], owners: &[Option<&str>]) -> Option<String> {
+    lists
+        .iter()
+        .flatten()
+        .flat_map(|l| l.split(','))
+        .map(|a| a.trim().to_lowercase())
+        .find(|a| {
+            !a.is_empty()
+                && !owners
+                    .iter()
+                    .flatten()
+                    .any(|o| o.trim().eq_ignore_ascii_case(a))
+        })
+}
+
+/// A sent message that shows the voice of the owner.
+#[derive(Clone, Debug)]
+struct Sample {
+    id: i64,
+    to: Option<String>,
+    text: String,
+}
+
+/// The sent messages of account `?1` that can be a sample: understood,
+/// not hostile, not gone, with clean text, `SENT` and not `DRAFT`.
+const SAMPLE: &str = "FROM message m
+         JOIN body b ON b.message_id = m.id
+         LEFT JOIN header h ON h.message_id = m.id
+         WHERE m.account_id = ?1 AND m.gone_at IS NULL
+           AND m.understood_at IS NOT NULL AND NOT {HOSTILE}
+           AND trim(b.text) <> ''
+           AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                       WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+           AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')";
+
+fn sample_sql(tail: &str) -> String {
+    format!("{} {tail}", SAMPLE.replace("{HOSTILE}", HOSTILE))
+}
+
+/// True if each of `ids` can still be a sample.
+fn samples_ok(c: &Connection, account: i64, ids: &[i64]) -> rusqlite::Result<bool> {
+    let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let n: i64 = c.query_row(
+        &format!(
+            "SELECT count(*) {}",
+            sample_sql(&format!("AND m.id IN ({list})"))
+        ),
+        [account],
+        |r| r.get(0),
+    )?;
+    Ok(n == ids.len() as i64)
 }
 
 /// Up to [`MAX_SAMPLES`] sent messages of the account from other threads:
@@ -230,26 +291,23 @@ fn samples(
     account: i64,
     thread: i64,
     to: Option<&str>,
-) -> rusqlite::Result<Vec<(Option<String>, String)>> {
+) -> rusqlite::Result<Vec<Sample>> {
     let mut st = c.prepare_cached(&format!(
-        "SELECT h.to_addrs, b.text
-         FROM message m
-         JOIN body b ON b.message_id = m.id
-         LEFT JOIN header h ON h.message_id = m.id
-         WHERE m.account_id = ?1 AND m.thread_id <> ?2 AND m.gone_at IS NULL
-           AND m.understood_at IS NOT NULL AND NOT {HOSTILE}
-           AND trim(b.text) <> ''
-           AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
-           AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
+        "SELECT m.id, h.to_addrs, b.text {}",
+        sample_sql(
+            "AND m.thread_id <> ?2
          ORDER BY coalesce(instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',',
                                  ',' || ?3 || ','), 0) > 0 DESC,
                   coalesce(m.internal_date, 0) DESC, m.id DESC
          LIMIT ?4"
+        )
     ))?;
     let rows = st.query_map(params![account, thread, to, MAX_SAMPLES as i64], |r| {
-        Ok((r.get(0)?, r.get(1)?))
+        Ok(Sample {
+            id: r.get(0)?,
+            to: r.get(1)?,
+            text: r.get(2)?,
+        })
     })?;
     rows.collect()
 }
@@ -268,7 +326,7 @@ fn data(
     me: &str,
     to: Option<&str>,
     intent: Option<&str>,
-    samples: &[(Option<String>, String)],
+    samples: &[Sample],
     msgs: &[Msg],
 ) -> String {
     let mut d = format!("Owner: {me}\nReply to: {}\n", to.unwrap_or("unknown"));
@@ -278,7 +336,7 @@ fn data(
     if let Some(i) = intent {
         d += &format!("Intent of the owner: {}\n", i.trim());
     }
-    for (n, (to, text)) in samples.iter().enumerate() {
+    for (n, Sample { to, text, .. }) in samples.iter().enumerate() {
         d += &format!(
             "\nSent by the owner, example {} (to: {}):\n{}\n",
             n + 1,
@@ -348,7 +406,7 @@ pub fn write(
     if intent.is_some_and(|i| i.chars().count() > MAX_INTENT) {
         return Err(Error::LongIntent);
     }
-    let (me, snap, samples) = store
+    let (account, me, snap, samples) = store
         .read(|c| {
             let me: Option<(i64, String)> = c
                 .query_row(
@@ -362,19 +420,21 @@ pub fn write(
                 return Ok(None);
             };
             let snap = snapshot(c, thread)?;
-            let to = recipient(&snap.newest);
+            let to = recipient(&snap.newest, &me);
             let samples = samples(c, account, thread, to.as_deref())?;
-            Ok(Some((me, snap, samples)))
+            Ok(Some((account, me, snap, samples)))
         })?
         .ok_or(Error::NoThread(thread))?;
     let based_on = check(&snap)?.id;
-    let to = recipient(&snap.newest);
+    let to = recipient(&snap.newest, &me);
     let data = data(&me, to.as_deref(), intent, &samples, &snap.newest);
     // The last check before the call, after the slow read of the samples.
     // shortcut: a sync that marks a message hostile after this check and
     // before the request leaves still does not stop the call (as in
     // understanding). Issue #250.
-    if store.read(|c| Ok(snapshot(c, thread)?))? != snap {
+    let ids: Vec<i64> = samples.iter().map(|s| s.id).collect();
+    let same = store.read(|c| Ok(snapshot(c, thread)? == snap && samples_ok(c, account, &ids)?))?;
+    if !same {
         return Err(Error::Changed);
     }
 

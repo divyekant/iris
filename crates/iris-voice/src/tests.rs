@@ -629,3 +629,92 @@ fn a_long_thread_gives_a_bounded_snapshot() {
     let texts: Vec<_> = s.newest.iter().map(|m| m.text.clone().unwrap()).collect();
     assert_eq!(texts, ["N994", "N995", "N996", "N997", "N998", "N999"]);
 }
+
+/// A sample that turns hostile after the read fails the last check.
+#[test]
+fn a_sample_marked_spam_after_the_read_fails_the_last_check() {
+    let (b, t) = mailbox("sample-spam");
+    let picked = b
+        .store
+        .read(|c| Ok(samples(c, 1, t, Some("ana@example.org"))?))
+        .unwrap();
+    let ids: Vec<i64> = picked.iter().map(|s| s.id).collect();
+    assert_eq!(ids.len(), 3);
+    let ok = |store: &Store| store.read(|c| Ok(samples_ok(c, 1, &ids)?)).unwrap();
+    assert!(ok(&b.store));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [ids[1]],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(!ok(&b.store));
+}
+
+/// A sent newest message: the reply goes to its first recipient that is
+/// not the owner, in `To` and then `Cc`.
+#[test]
+fn the_recipient_of_sent_mail_is_never_the_owner() {
+    let m = |to: Option<&str>, cc: Option<&str>| Msg {
+        id: 1,
+        from_addr: Some("alias@example.com".into()),
+        from_name: None,
+        to_addrs: to.map(str::to_string),
+        cc_addrs: cc.map(str::to_string),
+        subject: String::new(),
+        text: None,
+        sent: true,
+    };
+    let r = |to, cc| recipient(&[m(to, cc)], "me@example.com");
+    assert_eq!(
+        r(Some("me@example.com,ana@example.org"), None).as_deref(),
+        Some("ana@example.org")
+    );
+    assert_eq!(
+        r(None, Some("bo@example.org")).as_deref(),
+        Some("bo@example.org")
+    );
+    assert_eq!(r(Some("alias@example.com"), Some("ME@example.com")), None);
+
+    // For any lists, the result is an address of the lists and no owner.
+    const PIECES: [&str; 7] = [
+        "me@example.com",
+        "ME@Example.com",
+        "a@x.org",
+        "B@x.org",
+        ",",
+        " ",
+        "",
+    ];
+    let owners = [Some("me@example.com"), Some("b@x.org")];
+    let mut x: u64 = 0x1234_5678_9abc_def1;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for _ in 0..5000 {
+        let mut lists = [String::new(), String::new()];
+        for l in &mut lists {
+            for _ in 0..next() % 6 {
+                l.push_str(PIECES[(next() % PIECES.len() as u64) as usize]);
+            }
+        }
+        let got = first_other(&[Some(&lists[0]), Some(&lists[1])], &owners);
+        let all: Vec<String> = lists
+            .iter()
+            .flat_map(|l| l.split(','))
+            .map(|a| a.trim().to_lowercase())
+            .collect();
+        let others: Vec<&String> = all
+            .iter()
+            .filter(|a| !a.is_empty() && *a != "me@example.com" && *a != "b@x.org")
+            .collect();
+        assert_eq!(got.as_ref(), others.first().copied(), "{lists:?}");
+    }
+}
