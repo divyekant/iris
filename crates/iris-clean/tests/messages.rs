@@ -749,6 +749,21 @@ fn a_hidden_part_after_a_full_text_is_no_cut() {
 }
 
 #[test]
+fn a_big_hidden_last_alternative_after_a_full_text_is_no_cut() {
+    let part = "w".repeat(iris_clean::TEXT_LIMIT);
+    // Hidden HTML larger than the part limit: the decode cuts it, but it has no text.
+    let hidden = format!("<div hidden>{}</div>", "s ".repeat(iris_clean::PART_LIMIT));
+    let raw = format!(
+        "Subject: Full\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\n{part}\n\
+         --m\nContent-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\n\n\
+         --a\nContent-Type: text/html\n\n{hidden}\n--a--\n--m--\n"
+    );
+    let c = clean(raw.as_bytes());
+    assert!(!c.cut);
+    assert_eq!(c.text, part);
+}
+
+#[test]
 fn an_attached_message_at_the_depth_limit_is_cut() {
     let mut part = String::from("Content-Type: message/rfc822\n\nSubject: Deep\n\nToo deep.\n");
     // The top message is depth 0. Each multipart adds one level.

@@ -29,6 +29,7 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         return (None, false);
     }
     let mut stopped = false;
+    let mut data_end = 0;
     let mut out = String::new();
     let mut total = 0;
     let mut at = 0;
@@ -44,7 +45,9 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         if kw >= 3 && &pdf[kw - 3..kw] == b"end" {
             continue;
         }
-        let dict = dict_before(pdf, kw);
+        // The dictionary is after the data of the stream before: each byte
+        // is in one window only, so many streams do not rescan the same bytes.
+        let dict = dict_before(pdf, kw, data_end);
         // A direct `/Length` gives the end, so `endstream` inside the data
         // does not cut the stream. Without it, search for the keyword.
         let len = match declared_len(dict).filter(|&n| ends_at(pdf, start, n)) {
@@ -56,6 +59,7 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         };
         let data = &pdf[start..start + len];
         at = start + len;
+        data_end = at;
         if !is_content(dict) {
             continue;
         }
@@ -188,8 +192,8 @@ fn ends_at(pdf: &[u8], start: usize, len: usize) -> bool {
 /// The stream dictionary: the bytes after the last object header
 /// (`<number> <number> obj`) before the stream, at most 4 KiB back. An
 /// `obj` in a value, for example `(obj)`, is not a header.
-fn dict_before(pdf: &[u8], kw: usize) -> &[u8] {
-    let from = kw.saturating_sub(4096);
+fn dict_before(pdf: &[u8], kw: usize, floor: usize) -> &[u8] {
+    let from = kw.saturating_sub(4096).max(floor);
     let window = &pdf[from..kw];
     let start = (0..window.len().saturating_sub(2))
         .rev()
@@ -543,6 +547,18 @@ mod tests {
             assert_eq!(got.as_deref(), Some("Hello world"));
             assert!(cut, "flate {flate}");
         }
+    }
+
+    #[test]
+    fn many_short_streams_stay_fast() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        while pdf.len() < 9 * 1024 * 1024 {
+            pdf.extend_from_slice(b"stream\nendstream\n");
+        }
+        let begin = std::time::Instant::now();
+        assert_eq!(text(&pdf, 1000), None);
+        let time = begin.elapsed();
+        assert!(time < std::time::Duration::from_secs(3), "time {time:?}");
     }
 
     #[test]

@@ -249,7 +249,8 @@ its first 1 KiB holds `%PDF`.
 
 - Streams: the reader finds each `stream` keyword. Its dictionary is the
   text after the last object header (`<number> <number> obj`) before it, at
-  most 4 KiB back. The data ends at the
+  most 4 KiB back and not before the data of the stream before. The data
+  ends at the
   direct `/Length` key (not `/Length1` or another key that starts with
   `/Length`) of the stream dictionary, outside its strings, comments and
   inner dictionaries, if `endstream` follows that

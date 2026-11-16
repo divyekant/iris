@@ -252,13 +252,13 @@ impl<'a> Walker<'a> {
     fn body_part(&mut self, body: &[u8], cte: &str, html: bool, charset: Option<&str>) {
         // Also when the text is full, the part goes through the steps: only
         // a later part with clean text makes a cut.
-        let (bytes, truncated) = decode_capped(body, cte, PART_LIMIT);
-        self.cut |= truncated;
+        // A cut of a part counts only if the part has clean text.
+        let (bytes, mut cut) = decode_capped(body, cte, PART_LIMIT);
         let text = mime::decode(&bytes, charset);
         drop(bytes);
         let text = if html {
             let (md, full) = html::to_markdown(&text, self.is_reply);
-            self.cut |= full;
+            cut |= full;
             md
         } else {
             text
@@ -267,13 +267,14 @@ impl<'a> Walker<'a> {
         // The quote and signature steps keep a list of the lines. Bound it.
         if let Some((i, _)) = text.match_indices('\n').nth(MAX_LINES) {
             text.truncate(i);
-            self.cut = true;
+            cut = true;
         }
         let text = quote::strip_signature(&quote::strip_quotes(&text, self.is_reply));
         let mut text = tidy(&url::clean_urls(&text));
         if text.is_empty() {
             return;
         }
+        self.cut |= cut;
         // The texts join with an empty line: two characters.
         let sep = if self.texts.is_empty() { 0 } else { 2 };
         let Some(left) = TEXT_LIMIT.checked_sub(self.chars + sep).filter(|&l| l > 0) else {
