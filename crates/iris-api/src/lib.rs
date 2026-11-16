@@ -21,7 +21,9 @@ use axum::{
 use iris_store::Store;
 use serde::Deserialize;
 
+mod auth;
 mod read;
+pub use auth::{Auth, SIGN_IN};
 pub use read::*;
 
 #[derive(Debug)]
@@ -63,7 +65,7 @@ impl IntoResponse for Error {
     }
 }
 
-fn error(code: StatusCode, text: &str) -> Response {
+pub(crate) fn error(code: StatusCode, text: &str) -> Response {
     (code, Json(serde_json::json!({ "error": text }))).into_response()
 }
 
@@ -72,8 +74,9 @@ fn not_found() -> Response {
 }
 
 /// The routes of the API, under `/api`. Merge them before the fallback of
-/// `iris_web::router()`.
-pub fn router(store: Arc<Store>) -> Router {
+/// `iris_web::router()`. Each request needs the cookie of the sign-in
+/// address of `auth` (see [`Auth`]).
+pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
     Router::new()
         .route("/api/status", get(get_status))
         .route("/api/brief", get(get_brief))
@@ -87,6 +90,9 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
         .with_state(store)
+        // The sign-in address has no route: the check answers it.
+        .route(SIGN_IN, get(|| async { not_found() }))
+        .layer(middleware::from_fn_with_state(auth, auth::signed_in))
         .layer(middleware::from_fn(local_only))
 }
 

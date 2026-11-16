@@ -1,10 +1,11 @@
 //! Tests of the local API on a store filled from the synthetic mailbox.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
+use iris_api::Auth;
 use iris_store::{Body as Text, Header, NewMessage, Store};
 use iris_synth::{Mailbox, Sender};
 use serde_json::{json, Value};
@@ -151,16 +152,35 @@ fn party(p: &str) -> Value {
     json!({"kind": "sender", "sender": p})
 }
 
+/// One web secret for all tests, so `call` can sign in each request.
+fn auth() -> Arc<Auth> {
+    static AUTH: OnceLock<Arc<Auth>> = OnceLock::new();
+    AUTH.get_or_init(|| Arc::new(Auth::new().unwrap())).clone()
+}
+
+/// A request with the cookie of the sign-in.
 async fn call(
     store: &Arc<Store>,
     uri: &str,
     headers: &[(&str, &str)],
 ) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
+    call_as(store, uri, headers, Some(&auth().cookie_header())).await
+}
+
+async fn call_as(
+    store: &Arc<Store>,
+    uri: &str,
+    headers: &[(&str, &str)],
+    cookie: Option<&str>,
+) -> (StatusCode, Vec<u8>, axum::http::HeaderMap) {
     let mut req = Request::get(uri);
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
-    let res = iris_api::router(store.clone())
+    if let Some(c) = cookie {
+        req = req.header("cookie", c);
+    }
+    let res = iris_api::router(store.clone(), auth())
         .oneshot(req.body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -613,6 +633,29 @@ async fn brief_follows_the_queries_of_section_8() {
             json!({"type": t, "issuer": party(&service)}),
         );
     }
+    // A possible duplicate of the booking counts once.
+    let original: i64 = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT id FROM item WHERE json_extract(doc, '$.type') = 'booking'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let dup_booking = add_item(
+        &store,
+        "record",
+        "kept",
+        12,
+        2,
+        json!({"type": "booking", "issuer": party(&service)}),
+    );
+    exec(
+        &store,
+        "UPDATE item SET duplicate_of = ?1 WHERE id = ?2",
+        [original, dup_booking],
+    );
     let f_new = add_item(
         &store,
         "feed",
@@ -827,10 +870,12 @@ async fn brief_follows_the_queries_of_section_8() {
 async fn merges_with_the_web_client_router() {
     let dir = temp("merge");
     let store = Arc::new(Store::open(&dir.0).unwrap());
-    let app = iris_api::router(store).merge(iris_web::router());
+    let app = iris_api::router(store, auth()).merge(iris_web::router());
+    let cookie = auth().cookie_header();
     let send = |uri: &str| {
         let req = Request::get(uri)
             .header("host", "127.0.0.1:4800")
+            .header("cookie", &cookie)
             .body(Body::empty())
             .unwrap();
         app.clone().oneshot(req)
@@ -847,4 +892,62 @@ async fn merges_with_the_web_client_router() {
         .to_str()
         .unwrap()
         .starts_with("text/html"));
+}
+
+#[tokio::test]
+async fn needs_the_cookie_of_the_one_time_sign_in() {
+    let dir = temp("auth");
+    let (store, _) = filled(&dir);
+    let auth = Arc::new(Auth::new().unwrap());
+    let app = iris_api::router(store, auth.clone());
+    let send = |uri: String, cookie: Option<String>| {
+        let mut req = Request::get(uri).header("host", "localhost:4800");
+        if let Some(c) = cookie {
+            req = req.header("cookie", c);
+        }
+        app.clone().oneshot(req.body(Body::empty()).unwrap())
+    };
+    // Another local user with no cookie, or a wrong one, reads nothing.
+    for uri in [
+        "/api/status",
+        "/api/messages/m-1",
+        "/api/messages/m-1/raw",
+        "/api/nothing",
+    ] {
+        assert_eq!(
+            send(uri.into(), None).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri}"
+        );
+        let wrong = Some("iris_session=00".to_string());
+        assert_eq!(
+            send(uri.into(), wrong).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri}"
+        );
+    }
+    // A wrong code does not use the code.
+    let path = auth.sign_in_path().unwrap();
+    let res = send("/api/session?code=nope".into(), None).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // The sign-in address sets the cookie and goes to the client.
+    let res = send(path.clone(), None).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res.headers()["location"], "/");
+    let set = res.headers()["set-cookie"].to_str().unwrap().to_string();
+    assert!(
+        set.contains("HttpOnly") && set.contains("SameSite=Strict"),
+        "{set}"
+    );
+    let cookie = set.split(';').next().unwrap().to_string();
+    let res = send("/api/messages/m-1/raw".into(), Some(cookie))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    // The code works one time only.
+    assert_eq!(
+        send(path, None).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(auth.sign_in_path(), None);
 }

@@ -7,7 +7,10 @@ is read only.
 ## Use
 
 ```rust
-let app = iris_api::router(Arc::new(store)).merge(iris_web::router());
+let auth = Arc::new(iris_api::Auth::new()?);
+// Print (and open) the one-time sign-in address.
+println!("http://{addr}{}", auth.sign_in_path().unwrap());
+let app = iris_api::router(Arc::new(store), auth).merge(iris_web::router());
 ```
 
 Merge the API routes before the fallback of `iris_web::router()`. The read
@@ -71,13 +74,24 @@ An error is `{"error": "<reason>"}`:
 | Status | Cause |
 |---|---|
 | 400 | The search text, an ID or a filter is not valid. |
-| 403 | The `Host` or the `Origin` of the request is not local. |
+| 401 | The request has no sign-in cookie, or a wrong one. |
+| 403 | The `Host` or the `Origin` of the request is not local, or the sign-in code is not valid or was used. |
 | 404 | No object has the ID, or the path is not an endpoint. |
 | 500 | The store failed. |
 
+## Sign-in
+
+The API follows specification 2, section 8.6. At each start, `Auth::new()`
+makes a random web secret of 32 bytes and a one-time code. `iris serve`
+prints the sign-in address `/api/session?code=<code>`. The address sets the
+cookie `iris_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`) and sends the
+browser to `/`. The code works one time. Each other request needs the cookie,
+so another OS user on the same machine cannot read the mail through the API.
+For a new code, start `iris serve` again.
+
 ## Local requests only
 
-Release 1 has no sign-in on the API. So the API refuses each request whose
+The API also refuses each request whose
 `Host` is not `127.0.0.1`, `localhost` or `[::1]` (with an optional port), and
 each request with an `Origin` that does not have one of these hosts. A web page
 on another site cannot read the API through DNS rebinding. A request with no

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }
 iris-store = { version = "0.0.0", path = "../iris-store" }

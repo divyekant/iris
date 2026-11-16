@@ -533,7 +533,11 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         let mut records = serde_json::Map::new();
         let mut st = c.prepare(
             "SELECT json_extract(doc, '$.type'), count(*) FROM item
-             WHERE form = 'record' AND status != 'gone' GROUP BY 1 ORDER BY 1",
+             WHERE form = 'record' AND status != 'gone'
+               -- A possible duplicate pair counts once (section 7.5).
+               AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
+                 (SELECT i.id FROM item i WHERE i.form = 'record' AND i.status != 'gone'))
+             GROUP BY 1 ORDER BY 1",
         )?;
         for row in st.query_map([], |r| {
             Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
