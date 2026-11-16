@@ -389,6 +389,10 @@ An `allow` rule never matches an action with no message.
   hash of that text is not the hash of the confirmation, the engine refuses
   the confirmation, and the web client shows the new difference. So a
   confirmation never makes active a text that the person did not see.
+- The engine keeps each rule `id` of each active policy (table
+  `policy_rule_id`). It refuses a confirmation of a file that has the `id`
+  of a rule that an earlier active policy removed, and the brief names the
+  line. So a ledger entry always names one rule.
 - When the person changes the policy in the web client (a change of `mode`,
   an accepted proposal or the removal of a rule), the engine writes the file
   and makes it the active policy in one step. The engine starts from the text
