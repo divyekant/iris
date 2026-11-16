@@ -24,6 +24,9 @@ pub enum Change {
     Mode(Mode),
     /// Remove the rule with this ID. Iris never uses the ID again.
     Remove(u32),
+    /// Add the rule of the open proposal with this ID (spec 2, section 6.6),
+    /// with `by = "proposal"` and the next rule ID.
+    Accept(i64),
 }
 
 /// The result of a change.
@@ -36,7 +39,8 @@ pub enum Edited {
     /// The file on disk is not the active policy, or there is no file after
     /// a confirmation. The person first confirms or discards it.
     FileChanged,
-    /// The active policy has no rule with this ID.
+    /// The active policy has no rule with this ID, or there is no open
+    /// proposal with this ID.
     NoRule,
     /// The active text is not valid any more, so it cannot be the start of
     /// a change. The person corrects the file and confirms it.
@@ -88,7 +92,22 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
                 if Some(&l.sha256) == active.sha256.as_ref() => {}
             _ => return Ok(Edited::FileChanged),
         }
-        let text = match edit_text(&base, change) {
+        let added = match change {
+            Change::Accept(id) => match crate::propose::get(tx, id)? {
+                Some(p) => Some((
+                    id,
+                    p.rule(crate::next_rule_id(tx)?, &crate::propose::date(now)),
+                    p.approvals,
+                )),
+                None => return Ok(Edited::NoRule),
+            },
+            _ => None,
+        };
+        let edited = match &added {
+            Some((_, rule, approvals)) => add_rule(&base, rule, *approvals).map(Some),
+            None => edit_text(&base, change),
+        };
+        let text = match edited {
             Ok(Some(t)) => t,
             Ok(None) => return Ok(Edited::NoRule),
             Err(e) => return Ok(Edited::Invalid(e)),
@@ -107,6 +126,9 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
         // If the commit fails after the write, the file is a change that the
         // person confirms or discards; it is not active.
         let version = record(tx, &text, &sha256_hex(&text), &policy, now)?;
+        if let Some((id, rule, _)) = added {
+            crate::propose::accepted(tx, id, rule.id, now)?;
+        }
         Ok(Edited::Done { version, policy })
     })
 }
@@ -144,10 +166,7 @@ pub fn discard(store: &Store) -> Result<Discarded> {
 /// and comments. Gives `None` when the text has no rule with the ID to
 /// remove.
 pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<String>, Error> {
-    let mut doc: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| Error {
-        line: e.span().map_or(0, |s| line_of(text, s.start)),
-        message: e.message().trim().to_string(),
-    })?;
+    let mut doc = parse_doc(text)?;
     match change {
         Change::Mode(mode) => {
             let Some(v) = doc.get_mut("mode").and_then(Item::as_value_mut) else {
@@ -161,6 +180,7 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
             *v = Value::from(mode.name());
             *v.decor_mut() = decor;
         }
+        Change::Accept(_) => return Ok(None),
         Change::Remove(id) => {
             let Some(rules) = doc.get_mut("rule").and_then(Item::as_array_of_tables_mut) else {
                 return Ok(None);
@@ -203,6 +223,56 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
         }
     }
     Ok(Some(doc.to_string()))
+}
+
+/// Adds `rule` at the end of the text, as one `[[rule]]` table with a
+/// comment that says why Iris proposed it. Keeps all other text.
+fn add_rule(text: &str, rule: &crate::Rule, approvals: i64) -> std::result::Result<String, Error> {
+    let mut doc = parse_doc(text)?;
+    let mut t = toml_edit::Table::new();
+    t.insert("id", toml_edit::value(i64::from(rule.id)));
+    t.insert("name", toml_edit::value(rule.name.as_str()));
+    t.insert("effect", toml_edit::value(rule.effect.name()));
+    let verbs: toml_edit::Array = rule.verbs.iter().map(|v| v.name()).collect();
+    t.insert("verbs", toml_edit::value(verbs));
+    let mut when = toml_edit::InlineTable::new();
+    if let Some(s) = &rule.when.sender {
+        when.insert("sender", s.as_str().into());
+    }
+    if let Some(k) = rule.when.sender_kind {
+        when.insert("sender_kind", k.name().into());
+    }
+    t.insert("when", toml_edit::value(when));
+    t.insert("by", toml_edit::value(rule.by.name()));
+    let added: toml_edit::Datetime = rule.added.parse().map_err(|_| Error {
+        line: 0,
+        message: format!("the date {} is not valid", rule.added),
+    })?;
+    t.insert("added", toml_edit::value(added));
+    let verb = rule.verbs.first().map_or("", |v| v.name());
+    t.decor_mut().set_prefix(format!(
+        "\n# Iris proposed this rule after you approved {approvals} of {approvals} {verb} actions.\n"
+    ));
+    if doc.get("rule").is_none() {
+        doc.insert("rule", Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    }
+    match doc.get_mut("rule").and_then(Item::as_array_of_tables_mut) {
+        Some(rules) => rules.push(t),
+        None => {
+            return Err(Error {
+                line: crate::find_line(text, "rule"),
+                message: "rule is not a list of tables".into(),
+            })
+        }
+    }
+    Ok(doc.to_string())
+}
+
+fn parse_doc(text: &str) -> std::result::Result<DocumentMut, Error> {
+    text.parse().map_err(|e: toml_edit::TomlError| Error {
+        line: e.span().map_or(0, |s| line_of(text, s.start)),
+        message: e.message().trim().to_string(),
+    })
 }
 
 /// The part of the text before a `[[rule]]` header that is not about that
