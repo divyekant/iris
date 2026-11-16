@@ -75,21 +75,5 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 | Policy notice | `PolicyNotice.svelte` | Above the brief: the policy file changed and waits for a confirmation (`warning` border), or it has an error (`error` border). A link opens the rules. |
 | Mode choice | `Rules.svelte` | Two cards side by side (one column on a phone), each a radio button. The chosen card has a primary border and a ring with a primary center, the mark of Iris. A change asks for one more click on the primary button. |
 | Rule line | `Rules.svelte` | The name, the verbs as words, each condition as a chip, and the rule number and line in small muted text. The Remove button stays quiet until the pointer or the focus is on the line. A remove asks one question in place, with no dialog. |
-| Request | `Request.svelte` | One changeset in the review: the mark of the author (a `primary` ring, or the Iris mark for Iris triage), the reason of the author as a quote with a `primary` line, then each change as a sentence (the verb in bold, then the real count), its reason and its flags (a `warning` dot and words). The changes that have a decision are behind one quiet line, "N more changes have a decision". When nothing waits, the line opens. |
-| Decide | `Request.svelte` | Design B (the owner's choice): a round tick box before each waiting change, ticked at the start (`primary` fill, an `on-primary` tick). An unticked change goes to half opacity and says "Iris will deny this change.". One `primary` pill button says what happens ("Approve all 3", "Approve 2, deny 1", "Deny all 3"). With no tick, the pill has no fill. The button acts only when each row of each waiting change loaded; until then a quiet line says that Iris loads them. After the decision, one quiet line says what the person approved and denied. |
-| Withdraw | `Request.svelte` | A quiet "Withdraw the request" in faint text at the end of the decision row of an open request (option B, the owner's pick). If no change waits, the row says "No change of this request waits for your decision." and keeps the control. A click opens one question under the row, with a `warning` line on the left: "Withdraw this request?", what Iris cancels, what stays, and "You cannot undo a withdraw." The question gives no count, because the page cannot see which approved change Iris started. An outline pill withdraws, and a quiet "Keep it" closes the question. After the withdraw, one quiet line counts the cancelled changes, and the changes that Iris started, from the states that the store gives back. Each cancelled change stays in view, also one of an older revision, and reads "Withdrawn". |
-| Message box | `Request.svelte` | The real messages of one change: sender, subject and date in one raised box with quiet lines. On a phone the subject goes under the sender. A gone message shows as words. Each row of the change shows: after about six rows, the box scrolls. |
-| Change panel | `Rules.svelte` | A raised panel with a primary border on the left: each change of the file, with a dot of color and a word (New `success`, Changed `warning`, Removed `error`), the file text behind "Show the file", and Confirm and Discard. An error uses the `error` border. |
-
-`client/test/tokens.test.mjs` checks each palette: the count of colors, the
-contrast of each text color, of `primary` and of each semantic color on each
-background, and the contrast of `on-primary` on `primary`. It also checks that
-no view has a color literal.
-
-## Rules
-
-- Each color comes from a token.
-- Text meets the WCAG 2.1 AA contrast level (Web Content Accessibility Guidelines): a ratio of 4.5 or more. `primary` and `success` also meet 4.5, so they can be text.
-- A line or a dot that shows a state (`warning`, `error`, `info`) has a ratio of 3 or more (WCAG 1.4.11).
-- Each image has alt text.
-- Motion shows a change of state. It respects the reduced-motion setting.
+| Suggested rule | `Rules.svelte` | A rule that Iris proposes from your approvals, in the section "Suggested by Iris" above the mode. It reads like a Rule line, with one muted line that says why ("You approved all 14 archive changes like this."). An outline button with a `primary` border adds the rule, and a quiet Dismiss button removes the suggestion. On a phone the buttons go under the words. |
+| Suggestion notice | `PolicyNotice.svelte` | Above the brief, when no notice of the file shows and a suggestion is open: one line with a `primary` border, "Iris suggests N rules from your approvals.", and a link to the rules. |

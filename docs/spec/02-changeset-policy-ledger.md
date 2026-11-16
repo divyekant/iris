@@ -620,8 +620,12 @@ changes:
   (section 6.4), with the author, the job and the flag `bulk` of the
   action. The engine proposes the rule when 10 or more approvals count and
   no refusal counts.
-- A refusal that the engine cannot read again (a message row is gone)
-  stops each proposal of its verb.
+- A refusal that the engine cannot read again (a message row or its
+  header is gone) stops each proposal of its verb.
+- The pass holds the facts of one action at a time, and one count for each
+  key. It skips a bulk action, because a bulk action stays in review with
+  each rule (section 6.5), so it holds the facts of 500 messages or fewer.
+  It runs on a read connection and holds no write lock.
 - The person accepts or dismisses a proposal in the web client. An accept
   is a change of section 6.3: the engine adds the rule at the end of the
   file, with the next rule ID, `by = "proposal"`, the date and a comment,

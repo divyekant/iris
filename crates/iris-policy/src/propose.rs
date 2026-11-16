@@ -115,7 +115,7 @@ pub(crate) fn current(tx: &Connection, id: i64, now: i64) -> Result<Option<Propo
         (None, None) => return Ok(None),
     };
     let key = (p.verb.name().to_string(), cond.to_string(), value);
-    Ok(pass(tx, now)?.get(&key).map(|&n| {
+    Ok(pass(tx, now)?.proposals.get(&key).map(|&n| {
         p.approvals = n;
         p
     }))
@@ -151,15 +151,22 @@ pub struct Mark([i64; 5]);
 /// decisions, the active policy or the hour changed since `last`. Gives the
 /// number of open proposals after a pass, or `None` when no pass ran.
 pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Option<usize>> {
-    let seen = *last;
-    let (mark, n) = store.write(|tx| {
-        let mark = mark(tx, now)?;
-        if seen == Some(mark) {
-            return Ok((mark, None));
-        }
-        let found = pass(tx, now)?;
+    // The pass reads many facts: it runs on a read connection, so it holds
+    // no write lock. A decision after the read gives a new mark, and the
+    // next tick runs again; an accept checks its proposal again.
+    let (mark, found) = store.read(|c| {
+        let mark = mark(c, now)?;
+        Ok((
+            mark,
+            (*last != Some(mark)).then(|| pass(c, now)).transpose()?,
+        ))
+    })?;
+    let Some(found) = found else {
+        return Ok(None);
+    };
+    let n = store.write(|tx| {
         let mut keep = BTreeSet::new();
-        for ((verb, cond, value), approvals) in &found {
+        for ((verb, cond, value), approvals) in &found.proposals {
             tx.execute(
                 "INSERT INTO rule_proposal (verb, cond, value, approvals, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?5)
@@ -183,11 +190,11 @@ pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Optio
                 tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
             }
         }
-        Ok((mark, Some(n)))
+        Ok(n)
     })?;
     // Only after the commit: a pass that did not commit runs again.
     *last = Some(mark);
-    Ok(n)
+    Ok(Some(n))
 }
 
 fn mark(tx: &Connection, now: i64) -> Result<Mark> {
@@ -202,170 +209,162 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
     Ok(Mark([count, at, undone, version, now.div_euclid(3600)]))
 }
 
-/// One decided action, with the facts of its messages.
-struct Decided {
-    verb: Verb,
-    author: Author,
-    job: Option<String>,
-    /// The flag `bulk` of the action (spec 2, section 5.3).
-    bulk: bool,
-    /// True for an approval by the person, false for a denial or an undo.
-    approved: bool,
-    messages: Vec<Facts>,
-}
-
 type Key = (String, String, String);
 
-/// The proposals that the decided actions give now: the key and the number
-/// of approvals.
-fn pass(tx: &Connection, now: i64) -> Result<BTreeMap<Key, i64>> {
-    let active = crate::active(tx)?;
-    if active.error.is_some() {
-        // The active text is not valid; the person corrects it first.
-        return Ok(BTreeMap::new());
-    }
-    let actions = decided(tx, now)?;
-    // The candidates: one value of a condition that each message of an
-    // approved action has.
-    let mut candidates: BTreeSet<(Verb, &'static str, String)> = BTreeSet::new();
-    // An action on hostile mail gives no candidate: Iris does not propose
-    // a rule from it, even one that the hard limits allow.
-    for a in actions
-        .iter()
-        .filter(|a| a.approved && !a.messages.iter().any(|m| kind(m) == SenderKind::Hostile))
-    {
-        if let Some(s) = same(&a.messages, |m| {
-            crate::check_sender(m.sender.clone())
-                .ok()
-                .filter(|s| !s.starts_with('@'))
-        }) {
-            candidates.insert((a.verb, "sender", s));
-        }
-        if let Some(k) = same(&a.messages, |m| Some(kind(m))) {
-            candidates.insert((a.verb, "sender_kind", k.name().to_string()));
-        }
-    }
-    let mut base = active.policy;
-    base.mode = crate::Mode::Apply;
-    let mut out = BTreeMap::new();
-    for (verb, cond, value) in candidates {
-        // `when` refuses a value that a rule cannot have, and `hostile`.
-        let Some(when) = when(cond, &value) else {
-            continue;
-        };
-        if decided_before(tx, verb, cond, &value)? {
-            continue;
-        }
-        let mut policy = base.clone();
-        let p = Proposal {
-            id: 0,
-            verb,
-            when,
-            approvals: 0,
-            created_at: 0,
-        };
-        policy.rules.push(p.rule(u32::MAX, ""));
-        let (mut yes, mut no) = (0i64, 0i64);
-        for a in actions.iter().filter(|a| a.verb == verb) {
-            let action = Action {
-                verb,
-                author: a.author,
-                job: a.job.as_deref(),
-                bulk: a.bulk,
-                now,
-            };
-            let allow = |p: &Policy| {
-                p.decide(&action, a.messages.iter().map(Facts::message))
-                    .outcome
-                    == Outcome::Allow
-            };
-            // Only an action that the new rule changes to approved counts.
-            if !allow(&base) && allow(&policy) {
-                if a.approved {
-                    yes += 1;
-                } else {
-                    no += 1;
-                }
-            }
-        }
-        if no == 0 && yes >= MIN_APPROVALS {
-            out.insert((verb.name().to_string(), cond.to_string(), value), yes);
-        }
-    }
-    Ok(out)
+/// The counts of one key in a pass.
+#[derive(Default)]
+struct Count {
+    /// Approvals and refusals that the rule changes to approved.
+    yes: i64,
+    no: i64,
+    /// An approved action with no hostile mail has the key.
+    sourced: bool,
 }
 
-/// The newest [`MAX_ACTIONS`] actions of another author with a verb of
-/// [`VERBS`] that the person approved, denied or that was undone.
-fn decided(tx: &Connection, now: i64) -> Result<Vec<Decided>> {
-    let mut st = tx.prepare(
-        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job,
-                EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
+/// The result of a pass: the proposals of now (the key and the number of
+/// approvals), and the most message facts that the pass held at one time.
+pub(crate) struct Found {
+    pub(crate) proposals: BTreeMap<Key, i64>,
+    pub(crate) held: usize,
+}
+
+/// One pass over the newest [`MAX_ACTIONS`] actions of another author with
+/// a verb of [`VERBS`] that the person approved, refused (`denied` by the
+/// person) or that was undone. The pass holds the facts of one action at a
+/// time. A bulk action stays in review with each rule (section 6.5), so the
+/// pass skips it, and each other action has 500 messages or fewer.
+pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
+    let mut found = Found {
+        proposals: BTreeMap::new(),
+        held: 0,
+    };
+    let active = crate::active(conn)?;
+    if active.error.is_some() {
+        // The active text is not valid; the person corrects it first.
+        return Ok(found);
+    }
+    let mut policy = active.policy;
+    policy.mode = crate::Mode::Apply;
+    let mut st = conn.prepare(
+        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job
          FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
          WHERE a.verb IN ('archive', 'read', 'unread', 'inbox', 'trash')
            AND c.author_kind <> 'person'
            AND ((a.decided_by = 'person'
                  AND a.state IN ('approved', 'held', 'applied', 'failed', 'denied'))
                 OR a.state = 'undone')
+           AND NOT EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
          ORDER BY a.id DESC LIMIT ?1",
     )?;
-    #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, String, String, String, Option<String>, bool)> = st
+    let rows: Vec<(i64, String, String, String, Option<String>)> = st
         .query_map([MAX_ACTIONS as i64], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let mut header = tx.prepare_cached("SELECT 1 FROM header WHERE message_id = ?1")?;
-    let mut ids =
-        tx.prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1")?;
-    let mut out = Vec::new();
+    let mut counts: BTreeMap<(Verb, &'static str, String), Count> = BTreeMap::new();
     let mut blocked = BTreeSet::new();
-    for (id, verb, state, author, job, bulk) in rows {
+    for (id, verb, state, author, job) in rows {
         let (Some(verb), Some(author)) = (Verb::from_name(&verb), Author::from_name(&author))
         else {
             continue;
         };
         let approved = !matches!(state.as_str(), "denied" | "undone");
-        let msg_ids: Vec<i64> = ids
-            .query_map([id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut messages = Vec::with_capacity(msg_ids.len());
-        let mut whole = true;
-        for m in msg_ids {
-            // The facts are the facts of the decision only while the header
-            // is there: a cleanup of a gone message deletes it (spec 1, 5.5).
-            match facts(tx, m, now)? {
-                Some(f) if header.exists([m])? => messages.push(f),
-                _ => whole = false,
+        let Some(messages) = read(conn, id, now)? else {
+            if !approved {
+                // A refusal that cannot be read again blocks each rule of its verb.
+                blocked.insert(verb);
             }
-        }
-        if !whole {
-            if approved {
-                // An approval that cannot be read again does not count.
-                continue;
-            }
-            // A refusal that cannot be read again blocks each rule of its verb.
-            blocked.insert(verb);
             continue;
-        }
-        out.push(Decided {
+        };
+        found.held = found.held.max(messages.len());
+        let action = Action {
             verb,
             author,
-            job,
-            bulk,
-            approved,
-            messages,
-        });
+            job: job.as_deref(),
+            bulk: false,
+            now,
+        };
+        let base = allows(&policy, &action, &messages);
+        let hostile = messages.iter().any(|m| kind(m) == SenderKind::Hostile);
+        // An allow rule with one condition matches an action only when each
+        // message has the value, so these two keys are the only rules that
+        // can change this action.
+        let keys = [
+            same(&messages, |m| {
+                crate::check_sender(m.sender.clone())
+                    .ok()
+                    .filter(|s| !s.starts_with('@'))
+            })
+            .map(|s| ("sender", s)),
+            same(&messages, |m| Some(kind(m))).map(|k| ("sender_kind", k.name().to_string())),
+        ];
+        for (cond, value) in keys.into_iter().flatten() {
+            // `when` refuses a value that a rule cannot have, and `hostile`.
+            let Some(when) = when(cond, &value) else {
+                continue;
+            };
+            let rule = Proposal {
+                id: 0,
+                verb,
+                when,
+                approvals: 0,
+                created_at: 0,
+            }
+            .rule(u32::MAX, "");
+            policy.rules.push(rule);
+            let changed = !base && allows(&policy, &action, &messages);
+            policy.rules.pop();
+            let c = counts.entry((verb, cond, value)).or_default();
+            // An action on hostile mail gives no candidate: Iris does not
+            // propose a rule from it, even one that the hard limits allow.
+            c.sourced |= approved && !hostile;
+            match (changed, approved) {
+                (true, true) => c.yes += 1,
+                (true, false) => c.no += 1,
+                _ => {}
+            }
+        }
     }
-    out.retain(|a| !blocked.contains(&a.verb));
-    Ok(out)
+    for ((verb, cond, value), c) in counts {
+        if c.sourced
+            && c.no == 0
+            && c.yes >= MIN_APPROVALS
+            && !blocked.contains(&verb)
+            && !decided_before(conn, verb, cond, &value)?
+        {
+            found
+                .proposals
+                .insert((verb.name().to_string(), cond.to_string(), value), c.yes);
+        }
+    }
+    Ok(found)
+}
+
+/// True when `policy` approves the action.
+fn allows(policy: &Policy, action: &Action, messages: &[Facts]) -> bool {
+    policy
+        .decide(action, messages.iter().map(Facts::message))
+        .outcome
+        == Outcome::Allow
+}
+
+/// The facts of the messages of action `id`, or `None` when one of them
+/// cannot be read again. The facts are the facts of the decision only while
+/// the header is there: a cleanup of a gone message deletes it (spec 1, 5.5).
+fn read(conn: &Connection, id: i64, now: i64) -> Result<Option<Vec<Facts>>> {
+    let mut header = conn.prepare_cached("SELECT 1 FROM header WHERE message_id = ?1")?;
+    let ids: Vec<i64> = conn
+        .prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1")?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::with_capacity(ids.len());
+    for m in ids {
+        match facts(conn, m, now)? {
+            Some(f) if header.exists([m])? => out.push(f),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(out))
 }
 
 fn decided_before(tx: &Connection, verb: Verb, cond: &str, value: &str) -> Result<bool> {
@@ -450,6 +449,70 @@ pub fn date(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pass holds the facts of one action at a time, and skips each bulk
+    /// action, so its memory does not grow with the number of actions.
+    #[test]
+    fn the_pass_holds_one_action_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("iris-propose-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
+                     INSERT INTO thread(id, account_id, provider_id) VALUES (1, 1, 't');",
+                )?;
+                // 30 actions of 40 messages, and one bulk action of 600.
+                for (a, n, flags) in (0..30).map(|a| (a, 40, "[]")).chain([(30, 600, "[\"bulk\"]")]) {
+                    tx.execute("INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)", [])?;
+                    let cs = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, hash)
+                         VALUES (?1, 1, 1, 'archive', '{}', '{}', 'h')",
+                        [cs],
+                    )?;
+                    let id = tx.last_insert_rowid();
+                    for m in 0..n {
+                        tx.execute(
+                            "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+                             VALUES (1, 1, ?1, 0)",
+                            [format!("m{a}-{m}")],
+                        )?;
+                        let msg = tx.last_insert_rowid();
+                        tx.execute(
+                            "INSERT INTO header(message_id, from_addr) VALUES (?1, 'x@y.example')",
+                            [msg],
+                        )?;
+                        tx.execute(
+                            "INSERT INTO action_message(action_id, message_id) VALUES (?1, ?2)",
+                            [id, msg],
+                        )?;
+                    }
+                    tx.execute("UPDATE changeset SET why = 'w', submitted_at = 1 WHERE id = ?1", [cs])?;
+                    tx.execute(
+                        "UPDATE changeset_action SET flags = ?2, state = 'approved',
+                         decided_by = 'person', decided_at = 2 WHERE id = ?1",
+                        params![id, flags],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let found = store.read(|c| pass(c, 1_800_000_000)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.held, 40);
+        let key = (
+            "archive".to_string(),
+            "sender".to_string(),
+            "x@y.example".to_string(),
+        );
+        assert_eq!(
+            found.proposals.get(&key),
+            Some(&30),
+            "the bulk action does not count"
+        );
+    }
 
     #[test]
     fn dates() {
