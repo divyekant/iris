@@ -1060,3 +1060,70 @@ fn a_gone_update_with_a_hostile_mark_is_no_source() {
     );
     assert_eq!(doc["sources"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn a_gone_origin_from_a_sender_that_became_hostile_ends_the_talk() {
+    let b = Box_::new("gonehostilesender");
+    let v = validator();
+    b.kind("news@shop.example", "service");
+    let p = b.put(M {
+        id: "a",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    b.put(M {
+        id: "s",
+        from: ("Shop", "news@shop.example"),
+        ..M::default()
+    });
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW} WHERE id = {p}"
+    ));
+    b.kind("sam@fabrikam.example", "hostile");
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["status"], "gone");
+    assert_eq!(
+        doc["sources"][0]["message"],
+        format!("m-{p}"),
+        "the origin stays a source"
+    );
+}
+
+#[test]
+fn an_empty_mark_list_with_spaces_is_no_mark() {
+    let b = Box_::new("emptymarks");
+    let m1 = b.put(M {
+        id: "a",
+        at: NOW - 3 * DAY,
+        ..M::default()
+    });
+    let m2 = b.put(M {
+        id: "b",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    let m3 = b.put(M {
+        id: "c",
+        at: NOW - DAY,
+        ..M::default()
+    });
+    b.sql(&format!(
+        "UPDATE message SET hostile = '[ ]' WHERE id = {m2}"
+    ));
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW} WHERE id = {m2}"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    let id = doc["id"].as_str().unwrap();
+    assert_eq!(
+        b.sources(id),
+        [
+            (m1, "origin".into()),
+            (m2, "update".into()),
+            (m3, "update".into())
+        ]
+    );
+}
