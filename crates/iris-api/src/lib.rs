@@ -27,9 +27,11 @@ mod auth;
 pub mod policy;
 mod read;
 mod review;
+mod verbs;
 pub use auth::{Auth, SIGN_IN};
 pub use read::*;
 pub use review::*;
+pub use verbs::*;
 
 #[derive(Debug)]
 pub enum Error {
@@ -94,6 +96,7 @@ pub fn router(store: Arc<Store>, auth: Arc<Auth>) -> Router {
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
+        .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
         .route("/api/changesets/{id}", get(get_changeset))
@@ -332,6 +335,21 @@ async fn get_items(
 
 async fn get_item(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
     Ok(item(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// A state verb of the person on one item: `close`, `decline` or `defer`
+/// (specification 2, section 4). The answer is the item after the change.
+async fn post_verb(
+    State(s): State<Arc<Store>>,
+    Path((id, verb)): Path<(String, String)>,
+    b: std::result::Result<Json<VerbBody>, JsonRejection>,
+) -> Result<Response> {
+    if !matches!(verb.as_str(), "close" | "decline" | "defer") {
+        return Ok(not_found());
+    }
+    let b = body(b)?;
+    Ok(apply_verb(&s, &id, &verb, &b, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
 }
 
 #[derive(Deserialize)]
