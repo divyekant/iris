@@ -159,11 +159,13 @@ fn only_the_moves_of_section_5_2() {
                 )?;
                 tx.execute_batch(&trigger)?;
                 // The submit. For replaced, a newer revision is submitted.
-                tx.execute(
-                    "UPDATE changeset SET revision = iif(?1 = 'replaced', 2, 1),
-                       submitted_at = 0, why = 'w'",
-                    [to],
-                )?;
+                tx.execute("UPDATE changeset SET submitted_at = 0, why = 'w'", [])?;
+                if to == "replaced" {
+                    tx.execute_batch(
+                        "UPDATE changeset SET revision = 2, submitted_at = NULL;
+                         UPDATE changeset SET submitted_at = 0;",
+                    )?;
+                }
                 // The event of cancelled: a withdraw.
                 if to == "cancelled" {
                     tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
@@ -225,22 +227,6 @@ fn a_move_needs_its_event() {
         "INSERT INTO changeset(author_kind, created_at, submitted_at) VALUES ('agent', 0, 0)",
     );
     s.write(|tx| Ok(submit(tx, 1)?)).unwrap();
-    // A new action goes into the draft revision only: not after the submit,
-    // not into another revision.
-    let insert = |revision: i64| {
-        format!(
-            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
-             VALUES (1, {revision}, 2, 'archive', '{{}}', '{{}}')"
-        )
-    };
-    fails(&s, &insert(1));
-    fails(&s, &insert(2));
-    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 2, submitted_at = NULL", [])?))
-        .unwrap();
-    works(&s, &insert(2));
-    fails(&s, &insert(1));
-    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 1, submitted_at = 0", [])?))
-        .unwrap();
     for sql in [
         // Expired only 14 days after the submit.
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry',
@@ -279,6 +265,69 @@ fn a_move_needs_its_event() {
         &s,
         "UPDATE changeset_action SET state = 'approved', decided_by = 'person'",
     );
+}
+
+/// A submitted revision stays submitted, and a new action goes only into the
+/// draft revision.
+#[test]
+fn a_submitted_revision_stays_submitted() {
+    let dir = TempDir::new("revisions");
+    let s = store(&dir);
+    s.write(|tx| Ok(submit(tx, draft(tx)?)?)).unwrap();
+    let insert = |revision: i64| {
+        format!(
+            "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+             VALUES (1, {revision}, 2, 'archive', '{{}}', '{{}}')"
+        )
+    };
+    for sql in [
+        &insert(1),
+        &insert(2),
+        "UPDATE changeset SET submitted_at = NULL",
+        "UPDATE changeset SET submitted_at = 1",
+        "UPDATE changeset SET why = 'x'",
+        "UPDATE changeset SET revision = 3, submitted_at = NULL",
+        "UPDATE changeset SET revision = 2",
+        "UPDATE changeset SET author_name = 'x'",
+        "UPDATE changeset SET created_at = 1",
+        "INSERT INTO changeset(author_kind, created_at, revision) VALUES ('agent', 0, 2)",
+        "INSERT INTO changeset(author_kind, created_at, state) VALUES ('agent', 0, 'open')",
+        "INSERT OR REPLACE INTO changeset(id, author_kind, created_at) VALUES (1, 'agent', 0)",
+    ] {
+        fails(&s, sql);
+    }
+    // A new revision.
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET revision = 2, submitted_at = NULL", [])?))
+        .unwrap();
+    works(&s, &insert(2));
+    for sql in [
+        &insert(1),
+        // An insert does not replace a submitted action.
+        "INSERT OR REPLACE INTO changeset_action(id, changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 1, 2, 1, 'archive', '{}', '{}')",
+        "INSERT OR REPLACE INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (1, 1, 1, 'archive', '{}', '{}')",
+        // Revision 1 does not become a draft again.
+        "UPDATE changeset SET revision = 1",
+        "UPDATE changeset SET revision = 1, submitted_at = 0",
+    ] {
+        fails(&s, sql);
+    }
+    let resolved: i64 = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM action_message WHERE action_id = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(resolved, 1);
+    // A withdrawn changeset does not change.
+    s.write(|tx| Ok(tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?))
+        .unwrap();
+    fails(&s, "UPDATE changeset SET submitted_at = 0, why = 'w'");
+    fails(&s, &insert(2));
 }
 
 /// A rule decision names a rule ID of the active policy.
@@ -401,6 +450,7 @@ fn the_apply_keeps_who_approved() {
     .unwrap();
     for to in ["applied", "failed"] {
         for change in [
+            "flags = '[\"bulk\"]'",
             "decided_by = 'engine', rule = NULL, policy = NULL",
             "decided_by = 'person', rule = NULL, policy = NULL",
             "rule = 2",

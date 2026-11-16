@@ -100,9 +100,38 @@ INSERT INTO action_transition VALUES
 -- Section 5.2 also allows failed to undone, but only when the ledger lists
 -- a changed message. The ledger (R2-03) adds that move with its check.
 
+-- A new changeset is a draft of revision 1. No insert replaces a changeset.
+CREATE TRIGGER changeset_insert BEFORE INSERT ON changeset
+WHEN new.revision <> 1 OR new.submitted_at IS NOT NULL OR new.state <> 'draft'
+  OR EXISTS (SELECT 1 FROM changeset WHERE id = new.id)
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a new changeset is a draft of revision 1');
+END;
+
+-- The author and the time of a changeset do not change. A revision moves
+-- only in two ways: the submit of the draft revision, and a new draft
+-- revision after the submit. A submitted revision does not become a draft
+-- again, and a withdrawn changeset does not change.
+CREATE TRIGGER changeset_revision BEFORE UPDATE OF revision, submitted_at, why,
+  author_kind, author_name, author_session, author_job, created_at ON changeset
+WHEN new.author_kind IS NOT old.author_kind OR new.author_name IS NOT old.author_name
+  OR new.author_session IS NOT old.author_session OR new.author_job IS NOT old.author_job
+  OR new.created_at IS NOT old.created_at OR old.state = 'withdrawn'
+  OR NOT ((new.revision = old.revision AND old.submitted_at IS NULL)
+          OR (new.revision = old.revision + 1 AND old.submitted_at IS NOT NULL
+              AND new.submitted_at IS NULL AND new.why IS old.why))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: this change of a changeset is not allowed');
+END;
+
 -- An action enters only the draft revision of its changeset, with no state.
+-- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, so no insert
+-- replaces an action.
 CREATE TRIGGER action_insert BEFORE INSERT ON changeset_action
 WHEN new.state IS NOT NULL
+  OR EXISTS (SELECT 1 FROM changeset_action WHERE id = new.id
+             OR (changeset_id = new.changeset_id AND revision = new.revision
+                 AND n = new.n))
   OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
                  AND revision = new.revision AND submitted_at IS NULL
                  AND state <> 'withdrawn')
@@ -194,6 +223,7 @@ WHEN json_type(new.flags) IS NOT 'array'
                    'first_contact', 'untrusted_content', 'bulk'))
   OR (old.state IS NOT NULL
       AND (old.state NOT IN ('proposed', 'in_review', 'approved')
+           OR new.state NOT IN ('proposed', 'in_review', 'approved')
            OR EXISTS (SELECT 1 FROM json_each(old.flags) o
                       WHERE NOT EXISTS (SELECT 1 FROM json_each(new.flags) f
                                         WHERE f.value IS o.value))))
