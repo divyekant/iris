@@ -40,6 +40,8 @@ struct Fake {
     calls: Calls,
     /// Runs in the call, before the answer.
     during: Option<Rc<dyn Fn()>>,
+    /// The usage of the reply; `None` is 100 + 10 tokens, known.
+    usage: Option<Usage>,
 }
 
 impl Model for Fake {
@@ -62,12 +64,12 @@ impl Model for Fake {
         Ok(Reply {
             stop: Stop::End,
             text,
-            usage: Usage {
+            usage: self.usage.unwrap_or(Usage {
                 input_tokens: 100,
                 output_tokens: 10,
                 cost_micro_usd: None,
                 known: true,
-            },
+            }),
         })
     }
 }
@@ -180,6 +182,16 @@ fn run_with(
     question: &str,
     during: Option<Rc<dyn Fn()>>,
 ) -> (Result<Answer, Error>, Calls) {
+    run_full(b, answer, question, during, None)
+}
+
+fn run_full(
+    b: &Box_,
+    answer: Result<&str, &str>,
+    question: &str,
+    during: Option<Rc<dyn Fn()>>,
+    usage: Option<Usage>,
+) -> (Result<Answer, Error>, Calls) {
     let calls: Calls = Rc::default();
     let c = calls.clone();
     let answer = answer.map(str::to_string).map_err(str::to_string);
@@ -188,6 +200,7 @@ fn run_with(
             answer: answer.clone(),
             calls: c.clone(),
             during: during.clone(),
+            usage,
         }))
     };
     (ask(&b.store, &connect, question, NOW), calls)
@@ -399,6 +412,55 @@ fn a_model_error_or_a_bad_answer_is_an_error() {
         ),
         Some(0)
     );
+}
+
+/// A valid answer with unknown usage, or with a cost above its
+/// reservation, keeps the answer and gets the stop of a batch run.
+#[test]
+fn a_charge_outside_the_reservation_gets_its_stop() {
+    let b = setup("charge", Some(1_000_000), MAIL);
+    let reply = r#"{"claims": [{"text": "At 07:40.", "sources": [1]}]}"#;
+    for (usage, stop, cost) in [
+        // The worst case (1000 + 100) stays taken.
+        (
+            Usage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cost_micro_usd: None,
+                known: false,
+            },
+            "unknown",
+            1100,
+        ),
+        // 2000 + 10 tokens: more than the reservation of 1100.
+        (
+            Usage {
+                input_tokens: 2000,
+                output_tokens: 10,
+                cost_micro_usd: None,
+                known: true,
+            },
+            "budget",
+            2010,
+        ),
+    ] {
+        let before = one(&b, "SELECT budget_micro_usd FROM model_setting").unwrap();
+        let got = run_full(&b, Ok(reply), "flight", None, Some(usage)).0;
+        assert!(got.unwrap().text().is_some(), "{stop}");
+        assert_eq!(
+            one(
+                &b,
+                &format!("SELECT stop = '{stop}' FROM understand_run ORDER BY id DESC LIMIT 1")
+            ),
+            Some(1),
+            "{stop}"
+        );
+        assert_eq!(
+            one(&b, "SELECT budget_micro_usd FROM model_setting"),
+            Some(before - cost),
+            "{stop}"
+        );
+    }
 }
 
 /// The call holds the run lock from the read of the model row to the

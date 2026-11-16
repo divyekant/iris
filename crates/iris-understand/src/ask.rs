@@ -250,8 +250,12 @@ pub fn ask(store: &Store, connect: Connect, question: &str, now_ms: i64) -> Resu
         .and_then(|r| r.json().ok())
         .and_then(|j| read_answer(&j, &docs));
     let s = budgeted.state();
+    // The order of the stops of a batch run: a charge outside the
+    // reservation comes before the answer.
     let stop = match &reply {
         _ if s.store_failed => "error",
+        _ if s.unknown => "unknown",
+        Ok(_) if s.overrun => "budget",
         Ok(_) if read.is_some() => "done",
         Ok(_) => "model",
         Err(iris_model::Error::Budget(_)) => "budget",
