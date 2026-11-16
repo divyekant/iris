@@ -66,6 +66,10 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
             Item::Stream { kw, start, header } => (kw, start, header),
         };
         let num = header.and_then(|h| h.1);
+        // A stream replaces each earlier object of its number.
+        if let Some(n) = num {
+            doc.forget(n);
+        }
         // The dictionary is the text from the object header to the keyword.
         // A longer dictionary than 4 KiB is not read.
         let dict = header
@@ -567,16 +571,22 @@ impl Doc {
     /// Keep the body of object `num`. A later object of the same number
     /// replaces it, as in an incremental update.
     fn keep(&mut self, num: u32, body: &[u8]) {
-        // The replaced body gives its cost back.
-        if let Some(old) = self.objs.remove(&num) {
-            self.obj_bytes -= old.len() + 64;
-        }
+        self.forget(num);
         let cost = body.len() + 64;
         if body.len() > OBJ_LIMIT || self.obj_bytes + cost > OBJ_BUDGET {
             return;
         }
         self.obj_bytes += cost;
         self.objs.insert(num, body.to_vec());
+    }
+
+    /// Remove the kept body and the code map of object `num`. The removed
+    /// body gives its cost back.
+    fn forget(&mut self, num: u32) {
+        if let Some(old) = self.objs.remove(&num) {
+            self.obj_bytes -= old.len() + 64;
+        }
+        self.maps.remove(&num);
     }
 
     /// Keep the objects of one decoded object stream.
@@ -953,6 +963,8 @@ impl CMap {
             List(Vec<&'a [u8]>),
         }
         let mut m = CMap::default();
+        // The operands of one entry: at most 3, because 3 operands always
+        // end an entry or clear the list.
         let mut ops: Vec<Op> = Vec::new();
         let mut mode = &b""[..];
         let mut lx = Lexer::new(data);

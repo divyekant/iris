@@ -272,8 +272,9 @@ its first 1 KiB holds `%PDF`.
   (`<number> <number> obj` to `endobj`) of at most 16 KiB, and of each
   object in an object stream (`/Type /ObjStm`, `/N`, `/First`). It keeps
   at most 4 MiB of bodies for each PDF, with 64 bytes more for each body.
-  A later object of the same number replaces the earlier one. If the later
-  object is not kept, the earlier one goes out too.
+  A later object or stream of the same number replaces the earlier body
+  and code map. If the later object is not kept, the earlier one goes out
+  too.
 - Code maps: a stream whose data holds `begincmap` is a code map of its
   object number. The reader reads its `begincodespacerange` (at most 16),
   `beginbfchar` and `beginbfrange` entries, with a direct destination or an
