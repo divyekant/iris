@@ -402,6 +402,11 @@ impl Engine {
         if let Err(e) = iris_changeset::expire(&self.store, now_ms()) {
             say!("iris: changeset expiry: {e}");
         }
+        // The state verbs change no mailbox, so they apply here, with no
+        // account and no token (R2-10).
+        if let Err(e) = iris_apply::apply_states(&self.store) {
+            say!("iris: state actions: {e}");
+        }
         // Triage (R2-05): store the proposal of each account. A run with no
         // change writes nothing.
         for account in sync_accounts(&self.store)? {

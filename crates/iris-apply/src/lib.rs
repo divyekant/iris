@@ -28,6 +28,10 @@
 //! reads the labels at Gmail. See the failure list in specification 2,
 //! section 7.2.
 
+mod state;
+
+pub use state::{apply_state, apply_states};
+
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
 use iris_store::Store;
@@ -55,7 +59,8 @@ pub enum Error {
     /// or in another. The action
     /// stays as it was. Apply again after the other apply.
     Busy,
-    /// The verb has no Gmail apply: the state verbs.
+    /// The verb has no Gmail apply: a state verb applies with
+    /// [`apply_state`].
     Verb(String),
     /// The ledger entry has no undo now, with the reason ([`undo`]).
     Undo(String),
@@ -1115,17 +1120,7 @@ fn writing_rows(store: &Store, account: i64) -> Result<bool> {
 /// `observe` (section 5.4). Gives the outcome if the action does not apply
 /// now.
 fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
-    let expired = tx.execute(
-        "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
-           policy = NULL, reason = NULL,
-           decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-         WHERE id = ?1 AND state = 'approved'
-           AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
-           AND NOT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)
-           AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
-        params![action, EXPIRY_MS],
-    )?;
-    if expired > 0 {
+    if expire(tx, action)? {
         return Ok(Some(Outcome::Expired));
     }
     // The mode `observe` does not hold an undo (section 7.4). Step 2 of the
@@ -1141,6 +1136,22 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
         return Ok(Some(Outcome::Waiting));
     }
     Ok(None)
+}
+
+/// Expire an approved action 14 days after its submit (section 5.5), if it
+/// has no ledger row in `writing`. Gives `true` if it expired.
+fn expire(tx: &Connection, action: i64) -> iris_store::Result<bool> {
+    let expired = tx.execute(
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
+           policy = NULL, reason = NULL,
+           decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+         WHERE id = ?1 AND state = 'approved'
+           AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
+           AND NOT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)
+           AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
+        params![action, EXPIRY_MS],
+    )?;
+    Ok(expired > 0)
 }
 
 /// The checks before the first provider call of an action. Gives the

@@ -134,12 +134,13 @@ export const waits = (a: Action) => a.decision?.state === "proposed" || a.decisi
 const OPEN = ["proposed", "in_review", "approved", "held"];
 
 /**
- * The actions to show: each submitted action of the newest revision, and an
- * action of an older revision that is still open (spec 2 section 5.5). A
- * draft action has no decision yet, and a replaced action is history.
+ * The actions to show: each submitted action of the newest revision, an
+ * action of an older revision that is still open (spec 2 section 5.5), and
+ * each action that a withdraw cancelled. A draft action has no decision yet,
+ * and a replaced action is history.
  */
 export function shown(c: Changeset): Action[] {
-  return c.actions.filter((a) => a.decision && a.decision.state !== "replaced" && (a.revision === c.revision || OPEN.includes(a.decision.state)));
+  return c.actions.filter((a) => a.decision && a.decision.state !== "replaced" && (a.revision === c.revision || OPEN.includes(a.decision.state) || a.decision.state === "cancelled"));
 }
 
 /** Who asked, for the head of the request. */
@@ -168,7 +169,8 @@ export function outcome(a: Action): string {
     case "expired":
       return "Expired: no decision in 14 days";
     case "cancelled":
-      return "The author withdrew it";
+      // by is always "author" here: it names the event (a withdraw or a new revision), not who withdrew (issue 221).
+      return "Withdrawn";
     default:
       return "";
   }

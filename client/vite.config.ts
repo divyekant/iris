@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { answer, decide, raw } from "./dev/fixtures.ts";
+import { answer, decide, raw, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -23,12 +23,13 @@ export default defineConfig(({ mode }) => {
             res.end(source);
             return;
           }
-          const decision = url.match(/^\/changesets\/([^/?]+)\/decide$/);
+          const decision = url.match(/^\/changesets\/([^/?]+)\/(decide|withdraw)$/);
           if (decision && req.method === "POST") {
             let text = "";
             req.on("data", (part: Buffer) => (text += part));
             req.on("end", () => {
-              const done = decide(decodeURIComponent(decision[1]), JSON.parse(text));
+              const id = decodeURIComponent(decision[1]);
+              const done = decision[2] === "decide" ? decide(id, JSON.parse(text)) : withdraw(id);
               res.statusCode = done ? 200 : 404;
               res.setHeader("content-type", "application/json");
               res.end(JSON.stringify(done ?? { error: "Not found." }));

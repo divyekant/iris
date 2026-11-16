@@ -3,9 +3,9 @@
 //! each later sync and understanding run.
 //!
 //! The caller is the step that applies a `correct` action of a changeset
-//! (specification 2, section 4), in the transaction of its ledger row.
-//! Release 1 has no such caller and no command for it: the command
-//! `iris correct` adds a changeset action (specification 2, section 8.2).
+//! (specification 2, section 4), in the transaction of its ledger row
+//! (`iris_apply::apply_state`). The command `iris correct` adds a changeset
+//! action (specification 2, section 8.2).
 //!
 //! The `correction` row pins the item. Understanding never deletes a pinned
 //! item, never changes its ID, and gives the model the corrected document as

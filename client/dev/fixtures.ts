@@ -239,6 +239,17 @@ export function decide(id: string, body: { actions: { revision: number; n: numbe
   return c;
 }
 
+/** The withdraw of the person on the fixtures: each open action becomes cancelled (spec 2 section 5.5). */
+export function withdraw(id: string): Changeset | undefined {
+  const c = changesets.find((x) => x.id === id);
+  if (!c) return undefined;
+  c.state = "withdrawn";
+  for (const a of c.actions) {
+    if (a.decision && ["proposed", "in_review", "approved"].includes(a.decision.state)) a.decision = { state: "cancelled", by: "author" };
+  }
+  return c;
+}
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
