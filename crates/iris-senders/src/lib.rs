@@ -109,7 +109,9 @@ pub fn decide(
 /// transaction. Spec 1 section 6.7 says that the kinds are current after
 /// each refresh.
 ///
-/// It decides again each engine row with a known or hostile kind, then each
+/// It decides again each engine row with a known or hostile kind, and each
+/// address with an evidence row (for example a service whose older mail
+/// was understood after its newer mail), then each
 /// row that the near-copy rule compares with a domain that changed, until
 /// no kind changes.
 pub fn refresh(conn: &Connection, now_ms: i64) -> rusqlite::Result<Vec<i64>> {
@@ -117,7 +119,8 @@ pub fn refresh(conn: &Connection, now_ms: i64) -> rusqlite::Result<Vec<i64>> {
     let rows: Vec<String> = conn
         .prepare_cached(
             "SELECT address FROM sender WHERE decided_by IS NOT 'person'
-               AND kind IN ('person', 'service', 'hostile')",
+               AND kind IN ('person', 'service', 'hostile')
+             UNION SELECT address FROM sender_evidence",
         )?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -187,7 +190,8 @@ fn decide_message(
     // recipient that loses its `sent` row is decided again after it.
     let old: Vec<String> = conn
         .prepare_cached(
-            "SELECT address FROM sender_evidence WHERE message_id = ?1 AND rule = 'sent'",
+            "SELECT address FROM sender_evidence WHERE message_id = ?1
+               AND rule IN ('sent', 'replied')",
         )?
         .query_map([message], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -257,6 +261,27 @@ fn decide_message(
             };
         }
 
+        // The `replied` rule: each earlier sender of the thread. Its row
+        // is decided again now, and by each refresh.
+        let earlier: Vec<String> = conn
+            .prepare_cached(
+                "SELECT DISTINCT h.from_addr FROM message m JOIN header h ON h.message_id = m.id
+                  WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
+                    AND m.id != ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL
+                    AND h.from_addr IS NOT NULL AND h.from_addr != '' AND h.from_addr != lower(?3)",
+            )?
+            .query_map(params![message, date.unwrap_or(i64::MIN), account], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for a in &earlier {
+            conn.prepare_cached(
+                "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
+                 VALUES (?1, ?2, 'replied', ?3)",
+            )?
+            .execute(params![message, a, sha])?;
+            recheck(conn, a, now_ms, ch)?;
+        }
         return Ok(Decision {
             rerun: Vec::new(),
             ..own("sent")
@@ -272,6 +297,16 @@ fn decide_message(
             rerun: Vec::new(),
         });
     };
+    // The `service` rule: this message is automated mail with a Gmail DKIM
+    // pass. The rule counts its earlier messages when it reads the row, so
+    // an older message that is understood later counts too.
+    if head.automated() && head.dkim_pass(domain_of(&addr)) {
+        conn.prepare_cached(
+            "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
+             VALUES (?1, ?2, 'service', ?3)",
+        )?
+        .execute(params![message, addr, sha])?;
+    }
     // (id, kind, decided_by)
     type Row = (i64, Option<String>, Option<String>);
     let row: Option<Row> = conn
@@ -299,7 +334,7 @@ fn decide_message(
         }
     }
 
-    let (kind, basis) = rules(conn, &addr, Some((&head, message, sha.as_deref(), date)))?;
+    let (kind, basis) = rules(conn, &addr)?;
     let id = upsert(ch, conn, &addr, name.as_deref(), kind, &basis, now_ms)?;
     Ok(Decision {
         rerun: Vec::new(),
@@ -340,20 +375,15 @@ fn own(basis: &str) -> Decision {
 /// Decide the address `addr` again with no message from it, from the
 /// evidence in the store.
 fn recheck(conn: &Connection, addr: &str, now_ms: i64, ch: &mut Changes) -> rusqlite::Result<()> {
-    let (kind, basis) = rules(conn, addr, None)?;
+    let (kind, basis) = rules(conn, addr)?;
     upsert(ch, conn, addr, None, kind, &basis, now_ms)?;
     Ok(())
 }
 
-/// The message that the rules decide: (headers, `m-` row, content hash,
-/// internal date).
-type This<'a> = (&'a Head, i64, Option<&'a str>, Option<i64>);
-
 /// The engine rules in the order of spec 1 section 6.7: `hostile`, then
-/// `person`, then `service`, else `stranger`. With `this`, the message
-/// from `addr` can qualify for the `service` rule.
-fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<(Kind, String)> {
-    let domain = domain_of(addr);
+/// `person`, then `service`, else `stranger`. They read only the store, so
+/// [`refresh`] gives the same result as [`decide`].
+fn rules(conn: &Connection, addr: &str) -> rusqlite::Result<(Kind, String)> {
     if let Some(k) = near(addr, &known_domains(conn, addr)?) {
         return Ok((Kind::Hostile, format!("near copy of {k}")));
     }
@@ -403,32 +433,10 @@ fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<
         return Ok((Kind::Person, "replied".into()));
     }
 
-    if let Some((_, message, sha, date)) =
-        this.filter(|(head, ..)| head.automated() && head.dkim_pass(domain))
-    {
-        let earlier: i64 = conn.query_row(
-            "SELECT count(*) FROM (SELECT 1 FROM header h JOIN message m ON m.id = h.message_id
-              WHERE h.from_addr = ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL LIMIT 2)",
-            params![addr, date.unwrap_or(i64::MIN)],
-            |r| r.get(0),
-        )?;
-        if earlier >= 2 {
-            conn.prepare_cached(
-                "INSERT OR IGNORE INTO sender_evidence(message_id, address, rule, content_sha256)
-                 VALUES (?1, ?2, 'service', ?3)",
-            )?
-            .execute(params![message, addr, sha])?;
-            return Ok((
-                Kind::Service,
-                "automated, dkim pass, 2 earlier messages".into(),
-            ));
-        }
-    }
-    // The kind belongs to the address. Another message from the address can
-    // qualify (an older message is read later, newest first). It counts
-    // while it is there with the same bytes (so the same automated and DKIM
-    // headers), and still has 2 earlier messages from the address.
-    let other: bool = conn.query_row(
+    // The `service` rule: a message with a `service` row qualifies while
+    // it is there with the same bytes (so the same automated and DKIM
+    // headers) and has 2 earlier messages from the address.
+    let service: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sender_evidence ev JOIN message q ON q.id = ev.message_id
           WHERE ev.address = ?1 AND ev.rule = 'service' AND q.content_sha256 IS ev.content_sha256
             AND q.gone_at IS NULL
@@ -438,8 +446,11 @@ fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<
         [addr],
         |r| r.get(0),
     )?;
-    if other {
-        return Ok((Kind::Service, "another message qualifies".into()));
+    if service {
+        return Ok((
+            Kind::Service,
+            "automated, dkim pass, 2 earlier messages".into(),
+        ));
     }
     Ok((Kind::Stranger, "no rule matched".into()))
 }

@@ -919,8 +919,10 @@ fn a_service_that_was_hostile_is_a_service_again() {
     let m = new_message("m1", "t1", 1000, &["INBOX"], raw.as_bytes());
     c.store.put_messages(c.acc, &[m]).unwrap();
     refreshed(&c);
-    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("stranger"));
     assert_eq!(c.row("no-reply@paypa1.com").1.as_deref(), Some("service"));
+    // support@paypal.com has no evidence now, and its domain is a near copy
+    // of the known service.
+    assert_eq!(c.row("support@paypal.com").1.as_deref(), Some("hostile"));
 }
 
 #[test]
