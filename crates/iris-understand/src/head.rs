@@ -337,27 +337,23 @@ fn invitation(raw: &[u8]) -> bool {
 /// METHOD line comes near the start of a calendar.
 const CALENDAR_B64: usize = 64 * 1024;
 
-/// Decode base64 and skip the bytes that are not base64.
+/// Decode a base64 body. Line ends and other bytes that are not base64 go
+/// out first. A body that does not decode gives nothing.
 fn base64(src: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len() / 4 * 3);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for &c in src {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => continue,
-        };
-        acc = (acc << 6) | u32::from(v);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    out
+    use base64::engine::{general_purpose::GeneralPurpose, DecodePaddingMode};
+    use base64::{alphabet, engine::GeneralPurposeConfig, Engine};
+    const LAX: GeneralPurpose = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent)
+            .with_decode_allow_trailing_bits(true),
+    );
+    let clean: Vec<u8> = src
+        .iter()
+        .copied()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/'))
+        .collect();
+    LAX.decode(clean).unwrap_or_default()
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
