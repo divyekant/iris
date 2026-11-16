@@ -87,12 +87,20 @@ own check of the retry state.
 
 The runner works thread by thread. It takes the next thread that has a
 pending message and that this run did not visit yet, and runs its pending
-messages. A run calls `store::understand` at most one time for each
-message. When a message of the thread stays not understood (a refused or
+messages. In the main pass, a run calls `store::understand` at most one time for
+each message. When a message of the thread stays not understood (a refused or
 failed call, a change), the later messages of the thread wait (thread
 rule), so the runner leaves the thread for this run. Then it takes the next
 thread. So a thread that waits for the budget does not stop the free steps
-of later threads. It reads the pending rule again just before
+of later threads.
+
+A sender rerun in this run can make a message of a visited thread pending
+again. After the last thread, the runner makes one more pass over the
+threads with such a message. In that pass, a message can get its second
+call of `store::understand` in this run, never a third. Reruns that this
+pass makes stay pending for the next run. So a run always ends, and a run
+with no limit and no model error leaves no message pending that it could
+reach. It reads the pending rule again just before
 each message, so an older message that failed in this run holds the later
 messages of its thread. Only the message IDs of the current thread stay in
 memory.
@@ -116,6 +124,13 @@ approval).
 - The caller of `batch::run` gives no model. The runner reads the row and
   makes the model with `connect(&row)`. The program passes a `connect` that
   builds the `iris-model` client; tests pass a fake.
+- Numbers: a price is a decimal USD amount from 0 to 1,000 for one million
+  tokens, and a budget from 0 to 100,000 USD. The command refuses a
+  negative, an infinite or a larger value, and any value with more than 6
+  decimals. It converts them to micro-USD as `u64` with checked
+  arithmetic. Each cost uses checked multiplication; an overflow refuses
+  the call, like a budget that is too small. So a worst case is never
+  negative and never wraps.
 - `iris model set` takes the run lock too. It writes a new row and sets
   `budget_micro_usd` to NULL. While a run holds the lock, it fails with "a
   run is in progress". So the row cannot change during a run, and a budget
@@ -386,6 +401,8 @@ more calls.
 | The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
 | A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
 | A new `SPAM` message after an older message that waits for the budget | Its hostile mark is missing | The thread rule does not hold `SPAM` mail or mail from a hostile sender. | Batch test. |
+| A sender rerun resets a message of a visited thread | The run ends with mail that it could reach still pending | One more pass, at most two calls of a message in one run. | Batch test. |
+| `--price-in -1`, `--budget 1e309`, or a cost that overflows | The budget grows, or a worst case wraps | Refused before any write; checked arithmetic refuses the call. | Command and unit tests. |
 | A first reply with no usage and an answer that is not valid | The second try pays again before the run stops | The wrapper refuses each call after a call with unknown usage. The message stays pending, no try counts. | Batch test. |
 | The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
