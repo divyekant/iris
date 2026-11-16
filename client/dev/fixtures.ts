@@ -142,6 +142,20 @@ export const policy: Policy = {
   version: 3,
   next_id: 6,
   rules,
+  proposals: [
+    {
+      id: 1,
+      approvals: 14,
+      created_at: 1794787200,
+      rule: rule({ id: 6, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
+    },
+    {
+      id: 2,
+      approvals: 11,
+      created_at: 1794790800,
+      rule: rule({ id: 6, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
+    },
+  ],
   error: null,
   file: {
     state: "changed",
