@@ -278,3 +278,58 @@ fn many_bad_files_are_counted_and_the_list_is_bounded() {
     let again = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
     assert_eq!(again.total, 0, "each file is repaired");
 }
+
+#[test]
+fn a_400_of_the_extra_message_check_is_an_error_not_a_difference() {
+    let (fake, store, account) = synced("v-extra-400", 34, 30);
+    // A mirror row that Gmail does not list.
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message(account_id, thread_id, provider_id, fetched_at)
+                 SELECT account_id, thread_id, 'ffffffffffffffff', 1 FROM message LIMIT 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let at_fake = fake.clone();
+    let gmail = client(hook_proxy(fake.addr(), "format=minimal", move || {
+        at_fake.fail_next(&[400])
+    }));
+    match verify(&store, &gmail, account, TOKEN) {
+        Err(iris_sync::Error::Gmail(iris_gmail::Error::Api { status: 400, .. })) => {}
+        other => panic!("not the 400: {other:?}"),
+    }
+    assert_eq!(sync_state(&store).0, None, "no resync");
+    // Without the failure, Gmail gives 404: a real difference.
+    let r = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    assert_eq!(
+        r.differences[0],
+        Difference::ExtraMessage("ffffffffffffffff".into())
+    );
+    assert!(r.resync);
+}
+
+#[test]
+fn many_thread_differences_are_counted_with_flat_memory() {
+    let n = iris_sync::LISTED + 50;
+    let (fake, store, account) = synced("v-threads", 35, n);
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO thread(account_id, provider_id) SELECT id, 'wrong' FROM account",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE message SET thread_id = (SELECT id FROM thread WHERE provider_id = 'wrong')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let r = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    assert_eq!(r.total, n as u64);
+    assert_eq!(r.differences.len(), iris_sync::LISTED);
+    assert!(r.resync);
+}

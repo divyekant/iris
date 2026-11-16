@@ -146,7 +146,7 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
         tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
         Ok(())
     })?;
-    let other_thread = list_pages(store, gmail, account, token, &[], Mark::Seen)?;
+    let (other_thread, more_threads) = list_pages(store, gmail, account, token, &[], Mark::Seen)?;
     let ids: Vec<String> = before.iter().map(|l| l.id.clone()).collect();
     label_sets(store, gmail, account, token, &ids)?;
     let after = gmail.labels(token)?;
@@ -204,6 +204,13 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
     for id in other_thread.into_iter().filter(|id| !changed.contains(id)) {
         report.push(Difference::Thread(id));
     }
+    // Past the limit, the IDs are not kept, so the messages that changed
+    // during verify cannot be left out. So many thread differences mean a
+    // broken mirror: count them, and the full resync corrects them.
+    if more_threads > 0 {
+        report.total += more_threads;
+        report.resync = true;
+    }
     let keep = |id: &String| !changed.contains(id);
     // Gmail has the message: a mirror row that is not gone, or no row.
     each_page(
@@ -236,7 +243,6 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
             match gmail.minimal(token, &id) {
                 Ok(_) => {}
                 Err(iris_gmail::Error::NotFound) => report.push(Difference::ExtraMessage(id)),
-                Err(e) if per_message(&e) => report.push(Difference::ExtraMessage(id)),
                 Err(e) => return Err(e.into()),
             }
             Ok(())

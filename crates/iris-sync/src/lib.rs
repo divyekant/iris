@@ -885,7 +885,8 @@ enum Mark<'a> {
 /// List each message (with `includeSpamTrash`) that has each label of
 /// `labels`, page by page, one transaction for each page. With
 /// [`Mark::Seen`], gives each listed message that the mirror has (not gone)
-/// in another thread.
+/// in another thread: at most [`verify::LISTED`] IDs, and the count of the
+/// rest.
 fn list_pages(
     store: &Store,
     gmail: &Gmail,
@@ -893,9 +894,10 @@ fn list_pages(
     token: &str,
     labels: &[&str],
     mark: Mark,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, u64)> {
     let mut page_token: Option<String> = None;
     let mut other_thread = Vec::new();
+    let mut more = 0u64;
     loop {
         let page = gmail.messages(token, labels, true, page_token.as_deref())?;
         store.write(|tx| {
@@ -919,7 +921,12 @@ fn list_pages(
                             .query_row(params![account, m.id], |r| r.get(0))
                             .optional()?;
                         if t.is_some_and(|t| t != m.thread_id) {
-                            other_thread.push(m.id.clone());
+                            // Memory stays flat: past the limit, only a count.
+                            if other_thread.len() < verify::LISTED {
+                                other_thread.push(m.id.clone());
+                            } else {
+                                more += 1;
+                            }
                         }
                     }
                     Mark::Known => insert_known(tx, account, &m.id, &m.thread_id)?,
@@ -936,7 +943,7 @@ fn list_pages(
         })?;
         match page.next_page_token {
             Some(t) => page_token = Some(t),
-            None => return Ok(other_thread),
+            None => return Ok((other_thread, more)),
         }
     }
 }
