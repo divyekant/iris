@@ -336,6 +336,31 @@ fn a_promotion_code_is_no_sign_in_code() {
 }
 
 #[test]
+fn an_invoice_only_in_an_attachment_goes_to_the_model() {
+    let raw = "From: Mail Weekly <news@weekly.example>
+List-Id: <weekly.news.example>
+Subject: Your documents
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=\"b\"
+
+--b
+Content-Type: text/plain
+
+See the file.
+--b
+Content-Type: text/plain; name=\"doc.txt\"
+Content-Disposition: attachment; filename=\"doc.txt\"
+
+Invoice 77. Amount 12.50 USD.
+--b--
+";
+    assert!(drafts(raw, Kind::Service, &[]).is_none());
+    // The same message with a neutral file is a feed item.
+    let plain = raw.replace("Invoice 77. Amount 12.50 USD.", "Notes of the week.");
+    assert_eq!(one(&plain, Kind::Service, &[]).item["form"], "feed");
+}
+
+#[test]
 fn an_invoice_with_a_code_goes_to_the_model() {
     let raw = "From: Shop <billing@shop.example>\nSubject: Your invoice\n\nVerification code: 482913\nTotal: 12.50 USD\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());

@@ -167,8 +167,13 @@ fn or_none(s: &str) -> &str {
 }
 
 fn looks_like_record(a: &Analysis) -> bool {
-    // The whole clean text: it is bounded, and a receipt can come late.
-    let hay = format!("{}\n{}", a.text.subject, a.text.text);
+    // The whole clean text and the attachment text: both are bounded, and a
+    // receipt can come late or only in an attached PDF.
+    let mut hay = format!("{}\n{}", a.text.subject, a.text.text);
+    for (_, t) in &a.text.attachment_text {
+        hay.push('\n');
+        hay.push_str(t);
+    }
     let low = hay.to_lowercase();
     RECORD_WORDS.iter().any(|w| low.contains(w)) || !words(&hay, &ACTION_WORDS).is_empty()
 }
@@ -194,8 +199,9 @@ fn is_login(a: &Analysis) -> bool {
 /// result is `Some(None)`, and the model reads the message.
 ///
 /// If a line has a code word and no number, the next line continues it: a
-/// number there binds to the code word by the same rules, with the words of
-/// both lines in the gap.
+/// number there binds to the code word with the words of both lines in the
+/// gap. Across the line break only a strong code counts, like a line of only
+/// the code. A weak one is not clear.
 ///
 /// Gives the code and the line that has the code (at most 500 characters),
 /// `Some(None)` if the code is not clear, or `None` if there is no code.
@@ -217,14 +223,14 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<Option<(String, &'a 
         }
         let nums = numbers(l);
         let pick = if !nums.is_empty() {
-            the_code(l, &cues, &nums, 0)
+            the_code(l, &cues, &nums, None)
                 .map(|o| o.map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s))))
         } else if let Some(&next) = lines.get(i + 1) {
             // The cue line and the next line as one text, with the cues at
             // their own offsets and the numbers after the line break.
             let both = format!("{l}\n{next}");
             let shift = l.len() + 1;
-            the_code(&both, &cues, &numbers(next), shift).map(|o| {
+            the_code(&both, &cues, &numbers(next), Some(shift)).map(|o| {
                 o.map(|(s, e)| {
                     let (s, e) = (s - shift, e - shift);
                     (next[s..e].to_string(), excerpt(next, s, e - s))
@@ -248,12 +254,18 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<Option<(String, &'a 
 /// - `None`: no number binds;
 /// - `Some(None)`: numbers bind, but not one clear code;
 /// - `Some(Some(range))`: one clear code.
+///
+/// With `next`, the numbers are on the line after the cues, at `next` in
+/// `text`. Across a line break only a strong number is clear: a weak one
+/// gives `Some(None)`.
+#[allow(clippy::option_option)]
 fn the_code(
     text: &str,
     cues: &[(usize, usize)],
     nums: &[(usize, usize)],
-    shift: usize,
+    next: Option<usize>,
 ) -> Option<Option<(usize, usize)>> {
+    let shift = next.unwrap_or(0);
     // Only the cues near a number can bind to it: `cues` is in order.
     let level = |(s, e): (usize, usize)| {
         let year = e - s == 4 && matches!(&text[s..s + 2], "19" | "20");
@@ -278,7 +290,7 @@ fn the_code(
     match bound.as_slice() {
         [] => None,
         [(n, Bind::Strong)] => Some(Some(*n)),
-        [(n, _)] if all.len() == 1 => Some(Some(*n)),
+        [(n, _)] if all.len() == 1 && next.is_none() => Some(Some(*n)),
         _ => Some(None),
     }
 }
@@ -433,9 +445,17 @@ mod tests {
             None
         );
         assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
+        // Across a line break, only a strong code is clear.
         assert_eq!(
-            code("Your verification code", "Use 482913 to sign in"),
-            Some("482913".into())
+            find_code("Your verification code", "Use 482913 to sign in"),
+            Some(None)
+        );
+        assert_eq!(
+            find_code(
+                "Sign in",
+                "Your verification code:\nExpires in 3600 seconds\nUse 482913 to sign in"
+            ),
+            Some(None)
         );
         assert_eq!(code("Your code", "Expires in 2026"), None);
         assert_eq!(code("Your code is", "2026"), Some("2026".into()));
