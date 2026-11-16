@@ -605,8 +605,12 @@ sender that matches no rule is a `stranger`.
 A sender row can have no kind yet. A step that needs the `p-` ID of an
 address (conversations, people) adds the row with the address and the name
 only, and never writes a kind. The sender step (section 7.1, step 3) sets the
-kind, `basis` and `decided_by`. A reader that needs the kind of a row with no
-kind applies the rules of this section itself.
+kind, `basis` and `decided_by`. A row with no kind is not decided, and no
+step treats it as `person` for a treatment of this section. The people
+profiles are an exception for display only: a profile shows an address
+with no kind that matches the `person` rule, and the near-copy check of
+`hostile` waits for the sender step. When the sender step sets a kind other
+than `person`, the profile drops the address.
 
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
 A decision by a person always wins over the engine, and the engine never
