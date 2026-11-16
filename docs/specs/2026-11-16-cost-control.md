@@ -1,7 +1,8 @@
 # Spec: cost control for understanding
 
 - Date: 2026-11-16
-- Card: R1-30 (this spec). The build: R1-31 (batch runner), R1-15 (commands).
+- Card: R1-30 (this spec). The build: R1-31 (budget wrapper), R1-32 (batch
+  runner), R1-15 (commands).
 - Status: Draft
 
 ## Problem
@@ -511,8 +512,10 @@ scripts/local-ci/run.sh
 ## Rollout
 
 1. R1-30: this spec.
-2. R1-31: `schema_3.sql`, the usage status, the `batch` module.
-3. R1-15: `iris model` and `iris understand`.
+2. R1-31: `schema_3.sql`, the usage status, the `budget` module and
+   `rerun_senders`.
+3. R1-32: the `batch` module (runner, order, run lock, estimate).
+4. R1-15: `iris model` and `iris understand`.
 
 ## Risks
 
@@ -526,8 +529,9 @@ scripts/local-ci/run.sh
 One PR for each card:
 
 1. R1-30: this spec.
-2. R1-31 (depends on R1-30): batch runner, counts, estimate.
-3. R1-15 (depends on R1-31): commands.
+2. R1-31 (depends on R1-30): budget wrapper, counts, sender reruns.
+3. R1-32 (depends on R1-31): batch runner, run lock, estimate.
+4. R1-15 (depends on R1-32): commands.
 
 ## Test plan
 
