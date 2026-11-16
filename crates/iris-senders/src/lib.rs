@@ -136,6 +136,11 @@ pub fn decide(
         // The `hostile` rule comes before the `person` rule. A recipient that
         // becomes a person is a known sender for the next recipients of the
         // same message.
+        // Old recipients first: a domain that loses its only known sender is
+        // not known for the new recipients.
+        for a in old.iter().filter(|a| !recipients.contains(a)) {
+            recheck(conn, a, now_ms, &mut rerun)?;
+        }
         let mut known = known_domains(conn, "")?;
         for to in &recipients {
             conn.prepare_cached(
@@ -168,9 +173,7 @@ pub fn decide(
                 }
             };
         }
-        for a in old.iter().filter(|a| !recipients.contains(a)) {
-            recheck(conn, a, now_ms, &mut rerun)?;
-        }
+
         return Ok(Decision {
             rerun,
             ..own("sent")
