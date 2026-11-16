@@ -78,6 +78,10 @@
   let feedComplete = $derived(brief.feed.items.length >= brief.feed.count);
   let bundles = $derived(brief.bundles ?? []);
   let hidden = $derived(brief.hidden ?? 0);
+  // An API from before R2-09 gives only the hidden count.
+  let handled = $derived(brief.handled ?? { count: hidden, verbs: {} });
+  // The messages of the actions that a rule approved. An approved action can still wait to apply, so the brief says decided, not changed.
+  let decided = $derived(Object.values(handled.verbs).reduce((a, b) => a + b, 0));
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
   let progress = $derived(status && unfinished(status).length ? status.messages : null);
   let stopped = $derived(copying(status).length === 0);
@@ -113,6 +117,9 @@
 {#if brief.review?.actions}
   <section aria-labelledby="review">
     <h2 id="review"><span>Waits for your review</span> <span class="count">{brief.review.actions}</span></h2>
+    {#if proposal}
+      <p class="note">Triage proposes to {Object.entries(proposal.verbs).map(([verb, n]) => `${verb} ${n.toLocaleString("en-US")} ${n === 1 ? "message" : "messages"}`).join(", ")}.</p>
+    {/if}
     <a class="all" href="#/review">Open the review</a>
   </section>
 {/if}
@@ -141,13 +148,11 @@
   </section>
 {/if}
 
-{#if proposal}
-  <section class="proposal" aria-labelledby="proposal">
-    <h2 id="proposal"><span>Triage proposal</span> <span class="count">{proposal.count}</span></h2>
-    <p>
-      Iris would make {proposal.count.toLocaleString("en-US")} changes to your mailbox:
-      {Object.entries(proposal.verbs).map(([verb, n]) => `${verb} ${n.toLocaleString("en-US")}`).join(", ")}. Nothing is applied.
-    </p>
+{#if handled.count > 0}
+  <section aria-labelledby="handled">
+    <h2 id="handled"><span>Handled without you</span> <span class="count">{handled.count}</span></h2>
+    <p class="note">{[hidden ? `${hidden.toLocaleString("en-US")} hidden from this brief` : "", decided ? `${decided.toLocaleString("en-US")} ${decided === 1 ? "message" : "messages"} that your rules decided` : ""].filter(Boolean).join(", ")}.</p>
+    <a class="all" href="#/handled">See what and why</a>
   </section>
 {/if}
 
@@ -179,10 +184,7 @@
   {#if brief.not_understood > 0}
     <p>Iris could not read {brief.not_understood} messages. They stay in your mailbox as they are.</p>
   {/if}
-  {#if hidden > 0}
-    <p>Your rules hide {hidden.toLocaleString("en-US")} {hidden === 1 ? "item" : "items"} from this brief. <a href="#/rules">See the rules</a></p>
-  {/if}
-  <p>Iris only observes. It changed nothing in your mailbox.</p>
+  {#if (status?.mode ?? "observe") === "observe" && decided === 0}<p>Iris only observes. It changed nothing in your mailbox.</p>{/if}
 </footer>
 
 <style>
@@ -259,8 +261,8 @@
   .all:hover {
     color: var(--color-text);
   }
-  .proposal p {
-    margin: 0;
+  .note {
+    margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
   }
   .label {
@@ -301,12 +303,6 @@
   }
   footer p {
     margin: 0 0 var(--space-2);
-  }
-  footer a {
-    color: var(--color-text-muted);
-  }
-  footer a:hover {
-    color: var(--color-text);
   }
   .warning {
     color: var(--color-text);

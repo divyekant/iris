@@ -1035,6 +1035,19 @@ actions, and the count for each verb. The local API gives the full list
 separately. Release 1 does not store it. From release 2, triage stores it as
 a changeset, in the mode of the active policy (see below).
 
+From release 2, the brief reads the stored triage changesets, and computes no
+proposal. Its proposal totals count the messages of the triage actions that
+wait for a person (`proposed` or `in_review`). The review lists these
+changesets. The brief also gives the count of what Iris handled without the
+person: the hidden items and the messages of the actions that a rule decided
+without the person and that have one of the states `approved`, `held`,
+`applied`, `failed`, `undone` or `denied`. A `failed` action stays, because it
+can have changed some messages. An action in `in_review` waits for the person,
+so the review lists it. An approved action that expires or whose changeset the
+author withdraws gets a new decision (`expiry` or `author`) and changed
+nothing, so it leaves the count and the list. One step shows the list of each, with the reason of each item and
+action.
+
 The triage proposal of release 1 (crate `iris-observe`) has these rules:
 
 - Each rule gives one `archive` action on the messages with the label `INBOX`
@@ -1079,7 +1092,7 @@ forms, labels and senders in the store.
 |---|---|---|
 | A crash, an error or a refusal in a run | A draft revision that blocks each approval (spec 2, section 5.5), or half a proposal | The transaction rolls back. No changeset, revision or action of the run stays. |
 | Two runs for one account at the same time, in one process or in two | Two open triage changesets for one account | Each run reads and writes in one transaction. In one process, the write lock of the store puts the runs in order. Across processes, SQLite refuses the write of the run whose snapshot is old, and that run gives an error. |
-| A proposal with no action, while a triage changeset is open | A revision with no action | The run writes nothing. The open actions stay until withdraw and expiry are built (R2-01 part 3). |
+| A proposal with no action, while a triage changeset is open | A revision with no action, or open actions that triage no longer proposes | The run withdraws the changeset: its proposed and in_review actions become cancelled. If the changeset has an approved or held action, the run writes nothing, because a withdraw cancels that action too (issue #220). The open actions then wait for a person or the expiry. |
 | A proposal with no action, and no open changeset | An empty changeset | The run writes nothing. |
 | A large inbox | Memory that grows with the mailbox | The run keeps the IDs of one action (500 at most) in memory. |
 | A message that leaves the inbox between the run and an apply | The apply changes a message that triage did not propose | Submit resolves the targets in the run. The apply (R2-02) checks each message again. |

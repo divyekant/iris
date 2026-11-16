@@ -7,7 +7,8 @@
   import { due, initials, money, origin, other, party, timeLeft, when } from "../format";
   import { href } from "../route";
 
-  let { item, now = new Date(), twins = [] }: { item: Item; now?: Date; twins?: string[] } = $props();
+  // `note`: one more muted line, for example the reason of a rule that hides the item.
+  let { item, now = new Date(), twins = [], note = "" }: { item: Item; now?: Date; twins?: string[]; note?: string } = $props();
 
   let who = $derived(other(item));
   let date = $derived(item.form === "commitment" ? due(item, now) : null);
@@ -37,6 +38,7 @@
     <p class="detail">
       {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
+    {#if note}<p class="note">{note}</p>{/if}
     {#if twins.length}
       <p class="twins">
         Maybe the same as {#each twins as id, i (id)}{i ? ", " : ""}<a href={href.item(id)}>{id}</a>{/each}
@@ -112,6 +114,7 @@
     line-clamp: 2;
     overflow: hidden;
   }
+  .note,
   .twins {
     margin: var(--space-1) 0 0;
     color: var(--color-text-muted);
