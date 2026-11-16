@@ -829,6 +829,7 @@ name = "iris-talk"
 version = "0.0.0"
 dependencies = [
  "iris-clean",
+ "iris-people",
  "iris-store",
  "iris-synth",
  "jsonschema",
