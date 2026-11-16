@@ -709,6 +709,7 @@ dependencies = [
  "iris-synth",
  "iris-triage",
  "iris-understand",
+ "iris-voice",
  "iris-web",
  "rusqlite",
  "serde",
@@ -967,6 +968,17 @@ dependencies = [
  "iris-synth",
  "iris-talk",
  "jsonschema",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "iris-voice"
+version = "0.0.0"
+dependencies = [
+ "iris-model",
+ "iris-store",
+ "iris-understand",
  "rusqlite",
  "serde_json",
 ]
