@@ -22,9 +22,14 @@ function serve(answer) {
 }
 
 const row = (id) => ({ id, address: "a@b.example", name: null, kind: "person", decided_by: "person", declined: false });
+// The sender row that the engine gives for the answer of `path` (senders/<id>/<answer>).
+const rowFor = (path) => {
+  const [, id, verb] = path.split("/");
+  return verb === "accept" ? row(id) : { ...row(id), kind: "stranger", decided_by: "engine", declined: verb === "decline" };
+};
 
 test("Accept answers the sender, and Undo asks again", async () => {
-  const asked = serve((path) => [200, row(path.split("/")[1])]);
+  const asked = serve((path) => [200, rowFor(path)]);
   let answers = 0;
   const view = await mount("/src/views/Gate.svelte", { page: fx.gate, declined: 1, onanswer: () => answers++ });
   try {
@@ -60,7 +65,7 @@ test("a refusal of the engine shows its words, and the sender keeps its buttons"
 });
 
 test("on the list of ignored senders, Ask again reopens, and Undo ignores again", async () => {
-  const asked = serve((path) => [200, row(path.split("/")[1])]);
+  const asked = serve((path) => [200, rowFor(path)]);
   const view = await mount("/src/views/Gate.svelte", { page: fx.ignored, declinedList: true, title: "Senders that you ignored" });
   try {
     assert.equal(button(view, "Ignore"), undefined);
@@ -137,8 +142,9 @@ test("a sender takes one answer at a time, also while another sender waits", asy
   const held = [];
   const asked = [];
   globalThis.fetch = (url) => {
-    asked.push(String(url).replace(/^\/api\//, ""));
-    return new Promise((done) => held.push(() => done(new Response(JSON.stringify(row("x")), { status: 200 }))));
+    const path = String(url).replace(/^\/api\//, "");
+    asked.push(path);
+    return new Promise((done) => held.push(() => done(new Response(JSON.stringify(rowFor(path)), { status: 200 }))));
   };
   const view = await mount("/src/views/Gate.svelte", { page: fx.gate });
   try {
@@ -179,4 +185,70 @@ test("the dev fixtures apply each answer to the gate and the brief", () => {
   assert.deepEqual(ids(fx.answer("gate")), ["p-71", "p-72", "p-73"]);
   assert.ok(!owe().includes("c-401"));
   assert.equal(fx.answer("brief").declined, 1);
+});
+
+test("on the ignored list, Undo of an accept ignores the sender again", async () => {
+  const states = { accept: ["person", "person", false], reopen: ["stranger", "engine", false], decline: ["stranger", "engine", true] };
+  const asked = serve((path) => {
+    const [kind, by, declined] = states[path.split("/")[2]];
+    return [200, { ...row("p-74"), kind, decided_by: by, declined }];
+  });
+  const view = await mount("/src/views/Gate.svelte", { page: fx.ignored, declinedList: true });
+  try {
+    button(view, "Accept").click();
+    await until(() => text(view.target).includes("You know Dana Brooks now."));
+    button(view, "Undo").click();
+    await until(() => button(view, "Ask again"));
+    assert.deepEqual(asked.map(([, p]) => p), ["senders/p-74/accept", "senders/p-74/reopen", "senders/p-74/decline"]);
+    assert.ok(button(view, "Accept"));
+  } finally {
+    view.destroy();
+  }
+});
+
+test("the brief links all senders while a waiting sender is not on the page, also with answered rows", async () => {
+  const many = (from, n) => Array.from({ length: n }, (_, k) => ({ ...fx.gate.senders[1], id: `p-${from + k}`, name: `Sender ${from + k}` }));
+  const first = { ...fx.brief, gate: { count: 20, senders: many(100, 20), next: null } };
+  // After the accept of p-100: two new senders, 21 wait, and the brief gives the first 20.
+  const after = { ...fx.brief, gate: { count: 21, senders: many(101, 20), next: "k" } };
+  serve((path) => (path === "brief" ? [200, after] : [200, row("p-100")]));
+  const view = await mount("/src/views/Brief.svelte", { brief: first, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  try {
+    assert.doesNotMatch(text(view.target), /All 20/);
+    buttons(view, "Accept")[0].click();
+    await until(() => text(view.target).includes("All 21"));
+    assert.match(text(view.target), /You know Sender 100 now\./);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("the brief shows the newest load when two loads answer out of order", async () => {
+  const held = [];
+  const gets = [];
+  const afterA = { ...fx.brief, gate: { count: 2, senders: fx.gate.senders.slice(1), next: null } };
+  const afterAB = { ...fx.brief, gate: { count: 1, senders: fx.gate.senders.slice(2), next: null } };
+  globalThis.fetch = (url) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (path !== "brief") return Promise.resolve(new Response(JSON.stringify(rowFor(path)), { status: 200 }));
+    gets.push(path);
+    const body = gets.length === 1 ? afterA : afterAB;
+    return new Promise((done) => held.push(() => done(new Response(JSON.stringify(body), { status: 200 }))));
+  };
+  const view = await mount("/src/views/Brief.svelte", { brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const heading = () => text(view.target.querySelector("#strangers"));
+  try {
+    buttons(view, "Accept")[0].click();
+    await until(() => gets.length === 1);
+    buttons(view, "Ignore")[1].click();
+    await until(() => gets.length === 2);
+    held[1]();
+    await until(() => heading().includes("1"));
+    held[0]();
+    await new Promise((r) => setTimeout(r, 50));
+    view.flushSync();
+    assert.match(heading(), /From senders you do not know 1/);
+  } finally {
+    view.destroy();
+  }
 });

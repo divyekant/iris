@@ -28,14 +28,22 @@
   let now = $state(start);
   const ready = (s: Status | null) => copying(s).length === 0;
 
+  // Two loads of the brief can answer out of order (a poll, an answer at the gate):
+  // show a brief only if no later load started.
+  let asked = 0;
+  const newest = (n: number, b: Brief) => void (n === asked && (brief = b));
+
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
   let syncing = $derived(!ready(status));
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([loadBrief(), get<Status>("status")]),
-      ([b, s]) => ((brief = b), (status = s)),
+      () => {
+        const n = ++asked;
+        return Promise.all([loadBrief(), get<Status>("status"), n] as const);
+      },
+      ([b, s, n]) => (newest(n, b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });
@@ -44,7 +52,11 @@
   // After an answer at the gate, the items of the sender move: load the brief again.
   // The gate stays after the last answer, so that its Undo stays too.
   let answered = $state(false);
-  const reload = () => ((answered = true), void loadBrief().then((b) => (brief = b)).catch(() => {}));
+  const reload = () => {
+    answered = true;
+    const n = ++asked;
+    loadBrief().then((b) => newest(n, b), () => {});
+  };
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);

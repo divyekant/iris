@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { untrack } from "svelte";
-  import { answerSender, get, own, type GatePage, type GateSender } from "../api";
+  import { answerSender, get, own, type GateAnswer, type GatePage, type GateSender } from "../api";
   import { initials } from "../format";
   import { href } from "../route";
 
@@ -31,9 +31,19 @@
   } = $props();
 
   type Verb = "accept" | "decline" | "reopen";
-  // The answer of each sender in this view. The row stays, with an Undo, also when the
-  // brief loads again and the sender is not in the page any more.
-  let done = $state<Record<string, Verb>>({});
+  // The state of a sender after an answer, from the row that the engine gives back.
+  // `other`: the sender is not a stranger now (for example, hostile), so no Undo.
+  type State = "waiting" | "declined" | "accepted" | "other";
+  const stateOf = (r: GateAnswer): State =>
+    r.declined ? "declined" : r.kind === "person" && r.decided_by === "person" ? "accepted" : r.kind === "stranger" ? "waiting" : "other";
+  // The state of each row before an answer: the list that the row is on.
+  // svelte-ignore state_referenced_locally
+  const base: State = declinedList ? "declined" : "waiting";
+  // The state of each sender that got an answer in this view. A row whose state is not
+  // the base state shows the answer with an Undo, also when the brief loads again and
+  // the sender is not in the page any more.
+  let done = $state<Record<string, State>>({});
+  const answered = (s: GateSender) => !!done[s.id] && done[s.id] !== base;
   // The senders whose answer waits for the engine. A sender takes one answer at a time.
   let busy = $state<Record<string, boolean>>({});
   let problem = $state<Record<string, string>>({});
@@ -48,32 +58,32 @@
   $effect(() => {
     const fresh = new Map(page.senders.map((s) => [s.id, s]));
     untrack(() => {
-      const kept = rows.filter((s) => fresh.has(s.id) || done[s.id]).map((s) => fresh.get(s.id) ?? s);
+      const kept = rows.filter((s) => fresh.has(s.id) || answered(s)).map((s) => fresh.get(s.id) ?? s);
       rows = [...kept, ...page.senders.filter((s) => !kept.some((k) => k.id === s.id))];
     });
   });
 
   const nameOf = (s: GateSender) => s.name ?? s.address;
   const items = (n: number) => `${n} ${n === 1 ? "item" : "items"}`;
-  // The answer that takes an answer back.
-  const UNDO: Record<Verb, Verb> = { accept: "reopen", decline: "reopen", reopen: "decline" };
+  // The answers that take a row back to the base state. Reopen ends an accept or a decline.
+  // On the ignored list, a decline follows, because the engine declines only a stranger.
+  const undo = (now: State): Verb[] => (base === "waiting" ? ["reopen"] : now === "accepted" ? ["reopen", "decline"] : ["decline"]);
 
-  async function answer(sender: GateSender, verb: Verb, undo = false) {
+  async function answer(sender: GateSender, ...verbs: Verb[]) {
     if (busy[sender.id]) return;
     busy = { ...busy, [sender.id]: true };
     problem = { ...problem, [sender.id]: "" };
     try {
-      await answerSender(sender.id, verb);
-      if (undo) {
-        const { [sender.id]: _, ...rest } = done;
-        done = rest;
-      } else done = { ...done, [sender.id]: verb };
-      onanswer();
+      for (const verb of verbs) {
+        const row = await answerSender(sender.id, verb);
+        done = { ...done, [sender.id]: stateOf(row) };
+      }
     } catch (e) {
       problem = { ...problem, [sender.id]: own(e) || "Iris could not save the answer. Try again." };
     } finally {
       const { [sender.id]: _, ...rest } = busy;
       busy = rest;
+      onanswer();
     }
   }
 
@@ -111,16 +121,18 @@
 {/snippet}
 
 {#snippet result(sender: GateSender)}
-  {@const verb = done[sender.id]}
+  {@const now = done[sender.id]}
   <p class="result" role="status">
-    {#if verb === "accept"}
+    {#if now === "accepted"}
       You know {nameOf(sender)} now.
-    {:else if verb === "decline"}
+    {:else if now === "declined"}
       You ignored {nameOf(sender)}.
-    {:else}
+    {:else if now === "waiting"}
       Iris asks you about {nameOf(sender)} again.
+    {:else}
+      {nameOf(sender)} is not a sender that you do not know now.
     {/if}
-    <button class="undo" disabled={busy[sender.id]} onclick={() => answer(sender, UNDO[verb], true)}>Undo</button>
+    {#if now !== "other"}<button class="undo" disabled={busy[sender.id]} onclick={() => answer(sender, ...undo(now))}>Undo</button>{/if}
   </p>
   {#if problem[sender.id]}<p class="problem">{problem[sender.id]}</p>{/if}
 {/snippet}
@@ -132,7 +144,7 @@
   <ul class="senders">
     {#each rows as sender (sender.id)}
       <li class="sender">
-        {#if done[sender.id]}
+        {#if answered(sender)}
           {@render result(sender)}
         {:else}
           <span class="mark" aria-hidden="true">{initials({ kind: "sender", sender: sender.id, name: sender.name ?? undefined, address: sender.address })}</span>
@@ -154,7 +166,7 @@
 {/if}
 {#if !declinedList}
   <p class="foot">
-    {#if !more && page.count > rows.length}<a href="#/brief/gate">All {page.count}</a>{/if}
+    {#if !more && page.count > page.senders.length}<a href="#/brief/gate">All {page.count}</a>{/if}
     {#if declined > 0}<a href="#/brief/declined">Ignored {declined}</a>{/if}
     <a href="#/rules">Let a rule answer</a>
   </p>
