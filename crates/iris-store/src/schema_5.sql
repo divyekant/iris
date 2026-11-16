@@ -25,19 +25,22 @@ CREATE TABLE changeset (
   state TEXT NOT NULL DEFAULT 'draft'
     CHECK (state IN ('draft', 'open', 'closed', 'withdrawn')),
   -- The revision that the trigger changeset_submit replaces in, while it
-  -- runs. NULL at all other times. Only that trigger writes it.
+  -- runs. NULL at all other times. The trigger changeset_replacing allows
+  -- it only once for each revision, in its submit.
   replacing INTEGER,
   -- coalesce: a CHECK that gives NULL passes.
   CHECK (submitted_at IS NULL OR length(trim(coalesce(why, ''))) > 0)
 );
 
 -- Each submitted revision, with its reason and its submit time. The trigger
--- changeset_submit writes a row. Rows do not change.
+-- changeset_submit writes a row. Rows do not change, except `replaced`:
+-- 0 while the submit replaces the older actions, then 1.
 CREATE TABLE changeset_revision (
   changeset_id INTEGER NOT NULL REFERENCES changeset(id),
   revision INTEGER NOT NULL,
   why TEXT NOT NULL,
   submitted_at INTEGER NOT NULL,
+  replaced INTEGER NOT NULL DEFAULT 0 CHECK (replaced IN (0, 1)),
   PRIMARY KEY (changeset_id, revision)
 ) WITHOUT ROWID;
 
@@ -160,9 +163,11 @@ END;
 -- empty from is a draft action: submit gives 'proposed', or 'denied' for an
 -- action that is not valid; a withdraw gives 'cancelled'. The list is in
 -- the trigger, not in a table, so no write to the store can add a move.
--- Release 3 adds approved to held and the moves of held, for a send.
--- Section 5.2 also allows failed to undone, but only when the ledger lists
--- a changed message. The ledger (R2-03) adds that move with its check.
+-- Release 3 adds approved to held and the moves of held, for a send. The
+-- moves approved to applied, approved to failed, applied to undone and
+-- failed to undone need a ledger entry (section 7.1). The ledger migration
+-- (R2-03) adds them with that check, and keeps the decision that approved
+-- the action on applied and failed.
 --
 -- Only the submit of its revision gives a draft action a state other than
 -- 'cancelled' (trigger changeset_submit).
@@ -173,9 +178,7 @@ WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
     'proposed>cancelled', 'proposed>replaced',
     'in_review>approved', 'in_review>denied', 'in_review>expired', 'in_review>cancelled',
     'in_review>replaced',
-    'approved>applied', 'approved>failed', 'approved>in_review', 'approved>denied',
-    'approved>expired', 'approved>cancelled',
-    'applied>undone')
+    'approved>in_review', 'approved>denied', 'approved>expired', 'approved>cancelled')
   -- An action in review waits for a person (section 5.2).
   OR (old.state = 'in_review' AND new.state IN ('approved', 'denied')
       AND new.decided_by IS NOT 'person')
@@ -206,12 +209,6 @@ WHEN coalesce(old.state, '') || '>' || coalesce(new.state, '') NOT IN (
   OR (new.state = 'expired'
       AND (new.decided_at IS NULL OR new.decided_at - old.submitted_at < 1209600000
            OR new.decided_at > unixepoch('subsec') * 1000))
-  -- Applied and failed keep the decision that approved the action: the
-  -- ledger names it (section 7.1).
-  OR (new.state IN ('applied', 'failed')
-      AND (new.decided_by IS NOT old.decided_by OR new.rule IS NOT old.rule
-           OR new.policy IS NOT old.policy OR new.reason IS NOT old.reason
-           OR new.decided_at IS NOT old.decided_at))
   -- A rule decision names a rule ID of the active policy (section 6.3).
   OR (new.decided_by IS 'rule' AND new.state IN ('in_review', 'approved', 'denied')
       AND (new.policy IS NOT (SELECT max(version) FROM policy_version)
@@ -287,6 +284,8 @@ BEGIN
     AND changeset_id = new.id AND revision < new.revision
     AND state IN ('proposed', 'in_review');
   UPDATE changeset SET replacing = NULL WHERE id = new.id AND replacing IS NOT NULL;
+  UPDATE changeset_revision SET replaced = 1
+  WHERE changeset_id = new.id AND revision = new.revision AND replaced = 0;
   UPDATE changeset SET state =
     CASE WHEN new.submitted_at IS NULL THEN 'draft'
          WHEN EXISTS (SELECT 1 FROM changeset_action WHERE changeset_id = new.id
@@ -296,8 +295,19 @@ BEGIN
   WHERE id = new.id;
 END;
 
+-- The marker of the replace is set once for each revision: in its submit,
+-- before the revision row has replaced = 1.
+CREATE TRIGGER changeset_replacing BEFORE UPDATE OF replacing ON changeset
+WHEN new.replacing IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM changeset_revision WHERE changeset_id = new.id
+                  AND revision = new.replacing AND new.replacing = new.revision
+                  AND replaced = 0)
+BEGIN
+  SELECT RAISE(ABORT, 'iris: only the submit of a revision replaces actions');
+END;
+
 CREATE TRIGGER changeset_revision_insert BEFORE INSERT ON changeset_revision
-WHEN NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
+WHEN new.replaced <> 0 OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
                  AND revision = new.revision AND why IS new.why
                  AND submitted_at IS new.submitted_at)
 BEGIN
@@ -305,6 +315,9 @@ BEGIN
 END;
 
 CREATE TRIGGER changeset_revision_update BEFORE UPDATE ON changeset_revision
+WHEN new.changeset_id IS NOT old.changeset_id OR new.revision IS NOT old.revision
+  OR new.why IS NOT old.why OR new.submitted_at IS NOT old.submitted_at
+  OR NOT (old.replaced = 0 AND new.replaced = 1)
 BEGIN
   SELECT RAISE(ABORT, 'iris: a submitted revision does not change');
 END;

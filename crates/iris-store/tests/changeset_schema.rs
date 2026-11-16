@@ -55,15 +55,9 @@ fn allowed(from: Option<&str>) -> &'static [&'static str] {
         Some("in_review") => &["approved", "denied", "expired", "cancelled", "replaced"],
         // approved to held comes with release 3, failed to undone with the
         // ledger (R2-03).
-        Some("approved") => &[
-            "applied",
-            "failed",
-            "in_review",
-            "denied",
-            "expired",
-            "cancelled",
-        ],
-        Some("applied") => &["undone"],
+        // The ledger migration (R2-03) adds the moves to applied, failed and
+        // undone, with their ledger entry.
+        Some("approved") => &["in_review", "denied", "expired", "cancelled"],
         Some(_) => &[],
     }
 }
@@ -568,6 +562,13 @@ fn a_new_revision_replaces_and_is_a_draft() {
         )?)
     })
     .unwrap();
+    // The marker of the replace is set only in a submit.
+    for r in [2, 3] {
+        fails(
+            &s,
+            &format!("UPDATE changeset SET replacing = {r} WHERE id = 2"),
+        );
+    }
     for at in [20, 21, 22] {
         fails(
             &s,
@@ -617,6 +618,7 @@ fn a_new_revision_replaces_and_is_a_draft() {
     );
     for sql in [
         "UPDATE changeset_revision SET why = 'x'",
+        "UPDATE changeset_revision SET replaced = 0",
         "DELETE FROM changeset_revision",
         "INSERT INTO changeset_revision VALUES (2, 4, 'x', 40)",
         "INSERT INTO changeset_revision VALUES (1, 3, 'w', 0)",
@@ -806,10 +808,11 @@ fn a_submitted_action_does_not_change() {
     );
 }
 
-/// Applied and failed keep the decision that approved the action.
+/// No apply, failure or undo before the ledger (R2-03), and no flag on a
+/// closed action.
 #[test]
-fn the_apply_keeps_who_approved() {
-    let dir = TempDir::new("approver");
+fn no_apply_before_the_ledger() {
+    let dir = TempDir::new("noapply");
     let s = store(&dir);
     s.write(|tx| {
         submit(tx, draft(tx)?)?;
@@ -820,47 +823,14 @@ fn the_apply_keeps_who_approved() {
         )?)
     })
     .unwrap();
-    for to in ["applied", "failed"] {
-        for change in [
-            "flags = '[\"bulk\"]'",
-            "decided_by = 'engine', rule = NULL, policy = NULL",
-            "decided_by = 'person', rule = NULL, policy = NULL",
-            "rule = 2",
-            "reason = 'x'",
-            "decided_at = 6",
-        ] {
-            fails(
-                &s,
-                &format!("UPDATE changeset_action SET state = '{to}', {change}"),
-            );
-        }
-        works(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
+    for to in ["applied", "failed", "undone"] {
+        fails(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
     }
-    // After the apply, no flag is added.
     fails(
         &s,
-        "UPDATE changeset_action SET state = 'applied';
-         UPDATE changeset_action SET flags = '[\"bulk\"]';",
+        "UPDATE changeset_action SET state = 'denied', decided_by = 'person', reason = 'No.',
+           flags = '[\"bulk\"]'",
     );
-    // A newer policy does not change the approval of rule 3 in version 1.
-    s.write(|tx| {
-        Ok(tx.execute_batch(
-            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('b', 'h2', 0);
-             UPDATE policy_rule_id SET removed_at = 0 WHERE id = 3;
-             UPDATE changeset_action SET state = 'applied';",
-        )?)
-    })
-    .unwrap();
-    let by: (String, i64, i64) = s
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT decided_by, rule, policy FROM changeset_action",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?)
-        })
-        .unwrap();
-    assert_eq!(by, ("rule".into(), 3, 1));
 }
 
 /// The changeset is open while an action is open, then closed.
@@ -884,7 +854,12 @@ fn the_changeset_closes_with_its_last_open_action() {
     })
     .unwrap();
     assert_eq!(state(&s), "open");
-    s.write(|tx| Ok(tx.execute("UPDATE changeset_action SET state = 'applied'", [])?))
-        .unwrap();
+    s.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'denied', decided_by = 'person', reason = 'No.'",
+            [],
+        )?)
+    })
+    .unwrap();
     assert_eq!(state(&s), "closed");
 }
