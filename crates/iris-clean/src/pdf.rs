@@ -561,9 +561,12 @@ impl Doc {
     /// Keep the body of object `num`. A later object of the same number
     /// replaces it, as in an incremental update.
     fn keep(&mut self, num: u32, body: &[u8]) {
+        // The replaced body gives its cost back.
+        if let Some(old) = self.objs.remove(&num) {
+            self.obj_bytes -= old.len() + 64;
+        }
         let cost = body.len() + 64;
         if body.len() > OBJ_LIMIT || self.obj_bytes + cost > OBJ_BUDGET {
-            self.objs.remove(&num);
             return;
         }
         self.obj_bytes += cost;
@@ -683,6 +686,7 @@ impl Doc {
         let mut out = String::new();
         let mut dec = &Dec::Latin;
         let mut codes = Vec::new();
+        let mut clipped = false;
         let b = &self.buf;
         let mut i = 0;
         while i < b.len() && out.len() < limit {
@@ -700,7 +704,7 @@ impl Doc {
                     }
                 }
                 END => {
-                    decode(dec, &codes, &mut out, limit);
+                    clipped |= decode(dec, &codes, &mut out, limit);
                     codes.clear();
                 }
                 FONT => {
@@ -718,8 +722,8 @@ impl Doc {
             }
         }
         // The buffer can end inside the strings of one operator.
-        decode(dec, &codes, &mut out, limit);
-        let full = out.len() >= limit;
+        clipped |= decode(dec, &codes, &mut out, limit);
+        let full = clipped || out.len() >= limit;
         (out, full)
     }
 
@@ -842,11 +846,12 @@ fn latin(b: &[u8]) -> std::borrow::Cow<'_, str> {
 }
 
 /// Add the text of `codes` to `out`, which never grows past `limit` bytes.
-fn decode(dec: &Dec, codes: &[u8], out: &mut String, limit: usize) {
+/// True if the limit cut off some of the text.
+fn decode(dec: &Dec, codes: &[u8], out: &mut String, limit: usize) -> bool {
     let room = limit.saturating_sub(out.len());
     let t = match dec {
         Dec::Latin => latin(codes),
-        Dec::Skip => return,
+        Dec::Skip => return false,
         Dec::Map(m, two) => {
             let mut t = String::new();
             let mut i = 0;
@@ -861,7 +866,9 @@ fn decode(dec: &Dec, codes: &[u8], out: &mut String, limit: usize) {
             t.into()
         }
     };
-    out.push_str(&t[..crate::mime::floor_char(&t, room)]);
+    let end = crate::mime::floor_char(&t, room);
+    out.push_str(&t[..end]);
+    end < t.len()
 }
 
 /// A `ToUnicode` code map.

@@ -293,8 +293,8 @@ its first 1 KiB holds `%PDF`.
   shortest code with an entry, else 2 bytes for a `/Type0` font and 1 byte
   for another font. A code without an entry gives no text in a `/Type0`
   font and Windows-1252 in another font. A `/Type0` font without a map
-  gives no text. A font that the reader does not find, or a font without
-  a map, reads as Windows-1252.
+  gives no text. A font that the reader does not find, or a font that is
+  not `/Type0` and has no map, reads as Windows-1252.
 - The reader reads the names of a stream dictionary (`/Length`, `/Filter`
   and the names above) only outside its strings, comments and inner
   dictionaries.
@@ -308,7 +308,8 @@ its first 1 KiB holds `%PDF`.
   `.,;:!?'"()-/%&@€$£#*+=`. If not, `text` is `None`.
 - The check reads at least 4,096 bytes of text, also when less budget is
   left. Then the text is clipped to the budget. If the reader stops at a
-  limit before the end of the PDF (the text budget, the string buffer, the
+  limit before the end of the PDF (the text budget, also when it cuts off
+  part of a character, the string buffer, the
   stream limit of a content stream or the 32 MiB inflate limit of each PDF.
   Code maps and object streams count in the 32 MiB), the text gets `CUT_MARK`, also when
   trimmed white space makes the text shorter than the budget.
