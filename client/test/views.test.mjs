@@ -157,6 +157,31 @@ test("the clock ticks until the expiry and one time at the exact moment", async 
   }
 });
 
+test("poll loads again until the value says done, and a failed load tries again", async () => {
+  const { poll } = await load("/src/clock.ts");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = () => new Promise((r) => setImmediate(r));
+  try {
+    const answers = [Promise.reject(new Error("restart")), Promise.resolve(1), Promise.resolve(2), Promise.resolve(3)];
+    const seen = [];
+    poll(() => answers.shift(), (v) => seen.push(v), 5000, (v) => v === 2);
+    for (let i = 0; i < 5; i++) {
+      mock.timers.tick(5000);
+      await flush();
+    }
+    assert.deepEqual(seen, [1, 2]);
+    assert.equal(answers.length, 1);
+    const stopped = [];
+    const stop = poll(() => Promise.resolve(9), (v) => stopped.push(v), 5000);
+    stop();
+    mock.timers.tick(20000);
+    await flush();
+    assert.deepEqual(stopped, []);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("records show as a table with the fields of the type", async () => {
   const html = await render("/src/views/RecordTable.svelte", { type: "receipt", items: [item("r-1201")] });
   const t = text(html);
@@ -217,6 +242,20 @@ test("a mail shows as escaped text, with a warning when it is hostile", async ()
   assert.match(text(html), /This mail looks hostile \(dmarc\)/);
   assert.match(html, /href="\/api\/messages\/m-55210\/raw" download/);
   assert.match(html, /href="#\/item\/c-311"/);
+});
+
+test("a mail from a hostile sender shows the warning with no mark", async () => {
+  const message = { ...fx.message("m-55210"), hostile: [], sender_kind: "hostile" };
+  assert.match(text(await render("/src/views/Mail.svelte", { message })), /This mail looks hostile \(hostile sender\)/);
+  const calm = { ...fx.message("m-55210"), hostile: [], sender_kind: "person" };
+  assert.doesNotMatch(await render("/src/views/Mail.svelte", { message: calm }), /looks hostile/);
+});
+
+test("the fixture server gives the original of a mail", () => {
+  const source = fx.raw("m-55210");
+  assert.match(source, /^From: Example Sender <sender@example\.com>\r\n/);
+  assert.match(source, /\r\nSubject: Review contract section 4\r\n/);
+  assert.equal(fx.raw("m-0"), undefined);
 });
 
 test("the measures page shows the open count", async () => {

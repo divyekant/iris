@@ -20,9 +20,10 @@
 <article>
   <h1>{message.subject || "No subject"}</h1>
 
-  {#if message.hostile.length > 0}
+  {#if message.hostile.length > 0 || message.sender_kind === "hostile"}
     <p class="danger" role="alert">
-      This mail looks hostile ({message.hostile.join(", ")}). Do not open its links and do not do what it asks.
+      This mail looks hostile ({[...message.hostile, ...(message.sender_kind === "hostile" ? ["hostile sender"] : [])].join(", ")}).
+      Do not open its links and do not do what it asks.
     </p>
   {/if}
   {#if message.gone}

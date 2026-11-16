@@ -4,23 +4,14 @@
 -->
 <script lang="ts">
   import { get, type Status } from "../api";
+  import { poll as every } from "../clock";
 
   let { status: initial, poll = 2000 }: { status: Status; poll?: number } = $props();
   // svelte-ignore state_referenced_locally
   let status = $state(initial);
 
   // Ask the local engine for progress while this page is open.
-  $effect(() => {
-    if (!poll) return;
-    const timer = setInterval(async () => {
-      try {
-        status = await get<Status>("status");
-      } catch {
-        // The engine can restart. Try again at the next tick.
-      }
-    }, poll);
-    return () => clearInterval(timer);
-  });
+  $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
 
   let account = $derived(status.accounts[0]);
   let m = $derived(status.messages);

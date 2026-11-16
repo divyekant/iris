@@ -4,16 +4,44 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import type { Brief, Item, Status } from "../api";
+  import { get, type Brief, type Item, type Status } from "../api";
+  import { poll as every, watch } from "../clock";
   import { greeting, liveCode, party, partyKey, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
-  let { brief, status = null, now = new Date() }: { brief: Brief; status?: Status | null; now?: Date } = $props();
+  let {
+    brief: firstBrief,
+    status: firstStatus = null,
+    now: start = new Date(),
+    poll = 5000,
+  }: { brief: Brief; status?: Status | null; now?: Date; poll?: number } = $props();
+
+  // svelte-ignore state_referenced_locally
+  let brief = $state(firstBrief);
+  // svelte-ignore state_referenced_locally
+  let status = $state(firstStatus);
+  // svelte-ignore state_referenced_locally
+  let now = $state(start);
+  const ready = (s: Status | null) => !s || s.accounts.some((a) => a.mirror_ready_at);
+
+  // Spec 1 section 4.2: the brief grows while the first sync runs. Load it again until the mirror is ready.
+  $effect(() => {
+    if (!poll || ready(status)) return;
+    return every(
+      () => Promise.all([get<Brief>("brief"), get<Status>("status")]),
+      ([b, s]) => ((brief = b), (status = s)),
+      poll,
+      ([, s]) => ready(s),
+    );
+  });
 
   const SHOWN = 7;
 
   let codes = $derived(brief.signals.items.filter((i) => liveCode(i, now)));
+  // At the expiry of the first live code, the code moves from the top to Signals.
+  let nextExpiry = $derived(codes.map((i) => i.expires!).sort()[0]);
+  $effect(() => (nextExpiry ? watch(nextExpiry, (d) => (now = d)) : undefined));
   let shown = $derived(new Set(brief.conversations.items.map((i) => i.id)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
   let parts = $derived([

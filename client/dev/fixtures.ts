@@ -64,6 +64,23 @@ export function message(id: string): Message | undefined {
   };
 }
 
+/** The original source of a fixture message (RFC 5322), for /api/messages/<id>/raw. */
+export function raw(id: string): string | undefined {
+  const m = message(id);
+  if (!m) return undefined;
+  return [
+    `From: ${m.from.name} <${m.from.address}>`,
+    `To: ${m.to.map((t) => t.address).join(", ")}`,
+    `Subject: ${m.subject}`,
+    `Date: ${new Date(m.date).toUTCString()}`,
+    `Message-ID: <${id}@fixtures.example>`,
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    m.text,
+    "",
+  ].join("\r\n");
+}
+
 /** The answer for one API path (no `/api/` prefix), or undefined for a 404. */
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");

@@ -93,6 +93,8 @@ export type Message = Summary & {
   text: string;
   gone: boolean;
   hostile: string[];
+  /** The kind of the From sender (spec 1 section 6.7). */
+  sender_kind?: "person" | "service" | "stranger" | "hostile";
   items: string[];
 };
 

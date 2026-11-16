@@ -16,3 +16,28 @@ export function watch(until: string, tick: (now: Date) => void, step = 30_000): 
   next();
   return () => clearTimeout(timer);
 }
+
+/**
+ * Call `load` each `ms` and give each value to `apply`, until `done` is true
+ * for a value or until the stop function runs. A failed load tries again at the next tick.
+ */
+export function poll<T>(load: () => Promise<T>, apply: (value: T) => void, ms: number, done: (value: T) => boolean = () => false): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const run = async () => {
+    try {
+      const value = await load();
+      if (stopped) return;
+      apply(value);
+      if (done(value)) return;
+    } catch {
+      // The engine can restart. Try again at the next tick.
+    }
+    if (!stopped) timer = setTimeout(run, ms);
+  };
+  timer = setTimeout(run, ms);
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
