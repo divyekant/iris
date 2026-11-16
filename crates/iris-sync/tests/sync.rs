@@ -426,3 +426,48 @@ fn a_second_sync_of_the_account_does_not_run_at_the_same_time() {
         30
     );
 }
+
+/// The bytes of one answer of the fake, headers included.
+fn answer_size(fake: &FakeGmail, path: &str) -> i64 {
+    let mut s = TcpStream::connect(fake.addr()).unwrap();
+    write!(
+        s,
+        "GET /gmail/v1/users/me/{path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).unwrap();
+    out.len() as i64
+}
+
+#[test]
+fn a_resumed_list_keeps_the_newest_thread_first() {
+    // 700 messages: two list pages. Drop the connection in the second page.
+    let fake = FakeGmail::start(Mailbox::new(23, 700)).unwrap();
+    let budget = answer_size(&fake, "profile")
+        + answer_size(&fake, "labels")
+        + answer_size(&fake, "messages?maxResults=500&includeSpamTrash=true")
+        + 200;
+    let store = Store::open(&data_dir("relist")).unwrap();
+    let account = store.add_account("gmail", OWNER).unwrap();
+    let cut = client(cutting_proxy(fake.addr(), budget));
+    assert!(first_sync(&store, &cut, account, TOKEN).is_err());
+    assert_eq!(sync_state(&store).2, Some(iris_sync::STEP_LIST));
+    assert_eq!(count(&store, "SELECT count(*) FROM message"), 500);
+
+    // New mail in a new thread arrives before the resume.
+    let new = fake.add_message(&Mailbox::new(23, 1).raw(0), &["INBOX"]);
+    let gmail = client(fake.base_url());
+    first_sync(&store, &gmail, account, TOKEN).unwrap();
+    let first: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM message ORDER BY thread_id, id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(first, new);
+    assert_eq!(mirror_state(&store), fake_state(&fake));
+}
