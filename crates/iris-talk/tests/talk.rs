@@ -653,3 +653,73 @@ fn synthetic_mailbox() {
         "{talks} talks, {replies} with replies"
     );
 }
+
+#[test]
+fn only_service_mail_left_makes_the_talk_gone() {
+    let b = Box_::new("svcgone");
+    let v = validator();
+    b.kind("news@shop.example", "service");
+    let p = b.put(M {
+        id: "p",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    b.put(M {
+        id: "s",
+        from: ("Shop", "news@shop.example"),
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    assert_eq!(doc["status"], "active");
+    b.sql(&format!(
+        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = {p}"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["status"], "gone");
+    assert_eq!(
+        doc["sources"][0]["message"],
+        format!("m-{p}"),
+        "the origin stays"
+    );
+    b.sql(&format!("UPDATE message SET hostile = '[]' WHERE id = {p}"));
+    assert_eq!(b.talk("t1", NOW).unwrap()["status"], "active");
+}
+
+#[test]
+fn a_correction_stays_after_the_next_message() {
+    let b = Box_::new("correct");
+    let v = validator();
+    b.put(M {
+        id: "a",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    let id: i64 = doc["id"].as_str().unwrap()[2..].parse().unwrap();
+    b.sql(&format!(
+        "INSERT INTO correction(item_id, field, value, by, at) VALUES ({id}, 'summary', '\"Dinner plan\"', 'person', 1)"
+    ));
+    b.put(M {
+        id: "b",
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["messages"], 2);
+    assert_eq!(doc["summary"], "Dinner plan");
+}
+
+#[test]
+fn an_address_in_a_display_name_is_no_party() {
+    let b = Box_::new("dname");
+    b.put(M {
+        id: "a",
+        to: "\"billing@acme.example\" <owner@example.com>",
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    assert_eq!(doc["role"], "direct");
+    assert_eq!(doc["participants"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["your_turn"], true);
+}
