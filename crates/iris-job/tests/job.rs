@@ -1,0 +1,407 @@
+use std::fs;
+use std::path::PathBuf;
+
+use iris_job::{
+    answer, ask, create, events, finish, format_job_id, get, list, parse_job_id, wait, wake,
+    write_document, By, End, Error, State, Wait,
+};
+use iris_store::Store;
+use rusqlite::params;
+use serde_json::Value;
+
+/// A new empty folder for one test, removed at the end.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("iris-job-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+const NOW: i64 = 1_763_283_422_000;
+const DAY: i64 = 86_400_000;
+
+fn refused<T: std::fmt::Debug>(r: Result<T, Error>) {
+    assert!(matches!(r, Err(Error::Refused(_))), "{r:?}");
+}
+
+/// Run raw SQL on the write connection. Gives `true` if it succeeds.
+fn sql(store: &Store, text: &str) -> bool {
+    store.write(|tx| Ok(tx.execute_batch(text)?)).is_ok()
+}
+
+/// The state of the job row and of its newest event, and the event count.
+fn agree(store: &Store, job: i64) {
+    let (row, newest, n): (String, Option<String>, i64) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state,
+                   (SELECT state FROM job_event WHERE job_id = ?1 ORDER BY id DESC LIMIT 1),
+                   (SELECT count(*) FROM job_event WHERE job_id = ?1)
+                 FROM job WHERE id = ?1",
+                [job],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert!(n >= 1, "job {job} has no event");
+    assert_eq!(Some(row), newest, "job {job}");
+}
+
+#[test]
+fn a_job_keeps_its_state_after_a_restart() {
+    let dir = TempDir::new("restart");
+    let w = Wait {
+        thread: Some(7),
+        until_ms: NOW + 2 * DAY,
+    };
+    let (job, before, events_before) = {
+        let store = Store::open(&dir.0).unwrap();
+        let job = create(
+            &store,
+            "Get the signed contract from Dana.",
+            Some(NOW + 4 * DAY),
+            NOW,
+        )
+        .unwrap();
+        ask(&store, job, "Can I accept section 4?", None, NOW + 1).unwrap();
+        answer(&store, job, "Yes.", NOW + 2).unwrap();
+        wait(&store, job, w, Some("Dana has the contract now."), NOW + 3).unwrap();
+        (job, get(&store, job).unwrap(), events(&store, job).unwrap())
+    };
+    let store = Store::open(&dir.0).unwrap();
+    let after = get(&store, job).unwrap();
+    assert_eq!(after, before);
+    assert_eq!(after.state, State::Waiting);
+    assert_eq!(after.wait, Some(w));
+    assert_eq!(after.due_ms, Some(NOW + 4 * DAY));
+    assert_eq!(after.updated_ms, NOW + 3);
+    assert_eq!(events(&store, job).unwrap(), events_before);
+    assert_eq!(events_before.len(), 4);
+    assert_eq!(events_before[2].answer.as_deref(), Some("Yes."));
+    assert_eq!(list(&store, State::Waiting).unwrap(), vec![after]);
+}
+
+/// The move table of the spec: from, to, who, and the kind of value.
+#[derive(Clone, Copy, Debug)]
+enum Val {
+    None,
+    Wait,
+    Question,
+    Answer,
+    Complete,
+    Cancel,
+}
+
+fn allowed(from: State, to: State, by: By, v: Val) -> bool {
+    use State::*;
+    match (from, to, v) {
+        (Working, Waiting, Val::Wait) => by == By::Agent,
+        (Working, NeedsYou, Val::Question) => by == By::Agent,
+        (Waiting, Working, Val::None) => by == By::Engine || by == By::Person,
+        (NeedsYou, Working, Val::Answer) => by == By::Person,
+        (Working, Done, Val::Complete) => by == By::Agent || by == By::Person,
+        (Waiting | NeedsYou, Done, Val::Complete) => by == By::Person,
+        (Working | Waiting | NeedsYou, Done, Val::Cancel) => by == By::Person,
+        _ => false,
+    }
+}
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn pick<T: Copy>(&mut self, from: &[T]) -> T {
+        from[(self.next() % from.len() as u64) as usize]
+    }
+}
+
+/// Property test of the move table: random moves, through raw SQL, with
+/// random states, actors and values. Each move succeeds exactly when the
+/// table allows it, and the job row always agrees with its newest event.
+#[test]
+fn only_the_moves_of_the_table_succeed() {
+    let dir = TempDir::new("moves");
+    let store = Store::open(&dir.0).unwrap();
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let values = [
+        Val::None,
+        Val::Wait,
+        Val::Question,
+        Val::Answer,
+        Val::Complete,
+        Val::Cancel,
+    ];
+    let (mut ok, mut no) = (0, 0);
+    for round in 0..60 {
+        let job = create(&store, &format!("Goal {round}"), None, NOW).unwrap();
+        agree(&store, job);
+        let mut at = NOW;
+        for _ in 0..12 {
+            at += 1000;
+            let from = get(&store, job).unwrap().state;
+            let to = rng.pick(State::ALL);
+            let by = rng.pick(By::ALL);
+            let v = rng.pick(&values);
+            let (thread, until, question, answer, end) = match v {
+                Val::None => (None, None, None, None, None),
+                Val::Wait => (Some(9), Some(at + DAY), None, None, None),
+                Val::Question => (None, None, Some("Which day?"), None, None),
+                Val::Answer => (None, None, None, Some("Tuesday."), None),
+                Val::Complete => (None, None, None, None, Some("complete")),
+                Val::Cancel => (None, None, None, None, Some("cancel")),
+            };
+            let done = store
+                .write(|tx| {
+                    Ok(tx.execute(
+                        "INSERT INTO job_event (job_id, at, state, by, wait_thread, wait_until,
+                           question, answer, end_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            job,
+                            at,
+                            to.as_str(),
+                            by.as_str(),
+                            thread,
+                            until,
+                            question,
+                            answer,
+                            end
+                        ],
+                    )?)
+                })
+                .is_ok();
+            assert_eq!(
+                done,
+                allowed(from, to, by, v),
+                "{from:?} -> {to:?} by {by:?} with {v:?}"
+            );
+            if done {
+                ok += 1;
+            } else {
+                no += 1;
+            }
+            agree(&store, job);
+        }
+    }
+    assert!(ok > 50 && no > 50, "{ok} moves, {no} refusals");
+}
+
+#[test]
+fn the_api_moves_and_refusals() {
+    let dir = TempDir::new("api");
+    let store = Store::open(&dir.0).unwrap();
+    let job = create(&store, "Book the dentist.", None, NOW).unwrap();
+    // A wait must end after the move.
+    let w = |until_ms| Wait {
+        thread: None,
+        until_ms,
+    };
+    refused(wait(&store, job, w(NOW), None, NOW));
+    // The person does not wait or ask, and the agent does not answer.
+    refused(answer(&store, job, "Yes.", NOW));
+    wait(&store, job, w(NOW + DAY), None, NOW + 1).unwrap();
+    // The agent does not wake or end a waiting job.
+    refused(wake(&store, job, By::Agent, None, NOW + 2));
+    refused(finish(&store, job, By::Agent, End::Complete, None, NOW + 2));
+    // An event is not before the newest event.
+    refused(wake(&store, job, By::Engine, Some("reply"), NOW));
+    wake(&store, job, By::Engine, Some("reply"), NOW + 2).unwrap();
+    // The agent does not cancel.
+    refused(finish(&store, job, By::Agent, End::Cancel, None, NOW + 3));
+    ask(&store, job, "Morning or afternoon?", None, NOW + 3).unwrap();
+    finish(
+        &store,
+        job,
+        By::Person,
+        End::Cancel,
+        Some("Not needed."),
+        NOW + 4,
+    )
+    .unwrap();
+    // done is final.
+    for by in By::ALL {
+        refused(wake(&store, job, *by, None, NOW + 5));
+        refused(finish(&store, job, *by, End::Complete, None, NOW + 5));
+    }
+    let j = get(&store, job).unwrap();
+    assert_eq!(
+        (j.state, j.end, j.question),
+        (State::Done, Some(End::Cancel), None)
+    );
+    let states: Vec<State> = events(&store, job)
+        .unwrap()
+        .iter()
+        .map(|e| e.state)
+        .collect();
+    use State::*;
+    assert_eq!(states, [Working, Waiting, Working, NeedsYou, Done]);
+    // Unknown job.
+    assert!(matches!(get(&store, 99), Err(Error::NotFound)));
+    assert!(matches!(events(&store, 99), Err(Error::NotFound)));
+    assert!(matches!(
+        wake(&store, 99, By::Person, None, NOW),
+        Err(Error::NotFound)
+    ));
+}
+
+#[test]
+fn the_text_limits() {
+    let dir = TempDir::new("limits");
+    let store = Store::open(&dir.0).unwrap();
+    refused(create(&store, "", None, NOW));
+    refused(create(&store, &"g".repeat(2001), None, NOW));
+    // Characters, not bytes: 2,000 two-byte characters fit.
+    let job = create(&store, &"é".repeat(2000), None, NOW).unwrap();
+    refused(ask(&store, job, "", None, NOW));
+    refused(ask(&store, job, &"q".repeat(2001), None, NOW));
+    refused(ask(&store, job, "Which?", Some(""), NOW));
+    ask(&store, job, "Which?", None, NOW).unwrap();
+    refused(answer(&store, job, &"a".repeat(10_001), NOW));
+    answer(&store, job, &"a".repeat(10_000), NOW).unwrap();
+    agree(&store, job);
+}
+
+#[test]
+fn raw_sql_cannot_change_a_job_without_an_event() {
+    let dir = TempDir::new("raw");
+    let store = Store::open(&dir.0).unwrap();
+    let job = create(&store, "Pay the invoice.", None, NOW).unwrap();
+    for text in [
+        "UPDATE job SET goal = 'Other.'",
+        "UPDATE job SET due_at = 5",
+        "UPDATE job SET created_at = 5",
+        "UPDATE job SET id = 50",
+        "UPDATE job SET state = 'done', end_kind = 'complete'",
+        "UPDATE job SET updated_at = updated_at + 1",
+        "DELETE FROM job",
+        "UPDATE job_event SET by = 'agent'",
+        "DELETE FROM job_event",
+        // A second create event.
+        "INSERT INTO job_event (job_id, at, state, by) VALUES (1, 1763283422000, 'working', 'person')",
+        // A new job that is not in working.
+        "INSERT INTO job (goal, created_at, state, question, updated_at)
+           VALUES ('G', 1, 'needs_you', 'Q', 1)",
+        "INSERT INTO job (goal, created_at, state, updated_at) VALUES ('G', 1, 'working', 2)",
+        // An insert that replaces the job.
+        "INSERT OR REPLACE INTO job (id, goal, created_at, state, updated_at)
+           VALUES (1, 'G', 1, 'working', 1)",
+        // An event with an ID lower than the newest event.
+        "INSERT INTO job_event (id, job_id, at, state, by, question)
+           VALUES (0, 1, 1763283423000, 'needs_you', 'agent', 'Q')",
+        // An event of a job that does not exist.
+        "INSERT INTO job_event (job_id, at, state, by, end_kind)
+           VALUES (9, 1763283423000, 'done', 'person', 'cancel')",
+    ] {
+        assert!(!sql(&store, text), "{text}");
+    }
+    agree(&store, job);
+    assert_eq!(get(&store, job).unwrap().goal, "Pay the invoice.");
+    // A raw insert of a job gets its create event from the trigger.
+    assert!(sql(
+        &store,
+        "INSERT INTO job (goal, created_at, state, updated_at) VALUES ('G', 7, 'working', 7)"
+    ));
+    let e = events(&store, 2).unwrap();
+    assert_eq!((e.len(), e[0].by, e[0].at_ms), (1, By::Person, 7));
+    agree(&store, 2);
+}
+
+/// Two moves of one job at the same time: one succeeds, and the other gets
+/// the new state and fails.
+#[test]
+fn two_moves_at_the_same_time() {
+    let dir = TempDir::new("race");
+    let store = Store::open(&dir.0).unwrap();
+    for i in 0..20 {
+        let job = create(&store, "Race.", None, NOW).unwrap();
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| ask(&store, job, "Which?", None, NOW + 1));
+            let b = s.spawn(|| finish(&store, job, By::Agent, End::Complete, None, NOW + 1));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert!(a.is_ok() != b.is_ok(), "round {i}: {a:?} {b:?}");
+        agree(&store, job);
+    }
+}
+
+#[test]
+fn the_document_of_each_state_passes_the_schema() {
+    let dir = TempDir::new("doc");
+    let store = Store::open(&dir.0).unwrap();
+    let schema = iris_spec::validator("job");
+    let check = |job: i64, state: &str| {
+        let mut out = Vec::new();
+        write_document(&store, job, &mut out).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        let errors: Vec<String> = schema.iter_errors(&v).map(|e| e.to_string()).collect();
+        assert!(errors.is_empty(), "{state}: {errors:?}\n{v}");
+        assert_eq!(v["state"], state);
+        assert_eq!(v["id"], format_job_id(job));
+        v
+    };
+    let job = create(&store, "Get the contract.", Some(NOW + DAY), NOW).unwrap();
+    check(job, "working");
+    let w = Wait {
+        thread: Some(8841),
+        until_ms: NOW + DAY,
+    };
+    wait(&store, job, w, Some("Dana has it."), NOW + 1).unwrap();
+    let v = check(job, "waiting");
+    assert_eq!(v["wait"]["thread"], "t-8841");
+    wake(&store, job, By::Engine, Some("reply"), NOW + 2).unwrap();
+    ask(&store, job, "Accept section 4?", None, NOW + 3).unwrap();
+    check(job, "needs_you");
+    answer(&store, job, "Yes.", NOW + 4).unwrap();
+    finish(
+        &store,
+        job,
+        By::Agent,
+        End::Complete,
+        Some("Signed."),
+        NOW + 5,
+    )
+    .unwrap();
+    let v = check(job, "done");
+    assert_eq!(v["events"].as_array().unwrap().len(), 6);
+    assert_eq!(v["events"][4]["answer"], "Yes.");
+    let mut out = Vec::new();
+    assert!(matches!(
+        write_document(&store, 99, &mut out),
+        Err(Error::NotFound)
+    ));
+}
+
+/// Property test of the job ID parser on random text: it accepts exactly
+/// `j-` and a positive decimal `i64`, and round-trips.
+#[test]
+fn job_id_parser() {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let alphabet = b"j-0123456789+ x";
+    for _ in 0..20_000 {
+        let len = (rng.next() % 8) as usize;
+        let text: String = (0..len).map(|_| rng.pick(alphabet) as char).collect();
+        let expect = text
+            .strip_prefix("j-")
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|n| n.parse::<i64>().ok())
+            .filter(|n| *n > 0);
+        assert_eq!(parse_job_id(&text), expect, "{text:?}");
+        if let Some(n) = expect {
+            assert_eq!(parse_job_id(&format_job_id(n)), Some(n));
+        }
+    }
+    assert_eq!(parse_job_id("j-99999999999999999999"), None);
+}
