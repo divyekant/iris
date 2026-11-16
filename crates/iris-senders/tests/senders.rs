@@ -509,17 +509,27 @@ fn a_new_fetch_of_a_sent_message_clears_its_old_bcc() {
     );
 }
 
+/// Spec 1 section 6.7: "The first sync fetches newest first, so a known
+/// person can be a stranger for some time." The understanding step saves
+/// the header row of a message just before it decides the sender, so a sent
+/// message of another thread that waits for understanding has no header
+/// row yet. Its own decision then makes the recipient a person, and the
+/// brief reads the kind when it runs.
 #[test]
-fn a_stored_sent_message_counts_before_its_own_decision() {
-    let mut c = Case::new("sent-first");
-    // The sent message is stored, but not decided yet.
-    c.n += 1;
-    let raw = format!("From: {OWNER}\r\nTo: fay@example.org\r\nSubject: x\r\n\r\nBody.\r\n");
-    let m = new_message("m1", "t1", 1000, &["SENT"], raw.as_bytes());
-    c.store.put_messages(c.acc, &[m]).unwrap();
+fn a_sent_message_of_another_thread_counts_at_its_own_decision() {
+    let mut c = Case::new("sent-later");
     let d = c.put("t2", &[], "From: Fay <fay@example.org>");
-    assert_eq!(d.kind, Kind::Person);
-    assert!(d.basis.starts_with("sent: m-1"), "{}", d.basis);
+    assert_eq!(d.kind, Kind::Stranger);
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: fay@example.org"),
+    );
+    assert_eq!(c.row("fay@example.org").1.as_deref(), Some("person"));
+    assert_eq!(
+        c.put("t3", &[], "From: Fay <fay@example.org>").kind,
+        Kind::Person
+    );
 }
 
 #[test]

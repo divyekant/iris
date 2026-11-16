@@ -288,6 +288,13 @@ fn rules(
     // `Bcc`: first the message of the basis, then each sent message.
     // A hostile row also gets the check: the hostile decision replaced the
     // basis of an earlier sent message.
+    // A new or stranger row needs no scan: the understanding step saves the
+    // header row of a message just before this decision, so a sent message
+    // that waits for understanding has no header row to find. Its own
+    // decision makes the recipients `person`. Spec 1 section 6.7 accepts
+    // this: "The first sync fetches newest first, so a known person can be a
+    // stranger for some time." A scan for each message would also read every
+    // stored sent message (4.5 ms for each message at 20,000 messages).
     if matches!(previous, Some(Kind::Person | Kind::Hostile)) {
         if let Some((rule, m, old_sha)) = old_basis.and_then(parse_evidence) {
             let to = if rule == "sent" {
