@@ -848,6 +848,20 @@ changeset format of specification 2, with each action in the state
 `proposed`. Release 1 does not store it. From release 2, triage stores it as
 a changeset in the mode `observe`.
 
+The triage proposal of release 1 (crate `iris-observe`) has these rules:
+
+- Each rule gives one `archive` action on the messages with the label `INBOX`
+  that are not gone. The rules are, in order: hostile mail, signals with the
+  status `expired`, feed items, and records. A message goes only to the first
+  rule that matches it.
+- The engine reads the counts and the message IDs in one read transaction.
+- Because release 1 does not store the proposal, its ID is an exception to
+  the rule "unique in one install" of specification 2, section 5.1. The ID is
+  `cs-` and the first 63 bits of the SHA-256 of the account and the message
+  IDs of each rule. So the ID names the content: the same content gives the
+  same ID, also at a later time, and a different content gives a different
+  ID. A client must not use this ID as the ID of a stored changeset.
+
 ## 9. Memory
 
 The design keeps memory flat when the mailbox grows:

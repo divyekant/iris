@@ -697,6 +697,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-observe"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "iris-spec"
 version = "0.0.0"
 dependencies = [
