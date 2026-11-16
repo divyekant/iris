@@ -697,6 +697,7 @@ dependencies = [
  "http",
  "iris-api",
  "iris-auth",
+ "iris-changeset",
  "iris-fakegmail",
  "iris-gmail",
  "iris-model",

@@ -355,7 +355,8 @@ impl Engine {
     }
 
     /// Start a sync thread for each account that has none, open the
-    /// deferred commitments whose date came, and run the content cleanup if
+    /// deferred commitments whose date came, expire the changeset actions
+    /// 14 days after their submit, and run the content cleanup if
     /// [`CLEAN_EVERY`] passed. So an account that
     /// `iris account add` adds or signs in again starts to sync without a
     /// restart. Gives the accounts that got a new thread.
@@ -397,6 +398,9 @@ impl Engine {
         }
         if let Err(e) = self.store.reopen_deferred(now_ms()) {
             say!("iris: deferred commitments: {e}");
+        }
+        if let Err(e) = iris_changeset::expire(&self.store, now_ms()) {
+            say!("iris: changeset expiry: {e}");
         }
         // Triage (R2-05): store the proposal of each account. A run with no
         // change writes nothing.

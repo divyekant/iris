@@ -401,6 +401,59 @@ pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64>
 }
 
 /// The same `kind`, `name` and `session` (section 5.5).
+/// Withdraw a changeset (section 5.5). `author` is the author of the
+/// changeset (`iris withdraw`), or `None` for the person in the web client.
+/// Each open action and each draft action becomes `cancelled` in the same
+/// write (trigger `changeset_withdraw`), except an action whose provider
+/// calls started: it ends as `applied` or `failed`. Applied actions stay.
+pub fn withdraw(store: &Store, changeset: i64, author: Option<&Author>) -> Result<()> {
+    write(store, |c| withdraw_in(c, changeset, author))
+}
+
+/// [`withdraw`] in a write transaction of the caller, with the same checks.
+pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> Result<()> {
+    match author {
+        Some(author) => check_author(c, changeset, author)?,
+        None => {
+            c.query_row("SELECT 1 FROM changeset WHERE id = ?1", [changeset], |_| {
+                Ok(())
+            })
+            .optional()?
+            .ok_or(Error::NotFound)?;
+        }
+    }
+    let changed = c.execute(
+        "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
+        [changeset],
+    )?;
+    if changed == 0 {
+        return Err(refused("the changeset is withdrawn".into()));
+    }
+    Ok(())
+}
+
+/// Expire each open action 14 days or more after its submit (section 5.5):
+/// `proposed`, `in_review` and `approved`, by `expiry`. An action whose
+/// provider calls started (`applying`) continues to its end. `held`
+/// (release 3) does not expire. Gives the count of expired actions. The
+/// engine runs it on each tick.
+pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
+    write(store, |c| expire_in(c, now_ms))
+}
+
+/// [`expire`] in a write transaction of the caller.
+pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
+    // shortcut: R2-03 replaces `applying` with the ledger row in `writing`
+    // (issue #169); then this query checks the ledger.
+    Ok(c.execute(
+        "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
+           policy = NULL, reason = 'no decision or apply in 14 days', decided_at = ?1
+         WHERE state IN ('proposed', 'in_review', 'approved') AND applying = 0
+           AND submitted_at <= ?1 - ?2",
+        params![now_ms, EXPIRY_MS],
+    )?)
+}
+
 fn check_author(c: &Connection, changeset: i64, author: &Author) -> Result<()> {
     let same: Option<bool> = c
         .query_row(
