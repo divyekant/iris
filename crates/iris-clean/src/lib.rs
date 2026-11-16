@@ -855,6 +855,63 @@ fn tidy(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// For generated bodies of lines that match, almost match or do not
+    /// match, fed in parts split at random points, `MethodLine` agrees with
+    /// a whole-body line matcher.
+    #[test]
+    fn method_line_agrees_with_a_whole_body_matcher() {
+        const LINES: [&[u8]; 14] = [
+            b"METHOD:REQUEST",
+            b"method:request",
+            b"  METHOD:REQUEST \t",
+            b"\tMethod:Request\r",
+            b"METHOD:REQUESTS",
+            b"METHOD:REQUES",
+            b"METHOD: REQUEST",
+            b"X-METHOD:REQUEST",
+            b"METHOD:REQUEST X",
+            b"METHOD:CANCEL",
+            b"",
+            b" ",
+            b"BEGIN:VCALENDAR",
+            b"DESCRIPTION:METHOD:REQUEST",
+        ];
+        let whole = |body: &[u8]| {
+            body.split(|&c| c == b'\n')
+                .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
+        };
+        let mut x: u64 = 0x5851_f42d_4c95_7f2d;
+        let mut next = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..5000 {
+            let mut body = Vec::new();
+            for _ in 0..next(6) {
+                body.extend_from_slice(LINES[next(LINES.len())]);
+                if next(4) > 0 {
+                    body.push(b'\n');
+                }
+            }
+            let mut m = MethodLine::default();
+            let mut at = 0;
+            while at < body.len() {
+                let end = (at + 1 + next(8)).min(body.len());
+                m.feed(&body[at..end]);
+                at = end;
+            }
+            m.feed(b"\n");
+            assert_eq!(
+                m.found,
+                whole(&body),
+                "{:?}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+    }
+
     /// For any quoted-printable body: each chunk has at most QP_CHUNK + 2
     /// bytes, and the chunks decode to the decode of the whole body.
     #[test]
