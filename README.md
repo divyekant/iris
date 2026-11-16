@@ -67,6 +67,44 @@ the client. `IRIS_REQUIRE_CLIENT=1` makes the build stop in that case.
 
 `iris serve` listens on `127.0.0.1:4800`. Only this machine can connect to it.
 
+## Connect a Gmail account
+
+Release 1 reads mail only. You need the JSON file of your own Google OAuth
+client of the type "Desktop app". The decision record
+`docs/decisions/2026-11-google-sign-in.md` tells how to make one.
+
+1. Sign in:
+
+   ```bash
+   target/release/iris account add client.json
+   ```
+
+2. Open the address that the command prints, and sign in to Google.
+3. If the browser is on another machine than Iris, add `--paste`. Then copy
+   the address of the browser after the sign-in, and paste it into the
+   command.
+4. Start the engine:
+
+   ```bash
+   target/release/iris serve
+   ```
+
+The engine syncs the mailbox at once, then each 60 seconds. If Google refuses
+the stored sign-in, run `iris account add` again.
+
+Iris keeps all state in the data folder: `~/Library/Application Support/iris`
+on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
+`IRIS_DATA` changes the folder. The refresh token and the client file are
+encrypted with the `key` file of the data folder.
+
+CAUTION: The backup folder holds the key and your mail. Keep it private.
+
+To copy the data folder while the engine runs, run:
+
+```bash
+target/release/iris backup <empty-folder>
+```
+
 ## Layout
 
 | Path | Content |

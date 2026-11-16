@@ -637,8 +637,16 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "clap",
+ "iris-auth",
+ "iris-fakegmail",
+ "iris-gmail",
  "iris-service",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
  "iris-web",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -698,6 +706,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-observe"
+version = "0.0.0"
+dependencies = [
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "iris-service"
 version = "0.0.0"
 
@@ -729,6 +751,7 @@ dependencies = [
  "iris-store",
  "iris-synth",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]
