@@ -105,9 +105,14 @@ Each budget only goes down. No step gives budget back.
   - The first field of a name counts.
 - The parser keeps all other fields raw, because a parse of a 5 MB subject
   uses 8.5 MB. It always parses `Content-Type`, `Content-Disposition` and
-  `Content-Transfer-Encoding` in full, for the MIME structure. So the
-  parameters of these fields cost memory: at most about 3 bytes for each
-  byte of the message (measured: 2.3).
+  `Content-Transfer-Encoding` in full, for the MIME structure, and their
+  decoded parameters cost about 2.3 bytes for each byte. So before the
+  parse, a line scan checks these fields: each at most 16 KiB, all of them
+  at most `MIME_FIELD_LIMIT` (1 MiB). A message that does not fit is not
+  parsed (fail closed): no subject, no attachments, and the text is only
+  the cut mark. The same check applies to an attached message before its
+  parse. The scan reads lines only, so a body line that looks like a MIME
+  field counts too: the check can refuse more, never less.
 
 ### A reply
 

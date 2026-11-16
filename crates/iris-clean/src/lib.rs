@@ -21,6 +21,7 @@
 //! - Only a PDF of at most [`PDF_LIMIT`] bytes is decoded for its text.
 //! - The parser reads at most [`MAX_PARTS`] MIME parts, [`MAX_DEPTH`] levels deep.
 //! - The body of an attachment is not decoded to measure its size.
+//! - A message with MIME fields past [`MIME_FIELD_LIMIT`] is not parsed.
 //!
 //! So the memory use does not grow with the size of the message, and the
 //! time is linear in the size of the message. The largest use is a PDF of
@@ -95,6 +96,14 @@ pub struct Attachment {
 pub fn clean(raw: &[u8]) -> Clean {
     let mut parts = 0;
     let mut attach_left = ATTACHMENT_TEXT_LIMIT;
+    if !mime_fields_fit(raw) {
+        return Clean {
+            subject: String::new(),
+            text: CUT_MARK.to_string(),
+            cut: true,
+            attachments: Vec::new(),
+        };
+    }
     let Some(parsed) = parser().parse(raw) else {
         return Clean {
             subject: String::new(),
@@ -122,6 +131,44 @@ pub fn clean(raw: &[u8]) -> Clean {
 /// not count the parts of an attached message in step 1, so an attached
 /// message of up to this many parts leaves the outer text.
 pub const PARSE_PARTS: usize = 10_000;
+
+/// The most bytes of all MIME fields (`Content-Type`, `Content-Disposition`
+/// and `Content-Transfer-Encoding`) of one message, with their folded lines.
+pub const MIME_FIELD_LIMIT: usize = 1024 * 1024;
+
+/// True if the MIME fields of a message fit the limits: each field at most
+/// [`VALUE_LIMIT`] bytes, all of them at most [`MIME_FIELD_LIMIT`] bytes.
+/// `mail-parser` always parses these fields in full, and their decoded
+/// parameters cost about 2.3 bytes for each byte. So a message that does not
+/// fit is not parsed at all (fail closed), and the parse memory has a fixed
+/// bound. The scan reads lines only: a body line that looks like a MIME field
+/// counts too, so the check can only refuse more, never less.
+fn mime_fields_fit(raw: &[u8]) -> bool {
+    const NAMES: [&[u8]; 3] = [
+        b"content-type:",
+        b"content-disposition:",
+        b"content-transfer-encoding:",
+    ];
+    let (mut field, mut total, mut inside) = (0usize, 0usize, false);
+    for line in raw.split(|&b| b == b'\n') {
+        let len = line.len() + 1;
+        if inside && line.first().is_some_and(|&b| b == b' ' || b == b'\t') {
+            field += len;
+        } else {
+            inside = NAMES
+                .iter()
+                .any(|n| line.len() >= n.len() && line[..n.len()].eq_ignore_ascii_case(n));
+            field = if inside { len } else { 0 };
+        }
+        if inside {
+            total += len;
+            if field > VALUE_LIMIT || total > MIME_FIELD_LIMIT {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 /// The parser of the MIME structure. Transfer-encoded attached messages are
 /// not parsed here: step 2 decodes at most [`INNER_LIMIT`] bytes of each one.
@@ -440,12 +487,20 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
         let (inner, clipped) = decode_capped(body, enc, INNER_LIMIT);
         // The first parse saw an attached message that is not encoded, but
         // its bytes past INNER_LIMIT must not count. So parse the capped bytes again.
-        let Some(parsed) = parser().parse(&inner[..]) else {
+        let fits = mime_fields_fit(&inner);
+        let Some(parsed) = fits.then(|| parser().parse(&inner[..])).flatten() else {
             out.push(Attachment {
                 name: String::new(),
                 mime_type: f.mime_type,
                 size,
-                text: had_budget.then(String::new),
+                // A message that Iris does not parse because of a limit is cut.
+                text: had_budget.then(|| {
+                    if fits {
+                        String::new()
+                    } else {
+                        CUT_MARK.to_string()
+                    }
+                }),
             });
             return;
         };
