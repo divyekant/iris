@@ -126,10 +126,8 @@ call. The OS releases the lock when the process ends, also after a crash, so
 no stale lock stays. So two runners never pay for the same message, and the
 cost limit of the one run covers all calls.
 
-0. Once at the start of each run, also with no pending message: in one
-   write, call `iris_senders::refresh` and apply its kind changes (below).
-   This catches the sender changes that a sync made, for example a gone
-   sent message that was the only evidence of a person.
+0. Once at the start of each run, also with no pending message and before
+   the approval check: `batch::refresh` (below). It makes no model call.
 1. Read the next batch: at most `Limits::batch` (default 50) pending message
    IDs, in the order above. Only the IDs stay in memory.
 2. For each message that is still pending, call `store::understand`. Then
@@ -145,10 +143,25 @@ Stop conditions:
   each message, so a run can pass the limit by the cost of one message (at
   most two calls).
 - `Limits::max_messages` messages are done.
-- The model gives an error that stops the batch (spec 1 section 7.4: a
-  refused key, HTTP 401 or 403). A time-out, HTTP 429 or 5xx ends the run
-  too. The message stays pending.
+- The model refuses the call before any charge: a refused key (HTTP 401,
+  403) or HTTP 429. `stop = model`. The message stays pending.
+- A call has an unknown result or unknown usage: a time-out, a lost
+  response, HTTP 5xx, or an answer with no usage. `stop = unknown`. The
+  message stays pending (or its try counts, for an answer that is not
+  valid).
 - Another error of the store.
+
+### Sender refresh
+
+`batch::refresh(store, now)` does, in one write: `iris_senders::refresh`,
+then the kind changes (below), then the conversations of the threads with a
+reset (see "Resets"). It makes no model call and needs no approval.
+
+- `batch::run` calls it at step 0.
+- Sync calls it after each sync batch (spec 1 section 6.7: "After each
+  batch of sync or understanding, a refresh"). R1-28 wires this call into
+  `iris serve` and `iris mirror sync`. So the sender kinds stay current also
+  when no paid run is approved.
 
 ### Kind changes
 
@@ -281,8 +294,16 @@ A run that can cost money needs the approval of the person, on every path:
   `run_max_cost_micro_usd`. So an automatic run (R1-28, after each sync)
   has the limit that the person approved, and cannot pass it.
 - `iris understand --yes` records the approval and the limit
-  (`--max-cost`, default 1 USD for each run). `iris model set` clears the
+  (`--max-cost`, default 1 USD for each run). The limit applies to the cost
+  that Iris computes from the price in `model_setting` (see Risks). `iris model set` clears the
   approval, because the price or the model changed.
+
+### Rebuild
+
+`iris rebuild` (spec 1 section 7.5) resets the messages that it selects, in
+one write, and then calls `batch::run`. So a rebuild has the run lock, the
+approval check, the cost limit and the run row of every other run. No path
+calls `store::understand` with a priced model outside `batch::run`.
 
 ### Commands
 
@@ -322,13 +343,15 @@ No parser or protocol code is new. The model client is `iris-model`.
 | A second run | All messages understood | Zero calls, zero cost. | Counting fake model, two runs. |
 | A sync during a run | A message changes between two writes | `store::understand` gives `changed`. The message stays pending for the next batch. | Existing tests of the store step. |
 | A refused key (401, 403) | No call can work | The run stops with `stop = model`. No try counts. | Fake model error. |
-| A time-out, a lost response, 5xx | Result not known; the provider can charge | The run stops with `stop = model`. The message stays pending. `unknown_calls` and `unknown_cost_micro_usd` grow by one worst case. | Fake model error: the run row has the worst case. |
+| A time-out, a lost response, 5xx | Result not known; the provider can charge | The run stops with `stop = unknown`. The message stays pending. `unknown_calls` and `unknown_cost_micro_usd` grow by one worst case. | Fake model error: the run row has the worst case. |
 | HTTP 200 with no usage or a body that does not parse | The provider can charge, Iris has no count | The call counts in `unknown_calls` with its worst case from the request bytes, also when a second try succeeds. The run stops with `stop = unknown`. | Fake model reply with no usage. |
 | Sent mail makes Alice a known person, and an understood message from another address has the display name Alice | The spoof mark is stale | The same transaction resets that message and the later messages of its thread. | Store test. |
 | A sync removes the domain that made a look-alike sender hostile | The estimate shows zero, the run pays | The estimate does step 0 in a rolled-back transaction, so it counts the reset messages. | Batch test. |
 | A second `iris understand` while a run goes on | Two runs pay twice | The second run gets "a run is in progress" and makes no call. | Two runners on one store: one gets the error, the fake model sees each message once. |
 | A first sync calls the runner (R1-28) before the person saw an estimate | Paid calls with no approval | `batch::run` stops with `stop = approval`, no call. | Batch test with a priced fake model and no approval. |
 | An earlier message of an understood thread gets new content or `SPAM` | Later items used it as context | The reset covers the later messages of the thread. | Store test. |
+| Sync removes the only sent evidence of a person, and no paid run is approved | The kind stays `person` | Sync calls `batch::refresh`, which needs no approval. | Batch test: refresh with a priced model and no approval. |
+| `iris rebuild` with a priced model | Paid calls outside the guards | Rebuild calls `batch::run`. | R1 rebuild test. |
 | HTTP 429 | The provider refused the call | The run stops with `stop = model`. The message stays pending. No cost. | Fake model error. |
 | A sync marks the only sent evidence of a person gone, with no new mail | No message is pending | Step 0 refreshes the kinds at the start of the next run and applies the changes. | Batch test with zero pending messages. |
 | A `SPAM` label comes or goes on an understood message | The hostile mark is stale | The label write resets the message, so the next run checks it again. | Store test. |
@@ -432,7 +455,12 @@ scripts/local-ci/run.sh
 ## Risks
 
 - A wrong estimate: the person sees a number that is too low. The command
-  says that it is an estimate, and `--max-cost` bounds the spend.
+  says that it is an estimate.
+- A wrong price: the cost limit bounds the cost that Iris computes from the
+  price that the person gave, not the charge of the provider. `iris model
+  set` and `iris understand` say this. A price that is too low lets the
+  provider charge more than the limit. The run row keeps the tokens, so
+  the person can check them against the bill of the provider.
 - Rollback: revert PR 3, then PR 2. The new tables stay (migrations go
   forward only) and do no harm.
 
