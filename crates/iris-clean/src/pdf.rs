@@ -514,6 +514,15 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_in_a_content_stream_ends() {
+        let t = b"BT %c\n(After the comment) Tj % last\nET";
+        assert_eq!(
+            text(&sample(t, false), 100).as_deref(),
+            Some("After the comment")
+        );
+    }
+
+    #[test]
     fn short_text_stays() {
         assert_eq!(
             text(&sample(b"BT (PAID) Tj ET", true), 100).as_deref(),
