@@ -791,3 +791,77 @@ fn latest_keeps_the_milliseconds() {
     assert_eq!(a, "2026-11-15T23:59:59.100Z");
     assert!(a < b, "{a} sorts before {b}");
 }
+
+#[test]
+fn a_gone_update_stays_a_source() {
+    let b = Box_::new("goneupd");
+    let v = validator();
+    let m1 = b.put(M {
+        id: "a",
+        at: NOW - 3 * DAY,
+        ..M::default()
+    });
+    let m2 = b.put(M {
+        id: "b",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    let m3 = b.put(M {
+        id: "c",
+        at: NOW - DAY,
+        ..M::default()
+    });
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW} WHERE id = {m2}"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["messages"], 2);
+    let ids: Vec<&str> = doc["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        [format!("m-{m1}"), format!("m-{m2}"), format!("m-{m3}")]
+    );
+    let id = doc["id"].as_str().unwrap();
+    assert_eq!(
+        b.sources(id),
+        [
+            (m1, "origin".into()),
+            (m2, "update".into()),
+            (m3, "update".into())
+        ]
+    );
+}
+
+#[test]
+fn the_kind_comes_from_the_parsed_from_address() {
+    let b = Box_::new("kindparse");
+    b.kind("news@shop.example", "service");
+    b.kind("bad@evil.example", "hostile");
+    b.put(M {
+        id: "s",
+        thread: "s",
+        from: ("", "Shop <News@Shop.example>"),
+        ..M::default()
+    });
+    assert!(
+        b.talk("s", NOW).is_none(),
+        "service mail with a display name in From"
+    );
+    b.put(M {
+        id: "h",
+        thread: "h",
+        from: ("", "\"Bad\" <bad@evil.example>"),
+        ..M::default()
+    });
+    assert!(
+        b.talk("h", NOW).is_none(),
+        "hostile mail with a display name in From"
+    );
+}
