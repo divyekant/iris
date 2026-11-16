@@ -543,7 +543,8 @@ fn is_delimiter(b: u8) -> bool {
 struct Doc {
     objs: BTreeMap<u32, Vec<u8>>,
     obj_bytes: usize,
-    maps: BTreeMap<u32, CMap>,
+    /// Each code map, with its cost in the map budget.
+    maps: BTreeMap<u32, (CMap, usize)>,
     map_left: usize,
     /// The font number of each content stream and font name.
     font_ids: HashMap<(Option<u32>, Vec<u8>), u16>,
@@ -595,7 +596,9 @@ impl Doc {
         if let Some(old) = self.objs.remove(&num) {
             self.obj_bytes -= old.len() + 64;
         }
-        self.maps.remove(&num);
+        if let Some((_, cost)) = self.maps.remove(&num) {
+            self.map_left += cost;
+        }
     }
 
     /// Keep the objects of one decoded object stream.
@@ -638,9 +641,10 @@ impl Doc {
         if self.map_left < cost {
             return;
         }
+        let before = self.map_left;
         self.map_left -= cost;
         let map = CMap::parse(data, &mut self.map_left);
-        self.maps.insert(num, map);
+        self.maps.insert(num, (map, before - self.map_left));
     }
 
     /// Add `b` to the string buffer, or mark the buffer full.
@@ -856,7 +860,7 @@ impl Doc {
         };
         let two = get(font, b"/Subtype") == Some(Val::Name(b"/Type0"));
         let map = match get(font, b"/ToUnicode") {
-            Some(Val::Ref(n)) => self.maps.get(&n),
+            Some(Val::Ref(n)) => self.maps.get(&n).map(|m| &m.0),
             _ => None,
         };
         match map {
