@@ -117,6 +117,13 @@ fn sender(store: &Store, address: &str, kind: Option<&str>) -> String {
     format!("p-{id}")
 }
 
+/// The stored document of item row `row`.
+fn exec_doc(store: &Store, row: i64) -> String {
+    store
+        .read(|c| Ok(c.query_row("SELECT doc FROM item WHERE id = ?1", [row], |r| r.get(0))?))
+        .unwrap()
+}
+
 /// Add an item with `doc` (merged over the common fields), with message
 /// row `source` as its origin. Gives the row ID.
 fn add_item(store: &Store, form: &str, status: &str, source: i64, created: i64, doc: Value) -> i64 {
@@ -903,33 +910,45 @@ async fn brief_follows_the_queries_of_section_8() {
     }
     assert_eq!(paged, ids(&b["you_owe"]["items"]));
     // A page has the duplicates of its own items only.
-    let (_, p) = get(&store, "/api/brief/you_owe?limit=1").await;
-    assert_eq!(p["duplicates"], Value::Null);
-    assert_eq!(p["next"], c(sooner));
-    let (_, p) = get(
+    let (_, p1) = get(&store, "/api/brief/you_owe?limit=1").await;
+    assert_eq!(ids(&p1["items"]), [c(sooner)]);
+    assert_eq!(p1["duplicates"], Value::Null);
+    let after1 = p1["next"].as_str().unwrap().to_string();
+    let (_, p2) = get(
         &store,
-        &format!("/api/brief/you_owe?limit=1&after={}", c(soon)),
+        &format!("/api/brief/you_owe?limit=1&after={after1}"),
     )
     .await;
-    assert_eq!(p["duplicates"], json!({ c(late): [c(dup)] }));
-    // An item that leaves the section between two pages does not move the
-    // next page: the page after it starts after its place in the order.
+    assert_eq!(ids(&p2["items"]), [c(soon)]);
+    let (_, p3) = get(
+        &store,
+        &format!(
+            "/api/brief/you_owe?limit=1&after={}",
+            p2["next"].as_str().unwrap()
+        ),
+    )
+    .await;
+    assert_eq!(p3["duplicates"], json!({ c(late): [c(dup)] }));
+    // The last item of a page leaves the section, and its sort key changes
+    // (due later than all others). The next page still starts at `soon`.
+    let before = exec_doc(&store, sooner);
     exec(
         &store,
-        "UPDATE item SET status = 'done' WHERE id = ?1",
+        "UPDATE item SET status = 'done',
+           doc = json_set(doc, '$.due', json('{\"date\": \"2027-06-01\"}')) WHERE id = ?1",
         [sooner],
     );
     let (code, p) = get(
         &store,
-        &format!("/api/brief/you_owe?limit=1&after={}", c(sooner)),
+        &format!("/api/brief/you_owe?limit=1&after={after1}"),
     )
     .await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(ids(&p["items"]), [c(soon)]);
     exec(
         &store,
-        "UPDATE item SET status = 'open' WHERE id = ?1",
-        [sooner],
+        "UPDATE item SET status = 'open', doc = ?2 WHERE id = ?1",
+        rusqlite::params![sooner, before],
     );
     assert_eq!(
         get(&store, "/api/brief/records").await.0,
@@ -939,8 +958,12 @@ async fn brief_follows_the_queries_of_section_8() {
         get(&store, "/api/brief/you_owe?limit=0").await.0,
         StatusCode::BAD_REQUEST
     );
-    // The cursor must be the ID of an item of a form of the section.
-    for bad in ["x", "m-1", "c-999999", &v(1)] {
+    // An `after` that is not the `next` of a page of the section is a 400.
+    let feed_next = get(&store, "/api/brief/feed?limit=1").await.1["next"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for bad in ["x", "c-1", "zz", "5b5d", &feed_next] {
         assert_eq!(
             get(&store, &format!("/api/brief/you_owe?after={bad}"))
                 .await
@@ -963,6 +986,13 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(
         get(&store, "/api/messages/m-24").await.1["sender_kind"],
         "person"
+    );
+    // Rows whose addresses differ only in case: a row with no kind is a
+    // stranger and wins over a person, and hostile wins over all.
+    sender(&store, "dANA@contoso.example", None);
+    assert_eq!(
+        get(&store, "/api/messages/m-24").await.1["sender_kind"],
+        "stranger"
     );
     // Two sender rows whose addresses differ only in case: hostile wins.
     sender(&store, "Dana@Contoso.example", Some("hostile"));
