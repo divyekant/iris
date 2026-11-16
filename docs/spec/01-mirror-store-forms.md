@@ -1055,6 +1055,10 @@ changeset (specification 2, section 5.4):
   action changed. So an action in review does not change while the mailbox
   does not change.
 - One run is one write transaction. It reads the IDs of one action at a time.
+- A decision holds. A message that a decided triage action of the account
+  named (`denied`, `applied`, `failed`, `expired`, `cancelled` or `undone`)
+  does not come back in a later proposal, also when its changeset is
+  closed. Only a `replaced` action was not decided.
 
 Failure list of a triage run. Supported input: the account row ID and the
 forms, labels and senders in the store.

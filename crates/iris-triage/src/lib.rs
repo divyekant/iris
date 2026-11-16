@@ -161,8 +161,20 @@ fn each_action(
     mut f: impl FnMut(Rule, &[String]) -> Result<(), Error>,
 ) -> Result<(), Error> {
     for rule in Rule::ALL {
-        let mut st = c.prepare(&format!("{} ORDER BY 1", rule.query()))?;
-        let mut rows = st.query([account])?;
+        // A decision on a message holds: a message that a decided triage
+        // action of the account named does not come back. A replaced action
+        // was not decided, and an open action is still in the proposal.
+        let mut st = c.prepare(&format!(
+            "SELECT id FROM ({}) WHERE id NOT IN (
+               SELECT m.message_id FROM action_message m
+               JOIN changeset_action a ON a.id = m.action_id
+               JOIN changeset s ON s.id = a.changeset_id
+               WHERE s.author_kind = 'triage' AND s.author_session = ?2
+                 AND a.state NOT IN ('proposed', 'in_review', 'approved', 'held', 'replaced'))
+             ORDER BY 1",
+            rule.query()
+        ))?;
+        let mut rows = st.query(params![account, author(account).session])?;
         let mut ids = Vec::with_capacity(CHUNK);
         while let Some(row) = rows.next()? {
             ids.push(format_id(Kind::Message, row.get(0)?));

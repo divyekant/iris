@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use iris_changeset::{decide, ActionId, By, State};
 use iris_observe::Rule;
 use iris_store::{NewMessage, Store};
 use iris_triage::{run, Outcome, CHUNK, WHY};
@@ -325,4 +326,36 @@ fn one_changeset_for_each_account() {
         run(&s, a, NOW + 1).unwrap(),
         Outcome::Same { changeset: ca }
     );
+}
+
+/// A person denies the proposal: the next run with the same inbox does not
+/// propose the same messages again, also when the changeset is closed.
+#[test]
+fn a_denial_holds() {
+    let dir = TempDir::new("deny");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    let Outcome::Submitted {
+        changeset,
+        revision,
+    } = run(&s, a, NOW).unwrap()
+    else {
+        panic!("a proposal");
+    };
+    let id = ActionId {
+        changeset,
+        revision,
+        n: 1,
+    };
+    decide(&s, id, State::Denied, By::Person, Some("keep it"), NOW + 1).unwrap();
+    assert_eq!(run(&s, a, NOW + 2).unwrap(), Outcome::Nothing);
+    // A new feed message is proposed alone.
+    item(&s, a, "feed", "g4");
+    let Outcome::Submitted {
+        changeset: next, ..
+    } = run(&s, a, NOW + 3).unwrap()
+    else {
+        panic!("a proposal");
+    };
+    assert_eq!(actions(&s, next)[0].5, r#"{"messages":["m-4"]}"#);
 }
