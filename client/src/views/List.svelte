@@ -1,6 +1,6 @@
 <!-- A full list, 50 items for each page: all items of one form, or one section of the brief. -->
 <script lang="ts">
-  import { get, type Page } from "../api";
+  import { get, own, type Page } from "../api";
   import { addPage } from "../format";
   import Line from "./Line.svelte";
 
@@ -26,7 +26,7 @@
       duplicates = { ...duplicates, ...nextPage.duplicates };
       next = nextPage.next;
     } catch (e) {
-      error = (e as Error).message;
+      error = own(e);
     } finally {
       busy = false;
     }

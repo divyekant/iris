@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { get, SIGN_IN, SIGN_IN_FAILED, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
+  import { access } from "./access.svelte.ts";
+  import { get, own, type Brief as BriefData, type Item as ItemData, type Message as MessageData, type Page, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -9,6 +10,7 @@
   import Item from "./views/Item.svelte";
   import Mail from "./views/Mail.svelte";
   import Measures from "./views/Measures.svelte";
+  import SignInNotice from "./views/SignInNotice.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
@@ -22,6 +24,10 @@
     addEventListener("hashchange", update);
     return () => removeEventListener("hashchange", update);
   });
+
+  // Read the status one time at start, so a view opened from a link also shows an account that needs sign-in.
+  // svelte-ignore state_referenced_locally
+  if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
 
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
@@ -42,7 +48,13 @@
   </nav>
 </header>
 
+{#snippet failed(error: unknown)}
+  {#if own(error)}<p role="alert">{own(error)}</p>{/if}
+{/snippet}
+
 <main>
+  {#if access.problem}<p class="problem" role="alert">{access.problem}</p>{/if}
+  <SignInNotice />
   {#if route.view === "item" || route.view === "mail" || route.view === "section"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
@@ -52,32 +64,27 @@
         {#if route.view === "setup" || home(status) === "setup"}
           <Setup {status} />
         {:else}
-          {#await get<BriefData>("brief") then brief}<Brief {brief} {status} />{:catch error}<p role="alert">{error.message}</p>{/await}
+          {#await get<BriefData>("brief") then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
         {/if}
-      {:catch error}
-        {#if error.message === SIGN_IN || error.message === SIGN_IN_FAILED}
-          <p role="alert">{error.message}</p>
-        {:else}
-          <p role="alert">Iris cannot reach its engine ({error.message}). Start the engine with <code>iris serve</code>, then reload this page.</p>
-        {/if}
+      {:catch error}{@render failed(error)}
       {/await}
     {:else if route.view === "brief"}
-      {#await Promise.all([get<BriefData>("brief"), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}<p role="alert">{error.message}</p>{/await}
+      {#await Promise.all([get<BriefData>("brief"), get<Status>("status")]) then [brief, status]}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "section"}
       {@const key = route.key}
       {#await get<Page>(`brief/${key}?limit=50`) then page}
         <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" />
-      {:catch error}<p role="alert">{error.message}</p>{/await}
+      {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "list"}
       {@const form = route.form}
-      {#await get<Page>(`items?form=${form}&limit=50`) then page}<List title={TITLES[form]} {page} more={`items?form=${form}&limit=50`} />{:catch error}<p role="alert">{error.message}</p>{/await}
+      {#await get<Page>(`items?form=${form}&limit=50`) then page}<List title={TITLES[form]} {page} more={`items?form=${form}&limit=50`} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "records"}
       {@const type = route.type}
-      {#await get<BriefData>("brief") then brief}<Records counts={brief.records} {type} />{:catch error}<p role="alert">{error.message}</p>{/await}
+      {#await get<BriefData>("brief") then brief}<Records counts={brief.records} {type} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "item"}
-      {#await get<ItemData>(`items/${encodeURIComponent(route.id)}`) then item}<Item {item} />{:catch error}<p role="alert">{error.message}</p>{/await}
+      {#await get<ItemData>(`items/${encodeURIComponent(route.id)}`) then item}<Item {item} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "mail"}
-      {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}<p role="alert">{error.message}</p>{/await}
+      {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "measures"}
       <Measures />
     {/if}
@@ -113,6 +120,11 @@
     background: var(--color-background-surface);
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
+  }
+  .problem {
+    margin: 0 0 var(--space-8);
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
   }
   :global([role="alert"]) {
     border-left: 4px solid var(--color-error);

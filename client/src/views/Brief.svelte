@@ -9,7 +9,6 @@
   import { greeting, liveCode, nextDay, party, partyKey, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
-  import SignInNotice from "./SignInNotice.svelte";
 
   let {
     brief: firstBrief,
@@ -85,7 +84,6 @@
   <h1>{summary(brief)}</h1>
 </div>
 
-<SignInNotice accounts={status?.accounts ?? []} />
 
 {#if copying}
   <div class="copying" role="status">

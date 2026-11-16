@@ -1,3 +1,4 @@
+import { access } from "./access.svelte.ts";
 // The client reads the local API of the engine (crates/iris-api/README.md).
 // The form documents follow docs/spec/schema. The client only reads.
 
@@ -104,6 +105,19 @@ export type Message = Summary & {
 
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
+export const UNREACHABLE = "Iris cannot reach its engine. Start it with iris serve, then open the sign-in address that it prints.";
+
+/** The text that a view shows for an error: "" when App.svelte shows it already as the access state. */
+export function own(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return text === access.problem ? "" : text;
+}
+
+/** Set the access state that App.svelte shows above each view, and throw it. */
+function fail(problem: string): never {
+  access.problem = problem;
+  throw new Error(problem);
+}
 
 // Spec 2 section 8.6 and crates/iris-api/README.md: the API gives a token one
 // time for the code of the sign-in address. The token stays in the storage of
@@ -150,22 +164,23 @@ export function signIn(
   if (loc && inAddress) quiet(() => hist?.replaceState(null, "", `${loc.pathname}${loc.search}#/`));
   // A bad escape (for example `%`) gives undefined. This function must not throw: it runs at import.
   const fromAddress = inAddress ? quiet(() => decodeURIComponent(inAddress)) : undefined;
-  if (inAddress && !fromAddress) return (ready = Promise.reject(new Error(SIGN_IN_FAILED)));
+  if (inAddress && !fromAddress) return (ready = new Promise<void>(() => fail(SIGN_IN_FAILED)));
   const code = fromAddress ?? quiet(() => store?.getItem(CODE));
   if (!loc || !code) return Promise.resolve();
   if (fromAddress) quiet(() => store?.setItem(CODE, fromAddress));
   ready = (async () => {
-    // A throw here (no answer) keeps the code for the next try.
+    // No answer keeps the code for the next try (a reload).
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ code }),
-    });
+    }).catch(() => fail(UNREACHABLE));
     // The engine answered: it used the code or refused it. After a server error, keep it for a reload.
     if (response.status < 500) quiet(() => store?.removeItem(CODE));
     const body = await response.json().catch(() => null);
-    if (!response.ok || typeof body?.token !== "string") throw new Error(SIGN_IN_FAILED);
+    if (!response.ok || typeof body?.token !== "string") fail(SIGN_IN_FAILED);
     token = body.token;
+    access.problem = "";
     // With no storage, the token works until the page closes.
     quiet(() => store?.setItem(KEY, body.token));
   })();
@@ -183,12 +198,20 @@ export function newest(): () => () => boolean {
   };
 }
 
+// Each request of each view goes through here, so the access state covers every path.
 async function call(path: string, accept: string): Promise<Response> {
-  await ready;
+  // A failed sign-in does not stop a token that this page has from an earlier sign-in.
+  const signInError = await ready.then(() => null, (e: Error) => e);
   const headers: Record<string, string> = { accept };
   if (token) headers.authorization = `Bearer ${token}`;
-  const response = await fetch(`/api/${path}`, { headers });
-  if (response.status === 401) throw new Error(SIGN_IN);
+  const response = await fetch(`/api/${path}`, { headers }).catch(() => fail(UNREACHABLE));
+  if (response.status === 401) {
+    // The engine does not know the token (for example after a restart of iris serve).
+    token = null;
+    quiet(() => session()?.removeItem(KEY));
+    fail(signInError?.message ?? SIGN_IN);
+  }
+  access.problem = "";
   return response;
 }
 
@@ -197,6 +220,8 @@ export async function get<T>(path: string): Promise<T> {
   const response = await call(path, "application/json");
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(body?.error ?? `The engine answered ${response.status}.`);
+  // Spec 1 section 4.7: Google refused the refresh token of these accounts, so their sync stopped.
+  if (path === "status") access.locked = ((body as Status).accounts ?? []).filter((a) => a.state === "needs_sign_in").map((a) => a.address);
   return body as T;
 }
 

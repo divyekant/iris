@@ -3,7 +3,7 @@
   client never renders the HTML of a mail. Each open adds 1 to the open count (R1-22).
 -->
 <script lang="ts">
-  import { download, type Address, type Message } from "../api";
+  import { download, own, type Address, type Message } from "../api";
   import { initials, when } from "../format";
   import { countOpen } from "../opens";
   import { href } from "../route";
@@ -15,7 +15,7 @@
   });
 
   let failed = $state("");
-  const original = () => download(message.id).then(() => (failed = ""), (e: Error) => (failed = e.message));
+  const original = () => download(message.id).then(() => (failed = ""), (e: unknown) => (failed = own(e)));
   const address = (a: Address) => (a.name && a.address ? `${a.name} <${a.address}>` : a.name || a.address || "Unknown sender");
 </script>
 

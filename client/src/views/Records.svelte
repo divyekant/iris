@@ -1,6 +1,6 @@
 <!-- Records: one table for each type, 50 records at a time, with "Show more" for the next page. -->
 <script lang="ts">
-  import { get, newest, type Page } from "../api";
+  import { get, own, newest, type Page } from "../api";
   import { addPage } from "../format";
   import RecordTable from "./RecordTable.svelte";
 
@@ -32,7 +32,7 @@
       next = result.next;
       loaded = name;
     } catch (e) {
-      if (current()) error = (e as Error).message;
+      if (current()) error = own(e);
     } finally {
       if (current()) busy = false;
     }
