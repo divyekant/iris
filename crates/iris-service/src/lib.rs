@@ -193,8 +193,7 @@ pub fn install(program: &Path) -> io::Result<PathBuf> {
     match system {
         System::Launchd => {
             let domain = format!("gui/{}", uid()?);
-            // Stop the old agent first. This fails if none is loaded.
-            let _ = output("launchctl", &["bootout", &format!("{domain}/{LABEL}")]);
+            stop_agent(&domain)?;
             run("launchctl", &["bootstrap", &domain, path_str(&file)?])?;
         }
         System::Systemd => {
@@ -217,14 +216,14 @@ pub fn remove() -> io::Result<Option<PathBuf>> {
     }
     match system {
         System::Launchd => {
-            let _ = output(
-                "launchctl",
-                &["bootout", &format!("gui/{}/{LABEL}", uid()?)],
-            );
+            // If the stop fails, keep the file, so that a second remove can try again.
+            stop_agent(&format!("gui/{}", uid()?))?;
             std::fs::remove_file(&file)?;
         }
         System::Systemd => {
-            let _ = output("systemctl", &["--user", "disable", "--now", UNIT]);
+            // If the stop fails, keep the file, so that a second remove can try again.
+            // The unit file exists, so a failure here is a real failure.
+            run("systemctl", &["--user", "disable", "--now", UNIT])?;
             std::fs::remove_file(&file)?;
             run("systemctl", &["--user", "daemon-reload"])?;
         }
@@ -273,6 +272,17 @@ fn path_str(path: &Path) -> io::Result<&str> {
 fn uid() -> io::Result<String> {
     let out = run("id", &["-u"])?;
     Ok(out.trim().to_string())
+}
+
+/// Stop the launchd agent in `domain` if it is loaded. A failed stop of a
+/// loaded agent is an error.
+fn stop_agent(domain: &str) -> io::Result<()> {
+    let target = format!("{domain}/{LABEL}");
+    // `launchctl print` fails only when the agent is not loaded.
+    if output("launchctl", &["print", &target])?.status.success() {
+        run("launchctl", &["bootout", &target])?;
+    }
+    Ok(())
 }
 
 fn output(program: &str, args: &[&str]) -> io::Result<std::process::Output> {
