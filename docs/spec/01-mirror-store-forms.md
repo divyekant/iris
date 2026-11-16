@@ -722,14 +722,14 @@ The `hostile` column of the message holds each mark that applies:
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
 | `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `link` | A link in the clean text shows a web address with the host `S`, and goes to an `http` or `https` URL with the host `T` of another registrable domain. DMARC does not pass for the domain of `From`, or `T` is a near copy of `S`. If DMARC passes for the domain of `From` and that domain has the registrable domain of `S`, the link is not deceptive: the sender owns the shown domain. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
-A message with the label `SENT` is your mail. It never gets the marks `dmarc`
-and `spoof`, because these marks test the `From` header of mail that you
-receive.
+A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
+`spoof` and `link`, because these marks test mail that you receive.
 
-The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
+The engine computes the marks `dmarc`, `spoof`, `link` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding
 again on the message (section 7.1).

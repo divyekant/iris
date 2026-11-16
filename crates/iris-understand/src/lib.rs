@@ -13,6 +13,7 @@ pub mod batch;
 pub mod budget;
 pub mod correct;
 pub mod head;
+pub mod link;
 pub mod prompt;
 pub mod rules;
 mod schema;
@@ -65,6 +66,9 @@ impl Kind {
 pub enum Mark {
     Dmarc,
     Spoof,
+    /// A link that shows one web address and goes to another owner
+    /// ([`link::deceptive`]).
+    Link,
     Spam,
     Phishing,
 }
@@ -74,6 +78,7 @@ impl Mark {
         match self {
             Mark::Dmarc => "dmarc",
             Mark::Spoof => "spoof",
+            Mark::Link => "link",
             Mark::Spam => "spam",
             Mark::Phishing => "phishing",
         }
@@ -169,7 +174,7 @@ impl Analysis {
 }
 
 /// Steps 1 to 3: parse the headers, make the clean text, compute the hostile
-/// marks `dmarc`, `spoof` and `spam`.
+/// marks `dmarc`, `spoof`, `link` and `spam`.
 pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
     let head = Head::parse(raw);
     let mut text = Text::of(raw);
@@ -217,6 +222,9 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
                 marks.push(Mark::Spoof);
             }
         }
+    }
+    if !sent && link::deceptive(&text.text, from_domain, dmarc == Some("pass")) {
+        marks.push(Mark::Link);
     }
     if cx.labels.iter().any(|l| l == "SPAM") {
         marks.push(Mark::Spam);

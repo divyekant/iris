@@ -668,6 +668,12 @@ fn suffix_len(labels: &[&str]) -> usize {
     }
 }
 
+/// The registrable domain of `d`: the public suffix and one label more.
+/// Two domains with the same registrable domain have one owner.
+pub fn registrable(d: &str) -> String {
+    base(d).join(".")
+}
+
 /// The registrable domain: the suffix and one label more.
 fn base(d: &str) -> Vec<&str> {
     let l: Vec<&str> = d.split('.').collect();
