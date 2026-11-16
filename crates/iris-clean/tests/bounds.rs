@@ -120,6 +120,31 @@ fn memory_and_time_stay_bounded() {
     assert_eq!(c.attachments[0].text.as_deref(), Some("Hello raw words"));
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
+    // A PDF stream of 4 MiB with many short text lines.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let stream = "BT (ab) Tj T* (cd) Tj ET\n".repeat(4 * 1024 * 1024 / 25);
+    let pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+        stream.len()
+    );
+    drop(stream);
+    for chunk in pdf.as_bytes().chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, c) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with many short lines)");
+    let t = c.attachments[0].text.as_deref().unwrap_or_default();
+    assert!(
+        t.len() <= iris_clean::ATTACHMENT_TEXT_LIMIT + 64,
+        "{}",
+        t.len()
+    );
+    assert!(peak < 10 * 1024 * 1024, "peak {peak}");
+
     // Base64 with a few characters and very much white space.
     let mut raw = message(1000, 0);
     raw.truncate(raw.len() - b"--m--\r\n".len());

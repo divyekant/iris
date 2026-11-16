@@ -75,12 +75,15 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
             break;
         }
     }
-    let lines: Vec<&str> = out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let text = lines.join("\n");
+    // Join the lines that are not empty, without a list of all lines.
+    let mut text = String::with_capacity(out.len());
+    for l in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(l);
+    }
+    drop(out);
     readable(&text).then_some(text)
 }
 
@@ -163,6 +166,8 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
     let mut strings: Vec<Vec<u8>> = Vec::new();
     let mut array: Option<Vec<u8>> = None;
     let mut last_num = 0.0f64;
+    // A viewer shows text only inside a text object (`BT` to `ET`).
+    let mut in_text = false;
     let mut i = 0;
     while i < c.len() && out.len() < limit {
         match c[i] {
@@ -225,10 +230,11 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                     i += 1;
                 }
                 match &c[s..i] {
-                    b"Tj" | b"TJ" => emit(out, &mut strings),
-                    b"'" | b"\"" => {
+                    b"BT" => in_text = true,
+                    b"Tj" | b"TJ" if in_text => emit(out, &mut strings, limit),
+                    b"'" | b"\"" if in_text => {
                         newline(out);
-                        emit(out, &mut strings);
+                        emit(out, &mut strings, limit);
                     }
                     b"Td" | b"TD" => {
                         if last_num != 0.0 {
@@ -237,7 +243,11 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                             out.push(' ');
                         }
                     }
-                    b"T*" | b"Tm" | b"ET" => newline(out),
+                    b"ET" => {
+                        in_text = false;
+                        newline(out);
+                    }
+                    b"T*" | b"Tm" => newline(out),
                     _ => {}
                 }
                 strings.clear();
@@ -247,9 +257,12 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
     }
 }
 
-fn emit(out: &mut String, strings: &mut Vec<Vec<u8>>) {
+/// Add the strings to `out`, which never grows past `limit` bytes.
+fn emit(out: &mut String, strings: &mut Vec<Vec<u8>>, limit: usize) {
     for s in strings.drain(..) {
-        out.push_str(&encoding_rs::WINDOWS_1252.decode_without_bom_handling(&s).0);
+        let t = encoding_rs::WINDOWS_1252.decode_without_bom_handling(&s).0;
+        let room = limit.saturating_sub(out.len());
+        out.push_str(&t[..crate::mime::floor_char(&t, room)]);
     }
 }
 
@@ -403,6 +416,15 @@ mod tests {
         assert_eq!(declared_len(b"<< /Length 5 0 R >>"), None);
         assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), None);
         assert_eq!(declared_len(b"<< /Length 31 >>"), Some(31));
+    }
+
+    #[test]
+    fn text_outside_a_text_object_goes_out() {
+        let t = b"(Hidden instructions) Tj BT (Visible words) Tj ET (After) Tj";
+        assert_eq!(
+            text(&sample(t, false), 100).as_deref(),
+            Some("Visible words")
+        );
     }
 
     #[test]
