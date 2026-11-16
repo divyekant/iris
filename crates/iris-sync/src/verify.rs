@@ -80,6 +80,10 @@ pub struct Report {
     pub skipped: u64,
 }
 
+/// The prefix of a `sync_seen` row that marks a listed message in another
+/// thread than in the mirror.
+pub const THREAD_MARK: &str = "thread:";
+
 /// The most differences that a [`Report`] lists, so that memory stays flat
 /// for a mirror with many differences (specification 1, section 9).
 pub const LISTED: usize = 1_000;
@@ -146,7 +150,7 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
         tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
         Ok(())
     })?;
-    let (other_thread, more_threads) = list_pages(store, gmail, account, token, &[], Mark::Seen)?;
+    list_pages(store, gmail, account, token, &[], Mark::Seen)?;
     let ids: Vec<String> = before.iter().map(|l| l.id.clone()).collect();
     label_sets(store, gmail, account, token, &ids)?;
     let after = gmail.labels(token)?;
@@ -201,22 +205,27 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
             report.push(Difference::ExtraLabel(id.clone()));
         }
     }
-    for id in other_thread.into_iter().filter(|id| !changed.contains(id)) {
-        report.push(Difference::Thread(id));
-    }
-    // Past the limit, the IDs are not kept, so the messages that changed
-    // during verify cannot be left out. So many thread differences mean a
-    // broken mirror: count them, and the full resync corrects them.
-    if more_threads > 0 {
-        report.total += more_threads;
-        report.resync = true;
-    }
     let keep = |id: &String| !changed.contains(id);
+    each_page(
+        store,
+        // The literal is THREAD_MARK.
+        "SELECT substr(message_id, 8), '', '' FROM sync_seen
+         WHERE account_id = ?1 AND message_id > 'thread:' || ?2 AND message_id LIKE 'thread:%'
+         ORDER BY message_id LIMIT ?3",
+        account,
+        |id, _, _| {
+            if keep(&id) {
+                report.push(Difference::Thread(id));
+            }
+            Ok(())
+        },
+    )?;
     // Gmail has the message: a mirror row that is not gone, or no row.
     each_page(
         store,
         "SELECT s.message_id, '', '' FROM sync_seen s
-         WHERE s.account_id = ?1 AND s.message_id > ?2 AND NOT EXISTS (SELECT 1 FROM message m
+         WHERE s.account_id = ?1 AND s.message_id > ?2 AND s.message_id NOT LIKE 'thread:%'
+           AND NOT EXISTS (SELECT 1 FROM message m
            WHERE m.account_id = s.account_id AND m.provider_id = s.message_id AND m.gone_at IS NULL)
          ORDER BY s.message_id LIMIT ?3",
         account,

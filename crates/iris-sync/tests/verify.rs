@@ -333,3 +333,32 @@ fn many_thread_differences_are_counted_with_flat_memory() {
     assert_eq!(r.differences.len(), iris_sync::LISTED);
     assert!(r.resync);
 }
+
+#[test]
+fn a_changed_message_past_many_thread_differences_is_left_out() {
+    let n = iris_sync::LISTED + 50;
+    let (fake, store, account) = synced("v-threads-changed", 36, n);
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO thread(account_id, provider_id) SELECT id, 'wrong' FROM account",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE message SET thread_id = (SELECT id FROM thread WHERE provider_id = 'wrong')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // Message 0 is the oldest, so the newest-first list names it last.
+    let at_fake = fake.clone();
+    let gmail = client(hook_proxy(fake.addr(), "labelIds=", move || {
+        assert!(at_fake.modify_labels(&FakeGmail::id_of(0), &["STARRED"], &[]));
+    }));
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(r.total, n as u64 - 1);
+    assert!(!r
+        .differences
+        .contains(&Difference::Thread(FakeGmail::id_of(0))));
+}
