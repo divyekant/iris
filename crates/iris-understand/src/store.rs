@@ -122,15 +122,22 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 
     let sent = row.labels.iter().any(|l| l == "SENT");
     let draft = row.labels.iter().any(|l| l == "DRAFT");
-    let from = iris_from(&raw);
+    let head = crate::Head::parse(&raw);
     let kind = if sent {
         Kind::SelfOwner
     } else {
-        sender_kind(store, from.as_deref())?
+        sender_kind(store, head.from_addr.as_deref())?
     };
-    let known = |name: &str| known_person(store, name);
+    // The spoof check needs this lookup: a read error stops understanding
+    // before any model call.
+    let known_list = match &head.from_name {
+        Some(n) => known_person(store, n)?,
+        None => Vec::new(),
+    };
+    let known = |_: &str| known_list.clone();
     let existing = pinned(store, message)?;
     let earlier = thread_context(store, message, row.thread, row.internal_date)?;
+    let same = same_sender(store, message, row.thread, row.internal_date, &head)?;
     let cx = Context {
         me: &row.me,
         kind,
@@ -140,6 +147,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         known_person: &known,
         existing: &existing,
         thread: &earlier,
+        same_sender: &same,
     };
     let mut a = analyze(&raw, &cx);
     drop(raw);
@@ -309,10 +317,6 @@ fn pinned(store: &Store, message: i64) -> Result<Vec<Value>> {
     })?)
 }
 
-fn iris_from(raw: &[u8]) -> Option<String> {
-    crate::Head::parse(raw).from_addr
-}
-
 /// The kind of the sender (step 3).
 // shortcut: reads the kind that iris-senders wrote, a missing row or kind is
 // a stranger. Call iris_senders::decide(tx, message, raw, now) here when
@@ -332,20 +336,49 @@ fn sender_kind(store: &Store, from: Option<&str>) -> Result<Kind> {
     Ok(kind.flatten().map_or(Kind::Stranger, |k| Kind::parse(&k)))
 }
 
-/// The addresses of the known persons with this display name. A read error
-/// gives no match.
-fn known_person(store: &Store, name: &str) -> Vec<String> {
-    store
-        .read(|c| {
-            let mut st = c.prepare_cached(
-                "SELECT address FROM sender WHERE kind = 'person' AND name = ?1 COLLATE NOCASE",
-            )?;
-            let v = st
-                .query_map([name], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(v)
-        })
-        .unwrap_or_default()
+/// The addresses of the known persons with this display name.
+fn known_person(store: &Store, name: &str) -> Result<Vec<String>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT address FROM sender WHERE kind = 'person' AND name = ?1 COLLATE NOCASE",
+        )?;
+        let v = st
+            .query_map([name], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(v)
+    })?)
+}
+
+/// The most earlier messages of the same sender for the repeated end block.
+const SAME_SENDER_MESSAGES: i64 = 5;
+
+/// The clean texts of the earlier messages of the same sender in the thread.
+fn same_sender(
+    store: &Store,
+    message: i64,
+    thread: i64,
+    internal_date: Option<i64>,
+    head: &crate::Head,
+) -> Result<Vec<String>> {
+    let (Some(date), Some(from)) = (internal_date, head.from_addr.as_deref()) else {
+        return Ok(Vec::new());
+    };
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT b.text FROM message m JOIN body b ON b.message_id = m.id
+             JOIN header h ON h.message_id = m.id
+             WHERE m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
+               AND m.internal_date < ?3 AND h.from_addr = ?4
+             ORDER BY m.internal_date DESC, m.id DESC LIMIT ?5",
+        )?;
+        let v = st
+            .query_map(
+                params![thread, message, date, from, SAME_SENDER_MESSAGES],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(v)
+    })?)
 }
 
 /// The most earlier messages of the thread that the model gets.

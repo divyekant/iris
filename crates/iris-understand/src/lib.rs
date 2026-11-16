@@ -103,6 +103,10 @@ pub struct Context<'a> {
     /// The earlier messages of the thread, oldest first, as short text
     /// blocks. The model gets them as context (section 7.4).
     pub thread: &'a [String],
+    /// The clean texts of earlier messages of the same sender in the thread.
+    /// An end block that the text shares with one of them goes out, for
+    /// example a signature without a `-- ` line (section 7.2).
+    pub same_sender: &'a [String],
 }
 
 /// The clean text of one message: the only use of `iris-clean`.
@@ -172,7 +176,11 @@ impl Analysis {
 /// marks `dmarc`, `spoof` and `spam`.
 pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
     let head = Head::parse(raw);
-    let text = Text::of(raw);
+    let mut text = Text::of(raw);
+    if !cx.same_sender.is_empty() {
+        let earlier: Vec<&str> = cx.same_sender.iter().map(String::as_str).collect();
+        text.text = iris_clean::remove_repeated_end(&text.text, &earlier);
+    }
     let mut marks = Vec::new();
     let from = head.from_addr.as_deref().unwrap_or("");
     let from_domain = head::domain(from);

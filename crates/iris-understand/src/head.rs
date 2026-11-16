@@ -254,16 +254,18 @@ fn strip_comments(v: &str) -> String {
 
 /// True if the message has a `text/calendar` MIME entity with the method
 /// `REQUEST`: a `method=REQUEST` parameter of its `Content-Type`, or a
-/// `METHOD:REQUEST` line in its body. Only the boundaries that a
-/// `Content-Type` header declares start a new entity, so calendar words in
-/// a plain-text body do not count.
-// shortcut: a base64 calendar body with no method parameter is not found;
-// the model still sees the attachment name and type.
+/// `METHOD:REQUEST` line in its body (also a base64 body). Only the
+/// boundaries that a `Content-Type` header declares start a new entity, so
+/// calendar words in a plain-text body do not count.
 fn invitation(raw: &[u8]) -> bool {
     let mut boundaries: Vec<Vec<u8>> = Vec::new();
     let (mut in_head, mut cal) = (true, false);
     // The Content-Type value of the header block that the loop reads now.
     let mut ct: Option<Vec<u8>> = None;
+    // The entity has `Content-Transfer-Encoding: base64`.
+    let (mut b64_head, mut b64) = (false, false);
+    // The base64 text of a calendar body, at most CALENDAR_B64 bytes.
+    let mut buf: Vec<u8> = Vec::new();
     let end_header = |ct: &mut Option<Vec<u8>>, cal: &mut bool, b: &mut Vec<Vec<u8>>| -> bool {
         let Some(v) = ct.take() else { return false };
         let low = v.to_ascii_lowercase();
@@ -275,6 +277,11 @@ fn invitation(raw: &[u8]) -> bool {
         *cal = contains(&low, b"text/calendar");
         *cal && param(&low, &v, b"method=").is_some_and(|m| m.eq_ignore_ascii_case(b"request"))
     };
+    let request = |buf: &[u8]| {
+        base64(buf)
+            .split(|&c| c == b'\n')
+            .any(|l| l.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST"))
+    };
     for line in raw.split(|&c| c == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         let is_boundary = line.starts_with(b"--")
@@ -283,10 +290,11 @@ fn invitation(raw: &[u8]) -> bool {
                 rest.starts_with(bd) && matches!(&rest[bd.len()..], b"" | b"--")
             });
         if is_boundary {
-            if end_header(&mut ct, &mut cal, &mut boundaries) {
+            if end_header(&mut ct, &mut cal, &mut boundaries) || request(&buf) {
                 return true;
             }
-            (in_head, cal) = (true, false);
+            (in_head, cal, b64_head, b64) = (true, false, false, false);
+            buf.clear();
             continue;
         }
         if in_head {
@@ -295,6 +303,7 @@ fn invitation(raw: &[u8]) -> bool {
                 if end_header(&mut ct, &mut cal, &mut boundaries) {
                     return true;
                 }
+                b64 = cal && b64_head;
             } else if line.starts_with(b" ") || line.starts_with(b"\t") {
                 if let Some(v) = ct.as_mut() {
                     v.extend_from_slice(line);
@@ -306,12 +315,49 @@ fn invitation(raw: &[u8]) -> bool {
                 if line.len() > 13 && line[..13].eq_ignore_ascii_case(b"content-type:") {
                     ct = Some(line[13..].to_vec());
                 }
+                let cte = b"content-transfer-encoding:";
+                if line.len() > cte.len() && line[..cte.len()].eq_ignore_ascii_case(cte) {
+                    b64_head = line[cte.len()..]
+                        .trim_ascii()
+                        .eq_ignore_ascii_case(b"base64");
+                }
+            }
+        } else if b64 {
+            if buf.len() + line.len() <= CALENDAR_B64 {
+                buf.extend_from_slice(line.trim_ascii());
             }
         } else if cal && line.trim_ascii().eq_ignore_ascii_case(b"METHOD:REQUEST") {
             return true;
         }
     }
-    false
+    request(&buf)
+}
+
+/// The most base64 bytes of one calendar body that the scan decodes. The
+/// METHOD line comes near the start of a calendar.
+const CALENDAR_B64: usize = 64 * 1024;
+
+/// Decode base64 and skip the bytes that are not base64.
+fn base64(src: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(src.len() / 4 * 3);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &c in src {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -441,5 +487,13 @@ Content-Type: text/calendar;\r\n charset=utf-8\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:
         let ok = String::from_utf8_lossy(mixed).replace("METHOD:CANCEL", "METHOD:REQUEST");
         assert!(invitation(ok.as_bytes()));
         assert_eq!(date("1 Jan 9223372036854775807 00:00 +0000"), None);
+    }
+}
+
+#[cfg(test)]
+mod base64_tests {
+    #[test]
+    fn decodes_with_line_breaks_and_padding() {
+        assert_eq!(super::base64(b"TUVU\r\nSE9E\nOg=="), b"METHOD:");
     }
 }

@@ -138,10 +138,18 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
         "commitment" => {
             put("status", json!("open"));
             let you_owe = src.get("direction").and_then(Value::as_str) == Some("you_owe");
-            let (owner, other) = if you_owe {
-                (json!({"kind": "self"}), sender)
+            // In sent mail the sender is the owner: the other party is the
+            // first recipient. With no recipient, the item is not valid.
+            let other = if cx.kind == crate::Kind::SelfOwner {
+                let to = a.head.to.iter().chain(&a.head.cc).next()?;
+                json!({"kind": "sender", "address": to})
             } else {
-                (sender, json!({"kind": "self"}))
+                sender
+            };
+            let (owner, other) = if you_owe {
+                (json!({"kind": "self"}), other)
+            } else {
+                (other, json!({"kind": "self"}))
             };
             put("owner", owner);
             put("counterparty", other);

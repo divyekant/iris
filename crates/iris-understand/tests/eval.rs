@@ -152,6 +152,7 @@ fn score(mb: &Mailbox, indices: &[usize], oracle: bool) -> Report {
             known_person: &no_known,
             existing: &[],
             thread: &[],
+            same_sender: &[],
         };
         let a = analyze(raw, &cx);
         let d = decide(&a, &cx, Some(&model)).unwrap();
@@ -284,6 +285,7 @@ fn hand_written_rules() {
             known_person: &no_known,
             existing: &[],
             thread: &[],
+            same_sender: &[],
         };
         let a = analyze(raw.as_bytes(), &cx);
         let d = decide(&a, &cx, Some(&none)).unwrap();
