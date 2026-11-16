@@ -68,6 +68,10 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 | Access notice | `App.svelte` | Above every view: why the API cannot answer now (no sign-in, a used sign-in address, or no engine). It goes away at the next good answer. It uses the `warning` border. |
 | Setup link | `App.svelte` | Above each view other than setup and the brief, when Iris has no account: a link to setup. The Brief link opens setup in that case. It uses the `warning` border. |
 | Sign-in notice | `SignInNotice.svelte` | Above every view: the address of each account that needs sign-in, from the last status answer, and the command that signs in again. It uses the `warning` border. |
+| Policy notice | `PolicyNotice.svelte` | Above the brief: the policy file changed and waits for a confirmation (`warning` border), or it has an error (`error` border). A link opens the rules. |
+| Mode choice | `Rules.svelte` | Two cards side by side (one column on a phone), each a radio button. The chosen card has a primary border and a ring with a primary center, the mark of Iris. A change asks for one more click on the primary button. |
+| Rule line | `Rules.svelte` | The name, the verbs as words, each condition as a chip, and the rule number and line in small muted text. The Remove button stays quiet until the pointer or the focus is on the line. A remove asks one question in place, with no dialog. |
+| Change panel | `Rules.svelte` | A raised panel with a primary border on the left: each change of the file, with a dot of color and a word (New `success`, Changed `warning`, Removed `error`), the file text behind "Show the file", and Confirm and Discard. An error uses the `error` border. |
 
 `client/test/tokens.test.mjs` checks each palette: the count of colors, the
 contrast of each text color, of `primary` and of each semantic color on each
