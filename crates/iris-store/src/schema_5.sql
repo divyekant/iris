@@ -59,6 +59,9 @@ CREATE TABLE changeset_action (
   CHECK (json_valid(targets) AND json_valid(args) AND json_valid(flags)),
   -- An allow rule or a person approves (section 5.2).
   CHECK (state IS NOT 'approved' OR coalesce(decided_by, '') IN ('rule', 'person')),
+  -- A person approves or denies, but does not send an action to review.
+  CHECK (state IS NOT 'in_review' OR coalesce(decided_by, '') IN ('rule', 'policy', 'limit',
+    'engine')),
   -- A rule decision names its rule; only a rule decision names a rule.
   CHECK ((coalesce(decided_by, '') = 'rule') = (rule IS NOT NULL)),
   CHECK ((rule IS NULL) = (policy IS NULL)),
@@ -126,9 +129,10 @@ END;
 
 -- An action enters only the draft revision of its changeset, with no state.
 -- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, so no insert
--- replaces an action.
+-- replaces an action. A draft action has no decision.
 CREATE TRIGGER action_insert BEFORE INSERT ON changeset_action
-WHEN new.state IS NOT NULL
+WHEN new.state IS NOT NULL OR new.decided_by IS NOT NULL OR new.rule IS NOT NULL
+  OR new.policy IS NOT NULL OR new.reason IS NOT NULL OR new.decided_at IS NOT NULL
   OR EXISTS (SELECT 1 FROM changeset_action WHERE id = new.id
              OR (changeset_id = new.changeset_id AND revision = new.revision
                  AND n = new.n))
@@ -150,6 +154,13 @@ END;
 CREATE TRIGGER action_state BEFORE UPDATE OF state ON changeset_action
 WHEN NOT EXISTS (SELECT 1 FROM action_transition
                  WHERE from_state IS old.state AND to_state = new.state)
+  -- Submit proposes an action with no decision.
+  OR (new.state = 'proposed'
+      AND (new.decided_by IS NOT NULL OR new.rule IS NOT NULL OR new.policy IS NOT NULL
+           OR new.reason IS NOT NULL OR new.decided_at IS NOT NULL))
+  -- A withdrawn changeset applies nothing more (section 5.5).
+  OR (new.state IN ('in_review', 'approved', 'applied', 'failed')
+      AND (SELECT state FROM changeset WHERE id = new.changeset_id) = 'withdrawn')
   OR (old.state IS NULL AND new.state <> 'cancelled'
       AND (new.hash IS NULL OR new.submitted_at IS NULL
            OR NOT EXISTS (SELECT 1 FROM changeset WHERE id = new.changeset_id
@@ -182,6 +193,23 @@ WHEN NOT EXISTS (SELECT 1 FROM action_transition
                           WHERE id = new.rule AND removed_at IS NULL)))
 BEGIN
   SELECT RAISE(ABORT, 'iris: this state change of an action is not allowed');
+END;
+
+-- A withdraw cancels each open action and each draft action, in the same
+-- write (section 5.5). Release 3 adds held, with its moves. A withdrawn changeset stays withdrawn.
+CREATE TRIGGER changeset_withdraw AFTER UPDATE OF state ON changeset
+WHEN new.state = 'withdrawn' AND old.state <> 'withdrawn'
+BEGIN
+  UPDATE changeset_action SET state = 'cancelled', decided_by = 'author', rule = NULL,
+    policy = NULL, reason = NULL, decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
+  WHERE changeset_id = new.id
+    AND (state IS NULL OR state IN ('proposed', 'in_review', 'approved'));
+END;
+
+CREATE TRIGGER changeset_withdrawn BEFORE UPDATE OF state ON changeset
+WHEN old.state = 'withdrawn' AND new.state <> 'withdrawn'
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a withdrawn changeset stays withdrawn');
 END;
 
 -- A changeset is 'open' while one or more actions are open, else 'closed'.

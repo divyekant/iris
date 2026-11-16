@@ -166,21 +166,30 @@ fn only_the_moves_of_section_5_2() {
                          UPDATE changeset SET submitted_at = 0;",
                     )?;
                 }
-                // The event of cancelled: a withdraw.
+                // A withdraw cancels the action in the same write, or leaves it.
                 if to == "cancelled" {
                     tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
+                    let now: Option<String> =
+                        tx.query_row("SELECT state FROM changeset_action", [], |r| r.get(0))?;
+                    return Ok(from != Some("cancelled") && now.as_deref() == Some("cancelled"));
                 }
                 // 14 days after the submit: the event of expired. From a
                 // draft, submit sets the hash and the time with the state.
-                let sql = if from.is_none() {
-                    "UPDATE changeset_action SET state = ?1, hash = 'h', submitted_at = 0,
-                       decided_by = 'rule', rule = 1, policy = 1, reason = 'r',
-                       decided_at = 1209600000 WHERE changeset_id = ?2"
+                // Submit proposes with no decision.
+                let decision = if to == "proposed" {
+                    "decided_by = NULL, rule = NULL, policy = NULL, reason = NULL, decided_at = NULL"
                 } else {
-                    "UPDATE changeset_action SET state = ?1, decided_by = 'rule', rule = 1,
-                       policy = 1, reason = 'r', decided_at = 1209600000 WHERE changeset_id = ?2"
+                    "decided_by = 'rule', rule = 1, policy = 1, reason = 'r', decided_at = 1209600000"
                 };
-                Ok(tx.execute(sql, rusqlite::params![to, cs]).is_ok())
+                let hash = if from.is_none() {
+                    ", hash = 'h', submitted_at = 0"
+                } else {
+                    ""
+                };
+                let sql = format!(
+                    "UPDATE changeset_action SET state = ?1, {decision}{hash} WHERE changeset_id = ?2"
+                );
+                Ok(tx.execute(&sql, rusqlite::params![to, cs]).is_ok())
             });
             let expect = allowed(from).contains(&to);
             assert_eq!(r.unwrap(), expect, "{from:?} -> {to:?}");
@@ -328,6 +337,91 @@ fn a_submitted_revision_stays_submitted() {
         .unwrap();
     fails(&s, "UPDATE changeset SET submitted_at = 0, why = 'w'");
     fails(&s, &insert(2));
+}
+
+/// A withdraw cancels each open action in the same write, and a withdrawn
+/// changeset applies nothing more.
+#[test]
+fn a_withdraw_cancels_the_open_actions() {
+    let dir = TempDir::new("withdraw");
+    let s = store(&dir);
+    s.write(|tx| {
+        submit(tx, draft(tx)?)?;
+        tx.execute(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person'",
+            [],
+        )?;
+        Ok(tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?)
+    })
+    .unwrap();
+    let row: (String, String) = s
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT state, decided_by FROM changeset_action", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(row, ("cancelled".into(), "author".into()));
+    for sql in [
+        "UPDATE changeset_action SET state = 'applied'",
+        "UPDATE changeset SET state = 'open'",
+        "UPDATE changeset SET state = 'closed'",
+    ] {
+        fails(&s, sql);
+    }
+}
+
+/// A draft action has no decision, and submit proposes with no decision.
+#[test]
+fn a_draft_has_no_decision() {
+    let dir = TempDir::new("nodecision");
+    let s = store(&dir);
+    for column in [
+        "decided_by = 'person'",
+        "reason = 'r'",
+        "decided_at = 1",
+        "decided_by = 'rule', rule = 1, policy = 1",
+    ] {
+        let (name, value) = column.split_once(" = ").unwrap();
+        let (name, value) = if name == "decided_by" && value.contains("rule") {
+            ("decided_by, rule, policy", "'rule', 1, 1")
+        } else {
+            (name, value)
+        };
+        fails(
+            &s,
+            &format!(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+                 INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, {name})
+                 VALUES (last_insert_rowid(), 1, 1, 'archive', '{{}}', '{{}}', {value});"
+            ),
+        );
+        // A decision written into the draft, then the submit.
+        let r = s.dry_write(|tx| {
+            let cs = draft(tx)?;
+            tx.execute(&format!("UPDATE changeset_action SET {column}"), [])?;
+            Ok(submit(tx, cs).is_ok())
+        });
+        assert!(!r.unwrap(), "{column}");
+    }
+    works(
+        &s,
+        "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+         VALUES (last_insert_rowid(), 1, 1, 'archive', '{}', '{}');",
+    );
+    // A person does not send an action to review.
+    s.write(|tx| Ok(submit(tx, draft(tx)?)?)).unwrap();
+    fails(
+        &s,
+        "UPDATE changeset_action SET state = 'in_review', decided_by = 'person'",
+    );
+    works(
+        &s,
+        "UPDATE changeset_action SET state = 'in_review', decided_by = 'policy'",
+    );
 }
 
 /// A rule decision names a rule ID of the active policy.
