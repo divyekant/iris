@@ -868,8 +868,10 @@ version = "0.0.0"
 name = "iris-spec"
 version = "0.0.0"
 dependencies = [
+ "iris-policy",
  "jsonschema",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
