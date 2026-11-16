@@ -949,6 +949,27 @@ fn own_sent_mail_is_not_a_reply_to_received_mail() {
 }
 
 #[test]
+fn sent_or_draft_mail_is_no_service_evidence() {
+    // Two earlier messages with the service address are your own mail.
+    let mut c = Case::new("own-service");
+    c.put("t1", &["SENT"], &service_mail());
+    c.put("t2", &["DRAFT"], &service_mail());
+    assert_eq!(c.put("t3", &[], &service_mail()).kind, Kind::Stranger);
+    // The qualifying message gets SENT, and a refresh runs before its
+    // decision.
+    let mut c = Case::new("service-sent");
+    for t in ["t1", "t2", "t3"] {
+        c.put(t, &[], &service_mail());
+    }
+    set(&c, "INSERT INTO message_label(message_id, label_id) SELECT 3, id FROM label WHERE provider_id = 'SENT'");
+    refreshed(&c);
+    assert_eq!(
+        c.row("no-reply@shop.example.com").1.as_deref(),
+        Some("stranger")
+    );
+}
+
+#[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
     // Messages 3 and 4 each have 2 earlier messages.
