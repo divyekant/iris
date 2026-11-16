@@ -17,14 +17,28 @@ function plus(now: Date, days: number): Date {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
 }
 
-/** The day after `now`. */
-export function tomorrow(now: Date): string {
-  return ymd(plus(now, 1));
+/**
+ * The first day that Later can give: the local day after `now`, or a later
+ * day if that day already started in UTC. The engine opens a deferred
+ * commitment again when its date starts in UTC (spec 1 section 6.8, issue
+ * #121), so an earlier day would open it again at once.
+ */
+export function first(now: Date): string {
+  const local = ymd(plus(now, 1));
+  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString().slice(0, 10);
+  return local > utc ? local : utc;
 }
 
-/** The Monday after `now`. On a Monday, the Monday a week later. */
+/** The Monday after `now`. On a Monday, the Monday a week later. Never before `first(now)`. */
 export function nextWeek(now: Date): string {
-  return ymd(plus(now, ((8 - now.getDay()) % 7) || 7));
+  const monday = ymd(plus(now, ((8 - now.getDay()) % 7) || 7));
+  const min = first(now);
+  return monday > min ? monday : min;
+}
+
+/** The name of the first day of Later: "Tomorrow", or the day after when tomorrow already started in UTC. */
+export function firstName(now: Date): string {
+  return first(now) === ymd(plus(now, 1)) ? "Tomorrow" : "In 2 days";
 }
 
 /** A day as short words: "Tue 17 Nov". */

@@ -330,7 +330,10 @@ async function call(path: string, accept: string, body?: unknown): Promise<Respo
   const sent = token;
   if (sent) headers.authorization = `Bearer ${sent}`;
   const init: RequestInit =
-    body === undefined ? { headers } : { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
+    body === undefined
+      ? { headers }
+      : // keepalive: a POST that starts as the page closes still reaches the engine (Act.svelte).
+        { method: "POST", keepalive: true, headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) };
   const response = await fetch(`/api/${path}`, init).catch(() => fail(UNREACHABLE));
   if (response.status === 401) {
     // The engine does not know the token (for example after a restart of iris serve).

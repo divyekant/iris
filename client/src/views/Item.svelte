@@ -73,7 +73,7 @@
   <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
   <h1>{item.title}</h1>
 
-  <Act {item} {now} onchange={(next) => (item = next)} />
+  <Act {item} onchange={(next) => (item = next)} />
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>

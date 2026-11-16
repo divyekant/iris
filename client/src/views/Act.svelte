@@ -5,11 +5,16 @@
   the ledger (spec 2 section 4).
 -->
 <script lang="ts">
-  import { post, type Item } from "../api";
-  import { day, hold, HOLD, nextWeek, said, tomorrow, type Verb } from "../act";
+  import { get, post, type Item } from "../api";
+  import { day, first, firstName, hold, HOLD, nextWeek, said, type Verb } from "../act";
 
-  // `delay`: the time for Undo, shorter in tests.
-  let { item, now = new Date(), onchange, delay = HOLD }: { item: Item; now?: Date; onchange: (item: Item) => void; delay?: number } = $props();
+  // `delay`: the time for Undo, shorter in tests. `clock`: the time now.
+  let {
+    item,
+    onchange,
+    delay = HOLD,
+    clock = () => new Date(),
+  }: { item: Item; onchange: (item: Item) => void; delay?: number; clock?: () => Date } = $props();
 
   type Phase =
     | { at: "idle" }
@@ -23,8 +28,25 @@
   let pending: ReturnType<typeof hold> | undefined;
 
   let open = $derived(item.form === "commitment" && (item.status === "open" || item.status === "deferred"));
-  let first = $derived(tomorrow(now));
+  // The days of Later come from the time when Later opens, and a click checks them again.
+  let now = $state(new Date(0));
+  let soon = $derived(first(now));
   let week = $derived(nextWeek(now));
+
+  function openLater() {
+    now = clock();
+    later = !later;
+  }
+
+  function defer(date: string) {
+    // A page kept open past midnight: a day that started in UTC would open the item again at once.
+    if (!date || date < first(clock())) {
+      now = clock();
+      picked = "";
+      return;
+    }
+    choose("defer", date);
+  }
 
   function choose(verb: Verb, date?: string) {
     later = false;
@@ -50,11 +72,27 @@
       // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.
       const known = status >= 400 && status < 500;
       phase = { at: "failed", verb, date, why: (error as Error).message, known };
+      // A 409: the item changed after the page loaded it (for example, understanding closed it). Show it as it is now.
+      if (status === 409) {
+        try {
+          onchange(await get<Item>(`items/${encodeURIComponent(item.id)}`));
+        } catch {
+          // The refusal stays on the page. A reload shows the item.
+        }
+      }
     }
   }
 
-  // If the person leaves during the hold, the click stands: send it now.
-  $effect(() => () => pending?.flush());
+  // If the person leaves during the hold (another view, a reload or a closed
+  // tab), the click stands: send it now. The POST uses keepalive.
+  $effect(() => {
+    const leave = () => pending?.flush();
+    window.addEventListener("pagehide", leave);
+    return () => {
+      window.removeEventListener("pagehide", leave);
+      leave();
+    };
+  });
 </script>
 
 {#if phase.at !== "idle"}
@@ -88,16 +126,16 @@
         <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M5 10.5l3.25 3.25L15 7" /></svg>
         Done
       </button>
-      <button class="pill" type="button" aria-expanded={later} onclick={() => (later = !later)}>Later</button>
+      <button class="pill" type="button" aria-expanded={later} onclick={openLater}>Later</button>
       <button class="quiet" type="button" onclick={() => choose("decline")}>Decline</button>
     </div>
     {#if later}
       <div class="when">
-        <button class="chip" type="button" onclick={() => choose("defer", first)}>Tomorrow <span>{day(first)}</span></button>
-        <button class="chip" type="button" onclick={() => choose("defer", week)}>Next week <span>{day(week)}</span></button>
+        <button class="chip" type="button" onclick={() => defer(soon)}>{firstName(now)} <span>{day(soon)}</span></button>
+        {#if week !== soon}<button class="chip" type="button" onclick={() => defer(week)}>Next week <span>{day(week)}</span></button>{/if}
         <label class="chip">
           Pick a date
-          <input type="date" min={first} bind:value={picked} onchange={() => picked && choose("defer", picked)} />
+          <input type="date" min={soon} bind:value={picked} onchange={() => defer(picked)} />
         </label>
       </div>
     {/if}
