@@ -173,17 +173,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
     };
     let mut stack: Vec<Open> = Vec::new();
     // A style rule applies to elements before it too, so read all rules first.
-    let mut css = Css::default();
-    let mut at = 0;
-    while let Some(n) = b[at..]
-        .windows(6)
-        .position(|w| w.eq_ignore_ascii_case(b"<style"))
-    {
-        let open_end = find(b, at + n, b">").map_or(b.len(), |e| e + 1);
-        let end = find_close(b, open_end, "style");
-        css.read(&html[floor(html, open_end)..floor(html, end)]);
-        at = end.max(at + n + 6).min(b.len());
-    }
+    let css = read_styles(html);
     let mut hidden = 0usize;
     // Elements past the stack limit. Their content goes out, so that a hidden
     // element deep in the tree cannot show its text.
@@ -402,6 +392,40 @@ fn close_effect(name: &str, w: &mut Writer) {
         _ if LINE.contains(&name) => w.block(1),
         _ => {}
     }
+}
+
+/// The rules of each `<style>` element. The scan skips comments, other
+/// declarations and raw-text elements in the same way as the main pass, so
+/// a style tag that a browser ignores adds no rule.
+fn read_styles(html: &str) -> Css {
+    let b = html.as_bytes();
+    let mut css = Css::default();
+    let mut i = 0;
+    while let Some(n) = b[i..].iter().position(|&c| c == b'<') {
+        i += n;
+        if html[i..].starts_with("<!--") {
+            i = find(b, i + 4, b"-->").map_or(b.len(), |n| n + 3);
+            continue;
+        }
+        if matches!(b.get(i + 1), Some(b'!' | b'?')) {
+            i = find(b, i, b">").map_or(b.len(), |n| n + 1);
+            continue;
+        }
+        if !b.get(i + 1).is_some_and(u8::is_ascii_alphabetic) {
+            i += 1;
+            continue;
+        }
+        let (tag, end) = parse_tag(html, i + 1);
+        i = end;
+        if RAW.contains(&tag.name.as_str()) {
+            let close = find_close(b, i, &tag.name);
+            if tag.name == "style" {
+                css.read(&html[floor(html, i)..floor(html, close)]);
+            }
+            i = close.max(i);
+        }
+    }
+    css
 }
 
 /// True if a person does not see the content of the element, or if the
@@ -892,6 +916,14 @@ mod tests {
         assert_eq!(
             md("<div class=h>secret</div>ok<style>.h{display:none}</style>"),
             "ok"
+        );
+        // A browser ignores a style tag inside a comment or a script.
+        assert_eq!(
+            md(
+                "<!-- <style>.x{display:none}</style> --><p class=x>Visible</p>\
+                <script>'<style>.y{display:none}</style>'</script><p class=y>Too</p>"
+            ),
+            "Visible\n\nToo"
         );
         // Two rules inside a print block: neither one hides text on a screen.
         assert_eq!(
