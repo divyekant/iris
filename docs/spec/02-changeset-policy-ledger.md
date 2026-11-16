@@ -175,10 +175,10 @@ Schema of the changeset comes with the release 2 code, from this section.
 | `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
-| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. An approval names it (section 5.5). A submitted action does not change. `null` before submit. |
+| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. An approval names it (section 5.5). A submitted action does not change, but the engine can add a flag before apply (section 5.4). `null` before submit. |
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
-| `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid, or the apply), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. |
+| `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
 | `actions[].ledger` | The ledger entry, after apply. |
 
 ### 5.2 States of an action
@@ -296,7 +296,8 @@ decision.
 | A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
 | A state move that section 5.2 does not allow, from any writer | A decided action changes, or skips the review | The trigger `action_state` refuses the write. |
 | A rule decision with a policy version that is not active, or a rule ID that the active policy does not have | A decision names no rule text, or a rule that the person removed | The trigger `action_state` refuses the write. The policy of the first start has no rule, so no rule decides under it. |
-| A change of a submitted action, from any writer | The person approves one action, and another applies | The triggers refuse the write. |
+| A change of a submitted action, from any writer | The person approves one action, and another applies | The triggers refuse the write. Only a new flag can be added, and a flag does not go away. |
+| A move to `applied` or `failed` that changes the decision | The ledger cannot name who approved the action | The trigger `action_state` refuses the write. |
 | An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
 | Two writers at the same time | Two moves of one action | The engine has one write connection. Each request is one transaction, and the trigger checks the state at the time of the write. |
 | A crash in a submit or a decision, or a failed commit | Half a submit, or a success for a change that is not stored | The transaction rolls back, and the call gives the error. |

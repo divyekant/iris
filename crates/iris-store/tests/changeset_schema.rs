@@ -152,7 +152,8 @@ fn only_the_moves_of_section_5_2() {
                 tx.execute_batch("DROP TRIGGER action_state")?;
                 tx.execute(
                     "UPDATE changeset_action SET state = ?1, decided_by = 'rule', rule = 1,
-                       policy = 1, reason = 'r', hash = iif(?1 IS NULL, NULL, 'h'),
+                       policy = 1, reason = 'r', decided_at = 1209600000,
+                       hash = iif(?1 IS NULL, NULL, 'h'),
                        submitted_at = iif(?1 IS NULL, NULL, 0)",
                     [from],
                 )?;
@@ -317,7 +318,6 @@ fn a_submitted_action_does_not_change() {
         "UPDATE changeset_action SET args = '{\"x\":1}'",
         "UPDATE changeset_action SET verb = 'trash'",
         "UPDATE changeset_action SET hash = 'x'",
-        "UPDATE changeset_action SET flags = '[\"bulk\"]'",
         "UPDATE changeset_action SET submitted_at = 1",
         "UPDATE changeset_action SET why = 'x'",
         "UPDATE changeset_action SET n = 2",
@@ -333,6 +333,68 @@ fn a_submitted_action_does_not_change() {
     ] {
         fails(&s, sql);
     }
+    // The engine can add a flag before apply (section 5.4). A flag stays.
+    s.write(|tx| Ok(tx.execute("UPDATE changeset_action SET flags = '[\"bulk\"]'", [])?))
+        .unwrap();
+    fails(&s, "UPDATE changeset_action SET flags = '[]'");
+    fails(
+        &s,
+        "UPDATE changeset_action SET flags = '[\"first_contact\"]'",
+    );
+    works(
+        &s,
+        "UPDATE changeset_action SET flags = '[\"bulk\",\"first_contact\"]'",
+    );
+}
+
+/// Applied and failed keep the decision that approved the action.
+#[test]
+fn the_apply_keeps_who_approved() {
+    let dir = TempDir::new("approver");
+    let s = store(&dir);
+    s.write(|tx| {
+        submit(tx, draft(tx)?)?;
+        Ok(tx.execute(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'rule', rule = 3,
+               policy = 1, decided_at = 5",
+            [],
+        )?)
+    })
+    .unwrap();
+    for to in ["applied", "failed"] {
+        for change in [
+            "decided_by = 'engine', rule = NULL, policy = NULL",
+            "decided_by = 'person', rule = NULL, policy = NULL",
+            "rule = 2",
+            "reason = 'x'",
+            "decided_at = 6",
+        ] {
+            fails(
+                &s,
+                &format!("UPDATE changeset_action SET state = '{to}', {change}"),
+            );
+        }
+        works(&s, &format!("UPDATE changeset_action SET state = '{to}'"));
+    }
+    // A newer policy does not change the approval of rule 3 in version 1.
+    s.write(|tx| {
+        Ok(tx.execute_batch(
+            "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('b', 'h2', 0);
+             UPDATE policy_rule_id SET removed_at = 0 WHERE id = 3;
+             UPDATE changeset_action SET state = 'applied';",
+        )?)
+    })
+    .unwrap();
+    let by: (String, i64, i64) = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT decided_by, rule, policy FROM changeset_action",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(by, ("rule".into(), 3, 1));
 }
 
 /// The changeset is open while an action is open, then closed.
@@ -356,12 +418,7 @@ fn the_changeset_closes_with_its_last_open_action() {
     })
     .unwrap();
     assert_eq!(state(&s), "open");
-    s.write(|tx| {
-        Ok(tx.execute(
-            "UPDATE changeset_action SET state = 'applied', decided_by = 'engine'",
-            [],
-        )?)
-    })
-    .unwrap();
+    s.write(|tx| Ok(tx.execute("UPDATE changeset_action SET state = 'applied'", [])?))
+        .unwrap();
     assert_eq!(state(&s), "closed");
 }

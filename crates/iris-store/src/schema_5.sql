@@ -127,6 +127,12 @@ WHEN NOT EXISTS (SELECT 1 FROM action_transition
   -- Expired only 14 days after its submit (section 5.5).
   OR (new.state = 'expired'
       AND (new.decided_at IS NULL OR new.decided_at - old.submitted_at < 1209600000))
+  -- Applied and failed keep the decision that approved the action: the
+  -- ledger names it (section 7.1).
+  OR (new.state IN ('applied', 'failed')
+      AND (new.decided_by IS NOT old.decided_by OR new.rule IS NOT old.rule
+           OR new.policy IS NOT old.policy OR new.reason IS NOT old.reason
+           OR new.decided_at IS NOT old.decided_at))
   -- A rule decision names a rule ID of the active policy (section 6.3).
   OR (new.decided_by IS 'rule' AND new.state IN ('in_review', 'approved', 'denied')
       AND (new.policy IS NOT (SELECT max(version) FROM policy_version)
@@ -150,10 +156,20 @@ END;
 -- A submitted action does not change: its approval hash covers the targets,
 -- the arguments and the resolved messages (section 5.5).
 CREATE TRIGGER action_fixed BEFORE UPDATE OF changeset_id, revision, n, verb, targets,
-  args, why, flags, hash, submitted_at ON changeset_action
+  args, why, hash, submitted_at ON changeset_action
 WHEN old.state IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'iris: a submitted action does not change');
+END;
+
+-- The engine can add a flag before apply, for example bulk (section 5.4). A
+-- flag does not go away.
+CREATE TRIGGER action_flags BEFORE UPDATE OF flags ON changeset_action
+WHEN old.state IS NOT NULL
+  AND EXISTS (SELECT 1 FROM json_each(old.flags) o
+              WHERE o.value NOT IN (SELECT value FROM json_each(new.flags)))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a flag of a submitted action stays');
 END;
 
 CREATE TRIGGER action_message_insert BEFORE INSERT ON action_message
