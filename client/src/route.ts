@@ -23,6 +23,9 @@ export const SECTIONS: Record<SectionKey, string> = {
   feed: "To read",
 };
 
+/** The canonical job ID (docs/spec/schema/job.schema.json). Up to 18 digits keeps it inside an i64. */
+export const JOB_ID = /^j-[1-9]\d{0,17}$/;
+
 export function parse(hash: string): Route {
   let name = "";
   let id = "";
@@ -40,7 +43,12 @@ export function parse(hash: string): Route {
   const rule = hash.replace(/^#\/?/, "").split("/")[2] ?? "";
   if (name === "brief" && id === "bundle" && /^[1-9]\d{0,9}$/.test(rule)) return { view: "bundle", rule: Number(rule) };
   if (name === "records") return { view: "records", type: id };
-  if (name === "jobs") return id ? { view: "job", id } : { view: "jobs" };
+  // #/jobs, or #/jobs/j-12 with the canonical job ID and no other part.
+  if (name === "jobs") {
+    const parts = hash.replace(/^#\/?/, "").split("/");
+    if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: "jobs" };
+    return parts.length === 2 && JOB_ID.test(id) ? { view: "job", id } : { view: "home" };
+  }
   if (name === "setup" || name === "brief" || name === "measures" || name === "rules" || name === "review" || name === "handled") return { view: name };
   return { view: "home" };
 }

@@ -38,6 +38,7 @@
   // svelte-ignore state_referenced_locally
   if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
 
+  const JOB_STATES = ["needs_you", "working", "waiting", "done"] as const;
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
@@ -117,8 +118,8 @@
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "jobs"}
-      {#await Promise.all([get<JobPage>("jobs?limit=50"), get<JobPage>("jobs?state=done&limit=20")]) then [open, done]}
-        <Jobs {open} {done} />
+      {#await Promise.all(JOB_STATES.map((state) => get<JobPage>(`jobs?state=${state}&limit=${state === "done" ? 20 : 50}`))) then [needs_you, working, waiting, done]}
+        <Jobs pages={{ needs_you, working, waiting, done }} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "job"}
       {#await get<JobDetail>(`jobs/${encodeURIComponent(route.id)}`) then detail}

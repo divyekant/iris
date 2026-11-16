@@ -22,30 +22,25 @@ export function due(job: Job, now = new Date()): { text: string; tone: "late" | 
   return { text: `Due ${day(job.due)}, ${relative.format(days, "day")}`, tone: late ? "late" : days <= 2 ? "soon" : "" };
 }
 
-/** Who sent the newest mail of a thread, or null when the thread is gone or unknown. */
-function sender(t: Target | undefined): string | null {
-  if (!t || t.gone) return null;
-  return t.from.name || t.from.address || null;
-}
-
-/** The mail of a wait: a link to the newest message of its thread, or null. */
-export function waitMail(threads: Record<string, Target>, thread: string | undefined): { subject: string; from: string; link: string } | null {
+/**
+ * The mail of a wait: the subject of the newest message of its thread and a link to it, or null.
+ * The job does not say who must reply, and the newest message can be your own, so no sender is named.
+ */
+export function waitMail(threads: Record<string, Target>, thread: string | undefined): { subject: string; link: string } | null {
   const t = thread ? threads[thread] : undefined;
   if (!t || t.gone) return null;
-  return { subject: t.subject || "(no subject)", from: sender(t) ?? "", link: href.mail(t.id) };
+  return { subject: t.subject || "(no subject)", link: href.mail(t.id) };
 }
 
 /** The state of a job now, in a few words, for a list line or the top of the page. */
-export function now(job: Job, threads: Record<string, Target> = {}): string {
+export function now(job: Job): string {
   switch (job.state) {
     case "working":
       return "The agent works on it.";
     case "needs_you":
       return "The agent asks you a question.";
     case "waiting": {
-      const from = sender(job.wait?.thread ? threads[job.wait.thread] : undefined);
       const until = job.wait ? `, until ${day(job.wait.until)}` : "";
-      if (from) return `Waits for a reply from ${from}${until}.`;
       return job.wait?.thread ? `Waits for a reply${until}.` : `Waits${until}.`;
     }
     case "done":
@@ -60,7 +55,7 @@ export type Step = {
   who: "you" | "agent" | "iris";
   text: string;
   quote?: string;
-  mail?: { subject: string; from: string; link: string };
+  mail?: { subject: string; link: string };
   link?: { href: string; text: string };
   /** The tone of the step: a question to you, an end, or neither. */
   tone?: "ask" | "done" | "";

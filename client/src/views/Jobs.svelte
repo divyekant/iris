@@ -1,39 +1,36 @@
 <!--
-  The jobs of the agents (card R4-09): the open jobs by state, the jobs that
-  ask you first, then the jobs that ended. Each line opens the job.
+  The jobs of the agents (card R4-09): the jobs that ask you first, then the
+  jobs that work, wait and ended. Each state has its own page from the API,
+  so an older job that asks you is never behind a page of newer jobs.
+  Each line opens the job.
 -->
 <script lang="ts">
   import { get, own, type Job, type JobPage, type JobState } from "../api";
   import { due, now } from "../jobs";
   import { href } from "../route";
 
-  let { open: firstOpen, done: firstDone }: { open: JobPage; done: JobPage } = $props();
-
-  // svelte-ignore state_referenced_locally
-  let open = $state(firstOpen.jobs);
-  // svelte-ignore state_referenced_locally
-  let nextOpen = $state(firstOpen.next);
-  // svelte-ignore state_referenced_locally
-  let done = $state(firstDone.jobs);
-  // svelte-ignore state_referenced_locally
-  let nextDone = $state(firstDone.next);
-  let busy = $state("");
-  let error = $state("");
+  let { pages: first }: { pages: Record<JobState, JobPage> } = $props();
 
   const GROUPS: [JobState, string][] = [
     ["needs_you", "Asks you"],
     ["working", "Working"],
     ["waiting", "Waiting"],
+    ["done", "Ended"],
   ];
 
-  async function more(which: "open" | "done") {
-    busy = which;
+  // svelte-ignore state_referenced_locally
+  let pages = $state(structuredClone(first));
+  let busy = $state("");
+  let error = $state("");
+  let empty = $derived(GROUPS.every(([state]) => pages[state].jobs.length === 0));
+
+  async function more(state: JobState) {
+    busy = state;
     error = "";
     try {
-      const after = encodeURIComponent((which === "open" ? nextOpen : nextDone) ?? "");
-      const page = await get<JobPage>(`jobs?state=${which}&limit=50&after=${after}`);
-      if (which === "open") [open, nextOpen] = [[...open, ...page.jobs], page.next];
-      else [done, nextDone] = [[...done, ...page.jobs], page.next];
+      const page = await get<JobPage>(`jobs?state=${state}&limit=50&after=${encodeURIComponent(pages[state].next ?? "")}`);
+      const seen = new Set(pages[state].jobs.map((j) => j.id));
+      pages[state] = { jobs: [...pages[state].jobs, ...page.jobs.filter((j) => !seen.has(j.id))], next: page.next };
     } catch (e) {
       error = own(e);
     } finally {
@@ -58,28 +55,20 @@
 <h1>Jobs</h1>
 <p class="lead">The goals that you gave to your agents. Each job keeps each step, so you can see what the agent did and why.</p>
 
-{#if open.length === 0 && done.length === 0}
+{#if empty}
   <p class="empty">No job yet. A job is a goal with limits, for example “Get the signed contract from Dana before 20 Nov.”</p>
 {/if}
 
 {#each GROUPS as [state, title] (state)}
-  {@const jobs = open.filter((j) => j.state === state)}
-  {#if jobs.length}
+  {@const page = pages[state]}
+  {#if page.jobs.length}
     <section aria-labelledby={state}>
-      <h2 id={state}><span>{title}</span> <span class="count">{jobs.length}</span></h2>
-      <ul>{#each jobs as job (job.id)}{@render line(job)}{/each}</ul>
+      <h2 id={state}><span>{title}</span></h2>
+      <ul>{#each page.jobs as job (job.id)}{@render line(job)}{/each}</ul>
+      {#if page.next}<button type="button" onclick={() => more(state)} disabled={!!busy}>{busy === state ? "Loading" : "Show more"}</button>{/if}
     </section>
   {/if}
 {/each}
-{#if nextOpen}<button type="button" onclick={() => more("open")} disabled={!!busy}>{busy === "open" ? "Loading" : "Show more open jobs"}</button>{/if}
-
-{#if done.length}
-  <section aria-labelledby="done">
-    <h2 id="done"><span>Ended</span></h2>
-    <ul>{#each done as job (job.id)}{@render line(job)}{/each}</ul>
-    {#if nextDone}<button type="button" onclick={() => more("done")} disabled={!!busy}>{busy === "done" ? "Loading" : "Show more"}</button>{/if}
-  </section>
-{/if}
 {#if error}<p role="alert">{error}</p>{/if}
 
 <style>
@@ -107,11 +96,6 @@
     margin: 0 0 var(--space-2);
     padding-bottom: var(--space-2);
     border-bottom: 1px solid var(--color-border);
-  }
-  .count {
-    color: var(--color-text-muted);
-    font-weight: 400;
-    font-variant-numeric: tabular-nums;
   }
   ul {
     list-style: none;
