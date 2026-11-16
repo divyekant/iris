@@ -63,8 +63,10 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         if !is_content(dict) {
             continue;
         }
+        // Each stream gets at most the rest of the budget of the PDF.
+        let cap = STREAM_LIMIT.min(TOTAL_LIMIT - total);
         let decoded: std::borrow::Cow<[u8]> = if only_flate(dict) {
-            match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, STREAM_LIMIT) {
+            match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, cap) {
                 Ok(v) => v.into(),
                 Err(e) => {
                     // More output than the limit: text after it is not read.
@@ -76,8 +78,8 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
             continue;
         } else {
             // A raw stream is read in place, and only up to the stream limit.
-            stopped |= data.len() > STREAM_LIMIT;
-            data[..data.len().min(STREAM_LIMIT)].into()
+            stopped |= data.len() > cap;
+            data[..data.len().min(cap)].into()
         };
         total += decoded.len();
         if find(&decoded, b"BT").is_some() {
@@ -547,6 +549,25 @@ mod tests {
             assert_eq!(got.as_deref(), Some("Hello world"));
             assert!(cut, "flate {flate}");
         }
+    }
+
+    #[test]
+    fn no_text_past_the_inflate_limit_of_the_pdf() {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut add = |data: &[u8], n: usize| {
+            pdf.extend(format!("{n} 0 obj\n<< /Length {} >>\nstream\n", data.len()).bytes());
+            pdf.extend_from_slice(data);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        };
+        let pad = vec![b' '; STREAM_LIMIT - 1];
+        for n in 1..=8 {
+            add(&pad, n);
+        }
+        let last = format!("{}BT (Hello world) Tj ET", " ".repeat(64));
+        add(last.as_bytes(), 9);
+        let (got, cut) = text_cut(&pdf, 1000);
+        assert_eq!(got, None);
+        assert!(cut);
     }
 
     #[test]
