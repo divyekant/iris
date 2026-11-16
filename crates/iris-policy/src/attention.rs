@@ -33,7 +33,7 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
          LIMIT 1",
     )?;
     let mut labels = tx.prepare(
-        "SELECT l.name FROM message_label ml JOIN label l ON l.id = ml.label_id
+        "SELECT l.name, l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
          WHERE ml.message_id = ?1",
     )?;
     let mut items = tx.prepare(
@@ -41,10 +41,13 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
          FROM item_source s JOIN item i ON i.id = s.item_id
          WHERE s.message_id = ?1 AND s.role = 'origin'",
     )?;
-    // Only an item whose attention changes gets a write.
+    // SQLite makes the JSON of the field. Only an item whose attention
+    // changes gets a write.
     let mut write = tx.prepare(
-        "UPDATE item SET doc = json_set(doc, '$.attention', json(?2))
-         WHERE id = ?1 AND coalesce(json_extract(doc, '$.attention'), '') <> json(?2)",
+        "WITH a(v) AS (SELECT CASE WHEN ?3 IS NULL THEN json_object('state', ?2)
+                       ELSE json_object('state', ?2, 'rule', ?3, 'reason', ?4) END)
+         UPDATE item SET doc = json_set(doc, '$.attention', json((SELECT v FROM a)))
+         WHERE id = ?1 AND coalesce(json_extract(doc, '$.attention'), '') <> (SELECT v FROM a)",
     )?;
     for id in messages {
         let Some((sender, date, hostile)) = head
@@ -63,7 +66,22 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
         else {
             continue;
         };
+        let mut own = false;
+        let names: Vec<String> = labels
+            .query_map([id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .map(|l| {
+                l.map(|(name, provider)| {
+                    own |= provider == "SENT" || provider == "DRAFT";
+                    name
+                })
+            })
+            .collect::<rusqlite::Result<_>>()?;
+        // Spec 1 section 6.7: only the SENT or DRAFT label makes mail from
+        // you. A hostile mark still wins (`Message::kind`).
         let sender_kind = match sender.as_str() {
+            _ if own => SenderKind::SelfOwner,
             "" => SenderKind::Stranger,
             a => kind
                 .query_row([a], |r| r.get::<_, String>(0))
@@ -71,9 +89,6 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
                 .and_then(|k| SenderKind::from_name(&k))
                 .unwrap_or(SenderKind::Stranger),
         };
-        let names: Vec<String> = labels
-            .query_map([id], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
         let rows: Vec<(i64, Item)> = items
             .query_map([id], |r| {
                 let form: String = r.get(1)?;
@@ -113,52 +128,29 @@ pub fn evaluate(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
             items: &all,
         };
         for (item, it) in &rows {
-            let json = attention_json(policy, policy.attention(it, &msg, now));
-            write.execute(params![item, json])?;
+            let (state, rule, reason) = field(policy, policy.attention(it, &msg, now));
+            write.execute(params![item, state, rule, reason])?;
         }
     }
     Ok(())
 }
 
-/// The `attention` field of the schema, as JSON text.
-fn attention_json(policy: &Policy, a: crate::Attention) -> String {
-    let (state, rule) = match a {
-        crate::Attention::Shown => return r#"{"state":"shown"}"#.into(),
-        crate::Attention::Hidden { rule } => ("hidden", rule),
-        crate::Attention::Bundled { rule } => ("bundled", rule),
+/// The `attention` field of the schema: the state, and the rule with a
+/// reason for `hidden` and `bundled`.
+fn field(policy: &Policy, a: crate::Attention) -> (&'static str, Option<u32>, Option<String>) {
+    let (state, verb, rule) = match a {
+        crate::Attention::Shown => return ("shown", None, None),
+        crate::Attention::Hidden { rule } => ("hidden", "Hidden", rule),
+        crate::Attention::Bundled { rule } => ("bundled", "Bundled", rule),
     };
     let name = policy
         .rules
         .iter()
         .find(|r| r.id == rule)
         .map_or("", |r| r.name.as_str());
-    let verb = if state == "hidden" {
-        "Hidden"
-    } else {
-        "Bundled"
-    };
     let mut reason = format!("{verb} by rule {rule}: {name}");
     if reason.chars().count() > REASON_MAX {
         reason = reason.chars().take(REASON_MAX - 3).collect::<String>() + "...";
     }
-    format!(
-        r#"{{"state":"{state}","rule":{rule},"reason":{}}}"#,
-        json_string(&reason)
-    )
-}
-
-/// A JSON string literal of `s`.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    (state, Some(rule), Some(reason))
 }

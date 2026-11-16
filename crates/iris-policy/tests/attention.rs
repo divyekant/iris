@@ -48,7 +48,13 @@ const SENDERS: [(&str, Option<&str>); 6] = [
     ("unknown@else.example", None),
     ("", None),
 ];
-const LABELS: [&str; 3] = ["INBOX", "Promotions", "Work"];
+/// The labels: the name, and the provider ID. `SENT` makes mail from you.
+const LABELS: [(&str, &str); 4] = [
+    ("INBOX", "INBOX"),
+    ("Promotions", "Label_1"),
+    ("Work", "Label_2"),
+    ("Sent", "SENT"),
+];
 const FORMS: [&str; 5] = ["commitment", "conversation", "record", "feed", "signal"];
 const TYPES: [&str; 3] = ["receipt", "ticket", "other"];
 const KINDS: [&str; 3] = ["task", "reply", "payment"];
@@ -71,10 +77,10 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                 "INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
                  INSERT INTO thread(account_id, provider_id) VALUES (1, 't');",
             )?;
-            for (i, l) in LABELS.iter().enumerate() {
+            for (i, (name, provider)) in LABELS.iter().enumerate() {
                 tx.execute(
-                    "INSERT INTO label(id, account_id, provider_id, name, kind) VALUES (?1, 1, ?2, ?2, 'user')",
-                    rusqlite::params![i as i64 + 1, l],
+                    "INSERT INTO label(id, account_id, provider_id, name, kind) VALUES (?1, 1, ?2, ?3, 'user')",
+                    rusqlite::params![i as i64 + 1, provider, name],
                 )?;
             }
             for (a, k) in SENDERS {
@@ -106,13 +112,15 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                     )?;
                 }
                 let mut labels = Vec::new();
-                for (i, l) in LABELS.iter().enumerate() {
+                let mut sent = false;
+                for (i, (name, provider)) in LABELS.iter().enumerate() {
                     if rng.coin() {
                         tx.execute(
                             "INSERT INTO message_label(message_id, label_id) VALUES (?1, ?2)",
                             [id, i as i64 + 1],
                         )?;
-                        labels.push(l.to_string());
+                        labels.push(name.to_string());
+                        sent |= *provider == "SENT";
                     }
                 }
                 let mut items = Vec::new();
@@ -151,6 +159,7 @@ fn mailbox(store: &Store, rng: &mut Rng) -> Vec<Msg> {
                 out.push(Msg {
                     sender: addr.to_lowercase(),
                     kind: match addr {
+                        _ if sent => SenderKind::SelfOwner,
                         "News@Shop.example" => SenderKind::Stranger,
                         _ => k.and_then(SenderKind::from_name).unwrap_or(SenderKind::Stranger),
                     },
@@ -177,7 +186,7 @@ fn random_policy(rng: &mut Rng, ids: &mut u32) -> String {
         if rng.next().is_multiple_of(3) {
             when.push(format!(
                 "sender_kind = \"{}\"",
-                rng.pick(&["person", "service", "stranger", "hostile"])
+                rng.pick(&["self", "person", "service", "stranger", "hostile"])
             ));
         }
         if rng.next().is_multiple_of(3) {
@@ -187,7 +196,7 @@ fn random_policy(rng: &mut Rng, ids: &mut u32) -> String {
             ));
         }
         if rng.next().is_multiple_of(3) {
-            when.push(format!("label = \"{}\"", rng.pick(&LABELS)));
+            when.push(format!("label = \"{}\"", rng.pick(&LABELS).0));
         }
         if rng.next().is_multiple_of(3) {
             when.push(format!("older_than_days = {}", rng.next() % 50));
@@ -198,10 +207,18 @@ fn random_policy(rng: &mut Rng, ids: &mut u32) -> String {
         if when.is_empty() {
             when.push(format!("form = \"{}\"", rng.pick(&FORMS)));
         }
+        // A name with a quote and a backslash, and at times one so long
+        // that the reason gets cut.
+        let long = if rng.next().is_multiple_of(3) {
+            "x".repeat(250)
+        } else {
+            String::new()
+        };
         s += &format!(
-            "[[rule]]\nid = {}\nname = \"Rule \\\"{}\\\"\"\neffect = \"{}\"\nwhen = {{ {} }}\nby = \"person\"\nadded = 2026-11-10\n",
+            "[[rule]]\nid = {}\nname = \"Rule \\\"{}\\\" a\\\\b{}\"\neffect = \"{}\"\nwhen = {{ {} }}\nby = \"person\"\nadded = 2026-11-10\n",
             ids,
             ids,
+            long,
             rng.pick(&["hide", "bundle"]),
             when.join(", ")
         );
@@ -209,12 +226,19 @@ fn random_policy(rng: &mut Rng, ids: &mut u32) -> String {
     s
 }
 
-/// The `attention` field of each item, by item ID.
-fn stored(store: &Store) -> Vec<(i64, Option<String>)> {
+/// The `attention` field of each item, by item ID: the state, the rule, the
+/// reason, and the number of keys.
+type Field = (Option<String>, Option<u32>, Option<String>, i64);
+fn stored(store: &Store) -> Vec<(i64, Field)> {
     store
         .read(|c| {
-            c.prepare("SELECT id, json_extract(doc, '$.attention') FROM item ORDER BY id")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            c.prepare(
+                "SELECT id, json_extract(doc, '$.attention.state'), json_extract(doc, '$.attention.rule'),
+                        json_extract(doc, '$.attention.reason'),
+                        (SELECT count(*) FROM json_each(doc, '$.attention'))
+                 FROM item ORDER BY id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?
                 .collect::<rusqlite::Result<_>>()
                 .map_err(Into::into)
         })
@@ -241,10 +265,10 @@ fn expected(policy: &Policy, mailbox: &[Msg]) -> Vec<(i64, Attention)> {
     out
 }
 
-/// The `attention` JSON of the schema, as SQLite gives it back.
-fn agrees(got: &Option<String>, want: Attention, policy: &Policy) -> bool {
+/// The `attention` field of the schema for `want`.
+fn agrees(got: &Field, want: Attention, policy: &Policy) -> bool {
     let (state, rule) = match want {
-        Attention::Shown => return got.as_deref() == Some(r#"{"state":"shown"}"#),
+        Attention::Shown => return *got == (Some("shown".into()), None, None, 1),
         Attention::Hidden { rule } => ("hidden", rule),
         Attention::Bundled { rule } => ("bundled", rule),
     };
@@ -254,11 +278,13 @@ fn agrees(got: &Option<String>, want: Attention, policy: &Policy) -> bool {
     } else {
         "Bundled"
     };
-    let reason = format!("{verb} by rule {rule}: {name}").replace('"', "\\\"");
-    got.as_deref()
-        == Some(&format!(
-            r#"{{"state":"{state}","rule":{rule},"reason":"{reason}"}}"#
-        ))
+    let full: Vec<char> = format!("{verb} by rule {rule}: {name}").chars().collect();
+    let reason = if full.len() > 200 {
+        full[..197].iter().collect::<String>() + "..."
+    } else {
+        full.iter().collect()
+    };
+    *got == (Some(state.into()), Some(rule), Some(reason), 3)
 }
 
 #[test]
