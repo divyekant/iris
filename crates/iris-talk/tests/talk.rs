@@ -879,3 +879,60 @@ fn a_quoted_local_part_counts() {
     check(&v, &doc);
     assert_eq!(doc["participants"][1]["address"], "\"a,b\"@example.org");
 }
+
+#[test]
+fn a_gone_talk_drops_hostile_updates() {
+    let b = Box_::new("gonehostile");
+    let v = validator();
+    b.kind("news@shop.example", "service");
+    let p1 = b.put(M {
+        id: "a",
+        at: NOW - 3 * DAY,
+        text: "First",
+        ..M::default()
+    });
+    let s = b.put(M {
+        id: "s",
+        at: NOW - 2 * DAY,
+        from: ("Shop", "news@shop.example"),
+        text: "Sale",
+        ..M::default()
+    });
+    let p2 = b.put(M {
+        id: "b",
+        at: NOW - DAY,
+        text: "Second",
+        ..M::default()
+    });
+    assert_eq!(b.talk("t1", NOW).unwrap()["messages"], 3);
+    b.sql(&format!(
+        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id IN ({p1}, {p2})"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["status"], "gone");
+    assert_eq!(doc["messages"], 1);
+    assert_eq!(doc["latest"]["snippet"], "Sale");
+    let id = doc["id"].as_str().unwrap();
+    assert_eq!(b.sources(id), [(p1, "origin".into()), (s, "update".into())]);
+}
+
+#[test]
+fn encoded_headers_are_decoded() {
+    let b = Box_::new("encoded");
+    let v = validator();
+    b.put(M {
+        id: "a",
+        subject: "Café on Friday",
+        ..M::default()
+    });
+    // The header row keeps the encoded words; the clean text has the subject.
+    b.sql(
+        "UPDATE header SET subject = '=?UTF-8?Q?Caf=C3=A9_on_Friday?=', from_name = '=?UTF-8?Q?Ren=C3=A9e_Bo?='",
+    );
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["title"], "Café on Friday");
+    assert_eq!(doc["sources"][0]["quote"], "Café on Friday");
+    assert_eq!(doc["participants"][1]["name"], "Renée Bo");
+}
