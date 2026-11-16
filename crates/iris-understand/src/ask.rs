@@ -543,8 +543,9 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
 }
 
 /// True if `text` holds `quote` as whole words: with any run of white
-/// space as one space, no difference of case, and no letter or digit
-/// right before or after the match that would join a word of the quote.
+/// space as one space, and no difference of case. A word is letters and
+/// digits, also joined by one mark of [`JOIN`] (`1,234`, `07:40`, `e-mail`),
+/// so a match must not start or end inside a word.
 fn has(text: &str, quote: &str) -> bool {
     let norm = |s: &str| {
         s.split_whitespace()
@@ -556,13 +557,24 @@ fn has(text: &str, quote: &str) -> bool {
     let (Some(first), Some(last)) = (quote.chars().next(), quote.chars().last()) else {
         return false;
     };
-    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
     text.char_indices().any(|(i, _)| {
         text[i..].starts_with(&quote)
-            && !(first.is_alphanumeric() && word(text[..i].chars().last()))
-            && !(last.is_alphanumeric() && word(text[i + quote.len()..].chars().next()))
+            && !(first.is_alphanumeric() && goes_on(text[..i].chars().rev()))
+            && !(last.is_alphanumeric() && goes_on(text[i + quote.len()..].chars()))
     })
 }
+
+/// True if the characters, from a match out, go on with its word.
+fn goes_on(mut out: impl Iterator<Item = char>) -> bool {
+    match out.next() {
+        Some(c) if c.is_alphanumeric() => true,
+        Some(c) if JOIN.contains(&c) => out.next().is_some_and(char::is_alphanumeric),
+        _ => false,
+    }
+}
+
+/// The marks that join letters and digits into one word.
+const JOIN: &[char] = &['.', ',', ':', '-', '/', '\'', '\u{2019}', '_', '@'];
 
 #[cfg(test)]
 mod tests {
@@ -693,7 +705,7 @@ mod tests {
 
     #[test]
     fn a_quote_is_whole_words() {
-        let text = "Gate 12,  then\nFLIGHT TP1351 (Lisbon).";
+        let text = "Gate 12,  then\nFLIGHT TP1351 (Lisbon). Amount due: $1,234.50 at 07:40.";
         for (q, want) in [
             ("gate 12", true),
             ("gate 1", false),
@@ -702,7 +714,13 @@ mod tests {
             ("TP135", false),
             ("(lisbon).", true),
             ("lisbon)", true),
+            ("amount due: $1,234", false),
+            ("$1,234.50", true),
+            ("$1,234.50 at 07", false),
+            ("at 07:40", true),
             ("", false),
+            ("due: $1", false),
+            ("12, then", true),
             ("  ", false),
         ] {
             assert_eq!(has(text, q), want, "{q:?}");
@@ -710,21 +728,35 @@ mod tests {
     }
 
     /// A span of whole words of a text is a quote; a span whose first or
-    /// last word is cut is not. The words all end in `z` and are unique, so
-    /// a cut word is never a whole word of the text.
+    /// last word is cut, also at a join mark inside it, is not. The words
+    /// all start with `w`, end with `z` and are unique by their index, so a
+    /// cut word is never a whole word of the text.
     #[test]
     fn property_a_cut_word_is_no_quote() {
         let mut rng = Rng(0xD1B5_4A32_D192_ED03);
         for _ in 0..5000 {
             let n = 1 + rng.below(12);
-            let words: Vec<String> = (0..n).map(|i| format!("w{}{i}z", rng.below(100))).collect();
+            let words: Vec<String> = (0..n)
+                .map(|i| {
+                    let join = JOIN[rng.below(JOIN.len())];
+                    format!("w{}{join}{i}z", rng.below(100))
+                })
+                .collect();
             let text = words.join(if rng.below(2) == 0 { " " } else { "\n  " });
             let a = rng.below(n);
             let b = a + 1 + rng.below(n - a);
             let span = words[a..b].join(" ");
             assert!(has(&text, &span.to_uppercase()), "{text:?} {span:?}");
-            assert!(!has(&text, &span[..span.len() - 1]), "{text:?} {span:?}");
+            // Cut at the last or the first character.
+            let end = span.char_indices().last().unwrap().0;
+            assert!(!has(&text, &span[..end]), "{text:?} {span:?}");
             assert!(!has(&text, &span[1..]), "{text:?} {span:?}");
+            // Cut at the join mark of the last or the first word.
+            let last = span.rfind(|c| JOIN.contains(&c)).unwrap();
+            assert!(!has(&text, &span[..last]), "{text:?} {span:?}");
+            let first = span.find(|c| JOIN.contains(&c)).unwrap();
+            let after = first + span[first..].chars().next().unwrap().len_utf8();
+            assert!(!has(&text, &span[after..]), "{text:?} {span:?}");
         }
     }
 
