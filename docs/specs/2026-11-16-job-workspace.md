@@ -216,31 +216,48 @@ messages in the thread files.
 ### The build
 
 `iris_workspace::build(store, job, dir) -> Result<Built>`. `Built` gives the
-counts of threads, messages, items and people that the build wrote.
+counts of threads, messages, items and people that the build wrote, and the
+scope stamp of the scope that the build read.
 
-1. Make `dir` with mode `0700` if it is not there. Refuse a `dir` that is a
+The scope stamp is the pair (count of the scope rows of the job, count of
+the revoked rows). Rows are only added or revoked, never deleted or changed
+back, so each change of the scope changes the stamp.
+`iris_job::scope_stamp(store, job)` gives the current stamp.
+
+1. Make the folder that holds `dir` if it is not there. Take the lock file
+   `.<name>.lock` beside `dir` (`iris_store::FileLock`),
+   and keep it until the build ends. A second build of the same workspace
+   waits for the first, so two builds never use the same stage.
+2. Make `dir` with mode `0700` if it is not there. Refuse a `dir` that is a
    symbolic link or not a folder.
-2. If `.iris` is not a folder (for example a link of the agent), remove it as
+3. If `.iris` is not a folder (for example a link of the agent), remove it as
    a link or a file, and make a new folder with mode `0700`.
-3. Make the stage folder `.<name>.build` beside `dir` (for the default
+4. Make the stage folder `.<name>.build` beside `dir` (for the default
    folder: `<data dir>/workspaces/.j-<id>.build`). The stage is outside the
    workspace, so no path that the agent made is a part of its path. A stage
    that a stopped build left is removed first.
-4. Read the job, the scope and all the data of the files in one read
+5. Read the job, the scope and all the data of the files in one read
    transaction, so that all files agree, and write the new files into the
    stage.
-5. For each path that the build owns: remove the old path (a symbolic link is
+6. For each path that the build owns: remove the old path (a symbolic link is
    removed as a link, never followed), then rename the new path from the
    stage into place. Then remove the empty stage.
-6. Make `drafts/` and `notes.md` if they are not there.
+7. Make `drafts/` and `notes.md` if they are not there.
 
 The agent can write only in the workspace (R4-05), not in the folder that
 holds it. Each path that the build opens, makes or removes is the workspace
-folder itself, a direct child of it, or a path in the stage.
+folder itself, a direct child of it, the lock file, or a path in the stage.
 
-A crash in step 5 can leave an owned path absent. The session launcher
+A crash in step 6 can leave an owned path absent. The session launcher
 (R4-04) starts a session only after a build that returned `Ok`, so a session
 never sees a workspace with an absent path.
+
+A revoke can come while a build runs, after the build read the scope. The
+launcher (R4-04) must keep this rule: hold the workspace lock, build, then
+compare the stamp of the build with `scope_stamp`. If the two differ, build
+again. Start the session only when they agree. A revoke while a session
+runs takes effect in the read verbs at once (they read the current grant)
+and in the files at the next build.
 
 Each file is a new file (`create_new`), mode `0600`, so the build never
 writes through a link that the agent made. A rename and a remove act on the
@@ -291,13 +308,16 @@ Markdown and JSON with `serde_json`.
 | A change or a delete of a scope row, other than one revoke | Refused by the trigger | Unit test |
 | A revoke of a thread or an item of the scope | The next build has no file of its mail. The row stays, with `revoked_by` and `revoked_at` | Unit test |
 | A revoke by an agent | Refused | Unit test, and raw SQL |
+| A revoke while a build runs | The stamp of the build differs from `scope_stamp`, so the launcher builds again (R4-04) | Unit test: the stamp changes on each add and each revoke |
+| Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
 | An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
 | An unknown job | `Error::NotFound` | Unit test |
 
 ## Impact
 
 - `crates/iris-store/src/schema_15.sql` and the migration list.
-- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`.
+- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`,
+  `scope_stamp`.
 - `crates/iris-talk`: the clean messages of a thread become public, so the
   build uses the same rule of hostile mail as the conversation.
 - New crate `crates/iris-workspace`.
