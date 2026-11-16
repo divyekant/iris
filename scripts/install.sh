@@ -65,10 +65,13 @@ tar -xzf "$work/$asset" -C "$work"
 
 dir="${IRIS_INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$dir"
-# Move into place in one step, so that a running iris keeps its old file.
-cp "$work/iris" "$dir/.iris.new"
-chmod 755 "$dir/.iris.new"
-mv -f "$dir/.iris.new" "$dir/iris"
+# Copy to a file of this run only, then move it into place in one step, so
+# that a running iris keeps its old file and two installs do not mix.
+new="$(mktemp "$dir/.iris.XXXXXX")"
+trap 'rm -rf "$work"; rm -f "$new"' EXIT INT TERM
+cp "$work/iris" "$new"
+chmod 755 "$new"
+mv -f "$new" "$dir/iris"
 echo "iris install: installed $dir/iris"
 
 case ":$PATH:" in

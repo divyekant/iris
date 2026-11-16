@@ -148,3 +148,34 @@ fn a_system_with_no_service_manager_keeps_the_program() {
     assert!(stderr.contains("iris serve"), "{stderr}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn overlapping_installs_leave_one_whole_program() {
+    let dir = tmp("overlap");
+    let rel = release(&dir);
+    let runs: Vec<_> = (0..4)
+        .map(|_| {
+            let (dir, rel) = (dir.clone(), rel.clone());
+            std::thread::spawn(move || install(&dir, &rel, &[("IRIS_NO_SERVICE", "1")]))
+        })
+        .collect();
+    for run in runs {
+        let out = run.join().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let program = std::fs::read_to_string(dir.join("home/.local/bin/iris")).unwrap();
+    assert!(
+        program.starts_with("#!/bin/sh\n") && program.ends_with("fi\n"),
+        "{program}"
+    );
+    let left: Vec<_> = std::fs::read_dir(dir.join("home/.local/bin"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["iris"], "no temporary file stays");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
