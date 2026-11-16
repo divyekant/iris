@@ -123,16 +123,19 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     if row.gone {
         // A gone message leaves the conversation of its thread (section 4.5),
         // if a sync did not restore it after the first read.
-        let same = store.write(|tx| {
-            let same = state(tx, message, true)? == start;
-            if same {
-                iris_talk::update(tx, row.thread, None, now_ms)?;
+        // Its sender evidence goes too: a sent message can be the only
+        // evidence that its recipient is a person (section 6.7).
+        let done = store.write(|tx| {
+            if state(tx, message, true)? != start {
+                return Ok(None);
             }
-            Ok(same)
+            iris_talk::update(tx, row.thread, None, now_ms)?;
+            Ok(Some(iris_senders::refresh(tx, now_ms)?))
         })?;
         return Ok(Outcome {
-            gone: same,
-            changed: !same,
+            gone: done.is_some(),
+            changed: done.is_none(),
+            rerun: done.unwrap_or_default(),
             ..Outcome::default()
         });
     }

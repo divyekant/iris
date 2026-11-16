@@ -140,8 +140,8 @@ fn fields(raw: &[u8]) -> Vec<(String, String)> {
 }
 
 /// The addresses of an address list: `(bare address lowercase, display name)`,
-/// with the parser of `iris-senders` (groups, quotes, comments), and the
-/// display name decoded (RFC 2047).
+/// with the parser of `iris-senders` (groups, quotes, comments, a comment
+/// name, the display name decoded with RFC 2047).
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     iris_senders::head::addresses(v)
         .into_iter()
@@ -153,30 +153,7 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
                     && !domain.contains(char::is_whitespace)
             })
         })
-        // `a@b.example (Ana Lee)`: the comment shows as the display name.
-        // `iris-senders` decodes a display name; a comment is decoded here.
-        .map(|(a, n)| {
-            let n = n.or_else(|| {
-                comment_name(v, &a)
-                    .map(|c| decode_name(&c.replace("\\\"", "\"")))
-                    .filter(|c| !c.is_empty())
-            });
-            (a, n)
-        })
         .collect()
-}
-
-use iris_senders::head::decode_name;
-
-/// The comment right after a bare address in `v`, as in
-/// `ana@example.org (Ana Lee)`.
-fn comment_name(v: &str, addr: &str) -> Option<String> {
-    let low = v.to_ascii_lowercase();
-    let at = low.find(addr)? + addr.len();
-    let rest = v[at..].trim_start();
-    let inner = rest.strip_prefix('(')?;
-    let end = inner.find(')')?;
-    Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
 }
 
 /// The results of one `Authentication-Results` value, if its authserv-id is

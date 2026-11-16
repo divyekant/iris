@@ -1353,6 +1353,40 @@ fn a_later_spam_label_on_the_context_during_the_model_call_saves_nothing() {
 }
 
 #[test]
+fn a_gone_sent_message_takes_its_person_evidence() {
+    let b = store("gone-sent");
+    let raw = "From: owner@example.com
+To: bo@example.org (Bo Ren)
+Subject: Hi
+
+See you soon.
+";
+    let m = b.add("1", raw, &["SENT"]);
+    understand(&b.store, m, &Fake::default(), NOW).unwrap();
+    let row = |b: &Box_| -> (Option<String>, Option<String>) {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT kind, name FROM sender WHERE address = 'bo@example.org'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    // The comment is the name that you wrote.
+    assert_eq!(row(&b), (Some("person".into()), Some("Bo Ren".into())));
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [m])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(understand(&b.store, m, &Fake::default(), NOW).unwrap().gone);
+    assert_ne!(row(&b).0.as_deref(), Some("person"));
+}
+
+#[test]
 fn a_gone_message_leaves_the_conversation() {
     let b = store("gone-talk");
     let first =

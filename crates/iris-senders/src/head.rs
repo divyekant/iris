@@ -162,13 +162,24 @@ pub fn decode_name(n: &str) -> String {
         .to_string()
 }
 
+/// The comment right after a bare address in one entry, as in
+/// `ana@example.org (Ana Lee)`.
+fn comment_name(entry: &str, addr: &str) -> Option<String> {
+    let low = entry.to_ascii_lowercase();
+    let at = low.find(addr)? + addr.len();
+    let rest = entry.get(at..)?.trim_start();
+    let inner = rest.strip_prefix('(')?;
+    let end = inner.find(')')?;
+    Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
+}
+
 /// Split an address list at the commas that are outside quotes and angle
 /// brackets. Each entry gives (lowercase address, display name).
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     let (mut quoted, mut angle, mut start, mut comment) = (false, false, 0, 0u32);
-    let mut push = |s: &str| {
-        let s = strip_comments(s);
+    let mut push = |entry: &str| {
+        let s = strip_comments(entry);
         let s = s.trim();
         let (addr, name) = match (s.rfind('<'), s.rfind('>')) {
             (Some(a), Some(b)) if a < b => (&s[a + 1..b], s[..a].trim()),
@@ -176,6 +187,12 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
         };
         let addr = addr.trim().to_ascii_lowercase();
         if addr.contains('@') {
+            // `a@b.example (Ana Lee)`: the comment is the display name.
+            let comment = match name.is_empty() {
+                true => comment_name(entry, &addr),
+                false => None,
+            };
+            let name = comment.as_deref().unwrap_or(name);
             // The sender rows keep the decoded name: the spoof check
             // compares it with the decoded name of a later `From`.
             let name = decode_name(&name.trim_matches('"').replace("\\\"", "\""));
@@ -225,10 +242,14 @@ mod tests {
 
     #[test]
     fn comments_are_not_part_of_an_address() {
+        // A comment after a bare address is its display name.
         let h = Head::parse(
             b"From: lee@example.org (Lee, Ana)\r\nTo: \"Bo (work)\" <bo@example.net>, (x) cy@example.net\r\n\r\n",
         );
-        assert_eq!(h.from(), Some(("lee@example.org".into(), None)));
+        assert_eq!(
+            h.from(),
+            Some(("lee@example.org".into(), Some("Lee, Ana".into())))
+        );
         let to: Vec<String> = h.recipients().into_iter().map(|(a, _)| a).collect();
         assert_eq!(to, ["bo@example.net", "cy@example.net"]);
     }
