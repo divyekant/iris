@@ -1,0 +1,30 @@
+{
+  "model": "iris/0",
+  "id": "j-142",
+  "goal": "",
+  "due": "2026-11-20T00:00:00Z",
+  "created": "2026-11-16T09:00:00Z",
+  "updated": "2026-11-16T09:20:00Z",
+  "state": "waiting",
+  "wait": {
+    "thread": "t-8841",
+    "until": "2026-11-18T09:00:00Z"
+  },
+  "events": [
+    {
+      "at": "2026-11-16T09:00:00Z",
+      "state": "working",
+      "by": "person"
+    },
+    {
+      "at": "2026-11-16T09:20:00Z",
+      "state": "waiting",
+      "by": "agent",
+      "wait": {
+        "thread": "t-8841",
+        "until": "2026-11-18T09:00:00Z"
+      },
+      "why": "Dana has the contract now."
+    }
+  ]
+}
