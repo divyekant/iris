@@ -605,7 +605,7 @@
       },
       "allOf": [
         {
-          "$comment": "An applied, failed or undone action has its ledger entry (section 7.1).",
+          "$comment": "An undone action has its ledger entry (section 7.1). Until the ledger (R2-03), an applied or failed action has no ledger entry, so ledger is optional for them (section 7.2, the apply before the ledger).",
           "if": {
             "type": "object",
             "required": [
@@ -620,8 +620,6 @@
                 "properties": {
                   "state": {
                     "enum": [
-                      "applied",
-                      "failed",
                       "undone"
                     ]
                   }
