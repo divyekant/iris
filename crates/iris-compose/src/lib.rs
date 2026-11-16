@@ -357,7 +357,7 @@ fn read_with(raw: &[u8], account: &str, strict: bool) -> Option<Read> {
         names.contains("references"),
     ) {
         ([], false, false) => None,
-        ([one], true, has_references) if has_references != references.is_empty() => Some(Reply {
+        ([one], true, has_references) if has_references == !references.is_empty() => Some(Reply {
             in_reply_to: one.clone(),
             references,
         }),
