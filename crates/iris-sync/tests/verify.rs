@@ -175,3 +175,36 @@ fn a_repair_fetch_that_fails_is_reported_as_not_repaired() {
     assert_eq!(r.differences, vec![Difference::Unrepaired(id)]);
     assert_eq!(std::fs::read(&path).unwrap(), b"bad");
 }
+
+#[test]
+fn a_repair_that_stops_keeps_each_difference_and_the_resync() {
+    let (fake, store, account) = synced("v-repair-stop", 29, 50);
+    let bad = FakeGmail::id_of(3);
+    let path = store.content_path(&sha_of(&store, &bad).unwrap()).unwrap();
+    std::fs::write(&path, b"bad").unwrap();
+    store
+        .write(|tx| {
+            tx.execute(
+                "DELETE FROM message_label WHERE message_id =
+                   (SELECT id FROM message WHERE provider_id = ?1)",
+                [FakeGmail::id_of(8)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let at_fake = fake.clone();
+    // The repair fetch gets HTTP 401: an error that stops each fetch.
+    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || {
+        at_fake.fail_next(&[401])
+    }));
+
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(
+        r.differences,
+        vec![
+            Difference::Labels(FakeGmail::id_of(8)),
+            Difference::Unrepaired(bad)
+        ]
+    );
+    assert_eq!(sync_state(&store).0.as_deref(), Some(KIND_RESYNC));
+}
