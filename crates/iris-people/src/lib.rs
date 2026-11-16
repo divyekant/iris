@@ -137,25 +137,30 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                 continue;
             }
             if sent {
-                let to = to.as_deref().map(addresses).unwrap_or_default();
-                let cc = cc.as_deref().map(addresses).unwrap_or_default();
+                let to = to.as_deref().map(mailboxes).unwrap_or_default();
+                let cc = cc.as_deref().map(mailboxes).unwrap_or_default();
                 // The header table has no Bcc. Gmail keeps it in the raw sent message.
                 let bcc = sha
                     .and_then(|sha| store.content_path(&sha))
                     .and_then(|p| head_field(&p, "bcc"))
-                    .map(|b| addresses(&b))
+                    .map(|b| mailboxes(&b))
                     .unwrap_or_default();
                 let mut done = HashSet::new();
-                for a in to.into_iter().chain(cc).chain(bcc) {
+                for (a, name) in to.into_iter().chain(cc).chain(bcc) {
                     if own.contains(&a) || !done.insert(a.clone()) {
                         continue;
                     }
-                    stats.entry(a.clone()).or_default().seen.push(Seen {
+                    let s = stats.entry(a.clone()).or_default();
+                    s.seen.push(Seen {
                         message,
                         thread,
                         date,
                         from_them: false,
                     });
+                    if let Some(n) = name {
+                        let d = s.names.entry(n).or_insert(date);
+                        *d = (*d).max(date);
+                    }
                     known.insert(a);
                 }
             } else if let Some(a) = from.filter(|a| !own.contains(a)) {
@@ -365,6 +370,12 @@ pub fn person(store: &Store, account: i64, id: &str) -> Result<Option<Person>> {
 /// The addresses of an address list such as `A <a@example.com>, b@example.com`,
 /// in lower case. A part that has no address gives nothing.
 pub fn addresses(list: &str) -> Vec<String> {
+    mailboxes(list).into_iter().map(|(a, _)| a).collect()
+}
+
+/// The mailboxes of an address list: each address in lower case, with its
+/// display name if it has one.
+pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     let (mut quoted, mut angle, mut start) = (false, false, 0);
     for (i, c) in list.char_indices() {
@@ -373,14 +384,25 @@ pub fn addresses(list: &str) -> Vec<String> {
             '<' if !quoted => angle = true,
             '>' if !quoted => angle = false,
             ',' | ';' if !quoted && !angle => {
-                out.extend(one_address(&list[start..i]));
+                out.extend(mailbox(&list[start..i]));
                 start = i + 1;
             }
             _ => {}
         }
     }
-    out.extend(one_address(&list[start..]));
+    out.extend(mailbox(&list[start..]));
     out
+}
+
+/// One mailbox such as `"Lind, Ana" <ana@example.org>`: the address and the
+/// display name.
+fn mailbox(part: &str) -> Option<(String, Option<String>)> {
+    let address = one_address(part)?;
+    let name = part
+        .rfind('<')
+        .map(|i| part[..i].trim().trim_matches('"').trim().to_string())
+        .filter(|n| !n.is_empty());
+    Some((address, name))
 }
 
 /// The address of one mailbox such as `"Name" <a@example.com>`, in lower case.
@@ -391,11 +413,15 @@ fn one_address(part: &str) -> Option<String> {
         _ => part.rsplit(':').next().unwrap_or(part),
     };
     let a = a.trim().to_lowercase();
-    let ok = a.matches('@').count() == 1
-        && !a.starts_with('@')
-        && !a.ends_with('@')
-        && !a.contains(|c: char| c.is_whitespace() || "\"<>(),;:".contains(c));
-    ok.then_some(a)
+    let bad = |t: &str| t.contains(|c: char| c.is_whitespace() || "\"<>(),;:@".contains(c));
+    // The domain is after the last `@`. A quoted local part, such as
+    // `"john doe"@example.org`, can have any character but a quote.
+    let (local, domain) = a.rsplit_once('@')?;
+    let local_ok = match local.strip_prefix('"').and_then(|l| l.strip_suffix('"')) {
+        Some(inner) => !inner.contains(['"', '\\', '\r', '\n']),
+        None => !local.is_empty() && !bad(local),
+    };
+    (local_ok && !domain.is_empty() && !bad(domain)).then_some(a)
 }
 
 /// The key of a display name for the merge of addresses: lower case, one
@@ -422,6 +448,21 @@ mod tests {
         );
         assert_eq!(addresses("undisclosed-recipients:;"), Vec::<String>::new());
         assert_eq!(addresses("not an address, @x, x@"), Vec::<String>::new());
+        assert_eq!(
+            addresses(r#""john.doe"@Example.org, "a, b"@example.org, Jo <"j o"@example.org>"#),
+            [
+                r#""john.doe"@example.org"#,
+                r#""a, b"@example.org"#,
+                r#""j o"@example.org"#
+            ]
+        );
+        assert_eq!(
+            mailboxes(r#""Lind, Ana" <ana@example.org>, bo@example.org"#),
+            [
+                ("ana@example.org".to_string(), Some("Lind, Ana".to_string())),
+                ("bo@example.org".to_string(), None)
+            ]
+        );
     }
 
     #[test]
