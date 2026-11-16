@@ -219,7 +219,7 @@ history go out.
   target is URL.
 - The query parameters that go out: each name that starts with `utm_`, and
   each name of the `TRACKING` list in `url.rs`. Names have no case. The order
-  of the other parameters stays. The fragment stays.
+  of the other parameters stays, empty entries too. The fragment stays.
 
 ### Attachments
 
@@ -263,7 +263,9 @@ its first 1 KiB holds `%PDF`.
   must be letters, digits, white space or one of
   `.,;:!?'"()-/%&@€$£#*+=`. If not, `text` is `None`.
 - The check reads at least 4,096 bytes of text, also when less budget is
-  left. Then the text is clipped to the budget.
+  left. Then the text is clipped to the budget. If the reader stops at a
+  limit before the end of the PDF, the text gets `CUT_MARK`, also when
+  trimmed white space makes the text shorter than the budget.
 
 ### Known limits
 

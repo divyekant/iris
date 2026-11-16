@@ -39,7 +39,7 @@ pub fn clean_url(url: &str) -> String {
         .split('&')
         .filter(|p| {
             let k = p.split('=').next().unwrap_or("").to_ascii_lowercase();
-            !p.is_empty() && !k.starts_with("utm_") && !TRACKING.contains(&k.as_str())
+            !k.starts_with("utm_") && !TRACKING.contains(&k.as_str())
         })
         .collect();
     let mut out = base.to_string();
@@ -114,6 +114,11 @@ mod tests {
         assert_eq!(
             clean_url("https://a.example.com/x"),
             "https://a.example.com/x"
+        );
+        // An empty entry is not a tracking parameter: it stays.
+        assert_eq!(
+            clean_url("https://example.org/?a=1&&b=2&utm_source=x"),
+            "https://example.org/?a=1&&b=2"
         );
     }
 

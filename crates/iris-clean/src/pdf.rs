@@ -22,10 +22,13 @@ pub fn is_pdf(start: &[u8]) -> bool {
     find(&start[..start.len().min(1024)], b"%PDF").is_some()
 }
 
-pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
+/// The text, and true if the reader stopped at a limit before the end.
+/// Trimmed white space can make the text shorter than the limit.
+pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
     if !is_pdf(pdf) {
-        return None;
+        return (None, false);
     }
+    let mut stopped = false;
     let mut out = String::new();
     let mut total = 0;
     let mut at = 0;
@@ -72,6 +75,7 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
             content_text(&decoded, &mut out, limit);
         }
         if out.len() >= limit || total >= TOTAL_LIMIT {
+            stopped = true;
             break;
         }
     }
@@ -84,7 +88,7 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         text.push_str(l);
     }
     drop(out);
-    readable(&text).then_some(text)
+    (readable(&text).then_some(text), stopped)
 }
 
 /// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
@@ -462,6 +466,19 @@ mod tests {
         let mut bad = b"%PDF-1.4\nstream\n(((((\\".to_vec();
         bad.extend(std::iter::repeat_n(b'(', 10_000));
         text(&bad, 1000);
+    }
+
+    fn text(pdf: &[u8], limit: usize) -> Option<String> {
+        text_cut(pdf, limit).0
+    }
+
+    #[test]
+    fn a_limit_in_white_space_shows_a_cut() {
+        let t = format!("BT (Hello{}) Tj (later) Tj ET", " ".repeat(200));
+        let (got, cut) = text_cut(&sample(t.as_bytes(), false), 100);
+        assert_eq!(got.as_deref(), Some("Hello"));
+        assert!(cut);
+        assert!(!text_cut(&sample(PAGE, false), 1000).1);
     }
 
     #[test]

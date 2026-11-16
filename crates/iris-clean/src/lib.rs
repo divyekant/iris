@@ -349,7 +349,9 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
             let (bytes, _) = decode_capped(f.body, &f.cte, PDF_LIMIT as usize);
             // The quality check needs some text, also when little budget is
             // left. One byte more than the budget shows a cut.
-            if let Some(mut t) = pdf::text(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT)) {
+            let (found, stopped) = pdf::text_cut(&bytes, (*attach_left + 1).max(PDF_CHECK_TEXT));
+            if let Some(mut t) = found {
+                cut = stopped;
                 if t.len() > *attach_left {
                     t.truncate(floor_char(&t, *attach_left));
                     cut = true;
