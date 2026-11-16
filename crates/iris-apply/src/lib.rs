@@ -1,18 +1,21 @@
 //! The apply of one approved changeset action to Gmail (specification 2,
-//! section 7.2), for the verbs `archive`, `inbox`, `read`, `unread` and
-//! `trash`. The apply changes the mirror after each provider call.
+//! section 7.2), for the verbs `archive`, `inbox`, `read`, `unread`,
+//! `trash`, `label` and `unlabel`. The apply changes the mirror after each
+//! provider call.
 //!
 //! The steps of [`apply`]:
 //!
 //! 1. Expire an action 14 days after its submit. Wait while the active
 //!    policy has the mode `observe`. Send an action
 //!    that a rule approved to review (no ledger yet for the bulk count).
-//!    Deny an action whose hash does not agree with its rows.
+//!    Deny an action whose hash does not agree with its rows. For `label`
+//!    and `unlabel`, find the user label of the name at Gmail.
 //! 2. Read the labels of each message at Gmail (`format=minimal`), 1,000
 //!    messages at a time. Skip a gone message and a message that already
 //!    has the target state.
 //! 3. Change the other messages: one `batchModify` call for each page, or
-//!    one `trash` call for each message. Write the new labels to the mirror
+//!    one `trash` call for each message. Before its first `batchModify`, a
+//!    `label` action makes its label if Gmail does not have it. Write the new labels to the mirror
 //!    after each call.
 //! 4. Set the state `applied`, or `failed` after a clear refusal.
 //!
@@ -27,6 +30,7 @@ use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
 use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
+use unicase::UniCase;
 
 #[derive(Debug)]
 pub enum Error {
@@ -46,8 +50,7 @@ pub enum Error {
     /// or in another. The action
     /// stays as it was. Apply again after the other apply.
     Busy,
-    /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
-    /// and the state verbs.
+    /// The verb has no Gmail apply: the state verbs (issue #164).
     Verb(String),
 }
 
@@ -112,15 +115,19 @@ pub enum Outcome {
 /// An open action expires 14 days after its submit (section 5.5).
 const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
-/// The label change of a verb.
+/// The label change of a verb, with Gmail label IDs.
 struct Change {
-    add: &'static [&'static str],
-    remove: &'static [&'static str],
+    add: Vec<String>,
+    remove: Vec<String>,
     /// `messages.trash` for each message, not `batchModify`.
     trash: bool,
+    /// A `label` action whose label Gmail does not have: the name to make
+    /// before the first `batchModify`. Each message needs the change.
+    create: Option<String>,
 }
 
 impl Change {
+    /// The change of a verb with no label argument.
     fn of(verb: &str) -> Option<Change> {
         let (add, remove, trash): (&[&str], &[&str], bool) = match verb {
             "archive" => (&[], &["INBOX"], false),
@@ -130,14 +137,47 @@ impl Change {
             "trash" => (&["TRASH"], &[], true),
             _ => return None,
         };
-        Some(Change { add, remove, trash })
+        let own = |v: &[&str]| v.iter().map(|l| l.to_string()).collect();
+        Some(Change {
+            add: own(add),
+            remove: own(remove),
+            trash,
+            create: None,
+        })
     }
 
     /// True if a message with `labels` does not have the target state.
     fn needed(&self, labels: &[String]) -> bool {
-        let has = |l: &str| labels.iter().any(|x| x == l);
-        self.add.iter().any(|l| !has(l)) || self.remove.iter().any(|l| has(l))
+        self.create.is_some()
+            || self.add.iter().any(|l| !labels.contains(l))
+            || self.remove.iter().any(|l| labels.contains(l))
     }
+}
+
+/// The user label of the name `name` in `labels` (the labels of Gmail).
+/// Gmail refuses two labels whose names differ only in case, so the match
+/// has no regard to case, with the Unicode case folding of submit
+/// (`unicase`, as `iris-changeset`). `Err` gives the reason of a denial:
+/// the name is the name or the ID of a system label.
+fn find_label<'l>(
+    labels: &'l [iris_gmail::Label],
+    name: &str,
+) -> std::result::Result<Option<&'l iris_gmail::Label>, String> {
+    let name = UniCase::new(name);
+    let mut found = None;
+    for l in labels {
+        let same_name = UniCase::new(l.name.as_str()) == name;
+        if (same_name || UniCase::new(l.id.as_str()) == name) && l.kind == "system" {
+            return Err(format!(
+                "{} is a system label at Gmail: use its own verb.",
+                l.name
+            ));
+        }
+        if same_name {
+            found = Some(l);
+        }
+    }
+    Ok(found)
 }
 
 /// True if `token` is a token of the mailbox `address` (Gmail profile).
@@ -227,7 +267,26 @@ pub fn apply(
              Gmail again for this action. The next sync shows the labels.",
         );
     }
-    let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
+    // The label name of `label` and `unlabel`; submit checked the argument.
+    let label: Option<String> = match verb.as_str() {
+        "label" | "unlabel" => store.read(|c| {
+            Ok(c.query_row(
+                "SELECT json_extract(args, '$.label') FROM changeset_action WHERE id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })?,
+        _ => None,
+    };
+    let mut change = match (verb.as_str(), &label) {
+        ("label" | "unlabel", Some(_)) => Change {
+            add: Vec::new(),
+            remove: Vec::new(),
+            trash: false,
+            create: None,
+        },
+        _ => Change::of(&verb).ok_or(Error::Verb(verb.clone()))?,
+    };
     if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
         return Ok(o);
     }
@@ -257,6 +316,28 @@ pub fn apply(
         Ok(true) => {}
         Ok(false) => return Err(Error::OtherMailbox),
         Err(e) => return Err(Error::Gmail(e)),
+    }
+    if let Some(name) = &label {
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let id = match find_label(&labels, name) {
+            Err(reason) => {
+                decide(store, action, "denied", &reason)?;
+                return Ok(Outcome::Denied(reason));
+            }
+            Ok(Some(l)) => {
+                // The mirror needs the label row to show the change.
+                store.put_labels(account, &[(&l.id, &l.name, "user")])?;
+                Some(l.id.clone())
+            }
+            Ok(None) => None,
+        };
+        match (verb.as_str(), id) {
+            ("label", Some(id)) => change.add.push(id),
+            ("label", None) => change.create = Some(name.clone()),
+            (_, Some(id)) => change.remove.push(id),
+            // No message has a label that Gmail does not have.
+            (_, None) => {}
+        }
     }
     let mut after = 0;
     loop {
@@ -300,7 +381,7 @@ pub fn apply(
                 return Ok(o);
             }
         }
-        if let Err(e) = run.change(&change, &todo) {
+        if let Err(e) = run.change(&mut change, &todo) {
             return run.stop(e);
         }
     }
@@ -404,11 +485,15 @@ impl Run<'_, '_> {
     /// The write calls of one page, each with its mirror write.
     fn change(
         &mut self,
-        change: &Change,
+        change: &mut Change,
         todo: &[(i64, String, Vec<String>)],
     ) -> std::result::Result<(), iris_gmail::Error> {
         if todo.is_empty() {
             return Ok(());
+        }
+        if let Some(name) = change.create.take() {
+            let id = self.create_label(&name)?;
+            change.add.push(id);
         }
         if change.trash {
             for (id, provider_id, _) in todo {
@@ -419,23 +504,50 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let ids: Vec<&str> = todo.iter().map(|(_, p, _)| p.as_str()).collect();
-        self.call(|g, t| g.batch_modify(t, &ids, change.add, change.remove))?;
+        let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
+        let remove: Vec<&str> = change.remove.iter().map(String::as_str).collect();
+        self.call(|g, t| g.batch_modify(t, &ids, &add, &remove))?;
         // The labels after the call: the labels of step 2 with the change.
         let after: Vec<(i64, Vec<String>)> = todo
             .iter()
             .map(|(id, _, labels)| {
                 let mut l: Vec<String> = labels
                     .iter()
-                    .filter(|l| !change.remove.contains(&l.as_str()))
+                    .filter(|l| !change.remove.contains(l))
                     .cloned()
                     .collect();
-                l.extend(change.add.iter().map(|a| a.to_string()));
+                l.extend(change.add.iter().cloned());
                 (*id, l)
             })
             .collect();
         mirror(self.store, self.account, &after);
         self.counts.changed += todo.len() as u64;
         Ok(())
+    }
+}
+
+impl Run<'_, '_> {
+    /// Make the user label `name` at Gmail (after the mark), and save it in
+    /// the store. Gives its ID. After each error (for example HTTP 409: a
+    /// label with the name exists now, or an unknown result), the apply
+    /// reads the labels: the user label of the name is the label to use.
+    /// The create is not called again (section 7.2, step 1).
+    fn create_label(&mut self, name: &str) -> std::result::Result<String, iris_gmail::Error> {
+        let label = match self.call(|g, t| g.create_label(t, name)) {
+            Ok(l) => l,
+            Err(e) => {
+                let labels = self.call(|g, t| g.labels(t))?;
+                match find_label(&labels, name) {
+                    Ok(Some(l)) => l.clone(),
+                    _ => return Err(e),
+                }
+            }
+        };
+        // A store error loses only the mirror rows: the next sync writes them.
+        let _ = self
+            .store
+            .put_labels(self.account, &[(&label.id, &label.name, "user")]);
+        Ok(label.id)
     }
 }
 

@@ -617,9 +617,10 @@ The `ledger_message` table has one row for each message of the entry:
 
 ### 7.2 Apply
 
-1. If the action adds a user label that the mirror does not have, call
-   `labels.create`. If Gmail answers that the label exists, or the result is
-   not known, call `labels.list` and use the user label with that name. If
+1. If the action adds a user label that Gmail does not have (`labels.list`),
+   call `labels.create`. If Gmail answers with an error (for example, the
+   label exists) or the result is not known, call `labels.list` again and use
+   the user label with that name. If
    no label of kind `user` has that name, the action is `failed`. The label
    stays after an undo, so this step has no ledger entry.
 2. Read the labels of each message of the action at Gmail (`format=minimal`).
@@ -657,7 +658,7 @@ action that has a message of that row. The other action waits.
 #### Failure list of the apply before the ledger (R2-02)
 
 The crate `iris-apply` applies the verbs `archive`, `inbox`, `read`,
-`unread` and `trash`. It comes before the ledger (R2-03), so it has no
+`unread`, `trash`, `label` and `unlabel`. It comes before the ledger (R2-03), so it has no
 `writing` row, no list of the messages of each call and no recovery. In
 place of the `writing` row, migration 9 adds the mark `applying` to the
 action. The apply sets it before the first write call of the action. No
@@ -684,6 +685,11 @@ other than success is `failed`.
 | A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | A withdraw keeps a marked action `approved`, and it cancels an action with no mark. A marked action can only become `applied` or `failed`. The apply that set the mark ends it. The ledger row in `writing` replaces the mark in R2-03 (section 5.5). |
 | A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of step 2 for each message: as read for a message with the target state, with the change of the call for a changed message, and as the `trash` answer gives them. The apply changes only the label rows that differ, so the triggers on the labels of a message (the model wait, the attention) see only real changes. |
 | A store error after a provider call | The mirror does not have the new labels | The next sync writes the labels from the history of Gmail. |
+| The label name of `label` or `unlabel` | The mirror can be one sync interval behind Gmail, and Gmail refuses two labels whose names differ only in case | Before the mark, the apply reads `labels.list` and finds the label of the name, with no regard to case (the Unicode case folding of submit). The mirror gets the label row. |
+| A label name that is the name or the ID of a system label at Gmail | A `label` action changes a system label | Submit refuses the name. If Gmail has a system label that submit does not know, the engine denies the action, by `engine`, with no call. |
+| A `label` action of a label that Gmail does not have | No label to add | After the mark, the apply calls `labels.create` one time. After an error or an unknown result, it reads `labels.list` and uses the user label of the name. With no such label, the action is `failed`. |
+| An `unlabel` action of a label that Gmail does not have | A call that changes nothing | Each message has the target state. The action is `applied` with no write call. |
+| A label deleted at Gmail between `labels.list` and `batchModify` | Gmail refuses the call (HTTP 400) | A clear refusal: the action is `failed`. |
 
 ### 7.3 Recovery
 
