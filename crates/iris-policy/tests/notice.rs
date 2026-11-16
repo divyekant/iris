@@ -1,0 +1,334 @@
+//! Tests of notices by rule (card R5-08, `docs/specs/2026-11-16-notices.md`).
+
+use iris_policy::notice::{self, WINDOW_MS};
+use iris_policy::*;
+use iris_store::Store;
+use rusqlite::params;
+use std::path::PathBuf;
+
+const NOW: i64 = 1_800_000_000_000;
+const MIN: i64 = 60_000;
+
+struct Dir(PathBuf);
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn store(name: &str) -> (Dir, Store) {
+    let dir = std::env::temp_dir().join(format!("iris-notice-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account(id, provider, address) VALUES (1, 'gmail', 'me@x.example');
+                 INSERT INTO thread(account_id, provider_id) VALUES (1, 't');
+                 INSERT INTO label(id, account_id, provider_id, name, kind) VALUES
+                   (1, 1, 'INBOX', 'INBOX', 'system'), (2, 1, 'Label_1', 'Work', 'user'),
+                   (3, 1, 'SENT', 'Sent', 'system');
+                 INSERT INTO sender(address, kind) VALUES ('ann@friends.example', 'person'),
+                   ('news@shop.example', 'service'), ('x@far.example', 'hostile');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    (Dir(dir), store)
+}
+
+fn activate(s: &Store, text: &str) {
+    std::fs::write(s.dir().join(FILE), text).unwrap();
+    let sha = match file_state(s).unwrap() {
+        FileState::Changed(l) => l.sha256,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(confirm(s, &sha, NOW / 1000).unwrap(), Confirm::Done { .. }));
+}
+
+/// One mail: what decides if it gets a notice.
+#[derive(Clone, Debug)]
+struct Mail {
+    sender: &'static str,
+    /// Minutes before NOW of the fetch, and of the date before the fetch.
+    fetched_ago: i64,
+    date_before_fetch: i64,
+    body: bool,
+    gone: bool,
+    hostile: bool,
+    labels: Vec<i64>,
+    forms: Vec<&'static str>,
+    subject: String,
+}
+
+fn put(s: &Store, m: &Mail, n: usize) -> i64 {
+    s.write(|tx| {
+        let fetched = NOW - m.fetched_ago * MIN;
+        tx.execute(
+            "INSERT INTO message(account_id, thread_id, provider_id, internal_date, fetched_at, gone_at, hostile)
+             VALUES (1, 1, ?1, ?2, ?3, ?4, ?5)",
+            params![
+                format!("m{n}"),
+                fetched - m.date_before_fetch * MIN,
+                fetched,
+                m.gone.then_some(1),
+                m.hostile.then_some("[\"phishing\"]")
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO header(message_id, from_addr, from_name, subject) VALUES (?1, ?2, ?3, ?4)",
+            params![id, m.sender, "", m.subject],
+        )?;
+        if m.body {
+            tx.execute(
+                "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, '', '', '')",
+                [id],
+            )?;
+        }
+        for l in &m.labels {
+            tx.execute("INSERT INTO message_label(message_id, label_id) VALUES (?1, ?2)", [id, *l])?;
+        }
+        for f in &m.forms {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES (?1, 1, 'new', '{}', 0, 0)",
+                [f],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role) VALUES (?1, ?2, 'origin')",
+                [tx.last_insert_rowid(), id],
+            )?;
+        }
+        Ok(id)
+    })
+    .unwrap()
+}
+
+fn notices(s: &Store) -> Vec<(i64, u32)> {
+    s.read(|c| {
+        Ok(c.prepare("SELECT message_id, rule FROM notice ORDER BY message_id")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    })
+    .unwrap()
+}
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn pick<T: Copy>(&mut self, xs: &[T]) -> T {
+        xs[(self.next() % xs.len() as u64) as usize]
+    }
+    fn coin(&mut self) -> bool {
+        self.next().is_multiple_of(2)
+    }
+}
+
+const SENDERS: [&str; 4] = ["ann@friends.example", "news@shop.example", "x@far.example", "who@else.example"];
+const FORMS: [&str; 3] = ["commitment", "feed", "signal"];
+
+/// A rule of the generated policy, as the oracle reads it.
+#[derive(Clone, Debug)]
+struct Cond {
+    id: u32,
+    notify: bool,
+    sender: Option<&'static str>,
+    kind: Option<&'static str>,
+    form: Option<&'static str>,
+    label: Option<&'static str>,
+}
+
+fn kind_of(m: &Mail) -> &'static str {
+    match m.sender {
+        _ if m.labels.contains(&3) => "self",
+        _ if m.hostile => "hostile",
+        "ann@friends.example" => "person",
+        "news@shop.example" => "service",
+        "x@far.example" => "hostile",
+        _ => "stranger",
+    }
+}
+
+/// The oracle of the spec: the rule of the notice of `m`, if any.
+fn expected(m: &Mail, rules: &[Cond]) -> Option<u32> {
+    let kind = kind_of(m);
+    let fresh = m.fetched_ago <= 60 && m.date_before_fetch <= 60;
+    if !fresh || !m.body || m.gone || kind == "hostile" || kind == "self" {
+        return None;
+    }
+    rules
+        .iter()
+        .filter(|r| r.notify)
+        .filter(|r| {
+            r.sender.is_none_or(|s| match s.strip_prefix('@') {
+                Some(d) => m.sender.ends_with(&format!("@{d}")),
+                None => m.sender == s,
+            }) && r.kind.is_none_or(|k| k == kind)
+                && r.form.is_none_or(|f| m.forms.contains(&f))
+                && r.label.is_none_or(|l| {
+                    m.labels.iter().any(|&i| ["INBOX", "Work", "Sent"][i as usize - 1] == l)
+                })
+        })
+        .map(|r| r.id)
+        .min()
+}
+
+#[test]
+fn no_notice_without_a_rule_that_matches() {
+    // Invariant: after a refresh, the notices are exactly the new, safe mails
+    // that a notify rule matches, each with the lowest matching rule.
+    let mut total = 0;
+    for seed in 1..40u64 {
+        let (_d, s) = store(&format!("prop{seed}"));
+        let mut rng = Rng(seed * 7919);
+        let mut rules = Vec::new();
+        let mut text = "version = 0\nmode = \"observe\"\n".to_string();
+        for id in 1..=1 + rng.next() % 4 {
+            let mut c = Cond { id: id as u32, notify: rng.next() % 4 != 0, sender: None, kind: None, form: None, label: None };
+            if rng.coin() {
+                c.sender = Some(rng.pick(&["ann@friends.example", "@shop.example", "@far.example"]));
+            }
+            if rng.coin() {
+                c.kind = Some(rng.pick(&["person", "service", "stranger", "hostile", "self"]));
+            }
+            if rng.coin() {
+                c.form = Some(rng.pick(&FORMS));
+            }
+            if rng.next() % 3 == 0 {
+                c.label = Some(rng.pick(&["INBOX", "Work"]));
+            }
+            if c.sender.is_none() && c.kind.is_none() && c.form.is_none() && c.label.is_none() {
+                c.kind = Some("person");
+            }
+            let mut when = Vec::new();
+            for (k, v) in [("sender", c.sender), ("sender_kind", c.kind), ("form", c.form), ("label", c.label)] {
+                if let Some(v) = v {
+                    when.push(format!("{k} = \"{v}\""));
+                }
+            }
+            text += &format!(
+                "[[rule]]\nid = {id}\nname = \"Rule {id}\"\neffect = \"{}\"\nwhen = {{ {} }}\nby = \"person\"\nadded = 2026-11-10\n",
+                if c.notify { "notify" } else { rng.pick(&["hide", "bundle"]) },
+                when.join(", ")
+            );
+            rules.push(c);
+        }
+        activate(&s, &text);
+        let mut want = Vec::new();
+        for n in 0..30 {
+            let m = Mail {
+                sender: rng.pick(&SENDERS),
+                fetched_ago: rng.pick(&[0, 5, 30, 59, 60, 61, 600]),
+                date_before_fetch: rng.pick(&[0, 1, 30, 60, 61, 100_000]),
+                body: rng.next() % 5 != 0,
+                gone: rng.next() % 9 == 0,
+                hostile: rng.next() % 7 == 0,
+                labels: [1, 2, 3].into_iter().filter(|_| rng.next() % 3 == 0).collect(),
+                forms: (0..rng.next() % 3).map(|_| rng.pick(&FORMS)).collect(),
+                subject: format!("Mail {n}"),
+            };
+            let id = put(&s, &m, n);
+            if let Some(r) = expected(&m, &rules) {
+                want.push((id, r));
+            }
+        }
+        let new = notice::refresh(&s, NOW).unwrap();
+        assert_eq!(notices(&s), want, "seed {seed}\n{text}");
+        assert_eq!(new.len(), want.len());
+        // A second pass adds nothing.
+        assert!(notice::refresh(&s, NOW + 1).unwrap().is_empty());
+        assert_eq!(notices(&s), want);
+        total += want.len();
+    }
+    assert!(total > 20, "the generator gives notices: {total}");
+}
+
+fn mail() -> Mail {
+    Mail {
+        sender: "ann@friends.example",
+        fetched_ago: 1,
+        date_before_fetch: 1,
+        body: true,
+        gone: false,
+        hostile: false,
+        labels: vec![1],
+        forms: vec![],
+        subject: "Lunch?".into(),
+    }
+}
+
+const ANN: &str = "version = 0\nmode = \"observe\"\n[[rule]]\nid = 4\nname = \"From Ann\"\neffect = \"notify\"\nwhen = { sender = \"ann@friends.example\" }\nby = \"person\"\nadded = 2026-11-10\n";
+
+#[test]
+fn a_mail_waits_for_its_body_then_gets_one_notice() {
+    let (_d, s) = store("body");
+    activate(&s, ANN);
+    let id = put(&s, &Mail { body: false, ..mail() }, 0);
+    assert!(notice::refresh(&s, NOW).unwrap().is_empty());
+    s.write(|tx| {
+        tx.execute("INSERT INTO body(message_id, subject, sender, text) VALUES (?1, '', '', '')", [id])?;
+        Ok(())
+    })
+    .unwrap();
+    let new = notice::refresh(&s, NOW).unwrap();
+    assert_eq!(new.len(), 1);
+    assert_eq!((new[0].rule, new[0].rule_name.as_str()), (4, "From Ann"));
+    assert_eq!((new[0].title.as_str(), new[0].text.as_str()), ("ann@friends.example", "Lunch?"));
+    // After its hour, a mail is not new.
+    assert!(notice::refresh(&s, NOW + WINDOW_MS).unwrap().is_empty());
+}
+
+#[test]
+fn no_notice_without_an_active_policy() {
+    let (_d, s) = store("none");
+    put(&s, &mail(), 0);
+    assert!(notice::refresh(&s, NOW).unwrap().is_empty());
+}
+
+#[test]
+fn done_hides_a_notice_from_the_list() {
+    let (_d, s) = store("done");
+    activate(&s, ANN);
+    put(&s, &mail(), 0);
+    put(&s, &mail(), 1);
+    let new = notice::refresh(&s, NOW).unwrap();
+    let list = s.read(|c| notice::list(c)).unwrap();
+    assert_eq!(list.iter().map(|n| n.id).collect::<Vec<_>>(), [new[1].id, new[0].id]);
+    assert!(notice::done(&s, new[0].id, NOW).unwrap());
+    assert!(notice::done(&s, new[0].id, NOW + 1).unwrap(), "done again is fine");
+    assert!(!notice::done(&s, 999, NOW).unwrap());
+    let list = s.read(|c| notice::list(c)).unwrap();
+    assert_eq!(list.iter().map(|n| n.id).collect::<Vec<_>>(), [new[1].id]);
+}
+
+#[test]
+fn notice_words_are_one_short_line() {
+    assert_eq!(notice::line(" a\r\nb\u{0}\tc  "), "a b c");
+    let long = notice::line(&"y ".repeat(10_000));
+    assert_eq!(long.chars().count(), notice::WORDS_MAX);
+    assert!(long.ends_with("..."));
+    // Any text: one line, no control character, at most WORDS_MAX characters.
+    let mut rng = Rng(99);
+    for _ in 0..500 {
+        let s: String = (0..rng.next() % 400)
+            .map(|_| char::from_u32((rng.next() % 0x3000) as u32).unwrap_or('?'))
+            .collect();
+        let l = notice::line(&s);
+        assert!(l.chars().count() <= notice::WORDS_MAX);
+        assert!(!l.chars().any(|c| c.is_control()), "{l:?}");
+    }
+}
+
+#[test]
+fn a_notify_rule_needs_no_verbs_and_decides_no_action() {
+    let p = parse(ANN).unwrap();
+    assert_eq!(p.rules[0].effect, Effect::Notify);
+    let bad = ANN.replace("effect = \"notify\"", "effect = \"notify\"\nverbs = [\"archive\"]");
+    assert!(parse(&bad).is_err());
+}
