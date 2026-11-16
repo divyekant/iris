@@ -610,6 +610,14 @@ read the store. It sends each request to the engine through a Unix domain
 socket, and the engine does the work. Unix domain sockets work on macOS and on
 Linux.
 
+Release 1 exception: release 1 has no socket. The release 1 verbs (`status`,
+`search`, `show`, `mirror sync`, `mirror verify`, `backup` and `account add`)
+open the data folder directly, as the OS user that owns it, and they do not
+need a running engine. They call the same read functions as the local API, so
+they give the same data. Release 1 has no write verb, so no request can skip
+the policy. The socket comes with the first verb that adds an action
+(release 2). Then each verb goes through the socket.
+
 | Mode | When | Socket | Who |
 |---|---|---|---|
 | Host mode | No `.iris/` folder in the current folder or above it. | `iris.sock` in the data folder, mode `0600` | The OS user that runs the engine. |
@@ -678,7 +686,7 @@ engine before `submit`.
 | 1 | An error in the engine or at the provider. For `submit`: one or more actions are `failed`. |
 | 2 | The command is not correct (usage). |
 | 3 | The policy or a hard limit denied one or more actions. |
-| 4 | The engine is not reachable. |
+| 4 | The engine is not reachable. Release 1 never gives this code, because its verbs do not use the engine (section 8.1). |
 | 5 | For `submit`: one or more actions are open (`proposed`, `in_review`, `approved` or `held`), or a ledger row is in recovery. Nothing failed and nothing was denied. |
 
 If more than one code applies, the command exits with the first code of this
