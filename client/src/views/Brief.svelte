@@ -77,6 +77,19 @@
 
   const SHOWN = 7;
 
+  // After a quick Done, load the brief again, so the item and the counts change. A failed load waits for the next poll.
+  // The ticket keeps an older answer from undoing a newer one.
+  const fresher = newest();
+  async function reload() {
+    const fresh = fresher();
+    try {
+      const b = await loadBrief();
+      if (fresh()) brief = b;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
   // A signal leaves at its expiry. The date and the due words change at midnight.
@@ -163,7 +176,7 @@
   <section class="soon" aria-labelledby="soon">
     <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
     <ul>
-      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} />{/each}
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={reload} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
@@ -186,7 +199,7 @@
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
       {#if part.items.length}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={reload} />{/each}
         </ul>
       {/if}
       <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
