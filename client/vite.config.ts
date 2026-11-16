@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { answer, raw } from "./dev/fixtures.ts";
+import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
 // `pnpm dev --mode fixtures` answers /api from the schema examples, with no engine.
@@ -30,7 +31,7 @@ export default defineConfig(({ mode }) => {
       },
     },
   ],
-  server: fixtures ? {} : { proxy: { "/api": "http://127.0.0.1:4800" } },
+  server: fixtures ? {} : { proxy: { "/api": engineProxy("http://127.0.0.1:4800") } },
   build: { outDir: "dist", emptyOutDir: true },
   };
 });
