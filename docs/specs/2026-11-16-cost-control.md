@@ -170,9 +170,14 @@ the approved budget.
 A sender that becomes or stops being hostile makes its mail pending again
 (spec 1 section 6.7). The function `rerun_senders(tx, rows)` does this for
 each message from these addresses that is not gone: it deletes the items
-whose origin is the message and that are not pinned, and sets
-`understood_at`, `tries` and `retry_at` to NULL, 0 and NULL. A new hostile
-state is new input, so the old retry state does not hold the message.
+whose origin is the message and that are not pinned, other than the
+conversation (spec 1 section 7.3: a conversation is never deleted), and
+sets `understood_at`, `tries` and `retry_at` to NULL, 0 and NULL. A new
+hostile state is new input, so the old retry state does not hold the
+message. Then, in the same transaction, it runs `iris_talk::update` for
+each thread of these messages. The conversation then counts only
+understood mail that is not hostile, so no conversation shows the reset
+mail, also when the run stops before it reaches these threads.
 
 It runs in the transaction of the kind change, so a crash or an error cannot
 lose a rerun:
@@ -363,6 +368,7 @@ more calls.
 | A provider bills more input tokens than the body bytes | Settle passes the reservation | The budget can go below zero once; the run stops with `stop = budget` and shows the overrun. | Fake model with a large usage. |
 | The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
 | A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
+| The origin message of a conversation becomes hostile mail, and the run stops after one message | The conversation shows hostile mail | `rerun_senders` keeps the conversation row and computes it again in the same write. | Batch test with `--max-messages 1`. |
 | A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
 | A priced model and no budget | Paid calls with no approval | `stop = budget`, no call, also from R1-28. | Batch test. |
 | Automatic runs after each sync | Each run spends again | All runs take from one budget. | Batch test: two runs, one budget. |
