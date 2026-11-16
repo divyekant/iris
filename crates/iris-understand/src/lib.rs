@@ -9,6 +9,7 @@
 //!
 //! Mail text is data, never instructions. Code only compares the text.
 
+pub mod ask;
 pub mod batch;
 pub mod budget;
 pub mod correct;
