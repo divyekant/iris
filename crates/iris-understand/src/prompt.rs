@@ -41,13 +41,13 @@ pub const RETRY_NOTE: &str =
     "\n\nYour last answer did not match the format. Follow the format exactly.";
 
 /// The most bytes of the data block (about 25,000 tokens), so that a local
-/// model with a small context window can take it. The headers (each cut to
-/// `MAX_FIELD` characters) and the clean text of the current message (at
-/// most `iris_clean::TEXT_LIMIT` bytes) always go in. The existing items,
-/// attachment text, then the earlier messages of the thread, newest first,
-/// fill the rest.
+/// model with a small context window can take it. The headers (each value
+/// cut to `MAX_FIELD` bytes) go in first, then the clean text of the
+/// current message, cut only if it alone passes the budget. The existing
+/// items, attachment text, then the earlier messages of the thread, newest
+/// first, fill the rest.
 pub const MAX_DATA: usize = 96_000;
-/// The most characters of one header line in the data.
+/// The most bytes of one header value in the data.
 const MAX_FIELD: usize = 1000;
 /// The mark of text that the budget cut.
 const CUT_MARK: &str = "\n[cut]";
@@ -63,7 +63,10 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
         _ => String::new(),
     };
     let mut field = |name: &str, value: &str| {
-        d.push_str(&format!("{name}: {}\n", cut(value, MAX_FIELD)));
+        d.push_str(name);
+        d.push_str(": ");
+        push_cut(&mut d, value, MAX_FIELD);
+        d.push('\n');
     };
     field("From", &from);
     field("To", &h.to.join(", "));
@@ -85,8 +88,11 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     for (name, mime, size) in a.text.attachments.iter().take(MAX_ATTACHMENTS) {
         field("Attachment", &format!("{name} ({mime}, {size} bytes)"));
     }
-    let mut current = format!("\nThe current message:\n{}", a.text.text);
+    // The headers take at most about 30,000 bytes. The clean text takes the
+    // rest if it needs it: 32,000 characters can be 128,000 bytes.
+    let mut current = String::from("\nThe current message:\n");
     let mut left = MAX_DATA.saturating_sub(d.len() + current.len());
+    left -= push_cut(&mut current, &a.text.text, left);
     // An existing item that does not fit is left out: the model can then
     // find it again, and the store keeps the pinned item (section 7.5).
     for item in cx.existing {
@@ -132,6 +138,9 @@ fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
         out.push_str(text);
         return text.len();
     }
+    if max < CUT_MARK.len() {
+        return 0;
+    }
     let mut end = max.saturating_sub(CUT_MARK.len());
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -145,10 +154,8 @@ fn push_cut(out: &mut String, text: &str, max: usize) -> usize {
 /// format. A valid answer can hold drafts that the schemas refuse: the
 /// caller validates them.
 pub fn read(answer: &Value, a: &Analysis, cx: &Context) -> Option<(Vec<Draft>, bool)> {
-    let phishing = match answer.get("phishing") {
-        None => false,
-        Some(v) => v.as_bool()?,
-    };
+    // The answer must say if the mail is phishing (section 7.4).
+    let phishing = answer.get("phishing")?.as_bool()?;
     // Phishing gives no item, so the items do not need to be valid.
     if phishing {
         return Some((Vec::new(), true));
@@ -276,7 +283,7 @@ fn item(src: &Map<String, Value>, a: &Analysis, cx: &Context) -> Option<Draft> {
         _ => return None,
     }
     let mut item = Value::Object(m);
-    parties(&mut item, cx.me);
+    parties(&mut item, cx.me)?;
     Some(Draft::model(item, &quote))
 }
 
@@ -304,21 +311,24 @@ fn squash(s: &str) -> String {
 /// Make each model party a party of the open model: the owner of the mailbox
 /// becomes `{"kind": "self"}`, each other address a `sender` party. The
 /// `p-` ID is added later, from the sender row.
-fn parties(item: &mut Value, me: &str) {
+/// `None` if a party is neither the owner nor has an address: the store
+/// finds the sender row of a party only by its address.
+fn parties(item: &mut Value, me: &str) -> Option<()> {
     for key in ["owner", "counterparty", "issuer", "publisher"] {
         if let Some(p) = item.get_mut(key) {
-            fix(p, me);
+            fix(p, me)?;
         }
     }
     if let Some(Value::Array(list)) = item.pointer_mut("/fields/parties") {
         for p in list {
-            fix(p, me);
+            fix(p, me)?;
         }
     }
+    Some(())
 }
 
-fn fix(p: &mut Value, me: &str) {
-    let Some(o) = p.as_object() else { return };
+fn fix(p: &mut Value, me: &str) -> Option<()> {
+    let o = p.as_object()?;
     let addr = o
         .get("address")
         .and_then(Value::as_str)
@@ -329,7 +339,10 @@ fn fix(p: &mut Value, me: &str) {
             .is_some_and(|ad| ad.eq_ignore_ascii_case(me));
     if is_self {
         *p = json!({"kind": "self"});
-    } else if let Some(ad) = addr {
+        return Some(());
+    }
+    {
+        let ad = addr?;
         let mut n = json!({"kind": "sender", "address": ad});
         if let Some(name) = o
             .get("name")
@@ -340,6 +353,5 @@ fn fix(p: &mut Value, me: &str) {
         }
         *p = n;
     }
-    // A party with no address and no self kind stays as it is, and the
-    // schema check refuses it.
+    Some(())
 }

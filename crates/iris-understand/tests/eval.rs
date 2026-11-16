@@ -50,7 +50,7 @@ impl Model for Oracle {
             text: self
                 .next
                 .take()
-                .unwrap_or_else(|| r#"{"items": []}"#.into()),
+                .unwrap_or_else(|| r#"{"items": [], "phishing": false}"#.into()),
             usage: Usage::default(),
             stop: Stop::End,
         })
@@ -101,7 +101,7 @@ fn oracle_answer(mb: &Mailbox, i: usize, quote: &str) -> String {
             json!({"form": "signal", "title": "New sign-in", "quote": quote, "kind": "security"})
         }
         Form::Feed => json!({"form": "feed", "title": "News", "quote": quote}),
-        Form::Conversation => return r#"{"items": []}"#.into(),
+        Form::Conversation => return r#"{"items": [], "phishing": false}"#.into(),
     };
     json!({"items": [item], "phishing": false}).to_string()
 }

@@ -38,7 +38,7 @@ impl Model for Fake {
         self.replies
             .borrow_mut()
             .pop_front()
-            .unwrap_or_else(|| Ok(text(r#"{"items": []}"#)))
+            .unwrap_or_else(|| Ok(text(r#"{"items": [], "phishing": false}"#)))
     }
 }
 
@@ -242,6 +242,22 @@ fn the_engine_sets_statuses_and_parties() {
 }
 
 #[test]
+fn an_answer_without_phishing_or_with_a_party_with_no_address_gets_one_more_try() {
+    let no_phishing = Ok(text(r#"{"items": []}"#));
+    let m = Fake::with(vec![no_phishing, answer(task())]);
+    let (_, d) = run(ASK, Kind::Person, &[], &[], Some(&m));
+    assert_eq!(d.unwrap().calls, 2);
+    let mut bad = task();
+    bad[0]["counterparty"] = json!({"kind": "sender"});
+    let list = json!([{"form": "record", "type": "contract", "title": "C", "quote": "Can you send the slides",
+                       "confidence": 0.5, "fields": {"name": "C", "parties": [{"name": "No address"}]}}]);
+    let m = Fake::with(vec![answer(bad), answer(list)]);
+    let (_, d) = run(ASK, Kind::Person, &[], &[], Some(&m));
+    let d = d.unwrap();
+    assert_eq!((d.calls, d.drafts.len(), d.failed), (2, 0, true));
+}
+
+#[test]
 fn a_list_message_gives_the_list_headers_to_the_model() {
     let raw = "From: Ana <ana@shop.example>\nList-Id: <n.shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Hello\n\nHello.\n";
     let m = Fake::with(vec![answer(json!([]))]);
@@ -310,6 +326,13 @@ fn the_model_data_stays_within_its_budget() {
         same_sender: &[],
     };
     let mut a = analyze(raw.as_bytes(), &cx);
+    // Clean text of the most characters, in 4-byte characters: 128,000 bytes.
+    let wide = "😀".repeat(iris_clean::TEXT_LIMIT);
+    let text = std::mem::replace(&mut a.text.text, wide);
+    let data = prompt::data(&a, &cx);
+    assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
+    assert!(data.ends_with("😀\n[cut]"), "{}", &data[data.len() - 20..]);
+    a.text.text = text;
     a.text.attachment_text = vec![("big.pdf".into(), "ü".repeat(600_000))];
     let data = prompt::data(&a, &cx);
     assert!(data.len() <= prompt::MAX_DATA, "{}", data.len());
@@ -331,7 +354,8 @@ fn the_model_data_stays_within_its_budget() {
     };
     a.text.attachment_text = vec![("a.pdf".into(), "Total 5.00".into())];
     let data = prompt::data(&a, &cx);
-    assert!(!data.contains("[cut]"));
+    // Only the long header values (From, To, Subject) are cut.
+    assert_eq!(data.matches("[cut]").count(), 3);
     assert!(data.contains(&thread[0]) && data.contains(&thread[1]) && data.contains("c-1"));
 }
 
@@ -407,13 +431,17 @@ fn read_holds_for_generated_answers() {
             }
             items.push(Value::Object(o));
         }
-        let mut ans = json!({"items": items});
-        if next(10) == 0 {
-            ans["phishing"] = values[next(values.len())].clone();
+        let mut ans = json!({"items": items, "phishing": false});
+        match next(10) {
+            0 => ans["phishing"] = values[next(values.len())].clone(),
+            1 => drop(ans.as_object_mut().unwrap().remove("phishing")),
+            _ => {}
         }
         let Some((drafts, phishing)) = prompt::read(&ans, &a, &cx) else {
             continue;
         };
+        // An answer is valid only with a boolean `phishing`.
+        assert!(ans["phishing"].is_boolean(), "{ans}");
         some += 1;
         if phishing {
             assert!(drafts.is_empty());
