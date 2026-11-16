@@ -690,6 +690,28 @@ test("the brief and setup say that the copy stopped for an account that needs si
   assert.deepEqual(copying(status), []);
 });
 
+test("setup and the brief say that the counts of two or more accounts are totals", async () => {
+  // The API counts the messages of all accounts together (crates/iris-api/README.md, /api/status).
+  const ready = { ...fx.status.accounts[0], id: 1, address: "a@example.com" };
+  const copying = { ...fx.status.accounts[0], id: 2, address: "b@example.com", mirror_ready_at: null };
+  const status = { accounts: [ready, copying], messages: { total: 11000, fetched: 10100, understood: 500, gone: 0 } };
+  assert.match(text(await render("/src/views/Setup.svelte", { status, poll: 0 })), /10,100 of 11,000 messages copied from all accounts\./);
+  const stopped = { ...status, accounts: [ready, { ...copying, state: "needs_sign_in" }] };
+  assert.match(text(await render("/src/views/Setup.svelte", { status: stopped, poll: 0 })), /10,100 of 11,000 messages from all accounts/);
+  assert.match(text(await render("/src/views/Brief.svelte", { brief: fx.brief, status, now: NOW, poll: 0 })), /10,100 of 11,000 messages from all accounts\./);
+  // With one account, the counts are of that account.
+  const one = { ...status, accounts: [copying] };
+  assert.doesNotMatch(text(await render("/src/views/Setup.svelte", { status: one, poll: 0 })), /all accounts/);
+});
+
+test("a record field shows a party as a person, also in a list and with no name", async () => {
+  const { field } = await load("/src/format.ts");
+  const sender = { kind: "sender", sender: "p-3", address: "x@example.com" };
+  assert.equal(field(sender), "x@example.com");
+  assert.equal(field([{ kind: "self" }, sender, { kind: "sender", name: "Acme Legal", address: "legal@acme.example" }]), "You, x@example.com, Acme Legal");
+  assert.equal(field({ value: 12.5, currency: "USD" }).includes("12.50"), true);
+});
+
 test("an old 401 that ends after a new sign-in keeps the new token", async () => {
   const { get, signIn } = await load("/src/api.ts");
   const saved = globalThis.fetch;
