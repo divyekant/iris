@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Message, Policy, Rule, Status, Target } from "../src/api";
+import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -116,7 +116,7 @@ export const handled: HandledPage = { count: 0, next: null, actions: [] };
 
 export function message(id: string): Message | undefined {
   const item = items.find((i) => i.sources.some((s) => s.message === id));
-  if (!item) return undefined;
+  if (!item) return askMail(id);
   const source = item.sources.find((s) => s.message === id)!;
   return {
     id,
@@ -125,9 +125,11 @@ export function message(id: string): Message | undefined {
     from: { name: "Example Sender", address: "sender@example.com" },
     subject: item.title,
     labels: ["INBOX"],
+    // A mail with a fixed head has the head of its summary everywhere.
+    ...(HEADS[id] ? (summaryOf(id) as Summary) : {}),
     to: "you@example.com",
     cc: null,
-    text: `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
+    text: ASK_MAIL[id] ?? `${source.quote ?? item.title}\n\nThis is a fixture message, made from the open model examples.`,
     gone: false,
     hostile: [],
     items: items.filter((i) => i.sources.some((s) => s.message === id)).map((i) => i.id),
@@ -204,6 +206,7 @@ const HEADS: Record<string, [string, string, string, string]> = {
   "m-50102": ["t-7712", "Morning Brew", "crew@morningbrew.example", "Why oil fell on Tuesday"],
   "m-50140": ["t-7713", "Product Hunt Daily", "hello@producthunt.example", "Top launches of the week"],
   "m-55210": ["t-8841", "Priya Raman", "priya@northwind.example", "Q4 numbers for the board"],
+  "m-53500": ["t-8600", "Example Air", "trips@air.example", "Your flight to Tokyo: QX7K2P"],
   "m-55211": ["t-8841", "You", "you@example.com", "Re: Q4 numbers for the board"],
   "m-60001": ["t-9002", "Dana Brooks", "dana@leadgen.example", "Quick question about your Q1 plans"],
   "m-61500": ["t-9100", "Morning Brew", "crew@morningbrew.example", "Monday: the market opens higher"],
@@ -214,6 +217,41 @@ const PUBLISHERS = [
   ["The Verge", "newsletter@theverge.example", "Verge Deals of the day"],
   ["Product Hunt Daily", "hello@producthunt.example", "Top launches of the day"],
 ] as const;
+
+/** The text of each mail that a fixture answer of Ask cites. */
+const ASK_MAIL: Record<string, string> = {
+  "m-55210": "Hi,\n\nCould you review section 4 by Tuesday? The board meets on Wednesday.\n\nPriya",
+  "m-55211": "Thanks, Priya. I will send it on Monday.",
+  "m-53500": "Booking reference QX7K2P\n\nYour flight to Tokyo leaves on 10 December at 11:05 and lands on 11 December at 07:40, Tokyo time. The gate shows 24 hours before departure.",
+};
+
+/** A mail that Ask cites, with the head of its summary, so its link opens it. */
+function askMail(id: string): Message | undefined {
+  const text = ASK_MAIL[id];
+  if (text === undefined) return undefined;
+  const s = summaryOf(id) as Summary;
+  return { ...s, to: "you@example.com", cc: null, text, gone: false, hostile: [], items: [] };
+}
+
+/** POST /api/ask: a fixed answer for each kind of question, with no model. */
+export function askAnswer(question: string): AskAnswer {
+  const source = (n: number, id: string, quote: string | null) => ({ n, quote, message: summaryOf(id) as Summary });
+  if (/weather|lottery/i.test(question)) return { answer: null, sources: [], read: 0, cost_micro_usd: null };
+  if (/flight|tokyo|trip/i.test(question)) {
+    return {
+      answer: "Your flight to Tokyo leaves on 10 December at 11:05 [1]. The booking reference is QX7K2P [1].",
+      sources: [source(1, "m-53500", "Booking reference QX7K2P")],
+      read: 6,
+      cost_micro_usd: 3_120,
+    };
+  }
+  return {
+    answer: "Priya asked you to review section 4 of the Q4 numbers by Tuesday [1]. You answered that you will send it on Monday [2].",
+    sources: [source(1, "m-55210", "Could you review section 4 by Tuesday?"), source(2, "m-55211", null)],
+    read: 9,
+    cost_micro_usd: 4_180,
+  };
+}
 
 /** A summary for each fixture message ID. The triage IDs get a newsletter head. */
 function summaryOf(id: string): Target {

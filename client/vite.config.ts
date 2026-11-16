@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { act, answer, answerSender, decide, raw, watchPost, withdraw } from "./dev/fixtures.ts";
+import { act, answer, answerSender, askAnswer, decide, raw, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -21,6 +21,28 @@ export default defineConfig(({ mode }) => {
             res.setHeader("content-type", "message/rfc822");
             res.setHeader("content-disposition", `attachment; filename="${original[1]}.eml"`);
             res.end(source);
+            return;
+          }
+          if (url === "/ask" && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              res.setHeader("content-type", "application/json");
+              let question: unknown;
+              try {
+                question = JSON.parse(text)?.question;
+              } catch {
+                question = undefined;
+              }
+              // As the engine: a body with no question text is a 400.
+              if (typeof question !== "string" || !question.trim()) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: "A question has 1 to 500 characters." }));
+                return;
+              }
+              // A pause, so the wait of the view shows.
+              setTimeout(() => res.end(JSON.stringify(askAnswer(question))), 900);
+            });
             return;
           }
           const decision = url.match(/^\/changesets\/([^/?]+)\/(decide|withdraw)$/);

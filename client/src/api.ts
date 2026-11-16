@@ -151,6 +151,10 @@ export type Summary = {
   labels: string[];
 };
 
+/** POST /api/ask (card R5-09). `answer` has a mark `[n]` after each fact: the source with that `n`. */
+export type AskSource = { n: number; quote: string | null; message: Summary };
+export type AskAnswer = { answer: string | null; sources: AskSource[]; read: number; cost_micro_usd: number | null };
+
 export type Message = Summary & {
   /** The To and Cc headers as text, or null. */
   to: string | null;
