@@ -2063,7 +2063,7 @@ mod tests {
     #[test]
     fn a_name_like_a_keyword_does_not_end_an_object() {
         let pdf = doc(&[
-            (2, "<< /Type /Page /endobj 0 /obj 1 /stream 2 /Contents 3 0 R /Resources << /Font << /F1 5 0 R >> >> >>", None),
+            (2, "<< /Type /Page /Resources << /Font << /F1 5 0 R >> >> /endobj 0 /obj 1 /stream 2 /Contents 3 0 R >>", None),
             (3, "<< >>", Some(CODES)),
             (5, TYPE0, None),
             (6, "<< >>", Some(CMAP)),
