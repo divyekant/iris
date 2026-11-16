@@ -919,6 +919,14 @@ fn synthetic_mailbox_meets_the_sender_targets() {
             }))
         })
         .unwrap();
+    // The refresh after the batch: its cost on the whole mailbox.
+    let t0 = std::time::Instant::now();
+    let rerun = store.write(|tx| Ok(refresh(tx, 0)?)).unwrap();
+    eprintln!(
+        "refresh: {} rows to run again in {:?}",
+        rerun.len(),
+        t0.elapsed()
+    );
     eprintln!(
         "decide: {} messages in {spent:?} ({:?} with the mailbox)",
         mb.len(),

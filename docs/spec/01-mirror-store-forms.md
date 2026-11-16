@@ -647,8 +647,11 @@ changes it. From release 2, the person sets the kind in the web client. In
 release 5, the stranger gate makes this a rule in the policy file.
 
 The engine decides the kind of a sender again each time it understands a
-message with that address. The first sync fetches newest first, so a known
-person can be a `stranger` for some time. The brief reads the kind of each
+message with that address. After each batch of sync or understanding, a
+refresh derives each stored `person`, `service` and `hostile` kind again
+from the evidence in the store, so a message that goes, gets new bytes or
+loses `SENT` changes the kinds at the next refresh. The first sync fetches
+newest first, so a known person can be a `stranger` for some time. The brief reads the kind of each
 party when it runs its query (section 8), so a later change of a kind moves
 the items. If a sender becomes `hostile` or stops being `hostile`, the engine
 runs understanding again on each message from that address.

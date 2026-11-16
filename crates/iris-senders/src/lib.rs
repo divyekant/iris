@@ -93,13 +93,59 @@ pub fn decide(
 ) -> rusqlite::Result<Decision> {
     let mut ch = Changes::default();
     let mut d = decide_message(conn, message, raw, now_ms, &mut ch)?;
-    // A row that the near-copy rule compares with a domain that became known
-    // or stopped being known is decided again.
-    // shortcut: this reads each sender row once for each such domain, and
-    // goes one level deep (a row that this changes does not start another
-    // pass); keep a domain index if a large mailbox makes it slow.
-    let domains = std::mem::take(&mut ch.domains);
-    if !domains.is_empty() {
+    sweep(conn, now_ms, &mut ch)?;
+    d.rerun = dedup(ch.rerun);
+    Ok(d)
+}
+
+/// Derive each stored engine kind again from the store, and give the
+/// `sender` rows that became `hostile` or stopped being `hostile`. The
+/// caller runs understanding again on each message from these rows.
+///
+/// [`decide`] keeps the rows of one message current. Other changes of the
+/// store change the evidence too: sync marks a message gone, a fetch of new
+/// bytes replaces a qualifying message, a message loses `SENT`. Call
+/// `refresh` after each batch of sync or understanding, in the same
+/// transaction. Spec 1 section 6.7 says that the kinds are current after
+/// each refresh.
+///
+/// It decides again each engine row with a known or hostile kind, then each
+/// row that the near-copy rule compares with a domain that changed, until
+/// no kind changes.
+pub fn refresh(conn: &Connection, now_ms: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut ch = Changes::default();
+    let rows: Vec<String> = conn
+        .prepare_cached(
+            "SELECT address FROM sender WHERE decided_by IS NOT 'person'
+               AND kind IN ('person', 'service', 'hostile')",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for a in &rows {
+        recheck(conn, a, now_ms, &mut ch)?;
+    }
+    sweep(conn, now_ms, &mut ch)?;
+    Ok(dedup(ch.rerun))
+}
+
+fn dedup(mut ids: Vec<i64>) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(*id));
+    ids
+}
+
+/// Decide again each row that the near-copy rule compares with a domain in
+/// `ch.domains` (a domain that became known or stopped being known), until
+/// no domain changes.
+/// shortcut: each pass reads each sender row once; keep a domain index if a
+/// large mailbox makes it slow. The passes stop after 8 (a chain of 8
+/// look-alike domains that each change the next one).
+fn sweep(conn: &Connection, now_ms: i64, ch: &mut Changes) -> rusqlite::Result<()> {
+    for _ in 0..8 {
+        let domains = std::mem::take(&mut ch.domains);
+        if domains.is_empty() {
+            break;
+        }
         let rows: Vec<String> = conn
             .prepare_cached("SELECT address FROM sender WHERE decided_by IS NOT 'person'")?
             .query_map([], |r| r.get(0))?
@@ -108,15 +154,10 @@ pub fn decide(
             .iter()
             .filter(|a| domains.iter().any(|d| near_copy(domain_of(a), d)))
         {
-            recheck(conn, a, now_ms, &mut ch)?;
+            recheck(conn, a, now_ms, ch)?;
         }
     }
-    for id in ch.rerun {
-        if !d.rerun.contains(&id) {
-            d.rerun.push(id);
-        }
-    }
-    Ok(d)
+    Ok(())
 }
 
 fn decide_message(
@@ -296,8 +337,8 @@ fn own(basis: &str) -> Decision {
     }
 }
 
-/// Decide the address `addr` again with no message from it: a sent message
-/// that named it lost its `sent` evidence row.
+/// Decide the address `addr` again with no message from it, from the
+/// evidence in the store.
 fn recheck(conn: &Connection, addr: &str, now_ms: i64, ch: &mut Changes) -> rusqlite::Result<()> {
     let (kind, basis) = rules(conn, addr, None)?;
     upsert(ch, conn, addr, None, kind, &basis, now_ms)?;
@@ -650,9 +691,4 @@ mod tests {
             assert!(!near_copy(d, k), "{d} {k}");
         }
     }
-}
-
-/// Derive each stored engine kind again (stub).
-pub fn refresh(_conn: &Connection, _now_ms: i64) -> rusqlite::Result<Vec<i64>> {
-    Ok(Vec::new())
 }
