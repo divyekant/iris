@@ -113,7 +113,7 @@ approves or denies it. This is the safe side of the policy: a rule can only
 approve or deny with no person, and here the person always decides. A hard
 limit that denies (section 6.5) is also a decision that the person makes in
 the review for now. The general policy step for each author is a known limit
-(an issue, `limit(engine)`), to build with the next author that needs rules.
+(issue #252), to build with the next author that needs rules.
 
 ### The command
 
