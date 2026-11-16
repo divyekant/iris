@@ -41,8 +41,9 @@ pub enum Error {
     NoAccount,
     /// The token gives a mailbox with another address than the account.
     WrongMailbox,
-    /// A full resync of the account runs. Only one sync of an account runs
-    /// at one time (specification 1, section 4.2).
+    /// Another sync of the account runs, or a full resync is not complete.
+    /// Only one sync of an account runs at one time (specification 1,
+    /// section 4.2).
     OtherSync,
     /// The saved sync state is not valid.
     BadState(&'static str),
@@ -102,6 +103,30 @@ struct State {
     step: Option<i64>,
 }
 
+/// The sync lock of one account: while a value lives, no other sync of the
+/// account runs, in this process or in another (specification 1, section
+/// 4.2). Each sync of the account takes it first, the incremental sync too.
+/// The operating system frees the lock when the process ends.
+pub struct SyncLock(#[allow(dead_code)] std::fs::File);
+
+/// Take the sync lock of `account`, or give [`Error::OtherSync`] if another
+/// sync holds it.
+pub fn lock(store: &Store, account: i64) -> Result<SyncLock> {
+    let path = store.dir().join(format!("sync-{account}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(iris_store::Error::Io)?;
+    // flock on Linux and macOS: two opens of the file conflict, also in one process.
+    match file.try_lock() {
+        Ok(()) => Ok(SyncLock(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::OtherSync),
+        Err(std::fs::TryLockError::Error(e)) => Err(iris_store::Error::Io(e).into()),
+    }
+}
+
 /// Run or continue the first sync of `account`. `token` is the access
 /// token. On [`iris_gmail::Error::Unauthorized`], get a new token and call
 /// again: the sync continues where it stopped.
@@ -109,6 +134,7 @@ struct State {
 /// An account with a complete first sync gives `Done` with zero counts and
 /// calls Gmail for nothing.
 pub fn first_sync(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Done> {
+    let _lock = lock(store, account)?;
     let s = state(store, account)?;
     match (s.kind.as_deref(), s.start.as_deref(), s.step) {
         (Some(KIND_FIRST), Some(_), Some(_)) => {}

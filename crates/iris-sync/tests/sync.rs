@@ -413,8 +413,14 @@ fn a_second_sync_of_the_account_does_not_run_at_the_same_time() {
     ));
     assert_eq!(fake.requests().len(), before);
     assert_eq!(count(&store, "SELECT count(*) FROM message"), 0);
-    assert!(matches!(iris_sync::lock(&store, account), Err(Error::OtherSync)));
+    assert!(matches!(
+        iris_sync::lock(&store, account),
+        Err(Error::OtherSync)
+    ));
 
     drop(held);
-    assert_eq!(first_sync(&store, &gmail, account, TOKEN).unwrap().fetched, 30);
+    assert_eq!(
+        first_sync(&store, &gmail, account, TOKEN).unwrap().fetched,
+        30
+    );
 }
