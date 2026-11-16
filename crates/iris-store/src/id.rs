@@ -12,9 +12,11 @@ pub enum Kind {
     Record,
     Feed,
     Signal,
+    /// A row of the table `watch` (card R5-07).
+    Watch,
 }
 
-const PREFIXES: [(Kind, &str); 8] = [
+const PREFIXES: [(Kind, &str); 9] = [
     (Kind::Message, "m"),
     (Kind::Thread, "t"),
     (Kind::Sender, "p"),
@@ -23,6 +25,7 @@ const PREFIXES: [(Kind, &str); 8] = [
     (Kind::Record, "r"),
     (Kind::Feed, "f"),
     (Kind::Signal, "s"),
+    (Kind::Watch, "w"),
 ];
 
 pub fn format_id(kind: Kind, row: i64) -> String {

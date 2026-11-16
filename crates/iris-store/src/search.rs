@@ -87,6 +87,47 @@ impl Query {
     }
 
     pub(crate) fn run(&self, conn: &Connection, limit: u32) -> Result<Vec<i64>> {
+        let (mut sql, args) = self.select();
+        sql.push_str(" ORDER BY m.internal_date DESC, m.id DESC LIMIT ");
+        sql.push_str(&limit.to_string());
+        let mut st = conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The first message that matches and arrived for a watch (card R5-07):
+    /// a row ID above `after`, a date from `since`, clean text (so the hostile
+    /// check ran), no hostile mark or hostile sender, and no label `SENT` or
+    /// `DRAFT`. The lowest row ID is the first arrival.
+    pub(crate) fn first_arrival(
+        &self,
+        conn: &Connection,
+        after: i64,
+        since: i64,
+    ) -> Result<Option<i64>> {
+        let (mut sql, mut args) = self.select();
+        args.push(after.into());
+        args.push(since.into());
+        let (a, s) = (args.len() - 1, args.len());
+        sql.push_str(&format!(
+            " AND m.id > ?{a} AND m.internal_date >= ?{s}
+              AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
+              AND (m.hostile IS NULL OR m.hostile IN ('', '[]'))
+              AND NOT EXISTS (SELECT 1 FROM header h JOIN sender x
+                    ON x.address = h.from_addr COLLATE NOCASE
+                  WHERE h.message_id = m.id AND x.kind = 'hostile')
+              AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                  WHERE ml.message_id = m.id AND l.provider_id IN ('SENT', 'DRAFT'))
+             ORDER BY m.id LIMIT 1"
+        ));
+        let mut st = conn.prepare(&sql)?;
+        let mut rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// The SELECT of the matching messages that are not gone, with its bound
+    /// values `?1` to `?n`.
+    fn select(&self) -> (String, Vec<Value>) {
         let mut sql = String::from("SELECT m.id FROM message m WHERE m.gone_at IS NULL");
         let mut args: Vec<Value> = Vec::new();
         let mut arg = |sql: &mut String, cond: &str, v: Value| {
@@ -130,11 +171,7 @@ impl Query {
                 ),
             }
         }
-        sql.push_str(" ORDER BY m.internal_date DESC, m.id DESC LIMIT ");
-        sql.push_str(&limit.to_string());
-        let mut st = conn.prepare(&sql)?;
-        let rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        (sql, args)
     }
 }
 
