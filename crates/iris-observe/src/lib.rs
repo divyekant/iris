@@ -122,9 +122,9 @@ fn count_in(c: &rusqlite::Connection, account: i64) -> iris_store::Result<Vec<(R
 
 /// Write the triage changeset as JSON (specification 2, section 5.1).
 ///
-/// `created` is the time in RFC 3339. The ID is `cs-0`, because release 1
-/// does not store the proposal and 0 is never a row ID. A rule with no
-/// message gives no action. Each action has the state `proposed`.
+/// `created` is the time in RFC 3339. Each call gives a new ID (see
+/// [`next_id`]). A rule with no message gives no action. Each action has the
+/// state `proposed`.
 pub fn write_changeset(
     store: &Store,
     account: i64,
@@ -140,7 +140,8 @@ pub fn write_changeset(
         let total: u64 = counts.iter().map(|(_, n)| n).sum();
         write!(
             out,
-            r#"{{"model":"iris/0","id":"cs-0","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
+            r#"{{"model":"iris/0","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
+            id = next_id(),
             state = if total == 0 { "closed" } else { "open" },
         )?;
         let mut n = 0;
@@ -164,6 +165,28 @@ pub fn write_changeset(
         out.write_all(b"]}")?;
         Ok(())
     })
+}
+
+/// A changeset number that no other call gives: the time in microseconds at
+/// the first call, plus one for each later call in the process.
+// shortcut: unique only while the clock does not go back; release 2 stores
+// changesets and uses the row ID.
+fn next_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |d| d.as_micros() as u64);
+    // Never below the clock, so a new process does not give an old number.
+    let mut cur = NEXT.load(Ordering::Relaxed);
+    loop {
+        let id = cur.max(now) + 1;
+        match NEXT.compare_exchange(cur, id, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return id,
+            Err(seen) => cur = seen,
+        }
+    }
 }
 
 fn write_ids(
