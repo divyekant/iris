@@ -179,7 +179,27 @@ pub struct Brief {
     /// changes that observe mode would propose, with nothing applied.
     /// Computed from `iris_observe::counts` for each account; not stored.
     pub proposal: Option<Proposal>,
+    /// The items of each `bundle` rule (specification 2, section 6.4), by
+    /// rule ID. A bundled item is in no other section and in no count.
+    pub bundles: Vec<Bundle>,
+    /// The count of items that a `hide` rule leaves out of the brief.
+    pub hidden: i64,
 }
+
+/// The items of one `bundle` rule: the count, and the newest
+/// [`BUNDLE_ITEMS`] items.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Bundle {
+    pub rule: u32,
+    /// The name of the rule in the active policy.
+    pub name: String,
+    #[serde(flatten)]
+    pub section: Section,
+}
+
+/// The most items of each bundle in the brief: enough for the client to
+/// name who sent them. `/api/brief/bundle-<rule>` gives all.
+pub const BUNDLE_ITEMS: u32 = 20;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Page {
@@ -435,9 +455,53 @@ pub const SECTIONS: [&str; 6] = [
     "strangers",
 ];
 
+/// The condition of an item that the brief shows in its section: no `hide`
+/// or `bundle` rule matches it (specification 2, section 6.4). An item with
+/// no `attention` field yet counts as shown.
+const SHOWN: &str = "coalesce(json_extract(doc, '$.attention.state'), 'shown') = 'shown'";
+
 /// The filter and the order of each list section of the brief, in the
-/// order of [`SECTIONS`].
+/// order of [`SECTIONS`]. Each filter leaves out hidden and bundled items.
 fn section_sql(now: i64) -> [(String, String); 6] {
+    base_sql(now).map(|(filter, order)| (format!("({filter}) AND {SHOWN}"), order))
+}
+
+/// The filter of each record that the brief counts: not gone.
+const RECORD: &str = "form = 'record' AND status != 'gone'";
+
+/// The filter of each item that the brief can show (a list section or a
+/// record count), before the attention.
+fn in_brief(now: i64) -> String {
+    base_sql(now)
+        .iter()
+        .map(|(filter, _)| format!("({filter})"))
+        .chain([format!("({RECORD})")])
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// The filter and the order of the bundle of rule `rule`: newest first.
+fn bundle_sql(now: i64, rule: u32) -> (String, String) {
+    (
+        format!(
+            "({}) AND json_extract(doc, '$.attention.state') = 'bundled'
+             AND json_extract(doc, '$.attention.rule') = {rule}",
+            in_brief(now)
+        ),
+        "created_at DESC, id DESC".to_string(),
+    )
+}
+
+/// The rule of a bundle section name: `bundle-3` is rule 3.
+fn bundle_rule(name: &str) -> Option<u32> {
+    let n = name.strip_prefix("bundle-")?;
+    // Only the canonical form, so one bundle has one cursor name.
+    n.parse().ok().filter(|r: &u32| r.to_string() == n)
+}
+
+/// The filter and the order of each list section of the brief, with no
+/// attention condition.
+fn base_sql(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
@@ -698,14 +762,14 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         let section =
             |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, None).map(|(s, _)| s);
         let mut records = serde_json::Map::new();
-        let mut st = c.prepare(
+        let mut st = c.prepare(&format!(
             "SELECT json_extract(doc, '$.type'), count(*) FROM item
-             WHERE form = 'record' AND status != 'gone'
-               -- A possible duplicate pair counts once (section 7.5).
-               AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
-                 (SELECT i.id FROM item i WHERE i.form = 'record' AND i.status != 'gone'))
-             GROUP BY 1 ORDER BY 1",
-        )?;
+                 WHERE {RECORD} AND {SHOWN}
+                   -- A possible duplicate pair counts once (section 7.5).
+                   AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
+                     (SELECT id FROM item WHERE {RECORD} AND {SHOWN}))
+                 GROUP BY 1 ORDER BY 1"
+        ))?;
         for row in st.query_map([], |r| {
             Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
         })? {
@@ -735,6 +799,39 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
                 |r| r.get::<_, Option<i64>>(0),
             )?
             .map(rfc3339);
+        let all = in_brief(now);
+        let hidden = c.query_row(
+            &format!(
+                "SELECT count(*) FROM item
+                 WHERE ({all}) AND json_extract(doc, '$.attention.state') = 'hidden'"
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        let rules: Vec<u32> = c
+            .prepare(&format!(
+                "SELECT DISTINCT json_extract(doc, '$.attention.rule') FROM item
+                 WHERE ({all}) AND json_extract(doc, '$.attention.state') = 'bundled'
+                   AND json_extract(doc, '$.attention.rule') IS NOT NULL
+                 ORDER BY 1"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let policy = iris_policy::active(c)?.policy;
+        let mut bundles = Vec::new();
+        for rule in rules {
+            let (section, _) = read_section(c, &bundle_sql(now, rule), BUNDLE_ITEMS, None)?;
+            let name = policy
+                .rules
+                .iter()
+                .find(|r| r.id == rule)
+                .map_or_else(|| format!("Rule {rule}"), |r| r.name.clone());
+            bundles.push(Bundle {
+                rule,
+                name,
+                section,
+            });
+        }
         Ok(Brief {
             you_owe: section(&you_owe)?,
             owed_to_you: section(&owed)?,
@@ -747,6 +844,8 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             not_understood,
             oldest_fetched,
             proposal: None,
+            bundles,
+            hidden,
         })
     })?;
     brief.proposal = Some(proposal);
@@ -763,8 +862,9 @@ pub struct SectionPage {
     pub next: Option<String>,
 }
 
-/// One page of the list section `name` (one of [`SECTIONS`]) of the brief at
-/// the time `now`, with the same filter and order as [`brief`]. `after` is
+/// One page of the list section `name` (one of [`SECTIONS`], or
+/// `bundle-<rule>` for the bundle of a rule) of the brief at the time `now`,
+/// with the same filter and order as [`brief`]. `after` is
 /// the ID of the last item of the page before. The page starts after the
 /// place of that item in the order, also when the item left the section.
 pub fn brief_section(
@@ -775,10 +875,11 @@ pub fn brief_section(
     after: Option<&str>,
 ) -> Result<Option<SectionPage>> {
     check_limit(limit)?;
-    let Some(index) = SECTIONS.iter().position(|n| *n == name) else {
-        return Ok(None);
+    let sql = &match (SECTIONS.iter().position(|n| *n == name), bundle_rule(name)) {
+        (Some(index), _) => section_sql(now)[index].clone(),
+        (None, Some(rule)) => bundle_sql(now, rule),
+        (None, None) => return Ok(None),
     };
-    let sql = &section_sql(now)[index];
     let after = after
         .map(|token| decode_cursor(token, name, sort_keys(&sql.1).len()))
         .transpose()?;

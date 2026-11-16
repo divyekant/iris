@@ -1175,3 +1175,216 @@ async fn pages_a_section_larger_than_the_brief() {
     let (_, brief) = get(&store, "/api/brief").await;
     assert_eq!(ids(&brief["feed"]["items"]), big[..200]);
 }
+
+/// The six list sections of the brief.
+const LISTS: [&str; 6] = [
+    "you_owe",
+    "owed_to_you",
+    "conversations",
+    "feed",
+    "signals",
+    "strangers",
+];
+
+/// The item count of the brief: each list section and each record type.
+fn shown_total(b: &Value) -> i64 {
+    LISTS
+        .iter()
+        .map(|s| b[s]["count"].as_i64().unwrap())
+        .sum::<i64>()
+        + b["records"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|n| n.as_i64().unwrap())
+            .sum::<i64>()
+}
+
+#[tokio::test]
+async fn each_item_of_the_brief_is_shown_bundled_or_hidden_once() {
+    // Invariant (spec 2 section 6.4): each item that the brief can show is
+    // in exactly one place: its section (or record count) when shown, the
+    // bundle of its rule when bundled, or the hidden count. An item with no
+    // `attention` field is shown.
+    for seed in 1..=12u64 {
+        let dir = temp(&format!("attn-{seed}"));
+        let (store, _) = filled(&dir);
+        let person = sender(&store, "pat@one.example", Some("person"));
+        let service = sender(&store, "news@two.example", Some("service"));
+        let stranger = sender(&store, "who@three.example", Some("stranger"));
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut rows = Vec::new();
+        for i in 0..60i64 {
+            let (form, status, doc) = match next() % 9 {
+                0 => (
+                    "commitment",
+                    "open",
+                    json!({"direction": "you_owe", "kind": "task", "counterparty": party(&person), "owner": {"kind": "self"}}),
+                ),
+                1 => (
+                    "commitment",
+                    "open",
+                    json!({"direction": "owed_to_you", "kind": "task", "owner": party(&service), "counterparty": {"kind": "self"}}),
+                ),
+                2 => (
+                    "conversation",
+                    "active",
+                    json!({"new": 1, "participants": [{"kind": "self"}, party(&person)]}),
+                ),
+                3 => (
+                    "conversation",
+                    "active",
+                    json!({"new": 1, "participants": [{"kind": "self"}, party(&stranger)]}),
+                ),
+                4 => ("feed", "new", json!({"publisher": party(&service)})),
+                5 => (
+                    "signal",
+                    "active",
+                    json!({"issuer": party(&service), "expires": "2026-11-17T00:00:00Z"}),
+                ),
+                6 => {
+                    let kind = ["receipt", "booking"][(next() % 2) as usize];
+                    (
+                        "record",
+                        "new",
+                        json!({"type": kind, "issuer": party(&service)}),
+                    )
+                }
+                // Not in the brief: never counted, whatever its attention.
+                7 => (
+                    "commitment",
+                    "done",
+                    json!({"direction": "you_owe", "kind": "task", "counterparty": party(&person)}),
+                ),
+                _ => (
+                    "signal",
+                    "active",
+                    json!({"issuer": party(&service), "expires": "2026-11-01T00:00:00Z"}),
+                ),
+            };
+            rows.push(add_item(&store, form, status, 13 + i % 40, i, doc));
+        }
+        let (_, before) = get(&store, "/api/brief").await;
+        let universe = shown_total(&before);
+        assert_eq!(before["hidden"], 0);
+        assert!(before["bundles"].as_array().unwrap().is_empty());
+        for row in &rows {
+            let attention = match next() % 5 {
+                0 => json!({"state": "hidden", "rule": 2, "reason": "r"}),
+                1 => json!({"state": "bundled", "rule": 3, "reason": "r"}),
+                2 => json!({"state": "bundled", "rule": 7, "reason": "r"}),
+                3 => json!({"state": "shown"}),
+                _ => continue,
+            };
+            exec(
+                &store,
+                "UPDATE item SET doc = json_set(doc, '$.attention', json(?2)) WHERE id = ?1",
+                rusqlite::params![row, attention.to_string()],
+            );
+        }
+        let (_, b) = get(&store, "/api/brief").await;
+        let bundles = b["bundles"].as_array().unwrap();
+        let bundled: i64 = bundles.iter().map(|x| x["count"].as_i64().unwrap()).sum();
+        assert_eq!(
+            shown_total(&b) + bundled + b["hidden"].as_i64().unwrap(),
+            universe,
+            "seed {seed}"
+        );
+        for s in LISTS {
+            for item in b[s]["items"].as_array().unwrap() {
+                let state = item["attention"]["state"].as_str().unwrap_or("shown");
+                assert_eq!(state, "shown", "seed {seed} section {s}");
+            }
+        }
+        let mut rules = Vec::new();
+        for bundle in bundles {
+            let rule = bundle["rule"].as_u64().unwrap();
+            rules.push(rule);
+            // No policy names the rule.
+            assert_eq!(bundle["name"], format!("Rule {rule}"));
+            // The full list of the bundle, page by page.
+            let mut all = Vec::new();
+            let mut after = String::new();
+            loop {
+                let (code, p) =
+                    get(&store, &format!("/api/brief/bundle-{rule}?limit=7{after}")).await;
+                assert_eq!(code, StatusCode::OK);
+                for item in p["items"].as_array().unwrap() {
+                    assert_eq!(item["attention"]["state"], "bundled");
+                    assert_eq!(item["attention"]["rule"], rule);
+                    all.push(item["id"].as_str().unwrap().to_string());
+                }
+                match p["next"].as_str() {
+                    Some(n) => after = format!("&after={n}"),
+                    None => break,
+                }
+            }
+            assert_eq!(
+                all.len() as i64,
+                bundle["count"].as_i64().unwrap(),
+                "seed {seed}"
+            );
+            let first: Vec<&str> = ids(&bundle["items"]);
+            assert_eq!(
+                first,
+                all[..first.len()]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut sorted = rules.clone();
+        sorted.sort();
+        assert_eq!(rules, sorted, "bundles in the order of the rule IDs");
+    }
+}
+
+#[tokio::test]
+async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
+    let dir = temp("bundle-name");
+    let (store, _) = filled(&dir);
+    let service = sender(&store, "news@two.example", Some("service"));
+    for created in [1, 2] {
+        add_item(
+            &store,
+            "feed",
+            "new",
+            13,
+            created,
+            json!({"publisher": party(&service)}),
+        );
+    }
+    std::fs::write(
+        store.dir().join(iris_policy::FILE),
+        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 3\nname = \"Bundle the feed\"\neffect = \"bundle\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    )
+    .unwrap();
+    let sha = match iris_policy::file_state(&store).unwrap() {
+        iris_policy::FileState::Changed(l) => l.sha256,
+        other => panic!("{other:?}"),
+    };
+    // The confirmation writes the attention of each item.
+    iris_policy::confirm(&store, &sha, NOW / 1000).unwrap();
+    let (_, b) = get(&store, "/api/brief").await;
+    assert_eq!(b["bundles"][0]["name"], "Bundle the feed");
+    assert_eq!(b["bundles"][0]["count"], 2);
+    assert_eq!(b["feed"]["count"], 0);
+    for bad in ["bundle-03", "bundle-", "bundle-x", "bundle-+3", "bundles-3"] {
+        let (code, _) = get(&store, &format!("/api/brief/{bad}")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{bad}");
+    }
+    // A cursor of one bundle is not a cursor of another.
+    let (_, p) = get(&store, "/api/brief/bundle-3?limit=1").await;
+    let next = p["next"].as_str().unwrap();
+    let (code, _) = get(&store, &format!("/api/brief/bundle-4?after={next}")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, p) = get(&store, &format!("/api/brief/bundle-3?after={next}")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(p["items"].as_array().unwrap().len(), 1);
+}
