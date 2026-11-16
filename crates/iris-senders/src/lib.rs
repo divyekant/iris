@@ -156,7 +156,15 @@ pub fn decide(
                 .map(drop)?,
                 None => {
                     upsert(&mut rerun, conn, to, None, Kind::Person, "sent", now_ms)?;
-                    known.push(domain_of(to).to_string());
+                    // A row that a person set keeps its kind: only a known
+                    // sender adds its domain.
+                    let kind: Option<String> =
+                        conn.query_row("SELECT kind FROM sender WHERE address = ?1", [to], |r| {
+                            r.get(0)
+                        })?;
+                    if matches!(kind.as_deref(), Some("person" | "service")) {
+                        known.push(domain_of(to).to_string());
+                    }
                 }
             };
         }
@@ -302,7 +310,7 @@ fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<
     // flag in the store if a large mailbox makes it slow.
     // The `replied` rule: a sent message in a thread after a message from
     // the address. A sent message before the address joined the thread does
-    // not count. A sent message of this thread to the address also counts
+    // not count, and neither does one at the same time (no order is known). A sent message of this thread to the address also counts
     // (the `sent` rule), because a sent message that is older than this one
     // can still wait for its own decision (the engine reads newest first).
     let replied: bool = conn.query_row(
@@ -312,7 +320,7 @@ fn rules(conn: &Connection, addr: &str, this: Option<This>) -> rusqlite::Result<
                  JOIN message s ON s.thread_id = m.thread_id AND s.id != m.id
                  JOIN header h ON h.message_id = s.id
                 WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {SENT_NOT_DRAFT}
-                  AND (s.internal_date >= m.internal_date OR {}))",
+                  AND (s.internal_date > m.internal_date OR {}))",
             to_addr(1)
         ),
         [addr],
