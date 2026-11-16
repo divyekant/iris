@@ -10,6 +10,7 @@
   import Item from "./views/Item.svelte";
   import Mail from "./views/Mail.svelte";
   import Measures from "./views/Measures.svelte";
+  import Ask from "./views/Ask.svelte";
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
@@ -108,6 +109,8 @@
       {#await get<ItemData>(`items/${encodeURIComponent(route.id)}`) then item}<Item {item} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "mail"}
       {#await get<MessageData>(`messages/${encodeURIComponent(route.id)}`) then message}<Mail {message} />{:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "ask"}
+      <Ask />
     {:else if route.view === "measures"}
       <Measures />
     {:else if route.view === "review"}
