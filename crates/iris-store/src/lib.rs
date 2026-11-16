@@ -32,6 +32,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_2.sql"),
     include_str!("schema_3.sql"),
     include_str!("schema_4.sql"),
+    include_str!("schema_5.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,

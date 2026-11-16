@@ -137,23 +137,27 @@ Schema of the changeset comes with the release 2 code, from this section.
   "actions": [
     {
       "n": 1,
+      "revision": 1,
       "verb": "archive",
       "targets": { "threads": ["t-7712", "t-7713"] },
       "resolved": { "messages": ["m-50101", "m-50102", "m-50140"] },
       "args": {},
       "why": "Two newsletters from last week.",
       "flags": [],
+      "hash": "9b2e61d0c4a57f3e8d1b6a0f2c49e7d3a18f5b0c6e2d94a7b3f0c18e5d7a2b46",
       "decision": { "state": "applied", "by": "rule", "rule": 1, "policy": 3, "at": "2026-11-16T09:17:41Z" },
       "ledger": "l-901"
     },
     {
       "n": 2,
+      "revision": 1,
       "verb": "label",
       "targets": { "threads": ["t-8841"] },
       "resolved": { "messages": ["m-55210", "m-55211"] },
       "args": { "label": "Finance" },
       "flags": [],
-      "decision": { "state": "in_review", "reason": "No rule allows label for this sender." }
+      "hash": "4f8a0c2e7b13d95a6e0f1b8c3d72a4e95b6c0d1f8e3a7b29c4d05e6f1a8b3c72",
+      "decision": { "state": "in_review", "by": "policy", "reason": "No rule allows label for this sender." }
     }
   ]
 }
@@ -167,11 +171,14 @@ Schema of the changeset comes with the release 2 code, from this section.
 | `why` | The reason of the author, in one or two sentences. Required. |
 | `state` | `draft` (before submit), `open` (one or more actions are open, section 5.2), `closed` (no action is open) or `withdrawn`. |
 | `actions[].n` | The number of the action in the changeset, from 1. |
+| `actions[].revision` | The revision of the action. The document lists the actions of each revision, because an old revision can keep decided actions and `approved` actions. |
 | `actions[].targets` | What the author named: `threads`, `messages` or `items`. |
 | `actions[].resolved` | The message IDs at submit. Review shows these, and apply uses only these. The engine keeps them in a child table, and writes the document by streaming (section 9). |
 | `actions[].flags` | Why a person must look: see section 5.3. |
+| `actions[].hash` | `null` in a triage proposal that the engine does not store (release 1). Else the SHA-256 (hex) of the `verb`, the `targets` text, the `args` text and the `resolved` message IDs, from submit. An approval names it (section 5.5). A submitted action does not change. `null` before submit. |
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
+| `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid, or the apply), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. |
 | `actions[].ledger` | The ledger entry, after apply. |
 
 ### 5.2 States of an action
@@ -253,8 +260,12 @@ that a rule approved at the same time cannot together go past the limit of
 - The person can approve all, approve one, edit the text of a draft, comment
   or deny.
 - An approval names the changeset, the revision, the action number, and the
-  SHA-256 hash of `resolved` and `args` that the person saw. The engine
-  refuses an approval that does not match the current revision and hash.
+  hash that the person saw (`actions[].hash`, section 5.1). The engine
+  refuses an approval while a new revision is a draft, an approval of a
+  replaced action, and an approval with another hash. If an action of an
+  older revision stays open after the submit of a new revision, a rule
+  approved it before. It can come back to review (section 5.4), and the
+  person approves it with its hash.
 - A comment goes back to the author. In release 4, the comment arrives as a
   file in the workspace. The author submits a new revision.
 - `iris withdraw` withdraws a changeset. The engine accepts it only from the
@@ -264,6 +275,32 @@ that a rule approved at the same time cannot together go past the limit of
   which continues to its end. Applied actions stay.
 - 14 days after submit, each open action that is not `held`, and has no
   ledger row in the state `writing`, becomes `expired`. The changeset is `closed` when no action is open.
+
+### 5.6 Failure list of the changeset store
+
+The changeset store (crate `iris-changeset`, migration 5) takes requests
+from authors that the product does not control. The apply and the ledger
+(sections 7.2 and 7.3) get their own failure list with their code.
+
+Supported input: short IDs of section 5.7 of specification 1, an `args`
+JSON object, a reason, and the action number, revision and hash of a
+decision.
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A text that is not an ID, a sender ID, or IDs of two kinds in one action | The action names nothing that it can change | `add_action` refuses it. Nothing is written. |
+| An ID that is not in the mirror, a gone message, or a target of the wrong kind for the verb | Apply changes the wrong object | Submit gives the action `denied`, by `engine`, with the reason. |
+| No target, or targets that give no message (each message of the thread is gone or in `SPAM` or `TRASH`) | A `proposed` action that changes nothing | Submit gives the action `denied`. |
+| Targets in two or more accounts | One approval changes two mailboxes, and the apply has no one account | Submit gives the action `denied`. One action changes one account. |
+| Arguments that do not fit the verb, or the verb `untrash` from an author | A rule or a limit for one verb is bypassed | Submit gives the action `denied`. Until each verb has its argument checks, submit denies the verb. Only the undo of a `trash` makes `untrash` (section 7.4). |
+| A row with targets or arguments of a wrong shape, from another writer | A panic of the engine | Submit gives the action `denied`. A text that is not JSON cannot be stored (`CHECK`). |
+| A state move that section 5.2 does not allow, from any writer | A decided action changes, or skips the review | The trigger `action_state` refuses the write. |
+| A rule decision with a policy version that is not active, or a rule ID that the active policy does not have | A decision names no rule text, or a rule that the person removed | The trigger `action_state` refuses the write. The policy of the first start has no rule, so no rule decides under it. |
+| A change of a submitted action, from any writer | The person approves one action, and another applies | The triggers refuse the write. |
+| An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
+| Two writers at the same time | Two moves of one action | The engine has one write connection. Each request is one transaction, and the trigger checks the state at the time of the write. |
+| A crash in a submit or a decision, or a failed commit | Half a submit, or a success for a change that is not stored | The transaction rolls back, and the call gives the error. |
+| All other input | | Refused with an error, and nothing is written. |
 
 ## 6. The policy file
 
@@ -854,9 +891,11 @@ another OS user, if it must not approve. The documentation must say this.
 - A test that the web interface refuses a request without the cookie, and a
   request with another `Origin`. A test that `iris serve --addr 0.0.0.0:4800`
   does not start.
-- A test that an approval of revision 1 is refused after revision 2 is
-  submitted, and that the `proposed` and `in_review` actions of revision 1
-  are `replaced`.
+- A test that an approval of revision 1 is refused while revision 2 is a
+  draft and after revision 2 is submitted, and that the `proposed` and
+  `in_review` actions of revision 1 are `replaced`. A test that an
+  `approved` action of revision 1 that comes back to review after revision 2
+  can get the approval of the person, with its hash (section 5.5).
 - A test that an undo skips a message that changed after the entry, and that
   an undo applies in the mode `observe`.
 - A test that trashes an archived message and undoes the trash: the message

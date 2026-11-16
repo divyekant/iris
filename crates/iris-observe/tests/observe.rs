@@ -156,6 +156,8 @@ fn the_first_run_proposes_archives_and_makes_zero_writes_to_gmail() {
     for a in actions {
         assert_eq!(a["verb"], "archive");
         assert_eq!(a["decision"]["state"], "proposed");
+        assert_eq!(a["revision"], 1);
+        assert!(a["hash"].is_null());
         let ids: Vec<String> = a["resolved"]["messages"]
             .as_array()
             .unwrap()
