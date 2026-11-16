@@ -1,0 +1,10 @@
+{
+  "model": "iris/0",
+  "id": "p-42",
+  "address": "dana@contoso.example",
+  "name": "Dana Whitfield",
+  "kind": "friend",
+  "basis": "sent-to",
+  "decided_by": "engine",
+  "decided_at": "2026-11-15T10:00:00Z"
+}

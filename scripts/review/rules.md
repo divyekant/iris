@@ -3,6 +3,10 @@
      and testable. -->
 
 - A change to behavior has a test that fails without the change.
+- The kit files (`scripts/local-ci/`, `scripts/release/`, `scripts/git-hooks/`, and
+  `review.py`, `prompt.md`, `schema.json` and `spec.md` in `scripts/review/`) have their
+  tests in the projectstarter repository. A PR that copies a kit change names the kit PR
+  and its tests. Do not ask for a copy of the kit tests in the product.
 - A change to a public API, a database schema or an environment variable is named in
   the `## Release Notes` section of the PR.
 - No secret, token or key is in the code, the tests or the docs.

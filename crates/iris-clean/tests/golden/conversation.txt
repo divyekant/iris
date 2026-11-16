@@ -1,0 +1,11 @@
+subject: About the game
+cut: false
+---
+Hi Avel,
+It was a long week here.
+See the notes below.
+I talked to the team about it.
+No rush on this.
+How was the game?
+
+Siamar

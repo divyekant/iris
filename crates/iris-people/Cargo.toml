@@ -1,0 +1,19 @@
+[package]
+name = "iris-people"
+description = "People of Iris: one profile for each known person, from the mail history in the store."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-store = { version = "0.0.0", path = "../iris-store" }
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
+rusqlite = "=0.43.0"
+
+[dev-dependencies]
+iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
+iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-sync = { version = "0.0.0", path = "../iris-sync" }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }

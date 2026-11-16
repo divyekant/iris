@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:sender",
+  "title": "Iris open model 0 (draft): sender",
+  "description": "Draft. One address on the sender axis. See docs/spec/01-mirror-store-forms.md, section 6.7.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "id", "address", "kind", "basis", "decided_by"],
+  "properties": {
+    "model": { "const": "iris/0" },
+    "id": { "$ref": "urn:iris:model:0:common#/$defs/senderId" },
+    "address": { "type": "string", "format": "email" },
+    "name": { "type": "string", "maxLength": 200 },
+    "kind": { "enum": ["person", "service", "stranger", "hostile"] },
+    "basis": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "decided_by": { "enum": ["engine", "person"] },
+    "decided_at": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" }
+  }
+}

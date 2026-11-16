@@ -1,0 +1,92 @@
+/*
+ * Design tokens of Iris, from .kalos.yaml (managed by Kalos).
+ * test/tokens.test.mjs checks that these values agree with .kalos.yaml and
+ * that the text colors meet WCAG AA contrast (4.5) on each background.
+ * The dark palette is the default (active brand). The light palette applies
+ * when the system asks for light.
+ */
+:root {
+  /* Fonts */
+  --font-family: Inter, system-ui, sans-serif;
+  --font-family-mono: 'SF Mono', 'Cascadia Mono', 'Menlo', monospace;
+
+  /* Type scale: ratio 1.25 from a 16px base */
+  --font-size--2: 0.64rem;
+  --font-size--1: 0.8rem;
+  --font-size-0: 1rem;
+  --font-size-1: 1.25rem;
+  --font-size-2: 1.5625rem;
+  --font-size-3: 1.9531rem;
+  --font-size-4: 2.4414rem;
+
+  /* Spacing: multiples of the 4px base unit. --space-N = N x 4px */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+  --space-32: 128px;
+
+  /* Radii */
+  --radius-none: 0;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* Transitions */
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+
+  /* Semantic colors (the same in both palettes) */
+  --color-success: #16A34A;
+  --color-warning: #CA8A04;
+  --color-error: #DC2626;
+  --color-info: #2563EB;
+}
+
+/* palette: dark */
+:root {
+  color-scheme: dark;
+  --color-primary: #d4af37;
+  --color-secondary: #f5d060;
+  --color-background: #0a0a0a;
+  --color-background-elevated: #111111;
+  --color-background-surface: #1a1a1a;
+  --color-text: #e5e5e5;
+  --color-text-muted: #a3a3a3;
+  --color-text-faint: #848484;
+  --color-border: rgba(212,175,55,0.15);
+  --color-border-subtle: rgba(255,255,255,0.06);
+  --color-accent-border: rgba(212,175,55,0.15);
+  --color-overlay: rgba(0,0,0,0.6);
+  --color-unread: #d4af37;
+  /* Text on a primary (gold) background. A value of this palette, not a new color. */
+  --color-on-primary: #0a0a0a;
+}
+
+/* palette: light */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --color-primary: #b8960f;
+    --color-secondary: #d4af37;
+    --color-background: #FAF9F6;
+    --color-background-elevated: #FFFEF9;
+    --color-background-surface: #F0EDE6;
+    --color-text: #2C2418;
+    --color-text-muted: #655D50;
+    --color-text-faint: #6E6960;
+    --color-border: #E8E2D6;
+    --color-border-subtle: rgba(0,0,0,0.06);
+    --color-accent-border: rgba(184,150,15,0.18);
+    --color-overlay: rgba(0,0,0,0.3);
+    --color-unread: #b8960f;
+    --color-on-primary: #2C2418;
+  }
+}

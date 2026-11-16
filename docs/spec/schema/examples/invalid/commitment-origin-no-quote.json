@@ -1,0 +1,38 @@
+{
+  "model": "iris/0",
+  "id": "c-311",
+  "form": "commitment",
+  "status": "open",
+  "title": "Review contract section 4",
+  "direction": "you_owe",
+  "kind": "task",
+  "owner": {
+    "kind": "self"
+  },
+  "counterparty": {
+    "kind": "sender",
+    "sender": "p-42",
+    "name": "Dana Whitfield",
+    "address": "dana@contoso.example"
+  },
+  "due": {
+    "date": "2026-11-17",
+    "strict": false
+  },
+  "sources": [
+    {
+      "message": "m-55210",
+      "thread": "t-8841",
+      "role": "origin"
+    }
+  ],
+  "created": "2026-11-16T09:02:11Z",
+  "updated": "2026-11-16T09:02:11Z",
+  "derived": {
+    "by": "model",
+    "model": "example-model-1",
+    "prompt": "understand/0.1"
+  },
+  "confidence": 0.92,
+  "matter": null
+}

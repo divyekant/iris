@@ -55,6 +55,33 @@ All commands run in the repository root with a clean environment: a private
 `HOME` in `.local-ci/home`, no tokens, `TZ=UTC` and `LANG=C.UTF-8`. The
 `env` of the area is added to this environment.
 
+## Budgets
+
+The test `crates/iris/tests/budget.rs` starts the real `iris serve` program. It
+measures two values:
+
+| Value | Limit | How the test measures it |
+|---|---|---|
+| Start time | 1 second | From the program start to the first HTTP 200 answer |
+| Resident memory (RSS) | 50 MB | `ps -o rss= -p <pid>`, on macOS and Linux |
+| RSS after a first sync | 50 MB | The same, after `iris serve` syncs 2,000 synthetic messages from the fake Gmail |
+
+If a value is over its limit, the test fails. The limits are the constants
+`MAX_START` and `MAX_RSS_KIB` at the top of the file. `cargo test` runs the
+test, so local CI runs it too.
+
+To see the measured values, run:
+
+```bash
+cargo test -p iris --test budget -- --nocapture
+```
+
+Release 0 measures an empty program. When the store exists, the test will also
+load 100,000 messages.
+
+Do not increase a limit to make a change pass. If a change needs more memory,
+say how much in the PR.
+
 ## Local CI
 
 1. Commit your change.
@@ -94,3 +121,21 @@ The command runs Codex on the exact head of the PR, in a read-only sandbox, and
 posts the result on the PR. If the result is clean, it merges the PR. Read
 `AGENTS.md`, "Workflow for one change", for what to do with each result.
 Add review rules of the product to `scripts/review/rules.md`.
+
+Before the PR is open, `python3 scripts/review/review.py --pre` runs the same
+reviewer on HEAD of the branch. It posts nothing and writes
+`.local-ci/pre-review.json`. Local CI refuses the proof commit of a large branch
+that has no pre-review.
+
+After the first round, a P2 finding on code that did not change since the last
+reviewed head does not block the merge. Two rounds in a row with a defect in the
+fix code give a repair signal in the review comment.
+
+These settings in `review` of `starter.json` control the loop:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `first_effort` | `"high"` | The Codex effort of the pre-review and of the first round. Later rounds use `effort`. |
+| `pre_review_lines` | `300` | A branch that adds more lines needs a pre-review before local CI writes the proof. |
+| `max_rounds` | `5` | The command stops after this number of blocked rounds. `--force` continues. |
+| `spec_paths` | `["docs/spec/**", "docs/specs/**"]` | A PR that changes a matching file gets the spec rules of `scripts/review/spec.md`. |

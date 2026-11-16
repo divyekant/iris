@@ -1,0 +1,10 @@
+subject: Action needed: your Edvos Build account is on hold
+cut: false
+---
+Thank you for your order 96862.
+Total: 151.40 EUR
+Order date: Mon, 08 Jan 2024 10:12:35 +0000
+Keep this message for your records.
+We saw odd activity. Verify your account in 24 hours or we close it:
+
+[https://www.edvos.example.com/account](https://login.edvos-secure.example.net/verify?u=96862)

@@ -1,0 +1,18 @@
+[package]
+name = "iris-clean"
+description = "Make the clean text of one raw mail message. Pure functions, no network, no model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"
+miniz_oxide = "0.9"
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
+
+[dev-dependencies]
+miniz_oxide = "0.9"
+mail-parser = { version = "=1.0.1", default-features = false, features = ["full_encoding"] }
+iris-synth = { path = "../iris-synth" }

@@ -21,6 +21,8 @@
     "engine": {
       "paths": [
         "crates/**",
+        "scripts/install.sh",
+        "docs/spec/schema/**",
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
@@ -45,14 +47,16 @@
     },
     "client": {
       "paths": [
-        "client/**"
+        "client/**",
+        ".kalos.yaml"
       ],
-      "setup": "cd client && npm ci --no-audit --no-fund",
+      "setup": "cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile",
       "setup_inputs": [
         "client/package.json",
-        "client/package-lock.json"
+        "client/pnpm-lock.yaml",
+        "client/.npmrc"
       ],
-      "check": "cd client && npm run --if-present lint",
+      "check": "cd client && npm run lint",
       "test": "cd client && npm test",
       "tools": [
         "node --version",
@@ -61,7 +65,7 @@
     }
   },
   "cloud": {
-    "profile": false,
+    "profile": true,
     "keys": [],
     "apt": [],
     "hosts": [
@@ -72,5 +76,6 @@
       "registry.npmjs.org",
       "github.com"
     ]
-  }
+  },
+  "board": "https://claude.ai/artifact/VWqsmpqHNgiop14TpoecjV"
 }

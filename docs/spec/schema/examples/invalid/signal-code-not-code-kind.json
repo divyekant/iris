@@ -1,0 +1,29 @@
+{
+  "model": "iris/0",
+  "id": "s-901",
+  "form": "signal",
+  "status": "active",
+  "title": "Login code for Example Bank",
+  "kind": "security",
+  "issuer": {
+    "kind": "sender",
+    "sender": "p-60",
+    "address": "no-reply@bank.example"
+  },
+  "code": "482913",
+  "expires": "2026-11-16T09:15:00Z",
+  "sources": [
+    {
+      "message": "m-55500",
+      "thread": "t-9100",
+      "role": "origin",
+      "quote": "Your login code is 482913."
+    }
+  ],
+  "created": "2026-11-16T09:00:00Z",
+  "updated": "2026-11-16T09:00:00Z",
+  "derived": {
+    "by": "rule",
+    "rule": "code-pattern"
+  }
+}

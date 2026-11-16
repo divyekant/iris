@@ -1,0 +1,95 @@
+# Spec: <name>
+
+- Date: <YYYY-MM-DD>
+- Card: <ID of the Iris tracker card, for example R0-09>
+- Status: Draft | Agreed | Built | Replaced by <link>
+
+## Problem
+
+<!-- Who has the problem and why it matters now. -->
+
+## Goal
+
+<!-- What is true when the work is done. -->
+
+## Not in scope
+
+
+## Design
+
+<!-- How it works: the flow, the data, the screens, the API. -->
+
+## Options not chosen
+
+<!-- Each option that you did not choose, and the reason, in one line each. For a
+parser, a protocol client, a format converter or security code: name the public
+libraries that you checked, and why the design uses one or writes its own code. -->
+
+## Failure list
+
+<!-- For input that the product does not control, for concurrency and for crash
+recovery: each input class and each failure mode, with the result that the design
+gives and the test that proves it. State the supported inputs. State the one safe
+result for all other input (fail closed). Write "None" if the subject has none. -->
+
+## Impact
+
+<!-- The files and the parts of the product that the change touches, and each
+change to a data format, an API or a screen. -->
+
+## Assumptions
+
+<!-- Each fact that the design depends on. For each one, name the evidence (a
+command, a file, a document), or write `pending` and say how the design tolerates
+a wrong assumption. The owner confirms or corrects each one. -->
+
+## External writes
+
+<!-- Each call that changes data outside the product. For each one, state what
+happens on success, on a definite rejection, on an unknown result (a time-out, a
+lost response or a crash), and on retry. Write "None" if there are none. -->
+
+## Open questions
+
+<!-- Questions that the build can answer without a change to the design. The
+review does not block on them. -->
+
+## Acceptance criteria
+
+<!-- Each result that the owner can check. For each one, say what would make it
+go red. A criterion that nothing can make go red is not a criterion. -->
+
+## Verify
+
+<!-- The exact commands that prove the acceptance criteria. -->
+
+## Rollout
+
+<!-- The order of the steps: flags, migrations, config, docs. Write "None" if the
+change needs no rollout step. -->
+
+## Risks
+
+<!-- What can go wrong, and how to undo the change (rollback). -->
+
+## Plan
+
+<!-- One line for each card, in the order of the work. Each card gets one PR.
+1. <card ID, for example R0-09>: <what it does>
+-->
+
+## Test plan
+
+## Spec checks
+
+<!-- Answer each check before the spec goes to review (docs/PLANNING.md, "Spec checks").
+- [ ] Each assumption holds with a second caller, worker or tab.
+- [ ] Each assumption holds when an outcome is unknown (a time-out, a lost response, a crash).
+- [ ] Each dropped mechanism was dropped for a reason that makes it unnecessary.
+- [ ] Each "idempotent" step is not check-then-act.
+- [ ] Each property that the design depends on has a test or a command that shows it.
+- [ ] The spec addresses the hardest problem of the change.
+- [ ] Each acceptance criterion can go red.
+- [ ] The assumptions do not contradict each other.
+- [ ] The failure list names the supported inputs and the safe result for all other input.
+-->

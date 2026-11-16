@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:0:commitment",
+  "title": "Iris open model 0 (draft): commitment",
+  "description": "Draft. An ask or a promise with an owner and a date. See docs/spec/01-mirror-store-forms.md, section 6.2.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["direction", "owner", "counterparty", "kind"],
+  "properties": {
+    "id": { "pattern": "^c-[1-9][0-9]*$" },
+    "form": { "const": "commitment" },
+    "status": { "enum": ["open", "done", "declined", "deferred", "cancelled", "gone"] },
+    "direction": { "enum": ["you_owe", "owed_to_you"] },
+    "owner": { "$ref": "urn:iris:model:0:common#/$defs/party" },
+    "counterparty": { "$ref": "urn:iris:model:0:common#/$defs/party" },
+    "kind": { "enum": ["task", "reply", "payment", "invitation", "decision"] },
+    "due": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "date": { "$ref": "urn:iris:model:0:common#/$defs/date" },
+        "at": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+        "strict": { "type": "boolean" }
+      },
+      "oneOf": [{ "required": ["date"] }, { "required": ["at"] }]
+    },
+    "amount": { "$ref": "urn:iris:model:0:common#/$defs/money" },
+    "deferred_until": { "$ref": "urn:iris:model:0:common#/$defs/date" }
+  },
+  "allOf": [
+    { "$ref": "urn:iris:model:0:common#/$defs/item" },
+    { "if": { "properties": { "kind": { "const": "payment" } } }, "then": { "required": ["amount"] } },
+    { "if": { "properties": { "status": { "const": "deferred" } } }, "then": { "required": ["deferred_until"] } },
+    {
+      "if": { "properties": { "direction": { "const": "you_owe" } } },
+      "then": { "properties": { "owner": { "properties": { "kind": { "const": "self" } } } } },
+      "else": { "properties": { "counterparty": { "properties": { "kind": { "const": "self" } } } } }
+    }
+  ]
+}

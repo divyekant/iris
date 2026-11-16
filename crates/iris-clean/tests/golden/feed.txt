@@ -1,0 +1,20 @@
+subject: Zansia Post weekly: 3 new stories
+cut: false
+---
+* Riedpa (Paul)
+  https://news.example.org/zansia/0
+* Edtesia (Marul)
+  https://news.example.org/zansia/1
+* Anxolo (Tased)
+  https://news.example.org/zansia/2
+* Renquiein (Miqui)
+  https://news.example.org/zansia/3
+* Quinored (Belzan)
+  https://news.example.org/zansia/4
+* Vosriri (Sialun)
+  https://news.example.org/zansia/5
+* Belrenmar (Vosbel)
+  https://news.example.org/zansia/6
+Unsubscribe: https://zansia.example.com/unsubscribe
+
+Zansia
