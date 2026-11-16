@@ -108,7 +108,7 @@ pub fn update(
             quote,
             created: now,
         };
-        parts.fill(&mut doc, thread, &mails, now);
+        parts.fill(&mut doc, thread, &mails, &[], now);
         save(conn, id, &doc, None, now, &mails, origin)?;
         return Ok(Some(id));
     };
@@ -164,7 +164,7 @@ pub fn update(
         status.as_deref(),
     )?
     .expect("a message counts");
-    parts.fill(&mut doc, thread, &mails, now);
+    parts.fill(&mut doc, thread, &mails, &gone_sources(conn, old.id)?, now);
     corrections(conn, old.id, &mut doc)?;
     // Compare without the time of the change, so a call that changes nothing
     // writes nothing.
@@ -186,7 +186,8 @@ struct Parts {
 }
 
 impl Parts {
-    fn fill(&self, doc: &mut Value, thread: i64, mails: &[Mail], now: i64) {
+    /// `gone` holds the update sources whose message is gone, as (time, row).
+    fn fill(&self, doc: &mut Value, thread: i64, mails: &[Mail], gone: &[(i64, i64)], now: i64) {
         let t = format_id(Kind::Thread, thread);
         let mut sources = vec![json!({
             "message": format_id(Kind::Message, self.origin),
@@ -194,8 +195,12 @@ impl Parts {
             "role": "origin",
             "quote": self.quote,
         })];
-        sources.extend(mails.iter().filter(|m| m.id != self.origin).map(
-            |m| json!({ "message": format_id(Kind::Message, m.id), "thread": t, "role": "update" }),
+        let mut updates: Vec<(i64, i64)> = mails.iter().map(|m| (m.at, m.id)).collect();
+        updates.extend_from_slice(gone);
+        updates.sort_unstable();
+        updates.dedup_by_key(|u| u.1);
+        sources.extend(updates.iter().filter(|u| u.1 != self.origin).map(
+            |u| json!({ "message": format_id(Kind::Message, u.1), "thread": t, "role": "update" }),
         ));
         doc["title"] = json!(self.title);
         doc["sources"] = Value::Array(sources);
@@ -220,7 +225,9 @@ fn save(
     )?;
     if existed.is_some() {
         conn.execute(
-            "DELETE FROM item_source WHERE item_id = ?1 AND role <> 'origin'",
+            // A source whose message is gone stays (section 4.5).
+            "DELETE FROM item_source WHERE item_id = ?1 AND role <> 'origin'
+             AND message_id IN (SELECT id FROM message WHERE gone_at IS NULL)",
             [id],
         )?;
     }
@@ -231,6 +238,16 @@ fn save(
         add.execute(params![id, m.id])?;
     }
     Ok(())
+}
+
+/// The update sources of the item whose message is gone, as (time, row).
+fn gone_sources(conn: &Connection, item: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
+    let mut q = conn.prepare_cached(
+        "SELECT COALESCE(m.internal_date, 0), m.id FROM item_source s JOIN message m ON m.id = s.message_id
+         WHERE s.item_id = ?1 AND s.role = 'update' AND m.gone_at IS NOT NULL",
+    )?;
+    let rows = q.query_map([item], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
 }
 
 /// Apply the corrections of the item (section 7.5), oldest first, so that a
@@ -270,7 +287,6 @@ fn mails(
     let mut q = conn.prepare_cached(
         "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
                 h.to_addrs, h.cc_addrs, h.subject, b.text, m.hostile,
-                (SELECT kind FROM sender WHERE address = lower(h.from_addr)),
                 EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
                 EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
@@ -283,14 +299,19 @@ fn mails(
     )?;
     let rows = q.query_map(params![thread, current], |r| {
         let hostile: Option<String> = r.get(8)?;
-        let kind: Option<String> = r.get(9)?;
-        let sent: bool = r.get(10)?;
-        let draft: bool = r.get(11)?;
+        let sent: bool = r.get(9)?;
+        let draft: bool = r.get(10)?;
         let from = r
             .get::<_, Option<String>>(2)?
             .and_then(|f| addresses(&f).into_iter().next())
             // A From that is not an address gives no party.
             .unwrap_or_default();
+        // The kind of the parsed address: sender rows hold bare addresses.
+        let kind: Option<String> = conn
+            .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
+            .query_row([&from], |r| r.get(0))
+            .optional()?
+            .flatten();
         let mine = sent || (!from.is_empty() && from == me);
         let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
         let mail = Mail {
