@@ -52,6 +52,7 @@ fn from_addr(raw: &[u8]) -> String {
         .split("\r\n")
         .find_map(|l| l.strip_prefix("From: "))
         .unwrap();
+    let line = line.split(" (").next().unwrap();
     let addr = line.rsplit('<').next().unwrap().trim_end_matches('>');
     addr.to_ascii_lowercase()
 }
@@ -467,6 +468,45 @@ fn auto_submitted_no_with_a_comment_is_not_a_service() {
     for t in ["t1", "t2", "t3"] {
         assert_eq!(c.put(t, &[], &mail).kind, Kind::Stranger);
     }
+}
+
+#[test]
+fn a_comment_after_a_bare_address_is_not_part_of_it() {
+    let mut c = Case::new("comment");
+    for t in ["t1", "t2", "t3"] {
+        c.put(
+            t,
+            &[],
+            &service_mail().replace(
+                "From: Shop <no-reply@shop.example.com>",
+                "From: no-reply@shop.example.com (Shop mail)",
+            ),
+        );
+    }
+    assert_eq!(
+        c.row("no-reply@shop.example.com").1.as_deref(),
+        Some("service")
+    );
+}
+
+#[test]
+fn a_new_fetch_of_a_sent_message_clears_its_old_bcc() {
+    let mut c = Case::new("refetch");
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nBcc: eve@example.org"),
+    );
+    // Gmail gives other bytes for the same message, with no Bcc. The
+    // understanding of the new bytes has not run yet.
+    let raw = format!("From: {OWNER}\r\nSubject: x\r\n\r\nBody.\r\n");
+    let mut m = new_message("m1", "t1", 1000, &["SENT"], raw.as_bytes());
+    m.content_sha256 = Some("new".into());
+    c.store.put_messages(c.acc, &[m]).unwrap();
+    assert_eq!(
+        c.put("t2", &[], "From: eve@example.org").kind,
+        Kind::Stranger
+    );
 }
 
 #[test]
