@@ -1,5 +1,5 @@
 //! Rules that Iris proposes from the approvals of the person (spec 2,
-//! section 6.6). A proposal is a row of `rule_proposal` (store migration 13),
+//! section 6.6). A proposal is a row of `rule_proposal` (store migration 15),
 //! never a line in the file. Only an accept by the person
 //! ([`crate::Change::Accept`]) adds the rule to the file, with
 //! `by = "proposal"`.

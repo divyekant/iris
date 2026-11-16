@@ -212,6 +212,11 @@ pub struct Brief {
     pub feed: Section,
     pub signals: Section,
     pub strangers: Section,
+    /// The senders that wait at the stranger gate, newest first, with their
+    /// items of `strangers` (specification 1, section 6.7).
+    pub gate: crate::gate::GatePage,
+    /// The count of declined senders with items that would wait at the gate.
+    pub declined: i64,
     /// The count of hostile mail of the last 7 days.
     pub hostile: i64,
     /// The count of messages that the model failed 3 times.
@@ -488,9 +493,12 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
 
 /// The kind of the sender row of the `p-` ID at the JSON path `path` of the
 /// item document `doc`. A sender with no row or no kind yet is a stranger.
-fn kind_sql(doc: &str, path: &str) -> String {
+/// A stranger that the person declined at the gate is `declined`.
+pub(crate) fn kind_sql(doc: &str, path: &str) -> String {
     format!(
-        "coalesce((SELECT kind FROM sender WHERE id =
+        "coalesce((SELECT CASE WHEN coalesce(kind, 'stranger') = 'stranger'
+                                AND declined_at IS NOT NULL THEN 'declined' ELSE kind END
+                   FROM sender WHERE id =
            CAST(substr(json_extract({doc}, '{path}'), 3) AS INTEGER)), 'stranger')"
     )
 }
@@ -509,11 +517,12 @@ pub const SECTIONS: [&str; 6] = [
 /// The condition of an item that the brief shows in its section: no `hide`
 /// or `bundle` rule matches it (specification 2, section 6.4). An item with
 /// no `attention` field yet counts as shown.
-const SHOWN: &str = "coalesce(json_extract(doc, '$.attention.state'), 'shown') = 'shown'";
+pub(crate) const SHOWN: &str =
+    "coalesce(json_extract(doc, '$.attention.state'), 'shown') = 'shown'";
 
 /// The filter and the order of each list section of the brief, in the
 /// order of [`SECTIONS`]. Each filter leaves out hidden and bundled items.
-fn section_sql(now: i64) -> [(String, String); 6] {
+pub(crate) fn section_sql(now: i64) -> [(String, String); 6] {
     base_sql(now).map(|(filter, order)| (format!("{} AND {SHOWN}", head(&filter)), order))
 }
 
@@ -525,21 +534,51 @@ const RECORD: &str = "form = 'record' AND status != 'gone'";
 /// (specification 1, section 7.5). The attention of the head decides where
 /// the pair goes, so a pair counts once in the brief, whatever the attention
 /// of the duplicate. The inner `item` of the subquery is the original.
-fn head(filter: &str) -> String {
+pub(crate) fn head(filter: &str) -> String {
     format!(
         "(({filter}) AND NOT (duplicate_of IS NOT NULL
              AND duplicate_of IN (SELECT id FROM item WHERE {filter})))"
     )
 }
 
-/// The places of the brief before the attention: the list sections and the
-/// records. No item is in two places.
+/// The places of the brief before the attention: the list sections, the
+/// records and the items of declined senders. No item is in two places.
 fn places(now: i64) -> Vec<String> {
     base_sql(now)
         .into_iter()
         .map(|(filter, _)| filter)
-        .chain([RECORD.to_string()])
+        .chain([RECORD.to_string(), declined_sql()])
         .collect()
+}
+
+/// The filter of the items that would wait at the stranger gate, but whose
+/// strangers the person declined: an open commitment whose counterparty
+/// (you owe) or owner (owed to you) is declined, or an active conversation
+/// with a declined participant and no stranger that waits. These items are
+/// in no section of the brief (specification 1, section 6.7).
+pub(crate) fn declined_sql() -> String {
+    let counter = kind_sql("doc", "$.counterparty.sender");
+    let owner = kind_sql("doc", "$.owner.sender");
+    format!(
+        "((form = 'commitment' AND status = 'open' AND (
+             (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
+          OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
+          OR (form = 'conversation' AND status = 'active'
+              AND {} AND NOT {}))",
+        participant_sql("= 'declined'"),
+        participant_sql("= 'stranger'")
+    )
+}
+
+/// True when the conversation document `doc` has a participant sender whose
+/// kind (as [`kind_sql`] gives it) matches `test`.
+fn participant_sql(test: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM json_each(doc, '$.participants') p
+           WHERE json_extract(p.value, '$.kind') = 'sender'
+             AND {} {test})",
+        kind_sql("p.value", "$.sender")
+    )
 }
 
 /// The filter of the head of each pair of the brief, in any place.
@@ -602,12 +641,7 @@ fn base_sql(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
-    let stranger_participant = format!(
-        "EXISTS (SELECT 1 FROM json_each(doc, '$.participants') p
-           WHERE json_extract(p.value, '$.kind') = 'sender'
-             AND {} = 'stranger')",
-        kind_sql("p.value", "$.sender")
-    );
+    let stranger_participant = participant_sql("= 'stranger'");
     let commitment = "form = 'commitment' AND status = 'open'";
     // Times are compared as instants: RFC 3339 text with an offset does
     // not sort in time order. A date with no time is midnight UTC.
@@ -625,11 +659,13 @@ fn base_sql(now: i64) -> [(String, String); 6] {
         "created_at, id".to_string(),
     );
     let conversations = (
-        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16).
+        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16),
+        // and a conversation with a declined stranger is in no section.
         format!(
             "form = 'conversation' AND status = 'active'
              AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-             AND NOT {stranger_participant}"
+             AND NOT {}",
+            participant_sql("IN ('stranger', 'declined')")
         ),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );
@@ -665,7 +701,7 @@ fn base_sql(now: i64) -> [(String, String); 6] {
 
 /// The `next` value of a page of section `name`: the name and the sort keys
 /// of the last item of the page, as hexadecimal text of a JSON array.
-fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
+pub(crate) fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
     let list: Vec<Value> = std::iter::once(Value::from(name))
         .chain(keys.iter().map(|k| match k {
             SqlValue::Integer(n) => (*n).into(),
@@ -683,7 +719,7 @@ fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
 
 /// The sort keys in an `after` value. A value that is empty, or that is not
 /// a cursor of section `name` with `count` keys, gives [`Error::Query`].
-fn decode_cursor(token: &str, name: &str, count: usize) -> Result<Vec<SqlValue>> {
+pub(crate) fn decode_cursor(token: &str, name: &str, count: usize) -> Result<Vec<SqlValue>> {
     let bad = || Error::Query(format!("after {token} is not the next value of a page"));
     if token.is_empty() || !token.len().is_multiple_of(2) || !token.is_ascii() {
         return Err(bad());
@@ -929,6 +965,8 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             feed: section(&feed)?,
             signals: section(&signals)?,
             strangers: section(&strangers)?,
+            gate: crate::gate::read_gate(c, now, false, crate::gate::GATE_IN_BRIEF, None)?,
+            declined: crate::gate::count_gate(c, now, true)?,
             hostile,
             not_understood,
             oldest_fetched,
@@ -1133,7 +1171,7 @@ fn item_id(row: i64, form: &str) -> Option<String> {
         .map(|(_, k)| format_id(*k, row))
 }
 
-fn row_of(id: &str, kind: Kind) -> Result<i64> {
+pub(crate) fn row_of(id: &str, kind: Kind) -> Result<i64> {
     match parse_id(id) {
         Some((k, row)) if k == kind => Ok(row),
         _ => Err(bad_id(id)),
