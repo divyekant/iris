@@ -812,6 +812,7 @@ dependencies = [
 name = "iris-senders"
 version = "0.0.0"
 dependencies = [
+ "iris-clean",
  "iris-eval",
  "iris-store",
  "iris-synth",
@@ -878,8 +879,11 @@ dependencies = [
  "iris-eval",
  "iris-model",
  "iris-senders",
+ "iris-store",
  "iris-synth",
+ "iris-talk",
  "jsonschema",
+ "rusqlite",
  "serde_json",
 ]
 

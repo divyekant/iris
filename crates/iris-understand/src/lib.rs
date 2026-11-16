@@ -13,6 +13,7 @@ pub mod head;
 pub mod prompt;
 pub mod rules;
 mod schema;
+pub mod store;
 pub mod time;
 
 use serde_json::{json, Value};
@@ -101,8 +102,8 @@ pub struct Context<'a> {
     /// example a signature without a `-- ` line (section 7.2).
     pub same_sender: &'a [String],
     /// Known persons that the model can name as parties, as
-    /// `Name <address>` lines, most relevant first: for example the persons
-    /// of the thread. The data holds at most `prompt::MAX_KNOWN` of them,
+    /// `Name <address>` lines: `store::understand` gives the persons in the
+    /// headers of the thread. The data holds at most `prompt::MAX_KNOWN` of them,
     /// in the budget (section 7.4).
     pub known: &'a [String],
 }
@@ -198,10 +199,13 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
                 .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
         })
         .and_then(|a| a.dmarc.as_deref());
-    if dmarc == Some("fail") {
+    // Mail with the label SENT is yours (spec 1 section 6.7): its own
+    // `From` header cannot make it a spoof or a DMARC fail.
+    let sent = cx.labels.iter().any(|l| l == "SENT");
+    if dmarc == Some("fail") && !sent {
         marks.push(Mark::Dmarc);
     }
-    if let Some(name) = &head.from_name {
+    if let Some(name) = head.from_name.as_ref().filter(|_| !sent) {
         let known = (cx.known_person)(name);
         if !known.is_empty() {
             let pass = dmarc == Some("pass")
@@ -256,6 +260,76 @@ impl Draft {
     pub fn form(&self) -> &str {
         self.item["form"].as_str().unwrap_or("")
     }
+
+    /// The complete item of the open model: the fields that the store owns
+    /// (ID, source, times, `derived`) and the `p-` ID of each sender party.
+    /// `sender` gives the row ID of the sender row of an address and a name.
+    pub fn finish(
+        &self,
+        ids: &Ids,
+        id: i64,
+        model: &str,
+        sender: &mut dyn FnMut(&str, Option<&str>) -> i64,
+    ) -> Value {
+        let mut v = self.item.clone();
+        let prefix = match self.form() {
+            "commitment" => "c",
+            "record" => "r",
+            "feed" => "f",
+            "signal" => "s",
+            _ => "x",
+        };
+        let now = time::rfc3339(ids.now_ms);
+        v["model"] = json!("iris/0");
+        v["id"] = json!(format!("{prefix}-{id}"));
+        v["sources"] = json!([{
+            "message": format!("m-{}", ids.message),
+            "thread": format!("t-{}", ids.thread),
+            "role": "origin",
+            "quote": self.quote,
+        }]);
+        v["created"] = json!(now);
+        v["updated"] = json!(now);
+        v["derived"] = match &self.by {
+            By::Rule(r) => json!({"by": "rule", "rule": r}),
+            By::Model => json!({"by": "model", "model": model, "prompt": PROMPT}),
+        };
+        for key in ["owner", "counterparty", "issuer", "publisher"] {
+            if let Some(p) = v.get_mut(key) {
+                set_sender(p, sender);
+            }
+        }
+        if let Some(Value::Array(list)) = v.pointer_mut("/fields/parties") {
+            for p in list {
+                set_sender(p, sender);
+            }
+        }
+        v
+    }
+}
+
+/// The row IDs and the time that [`Draft::finish`] needs.
+#[derive(Clone, Copy, Debug)]
+pub struct Ids {
+    pub message: i64,
+    pub thread: i64,
+    pub now_ms: i64,
+}
+
+/// Add the `p-` ID to a `sender` party with an address.
+fn set_sender(p: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) {
+    let Some(o) = p.as_object_mut() else { return };
+    if o.get("kind").and_then(Value::as_str) != Some("sender") {
+        return;
+    }
+    let Some(addr) = o.get("address").and_then(Value::as_str).map(str::to_string) else {
+        return;
+    };
+    let name = o.get("name").and_then(Value::as_str).map(str::to_string);
+    o.insert(
+        "sender".into(),
+        json!(format!("p-{}", sender(&addr, name.as_deref()))),
+    );
 }
 
 /// The status of a new feed item: `new` while the message has the label

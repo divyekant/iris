@@ -244,6 +244,14 @@ fn decide_message(
         for a in old.iter().filter(|a| !recipients.contains(a)) {
             recheck(conn, a, now_ms, ch)?;
         }
+        // You wrote these names: a new person row keeps the name.
+        let names = head.recipient_names();
+        let name_of = |to: &str| {
+            names
+                .iter()
+                .find(|(a, n)| a == to && n.is_some())
+                .and_then(|(_, n)| n.as_deref())
+        };
         let mut known = known_domains(conn, "")?;
         for to in &recipients {
             conn.prepare_cached(
@@ -263,7 +271,7 @@ fn decide_message(
                 )
                 .map(drop)?,
                 None => {
-                    upsert(ch, conn, to, None, Kind::Person, "sent", now_ms)?;
+                    upsert(ch, conn, to, name_of(to), Kind::Person, "sent", now_ms)?;
                     // A row that a person set keeps its kind: only a known
                     // sender adds its domain.
                     let kind: Option<String> =

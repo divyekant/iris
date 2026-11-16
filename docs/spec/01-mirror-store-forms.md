@@ -676,6 +676,10 @@ The `hostile` column of the message holds each mark that applies:
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
+A message with the label `SENT` is your mail. It never gets the marks `dmarc`
+and `spoof`, because these marks test the `From` header of mail that you
+receive.
+
 The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding
@@ -754,6 +758,9 @@ rebuild uses the same order.
   size.
 - The clean text has a limit of 32,000 characters for each message. The engine
   cuts longer text and marks the cut.
+- The engine reads at most 8 MiB of the raw message, so that one message
+  stays inside the memory budget (M3). A longer message counts as cut text
+  (section 7.3, rule 2), and parts after the limit are lost.
 
 ### 7.3 Fixed rules
 
@@ -879,9 +886,10 @@ The conversation rule runs for each message that is not hostile mail:
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.
-  The data lists at most 50 known persons as `Name <address>` (the caller
-  chooses them, most relevant first), in the budget, so that the model can
-  give the address of a person that the mail names only by name.
+  The data lists at most 50 known persons as `Name <address>`, in the
+  budget, so that the model can give the address of a person that the mail
+  names only by name. They are the `person` senders in the `From`, `To` and
+  `Cc` headers of the messages of the thread.
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row

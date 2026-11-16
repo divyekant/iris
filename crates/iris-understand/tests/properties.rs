@@ -96,3 +96,26 @@ fn random_mail_never_stops_the_parsers() {
         assert_eq!(sorted.len(), a.marks.len(), "seed {seed}: a mark twice");
     }
 }
+
+/// One decoder for display names: the names of the sender rows
+/// (`iris-senders`) and of the header rows (`iris-understand`) agree.
+#[test]
+fn both_address_parsers_give_the_same_decoded_name() {
+    for seed in 0..2000 {
+        let mut rng = Rng::new(seed);
+        let n = rng.below(12) as usize;
+        let mut v = String::new();
+        for _ in 0..n {
+            v.push_str(rng.pick(PIECES));
+        }
+        let ours = iris_understand::head::addresses(&v);
+        for (a, name) in iris_senders::head::addresses(&v) {
+            let Some(name) = name else { continue };
+            assert!(!name.contains("=?utf-8?B?QW5h?="), "seed {seed}: {v:?}");
+            if ours.iter().any(|(b, _)| *b == a) {
+                let pair = (a, Some(name));
+                assert!(ours.contains(&pair), "seed {seed}: {v:?} {pair:?}");
+            }
+        }
+    }
+}
