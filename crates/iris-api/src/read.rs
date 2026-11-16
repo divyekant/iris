@@ -285,9 +285,10 @@ fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary
 pub fn message(store: &Store, id: &str) -> Result<Option<Message>> {
     let row = row_of(id, Kind::Message)?;
     Ok(store.read(|c| {
-        let Some((summary, more)) = message_row(c, row)? else {
+        let Some((summary, mut more)) = message_row(c, row)? else {
             return Ok(None);
         };
+        more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
         let mut st = c.prepare(
             "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
              WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
@@ -820,19 +821,35 @@ pub fn write_proposal(store: &Store, now: i64, out: &mut impl std::io::Write) ->
     Ok(())
 }
 
+/// The kind of the sender row of `address`, or `stranger` with no row or no
+/// kind. Rows can differ only in case: the most cautious kind wins.
+/// shortcut: the case-insensitive match scans the sender table, one scan
+/// for each message detail and never for a search (about 4 ms for 100,000
+/// senders). Add a `lower(address)` index to the store if it shows in a profile.
+fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String> {
+    let Some(address) = address else {
+        return Ok("stranger".into());
+    };
+    let kind: Option<String> = c
+        .query_row(
+            "SELECT kind FROM sender WHERE address = ?1 COLLATE NOCASE AND kind IS NOT NULL
+             ORDER BY CASE kind WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
+                      WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END
+             LIMIT 1",
+            [address],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(kind.unwrap_or_else(|| "stranger".into()))
+}
+
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
 fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
-                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile,
-                    coalesce((SELECT s.kind FROM sender s
-                              WHERE s.address = h.from_addr COLLATE NOCASE
-                              -- Rows can differ only in case: the most cautious kind wins.
-                              ORDER BY CASE s.kind WHEN 'hostile' THEN 0 WHEN 'stranger' THEN 1
-                                       WHEN 'service' THEN 2 WHEN 'person' THEN 3 ELSE 4 END
-                              LIMIT 1), 'stranger')
+                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile
              FROM message m LEFT JOIN header h ON h.message_id = m.id
              LEFT JOIN body b ON b.message_id = m.id WHERE m.id = ?1",
             [row],
@@ -859,7 +876,7 @@ fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSumm
                         hostile: hostile
                             .and_then(|h| serde_json::from_str(&h).ok())
                             .unwrap_or_default(),
-                        sender_kind: r.get(10)?,
+                        sender_kind: String::new(),
                         items: Vec::new(),
                     },
                 ))
