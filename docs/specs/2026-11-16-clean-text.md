@@ -73,17 +73,22 @@ Each budget only goes down. No step gives budget back.
 - Each other multipart: each part, in order.
 - The `mail-parser` crate (1.0.1) reads the MIME tree, the headers and the
   transfer encodings (decision D3). Iris sets its limits: at most
-  `MAX_PARTS` + 1 parts and `MAX_DEPTH` + 2 levels. Iris does not let it
+  `PARSE_PARTS` (10,000) parts and `MAX_DEPTH` + 2 levels in one parse. An
+  attached message that is not transfer-encoded is part of the same parse,
+  so its parts count in `PARSE_PARTS`, but not in `MAX_PARTS` of step 1. So
+  an attached message with up to about 10,000 parts leaves the outer text.
+  Past `PARSE_PARTS`, the text is cut. The parts cost about 140 bytes each. Iris does not let it
   parse a transfer-encoded attached message: step 2 decodes at most
   `INNER_LIMIT` bytes of each attached message and parses these bytes again.
 - Transfer encodings: `base64` (characters outside the alphabet are skipped),
-  `quoted-printable` (an `=` without a valid escape stays), and all others as
+  `quoted-printable` (an `=` without a valid escape stays, but an `=` at the
+  end of the body is a soft line break and goes out), and all others as
   they are. Iris cuts the input before the decode, so a decode never uses
   more than about its cap. A quoted-printable cut never ends inside an escape
   such as `=41`. The `mail-parser` base64 decoder uses memory for
   white space too, so Iris gives it only the alphabet, in chunks of 64 KiB.
-  Iris counts the decoded size of a base64 body, because `mail-parser`
-  decodes a body with bytes outside the alphabet to measure it.
+  The size of a base64 attachment is the length of the same chunked decode,
+  so the size and the decode always agree (`QQ==QQ==` is 2 bytes).
 - Charsets: the labels of the WHATWG Encoding Standard, through `encoding_rs`.
   Text that is valid UTF-8 is read as UTF-8 if it has no label, an unknown
   label, or a label that `encoding_rs` maps to Windows-1252 (for example

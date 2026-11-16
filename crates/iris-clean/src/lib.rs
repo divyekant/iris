@@ -116,12 +116,18 @@ pub fn clean(raw: &[u8]) -> Clean {
     }
 }
 
-/// The parser of the MIME structure. One part more than [`MAX_PARTS`], so that
-/// the walker sees the overflow. Transfer-encoded attached messages are not
-/// parsed here: step 2 decodes at most [`INNER_LIMIT`] bytes of each one.
+/// The most MIME parts that `mail-parser` reads in one parse. It parses an
+/// attached message that is not transfer-encoded in the same parse, so its
+/// parts count here too. The walker applies [`MAX_PARTS`] by itself and does
+/// not count the parts of an attached message in step 1, so an attached
+/// message of up to this many parts leaves the outer text.
+pub const PARSE_PARTS: usize = 10_000;
+
+/// The parser of the MIME structure. Transfer-encoded attached messages are
+/// not parsed here: step 2 decodes at most [`INNER_LIMIT`] bytes of each one.
 fn parser() -> MessageParser {
     let p = MessageParser::new()
-        .max_parts(MAX_PARTS + 1)
+        .max_parts(PARSE_PARTS)
         .max_depth(MAX_DEPTH + 2)
         .max_encoded_nesting(0);
     // Iris parses these fields itself, from at most VALUE_LIMIT bytes (see
@@ -309,7 +315,11 @@ impl<'a> Walker<'a> {
             if !part.is_multipart() {
                 return;
             }
-            let list: Vec<MessagePart<'a>> = part.children().collect();
+            // One part more than the limit, so that the walker sees the overflow.
+            // Parts past the limit are not read. A last alternative can be one of them.
+            let max = MAX_PARTS.saturating_sub(self.parts) + 1;
+            let list: Vec<MessagePart<'a>> = part.children().take(max).collect();
+            self.cut |= part.children().len() > max;
             if sub == "alternative" {
                 self.alternative(list, depth);
             } else {
@@ -513,13 +523,33 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
     out.extend(inner_attachments);
 }
 
-/// The decoded size of a body. `mail-parser` decodes a base64 body with bytes
-/// outside the alphabet to measure it, so count the alphabet here: no memory.
+/// The decoded size of a body. For base64 it is the length of what
+/// [`base64_chunks`] gives, so the size and the decode agree by construction.
 fn decoded_len(body: &[u8], enc: Encoding) -> u64 {
     match enc {
-        Encoding::Base64 => mime::base64_chars(body) as u64 * 3 / 4,
+        Encoding::Base64 => {
+            let mut n = 0u64;
+            base64_chunks(body, |b| n += b.len() as u64);
+            n
+        }
         _ => enc.decoded_len(body) as u64,
     }
+}
+
+/// Decode base64 and give the bytes to `f`, in parts. The `mail-parser`
+/// decoder allocates 3/4 of its input, white space too. So it gets only the
+/// alphabet and the padding, in chunks of 64 KiB (a multiple of 4).
+fn base64_chunks(input: &[u8], mut f: impl FnMut(&[u8])) {
+    const CHUNK: usize = 64 * 1024;
+    let mut chunk = Vec::with_capacity(input.len().min(CHUNK));
+    for &b in input.iter().filter(|&&b| mime::is_b64(b) || b == b'=') {
+        chunk.push(b);
+        if chunk.len() == CHUNK {
+            f(&Encoding::Base64.decode(&chunk));
+            chunk.clear();
+        }
+    }
+    f(&Encoding::Base64.decode(&chunk));
 }
 
 /// Decode at most `cap` bytes of a body. Return the bytes and true if bytes
@@ -557,18 +587,8 @@ fn decode_capped(body: &[u8], enc: Encoding, cap: usize) -> (Cow<'_, [u8]>, bool
     // The base64 decoder of `mail-parser` allocates 3/4 of its input, white
     // space too. Give it only the alphabet and the padding.
     let mut bytes: Cow<'_, [u8]> = if enc == Encoding::Base64 {
-        // Decode in chunks of 64 KiB of the alphabet, so the copy stays small.
         let mut out = Vec::with_capacity(mime::base64_chars(input) * 3 / 4 + 3);
-        const CHUNK: usize = 64 * 1024;
-        let mut chunk = Vec::with_capacity(input.len().min(CHUNK));
-        for &b in input.iter().filter(|&&b| mime::is_b64(b) || b == b'=') {
-            chunk.push(b);
-            if chunk.len() == CHUNK {
-                out.extend_from_slice(&enc.decode(&chunk));
-                chunk.clear();
-            }
-        }
-        out.extend_from_slice(&enc.decode(&chunk));
+        base64_chunks(input, |b| out.extend_from_slice(b));
         Cow::Owned(out)
     } else {
         enc.decode(input)
