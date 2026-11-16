@@ -24,6 +24,7 @@ iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
+iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
 # Same version as iris-store, so the program has one copy of SQLite.
