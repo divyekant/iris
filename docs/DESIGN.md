@@ -35,8 +35,22 @@ At most 12 unique colors. The unread indicator uses the brand gold, not blue.
 
 ## Parts
 
-The client is an empty shell in release 0. Add each shared part here when it is
-built.
+Add each shared part here when it is built. The parts are in `client/src/views/`.
+
+| Part | File | Use |
+|---|---|---|
+| Navigation bar | `App.svelte` | One link for each view. The active link has a gold line under it. |
+| Line | `Line.svelte` | One item on one line: the title opens the item, the other party and the date in muted text, and "Mail" opens the source mail. |
+| Section | `Brief.svelte` | A heading with a muted count, up to 7 lines, and an "All N" link to the full list. |
+| Field list | `Item.svelte`, `Mail.svelte` | Labels in muted text and values in a grid of two columns. |
+| Record table | `RecordTable.svelte` | One column for each field of the record type, and a "Mail" column. |
+| Type choice | `Records.svelte` | Round buttons. The chosen button has a gold border. |
+| Warning | `Brief.svelte`, `Mail.svelte` | A border of 4px on the left: `warning` for a notice, `error` for hostile mail. |
+| Large code | `Item.svelte` | A login code in mono type at `font-size-4`. Never for an expired code. |
+| Button link | `Setup.svelte` | A gold border of 2px and text in the `text` color. |
+
+Gold is a border or a line, never the text color and never the background of
+text, because light gold on a light background fails the contrast rule.
 
 ## Rules
 
