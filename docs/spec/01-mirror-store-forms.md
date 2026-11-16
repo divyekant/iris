@@ -781,8 +781,10 @@ The conversation rule runs for each message that is not hostile mail:
   messages from you, a person or a stranger become hostile mail, and only
   `service` messages stay, the conversation also gets the status `gone`.
   While the origin message is only gone, the conversation keeps its status
-  (section 4.5), and the messages that stay give its fields. A gone message
-  that gets a hostile mark stops being a source.
+  (section 4.5), and the messages that stay give its fields. A gone update
+  source that becomes hostile mail stops being a source. The origin source
+  always stays (section 4.5); a gone origin that is hostile mail does not
+  keep the conversation from `gone`.
 
 `derived.by` is `rule`, and `derived.rule` names the rule.
 

@@ -39,6 +39,10 @@ struct Mail {
     text: String,
     mine: bool,
     service: bool,
+    gone: bool,
+    /// Not a draft and not hostile mail. A message counts when it is clean,
+    /// not gone, and from you or from an address.
+    clean: bool,
 }
 
 /// The conversation item of a thread, as the store has it.
@@ -77,11 +81,23 @@ pub fn update(
         [thread],
         |r| Ok((r.get(0)?, r.get::<_, String>(1)?.to_lowercase(), r.get(2)?)),
     )?;
-    let mails = mails(conn, thread, current, &me)?;
+    // One query and one rule decide each message, so that the live messages,
+    // the gone sources and the gone origin agree.
+    let all = mails(conn, thread, current, &me)?;
+    let gone_ok: Vec<(i64, i64)> = all
+        .iter()
+        .filter(|m| m.gone && m.clean)
+        .map(|m| (m.at, m.id))
+        .collect();
+    let origin_only_gone = |origin: i64| all.iter().any(|m| m.id == origin && m.gone && m.clean);
+    let mails: Vec<&Mail> = all
+        .iter()
+        .filter(|m| !m.gone && m.clean && (m.mine || !m.from.is_empty()))
+        .collect();
     let existing = existing(conn, thread)?;
 
     let Some(old) = existing else {
-        let Some(origin) = mails.iter().find(|m| !m.service) else {
+        let Some(origin) = mails.iter().copied().find(|m| !m.service) else {
             return Ok(None);
         };
         // The quote of a rule is the line that it matched (section 7.5).
@@ -108,8 +124,8 @@ pub fn update(
             quote,
             created: now,
         };
-        parts.fill(&mut doc, thread, &mails, &[], now);
-        save(conn, id, &doc, None, now, &mails, origin)?;
+        let updates = parts.fill(&mut doc, thread, &mails, &[], now);
+        save(conn, id, &doc, None, now, &updates)?;
         return Ok(Some(id));
     };
 
@@ -136,8 +152,8 @@ pub fn update(
     // alone makes no conversation. While the origin is only gone, the item
     // keeps its status (section 4.5). The origin row stays through the
     // content cleanup, so the rule does not need its header.
-    let gone = mails.is_empty()
-        || (mails.iter().all(|m| m.service) && !origin_only_gone(conn, old.origin)?);
+    let gone =
+        mails.is_empty() || (mails.iter().all(|m| m.service) && !origin_only_gone(old.origin));
     let mut doc = match doc(
         conn,
         thread,
@@ -152,7 +168,13 @@ pub fn update(
         // No message counts: the fields of the last message that counted stay.
         None => old.doc.clone(),
     };
-    parts.fill(&mut doc, thread, &mails, &gone_sources(conn, old.id)?, now);
+    // A gone source stays (section 4.5) while it is clean.
+    let kept = update_sources(conn, old.id)?;
+    let kept_gone: Vec<(i64, i64)> = gone_ok
+        .into_iter()
+        .filter(|g| kept.contains(&g.1))
+        .collect();
+    let updates = parts.fill(&mut doc, thread, &mails, &kept_gone, now);
     corrections(conn, old.id, &mut doc)?;
     let before = if gone {
         doc["status"] = json!("gone");
@@ -172,7 +194,7 @@ pub fn update(
         return Ok(Some(old.id));
     }
     doc["updated"] = json!(rfc3339(now));
-    save(conn, old.id, &doc, Some(before), now, &mails, old.origin)?;
+    save(conn, old.id, &doc, Some(before), now, &updates)?;
     Ok(Some(old.id))
 }
 
@@ -186,7 +208,15 @@ struct Parts {
 
 impl Parts {
     /// `gone` holds the update sources whose message is gone, as (time, row).
-    fn fill(&self, doc: &mut Value, thread: i64, mails: &[Mail], gone: &[(i64, i64)], now: i64) {
+    /// Give the rows of the update sources.
+    fn fill(
+        &self,
+        doc: &mut Value,
+        thread: i64,
+        mails: &[&Mail],
+        gone: &[(i64, i64)],
+        now: i64,
+    ) -> Vec<i64> {
         let t = format_id(Kind::Thread, thread);
         let mut sources = vec![json!({
             "message": format_id(Kind::Message, self.origin),
@@ -198,13 +228,15 @@ impl Parts {
         updates.extend_from_slice(gone);
         updates.sort_unstable();
         updates.dedup_by_key(|u| u.1);
-        sources.extend(updates.iter().filter(|u| u.1 != self.origin).map(
+        updates.retain(|u| u.1 != self.origin);
+        sources.extend(updates.iter().map(
             |u| json!({ "message": format_id(Kind::Message, u.1), "thread": t, "role": "update" }),
         ));
         doc["title"] = json!(self.title);
         doc["sources"] = Value::Array(sources);
         doc["created"] = json!(rfc3339(self.created));
         doc["updated"] = json!(rfc3339(now));
+        updates.into_iter().map(|u| u.1).collect()
     }
 }
 
@@ -215,8 +247,7 @@ fn save(
     // `Some(status_before_gone)` for an item that exists, `None` for a new item.
     existed: Option<Option<String>>,
     now: i64,
-    mails: &[Mail],
-    origin: i64,
+    updates: &[i64],
 ) -> rusqlite::Result<()> {
     let before = existed.clone().flatten();
     conn.execute(
@@ -226,42 +257,25 @@ fn save(
     )?;
     if existed.is_some() {
         conn.execute(
-            // A source whose message is gone stays (section 4.5), unless it
-            // is hostile mail.
-            &format!(
-                "DELETE FROM item_source WHERE item_id = ?1 AND role <> 'origin'
-                 AND message_id IN (SELECT m.id FROM message m WHERE m.gone_at IS NULL OR {MARKED})"
-            ),
+            "DELETE FROM item_source WHERE item_id = ?1 AND role <> 'origin'",
             [id],
         )?;
     }
     let mut add = conn.prepare_cached(
         "INSERT OR IGNORE INTO item_source(item_id, message_id, role) VALUES (?1, ?2, 'update')",
     )?;
-    for m in mails.iter().filter(|m| m.id != origin) {
-        add.execute(params![id, m.id])?;
+    for m in updates {
+        add.execute(params![id, m])?;
     }
     Ok(())
 }
 
-/// True if the origin message is gone and is not hostile mail.
-fn origin_only_gone(conn: &Connection, origin: i64) -> rusqlite::Result<bool> {
-    conn.prepare_cached(&format!(
-        "SELECT m.gone_at IS NOT NULL AND NOT {MARKED} FROM message m WHERE m.id = ?1"
-    ))?
-    .query_row([origin], |r| r.get(0))
-}
-
-/// The SQL test for a message `m` with one or more hostile marks. Same rule as [`marked`].
-const MARKED: &str = "(m.hostile IS NOT NULL AND trim(m.hostile) NOT IN ('', '[]'))";
-
-/// The update sources of the item whose message is gone, as (time, row).
-fn gone_sources(conn: &Connection, item: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
-    let mut q = conn.prepare_cached(&format!(
-        "SELECT COALESCE(m.internal_date, 0), m.id FROM item_source s JOIN message m ON m.id = s.message_id
-         WHERE s.item_id = ?1 AND s.role = 'update' AND m.gone_at IS NOT NULL AND NOT {MARKED}"
-    ))?;
-    let rows = q.query_map([item], |r| Ok((r.get(0)?, r.get(1)?)))?;
+/// The rows of the update sources of the item.
+fn update_sources(conn: &Connection, item: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut q = conn.prepare_cached(
+        "SELECT message_id FROM item_source WHERE item_id = ?1 AND role = 'update'",
+    )?;
+    let rows = q.query_map([item], |r| r.get(0))?;
     rows.collect()
 }
 
@@ -292,7 +306,9 @@ fn corrections(conn: &Connection, item: i64, doc: &mut Value) -> rusqlite::Resul
     Ok(())
 }
 
-/// The messages that the conversation counts, oldest first.
+/// Each message of the thread that is understood or `current`, also when it
+/// is gone, oldest first. The content cleanup can delete the header of a gone
+/// message: then only its row decides.
 fn mails(
     conn: &Connection,
     thread: i64,
@@ -305,10 +321,11 @@ fn mails(
                 EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
                 EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')
-         FROM message m JOIN header h ON h.message_id = m.id
+                       WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
+                m.gone_at IS NOT NULL
+         FROM message m LEFT JOIN header h ON h.message_id = m.id
          LEFT JOIN body b ON b.message_id = m.id
-         WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+         WHERE m.thread_id = ?1
            AND (m.understood_at IS NOT NULL OR m.id IS ?2)
          ORDER BY at, m.id",
     )?;
@@ -316,6 +333,7 @@ fn mails(
         let hostile: Option<String> = r.get(8)?;
         let sent: bool = r.get(9)?;
         let draft: bool = r.get(10)?;
+        let gone: bool = r.get(11)?;
         let from = r
             .get::<_, Option<String>>(2)?
             .and_then(|f| addresses(&f).into_iter().next())
@@ -343,12 +361,12 @@ fn mails(
             service: !mine && kind.as_deref() == Some("service"),
             mine,
             from,
+            gone,
+            clean: !draft && !hostile,
         };
-        // A message from another party needs a From address to be a party.
-        let counts = !draft && !hostile && (mail.mine || !mail.from.is_empty());
-        Ok(counts.then_some(mail))
+        Ok(mail)
     })?;
-    rows.filter_map(|r| r.transpose()).collect()
+    rows.collect()
 }
 
 /// True if the `hostile` column holds one or more marks. A value that is not
@@ -393,7 +411,7 @@ fn doc(
     me: &str,
     viewed_at: Option<i64>,
     now: i64,
-    mails: &[Mail],
+    mails: &[&Mail],
     status: Option<&str>,
 ) -> rusqlite::Result<Option<Value>> {
     let Some(last) = mails.last() else {
