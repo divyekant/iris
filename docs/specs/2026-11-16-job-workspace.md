@@ -91,8 +91,12 @@ the ref. It refuses `By::Agent`. A revoke of a ref that is not in the active
 scope does nothing. A revoke is allowed in each state of the job.
 
 `iris_job::scope(store, job)` gives the refs of the active rows. The next
-build writes each owned file again from the active scope, so the mail of a
-revoked ref leaves the files that the build owns.
+build writes each owned file again from the active scope. A revoke removes
+one grant, not the mail: a message or an item of a revoked ref leaves the
+files that the build owns, unless another active ref of the scope grants
+it. For example, if the scope has a thread and an item of that thread, a
+revoke of the item keeps the item, because the thread grants its sources.
+To remove the mail, the person revokes each ref that grants it.
 
 ### What the scope grants
 
@@ -224,8 +228,11 @@ counts of threads, messages, items and people that the build wrote.
    waits for the first, so two builds never use the same stage.
 2. Make `dir` with mode `0700` if it is not there. Refuse a `dir` that is a
    symbolic link or not a folder.
-3. If `.iris` is not a folder (for example a link of the agent), remove it as
-   a link or a file, and make a new folder with mode `0700`.
+3. Remove `.iris` (a link as a link, a folder with all its entries), and
+   make a new empty folder with mode `0700`. An entry that an agent left,
+   for example an old socket, never reaches the next session. The build
+   runs only while no session of the job runs (R4-04), so no live socket
+   is in the folder.
 4. Make the stage folder `.<name>.build` beside `dir` (for the default
    folder: `<data dir>/workspaces/.j-<id>.build`). The stage is outside the
    workspace, so no path that the agent made is a part of its path. A stage
@@ -307,6 +314,8 @@ Markdown and JSON with `serde_json`.
 | An agent file in `drafts/`, `notes.md` or another path | Kept as it is | Unit test |
 | A crash during the build | An owned path can be old, new or absent. The build returned no `Ok`, so no session starts (R4-04). The stage stays, and the next build removes it and writes each owned path again | Test: a build after a left stage succeeds and writes each owned path |
 | An agent link at `.iris` | Removed as a link, and a new folder is made. The stage is not under `.iris`, so the link cannot move the stage | Unit test |
+| An entry in `.iris` from an earlier session (an old socket, a file of the agent) | The build makes `.iris` new and empty | Unit test |
+| A revoke of one ref, and another active ref grants the same mail | The mail stays. The other ref grants it | Unit test |
 | A thread whose first message is hostile mail | The heading comes from the first message in the file | Unit test |
 | A person with mail outside the scope | The person file counts only the scope messages | Unit test |
 | An add to the scope by an agent, or to a `done` job | Refused | Unit test, and raw SQL |
@@ -365,8 +374,9 @@ None.
    the folder. Red if the target changes.
 6. An agent cannot add to a scope or revoke a part of it. Red if the store
    takes the row or the change.
-7. A build after a revoke has no file of the revoked mail. Red if its text
-   is in a file that the build owns.
+7. A build after a revoke has no file of the mail of the revoked ref that
+   no other active ref grants. Red if its text is in a file that the build
+   owns.
 
 ## Verify
 
