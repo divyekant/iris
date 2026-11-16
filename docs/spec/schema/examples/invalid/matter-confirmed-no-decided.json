@@ -1,0 +1,11 @@
+{
+  "model": "iris/0",
+  "id": "g-7",
+  "title": "Tokyo trip",
+  "status": "confirmed",
+  "items": ["r-1202", "v-880"],
+  "counts": { "commitment": 0, "conversation": 1, "record": 1 },
+  "created": "2026-11-06T09:00:00Z",
+  "updated": "2026-11-06T10:15:00Z",
+  "derived": { "by": "model", "model": "example-model-1", "prompt": "matters/0.1" }
+}
