@@ -84,8 +84,10 @@ Each budget only goes down. No step gives budget back.
   `quoted-printable` (an `=` without a valid escape stays, but an `=` at the
   end of the body is a soft line break and goes out), and all others as
   they are. Iris cuts the input before the decode, so a decode never uses
-  more than about its cap. A quoted-printable cut never ends inside an escape
-  such as `=41`. The `mail-parser` base64 decoder uses memory for
+  more than about its cap. Iris decodes quoted-printable with the
+  `mail-parser` decoder in chunks of about 64 KiB that end after a line end
+  (an escape never crosses one), and stops after the cap. The size of a
+  quoted-printable attachment is the length of the same chunked decode. The `mail-parser` base64 decoder uses memory for
   white space too, so Iris gives it only the alphabet, in chunks of 64 KiB.
   The size of a base64 attachment is the length of the same chunked decode,
   so the size and the decode always agree (`QQ==QQ==` is 2 bytes).

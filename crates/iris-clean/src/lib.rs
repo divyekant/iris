@@ -523,8 +523,8 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
     out.extend(inner_attachments);
 }
 
-/// The decoded size of a body. For base64 it is the length of what
-/// [`base64_chunks`] gives, so the size and the decode agree by construction.
+/// The decoded size of a body. It uses the same chunks as the decode (see
+/// [`base64_chunks`] and [`qp_chunks`]), so the size and the decode agree.
 fn decoded_len(body: &[u8], enc: Encoding) -> u64 {
     match enc {
         Encoding::Base64 => {
@@ -532,7 +532,40 @@ fn decoded_len(body: &[u8], enc: Encoding) -> u64 {
             base64_chunks(body, |b| n += b.len() as u64);
             n
         }
-        _ => enc.decoded_len(body) as u64,
+        // `mail-parser` counts a final `=4` as 1 byte but decodes 2 bytes.
+        Encoding::QuotedPrintable => {
+            let mut n = 0u64;
+            qp_chunks(body, |b| {
+                n += b.len() as u64;
+                true
+            });
+            n
+        }
+        Encoding::None => body.len() as u64,
+    }
+}
+
+/// Decode quoted-printable with the `mail-parser` decoder, in chunks of at
+/// most about 64 KiB, and give each decoded chunk to `f` until it returns
+/// false. A chunk ends after a line end, or in a long line at a byte that is
+/// not one of the 2 bytes after an `=`. An escape never crosses a line end,
+/// so each chunk decodes as in the decode of the whole body.
+fn qp_chunks(body: &[u8], mut f: impl FnMut(&[u8]) -> bool) {
+    const CHUNK: usize = 64 * 1024;
+    let mut start = 0;
+    while start < body.len() {
+        let window = &body[start..body.len().min(start + CHUNK)];
+        let mut end = match window.iter().position(|&b| b == b'\n') {
+            Some(n) => start + n + 1,
+            None => start + window.len(),
+        };
+        while end < body.len() && body[end.saturating_sub(2)..end].contains(&b'=') {
+            end += 1;
+        }
+        if !f(&Encoding::QuotedPrintable.decode(&body[start..end])) {
+            return;
+        }
+        start = end;
     }
 }
 
@@ -556,31 +589,27 @@ fn base64_chunks(input: &[u8], mut f: impl FnMut(&[u8])) {
 /// went out. The input is cut before the decode, so the decode never
 /// allocates more than about `cap` bytes.
 fn decode_capped(body: &[u8], enc: Encoding, cap: usize) -> (Cow<'_, [u8]>, bool) {
+    if enc == Encoding::QuotedPrintable {
+        // Decode chunks until the bytes pass `cap`, then look for one more
+        // decoded byte: the cut flag.
+        let mut out = Vec::new();
+        let mut more = false;
+        qp_chunks(body, |b| {
+            if out.len() <= cap {
+                out.extend_from_slice(&b[..b.len().min(cap + 1 - out.len())]);
+                true
+            } else {
+                more = !b.is_empty();
+                !more
+            }
+        });
+        let truncated = more || out.len() > cap;
+        out.truncate(cap);
+        return (Cow::Owned(out), truncated);
+    }
     let input_len = match enc {
         // Line ends between base64 characters do not count.
         Encoding::Base64 => mime::base64_prefix(body, cap / 3 * 4 + 4),
-        // Soft line breaks give no bytes: find the longest input that gives at most `cap` bytes.
-        Encoding::QuotedPrintable if enc.decoded_len(body) <= cap => body.len(),
-        Encoding::QuotedPrintable => {
-            // A cut point never ends inside an escape such as `=41`, so the
-            // decoded length only grows with the cut point.
-            let token_end = |mut p: usize| {
-                while p > 0 && body[p.saturating_sub(2)..p].contains(&b'=') {
-                    p -= 1;
-                }
-                p
-            };
-            let (mut lo, mut hi) = (0, body.len());
-            while lo < hi {
-                let mid = (lo + hi).div_ceil(2);
-                if enc.decoded_len(&body[..token_end(mid)]) <= cap {
-                    lo = mid;
-                } else {
-                    hi = mid - 1;
-                }
-            }
-            token_end(lo)
-        }
         _ => body.len().min(cap),
     };
     let (input, rest) = body.split_at(input_len);
@@ -640,6 +669,70 @@ fn tidy(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The invariant of `decode_capped`, for each cap: the bytes are the first
+    /// `min(cap, full)` bytes of the full decode, and the cut flag is true
+    /// only if bytes of the full decode went out.
+    fn check_every_cap(body: &[u8], enc: Encoding) {
+        let (full, _) = decode_capped(body, enc, usize::MAX / 4);
+        assert_eq!(
+            &full[..],
+            &enc.decode(body)[..],
+            "{enc:?} full decode of {body:?}"
+        );
+        assert_eq!(
+            decoded_len(body, enc),
+            full.len() as u64,
+            "{enc:?} size of {body:?}"
+        );
+        for cap in 0..=full.len() + 2 {
+            let (bytes, cut) = decode_capped(body, enc, cap);
+            let n = cap.min(full.len());
+            assert_eq!(
+                &bytes[..],
+                &full[..n],
+                "{enc:?} cap {cap} of {:?}",
+                String::from_utf8_lossy(body)
+            );
+            assert_eq!(
+                cut,
+                full.len() > cap,
+                "{enc:?} cap {cap} of {:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_printable_caps_keep_the_prefix_of_the_full_decode() {
+        for body in [
+            &b"=zz"[..],
+            b"a=41b",
+            b"ab=\r\ncd",
+            b"ab=\ncd=",
+            b"==41=4",
+            b"x=4=41=",
+            b"=\n=\n=\nX",
+            b"a= \r\nb=3D=3d",
+            b"=\r",
+            b"=",
+        ] {
+            check_every_cap(body, Encoding::QuotedPrintable);
+        }
+    }
+
+    #[test]
+    fn base64_caps_keep_the_prefix_of_the_full_decode() {
+        for body in [
+            &b"QQ==QQ=="[..],
+            b"QUJD\r\nREVG R0g=",
+            b"QUJDRA==\r\n  ",
+            b"Q",
+            b"QUI",
+        ] {
+            check_every_cap(body, Encoding::Base64);
+        }
+    }
 
     #[test]
     fn base64_at_the_cap_with_white_space_after_is_not_cut() {
