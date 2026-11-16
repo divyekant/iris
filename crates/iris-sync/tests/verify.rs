@@ -264,6 +264,77 @@ fn a_message_left_off_the_list_by_a_page_shift_is_still_compared() {
 }
 
 #[test]
+fn a_delete_between_two_pages_of_a_label_list_gives_no_difference() {
+    let (fake, store, account) = synced("v-label-shift", 37, 1_200);
+    let inbox: Vec<String> = fake_state(&fake)
+        .into_iter()
+        .filter(|(_, l)| l.iter().any(|l| l == "INBOX"))
+        .map(|(id, _)| id)
+        .collect();
+    assert!(inbox.len() > 500, "INBOX needs two list pages");
+    // `fake_state` sorts by ID, and a higher ID is newer: the last INBOX
+    // message is on the first page of the newest-first INBOX list.
+    let deleted = inbox.last().unwrap().clone();
+    eprintln!(
+        "INBOX n={} first={} at500={} at499={}",
+        inbox.len(),
+        inbox[0],
+        inbox[500],
+        inbox[499]
+    );
+    let at_fake = fake.clone();
+    let gmail = client(hook_proxy(
+        fake.addr(),
+        "labelIds=INBOX&includeSpamTrash=true&pageToken=",
+        move || assert!(at_fake.delete_message(&deleted)),
+    ));
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    for q in fake.requests().iter().filter(|r| r.contains("INBOX")) {
+        eprintln!("REQ {q}");
+    }
+    eprintln!("DBG {:?} skipped {}", r.differences, r.skipped);
+    assert_eq!(r.differences, vec![]);
+    assert!(!r.resync);
+}
+
+#[test]
+fn a_compare_error_keeps_the_difference_found_before_it() {
+    let (fake, store, account) = synced("v-error-keeps", 38, 30);
+    let missing = FakeGmail::id_of(9);
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET gone_at = 1 WHERE provider_id = ?1",
+                [&missing],
+            )?;
+            // A mirror row that Gmail does not list.
+            tx.execute(
+                "INSERT INTO message(account_id, thread_id, provider_id, fetched_at)
+                 SELECT account_id, thread_id, 'ffffffffffffffff', 1 FROM message LIMIT 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let at_fake = fake.clone();
+    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || {
+        at_fake.fail_next(&[400])
+    }));
+    assert!(verify(&store, &gmail, account, TOKEN).is_err());
+    let logged: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT result FROM sync_log WHERE kind = 'verify' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(logged.contains(&missing), "{logged}");
+    assert_eq!(sync_state(&store).0.as_deref(), Some(KIND_RESYNC));
+}
+
+#[test]
 fn a_message_deleted_during_verify_is_not_a_content_difference() {
     let (fake, store, account) = synced("v-content-gone", 31, 50);
     let id = FakeGmail::id_of(4);
