@@ -542,8 +542,9 @@ fn read_answer(json: &Value, docs: &[Doc]) -> Option<(Vec<Claim>, Vec<Source>)> 
     }))
 }
 
-/// True if `text` holds `quote`, with any run of white space as one space
-/// and no difference of case.
+/// True if `text` holds `quote` as whole words: with any run of white
+/// space as one space, no difference of case, and no letter or digit
+/// right before or after the match that would join a word of the quote.
 fn has(text: &str, quote: &str) -> bool {
     let norm = |s: &str| {
         s.split_whitespace()
@@ -551,7 +552,16 @@ fn has(text: &str, quote: &str) -> bool {
             .join(" ")
             .to_lowercase()
     };
-    norm(text).contains(&norm(quote))
+    let (text, quote) = (norm(text), norm(quote));
+    let (Some(first), Some(last)) = (quote.chars().next(), quote.chars().last()) else {
+        return false;
+    };
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    text.char_indices().any(|(i, _)| {
+        text[i..].starts_with(&quote)
+            && !(first.is_alphanumeric() && word(text[..i].chars().last()))
+            && !(last.is_alphanumeric() && word(text[i + quote.len()..].chars().next()))
+    })
 }
 
 #[cfg(test)]
@@ -679,6 +689,43 @@ mod tests {
             a.sources.iter().map(|s| s.message).collect::<Vec<_>>(),
             [101, 103]
         );
+    }
+
+    #[test]
+    fn a_quote_is_whole_words() {
+        let text = "Gate 12,  then\nFLIGHT TP1351 (Lisbon).";
+        for (q, want) in [
+            ("gate 12", true),
+            ("gate 1", false),
+            ("ate 12", false),
+            ("12, then flight", true),
+            ("TP135", false),
+            ("(lisbon).", true),
+            ("lisbon)", true),
+            ("", false),
+            ("  ", false),
+        ] {
+            assert_eq!(has(text, q), want, "{q:?}");
+        }
+    }
+
+    /// A span of whole words of a text is a quote; a span whose first or
+    /// last word is cut is not. The words all end in `z` and are unique, so
+    /// a cut word is never a whole word of the text.
+    #[test]
+    fn property_a_cut_word_is_no_quote() {
+        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+        for _ in 0..5000 {
+            let n = 1 + rng.below(12);
+            let words: Vec<String> = (0..n).map(|i| format!("w{}{i}z", rng.below(100))).collect();
+            let text = words.join(if rng.below(2) == 0 { " " } else { "\n  " });
+            let a = rng.below(n);
+            let b = a + 1 + rng.below(n - a);
+            let span = words[a..b].join(" ");
+            assert!(has(&text, &span.to_uppercase()), "{text:?} {span:?}");
+            assert!(!has(&text, &span[..span.len() - 1]), "{text:?} {span:?}");
+            assert!(!has(&text, &span[1..]), "{text:?} {span:?}");
+        }
     }
 
     #[test]
