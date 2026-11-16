@@ -2,8 +2,8 @@
 //! in the store (specification 1, sections 5.5 and 6.7).
 //!
 //! A known person is an address that matches the `person` rule of section
-//! 6.7: you sent a message to the address, or you sent a message in a thread
-//! where the address sent one. A draft does not count. A message with a
+//! 6.7: you sent a message to the address, or you replied in a thread after
+//! a message from the address. A draft does not count. A message with a
 //! hostile mark or the label `SPAM` does not count, because its `From` can be
 //! false. A kind in the `sender` table wins: only `person` gives a profile.
 //! A row with no kind is not decided yet, and the person rule decides the

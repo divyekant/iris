@@ -589,8 +589,9 @@ an expired code in large type.
 
 ### 6.7 The sender axis
 
-Each sender row has a kind. The kind is a property of the address, not of one
-message.
+Each sender row has a kind after the sender step decides it (see the
+paragraph about a row with no kind below). The kind is a property of the
+address, not of one message.
 
 | Kind | Rule in version 0 |
 |---|---|
