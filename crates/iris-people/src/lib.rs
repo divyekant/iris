@@ -554,7 +554,10 @@ mod tests {
         assert_eq!(addresses("undisclosed-recipients:;"), Vec::<String>::new());
         assert_eq!(addresses("not an address, @x, x@"), Vec::<String>::new());
         assert_eq!(addresses("a@b@c.d, <e@f@g.example>"), Vec::<String>::new());
-        assert_eq!(addresses(r#"<"a@b"@example.org>"#), [r#""a@b"@example.org"#]);
+        assert_eq!(
+            addresses(r#"<"a@b"@example.org>"#),
+            [r#""a@b"@example.org"#]
+        );
         // mail-parser 1.0.1 reads a bare quoted local part such as
         // `"john.doe"@example.org` as a name and `@example.org`, so the
         // address goes out. In `<>` the quoted local part works.
