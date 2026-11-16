@@ -301,13 +301,18 @@ fn a_link_that_shows_a_brand_and_goes_elsewhere_is_a_mark() {
     assert_eq!(run(&lines, &[], &[], &[]), vec![Mark::Link]);
     // The real target of the shown address.
     assert!(run(&html_link("https://www.shop.com/account"), &[], &[], &[]).is_empty());
-    // An authenticated sender of an unrelated domain with a plain redirect:
-    // the model decides, not this mark.
-    assert!(run(
-        &html_link("https://click.evil.example.net/r/1"),
-        &[],
-        &[],
-        &[]
-    )
-    .is_empty());
+    // DMARC for its own domain proves nothing about the shown domain.
+    assert_eq!(
+        run(
+            &html_link("https://click.evil.example.net/r/1"),
+            &[],
+            &[],
+            &[]
+        ),
+        vec![Mark::Link]
+    );
+    // The proven owner of the shown domain can link through a click counter.
+    let own =
+        html_link("https://click.mailer.example.org/r/1").replace("evil.example.net", "shop.com");
+    assert!(run(&own, &[], &[], &[]).is_empty(), "{own}");
 }

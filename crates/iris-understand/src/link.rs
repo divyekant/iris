@@ -4,29 +4,24 @@
 //! Mail text is data: the code only compares host names.
 
 use iris_clean::Link;
-use iris_senders::{near_copy, registrable};
+use iris_senders::registrable;
 use url::{Host, Url};
 
 /// True when the message has a deceptive link: the link text is a web
-/// address with the host `S`, and the target is an `http` or `https`
-/// URL that a browser opens on another owner. Iris reads the target with
-/// the WHATWG URL standard, as a browser does. The link is deceptive in
-/// each of these cases, unless DMARC proves that the sender owns the domain
-/// of `S` (then it can link through any redirect, for example a click
-/// counter of its mail service):
+/// address with the host `S`, and the target is an `http` or `https` URL
+/// that a browser opens on another owner. The owner of a host is its
+/// registrable domain by the public suffix list, with both hosts in
+/// punycode. Iris reads the target with the WHATWG URL standard, as a
+/// browser does. The link is deceptive when one of these is true:
 /// - The target host is an IP address, or Iris cannot read it, or the
-///   target has a user part, a
-///   backslash or a percent sign in front of its path.
-/// - The shown host or the target host has a punycode label (`xn--`) and
-///   the two hosts have other owners: look-alike letters that a person
-///   cannot tell apart (`pаypal.com` with a Cyrillic `а`). Iris compares
-///   both hosts as punycode, so an honest link to `münchen.de` is one owner.
-/// - The target host `T` has another registrable domain than `S`, and DMARC
-///   does not pass for the `From` domain (`authenticated` is false).
-/// - `T` has another registrable domain than `S` and looks like `S`: a near
-///   copy (`login.shop-secure.example.net` for `www.shop.example.com`), or
-///   a host with the name of `S` in front of another domain
-///   (`shop.example.com.evil.example.net`).
+///   target has a user part, a backslash or a percent sign in front of its
+///   path.
+/// - The target host has another owner than `S`.
+///
+/// Only one sender can link `S` to another owner: a sender that owns `S`,
+/// as DMARC proves (`authenticated` and the `From` domain has the owner of
+/// `S`). It can link through any redirect, for example a click counter of
+/// its mail service. DMARC for another domain proves nothing about `S`.
 ///
 /// `cut` is true when `iris-clean` could not list each link (a very large
 /// body). Iris cannot check the links that went out, so the message counts
@@ -46,19 +41,8 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
         }
         match target_host(href) {
             Target::NotWeb => {}
-            Target::Suspect => return true,
             Target::Host(t) if registrable(&t) == theirs => {}
-            Target::Host(t) => {
-                let puny = |h: &str| h.split('.').any(|l| l.starts_with("xn--"));
-                if !authenticated
-                    || puny(&shown)
-                    || puny(&t)
-                    || near_copy(&t, &shown)
-                    || embeds(&t, &theirs)
-                {
-                    return true;
-                }
-            }
+            Target::Suspect | Target::Host(_) => return true,
         }
     }
     false
@@ -149,21 +133,6 @@ fn target_host(href: &str) -> Target {
     }
 }
 
-/// True when the name label of the registrable domain `theirs` (`shop` of
-/// `shop.com`) is a label, or a hyphen part of a label, of `target` in front
-/// of its own registrable domain (`shop.com.evil.net`, `shop.evil.net`).
-fn embeds(target: &str, theirs: &str) -> bool {
-    let Some(name) = theirs.split('.').next().filter(|n| n.len() >= 3) else {
-        return false;
-    };
-    let own = registrable(target);
-    let front = target
-        .strip_suffix(own.as_str())
-        .unwrap_or("")
-        .trim_end_matches('.');
-    front.split(['.', '-']).any(|part| part == name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,13 +162,20 @@ mod tests {
     }
 
     #[test]
-    fn another_owner_is_deceptive_only_without_dmarc() {
+    fn another_owner_is_deceptive_also_with_dmarc_for_another_domain() {
         let (s, t) = (
             "www.news.example.com",
             "https://click.mailer.example.net/r/1",
         );
         assert!(one(s, t, "list.example.org", false));
-        assert!(!one(s, t, "list.example.org", true));
+        assert!(one(s, t, "list.example.org", true));
+        // A sender with its own domain and DMARC links a bank address to it.
+        assert!(one(
+            "https://bank.com/login",
+            "https://evil.example.net/login",
+            "evil.example.net",
+            true
+        ));
     }
 
     #[test]
@@ -254,13 +230,6 @@ mod tests {
                 "{href}"
             );
         }
-        // A longer word that holds the name is another name.
-        assert!(!one(
-            "shop.com",
-            "https://shopping.example.net/",
-            "example.net",
-            true
-        ));
     }
 
     #[test]
