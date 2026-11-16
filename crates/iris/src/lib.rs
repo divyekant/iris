@@ -188,13 +188,9 @@ pub fn run(cli: Cli) -> Result<(), String> {
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
-        Command::Correct { id, field, value } => print(verbs::correct(
-            &open()?,
-            id,
-            field,
-            value,
-            engine::now_ms(),
-        )),
+        Command::Correct { id, field, value } => {
+            print(verbs::correct(&open()?, id, field, value, engine::now_ms()))
+        }
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());

@@ -212,7 +212,12 @@ fn correct_changes_a_field_and_refuses_a_common_field() {
     assert_eq!(doc["status"], "corrected");
     let doc = json(
         &store,
-        &["correct", &id, "fields.amount", r#"{"value": "25.00", "currency": "EUR"}"#],
+        &[
+            "correct",
+            &id,
+            "fields.amount",
+            r#"{"value": "25.00", "currency": "EUR"}"#,
+        ],
     );
     assert_eq!(doc["fields"]["amount"]["value"], "25.00");
     assert_eq!(json(&store, &["show", &id]), doc);

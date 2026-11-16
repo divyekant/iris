@@ -1705,7 +1705,11 @@ fn a_refused_correction_writes_nothing() {
         (&id, "", json!("x")),
         (&id, "due..date", json!("2026-01-09")),
         (&id, "due.date", json!("Friday")),
-        (&id, "due", json!({"date": "2026-01-09", "at": "2026-01-09T10:00:00Z"})),
+        (
+            &id,
+            "due",
+            json!({"date": "2026-01-09", "at": "2026-01-09T10:00:00Z"}),
+        ),
         (&id, "kind", json!("party")),
         (&id, "unknown", json!(1)),
         (&format!("r-{row}"), "kind", json!("reply")),
@@ -1734,9 +1738,15 @@ fn a_corrected_record_is_corrected_and_stays_so_after_gone() {
     let id = format!("r-{row}");
     let status = |b: &Box_| -> String { b.col("SELECT status FROM item WHERE id = ?1", row) };
     assert_eq!(status(&b), "kept");
-    correct(&b.store, &id, "fields.summary", json!("The lease of flat 2"), NOW)
-        .unwrap()
-        .unwrap();
+    correct(
+        &b.store,
+        &id,
+        "fields.summary",
+        json!("The lease of flat 2"),
+        NOW,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(status(&b), "corrected");
     assert_eq!(b.items()[0]["status"], "corrected");
     // The same SQL as the sync (section 4.5): gone, a second correction,
