@@ -11,6 +11,7 @@ mod file_lock;
 mod id;
 mod search;
 mod secret;
+mod watch;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -26,6 +27,7 @@ pub use content::ContentWriter;
 pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
+pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
 /// Migrations go forward only. Never change a migration after it merged: add one.
@@ -42,6 +44,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_10.sql"),
     include_str!("schema_11.sql"),
     include_str!("schema_12.sql"),
+    include_str!("schema_13.sql"),
+    include_str!("schema_14.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -70,6 +74,8 @@ pub enum Error {
     /// the content cleanup deleted it, or the write of the file did not end.
     /// Fetch the message again.
     MissingContent(String),
+    /// The text of a watch is not valid, or too many watches wait.
+    Watch(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -85,6 +91,7 @@ impl fmt::Display for Error {
             Error::Key(why) => write!(f, "secret: {why}"),
             Error::Query(why) => write!(f, "search: {why}"),
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
+            Error::Watch(why) => write!(f, "watch: {why}"),
         }
     }
 }

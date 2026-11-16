@@ -6,7 +6,7 @@
 //! waiting job ([`wake`]), the person answers a question ([`answer`]), and
 //! [`finish`] ends a job. Each move is one `job_event` row.
 //!
-//! The SQL triggers of migration 12 allow only the moves of the move table
+//! The SQL triggers of migration 14 allow only the moves of the move table
 //! of the spec, with its actors, and copy the state of the newest event to
 //! the job row. So no caller can make a move that the spec does not allow,
 //! and this crate does not check the moves again.
@@ -47,7 +47,7 @@ impl From<iris_store::Error> for Error {
 
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
-        // A trigger or a CHECK of migration 12 refuses the change.
+        // A trigger or a CHECK of migration 14 refuses the change.
         if let rusqlite::Error::SqliteFailure(f, msg) = &e {
             if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER
                 || f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK
