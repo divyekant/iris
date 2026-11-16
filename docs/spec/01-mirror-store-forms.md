@@ -1078,6 +1078,15 @@ client shows You owe with the rest of its items, and with the engine count
 less the Due soon items. The "All" link of You owe, and the link of Due soon,
 give the engine count, because the full list holds both.
 
+A watch whose mail came (card R5-07) leads the brief. The opening sentence
+starts with one sentence that counts these mails ("The mail that you watched
+for came." for one, "Two mails that you watched for came." for two), and one
+card for each such
+watch comes before the live login codes. The card opens the mail. Done
+removes the watch. Near the end, "Iris watches for" lists the watches that
+wait, and a quiet button starts a new watch. The client reads the watches
+from `/api/watches`, not from the brief.
+
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
 applied.") is a list that the engine computes when the brief opens, in the
