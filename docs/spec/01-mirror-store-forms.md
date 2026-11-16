@@ -370,10 +370,12 @@ is never lost.
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
 
-The backup does not copy `workspaces/`. The build makes the files of a
+`iris backup` does not copy `workspaces/`. A copy of the whole folder while
+the engine is stopped copies `workspaces/` too, with the files of the agent.
+The build makes the files of a
 workspace again from the store, before each session. The files of the agent
-(`drafts/` and `notes.md`) are not in a backup: after a restore, the next
-build makes them empty. A draft that the agent submits is in the store
+(`drafts/` and `notes.md`) are not in a copy of `iris backup`: after a
+restore from it, the next build makes them empty. A draft that the agent submits is in the store
 (specification 2), so only work that the agent did not submit is lost. This
 is a known limit, with a GitHub issue, until the notes between sessions
 (R5-06) move into the store.
