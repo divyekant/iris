@@ -113,53 +113,76 @@ approval).
 
 ### Reservation
 
-The worst case of one message is the worst case of two calls (`decide` makes
-at most two). The worst case of one call is the instruction bytes plus
-`MAX_DATA` as input tokens (a token covers at least one byte; the data
-block stays inside `MAX_DATA`), and `max_tokens` as output tokens, at the
-price of the row.
+The runner gives `store::understand` a model that wraps the real one
+(`Budgeted`). The wrapper reserves money before each call and settles after
+it, in its own writes:
 
-1. Before the message, in one write: if `budget_micro_usd` is less than the
-   worst case of the message, stop with `stop = budget`. Else take the worst
-   case from `budget_micro_usd` and add it to `reserved_micro_usd` of the
-   run row.
-2. Call `store::understand`.
+1. Before the call, in one write: if `budget_micro_usd` is less than the
+   worst case of the call, refuse the call with `Error::Budget` (no request
+   goes out). Else take the worst case from `budget_micro_usd` and add it to
+   `reserved_micro_usd` of the run row.
+2. Send the request.
 3. After it, in one write: give back the worst case minus the real cost
-   (known cost plus the worst case of each call with unknown usage) to
+   (the known cost, or the worst case for unknown usage) to
    `budget_micro_usd`, take it from `reserved_micro_usd`, and add the counts
    to the run row.
 
+The worst case of one call is the byte count of the instruction and the
+data block that the call sends, as input tokens (a token covers at least one
+byte), and `max_tokens` as output tokens, at the price of the row. The
+wrapper knows the bytes before it sends them. So the second try of
+`decide` is reserved on its own, and the budget never pays for a call that
+it did not reserve.
+
 A crash between steps 1 and 3 keeps the whole worst case taken from the
 budget. Iris never gives it back, because it cannot know the real charge.
-So a crash can only make the budget smaller than the real spend, never
-larger.
+So a crash can only make the budget smaller than the real spend.
+
+A message that needs no model call (hostile mail, a fixed rule, a held
+message) reserves nothing. So the free steps run also with no budget:
+
+- `store::understand` refuses the model call of a message with
+  `Error::Model(Budget)` after write 1. Write 1 already saved the hostile
+  marks and dropped the old unpinned items. The message stays pending, and
+  no try counts.
+- The run goes on with the next messages, so hostile mail and fixed rules
+  finish for free. At the end, `stop = budget` if any call was refused.
 
 So an automatic run (R1-28) after each sync can spend only what is left of
 the approved budget.
+
+### Sender reruns
+
+A sender that becomes or stops being hostile makes its mail pending again
+(spec 1 section 6.7). The function `rerun_senders(tx, rows)` does this for
+each message from these addresses that is not gone: it deletes the items
+whose origin is the message and that are not pinned, and sets
+`understood_at`, `tries` and `retry_at` to NULL, 0 and NULL. A new hostile
+state is new input, so the old retry state does not hold the message.
+
+It runs in the transaction of the kind change, so a crash or an error cannot
+lose a rerun:
+
+- `store::understand` calls it in write 1, right after `iris_senders::decide`.
+- The runner calls it in the write of `iris_senders::refresh` (step 2).
 
 ### Batch runner
 
 `iris_understand::batch::run(store, connect, &Limits, now) -> Report`:
 
 1. Take the run lock. Insert the run row.
-2. Run `iris_senders::refresh` in one write. For each sender row that became
-   or stopped being hostile, set `understood_at` to NULL on each message from
-   that address that is not gone (spec 1 section 6.7: a hostile mark that
-   changes runs understanding again). No model call.
-3. Read `model_setting` and make the model. Check the budget.
-4. For each thread in order, and for each pending message of it:
-   1. Check the stop conditions.
-   2. Reserve, call `store::understand`, and settle (see "Reservation").
-   4. If the outcome has sender rows in `rerun`, set `understood_at` to NULL
-      on the messages of these senders, as in step 2.
+2. In one write: `iris_senders::refresh`, then `rerun_senders` for the rows
+   that became or stopped being hostile. No model call.
+3. Read `model_setting` and make the `Budgeted` model.
+4. For each thread in order, and for each pending message of it: check the
+   stop conditions, then call `store::understand`.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
 6. At the end, write `ended_at` and `stop`.
 
 Stop conditions, checked before each message:
 
-- No pending message is left: `stop = done`.
-- The budget cannot pay the worst case of one more message: `stop =
-  budget`.
+- No pending message is left: `stop = done`, or `stop = budget` if the
+  wrapper refused a call in this run.
 - The run cost reached `Limits::max_cost_micro_usd`: `stop = cost`. A run
   can pass this limit by the cost of one message.
 - `Limits::max_messages` messages are done: `stop = messages`. The next run
@@ -248,9 +271,13 @@ message. No path calls `store::understand` with a priced model outside
 - `iris model show`: the settings and the budget left, never the key.
 - `iris understand --estimate`: the estimate, no call.
 - `iris understand [--budget <usd>] [--max-cost <usd>] [--max-messages <n>]
-  [--yes]`: prints the estimate first. `--budget <usd> --yes` approves a new
-  budget. Without a budget left, it stops after the estimate. Then it runs
-  the batch runner and prints the run row.
+  [--yes]`: takes the run lock first and keeps it to the end. Under the lock
+  it reads `model_setting`, prints the estimate for that row (model, price),
+  and, with `--budget <usd> --yes`, writes the budget on that same row in the
+  same lock. No other command can change the row in between, so the budget
+  always belongs to the model and price of the estimate that the person saw.
+  Then it runs the batch runner (which takes the lock in the same process
+  through the held guard) and prints the run row.
 
 ## Options not chosen
 
@@ -274,8 +301,12 @@ more calls.
 | A second run | All mail understood | Zero calls. | Counting fake, two runs. |
 | A crash after the call, before write 3 | The model ran, no items | The message stays pending; the next run pays for it again (one message). | Fake model, stop after the call. |
 | A crash between the reservation and the settle write | Items saved, counts not | The budget keeps the whole worst case taken. The run row misses the tokens of one message. | Limit #113 (counts only); batch test of the reservation. |
-| The budget covers one call but not two | A second try outside the budget | The reservation covers two calls, so the run stops before the message. | Batch test. |
+| The budget covers one call but not two | A second try outside the budget | The wrapper reserves each call; it refuses the second call. | Batch test. |
 | `iris model set` during a run | Calls on an old row with a new budget | `iris model set` needs the run lock and fails. | Command test. |
+| `iris model set` between the estimate and the approval | A budget for a model the person did not see | `iris understand` holds the lock from the estimate to the approval and the run. | Command test. |
+| The budget is spent and a sender becomes hostile | Old items of its mail stay | `rerun_senders` drops them in the same write; the free steps run with no budget. | Batch test. |
+| A message with 3 tries whose sender becomes hostile | The message stays out of the pending set | `rerun_senders` clears `tries` and `retry_at`. | Batch test. |
+| A model error after write 1 made another sender hostile | The rerun is lost | `rerun_senders` ran in write 1. | Store test. |
 | A priced model and no budget | Paid calls with no approval | `stop = budget`, no call, also from R1-28. | Batch test. |
 | Automatic runs after each sync | Each run spends again | All runs take from one budget. | Batch test: two runs, one budget. |
 | A changed model row after the approval | The approval of another price | `iris model set` clears the budget; the runner makes its own model from the row. | Batch test. |
@@ -286,7 +317,6 @@ more calls.
 | An older message fails in this run | A later reply runs without its context | The later reply waits. | Batch test. |
 | A thread of ten new messages | The estimate counts one | The estimate counts ten. | Batch test. |
 | `--max-messages 1`, a thread of two | Both run | One message, `stop = messages`. | Batch test. |
-| A sender becomes hostile in step 2 or in a message | Old items of its mail stay | Its messages are pending again. | Batch test. |
 
 ## Impact
 
