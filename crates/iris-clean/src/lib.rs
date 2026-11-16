@@ -100,6 +100,33 @@ pub struct Link {
     pub href: String,
 }
 
+/// True when the bytes of `rest` (the part of a message past a cut) name
+/// the type `text/html`, in any case, also with white space in it: an HTML
+/// part can start there. One pass with a window of 9 bytes, so the memory
+/// does not grow with the input. Base64 data does not hold the word with
+/// its `/` by chance in practice.
+pub fn html_part_in(mut rest: impl std::io::Read) -> std::io::Result<bool> {
+    const WORD: &[u8; 9] = b"text/html";
+    let mut window = [0u8; 9];
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = rest.read(&mut buf)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        for &b in &buf[..n] {
+            if b.is_ascii_whitespace() {
+                continue;
+            }
+            window.copy_within(1.., 0);
+            window[8] = b.to_ascii_lowercase();
+            if &window == WORD {
+                return Ok(true);
+            }
+        }
+    }
+}
+
 /// An href as the URL standard reads it before the parse: no control
 /// characters or spaces at the ends, and no tab or line end inside.
 pub fn browser_href(href: &str) -> String {
@@ -132,8 +159,9 @@ pub fn clean(raw: &[u8]) -> Clean {
 
 /// [`clean`] for the first bytes of a message: `raw_cut` is true when
 /// `raw` is a prefix of a longer message. Then the link list is cut
-/// (`links_cut`) when an HTML body part reaches the end of `raw`, or when
-/// no body part ends before it.
+/// (`links_cut`) when an HTML body part reaches the end of `raw`. An HTML
+/// part that starts past the cut is the work of the caller
+/// ([`html_part_in`]).
 pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
     let mut parts = 0;
     let mut attach_left = ATTACHMENT_TEXT_LIMIT;
@@ -355,14 +383,10 @@ fn message<'a>(
         is_reply,
         links: Links::default(),
         at_end,
-        body_seen: false,
+        links_only: false,
     };
     w.entity(root, depth);
     *parts = w.parts;
-    // A cut message with no whole body part: its body is past the cut.
-    if at_end.is_some() && !w.body_seen {
-        w.links.cut = true;
-    }
     let mut text = w.texts.join("\n\n");
     if w.cut {
         text.push_str(CUT_MARK);
@@ -491,8 +515,9 @@ struct Walker<'a> {
     /// The length of the raw message when it is a prefix of a longer
     /// message ([`clean_cut`]).
     at_end: Option<usize>,
-    /// True when a body part ends before `at_end`.
-    body_seen: bool,
+    /// True while the walker reads a version of `multipart/alternative`
+    /// that the text does not use: only its links count.
+    links_only: bool,
 }
 
 impl<'a> Walker<'a> {
@@ -565,6 +590,9 @@ impl<'a> Walker<'a> {
             self.body_part(part, enc, mime_type == "text/html", charset.as_deref());
             return;
         }
+        if self.links_only {
+            return;
+        }
         self.files.push(File {
             mime_type,
             name,
@@ -579,14 +607,24 @@ impl<'a> Walker<'a> {
     /// the clean text uses it too. The walker reads the versions from the
     /// end and uses the first one with text after the quote and signature
     /// steps. A version that is not used adds no text, no attachment and no cut.
+    ///
+    /// Each version adds its links, also a version that the text does not
+    /// use: a mail client can show any version.
     fn alternative(&mut self, list: Vec<MessagePart<'a>>, depth: usize) {
-        for part in list.into_iter().rev() {
+        let mut versions = list.into_iter().rev();
+        while let Some(part) = versions.next() {
             let before = (self.texts.len(), self.chars, self.cut, self.files.len());
             let dropped = self.dropped;
             self.entity(part, depth + 1);
             // A version with text is used, also when the text is full and
             // its text did not fit: its cut stays.
             if self.texts.len() > before.0 || self.dropped > dropped {
+                let (cut, only) = (self.cut, self.links_only);
+                self.links_only = true;
+                for rest in versions {
+                    self.entity(rest, depth + 1);
+                }
+                (self.cut, self.links_only) = (cut, only);
                 return;
             }
             let texts;
@@ -612,9 +650,16 @@ impl<'a> Walker<'a> {
         let reaches_end = self
             .at_end
             .is_some_and(|end| part.offset_end() as usize >= end);
-        self.body_seen |= !reaches_end;
         if html && (truncated || reaches_end) {
             self.links.cut = true;
+        }
+        if self.links_only {
+            if html {
+                let (_, full, links) = html::convert(&mime::decode(&bytes, charset), self.is_reply);
+                self.links.add(links);
+                self.links.cut |= full;
+            }
+            return;
         }
         let text = mime::decode(&bytes, charset);
         drop(bytes);

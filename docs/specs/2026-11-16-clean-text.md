@@ -200,16 +200,20 @@ not used makes no cut in either case.
   target (card R5-10, the hostile mark `link` of spec 1 section 6.7): the
   text as the clean text shows it (trimmed, with its lines), and the href
   as the HTML gives it (entities decoded, not percent-encoded). Each HTML
-  part that the walker reads adds its links, also a version of
-  `multipart/alternative` that the text does not use, because a mail client
-  can show it. A hidden link has no text, so it is not in the list. The
+  part that the walker reads adds its links. Each HTML version of a
+  `multipart/alternative` adds its links too, also a version that the text
+  does not use, because a mail client can show it. The walker reads these
+  versions for their links only: they add no text and no attachment. A hidden link has no text, so it is not in the list. The
   texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
   true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
   its output limit or past `PART_LIMIT`; `MAX_PARTS`, `MAX_DEPTH` or a
   parser limit; a message that Iris cannot parse. `clean_cut(raw, true)`
   reads the first bytes of a longer message: `links_cut` is also true when
-  an HTML part reaches the end of `raw`, or when no body part ends before
-  it. The links of an attached message are not in the list.
+  an HTML part reaches the end of `raw`. The caller reads the rest of the
+  file with `html_part_in`, which is true when the bytes hold `text/html`
+  (case and whitespace ignored). The caller then sets `links_cut` too,
+  because the rest can hold an HTML part that a mail client shows. The
+  links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.

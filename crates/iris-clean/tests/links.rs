@@ -1,7 +1,7 @@
 //! The links of the clean text: each HTML link whose text is not its target
 //! (`Clean::links`), for the link check of spec 1 section 6.7.
 
-use iris_clean::{clean, clean_cut, Link, LINK_BYTES};
+use iris_clean::{browser_href, clean, clean_cut, html_part_in, Link, LINK_BYTES};
 
 fn html(body: &str) -> Vec<u8> {
     format!("From: a@example.com\r\nSubject: x\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{body}\r\n")
@@ -106,15 +106,17 @@ fn mixed(first_html: bool) -> Vec<u8> {
 }
 
 #[test]
-fn a_cut_message_cuts_the_links_only_when_a_body_can_be_past_the_cut() {
+fn a_cut_message_cuts_the_links_only_when_an_html_part_can_be_past_the_cut() {
     // The body ends before the cut, in the attachment: the list is whole.
     let raw = mixed(true);
     let c = clean_cut(&raw[..raw.len() - 1000], true);
     assert_eq!(c.links.len(), 1);
     assert!(!c.links_cut);
-    // The body is past the cut.
+    // The HTML body is past the cut: the rest names it.
     let raw = mixed(false);
-    assert!(clean_cut(&raw[..2000], true).links_cut);
+    assert!(!clean_cut(&raw[..2000], true).links_cut);
+    assert!(html_part_in(&raw[2000..]).unwrap());
+    assert!(!html_part_in(&mixed(true)[2000..]).unwrap());
     // The cut is in the HTML part.
     let raw = mixed(true);
     let end = raw.windows(9).position(|w| w == b"bank.exam").unwrap();
@@ -128,4 +130,104 @@ fn an_html_part_past_the_part_limit_cuts_the_links() {
         "a".repeat(iris_clean::PART_LIMIT)
     );
     assert!(clean(&html(&body)).links_cut);
+}
+
+#[test]
+fn html_part_in_finds_the_type_in_any_form() {
+    for rest in [
+        &b"Content-Type: text/html\r\n"[..],
+        b"content-type: TEXT/HTML; charset=utf-8",
+        b"Content-Type: text\r\n /\r\n html",
+        b"xxtextext/html",
+    ] {
+        assert!(
+            html_part_in(rest).unwrap(),
+            "{}",
+            String::from_utf8_lossy(rest)
+        );
+    }
+    for rest in [
+        &b"Content-Type: text/plain"[..],
+        b"text/htm",
+        b"QUJDRA==\r\ntext",
+    ] {
+        assert!(!html_part_in(rest).unwrap());
+    }
+}
+
+#[test]
+fn each_html_version_of_an_alternative_adds_its_links() {
+    let raw = "From: a@example.com\r\nSubject: x\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n\
+--b\r\nContent-Type: text/html\r\n\r\n<a href=\"https://evil.example.net/\">bank.example.com</a>\r\n\
+--b\r\nContent-Type: text/html\r\n\r\n<p>Hello.</p>\r\n\
+--b--\r\n";
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.text, "Hello.");
+    assert_eq!(
+        c.links,
+        vec![link("bank.example.com", "https://evil.example.net/")]
+    );
+    assert!(c.attachments.is_empty());
+}
+
+/// A small xorshift generator with a fixed seed, so a failure repeats.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+}
+
+/// Generated HTML with anchors: each anchor with a web or mail target and a
+/// text that is not its target is in the list, in order, with the href as
+/// a browser reads it. Nothing else is in the list.
+#[test]
+fn generated_anchors_give_the_link_list() {
+    let hrefs = [
+        "https://a.example.net/x",
+        "https:b.example.net",
+        " HTTP://c.example.net/ ",
+        "ht&#9;tps://d.example.net/",
+        "https://e.example.net\\@f.example.com/",
+        "mailto:g@example.net",
+        "javascript:run()",
+        "/relative",
+        "",
+    ];
+    let texts = [
+        "bank.example.com",
+        "Click here",
+        "https://h.example.com/a",
+        "W\u{fc}rze",
+    ];
+    let noise = [
+        "<p>", "</p>", "<br>", "<b>", "</b>", "word ", "&amp; ", "<div>", "</div>",
+    ];
+    let mut r = Rng(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..300 {
+        let mut body = String::new();
+        let mut expected = Vec::new();
+        for _ in 0..r.below(12) {
+            body.push_str(noise[r.below(noise.len())]);
+            if r.below(2) == 0 {
+                let (h, t) = (hrefs[r.below(hrefs.len())], texts[r.below(texts.len())]);
+                body.push_str(&format!("<a href=\"{h}\">{t}</a> "));
+                let read = browser_href(&h.replace("&#9;", "\t"));
+                let lower = read.to_ascii_lowercase();
+                if ["http:", "https:", "mailto:"]
+                    .iter()
+                    .any(|p| lower.starts_with(p))
+                {
+                    expected.push(link(t, &read));
+                }
+            }
+        }
+        let c = clean(&html(&body));
+        assert!(!c.links_cut, "{body}");
+        assert_eq!(c.links, expected, "{body}");
+    }
 }

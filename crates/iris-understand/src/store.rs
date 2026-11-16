@@ -150,7 +150,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         .as_deref()
         .and_then(|s| store.content_path(s))
         .ok_or(Error::NoMessage(message))?;
-    let (raw, raw_cut) = read_raw(&path)?;
+    let (raw, raw_cut, html_after) = read_raw(&path)?;
 
     let draft = row.labels.iter().any(|l| l == "DRAFT");
     let head = crate::Head::parse(&raw);
@@ -185,7 +185,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         same_sender: &first.same,
         known: &[],
     };
-    let mut a = analyze_cut(&raw, raw_cut, &cx);
+    let mut a = analyze_cut(&raw, raw_cut, html_after, &cx);
     a.text.cut |= raw_cut;
     // The mark phishing stays until a rebuild (section 6.7).
     if row.phishing {
@@ -407,19 +407,24 @@ fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result
 pub const RAW_LIMIT: u64 = 8 * 1024 * 1024;
 
 // shortcut: parts after RAW_LIMIT are lost, for example a text part after a
-// large attachment. Read only the parts that iris-clean decodes, with no
+// large attachment (an HTML part there gives the mark `link`). Read only the parts that iris-clean decodes, with no
 // limit on the file, when a real mailbox shows the need.
-/// The first `RAW_LIMIT` bytes of the content file, and true if the file is
-/// longer.
-fn read_raw(path: &std::path::Path) -> Result<(Vec<u8>, bool)> {
+/// The first `RAW_LIMIT` bytes of the content file, true if the file is
+/// longer, and true if the rest can hold an HTML part
+/// (`iris_clean::html_part_in`, from a little before the cut, so that a cut
+/// header counts). The rest is read in chunks: the memory stays bounded.
+fn read_raw(path: &std::path::Path) -> Result<(Vec<u8>, bool, bool)> {
     use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
     let mut raw = Vec::new();
-    std::fs::File::open(path)?
-        .take(RAW_LIMIT + 1)
-        .read_to_end(&mut raw)?;
+    (&mut file).take(RAW_LIMIT + 1).read_to_end(&mut raw)?;
     let cut = raw.len() as u64 > RAW_LIMIT;
+    let html_after = cut && {
+        let from = raw.len().saturating_sub(256);
+        iris_clean::html_part_in((&raw[from..]).chain(file))?
+    };
     raw.truncate(RAW_LIMIT as usize);
-    Ok((raw, cut))
+    Ok((raw, cut, html_after))
 }
 
 fn read_row(store: &Store, message: i64) -> Result<Row> {

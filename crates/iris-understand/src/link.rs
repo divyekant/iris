@@ -14,12 +14,13 @@ use url::{Host, Url};
 /// each of these cases, unless DMARC proves that the sender owns the domain
 /// of `S` (then it can link through any redirect, for example a click
 /// counter of its mail service):
-/// - The target host is an IP address, or Iris cannot read it (for
-///   example a host that is not ASCII), or the target has a user part, a
+/// - The target host is an IP address, or Iris cannot read it, or the
+///   target has a user part, a
 ///   backslash or a percent sign in front of its path.
-/// - The shown host is not ASCII (`pаypal.com` with a Cyrillic `а`), or the
-///   target host has a punycode label (`xn--`) and another owner: look-alike
-///   letters that a person cannot tell apart.
+/// - The shown host or the target host has a punycode label (`xn--`) and
+///   the two hosts have other owners: look-alike letters that a person
+///   cannot tell apart (`pаypal.com` with a Cyrillic `а`). Iris compares
+///   both hosts as punycode, so an honest link to `münchen.de` is one owner.
 /// - The target host `T` has another registrable domain than `S`, and DMARC
 ///   does not pass for the `From` domain (`authenticated` is false).
 /// - `T` has another registrable domain than `S` and looks like `S`: a near
@@ -48,9 +49,10 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
             Target::Suspect => return true,
             Target::Host(t) if registrable(&t) == theirs => {}
             Target::Host(t) => {
+                let puny = |h: &str| h.split('.').any(|l| l.starts_with("xn--"));
                 if !authenticated
-                    || !shown.is_ascii()
-                    || t.split('.').any(|l| l.starts_with("xn--"))
+                    || puny(&shown)
+                    || puny(&t)
                     || near_copy(&t, &shown)
                     || embeds(&t, &theirs)
                 {
@@ -97,7 +99,14 @@ fn shown_host(shown: &str) -> Option<String> {
             .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
         && last.chars().count() >= 2
         && last.chars().all(char::is_alphabetic);
-    ok.then(|| host.to_string())
+    if !ok {
+        return None;
+    }
+    // One form for each host: punycode, as the URL parser gives a target.
+    match Host::parse(host) {
+        Ok(Host::Domain(d)) => Some(d),
+        _ => None,
+    }
 }
 
 /// What a browser opens for a link target.
@@ -216,7 +225,7 @@ mod tests {
             "https://192.0.2.7/login",
             "https://0xc0.0.2.7/login",
             "https://[2001:db8::1]/login",
-            "https://p\u{430}ypal.example.net/",
+            "https://xn--pypal-4ve.example.net/",
         ] {
             assert!(
                 one("shop.example.com", href, "mx.example.org", true),
@@ -280,17 +289,19 @@ mod tests {
         for (s, t) in [
             ("paypal.example.com", "https://xn--pypal-4ve.example.net/"),
             ("p\u{430}ypal.example.com", "https://login.example.net/"),
-            ("P\u{430}YPAL.com", "https://xn--pypal-4ve.com/"),
+            ("PAYPAL.com", "https://xn--pypal-4ve.com/"),
         ] {
             assert!(one(s, t, "mx.example.org", true), "{s}");
         }
-        // The same owner: an honest link to an IDN domain.
-        assert!(!one(
-            "www.xn--mnchen-3ya.de",
-            "https://xn--mnchen-3ya.de/",
-            "x.org",
-            true
-        ));
+        // The same owner in two forms: an honest link to an IDN domain.
+        for (s, t) in [
+            ("www.xn--mnchen-3ya.de", "https://xn--mnchen-3ya.de/"),
+            ("www.m\u{fc}nchen.de", "https://www.m\u{fc}nchen.de/"),
+            ("www.M\u{dc}NCHEN.de", "https://xn--mnchen-3ya.de/a"),
+            ("xn--mnchen-3ya.de", "https://www.m\u{fc}nchen.de/"),
+        ] {
+            assert!(!one(s, t, "x.org", false), "{s} {t}");
+        }
     }
 
     #[test]

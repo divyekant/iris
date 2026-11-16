@@ -141,12 +141,14 @@ pub struct Text {
 
 impl Text {
     pub fn of(raw: &[u8]) -> Text {
-        Text::of_cut(raw, false)
+        Text::of_cut(raw, false, false)
     }
 
     /// [`Text::of`] for the first bytes of a message: `raw_cut` is true
-    /// when `raw` is a prefix of a longer message (`iris_clean::clean_cut`).
-    pub fn of_cut(raw: &[u8], raw_cut: bool) -> Text {
+    /// when `raw` is a prefix of a longer message (`iris_clean::clean_cut`),
+    /// and `html_after` when the rest can hold an HTML part
+    /// (`iris_clean::html_part_in`). Then the link list is cut.
+    pub fn of_cut(raw: &[u8], raw_cut: bool, html_after: bool) -> Text {
         let c = iris_clean::clean_cut(raw, raw_cut);
         let mut attachment_text = Vec::new();
         let mut attachments = Vec::with_capacity(c.attachments.len());
@@ -164,7 +166,7 @@ impl Text {
             cut: c.cut,
             invitation: c.invitation,
             links: c.links,
-            links_cut: c.links_cut,
+            links_cut: c.links_cut || html_after,
         }
     }
 }
@@ -189,15 +191,15 @@ impl Analysis {
 /// Steps 1 to 3: parse the headers, make the clean text, compute the hostile
 /// marks `dmarc`, `spoof`, `link` and `spam`.
 pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
-    analyze_cut(raw, false, cx)
+    analyze_cut(raw, false, false, cx)
 }
 
-/// [`analyze`] for the first bytes of a message: `raw_cut` is true when
-/// `raw` is a prefix of a longer message. A link past the cut can be
-/// missing, so the mark `link` reads the cut too.
-pub fn analyze_cut(raw: &[u8], raw_cut: bool, cx: &Context) -> Analysis {
+/// [`analyze`] for the first bytes of a message, with the flags of
+/// [`Text::of_cut`]. A link past the cut can be missing, so the mark `link`
+/// reads the flags too.
+pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) -> Analysis {
     let head = Head::parse(raw);
-    let mut text = Text::of_cut(raw, raw_cut);
+    let mut text = Text::of_cut(raw, raw_cut, html_after);
     if !cx.same_sender.is_empty() {
         // The cut mark is not part of the text: it stays at the end.
         let strip = |t: &str| {

@@ -1588,6 +1588,23 @@ fn an_html_body_past_the_read_limit_is_a_link_mark() {
 }
 
 #[test]
+fn an_html_body_after_a_plain_body_and_the_read_limit_is_a_link_mark() {
+    let b = store("large-link-plain");
+    // A plain part comes first, so the read part has a body. The HTML
+    // part with the link is still past the read limit.
+    let big = "A".repeat(iris_understand::store::RAW_LIMIT as usize);
+    let raw = format!(
+        "From: Bank <alerts@bank.example>\nTo: owner@example.com\nSubject: Sign in\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nSee the note.\n--b\nContent-Type: application/octet-stream\n\n{big}\n--b\nContent-Type: Text/HTML; charset=utf-8\n\n<a href=\"https://evil.example.net/\">bank.example</a>\n--b--\n"
+    );
+    let m = b.add("1", &raw, &["INBOX"]);
+    let fake = Fake::default();
+    understand(&b.store, m, &fake, NOW).unwrap();
+    let marks: String = b.col("SELECT hostile FROM message WHERE id = ?1", m);
+    assert_eq!(marks, r#"["link"]"#);
+    assert!(fake.calls.borrow().is_empty());
+}
+
+#[test]
 fn an_earlier_text_of_the_sender_that_changes_during_the_call_saves_nothing() {
     let b = store("same-change");
     let mut first = 0;
