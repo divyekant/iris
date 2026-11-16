@@ -100,8 +100,9 @@ The steps, in order:
    line ends. Keep at most one empty line between two lines of text.
 
 The texts of the body parts join with one empty line. When the text has
-`TEXT_LIMIT` characters, it stops there, and a later body part with content
-makes the text cut.
+`TEXT_LIMIT` characters, it stops there, and a later body part with clean
+text makes the text cut. A later part with no clean text (for example, only
+hidden HTML) makes no cut.
 
 ### HTML
 
@@ -154,7 +155,8 @@ selector of the list that is one class or one ID counts. A rule inside an
 `@` block (for example `@media`) does not count. A selector with more than
 one part (`.a.b`, `p.x`, `div .x`, `.x:hover`, `[a]`) does not count. A
 `<style>` element inside a comment or a raw-text element does not count. At
-most 256 rules count, and at most 4,096 bytes of each rule.
+most 256 rules count, and at most 4,096 bytes of each rule. Comments and
+the content of strings in CSS have no effect on rules or declarations.
 
 These go out also: `class` `gmail_signature` and `moz-signature`. In a
 reply: `class` `gmail_quote`, `yahoo_quoted` and `moz-cite-prefix`, a
@@ -235,8 +237,8 @@ its first 1 KiB holds `%PDF`.
 - Streams: the reader finds each `stream` keyword. The data ends at the
   direct `/Length` of the stream dictionary, if `endstream` follows that
   length. If not, the data ends at the next `endstream`.
-- A stream with no filter is read in place. A stream with only `FlateDecode`
-  is inflated, at most 4 MiB for each stream and 32 MiB for each PDF. A
+- A stream with no filter is read in place. A stream whose `/Filter` is
+  `/FlateDecode` or `[/FlateDecode]` is inflated, at most 4 MiB for each stream and 32 MiB for each PDF. A
   stream with another filter is skipped.
 - Streams with `/Image`, `/Length1`, `/Length2`, `/Metadata`, `/XRef`,
   `/ObjStm`, `/FontFile` or `/EmbeddedFile` are skipped.
@@ -281,7 +283,7 @@ client. They are not defects of this design:
 
 | Limit | Value | When it acts |
 |---|---|---|
-| `TEXT_LIMIT` | 32,000 characters | The body text stops, with `CUT_MARK`. |
+| `TEXT_LIMIT` | 32,000 characters | The body text stops, with `CUT_MARK` if clean text goes out. |
 | `PART_LIMIT` | 2 MiB | One body part decodes no more, with `CUT_MARK`. |
 | HTML output | 512 KiB | The Markdown of one part stops, with `CUT_MARK`. |
 | `MAX_PARTS` | 500 parts | Later parts are not read, with `CUT_MARK`. |

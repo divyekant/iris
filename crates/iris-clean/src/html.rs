@@ -462,6 +462,8 @@ const MAX_CSS_DECLS: usize = 4096;
 
 impl Css {
     fn read(&mut self, style: &str) {
+        // Braces in strings and comments do not open or close a block.
+        let style = &css_plain(style);
         // Only top-level rules count. A rule inside `@media` (a nested block)
         // applies only on some screens, so the whole block goes out.
         let (mut depth, mut start, mut open) = (0usize, 0, 0);
@@ -590,8 +592,47 @@ fn css_get(decls: &[(&str, &str)], p: &str) -> Option<String> {
         .map(|(_, v)| v.trim_end_matches("!important").to_string())
 }
 
+/// The CSS text without comments, and with each string made empty (`""`),
+/// so that a `{`, `}`, `;` or `:` in a string or a comment has no effect.
+fn css_plain(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut chars = css.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                for d in chars.by_ref() {
+                    if last == '*' && d == '/' {
+                        break;
+                    }
+                    last = d;
+                }
+                out.push(' ');
+            }
+            '"' | '\'' => {
+                while let Some(d) = chars.next() {
+                    match d {
+                        '\\' => {
+                            chars.next();
+                        }
+                        // A line end ends a bad string, as in CSS.
+                        '\n' => break,
+                        _ if d == c => break,
+                        _ => {}
+                    }
+                }
+                out.push(c);
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn css_decls(style: &str) -> String {
-    style
+    css_plain(style)
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
@@ -1025,6 +1066,12 @@ mod tests {
                 <p class=k style=\"display:block\">one</p><p class=c id=i>two</p>\
                 <p class=imp style=\"display:block\">gone</p><p hidden class=shown>three</p><p hidden>gone</p>"),
             "one\n\ntwo\n\nthree"
+        );
+        // Braces, `;` and `:` in a string or a comment change nothing.
+        assert_eq!(
+            md("<style>.x{content:\"{\"}/* } */.hide{display:none}</style><p class=hide>secret</p>\
+                <p style=\"content:'a;display:none'\">shown</p>"),
+            "shown"
         );
         // A later rule for the same name wins.
         assert_eq!(

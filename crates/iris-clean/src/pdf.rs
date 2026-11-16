@@ -56,7 +56,7 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         if !is_content(dict) {
             continue;
         }
-        let decoded: std::borrow::Cow<[u8]> = if has(dict, b"/FlateDecode") {
+        let decoded: std::borrow::Cow<[u8]> = if only_flate(dict) {
             match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, STREAM_LIMIT) {
                 Ok(v) => v.into(),
                 Err(e) => e.output.into(),
@@ -151,6 +151,32 @@ fn is_content(dict: &[u8]) -> bool {
     ]
     .iter()
     .any(|k| has(dict, k))
+}
+
+/// True if the `/Filter` of the dictionary is `FlateDecode` and nothing
+/// else: `/FlateDecode` or `[/FlateDecode]`.
+fn only_flate(dict: &[u8]) -> bool {
+    let Some(p) = find(dict, b"/Filter") else {
+        return false;
+    };
+    let rest = &dict[p + 7..];
+    let rest = &rest[rest.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+    let value = match rest.first() {
+        Some(b'[') => &rest[1..rest.iter().position(|&b| b == b']').unwrap_or(rest.len())],
+        _ => {
+            let end = rest
+                .iter()
+                .skip(1)
+                .position(|&b| b.is_ascii_whitespace() || b"/<>[]()".contains(&b))
+                .map_or(rest.len(), |n| n + 1);
+            &rest[..end]
+        }
+    };
+    let names: Vec<&[u8]> = value
+        .split(|&b| b.is_ascii_whitespace() || b == b'/')
+        .filter(|w| !w.is_empty())
+        .collect();
+    names == [b"FlateDecode"]
 }
 
 fn has(hay: &[u8], needle: &[u8]) -> bool {
@@ -428,6 +454,24 @@ mod tests {
             text(&sample(t, false), 100).as_deref(),
             Some("Visible words paid")
         );
+    }
+
+    #[test]
+    fn only_a_single_flate_filter_is_read() {
+        assert!(only_flate(b"<< /Filter /FlateDecode /Length 5 >>"));
+        assert!(only_flate(b"<< /Filter [ /FlateDecode ] >>"));
+        assert!(!only_flate(b"<< /Filter [/FlateDecode /Crypt] >>"));
+        assert!(!only_flate(b"<< /Filter /FlateDecodeX >>"));
+        assert!(!only_flate(b"<< /Length 5 >>"));
+        let data = miniz_oxide::deflate::compress_to_vec_zlib(b"BT (Hidden words) Tj ET", 6);
+        let mut pdf = format!(
+            "%PDF-1.4\n4 0 obj\n<< /Filter [/FlateDecode /Crypt] /Length {} >>\nstream\n",
+            data.len()
+        )
+        .into_bytes();
+        pdf.extend(data);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        assert_eq!(text(&pdf, 100), None);
     }
 
     #[test]

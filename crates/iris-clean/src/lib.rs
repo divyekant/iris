@@ -244,11 +244,8 @@ impl<'a> Walker<'a> {
     /// Make the clean text of one body part. Each part has its own quotes
     /// and signature, so a cut in one part cannot remove a later part.
     fn body_part(&mut self, body: &[u8], cte: &str, html: bool, charset: Option<&str>) {
-        if self.chars >= TEXT_LIMIT {
-            // The text is full. A later part with content is a cut.
-            self.cut |= !body.trim_ascii().is_empty();
-            return;
-        }
+        // Also when the text is full, the part goes through the steps: only
+        // a later part with clean text makes a cut.
         let (bytes, truncated) = decode_capped(body, cte, PART_LIMIT);
         self.cut |= truncated;
         let text = mime::decode(&bytes, charset);

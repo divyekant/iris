@@ -669,3 +669,15 @@ fn an_attached_message_has_one_whole_cut_mark() {
     let t = c.attachments[1].text.as_deref().unwrap_or_default();
     assert_eq!(t, format!("x{}", iris_clean::CUT_MARK));
 }
+
+#[test]
+fn a_hidden_part_after_a_full_text_is_no_cut() {
+    let part = "w".repeat(iris_clean::TEXT_LIMIT);
+    let raw = crlf(&format!(
+        "Subject: Full\nContent-Type: multipart/mixed; boundary=m\n\n--m\nContent-Type: text/plain\n\n{part}\n\
+         --m\nContent-Type: text/html\n\n<div hidden>secret</div>\n--m--\n"
+    ));
+    let c = clean(&raw);
+    assert!(!c.cut);
+    assert_eq!(c.text, part);
+}
