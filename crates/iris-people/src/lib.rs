@@ -448,7 +448,12 @@ fn one_address(text: &str) -> Option<String> {
 fn valid_address(text: &str) -> Option<String> {
     let a = text.trim().to_lowercase();
     let (local, domain) = a.rsplit_once('@')?;
-    let ok = !local.is_empty() && !domain.is_empty() && !domain.contains(char::is_whitespace);
+    // A second `@` outside quotes (as in `a@b@c.d`) is not a valid address.
+    let quoted = local.len() > 1 && local.starts_with('"') && local.ends_with('"');
+    let ok = !local.is_empty()
+        && (quoted || !local.contains('@'))
+        && !domain.is_empty()
+        && !domain.contains(char::is_whitespace);
     ok.then_some(a)
 }
 
@@ -548,6 +553,8 @@ mod tests {
         );
         assert_eq!(addresses("undisclosed-recipients:;"), Vec::<String>::new());
         assert_eq!(addresses("not an address, @x, x@"), Vec::<String>::new());
+        assert_eq!(addresses("a@b@c.d, <e@f@g.example>"), Vec::<String>::new());
+        assert_eq!(addresses(r#"<"a@b"@example.org>"#), [r#""a@b"@example.org"#]);
         // mail-parser 1.0.1 reads a bare quoted local part such as
         // `"john.doe"@example.org` as a name and `@example.org`, so the
         // address goes out. In `<>` the quoted local part works.
