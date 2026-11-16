@@ -34,7 +34,8 @@ pub struct Address {
 pub struct Person {
     /// The `p-` ID of the first sender row of the addresses.
     pub id: String,
-    /// The display name of the newest message from the person.
+    /// The display name of the newest message from the person. If the person
+    /// never sent you mail: the newest name that you gave it as a recipient.
     pub name: Option<String>,
     /// Each display name that the person used, sorted.
     pub names: Vec<String>,
@@ -64,17 +65,33 @@ struct Seen {
 #[derive(Default)]
 struct Stats {
     seen: Vec<Seen>,
-    /// Display name, with the date of its newest message.
+    /// Display names in the `From` of the person, with the date of the newest message.
     names: HashMap<String, i64>,
+    /// Display names that you gave the address as a recipient.
+    to_names: HashMap<String, i64>,
 }
 
 impl Stats {
-    fn latest_name(&self) -> Option<&str> {
-        self.names
-            .iter()
-            .max_by_key(|(n, d)| (**d, std::cmp::Reverse(n.as_str())))
-            .map(|(n, _)| n.as_str())
+    /// The names of the person: the names in its `From` if there are any,
+    /// else the names that you gave it.
+    fn best_names(&self) -> &HashMap<String, i64> {
+        if self.names.is_empty() {
+            &self.to_names
+        } else {
+            &self.names
+        }
     }
+
+    fn latest_name(&self) -> Option<&str> {
+        latest(self.best_names().iter().map(|(n, d)| (n.as_str(), *d)))
+    }
+}
+
+/// The name with the newest date. On the same date, the first name in sort order.
+fn latest<'a>(names: impl Iterator<Item = (&'a str, i64)>) -> Option<&'a str> {
+    names
+        .max_by_key(|(n, d)| (*d, std::cmp::Reverse(*n)))
+        .map(|(n, _)| n)
 }
 
 /// Give the profile of each known person of the account, the person with the
@@ -161,7 +178,7 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
                     let s = stats.entry(a.clone()).or_default();
                     // Each occurrence can give a name. The message counts one time.
                     if let Some(n) = name {
-                        let d = s.names.entry(n).or_insert(date);
+                        let d = s.to_names.entry(n).or_insert(date);
                         *d = (*d).max(date);
                     }
                     if done.insert(a.clone()) {
@@ -251,8 +268,15 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
             seen.sort_by_key(|s| s.message);
             seen.dedup_by_key(|s| s.message);
             let mut names: HashMap<&str, i64> = HashMap::new();
+            // The names in a `From` of the person win over the names that you gave it.
+            let from_them = addrs.iter().any(|a| !stats[a].names.is_empty());
             for a in &addrs {
-                for (n, d) in &stats[a].names {
+                let own = if from_them {
+                    &stats[a].names
+                } else {
+                    &stats[a].to_names
+                };
+                for (n, d) in own {
                     let e = names.entry(n.as_str()).or_insert(*d);
                     *e = (*e).max(*d);
                 }
@@ -266,10 +290,7 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
             threads.sort_by_key(|(t, d)| (std::cmp::Reverse(*d), std::cmp::Reverse(*t)));
             Person {
                 id: format_id(Kind::Sender, ids[&addrs[0]]),
-                name: names
-                    .iter()
-                    .max_by_key(|(n, d)| (**d, std::cmp::Reverse(**n)))
-                    .map(|(n, _)| n.to_string()),
+                name: latest(names.iter().map(|(n, d)| (*n, *d))).map(str::to_string),
                 names: names
                     .keys()
                     .map(|n| n.to_string())
@@ -391,60 +412,161 @@ pub fn addresses(list: &str) -> Vec<String> {
 }
 
 /// The mailboxes of an address list: each address in lower case, with its
-/// display name if it has one.
+/// display name if it has one. The scanner follows RFC 5322: quoted text
+/// with `\` escapes, comments such as `(Name)` (also nested), addresses in
+/// `<>`, and groups such as `team: a@example.org;`.
 pub fn mailboxes(list: &str) -> Vec<(String, Option<String>)> {
+    #[derive(Default)]
+    struct Part {
+        /// The text outside `<>` and comments, with quotes and escapes, for a bare address.
+        raw: String,
+        /// The same text without quotes and escapes, for the display name.
+        name: String,
+        /// The text inside `<>`.
+        angle: Option<String>,
+        /// The last comment that has text.
+        comment: Option<String>,
+    }
     let mut out = Vec::new();
-    let (mut quoted, mut angle, mut depth, mut start) = (false, false, 0u32, 0);
-    for (i, c) in list.char_indices() {
-        match c {
-            '"' if !angle && depth == 0 => quoted = !quoted,
-            '(' if !quoted => depth += 1,
-            ')' if !quoted => depth = depth.saturating_sub(1),
-            '<' if !quoted && depth == 0 => angle = true,
-            '>' if !quoted && depth == 0 => angle = false,
-            ',' | ';' if !quoted && !angle && depth == 0 => {
-                out.extend(mailbox(&list[start..i]));
-                start = i + 1;
+    let mut part = Part::default();
+    let (mut quoted, mut angle, mut depth) = (false, false, 0u32);
+    let mut comment = String::new();
+    let mut chars = list.chars();
+    let finish = |part: Part, out: &mut Vec<(String, Option<String>)>| {
+        let (address, name) = match part.angle {
+            Some(a) => (a, Some(part.name)),
+            None => (part.raw, part.comment.clone()),
+        };
+        if let Some(a) = valid_address(&address) {
+            let name = name
+                .map(|n| decode_words(n.trim()))
+                .filter(|n| !n.is_empty())
+                // The old form `a@example.org (Name)` puts the name in a comment.
+                .or(part.comment);
+            out.push((a, name));
+        }
+    };
+    while let Some(c) = chars.next() {
+        // The buffer that gets ordinary text now.
+        let target = |part: &mut Part,
+                      comment: &mut String,
+                      depth: u32,
+                      angle: bool,
+                      text: &str,
+                      quoted_char: bool| {
+            if depth > 0 {
+                comment.push_str(text);
+            } else if angle {
+                part.angle.get_or_insert_with(String::new).push_str(text);
+            } else {
+                part.raw.push_str(text);
+                if !quoted_char {
+                    part.name.push_str(text);
+                }
             }
-            _ => {}
+        };
+        match c {
+            '\\' if quoted || depth > 0 => {
+                let next = chars.next().unwrap_or('\\');
+                if depth > 0 {
+                    comment.push(next);
+                } else if angle {
+                    let a = part.angle.get_or_insert_with(String::new);
+                    a.push('\\');
+                    a.push(next);
+                } else {
+                    part.raw.push('\\');
+                    part.raw.push(next);
+                    part.name.push(next);
+                }
+            }
+            '"' if depth == 0 => {
+                quoted = !quoted;
+                // The quote stays in the address, not in the name.
+                target(&mut part, &mut comment, 0, angle, "\"", true);
+            }
+            _ if quoted => target(
+                &mut part,
+                &mut comment,
+                0,
+                angle,
+                c.encode_utf8(&mut [0; 4]),
+                false,
+            ),
+            '(' => {
+                if depth > 0 {
+                    comment.push(c);
+                }
+                depth += 1;
+            }
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let t = comment.trim();
+                    if !t.is_empty() {
+                        part.comment = Some(t.to_string());
+                    }
+                    comment.clear();
+                    target(&mut part, &mut comment, 0, angle, " ", false);
+                } else {
+                    comment.push(c);
+                }
+            }
+            _ if depth > 0 => comment.push(c),
+            '<' => {
+                angle = true;
+                part.angle = Some(String::new());
+            }
+            '>' if angle => angle = false,
+            // The end of a group name: the text before it is not a mailbox.
+            ':' if !angle => {
+                part = Part::default();
+            }
+            ',' | ';' if !angle => {
+                finish(std::mem::take(&mut part), &mut out);
+            }
+            _ => target(
+                &mut part,
+                &mut comment,
+                0,
+                angle,
+                c.encode_utf8(&mut [0; 4]),
+                false,
+            ),
         }
     }
-    out.extend(mailbox(&list[start..]));
+    finish(part, &mut out);
     out
 }
 
-/// One mailbox such as `"Lind, Ana" <ana@example.org>`: the address and the
-/// display name.
-fn mailbox(part: &str) -> Option<(String, Option<String>)> {
-    let (part, comment) = strip_comments(part);
-    let address = one_address(&part)?;
-    let name = part
-        .rfind('<')
-        .map(|i| {
-            let mut n = &part[..i];
-            // A group such as `Team: Ana <a@example.org>` starts with its name.
-            if let Some(c) = group_colon(n) {
-                n = &n[c + 1..];
-            }
-            decode_words(n.trim().trim_matches('"').trim())
-        })
-        .filter(|n| !n.is_empty())
-        // The old form `a@example.org (Name)` puts the name in a comment.
-        .or(comment);
-    Some((address, name))
+/// The address of one mailbox such as `"Name" <a@example.com>`, in lower case.
+fn one_address(text: &str) -> Option<String> {
+    mailboxes(text).into_iter().next().map(|(a, _)| a)
 }
 
-/// The position of the `:` that ends a group name, outside quoted text.
-fn group_colon(text: &str) -> Option<usize> {
-    let mut quoted = false;
-    for (i, c) in text.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            ':' if !quoted => return Some(i),
-            _ => {}
+/// Check one address, as `local@domain`, and give it in lower case. A quoted
+/// local part, such as `"john doe"@example.org`, can have any character, with
+/// a `\` escape before a quote or a `\`.
+fn valid_address(text: &str) -> Option<String> {
+    let a = text.trim().to_lowercase();
+    let bad = |t: &str| t.contains(|c: char| c.is_whitespace() || "\"<>(),;:@\\".contains(c));
+    let (local, domain) = a.rsplit_once('@')?;
+    let local_ok = match local.strip_prefix('"').and_then(|l| l.strip_suffix('"')) {
+        Some(inner) => {
+            let mut ok = true;
+            let mut it = inner.chars();
+            while let Some(c) = it.next() {
+                match c {
+                    '\\' => ok &= it.next().is_some(),
+                    '"' | '\r' | '\n' => ok = false,
+                    _ => {}
+                }
+            }
+            ok
         }
-    }
-    None
+        None => !local.is_empty() && !bad(local),
+    };
+    (local_ok && !domain.is_empty() && !bad(domain)).then_some(a)
 }
 
 /// Decode the RFC 2047 encoded words of a display name, such as
@@ -535,62 +657,6 @@ fn b_decode(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
-}
-
-/// Remove the RFC 5322 comments, such as `(Name)`, outside quoted text.
-/// Gives the text and the last comment that has text.
-fn strip_comments(part: &str) -> (String, Option<String>) {
-    let (mut out, mut comment, mut last) = (String::new(), String::new(), None);
-    let (mut quoted, mut depth) = (false, 0u32);
-    for c in part.chars() {
-        match c {
-            '"' if depth == 0 => {
-                quoted = !quoted;
-                out.push(c);
-            }
-            '(' if !quoted => {
-                if depth > 0 {
-                    comment.push(c);
-                }
-                depth += 1;
-            }
-            ')' if !quoted && depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    let t = comment.trim();
-                    if !t.is_empty() {
-                        last = Some(t.to_string());
-                    }
-                    comment.clear();
-                    out.push(' ');
-                } else {
-                    comment.push(c);
-                }
-            }
-            _ if depth > 0 => comment.push(c),
-            _ => out.push(c),
-        }
-    }
-    (out, last)
-}
-
-/// The address of one mailbox such as `"Name" <a@example.com>`, in lower case.
-fn one_address(part: &str) -> Option<String> {
-    let a = match (part.rfind('<'), part.rfind('>')) {
-        (Some(s), Some(e)) if s < e => &part[s + 1..e],
-        // A group such as `team: a@example.com` starts with its name.
-        _ => group_colon(part).map_or(part, |c| &part[c + 1..]),
-    };
-    let a = a.trim().to_lowercase();
-    let bad = |t: &str| t.contains(|c: char| c.is_whitespace() || "\"<>(),;:@".contains(c));
-    // The domain is after the last `@`. A quoted local part, such as
-    // `"john doe"@example.org`, can have any character but a quote.
-    let (local, domain) = a.rsplit_once('@')?;
-    let local_ok = match local.strip_prefix('"').and_then(|l| l.strip_suffix('"')) {
-        Some(inner) => !inner.contains(['"', '\\', '\r', '\n']),
-        None => !local.is_empty() && !bad(local),
-    };
-    (local_ok && !domain.is_empty() && !bad(domain)).then_some(a)
 }
 
 /// The key of a display name for the merge of addresses: lower case, one
@@ -708,6 +774,27 @@ mod tests {
                 ("bo@example.org".to_string(), None)
             ]
         );
+    }
+
+    #[test]
+    fn the_scanner_follows_rfc_5322() {
+        let m = |name: &str| Some(name.to_string());
+        assert_eq!(
+            mailboxes(r#""a\"b"@example.org, <c@example.org (note)>, "x<y>" <d@example.org>"#),
+            [
+                (r#""a\"b"@example.org"#.to_string(), None),
+                ("c@example.org".to_string(), m("note")),
+                ("d@example.org".to_string(), m("x<y>"))
+            ]
+        );
+        assert_eq!(
+            mailboxes(r#"A (x, y: z) <e@example.org>, list:;, g: "h, i" <f@example.org>;"#),
+            [
+                ("e@example.org".to_string(), m("A")),
+                ("f@example.org".to_string(), m("h, i"))
+            ]
+        );
+        assert_eq!(mailboxes(r#""unclosed <z@example.org>"#), vec![]);
     }
 
     #[test]
