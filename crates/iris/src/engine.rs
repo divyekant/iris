@@ -315,10 +315,17 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// attention of the items whose origin message changed, and each hour of
 /// each item ([`iris_policy::refresh_attention`]). It is apart from the
 /// understanding thread, because one understanding run can take hours.
+/// The same thread writes the rules that Iris proposes from the approvals
+/// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]).
 fn attention_loop(store: Arc<Store>) {
+    let mut mark = None;
     loop {
         if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
             say!("iris: attention: {e}");
+        }
+        if let Err(e) = iris_policy::propose::refresh(&store, now_ms().div_euclid(1000), &mut mark)
+        {
+            say!("iris: proposed rules: {e}");
         }
         std::thread::sleep(ATTENTION_EVERY);
     }

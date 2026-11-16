@@ -145,6 +145,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/policy/discard", post(post_discard))
         .route("/api/policy/mode", post(post_mode))
         .route("/api/policy/remove", post(post_remove))
+        .route("/api/policy/accept", post(post_accept))
+        .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
         // No fallback: `iris_web::router()` has the fallback of the server.
@@ -556,6 +558,35 @@ async fn post_remove(
     let b = body(b)?;
     let change = iris_policy::Change::Remove(b.id);
     Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+/// `id` is the ID of an open proposal (spec 2, section 6.6).
+#[derive(Deserialize)]
+struct ProposalBody {
+    version: Option<i64>,
+    id: i64,
+}
+
+async fn post_accept(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<ProposalBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let change = iris_policy::Change::Accept(b.id);
+    Ok(Json(policy::change(&s, b.version, change, now_s())?).into_response())
+}
+
+#[derive(Deserialize)]
+struct DismissBody {
+    id: i64,
+}
+
+async fn post_dismiss(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<DismissBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(Json(policy::dismiss(&s, b.id, now_s())?).into_response())
 }
 
 async fn get_watches(State(s): State<Arc<Store>>) -> Result<Response> {

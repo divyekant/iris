@@ -601,6 +601,51 @@ store, not a line in the file. When the person accepts it, the engine adds the
 rule to the file with `by = "proposal"`. A proposal never changes the file
 without the person.
 
+The proposal is a row of the table `rule_proposal` (store migration 15).
+The engine (crate `iris-policy`, module `propose`) writes the open rows
+again when a decision of the person, an undo, the active policy or the hour
+changes:
+
+- It reads the newest 2,000 actions of an author other than `person`, with
+  the verb `archive`, `read`, `unread`, `inbox` or `trash`, that the person
+  approved (the states `approved`, `held`, `applied` and `failed`) or
+  refused (`denied` by the person, or `undone`). `label` and `unlabel` are
+  not in the list, because a rule cannot name the label. The state verbs
+  change items, not mail.
+- A candidate is one verb and one condition: the `sender` address or the
+  `sender_kind` that each message of one approved action has. An action on
+  hostile mail (a hostile mark, or a sender of the kind `hostile`) gives no
+  candidate and counts as no approval, and `hostile` is never a candidate.
+- The candidate rule is added to the active policy. An action counts for it
+  only when the rule changes the decision of that action to approved
+  (section 6.4), with the author, the job and the flag `bulk` of the
+  action. The engine proposes the rule when 10 or more approvals count and
+  no refusal counts.
+- A refusal that the engine cannot read again (a message row or its
+  header is gone) stops each proposal of its verb.
+- The pass holds the facts of one action at a time, and one count for each
+  key. It skips a bulk action, because a bulk action stays in review with
+  each rule (section 6.5), so it holds the facts of 500 messages or fewer.
+  It runs on a read connection and holds no write lock.
+- The person accepts or dismisses a proposal in the web client. An accept
+  is a change of section 6.3: the engine adds the rule at the end of the
+  file, with the next rule ID, `by = "proposal"`, the date and a comment,
+  and marks the row `accepted` in the same transaction. The accept runs the
+  same count again in that transaction. If a decision after the last pass
+  breaks the pattern, the accept adds nothing and the web client gets a
+  409. A dismiss changes
+  no file. Iris never proposes an accepted or a dismissed rule again.
+- An open row that no longer has the pattern goes away.
+
+Failure list of the proposals:
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A decision after the last pass | An accept adds a rule that a new refusal contradicts | The accept counts again in its transaction, and refuses (409). |
+| A crash after the file write of an accept, before its commit | The file has the rule, and the row stays open | The file is a change of section 6.3. Each policy that becomes active (an accept, a confirmation) marks as accepted each open row whose rule it has with `by = "proposal"`. A discard leaves the row open. |
+| A failed commit of a pass | The pass is lost | The engine keeps the mark of a pass only after its commit, so the next tick runs it again. |
+| A message of a decided action that the cleanup changed | A refusal does not count | A refusal that the engine cannot read again stops each proposal of its verb. |
+
 ## 7. The ledger
 
 ### 7.1 What the ledger holds
