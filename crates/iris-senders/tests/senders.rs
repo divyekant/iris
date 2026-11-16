@@ -1092,6 +1092,15 @@ fn gate_of(
     c.store.write(|tx| Ok(f(tx, id, 9)?)).unwrap()
 }
 
+// The gate functions for a sender at the gate.
+fn accept(c: &rusqlite::Connection, id: i64, now: i64) -> rusqlite::Result<Gate> {
+    gate::accept(c, id, now, true)
+}
+
+fn decline(c: &rusqlite::Connection, id: i64, now: i64) -> rusqlite::Result<Gate> {
+    gate::decline(c, id, now, true)
+}
+
 fn declined_at(c: &Case, addr: &str) -> Option<i64> {
     c.store
         .read(|r| {
@@ -1117,10 +1126,7 @@ fn an_accepted_stranger_is_a_person_and_its_look_alikes_turn_hostile() {
         &format!("UPDATE sender SET declined_at = 5 WHERE id = {alice}"),
     );
 
-    assert_eq!(
-        gate_of(&c, gate::accept, alice),
-        Gate::Done { rerun: vec![look] }
-    );
+    assert_eq!(gate_of(&c, accept, alice), Gate::Done { rerun: vec![look] });
     let row = c.row("alice@paypal.com");
     assert_eq!(
         (row.1.as_deref(), row.2.as_deref(), row.3.as_deref()),
@@ -1133,10 +1139,7 @@ fn an_accepted_stranger_is_a_person_and_its_look_alikes_turn_hostile() {
     );
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
     // A second accept changes nothing, and the engine keeps the answer.
-    assert_eq!(
-        gate_of(&c, gate::accept, alice),
-        Gate::Done { rerun: vec![] }
-    );
+    assert_eq!(gate_of(&c, accept, alice), Gate::Done { rerun: vec![] });
     assert_eq!(refreshed(&c), Vec::<i64>::new());
     assert_eq!(c.row("alice@paypal.com").1.as_deref(), Some("person"));
 }
@@ -1159,7 +1162,7 @@ fn the_gate_refuses_a_sender_that_is_not_a_stranger_now() {
         &format!("From: {OWNER}\r\nTo: ana@example.org"),
     );
 
-    for f in [gate::accept, gate::decline] {
+    for f in [accept, decline] {
         assert_eq!(gate_of(&c, f, shop), Gate::NotStranger(Some(Kind::Service)));
         assert_eq!(gate_of(&c, f, look), Gate::NotStranger(Some(Kind::Hostile)));
         assert_eq!(gate_of(&c, f, known), Gate::NotStranger(Some(Kind::Person)));
@@ -1171,7 +1174,7 @@ fn the_gate_refuses_a_sender_that_is_not_a_stranger_now() {
         &c,
         &format!("UPDATE sender SET kind = 'stranger' WHERE id = {look}"),
     );
-    for f in [gate::accept, gate::decline] {
+    for f in [accept, decline] {
         assert_eq!(gate_of(&c, f, look), Gate::NotStranger(Some(Kind::Hostile)));
     }
     let row = c.row("alerts@shop-secure.example.net");
@@ -1187,21 +1190,15 @@ fn the_gate_refuses_a_sender_that_is_not_a_stranger_now() {
         &format!("UPDATE sender SET kind = 'service', decided_by = 'person' WHERE id = {look}"),
     );
     assert_eq!(
-        gate_of(&c, gate::decline, look),
+        gate_of(&c, decline, look),
         Gate::NotStranger(Some(Kind::Service))
     );
     set(
         &c,
         &format!("UPDATE sender SET kind = 'stranger' WHERE id = {look}"),
     );
-    assert_eq!(
-        gate_of(&c, gate::decline, look),
-        Gate::Done { rerun: vec![] }
-    );
-    assert_eq!(
-        gate_of(&c, gate::accept, look),
-        Gate::Done { rerun: vec![] }
-    );
+    assert_eq!(gate_of(&c, decline, look), Gate::Done { rerun: vec![] });
+    assert_eq!(gate_of(&c, accept, look), Gate::Done { rerun: vec![] });
     assert_eq!(
         c.row("alerts@shop-secure.example.net").1.as_deref(),
         Some("person")
@@ -1212,16 +1209,10 @@ fn the_gate_refuses_a_sender_that_is_not_a_stranger_now() {
 fn a_declined_stranger_keeps_an_engine_kind_and_can_turn_hostile() {
     let mut c = Case::new("gate-decline");
     let look = c.put("t1", &[], "From: alerts@paypa1.com").sender.unwrap();
-    assert_eq!(
-        gate_of(&c, gate::decline, look),
-        Gate::Done { rerun: vec![] }
-    );
+    assert_eq!(gate_of(&c, decline, look), Gate::Done { rerun: vec![] });
     assert_eq!(declined_at(&c, "alerts@paypa1.com"), Some(9));
     // The first decline keeps its time.
-    let again = c
-        .store
-        .write(|tx| Ok(gate::decline(tx, look, 20)?))
-        .unwrap();
+    let again = c.store.write(|tx| Ok(decline(tx, look, 20)?)).unwrap();
     assert_eq!(again, Gate::Done { rerun: vec![] });
     assert_eq!(declined_at(&c, "alerts@paypa1.com"), Some(9));
     // A known domain appears: the engine still decides the declined row.
@@ -1239,7 +1230,7 @@ fn reopen_gives_the_row_back_to_the_engine() {
     let mut c = Case::new("gate-reopen");
     let alice = c.put("t1", &[], "From: alice@paypal.com").sender.unwrap();
     let look = c.put("t2", &[], "From: alerts@paypa1.com").sender.unwrap();
-    gate_of(&c, gate::accept, alice);
+    gate_of(&c, accept, alice);
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
     // The domain is not known after the reopen: the look-alike is a stranger.
     assert_eq!(
@@ -1254,7 +1245,7 @@ fn reopen_gives_the_row_back_to_the_engine() {
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("stranger"));
 
     // Reopen ends a decline, and a row with no answer does not change.
-    gate_of(&c, gate::decline, alice);
+    gate_of(&c, decline, alice);
     assert_eq!(
         gate_of(&c, gate::reopen, alice),
         Gate::Done { rerun: vec![] }
@@ -1271,7 +1262,7 @@ fn reopen_gives_the_row_back_to_the_engine() {
 fn reopen_decides_an_accepted_look_alike_from_the_evidence_of_now() {
     let mut c = Case::new("gate-reopen-hostile");
     let look = c.put("t1", &[], "From: alerts@paypa1.com").sender.unwrap();
-    gate_of(&c, gate::accept, look);
+    gate_of(&c, accept, look);
     // While the person owns the kind, the look-alike is a known domain, and
     // the first known domain wins: the real domain is the near copy.
     let alice = c.put("t2", &[], "From: alice@paypal.com").sender.unwrap();
@@ -1296,4 +1287,56 @@ fn reopen_decides_an_accepted_look_alike_from_the_evidence_of_now() {
     assert_eq!(rerun, vec![look, alice]);
     assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
     assert_eq!(c.row("alice@paypal.com").1.as_deref(), Some("stranger"));
+}
+
+#[test]
+fn an_answer_needs_the_sender_at_the_gate() {
+    let mut c = Case::new("gate-at-gate");
+    let ana = c.put("t1", &[], "From: ana@example.org").sender.unwrap();
+    let away = |f: fn(&rusqlite::Connection, i64, i64, bool) -> rusqlite::Result<Gate>| {
+        c.store.write(|tx| Ok(f(tx, ana, 9, false)?)).unwrap()
+    };
+    // A rule took the items out of the gate: no answer, and no write.
+    assert_eq!(away(gate::accept), Gate::NotAtGate);
+    assert_eq!(away(gate::decline), Gate::NotAtGate);
+    let row = c.row("ana@example.org");
+    assert_eq!(
+        (row.1.as_deref(), row.3.as_deref()),
+        (Some("stranger"), Some("engine"))
+    );
+    assert_eq!(declined_at(&c, "ana@example.org"), None);
+    // An answer that the sender has already stays an answer.
+    gate_of(&c, decline, ana);
+    assert_eq!(away(gate::decline), Gate::Done { rerun: vec![] });
+    assert_eq!(declined_at(&c, "ana@example.org"), Some(9));
+    assert_eq!(away(gate::accept), Gate::NotAtGate);
+    gate_of(&c, accept, ana);
+    assert_eq!(away(gate::accept), Gate::Done { rerun: vec![] });
+}
+
+#[test]
+fn reopen_keeps_a_kind_that_a_person_set_outside_the_gate() {
+    let mut c = Case::new("gate-reopen-other");
+    let ana = c.put("t1", &[], "From: ana@example.org").sender.unwrap();
+    for kind in ["hostile", "person", "service", "stranger"] {
+        set(
+            &c,
+            &format!(
+                "UPDATE sender SET kind = '{kind}', decided_by = 'person', basis = 'a correction',
+                        declined_at = NULL WHERE id = {ana}"
+            ),
+        );
+        assert_eq!(gate_of(&c, gate::reopen, ana), Gate::Done { rerun: vec![] });
+        let row = c.row("ana@example.org");
+        assert_eq!(
+            (row.1.as_deref(), row.2.as_deref(), row.3.as_deref()),
+            (Some(kind), Some("a correction"), Some("person")),
+            "{kind}"
+        );
+    }
+    // A decline on a person-set stranger ends, and the kind stays.
+    gate_of(&c, decline, ana);
+    gate_of(&c, gate::reopen, ana);
+    assert_eq!(declined_at(&c, "ana@example.org"), None);
+    assert_eq!(c.row("ana@example.org").3.as_deref(), Some("person"));
 }
