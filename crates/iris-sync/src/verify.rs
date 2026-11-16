@@ -251,20 +251,37 @@ fn compare(store: &Store, gmail: &Gmail, account: i64, token: &str, v: u64) -> R
             }
         },
     )?;
+    // After an error that stops each fetch (network, sign-in), the rest is
+    // not fetched. Each bad file stays a difference.
+    let mut stop: Option<Error> = None;
     for (id, thread) in bad {
         // A local defect: fetch the message again to repair it.
         let mut counts = Done::default();
-        match fetch_one(store, gmail, token, &id, &thread)? {
-            Fetched::Message(m) => save(store, gmail, token, account, vec![*m], &mut counts)?,
-            // Gmail deleted it during verify: the next sync marks it gone.
-            Fetched::Gone(_) => {}
-            Fetched::Failed(id, e) => record_failure(store, account, &id, &e)?,
+        if stop.is_none() {
+            let r = fetch_one(store, gmail, token, &id, &thread).and_then(|f| match f {
+                Fetched::Message(m) => save(store, gmail, token, account, vec![*m], &mut counts),
+                // Gmail deleted it during verify: the next sync marks it gone.
+                Fetched::Gone(_) => Ok(()),
+                Fetched::Failed(id, e) => record_failure(store, account, &id, &e),
+            });
+            if let Err(e) = r {
+                stop = Some(e);
+            }
         }
         report.differences.push(if counts.fetched == 1 {
             Difference::Content(id)
         } else {
             Difference::Unrepaired(id)
         });
+    }
+    if let Some(e) = stop {
+        log(
+            store,
+            account,
+            "fetch",
+            now_ms(),
+            &format!("verify repair stopped: {e}"),
+        )?;
     }
     store.write(|tx| {
         tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
