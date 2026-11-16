@@ -36,11 +36,12 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub calendar: bool, pub calendar_text: String, pub calendar_cut: bool }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
 pub const TEXT_LIMIT: usize = 32_000;           // characters of `text`
 pub const ATTACHMENT_TEXT_LIMIT: usize = 1_000_000; // bytes of all attachment text
+pub const CALENDAR_TEXT_LIMIT: usize = 16 * 1024; // bytes of `calendar_text`
 pub const CUT_MARK: &str = "\n\n[Iris cut the text here.]";
 ```
 

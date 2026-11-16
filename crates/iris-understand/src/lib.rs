@@ -271,13 +271,3 @@ fn cut(s: &str, n: usize) -> String {
         None => s.to_string(),
     }
 }
-
-/// The status of a new feed item: `new` while the message has the label
-/// `UNREAD` (section 6.8), else `read`.
-fn feed_status(cx: &Context) -> &'static str {
-    if cx.labels.iter().any(|l| l == "UNREAD") {
-        "new"
-    } else {
-        "read"
-    }
-}

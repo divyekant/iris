@@ -2,9 +2,9 @@
 //! model: fast, free and the same each time. Mail text is data: the rules
 //! only compare text.
 
-use serde_json::{json, Value};
+use serde_json::json;
 
-use crate::{cut, feed_status, party_sender, time, Analysis, Context, Draft, Kind};
+use crate::{cut, party_sender, time, Analysis, Context, Draft, Kind};
 
 /// The default life of a code signal (specification 1, section 6.6).
 const CODE_LIFE_MS: i64 = 15 * 60 * 1000;
@@ -162,13 +162,12 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
         return Some(vec![Draft::rule(item, "invitation", quote)]);
     }
     // Any other calendar request, and a booking, a ticket or an event: the
-    // model decides, not the code or the list rule.
+    // model decides, not the code rule.
     if a.text.invitation || !words(&full_text(a), &BOOKING_WORDS).is_empty() {
         return None;
     }
     if cx.kind == Kind::Service {
-        // A sign-in message gives a code signal or goes to the model: it is
-        // never a feed item.
+        // A sign-in message gives a code signal or goes to the model.
         if is_login(a) {
             // A promotion word in sign-in mail: the model decides.
             if is_promo(a) {
@@ -194,20 +193,6 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
                 "expires": time::rfc3339(expires),
             });
             return Some(vec![Draft::rule(item, "code", line)]);
-        }
-        if a.head.list_id.is_some() || a.head.list_unsubscribe {
-            let mut item = json!({
-                "form": "feed",
-                "status": feed_status(cx),
-                "title": cut(or_none(subject), 200),
-                "publisher": party_sender(a),
-                "published": time::rfc3339(a.date(cx)),
-            });
-            // A longer List-Id is not cut: a cut ID names another list.
-            if let Some(l) = a.head.list_id.as_ref().filter(|l| l.chars().count() <= 500) {
-                item["list"] = Value::String(l.clone());
-            }
-            return Some(vec![Draft::rule(item, "list", quote)]);
         }
     }
     None

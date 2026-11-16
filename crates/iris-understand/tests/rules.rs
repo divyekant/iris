@@ -68,17 +68,20 @@ Read the news.
 ";
 
 #[test]
-fn a_list_from_a_service_is_a_feed() {
-    let d = one(LIST, Kind::Service, &["UNREAD"]);
-    assert_eq!(d.by, By::Rule("list"));
-    assert_eq!(d.item["form"], "feed");
-    assert_eq!(d.item["status"], "new");
-    assert_eq!(d.item["list"], "<weekly.news.example>");
-    assert_eq!(d.item["published"], "2025-12-31T23:59:00Z");
-    // The status follows the UNREAD label.
-    assert_eq!(one(LIST, Kind::Service, &[]).item["status"], "read");
-    // The same list from a stranger goes to the model.
+fn list_mail_goes_to_the_model() {
+    // The list rule is out of the fixed rules (issue #96): a list
+    // message can hold a request, a record or a code in any form.
+    assert!(drafts(LIST, Kind::Service, &["UNREAD"]).is_none());
     assert!(drafts(LIST, Kind::Stranger, &[]).is_none());
+}
+
+#[test]
+fn a_rule_item_that_fails_the_schema_goes_to_the_model() {
+    let raw = "From: Bank <no-reply@bank.example>\nSubject: Sign in\n\nYour code: 482913\n";
+    assert_eq!(one(raw, Kind::Service, &[]).item["code"], "482913");
+    // An address that the schema refuses as the issuer.
+    let bad = raw.replace("no-reply@bank.example", "a@@b.example");
+    assert!(drafts(&bad, Kind::Service, &[]).is_none());
 }
 
 #[test]
@@ -171,8 +174,6 @@ fn a_rule_quote_is_the_matched_line() {
     let d = one(&raw, Kind::Person, &[]);
     assert_eq!(d.item["title"], "Invitation: (no subject)");
     assert_eq!(d.quote, "(no subject)");
-    let bare = "From: news@weekly.example\nList-Id: <w.example>\n\n";
-    assert_eq!(one(bare, Kind::Service, &[]).quote, "(no subject)");
 }
 
 #[test]
@@ -258,13 +259,11 @@ fn a_planted_code_is_found_in_message_order() {
 }
 
 #[test]
-fn a_year_is_not_a_code_and_sign_in_mail_is_no_feed() {
+fn a_year_is_not_a_code() {
     // A sign-in message with no clear code goes to the model, also with a
     // list header.
     let raw = "From: News <news@shop.example>\nList-Id: <n.example>\nSubject: Verification in 2026\n\nRead.\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());
-    let news = raw.replace("Verification in 2026", "News of 2026");
-    assert_eq!(one(&news, Kind::Service, &[]).item["form"], "feed");
 }
 
 #[test]
@@ -280,17 +279,6 @@ fn a_code_late_in_a_long_line_keeps_its_quote() {
         "{}",
         d.quote
     );
-}
-
-#[test]
-fn a_long_list_id_gives_a_feed_with_no_list() {
-    let raw = LIST.replace(
-        "<weekly.news.example>",
-        &format!("<{}.example>", "w".repeat(600)),
-    );
-    let d = one(&raw, Kind::Service, &[]);
-    assert_eq!(d.item["form"], "feed");
-    assert!(d.item.get("list").is_none());
 }
 
 #[test]
@@ -352,11 +340,7 @@ fn a_payment_notice_in_a_list_message_goes_to_the_model() {
 fn a_promotion_code_is_no_sign_in_code() {
     let raw = "From: Shop <deals@shop.example>\nSubject: Your discount code\n\nUse code 1234 at checkout. Log in to see more.\n";
     assert!(drafts(raw, Kind::Service, &[]).is_none());
-    // In a list message, it is a feed item when it has no sign-in word.
-    let promo = raw.replace(" Log in to see more.", "");
-    let list = format!("List-Id: <deals.shop.example>\n{promo}");
-    assert_eq!(one(&list, Kind::Service, &[]).item["form"], "feed");
-    // Sign-in mail with a promotion word is no feed item: the model reads it.
+    // Sign-in mail with a promotion word: the model reads it.
     let mixed = "From: Shop <no-reply@shop.example>\nList-Unsubscribe: <https://shop.example/u>\nSubject: Sign in\n\nYour code: 482913\nShop our sale.\n";
     assert!(drafts(mixed, Kind::Service, &[]).is_none());
 }
