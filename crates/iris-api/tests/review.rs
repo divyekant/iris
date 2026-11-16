@@ -410,6 +410,9 @@ async fn a_refused_decision_writes_nothing() {
     let draft = json!({ "actions": [{ "revision": 1, "n": 1, "approve": true, "hash": hash }] })
         .to_string();
     assert_eq!(post(&s, &uri, &draft).await.0, StatusCode::CONFLICT);
+    // A denial too: the review hides a changeset while its new revision is a draft.
+    let deny = json!({ "actions": [{ "revision": 1, "n": 2, "approve": false }] }).to_string();
+    assert_eq!(post(&s, &uri, &deny).await.0, StatusCode::CONFLICT);
     assert_eq!(states(&s, cs).await, ["proposed", "proposed"]);
 }
 

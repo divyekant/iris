@@ -143,6 +143,18 @@ pub fn decide(store: &Store, changeset: i64, decisions: &[Decision], now_ms: i64
     }
     use iris_changeset::{ActionId, By, Error as Cs, State};
     iris_changeset::transaction(store, |c| {
+        // The review shows only an open changeset (the OPEN condition of the
+        // list and the counts). While a new revision is a draft, no decision applies.
+        let open: bool = c.query_row(
+            &format!("SELECT EXISTS (SELECT 1 FROM changeset c WHERE c.id = ?1 AND {OPEN})"),
+            [changeset],
+            |r| r.get(0),
+        )?;
+        if !open {
+            return Err(Cs::Refused(
+                "the changeset is not open for review now".into(),
+            ));
+        }
         for d in decisions {
             let action = ActionId {
                 changeset,
