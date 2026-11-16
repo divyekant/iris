@@ -407,3 +407,68 @@ fn the_kind_in_the_sender_table_wins() {
     let found: Vec<&str> = all.iter().flat_map(addrs).collect();
     assert_eq!(found, ["cy@example.org"]);
 }
+
+#[test]
+fn spam_sent_mail_does_not_make_a_thread_yours() {
+    let mut h = Hand::new("spam-sent");
+    h.add("t1", "SPAM", "me@example.com", "Me", "x@example.org");
+    h.add(
+        "t1",
+        "INBOX",
+        "eve@example.org",
+        "Eve Moor",
+        "me@example.com",
+    );
+    // The SPAM label makes the sent message bad, also with SENT.
+    let sent = h.add("t2", "SENT", "me@example.com", "Me", "y@example.org");
+    h.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                 SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
+                [sent],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    h.add(
+        "t2",
+        "INBOX",
+        "zed@example.org",
+        "Zed Pike",
+        "me@example.com",
+    );
+    assert_eq!(h.people(), vec![], "no valid sent message");
+}
+
+#[test]
+fn a_bcc_recipient_is_a_known_person() {
+    let mut h = Hand::new("bcc");
+    let raw = b"From: Me <me@example.com>\r\nTo: ana@example.org\r\nBcc: Bo Hart\r\n <Bo@Example.org>, cy@example.org\r\nSubject: hi\r\n\r\nBcc: not@example.org\r\n";
+    let sha = h.store.put_content(raw).unwrap();
+    h.next += 1;
+    h.store
+        .put_messages(
+            h.account,
+            &[NewMessage {
+                provider_id: "bcc".into(),
+                thread_provider_id: "t1".into(),
+                content_sha256: Some(sha),
+                internal_date: Some(1000),
+                labels: vec!["SENT".into()],
+                header: Header {
+                    from_addr: Some("me@example.com".into()),
+                    to_addrs: Some("ana@example.org".into()),
+                    ..Header::default()
+                },
+                ..NewMessage::default()
+            }],
+        )
+        .unwrap();
+    let all = h.people();
+    let found: BTreeSet<&str> = all.iter().flat_map(addrs).collect();
+    assert_eq!(
+        found,
+        BTreeSet::from(["ana@example.org", "bo@example.org", "cy@example.org"])
+    );
+}
