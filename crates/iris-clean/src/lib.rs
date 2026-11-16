@@ -53,6 +53,8 @@ pub const MAX_PARTS: usize = 500;
 pub const MAX_DEPTH: usize = 8;
 /// The most decoded bytes of an attached message that the parser reads.
 pub const INNER_LIMIT: usize = 2 * 1024 * 1024;
+/// The most bytes of decoded calendar text in [`Clean::calendar_text`].
+pub const CALENDAR_TEXT_LIMIT: usize = 16 * 1024;
 /// The largest PDF attachment (decoded bytes) that gives text (spec 1 section 9).
 pub const PDF_LIMIT: u64 = 10 * 1024 * 1024;
 /// The least bytes of PDF text that the quality check reads, whatever the
@@ -84,6 +86,12 @@ pub struct Clean {
     /// `METHOD:REQUEST` line. Another calendar file (for example
     /// `METHOD:PUBLISH`) next to a request makes this false.
     pub invitation: bool,
+    /// The decoded text of the calendar parts of the top message, at most
+    /// [`CALENDAR_TEXT_LIMIT`] bytes, so that a rule can read it.
+    pub calendar_text: String,
+    /// True if calendar text went out because of [`CALENDAR_TEXT_LIMIT`] or a
+    /// limit of the walker.
+    pub calendar_cut: bool,
 }
 
 /// One attachment: a name, a type and a size, and the text if there is one.
@@ -110,6 +118,8 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: true,
             attachments: Vec::new(),
             invitation: false,
+            calendar_text: String::new(),
+            calendar_cut: false,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -119,6 +129,8 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: false,
             attachments: Vec::new(),
             invitation: false,
+            calendar_text: String::new(),
+            calendar_cut: false,
         };
     };
     let mut cal = Calendars::default();
@@ -135,6 +147,8 @@ pub fn clean(raw: &[u8]) -> Clean {
         cut,
         attachments,
         invitation,
+        calendar_text: String::from_utf8_lossy(&cal.text).into_owned(),
+        calendar_cut: cal.cut,
     }
 }
 
@@ -308,6 +322,21 @@ struct Calendars {
     /// Calendar parts that are not a request, and parts past a limit of the
     /// walker: a part that is not read can be a calendar file.
     others: usize,
+    /// The decoded bodies of the calendar parts, at most
+    /// [`CALENDAR_TEXT_LIMIT`] bytes.
+    text: Vec<u8>,
+    /// Calendar text went out at a limit.
+    cut: bool,
+}
+
+impl Calendars {
+    fn push(&mut self, bytes: &[u8]) {
+        let room = CALENDAR_TEXT_LIMIT - self.text.len();
+        if bytes.len() > room {
+            self.cut = true;
+        }
+        self.text.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
 }
 
 /// Counts the calendar parts (`text/calendar`, `application/ics`) in the
@@ -320,6 +349,7 @@ fn calendar_parts(part: MessagePart<'_>, depth: usize, cal: &mut Calendars) {
     cal.seen += 1;
     if cal.seen > MAX_PARTS || depth > MAX_DEPTH {
         cal.others += 1;
+        cal.cut = true;
         return;
     }
     let ct_field = field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
@@ -343,7 +373,7 @@ fn calendar_parts(part: MessagePart<'_>, depth: usize, cal: &mut Calendars) {
     if !calendar {
         return;
     }
-    if is_request(part, &ct) {
+    if is_request(part, &ct, cal) {
         cal.requests += 1;
     } else {
         cal.others += 1;
@@ -351,14 +381,15 @@ fn calendar_parts(part: MessagePart<'_>, depth: usize, cal: &mut Calendars) {
 }
 
 /// The calendar part is a request: its `method` parameter or a line of its
-/// decoded body is `REQUEST`.
-fn is_request(part: MessagePart<'_>, ct: &mail_parser::ContentType<'_>) -> bool {
-    if ct
+/// decoded body is `REQUEST`. The decoded body also goes into `cal.text`.
+fn is_request(
+    part: MessagePart<'_>,
+    ct: &mail_parser::ContentType<'_>,
+    cal: &mut Calendars,
+) -> bool {
+    let param = ct
         .attribute("method")
-        .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"))
-    {
-        return true;
-    }
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("request"));
     let cte = field(part, HeaderName::ContentTransferEncoding)
         .map(|v| String::from_utf8_lossy(v).trim().to_ascii_lowercase());
     let enc = match cte.as_deref() {
@@ -367,19 +398,29 @@ fn is_request(part: MessagePart<'_>, ct: &mail_parser::ContentType<'_>) -> bool 
         _ => Encoding::None,
     };
     // The whole body, decoded in chunks of about 64 KiB, through a matcher
-    // of constant memory.
+    // of constant memory and the bounded calendar text. A separator keeps
+    // the text of two parts apart.
     let mut m = MethodLine::default();
     let body = part.raw_body();
+    cal.push(b"\n");
     match enc {
-        Encoding::Base64 => base64_chunks(body, |b| m.feed(b)),
+        Encoding::Base64 => base64_chunks(body, |b| {
+            m.feed(b);
+            cal.push(b);
+        }),
         Encoding::QuotedPrintable => qp_chunks(body, |b| {
             m.feed(b);
-            !m.found
+            cal.push(b);
+            // Stop when the decision and the text are both complete.
+            !((param || m.found) && cal.cut)
         }),
-        Encoding::None => m.feed(body),
+        Encoding::None => {
+            m.feed(body);
+            cal.push(body);
+        }
     }
     m.feed(b"\n");
-    m.found
+    param || m.found
 }
 
 /// Finds a line that is `METHOD:REQUEST` (any case, white space around it)

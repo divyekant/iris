@@ -188,3 +188,18 @@ BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n--m--\r\n";
     let text_cal = publish.replace("application/ics", "text/calendar");
     assert!(!inv(text_cal.as_bytes()));
 }
+
+#[test]
+fn calendar_text_is_given_and_bounded() {
+    let raw = b"Content-Type: text/calendar; method=REQUEST\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nBEGIN:VCALENDAR\r\nDESCRIPTION:Invoice=2077\r\nEND:VCALENDAR\r\n";
+    let c = iris_clean::clean(raw);
+    assert!(c.invitation && !c.calendar_cut);
+    assert!(c.calendar_text.contains("DESCRIPTION:Invoice 77"));
+    let long = format!(
+        "Content-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nDESCRIPTION:{}\r\nEND:VCALENDAR\r\n",
+        "x".repeat(iris_clean::CALENDAR_TEXT_LIMIT)
+    );
+    let c = iris_clean::clean(long.as_bytes());
+    assert!(c.calendar_cut);
+    assert!(c.calendar_text.len() <= iris_clean::CALENDAR_TEXT_LIMIT);
+}

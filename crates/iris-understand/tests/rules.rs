@@ -438,6 +438,13 @@ fn a_cut_text_or_a_calendar_file_goes_to_the_model() {
         .replace("multipart/alternative", "multipart/mixed")
         .replacen("--a--", "--a\nContent-Type: text/calendar; name=\"e.ics\"\nContent-Disposition: attachment; filename=\"e.ics\"\n\nBEGIN:VCALENDAR\nMETHOD:PUBLISH\nEND:VCALENDAR\n--a--", 1);
     assert!(drafts(&both, Kind::Person, &[]).is_none());
+    // A payment request only in the text of the calendar request.
+    let pay = INVITE.replace(
+        "METHOD:REQUEST\n",
+        "METHOD:REQUEST\nDESCRIPTION:Invoice 77\\; payment due.\n",
+    );
+    assert_ne!(pay, INVITE);
+    assert!(drafts(&pay, Kind::Person, &[]).is_none());
 }
 
 #[test]

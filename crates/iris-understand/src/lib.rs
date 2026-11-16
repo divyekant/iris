@@ -115,6 +115,11 @@ pub struct Text {
     pub cut: bool,
     /// A `text/calendar` part with the method `REQUEST` (from `iris-clean`).
     pub invitation: bool,
+    /// The decoded text of the calendar parts, at most
+    /// `iris_clean::CALENDAR_TEXT_LIMIT` bytes.
+    pub calendar: String,
+    /// `iris-clean` cut the calendar text at its limit.
+    pub calendar_cut: bool,
 }
 
 impl Text {
@@ -135,6 +140,8 @@ impl Text {
             attachment_text,
             cut: c.cut,
             invitation: c.invitation,
+            calendar: c.calendar_text,
+            calendar_cut: c.calendar_cut,
         }
     }
 }

@@ -139,6 +139,13 @@ memory stays bounded for a calendar of any size. The check stays inside
 `MAX_PARTS` and `MAX_DEPTH`. It does not go into an attached message: a
 calendar in an attached message is not an invitation to the user.
 
+
+`Clean.calendar_text` holds the decoded bodies of the calendar parts, at most
+`CALENDAR_TEXT_LIMIT` (16 KiB) bytes in all, so that the fixed rules can read
+a record or a payment request in a calendar description.
+`Clean.calendar_cut` is true if text went out at that limit or at a limit of
+the walker. Then the fixed rules give no item.
+
 ### A reply
 
 The message is a reply if it has `In-Reply-To` or `References`, or if its

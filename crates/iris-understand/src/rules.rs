@@ -133,7 +133,7 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
             || mime.eq_ignore_ascii_case("application/ics");
         !(a.text.invitation && calendar)
     });
-    if a.text.cut || file || looks_like_record(a) {
+    if a.text.cut || a.text.calendar_cut || file || looks_like_record(a) {
         return None;
     }
     let subject = a.text.subject.as_str();
@@ -219,9 +219,10 @@ fn or_none(s: &str) -> &str {
     }
 }
 
-/// The subject, the clean text and the attachment text, one per line.
+/// The subject, the clean text, the calendar text and the attachment text,
+/// one per line: all the text that iris-clean gives.
 fn full_text(a: &Analysis) -> String {
-    let mut hay = format!("{}\n{}", a.text.subject, a.text.text);
+    let mut hay = format!("{}\n{}\n{}", a.text.subject, a.text.text, a.text.calendar);
     for (_, t) in &a.text.attachment_text {
         hay.push('\n');
         hay.push_str(t);
