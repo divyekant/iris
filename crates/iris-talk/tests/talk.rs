@@ -723,3 +723,71 @@ fn an_address_in_a_display_name_is_no_party() {
     assert_eq!(doc["participants"].as_array().unwrap().len(), 2);
     assert_eq!(doc["your_turn"], true);
 }
+
+#[test]
+fn the_document_follows_a_gone_status_from_the_sync() {
+    let b = Box_::new("syncgone");
+    let v = validator();
+    let m = b.put(M {
+        id: "a",
+        ..M::default()
+    });
+    assert_eq!(b.talk("t1", NOW).unwrap()["status"], "active");
+    // The same writes as the sync when the message is gone (section 4.5).
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW} WHERE id = {m}"
+    ));
+    b.sql("UPDATE item SET status_before_gone = status, status = 'gone' WHERE status <> 'gone'");
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["status"], "gone");
+    b.sql("UPDATE message SET gone_at = NULL");
+    b.sql("UPDATE item SET status = status_before_gone, status_before_gone = NULL WHERE status = 'gone'");
+    assert_eq!(b.talk("t1", NOW).unwrap()["status"], "active");
+}
+
+#[test]
+fn a_from_that_is_not_an_address_is_no_party() {
+    let b = Box_::new("badfrom");
+    let v = validator();
+    b.put(M {
+        id: "a",
+        from: ("Sam", "not-an-address"),
+        ..M::default()
+    });
+    assert!(b.talk("t1", NOW).is_none());
+    b.put(M {
+        id: "b",
+        from: ("Sam", "Sam <SAM@Fabrikam.example>"),
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["messages"], 1);
+    assert_eq!(doc["participants"][1]["address"], "sam@fabrikam.example");
+}
+
+#[test]
+fn latest_keeps_the_milliseconds() {
+    let b = Box_::new("millis");
+    let v = validator();
+    b.put(M {
+        id: "a",
+        at: NOW - 900,
+        ..M::default()
+    });
+    b.put(M {
+        id: "b",
+        thread: "t2",
+        at: NOW - 100,
+        ..M::default()
+    });
+    let (one, two) = (b.talk("t1", NOW).unwrap(), b.talk("t2", NOW).unwrap());
+    check(&v, &one);
+    let (a, b) = (
+        one["latest"]["at"].as_str().unwrap(),
+        two["latest"]["at"].as_str().unwrap(),
+    );
+    assert_eq!(a, "2026-11-15T23:59:59.100Z");
+    assert!(a < b, "{a} sorts before {b}");
+}
