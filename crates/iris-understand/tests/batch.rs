@@ -1,0 +1,542 @@
+//! The batch runner and the estimate of docs/specs/2026-11-16-cost-control.md,
+//! with a fake model. No key, no network.
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use iris_model::{Error as ModelError, Reply, Stop, Usage};
+use iris_store::{NewMessage, Store};
+use iris_understand::batch::{self, Error, Limits};
+use iris_understand::budget::ModelRow;
+use iris_understand::Model;
+
+const NOW: i64 = 1_767_225_600_000; // 2026-01-01
+const DAY: i64 = 86_400_000;
+const VALID: &str = r#"{"items": [], "phishing": false}"#;
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> TempDir {
+        let dir = std::env::temp_dir().join(format!("iris-batch-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        TempDir(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// One answer of the fake: the text and the usage, or an error.
+type Answer = Result<(String, Usage), ModelError>;
+
+fn usage(input: u64, output: u64) -> Usage {
+    Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cost_micro_usd: None,
+        known: true,
+    }
+}
+
+/// Shared by the test and each model that `connect` makes.
+#[derive(Default)]
+struct Script {
+    answers: RefCell<VecDeque<Answer>>,
+    calls: RefCell<u32>,
+}
+
+impl Script {
+    fn push(&self, a: Answer) {
+        self.answers.borrow_mut().push_back(a);
+    }
+
+    fn calls(&self) -> u32 {
+        *self.calls.borrow()
+    }
+}
+
+struct Fake(Rc<Script>);
+
+impl Model for Fake {
+    fn name(&self) -> &str {
+        "fake-1"
+    }
+
+    fn request_bytes(&self, _: &str, _: &str) -> u64 {
+        1000
+    }
+
+    fn ask(&self, _: &str, _: &str) -> Result<Reply, ModelError> {
+        *self.0.calls.borrow_mut() += 1;
+        let (text, usage) = self
+            .0
+            .answers
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| Ok((VALID.into(), usage(100, 10))))?;
+        Ok(Reply {
+            stop: Stop::End,
+            text,
+            usage,
+        })
+    }
+}
+
+struct Box_ {
+    _dir: TempDir,
+    store: Store,
+    account: i64,
+    script: Rc<Script>,
+}
+
+fn store(name: &str) -> Box_ {
+    let dir = TempDir::new(name);
+    let store = Store::open(&dir.0).unwrap();
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    store
+        .put_labels(
+            account,
+            &[
+                ("INBOX", "INBOX", "system"),
+                ("SENT", "SENT", "system"),
+                ("SPAM", "SPAM", "system"),
+                ("DRAFT", "DRAFT", "system"),
+            ],
+        )
+        .unwrap();
+    Box_ {
+        _dir: dir,
+        store,
+        account,
+        script: Rc::default(),
+    }
+}
+
+fn raw(n: &str) -> String {
+    format!(
+        "From: Ana Lee <ana@example.org>\r\nTo: owner@example.com\r\nSubject: Note {n}\r\n\
+         Message-ID: <{n}@example.org>\r\nDate: Tue, 30 Dec 2025 08:00:00 +0000\r\n\
+         Content-Type: text/plain\r\n\r\nHello, this is note {n}.\r\n"
+    )
+}
+
+impl Box_ {
+    /// Adds message `id` in `thread`, `age` days before NOW.
+    fn add(&self, id: &str, thread: &str, age: i64, labels: &[&str]) -> i64 {
+        let raw = raw(id);
+        let sha = self.store.put_content(raw.as_bytes()).unwrap();
+        self.store
+            .put_messages(
+                self.account,
+                &[NewMessage {
+                    provider_id: id.into(),
+                    thread_provider_id: thread.into(),
+                    content_sha256: Some(sha),
+                    size: Some(raw.len() as i64),
+                    internal_date: Some(NOW - age * DAY),
+                    labels: labels.iter().map(|l| l.to_string()).collect(),
+                    ..NewMessage::default()
+                }],
+            )
+            .unwrap()[0]
+    }
+
+    /// Adds a message with the raw text `raw`.
+    fn add_raw(&self, id: &str, thread: &str, age: i64, raw: &str, labels: &[&str]) -> i64 {
+        let raw = raw.replace('\n', "\r\n");
+        let sha = self.store.put_content(raw.as_bytes()).unwrap();
+        self.store
+            .put_messages(
+                self.account,
+                &[NewMessage {
+                    provider_id: id.into(),
+                    thread_provider_id: thread.into(),
+                    content_sha256: Some(sha),
+                    size: Some(raw.len() as i64),
+                    internal_date: Some(NOW - age * DAY),
+                    labels: labels.iter().map(|l| l.to_string()).collect(),
+                    ..NewMessage::default()
+                }],
+            )
+            .unwrap()[0]
+    }
+
+    /// A model row: priced (1 micro-USD per token in and out) or local.
+    fn model(&self, priced: bool, budget: Option<i64>) {
+        self.store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO model_setting(id, provider, base_url, model, version,
+                       price_in, price_out, max_tokens, timeout_s, budget_micro_usd)
+                     VALUES (1, ?1, 'http://127.0.0.1:1/v1', 'fake-1', 1, ?2, ?2, 100, 30, ?3)",
+                    rusqlite::params![
+                        if priced { "anthropic" } else { "local" },
+                        priced.then_some(1_000_000),
+                        budget
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn run(&self, limits: &Limits) -> Result<batch::Report, Error> {
+        let script = self.script.clone();
+        let connect = move |_: &ModelRow| -> Result<Box<dyn Model>, String> {
+            Ok(Box::new(Fake(script.clone())))
+        };
+        batch::run(&self.store, &connect, limits, NOW)
+    }
+
+    fn col(&self, sql: &str) -> Option<i64> {
+        self.store
+            .read(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    }
+
+    fn understood(&self, m: i64) -> bool {
+        self.col(&format!("SELECT understood_at FROM message WHERE id = {m}"))
+            .is_some()
+    }
+
+    fn budget(&self) -> Option<i64> {
+        self.col("SELECT budget_micro_usd FROM model_setting")
+    }
+}
+
+// The worst case of one call of the fake: 1000 bytes + 100 max tokens.
+const WORST: i64 = 1100;
+// The cost of one call with the default usage (100 in, 10 out).
+const COST: i64 = 110;
+
+#[test]
+fn a_second_run_makes_zero_calls() {
+    let b = store("second");
+    b.model(false, None);
+    for (id, t) in [("1", "a"), ("2", "a"), ("3", "b")] {
+        b.add(id, t, 1, &["INBOX"]);
+    }
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!((r.messages, r.calls, b.script.calls()), (3, 3, 3));
+    assert_eq!((r.input_tokens, r.output_tokens), (300, 30));
+    assert_eq!(r.cost_micro_usd, None, "no price: no cost");
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("done"), 0));
+    assert_eq!(b.script.calls(), 3);
+}
+
+#[test]
+fn a_priced_model_with_no_budget_makes_zero_calls_but_free_steps_run() {
+    let b = store("nobudget");
+    b.model(true, None);
+    let m = b.add("1", "a", 2, &["INBOX"]);
+    // A newer SPAM message: hostile mail does not wait for the older one.
+    let spam = b.add("2", "a", 1, &["SPAM"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("budget"));
+    assert_eq!((r.calls, b.script.calls()), (0, 0));
+    assert!(!b.understood(m));
+    assert!(b.understood(spam), "the free step ran with no budget");
+    assert_eq!(
+        b.col(&format!("SELECT tries FROM message WHERE id = {m}")),
+        Some(0),
+        "a refused call counts no try"
+    );
+}
+
+#[test]
+fn no_model_runs_the_free_steps() {
+    let b = store("nomodel");
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let spam = b.add("2", "b", 1, &["SPAM"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("no_model"));
+    assert!(b.understood(spam) && !b.understood(m));
+}
+
+#[test]
+fn two_runs_share_one_budget() {
+    let b = store("share");
+    b.model(true, Some(WORST + 100));
+    b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("budget"), 1));
+    assert_eq!(r.cost_micro_usd, Some(COST));
+    assert_eq!(r.reserved_micro_usd, 0);
+    assert_eq!(b.budget(), Some(WORST + 100 - COST));
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("budget"), 0));
+    assert_eq!(b.script.calls(), 1);
+}
+
+#[test]
+fn unknown_usage_keeps_the_worst_case_and_stops() {
+    let b = store("unknown");
+    b.model(true, Some(10_000));
+    // No usage and an answer that is not valid: the second try is refused.
+    b.script.push(Ok(("not json".into(), Usage::default())));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("unknown"));
+    assert_eq!(b.script.calls(), 1);
+    assert_eq!((r.calls, r.unknown_calls), (0, 1));
+    assert_eq!(r.unknown_cost_micro_usd, Some(WORST));
+    assert_eq!(b.budget(), Some(10_000 - WORST));
+    assert!(!b.understood(m));
+    assert_eq!(
+        b.col(&format!("SELECT tries FROM message WHERE id = {m}")),
+        Some(0)
+    );
+}
+
+#[test]
+fn errors_with_no_usage_stop_the_run_with_the_worst_case() {
+    for e in [
+        ModelError::Transport("time-out".into()),
+        ModelError::Server(529),
+        ModelError::RateLimited { retry_after: None },
+        ModelError::BadAnswer("no usage".into()),
+    ] {
+        let b = store("errors");
+        b.model(true, Some(10_000));
+        b.script.push(Err(e));
+        b.add("1", "a", 1, &["INBOX"]);
+        let r = b.run(&Limits::default()).unwrap();
+        assert_eq!(r.stop.as_deref(), Some("unknown"));
+        assert_eq!(b.script.calls(), 1);
+        assert_eq!(b.budget(), Some(10_000 - WORST));
+    }
+}
+
+#[test]
+fn a_refused_key_gives_the_reservation_back() {
+    let b = store("key");
+    b.model(true, Some(10_000));
+    b.script.push(Err(ModelError::Rejected {
+        status: 401,
+        message: "bad key".into(),
+    }));
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("model"));
+    assert_eq!((r.calls, r.input_tokens, r.unknown_calls), (1, 0, 0));
+    assert_eq!(b.budget(), Some(10_000));
+    assert!(!b.understood(m));
+}
+
+#[test]
+fn a_cost_over_the_reservation_stops_the_run() {
+    let b = store("overrun");
+    b.model(true, Some(2 * WORST));
+    b.script.push(Ok((VALID.into(), usage(5_000, 10))));
+    b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("budget"));
+    assert_eq!(r.cost_micro_usd, Some(5_010));
+    assert_eq!(b.budget(), Some(2 * WORST - 5_010));
+    assert_eq!(b.script.calls(), 1);
+}
+
+#[test]
+fn a_local_model_needs_no_budget_and_goes_on_with_no_usage() {
+    let b = store("local");
+    b.model(false, None);
+    b.script.push(Ok((VALID.into(), Usage::default())));
+    b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!((r.calls, r.unknown_calls), (1, 1));
+    assert_eq!(r.unknown_cost_micro_usd, None);
+}
+
+#[test]
+fn a_local_server_error_stops_the_run() {
+    let b = store("localerr");
+    b.model(false, None);
+    b.script.push(Err(ModelError::Transport("refused".into())));
+    b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("model"));
+    assert_eq!(b.script.calls(), 1);
+}
+
+#[test]
+fn a_second_runner_gets_busy() {
+    let b = store("lock");
+    b.model(false, None);
+    b.add("1", "a", 1, &["INBOX"]);
+    let held = batch::lock(&b.store).unwrap();
+    assert!(matches!(b.run(&Limits::default()), Err(Error::Busy)));
+    assert_eq!(b.script.calls(), 0);
+    drop(held);
+    assert!(b.run(&Limits::default()).is_ok());
+}
+
+#[test]
+fn max_messages_stops_in_the_thread() {
+    let b = store("max");
+    b.model(false, None);
+    let first = b.add("1", "a", 2, &["INBOX"]);
+    let second = b.add("2", "a", 1, &["INBOX"]);
+    let limits = Limits {
+        max_messages: Some(1),
+        ..Limits::default()
+    };
+    let r = b.run(&limits).unwrap();
+    assert_eq!((r.stop.as_deref(), r.messages), (Some("messages"), 1));
+    assert!(b.understood(first) && !b.understood(second), "oldest first");
+    let r = b.run(&limits).unwrap();
+    assert_eq!(r.messages, 1);
+    assert!(b.understood(second), "the next run goes on in the thread");
+}
+
+#[test]
+fn max_cost_stops_the_run() {
+    let b = store("maxcost");
+    b.model(true, Some(100_000));
+    b.add("1", "a", 1, &["INBOX"]);
+    b.add("2", "b", 2, &["INBOX"]);
+    let r = b
+        .run(&Limits {
+            max_cost_micro_usd: Some(1),
+            ..Limits::default()
+        })
+        .unwrap();
+    assert_eq!((r.stop.as_deref(), r.calls), (Some("cost"), 1));
+}
+
+#[test]
+fn the_newest_thread_runs_first_and_old_threads_last() {
+    let b = store("order");
+    b.model(false, None);
+    let old = b.add("1", "old", 200, &["INBOX"]);
+    let new = b.add("2", "new", 1, &["INBOX"]);
+    let mid = b.add("3", "mid", 30, &["INBOX"]);
+    let r = b
+        .run(&Limits {
+            max_messages: Some(2),
+            ..Limits::default()
+        })
+        .unwrap();
+    assert_eq!(r.messages, 2);
+    assert!(b.understood(new) && b.understood(mid) && !b.understood(old));
+}
+
+#[test]
+fn a_later_message_waits_for_an_older_one_that_failed() {
+    let b = store("wait");
+    b.model(false, None);
+    b.script.push(Ok(("x".into(), usage(1, 1))));
+    b.script.push(Ok(("x".into(), usage(1, 1))));
+    let first = b.add("1", "a", 2, &["INBOX"]);
+    let second = b.add("2", "a", 1, &["INBOX"]);
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(b.script.calls(), 2, "two tries of the first message only");
+    assert!(!b.understood(first) && !b.understood(second));
+}
+
+#[test]
+fn the_estimate_counts_each_message_and_changes_nothing() {
+    let b = store("estimate");
+    b.model(true, None);
+    for i in 0..10 {
+        b.add(&format!("m{i}"), "a", 1, &["INBOX"]);
+    }
+    b.add("old", "b", 200, &["INBOX"]);
+    b.add("spam", "c", 1, &["SPAM"]);
+    let e = batch::estimate(&b.store, NOW).unwrap();
+    assert_eq!((e.messages, e.recent), (12, 11));
+    let size = raw("m0").len() as u64;
+    assert_eq!(
+        e.output_tokens,
+        11 * batch::OUTPUT_TOKENS,
+        "SPAM needs no call"
+    );
+    assert!(e.input_tokens >= 11 * (batch::PROMPT_TOKENS + size / batch::BYTES_PER_TOKEN - 1));
+    assert_eq!(e.cost_micro_usd, Some(e.input_tokens + e.output_tokens));
+    assert_eq!(e.model_version, Some(1));
+    assert_eq!(
+        b.col("SELECT count(*) FROM message WHERE understood_at IS NOT NULL"),
+        Some(0)
+    );
+    assert_eq!(b.col("SELECT count(*) FROM understand_run"), Some(0));
+}
+
+#[test]
+fn a_sender_rerun_clears_the_retry_state_and_old_items() {
+    let b = store("rerun");
+    b.model(false, None);
+    let m = b.add("1", "a", 1, &["INBOX"]);
+    b.run(&Limits::default()).unwrap();
+    assert!(b.understood(m));
+    let sender = b
+        .col("SELECT id FROM sender WHERE address = 'ana@example.org'")
+        .expect("a sender row");
+    b.store
+        .write(|tx| {
+            tx.execute(
+                &format!(
+                    "UPDATE message SET tries = 3, retry_at = {} WHERE id = {m}",
+                    NOW + DAY
+                ),
+                [],
+            )?;
+            let reset = iris_understand::store::rerun_senders(tx, &[sender], NOW)?;
+            assert_eq!(reset, 1);
+            Ok(())
+        })
+        .unwrap();
+    assert!(!b.understood(m));
+    assert_eq!(
+        b.col(&format!(
+            "SELECT tries + coalesce(retry_at, 0) FROM message WHERE id = {m}"
+        )),
+        Some(0)
+    );
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.calls, 1, "the reset message is pending again");
+    assert!(b.understood(m));
+}
+
+#[test]
+fn a_rerun_of_a_visited_thread_gets_one_more_pass() {
+    let b = store("pass");
+    b.model(false, None);
+    // The newest thread runs first: Ana is a stranger then.
+    let ana = b.add_raw(
+        "1",
+        "x",
+        1,
+        "From: Ana <ana@examp1e.org>\nTo: owner@example.com\nSubject: Hi\n\nCall me today.\n",
+        &["INBOX"],
+    );
+    // The sent message makes example.org known, so examp1e.org is a near
+    // copy: Ana becomes hostile in write 1, and her mail is reset.
+    b.add_raw(
+        "2",
+        "y",
+        3,
+        "From: owner@example.com\nTo: bo@example.org\nSubject: Hi\n\nSee you.\n",
+        &["SENT"],
+    );
+    let r = b.run(&Limits::default()).unwrap();
+    assert_eq!(r.stop.as_deref(), Some("done"));
+    assert_eq!(r.messages, 3, "Ana, the sent message, then Ana again");
+    assert!(
+        b.understood(ana),
+        "the second pass understood the reset mail"
+    );
+}

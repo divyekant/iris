@@ -112,6 +112,7 @@ fn the_model_gives_a_commitment_and_the_mail_stays_in_the_data() {
     assert_eq!(c["counterparty"]["address"], "ana@example.org");
     assert_eq!(d.usage.input_tokens, 100);
     assert_eq!(d.usage.cost_micro_usd, Some(5));
+    assert!(d.usage.known, "a known reply gives a known sum");
     let calls = m.calls.borrow();
     // The instruction is fixed text. The mail goes only in the data.
     assert_eq!(calls[0].0, INSTRUCTION);
@@ -127,6 +128,22 @@ fn one_bad_answer_gets_one_more_try() {
     assert_eq!((d.calls, d.drafts.len(), d.failed), (2, 1, false));
     assert!(m.calls.borrow()[1].0.ends_with(prompt::RETRY_NOTE));
     assert_eq!(d.usage.input_tokens, 200);
+    assert!(d.usage.known);
+}
+
+#[test]
+fn a_call_with_no_usage_makes_the_sum_unknown() {
+    let mut first = text("not json");
+    first.usage.known = false;
+    let m = Fake::with(vec![Ok(first), answer(task())]);
+    let (_, d) = run(ASK, Kind::Person, &[], &[], Some(&m));
+    assert!(!d.unwrap().usage.known);
+    let m = Fake::with(vec![
+        Err(iris_model::Error::BadAnswer("x".into())),
+        answer(task()),
+    ]);
+    let (_, d) = run(ASK, Kind::Person, &[], &[], Some(&m));
+    assert!(!d.unwrap().usage.known);
 }
 
 #[test]

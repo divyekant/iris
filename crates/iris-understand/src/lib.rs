@@ -9,6 +9,7 @@
 //!
 //! Mail text is data, never instructions. Code only compares the text.
 
+pub mod batch;
 pub mod budget;
 pub mod head;
 pub mod prompt;
@@ -429,6 +430,8 @@ pub fn decide(
         return Ok(d);
     };
     let data = prompt::data(a, cx);
+    // Known until a call gives no reliable usage (see `add`).
+    d.usage.known = true;
     for attempt in 0..2 {
         let instruction = if attempt == 0 {
             INSTRUCTION.to_string()
@@ -440,6 +443,7 @@ pub fn decide(
             // HTTP 200 with a body of an unknown format: the answer is not valid.
             Err(iris_model::Error::BadAnswer(_)) => {
                 d.calls += 1;
+                d.usage.known = false;
                 continue;
             }
             // A call that the server refuses for this data (HTTP 400, 413,
@@ -447,6 +451,7 @@ pub fn decide(
             // (401, 403) stops the batch.
             Err(iris_model::Error::Rejected { status, .. }) if status != 401 && status != 403 => {
                 d.calls += 1;
+                d.usage.known = false;
                 break;
             }
             Err(e) => return Err(e),
@@ -478,7 +483,10 @@ pub fn decide(
     Ok(d)
 }
 
+/// Adds the usage of one more call. The sum is known only while each call
+/// had known usage.
 fn add(sum: &mut Usage, u: Usage) {
+    sum.known &= u.known;
     sum.input_tokens += u.input_tokens;
     sum.output_tokens += u.output_tokens;
     sum.cost_micro_usd = match (sum.cost_micro_usd, u.cost_micro_usd) {
