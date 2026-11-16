@@ -68,11 +68,31 @@ CREATE TABLE action_draft (
 
 CREATE INDEX action_draft_draft ON action_draft(draft_id);
 
+-- The draft of a submitted action does not change, as the messages and
+-- the items of an action (migrations 7 and 10): the approval binds to it.
+CREATE TRIGGER action_draft_insert BEFORE INSERT ON action_draft
+WHEN (SELECT state FROM changeset_action WHERE id = new.action_id) IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a submitted action does not change');
+END;
+
+CREATE TRIGGER action_draft_delete BEFORE DELETE ON action_draft
+WHEN (SELECT state FROM changeset_action WHERE id = old.action_id) IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a submitted action does not change');
+END;
+
+-- Submit inserts and deletes these rows. Nothing updates them.
+CREATE TRIGGER action_draft_update BEFORE UPDATE ON action_draft
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a submitted action does not change');
+END;
+
 -- The one send of each draft that can have gone out. The claim of a send
 -- inserts the row; the primary key allows one claim for each draft, for
--- each writer. A send that Gmail did not do (a rejection, or the draft is
--- still at Gmail after 1 hour) deletes its row in the same transaction as
--- its `failed` state.
+-- each writer. Only a definite rejection of the send deletes the row, in
+-- the same transaction as its `failed` state. An unknown result keeps it
+-- (issue #280).
 CREATE TABLE ledger_send (
   draft_id INTEGER PRIMARY KEY REFERENCES draft(id),
   ledger_id INTEGER NOT NULL UNIQUE REFERENCES ledger(id)

@@ -156,3 +156,69 @@ fn one_send_row_for_each_draft() {
     })
     .unwrap();
 }
+
+/// The draft of a submitted action does not change: no new binding, no
+/// change and no delete, also for two drafts with the same hash.
+#[test]
+fn the_draft_of_a_submitted_send_is_fixed() {
+    let dir = TempDir::new("fixed");
+    let s = Store::open(&dir.0).unwrap();
+    let a = s.add_account("gmail", "owner@example.com").unwrap();
+    s.write(|tx| {
+        let mut drafts = Vec::new();
+        for n in 1..=2 {
+            add_action(tx, "draft")?;
+            let action = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                   action_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, '{}', 'same', x'00', ?4, 0, 0)",
+                rusqlite::params![a, format!("r{n}"), format!("iris.{n}@example.com"), action],
+            )?;
+            drafts.push(tx.last_insert_rowid());
+        }
+        // Before submit, the binding can change.
+        add_action(tx, "send")?;
+        let open = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO action_draft VALUES (?1, ?2)",
+            [open, drafts[0]],
+        )?;
+        tx.execute("DELETE FROM action_draft WHERE action_id = ?1", [open])?;
+
+        let send = approved(tx, "send")?;
+        assert!(tx
+            .execute(
+                "INSERT INTO action_draft VALUES (?1, ?2)",
+                [send, drafts[0]]
+            )
+            .is_err());
+        Ok(())
+    })
+    .unwrap();
+    // A row that submit wrote before the state stays fixed after it.
+    s.write(|tx| {
+        add_action(tx, "send")?;
+        let send = tx.last_insert_rowid();
+        let d1: i64 = tx.query_row("SELECT min(id) FROM draft", [], |r| r.get(0))?;
+        tx.execute("INSERT INTO action_draft VALUES (?1, ?2)", [send, d1])?;
+        tx.execute_batch(&format!(
+            "UPDATE changeset_action SET hash = 'h' WHERE id = {send};
+             UPDATE changeset SET why = 'w', submitted_at = 0
+               WHERE id = (SELECT changeset_id FROM changeset_action WHERE id = {send});
+             UPDATE changeset_action SET state = 'approved', decided_by = 'person', decided_at = 1
+               WHERE id = {send};"
+        ))?;
+        assert!(tx
+            .execute(
+                "UPDATE action_draft SET draft_id = draft_id + 1 WHERE action_id = ?1",
+                [send]
+            )
+            .is_err());
+        assert!(tx
+            .execute("DELETE FROM action_draft WHERE action_id = ?1", [send])
+            .is_err());
+        Ok(())
+    })
+    .unwrap();
+}
