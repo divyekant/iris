@@ -1041,6 +1041,25 @@ The triage proposal of release 1 (crate `iris-observe`) has these rules:
   same ID, also at a later time, and a different content gives a different
   ID. A client must not use this ID as the ID of a stored changeset.
 
+From release 2, the crate `iris-triage` stores the same proposal as a
+changeset (specification 2, section 5.4):
+
+- The author is `triage`, with the name `Iris` and the session
+  `account-<row ID>`. Each account has its own changeset, because one action
+  changes one account.
+- Each rule with one or more messages gives one action, with the reason of
+  the rule. The changeset has its own reason. Submit gives each action
+  `proposed`, so nothing applies without a rule or an approval.
+- A run uses the open triage changeset of the account. It submits a new
+  revision only when the verb, the reason or the targets of an action
+  changed. So an action in review does not change while the mailbox does not
+  change.
+- A run that stopped before its submit leaves a draft with actions. The next
+  run submits that draft, then submits its own revision, which replaces those
+  actions.
+- If the proposal becomes empty, the open actions stay until withdraw and
+  expiry are built (R2-01 part 3).
+
 ## 9. Memory
 
 The design keeps memory flat when the mailbox grows:
