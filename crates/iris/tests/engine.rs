@@ -630,3 +630,30 @@ fn a_tick_applies_an_approved_close() {
         .unwrap();
     assert_eq!(status, "done");
 }
+
+#[test]
+fn a_tick_finds_the_mail_of_a_watch() {
+    let store = Arc::new(Store::open(&data_dir("watch")).unwrap());
+    // No token: the tick starts no sync worker.
+    let account = store.add_account("gmail", "owner@example.com").unwrap();
+    let w = store.add_watch("visa", iris::engine::now_ms()).unwrap();
+    let m = store
+        .put_messages(
+            account,
+            &[iris_store::NewMessage {
+                provider_id: "a".into(),
+                thread_provider_id: "t".into(),
+                internal_date: Some(iris::engine::now_ms()),
+                body: Some(iris_store::Body {
+                    subject: "Visa".into(),
+                    sender: "embassy@example.com".into(),
+                    text: "Your visa is ready.".into(),
+                }),
+                ..Default::default()
+            }],
+        )
+        .unwrap()[0];
+    let mut e = Engine::new(store.clone(), config("http://127.0.0.1:9".into()), None);
+    e.tick().unwrap();
+    assert_eq!(store.watch(w).unwrap().unwrap().message, Some(m));
+}

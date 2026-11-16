@@ -356,7 +356,7 @@ impl Engine {
 
     /// Start a sync thread for each account that has none, open the
     /// deferred commitments whose date came, expire the changeset actions
-    /// 14 days after their submit, and run the content cleanup if
+    /// 14 days after their submit, check the watches, and run the content cleanup if
     /// [`CLEAN_EVERY`] passed. So an account that
     /// `iris account add` adds or signs in again starts to sync without a
     /// restart. Gives the accounts that got a new thread.
@@ -406,6 +406,10 @@ impl Engine {
         // account and no token (R2-10).
         if let Err(e) = iris_apply::apply_states(&self.store) {
             say!("iris: state actions: {e}");
+        }
+        // Watches (R5-07): the one notice of each watch whose mail came.
+        if let Err(e) = self.store.check_watches(now_ms()) {
+            say!("iris: watches: {e}");
         }
         // Triage (R2-05): store the proposal of each account. A run with no
         // change writes nothing.
