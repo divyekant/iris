@@ -198,15 +198,30 @@ fn a_repair_that_stops_keeps_each_difference_and_the_resync() {
         at_fake.fail_next(&[401])
     }));
 
-    let r = verify(&store, &gmail, account, TOKEN).unwrap();
-    assert_eq!(
-        r.differences,
-        vec![
-            Difference::Labels(FakeGmail::id_of(8)),
-            Difference::Unrepaired(bad)
-        ]
+    // The caller gets the 401, so that it can get a new token.
+    let e = verify(&store, &gmail, account, TOKEN).unwrap_err();
+    assert!(
+        matches!(e, iris_sync::Error::Gmail(iris_gmail::Error::Unauthorized)),
+        "{e}"
     );
+    // The log and the resync are saved before the error.
+    let logged: String = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT result FROM sync_log WHERE kind = 'verify' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(logged.starts_with("2 differences"), "{logged}");
+    assert!(logged.contains(&bad), "{logged}");
     assert_eq!(sync_state(&store).0.as_deref(), Some(KIND_RESYNC));
+    // With a new token, the next verify runs the resync, which repairs the
+    // labels, and repairs the content file.
+    let r = verify(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    assert_eq!(r.differences, vec![Difference::Content(bad)]);
+    assert!(!r.resync);
 }
 
 #[test]
@@ -221,6 +236,31 @@ fn a_delete_between_two_list_pages_gives_no_difference() {
     let r = verify(&store, &gmail, account, TOKEN).unwrap();
     assert_eq!(r.differences, vec![]);
     assert!(!r.resync);
+}
+
+#[test]
+fn a_message_left_off_the_list_by_a_page_shift_is_still_compared() {
+    let (fake, store, account) = synced("v-page-shift", 36, 700);
+    // The delete of message 690 (page one) moves message 199 from the start
+    // of page two to the end of page one, after Gmail sent page one.
+    let omitted = FakeGmail::id_of(199);
+    store
+        .write(|tx| {
+            tx.execute(
+                "DELETE FROM message_label WHERE message_id =
+                   (SELECT id FROM message WHERE provider_id = ?1)",
+                [&omitted],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let at_fake = fake.clone();
+    let gmail = client(hook_proxy(fake.addr(), "pageToken=", move || {
+        assert!(at_fake.delete_message(&FakeGmail::id_of(690)));
+    }));
+    let r = verify(&store, &gmail, account, TOKEN).unwrap();
+    assert_eq!(r.differences, vec![Difference::Labels(omitted)]);
+    assert!(r.resync);
 }
 
 #[test]
@@ -294,7 +334,7 @@ fn a_400_of_the_extra_message_check_is_an_error_not_a_difference() {
         })
         .unwrap();
     let at_fake = fake.clone();
-    let gmail = client(hook_proxy(fake.addr(), "format=minimal", move || {
+    let gmail = client(hook_proxy(fake.addr(), "format=raw", move || {
         at_fake.fail_next(&[400])
     }));
     match verify(&store, &gmail, account, TOKEN) {
