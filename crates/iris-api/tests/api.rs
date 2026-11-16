@@ -1095,3 +1095,51 @@ async fn a_proposal_that_fails_before_its_first_part_is_a_500() {
     assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(v["error"].is_string());
 }
+
+#[tokio::test]
+async fn pages_a_section_larger_than_the_brief() {
+    let dir = temp("pages");
+    let (store, _) = filled(&dir);
+    let a = sender(&store, "a@one.example", Some("service"));
+    let b = sender(&store, "b@two.example", Some("service"));
+    // 250 feed items: three publishers (one with no sender row and no
+    // address, so its sort key is NULL), equal times, and no time.
+    for i in 0..250i64 {
+        let publisher = [a.as_str(), b.as_str(), "p-99999"][(i % 3) as usize];
+        let mut doc = json!({"publisher": party(publisher)});
+        if i % 5 != 0 {
+            doc["published"] = json!(format!("2026-11-0{}T00:00:00Z", 1 + i % 4));
+        }
+        add_item(&store, "feed", "new", 13, i, doc);
+    }
+    let pages = |limit: u32| {
+        let store = store.clone();
+        async move {
+            let mut all = Vec::new();
+            let mut after = String::new();
+            loop {
+                let (code, p) = get(
+                    &store,
+                    &format!("/api/brief/feed?limit={limit}&after={after}"),
+                )
+                .await;
+                assert_eq!(code, StatusCode::OK);
+                assert_eq!(p["count"], 250);
+                all.extend(ids(&p["items"]).into_iter().map(str::to_string));
+                match p["next"].as_str() {
+                    Some(n) => after = n.to_string(),
+                    None => break,
+                }
+            }
+            all
+        }
+    };
+    let big = pages(200).await;
+    let small = pages(7).await;
+    assert_eq!(big.len(), 250);
+    assert_eq!(big, small);
+    let unique: std::collections::HashSet<_> = big.iter().collect();
+    assert_eq!(unique.len(), 250);
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ids(&brief["feed"]["items"]), big[..200]);
+}
