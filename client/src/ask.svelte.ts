@@ -31,11 +31,12 @@ export async function ask(question: string): Promise<boolean> {
 
 export type Part = { text: string } | { source: AskSource };
 
-/** The answer as text and source marks. A mark `[n]` with no source `n` stays as text. */
+/** The answer as text and source marks. A mark is `[n]` with n from 1, as the engine writes it
+ * (no leading 0). A mark with no source `n` stays as text. */
 export function parts(answer: string, sources: AskSource[]): Part[] {
   const out: Part[] = [];
   let last = 0;
-  for (const m of answer.matchAll(/\[(\d{1,3})\]/g)) {
+  for (const m of answer.matchAll(/\[([1-9]\d{0,2})\]/g)) {
     const source = sources.find((s) => s.n === Number(m[1]));
     if (!source) continue;
     // The mark sits close to its fact: no space before it.

@@ -206,7 +206,7 @@ const HEADS: Record<string, [string, string, string, string]> = {
   "m-50102": ["t-7712", "Morning Brew", "crew@morningbrew.example", "Why oil fell on Tuesday"],
   "m-50140": ["t-7713", "Product Hunt Daily", "hello@producthunt.example", "Top launches of the week"],
   "m-55210": ["t-8841", "Priya Raman", "priya@northwind.example", "Q4 numbers for the board"],
-  "m-53500": ["t-8890", "Japan Airlines", "booking@jal.example", "Your flight to Tokyo: QX7K2P"],
+  "m-53500": ["t-8600", "Example Air", "trips@air.example", "Your flight to Tokyo: QX7K2P"],
   "m-55211": ["t-8841", "You", "you@example.com", "Re: Q4 numbers for the board"],
   "m-60001": ["t-9002", "Dana Brooks", "dana@leadgen.example", "Quick question about your Q1 plans"],
   "m-61500": ["t-9100", "Morning Brew", "crew@morningbrew.example", "Monday: the market opens higher"],
@@ -222,7 +222,7 @@ const PUBLISHERS = [
 const ASK_MAIL: Record<string, string> = {
   "m-55210": "Hi,\n\nCould you review section 4 by Tuesday? The board meets on Wednesday.\n\nPriya",
   "m-55211": "Thanks, Priya. I will send it on Monday.",
-  "m-53500": "Booking reference QX7K2P\n\nYour flight to Tokyo leaves on 20 November. The gate shows 24 hours before departure.",
+  "m-53500": "Booking reference QX7K2P\n\nYour flight to Tokyo leaves on 10 December at 11:05 and lands on 11 December at 07:40, Tokyo time. The gate shows 24 hours before departure.",
 };
 
 /** A mail that Ask cites, with the head of its summary, so its link opens it. */
@@ -239,7 +239,7 @@ export function askAnswer(question: string): AskAnswer {
   if (/weather|lottery/i.test(question)) return { answer: null, sources: [], read: 0, cost_micro_usd: null };
   if (/flight|tokyo|trip/i.test(question)) {
     return {
-      answer: "Your flight to Tokyo has the booking reference QX7K2P [1]. The booking mail gives no gate yet [1].",
+      answer: "Your flight to Tokyo leaves on 10 December at 11:05 [1]. The booking reference is QX7K2P [1].",
       sources: [source(1, "m-53500", "Booking reference QX7K2P")],
       read: 6,
       cost_micro_usd: 3_120,

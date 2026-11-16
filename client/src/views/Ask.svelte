@@ -57,7 +57,7 @@
               <p class="muted">Iris reads your mail.</p>
             {:else if turn.answer.answer === null}
               <p class="muted">
-                {turn.answer.read === 0 ? "No mail has the words of this question." : "Your mail does not answer this question."}
+                {turn.answer.read === 0 ? "Iris found no mail to read for this question. Try other words, such as a name or a subject." : "Your mail does not answer this question."}
               </p>
             {:else}
               {@const sources = turn.answer.sources}

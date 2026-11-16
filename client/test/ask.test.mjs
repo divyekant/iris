@@ -24,6 +24,38 @@ test("a mark with a source is a part, other marks stay as text", () => {
   assert.deepEqual(parts("", s), []);
 });
 
+// A small xorshift generator with a fixed seed, so a failure repeats.
+function rng(seed) {
+  let x = seed;
+  return (n) => {
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17;
+    x ^= x << 5; x >>>= 0;
+    return x % n;
+  };
+}
+
+test("for any answer, only a mark with a source becomes a link, and no other text changes", () => {
+  const PIECES = ["[", "]", "1", "2", "9", "12", "[1]", "[2]", "[3]", "[0]", "[12]", "[999]", "[1000]", "[01]", "[ 1]", "[[1]]", " ", "  ", "\n", "x", ".", "é", "😀", "<b>", "&amp;"];
+  const below = rng(0x9e3779b9);
+  for (let i = 0; i < 20000; i++) {
+    const answer = Array.from({ length: below(16) }, () => PIECES[below(PIECES.length)]).join("");
+    const sources = [1, 2, 12].filter(() => below(2)).map((n) => src(n, `m-${n}`));
+    const out = parts(answer, sources);
+    // The text with each link part written back as its mark, and all white space out,
+    // is the answer with all white space out: parts() only trims white space before a mark.
+    const back = out.map((p) => ("source" in p ? `[${p.source.n}]` : p.text)).join("");
+    assert.equal(back.replace(/\s/g, ""), answer.replace(/\s/g, ""), JSON.stringify(answer));
+    for (const p of out) {
+      if ("source" in p) assert.ok(sources.includes(p.source), JSON.stringify(answer));
+      // No text part holds a mark of a source.
+      else for (const m of p.text.matchAll(/\[([1-9]\d{0,2})\]/g)) {
+        assert.ok(!sources.some((s) => s.n === Number(m[1])), `${JSON.stringify(answer)}: ${p.text}`);
+      }
+    }
+  }
+});
+
 test("the cost is in cents, or in dollars from 1 dollar", () => {
   assert.equal(cost(null), "");
   assert.equal(cost(0), "less than 0.1 cents");
@@ -40,6 +72,21 @@ test("the cost is in cents, or in dollars from 1 dollar", () => {
 test("#/ask opens the Ask view, which has a link in the header", () => {
   assert.deepEqual(parse("#/ask"), { view: "ask" });
   assert.ok(NAV.some(([link, label]) => link === "#/ask" && label === "Ask"));
+});
+
+test("each item source with a fixed head has the thread and the quote of its mail", () => {
+  for (const item of fx.items) {
+    for (const source of item.sources) {
+      const mail = fx.message(source.message);
+      assert.equal(mail.thread, source.thread, `${item.id}: ${source.message}`);
+      if (source.quote) assert.ok(mail.text.includes(source.quote), `${item.id}: ${source.quote}`);
+    }
+  }
+  // The flight question gets the departure of the booking item.
+  const flight = fx.askAnswer("When does my flight leave?");
+  assert.match(flight.answer, /10 December at 11:05/);
+  const booking = fx.items.find((i) => i.sources.some((s) => s.message === "m-53500"));
+  assert.equal(booking.fields.start.slice(0, 16), "2026-12-10T11:05");
 });
 
 test("each source of a fixture answer opens its mail, with the same head and the quote", () => {
@@ -103,8 +150,9 @@ test("questions and answers stack, and each mark opens its source mail", async (
     assert.deepEqual([...view.target.querySelectorAll(".chip")].map((a) => text(a)), ["1Priya Raman: Q4 numbers for the board", "2You: Re: Q4 numbers for the board"]);
     assert.match(text(replies()[0]), /Iris read 9 mails\. 0\.4 cents\.$/);
 
-    await send(view, "What is the weather?");
-    await until(() => text(replies()[1]).includes("No mail has the words"));
+    // "Who am I?" has only stop words: the engine reads no mail.
+    await send(view, "Who am I?");
+    await until(() => text(replies()[1]).includes("Iris found no mail to read for this question."));
     await send(view, "Where is the key?");
     await until(() => text(replies()[2]).includes("does not answer"));
     view.flushSync();
@@ -116,7 +164,7 @@ test("questions and answers stack, and each mark opens its source mail", async (
     view.flushSync();
     assert.equal(text(view.target.querySelector("[role=alert]")), "The budget cannot pay for this question.");
     assert.equal(view.target.querySelector("input").value, "Why so expensive?");
-    assert.deepEqual(asked, ["Did Priya get the Q4 numbers?", "What is the weather?", "Where is the key?", "Why so expensive?"]);
+    assert.deepEqual(asked, ["Did Priya get the Q4 numbers?", "Who am I?", "Where is the key?", "Why so expensive?"]);
     // The older answers are muted, the newest is not.
     assert.equal(view.target.querySelectorAll("li.older").length, 3);
   } finally {
