@@ -526,3 +526,65 @@ fn a_repeated_recipient_keeps_its_name() {
         "one message, also with the address three times"
     );
 }
+
+#[test]
+fn group_labels_and_encoded_names_do_not_stop_a_merge() {
+    let mut h = Hand::new("group");
+    h.add(
+        "t1",
+        "INBOX",
+        "ana@home.example.net",
+        "Ana Lind",
+        "me@example.com",
+    );
+    h.add("t1", "SENT", "me@example.com", "Me", "ana@home.example.net");
+    h.add(
+        "t2",
+        "SENT",
+        "me@example.com",
+        "Me",
+        "Team: Ana Lind <ana@work.example.org>;",
+    );
+    let raw = b"From: me@example.com\r\nTo: x@example.com\r\nBcc: =?UTF-8?Q?Bo_H=C3=A4rt?= <bo@a.example.org>\r\n\r\nhi\r\n";
+    let sha = h.store.put_content(raw).unwrap();
+    h.store
+        .put_messages(
+            h.account,
+            &[NewMessage {
+                provider_id: "enc".into(),
+                thread_provider_id: "t3".into(),
+                content_sha256: Some(sha),
+                internal_date: Some(9000),
+                labels: vec!["SENT".into()],
+                header: Header {
+                    from_addr: Some("me@example.com".into()),
+                    to_addrs: Some("x@example.com".into()),
+                    ..Header::default()
+                },
+                ..NewMessage::default()
+            }],
+        )
+        .unwrap();
+    h.add(
+        "t4",
+        "INBOX",
+        "bo@b.example.org",
+        "Bo Härt",
+        "me@example.com",
+    );
+    h.add("t4", "SENT", "me@example.com", "Me", "bo@b.example.org");
+
+    let all = h.people();
+    let ana = all
+        .iter()
+        .find(|p| addrs(p).contains(&"ana@work.example.org"))
+        .unwrap();
+    assert_eq!(addrs(ana), ["ana@home.example.net", "ana@work.example.org"]);
+    assert_eq!(ana.names, ["Ana Lind"]);
+    let bo = all
+        .iter()
+        .find(|p| addrs(p).contains(&"bo@a.example.org"))
+        .unwrap();
+    assert_eq!(addrs(bo), ["bo@a.example.org", "bo@b.example.org"]);
+    assert_eq!(bo.names, ["Bo Härt"]);
+}
