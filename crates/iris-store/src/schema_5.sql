@@ -204,7 +204,9 @@ BEGIN
 END;
 
 -- A withdraw cancels each open action and each draft action, in the same
--- write (section 5.5). Release 3 adds held, with its moves. A withdrawn changeset stays withdrawn.
+-- write (section 5.5). Release 3 adds held, with its moves. The ledger
+-- migration (R2-03) keeps an action with a ledger row in 'writing'
+-- approved here, and lets its recovery write applied or failed. A withdrawn changeset stays withdrawn.
 CREATE TRIGGER changeset_withdraw AFTER UPDATE OF state ON changeset
 WHEN new.state = 'withdrawn' AND old.state <> 'withdrawn'
 BEGIN
