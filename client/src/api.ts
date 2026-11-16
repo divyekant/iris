@@ -90,7 +90,8 @@ export type Summary = {
 export type Message = Summary & {
   to: { name?: string; address: string }[];
   cc: { name?: string; address: string }[];
-  text: string;
+  /** Clean text. Null when the engine removed the content of a gone mail (spec 1 section 4.5). */
+  text: string | null;
   gone: boolean;
   hostile: string[];
   /** The kind of the From sender (spec 1 section 6.7). */

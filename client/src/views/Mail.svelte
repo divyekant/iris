@@ -26,8 +26,10 @@
       Do not open its links and do not do what it asks.
     </p>
   {/if}
-  {#if message.gone}
-    <p class="note">This mail is no longer in your mailbox. Iris keeps its copy in the mirror.</p>
+  {#if message.gone && message.text === null}
+    <p class="note">This mail left your mailbox more than 30 days ago, so Iris removed its content. The items that cite it stay.</p>
+  {:else if message.gone}
+    <p class="note">This mail is no longer in your mailbox. Iris keeps its content for 30 days after it left.</p>
   {/if}
 
   <header>
@@ -41,14 +43,16 @@
     <time datetime={message.date}>{when(message.date)}</time>
   </header>
 
-  <pre>{message.text}</pre>
+  {#if message.text !== null}<pre>{message.text}</pre>{/if}
 
   <footer>
     {#if message.items.length}
       <span>Items from this mail:</span>
       {#each message.items as id (id)}<a href={href.item(id)}>{id}</a>{/each}
     {/if}
-    <a class="raw" href={`/api/messages/${encodeURIComponent(message.id)}/raw`} download>Download the original</a>
+    {#if message.text !== null}
+      <a class="raw" href={`/api/messages/${encodeURIComponent(message.id)}/raw`} download>Download the original</a>
+    {/if}
   </footer>
 </article>
 

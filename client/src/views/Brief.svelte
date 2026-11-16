@@ -6,7 +6,7 @@
 <script lang="ts">
   import { get, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { greeting, liveCode, party, partyKey, placeStrangers, summary, when } from "../format";
+  import { greeting, liveCode, nextDay, party, partyKey, placeStrangers, summary, when } from "../format";
   import Code from "./Code.svelte";
   import Line from "./Line.svelte";
 
@@ -42,8 +42,9 @@
 
   let codes = $derived(brief.signals.items.filter((i) => liveCode(i, now)));
   // At the expiry of the first live code, the code moves from the top to Signals.
-  let nextExpiry = $derived(codes.map((i) => i.expires!).sort()[0]);
-  $effect(() => (nextExpiry ? watch(nextExpiry, (d) => (now = d)) : undefined));
+  // The date and the due words change at midnight too. Keep `now` fresh until the first of the two.
+  let until = $derived([...codes.map((i) => i.expires!), nextDay(now)].sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
+  $effect(() => watch(until, (d) => (now = d)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
   let parts = $derived([
     { key: "you_owe", title: "You owe", ...brief.you_owe },

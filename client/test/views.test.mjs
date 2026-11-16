@@ -262,6 +262,21 @@ test("a mail from a hostile sender shows the warning with no mark", async () => 
   assert.doesNotMatch(await render("/src/views/Mail.svelte", { message: calm }), /looks hostile/);
 });
 
+test("a gone mail says how long its content stays, and a removed mail offers no download", async () => {
+  const kept = text(await render("/src/views/Mail.svelte", { message: { ...fx.message("m-55210"), gone: true } }));
+  assert.match(kept, /Iris keeps its content for 30 days/);
+  const html = await render("/src/views/Mail.svelte", { message: { ...fx.message("m-55210"), gone: true, text: null } });
+  assert.match(text(html), /Iris removed its content/);
+  assert.doesNotMatch(html, /Download the original|<pre/);
+});
+
+test("the next day starts at local midnight", async () => {
+  const { nextDay } = await load("/src/format.ts");
+  const at = new Date(2026, 10, 16, 23, 59);
+  assert.equal(nextDay(at), new Date(2026, 10, 17).toISOString());
+  assert.equal(new Date(nextDay(at)).getHours(), 0);
+});
+
 test("the fixture server gives the original of a mail", () => {
   const source = fx.raw("m-55210");
   assert.match(source, /^From: Example Sender <sender@example\.com>\r\n/);

@@ -119,6 +119,11 @@ const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eig
 const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
 
+/** The start of the next local day, as an ISO date-time. */
+export function nextDay(now = new Date()): string {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+}
+
 export function greeting(now = new Date()): string {
   const h = now.getHours();
   return h < 5 ? "Good evening." : h < 12 ? "Good morning." : h < 18 ? "Good afternoon." : "Good evening.";
