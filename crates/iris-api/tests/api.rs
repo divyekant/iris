@@ -364,11 +364,13 @@ async fn items_by_id_and_by_page() {
     let dir = temp("items");
     let (store, _) = filled(&dir);
     let issuer = party("p-1");
+    // Made first, from the newest of these messages: the page order is the
+    // date of the origin message, not the row order.
     let r1 = add_item(
         &store,
         "record",
         "kept",
-        1,
+        100,
         1,
         json!({"type": "receipt", "issuer": issuer}),
     );
@@ -417,19 +419,19 @@ async fn items_by_id_and_by_page() {
 
     // Pages, newest first, with no gone item.
     let (_, p) = get(&store, "/api/items?form=record&limit=2").await;
-    assert_eq!(ids(&p["items"]), [format!("r-{r3}"), format!("r-{r2}")]);
-    assert_eq!(p["next"], format!("r-{r2}"));
+    assert_eq!(ids(&p["items"]), [format!("r-{r1}"), format!("r-{r3}")]);
+    assert_eq!(p["next"], format!("r-{r3}"));
     let (_, p) = get(
         &store,
-        &format!("/api/items?form=record&limit=2&before=r-{r2}"),
+        &format!("/api/items?form=record&limit=2&before=r-{r3}"),
     )
     .await;
-    assert_eq!(ids(&p["items"]), [format!("r-{r1}")]);
+    assert_eq!(ids(&p["items"]), [format!("r-{r2}")]);
     assert_eq!(p["next"], Value::Null);
 
     // Filters.
     let (_, p) = get(&store, "/api/items?form=record&type=receipt").await;
-    assert_eq!(ids(&p["items"]), [format!("r-{r3}"), format!("r-{r1}")]);
+    assert_eq!(ids(&p["items"]), [format!("r-{r1}"), format!("r-{r3}")]);
     let (_, p) = get(&store, "/api/items?status=gone").await;
     assert_eq!(ids(&p["items"]), [format!("r-{gone}")]);
     assert_eq!(
@@ -454,8 +456,13 @@ async fn items_by_id_and_by_page() {
         "/api/items?form=record&before=c-2",
         "/api/items?limit=201",
         "/api/search?q=a&limit=0",
+        // The query string does not parse: still the JSON error.
+        "/api/search",
+        "/api/items?limit=abc",
     ] {
-        assert_eq!(get(&store, bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+        let (code, v) = get(&store, bad).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+        assert!(v["error"].is_string(), "{bad}");
     }
     assert_eq!(
         get(&store, "/api/items?status=open").await.0,
@@ -782,7 +789,17 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["not_understood"], 1);
     // Message 21 got the date 0 above: it is the oldest fetched message.
     assert_eq!(b["oldest_fetched"], "1970-01-01T00:00:00Z");
-    assert_eq!(b["proposal"], Value::Null);
+    // The triage proposal of observe mode, computed when the brief opens.
+    let want: u64 = iris_observe::counts(&store, 1)
+        .unwrap()
+        .iter()
+        .map(|(_, n)| n)
+        .sum();
+    assert!(want > 0);
+    assert_eq!(
+        b["proposal"],
+        json!({"count": want, "verbs": {"archive": want}})
+    );
 
     // The HTTP route gives the same shape.
     let (code, http) = get(&store, "/api/brief").await;

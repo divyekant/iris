@@ -24,7 +24,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 |---|---|
 | `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
 | `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
-| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
+| `/api/items?form=&status=&type=&before=&limit=` | `{"items": [...], "next"}`. Items newest first, by the date of the origin message. `form` is one of the five forms. `type` is a record type, and needs `form=record`. `before` is the `next` value of the page before: an item ID of the form of the filter. `limit` is 1 to 200, default 50. Items with the status `gone` are not in the list, unless `status=gone`. A `status` must be a status of the form (of any form, with no `form`). A `type` must be a record type of the schema. |
 | `/api/items/{id}` | One item (`c-`, `v-`, `r-`, `f-` or `s-`), also when it is gone. |
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
@@ -51,7 +51,7 @@ The text of a message is data. Show it as text, never as markup.
 | `strangers` | Open commitments whose counterparty or owner is a stranger, and active conversations with a stranger participant. Newest first. |
 | `hostile` | The count of hostile mail of the last 7 days. |
 | `not_understood` | The count of messages that the model failed 3 times. |
-| `proposal` | The triage proposal of specification 1, section 8: `{"count", "verbs": {"archive": 412}}`, with nothing applied. `null` until observe mode (tracker item R1-16) merges. |
+| `proposal` | The triage proposal of specification 1, section 8: `{"count", "verbs": {"archive": 412}}`, from `iris_observe::counts` for each account when the brief opens. Nothing is applied or stored. |
 | `oldest_fetched` | The date of the oldest fetched message that is not gone, or `null`. While the first sync continues, the brief covers only the mail from this date (specification 1, section 4.2). |
 
 Each list field is `{"count", "items"}`. `count` is the full count. `items`

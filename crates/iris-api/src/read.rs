@@ -173,7 +173,7 @@ pub struct Brief {
     pub oldest_fetched: Option<String>,
     /// The triage proposal of specification 1, section 8: the mailbox
     /// changes that observe mode would propose, with nothing applied.
-    /// `None` until observe mode (tracker item R1-16) gives the function.
+    /// Computed from `iris_observe::counts` for each account; not stored.
     pub proposal: Option<Proposal>,
 }
 
@@ -328,7 +328,8 @@ pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
     })?)
 }
 
-/// The items that match `filter`, newest first. Items with the status
+/// The items that match `filter`, newest first by the date of the origin
+/// message. Items with the status
 /// `gone` are left out, unless the filter asks for that status.
 pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     if let Some(form) = filter.form {
@@ -368,15 +369,25 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
         },
         None => None,
     };
+    // Newest by the date of the origin message: the first sync fetches newest
+    // first, so the row order is not the mail order.
+    let date = |t: &str| {
+        format!(
+            "coalesce((SELECT m.internal_date FROM item_source s JOIN message m ON m.id = s.message_id
+               WHERE s.item_id = {t}.id AND s.role = 'origin'), {t}.created_at)"
+        )
+    };
+    let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
-        let mut st = c.prepare(
+        let mut st = c.prepare(&format!(
             "SELECT id, form, status, doc FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
-               AND (?4 IS NULL OR id < ?4)
-             ORDER BY id DESC LIMIT ?5",
-        )?;
+               AND (?4 IS NULL OR ({outer}, id) <
+                    (SELECT {inner}, i.id FROM item i WHERE i.id = ?4))
+             ORDER BY {outer} DESC, id DESC LIMIT ?5"
+        ))?;
         let rows = st.query_map(
             params![filter.form, filter.status, filter.kind, before, limit + 1],
             doc_of,
@@ -465,7 +476,22 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         ),
         "created_at DESC, id DESC".to_string(),
     );
-    Ok(store.read(|c| {
+    // Outside the read of the brief: a nested read can wait for the
+    // connection that this thread holds.
+    let accounts: Vec<i64> = store.read(|c| {
+        let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
+        let ids = st.query_map([], |r| r.get(0))?;
+        Ok(ids.collect::<rusqlite::Result<_>>()?)
+    })?;
+    let mut proposal = Proposal::default();
+    for account in accounts {
+        for (rule, n) in iris_observe::counts(store, account)? {
+            proposal.count += n as i64;
+            let verb = proposal.verbs.entry(rule.verb()).or_insert(0.into());
+            *verb = (verb.as_i64().unwrap_or(0) + n as i64).into();
+        }
+    }
+    let mut brief = store.read(|c| {
         let section = |(filter, order): &(String, String)| -> iris_store::Result<Section> {
             // A possible duplicate whose original is in the same section
             // shows with the original, not as a line of its own. The inner
@@ -549,11 +575,11 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             hostile,
             not_understood,
             oldest_fetched,
-            // shortcut: no triage proposal until crates/iris-observe (R1-16)
-            // merges; then call it here.
             proposal: None,
         })
-    })?)
+    })?;
+    brief.proposal = Some(proposal);
+    Ok(brief)
 }
 
 /// The summary of message `row`, and the other fields of [`Message`]

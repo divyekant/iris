@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, Request, State},
+    extract::{rejection::QueryRejection, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -111,7 +111,16 @@ struct ItemsQuery {
     limit: Option<u32>,
 }
 
-async fn get_items(State(s): State<Arc<Store>>, Query(q): Query<ItemsQuery>) -> Result<Response> {
+/// A query string that does not parse gives the JSON error of the API.
+fn query<T>(q: std::result::Result<Query<T>, QueryRejection>) -> Result<T> {
+    q.map(|Query(v)| v).map_err(|e| Error::Query(e.body_text()))
+}
+
+async fn get_items(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<ItemsQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
     let filter = Filter {
         form: q.form.as_deref(),
         status: q.status.as_deref(),
@@ -131,7 +140,11 @@ struct SearchQuery {
     limit: Option<u32>,
 }
 
-async fn get_search(State(s): State<Arc<Store>>, Query(q): Query<SearchQuery>) -> Result<Response> {
+async fn get_search(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<SearchQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
     let messages = search(&s, &q.q, q.limit.unwrap_or(50))?;
     Ok(Json(serde_json::json!({ "messages": messages })).into_response())
 }
