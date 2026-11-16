@@ -522,3 +522,26 @@ fn a_save_through_an_open_file_is_never_lost() {
         );
     }
 }
+
+#[test]
+fn a_write_after_a_crash_never_truncates_the_policy_file() {
+    // Invariant: the policy write never opens a file that exists for
+    // writing. After a crash between the link and the cleanup, the
+    // temporary name and policy.toml are the same file, which the person
+    // can edit.
+    let dir = TempDir::new("policy-crash");
+    let store = Store::open(&dir.0).unwrap();
+    let lock = store.backup_lock().unwrap();
+    let path = dir.0.join("policy.toml");
+    fs::write(&path, b"v1").unwrap();
+    fs::hard_link(&path, dir.0.join("policy.toml.tmp")).unwrap();
+    fs::write(&path, b"edit").unwrap();
+    for (expect, text) in [
+        (PolicyExpect::Text(b"v1"), Some(&b"v2"[..])),
+        (PolicyExpect::Any, Some(&b"v2"[..])),
+    ] {
+        store.write_policy(&lock, expect, text).unwrap();
+        let files = policy_files(&dir.0);
+        assert!(files.iter().any(|(_, t)| t == b"edit"), "{files:?}");
+    }
+}

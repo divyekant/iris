@@ -174,7 +174,13 @@ impl Store {
         let path = self.dir.join("policy.toml");
         let tmp = self.dir.join("policy.toml.tmp");
         if let Some(text) = text {
-            let mut f = private_file(&tmp)?;
+            // After a crash, `tmp` can be a second name of `policy.toml`:
+            // remove the name, never write into that file.
+            match fs::remove_file(&tmp) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            let mut f = private_file(&tmp, true)?;
             f.write_all(text)?;
             f.sync_all()?;
         }
@@ -316,9 +322,14 @@ impl Store {
     }
 }
 
-fn private_file(path: &Path) -> io::Result<File> {
+/// A file with mode 0600 at `path`. With `new`, refuses a file that exists.
+fn private_file(path: &Path, new: bool) -> io::Result<File> {
     let mut o = fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    if new {
+        o.write(true).create_new(true);
+    } else {
+        o.write(true).create(true).truncate(true);
+    }
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     let f = o.open(path)?;
@@ -334,7 +345,7 @@ fn private_file(path: &Path) -> io::Result<File> {
 /// Copy `from` to a new file `to` with mode 0600, and write it to disk.
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
     let mut src = File::open(from)?;
-    let mut dst = private_file(to)?;
+    let mut dst = private_file(to, false)?;
     io::copy(&mut src, &mut dst)?;
     dst.sync_all()
 }
