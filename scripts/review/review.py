@@ -168,18 +168,26 @@ def changed_since(root: Path, last: Optional[str], head: str) -> Callable[[Dict[
                                   capture_output=True).returncode != 0:
         return lambda finding: True
 
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+
     def changed(finding: Dict[str, Any]) -> bool:
-        # shortcut: the cited line must be in a diff hunk (3 lines of context), upgrade if
-        # the reviewer often cites a line far from the changed code.
-        if subprocess.run(["git", "cat-file", "-e", f"{head}:{finding['path']}"], cwd=root,
-                          capture_output=True).returncode != 0:
-            return True  # not a file of the head (for example the PR description): keep it blocking
-        diff = git(root, "diff", last, head, "--", finding["path"], check=False)
-        hunks = re.findall(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", diff, re.MULTILINE)
-        line = finding.get("line") or 0
-        if not line or not hunks:
-            return bool(diff)  # no cited line, or a change with no lines (a mode change, a binary file)
-        return any(int(start) <= line < int(start) + int(count or 1) for start, count in hunks)
+        """Git answers the question. Each doubt (not a file, no cited line, no such line, a
+        change with no lines) counts as changed, so the finding stays blocking."""
+        path, line = finding["path"], finding.get("line") or 0
+        if run("cat-file", "-e", f"{head}:{path}").returncode != 0:
+            return True  # not a file of the head, for example the PR description
+        counts = run("diff", "--numstat", last, head, "--", path).stdout.split()[:2]
+        if not counts:
+            return False  # the file did not change
+        if not line or counts in (["0", "0"], ["-", "-"]):
+            return True  # no cited line, or a change with no lines (a mode change, a binary file)
+        blame = run("blame", "--porcelain", "-L", f"{line},{line}", head, "--", path)
+        if blame.returncode != 0 or not blame.stdout:
+            return True
+        # shortcut: a fix that only deletes lines changes no line of the head, so a finding on
+        # the next line counts as older code. Upgrade if such findings escape.
+        return run("merge-base", "--is-ancestor", blame.stdout.split()[0], last).returncode != 0
     return changed
 
 

@@ -2,7 +2,7 @@
 
 These rules apply to every agent that works in this repository (Claude, Codex, and
 others). `CLAUDE.md` imports this file. The process comes from the projectstarter
-kit (projectstarter 0.6.0). Product rules are at the end, in [Product rules](#product-rules).
+kit (projectstarter 0.6.1). Product rules are at the end, in [Product rules](#product-rules).
 
 Write all documentation, PR text and code comments as `docs/writing-style.md` says
 (Simplified Technical English).
