@@ -262,6 +262,50 @@ fn the_apply_reads_the_labels_at_gmail() {
     assert!(!b.gmail_labels(ms[3]).contains(&"INBOX".to_string()));
 }
 
+/// The mirror gets the labels that Gmail has, also for a label that
+/// changed at Gmail after the last sync.
+#[test]
+fn the_mirror_gets_the_labels_of_gmail() {
+    let b = setup("mirror", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    b.fake
+        .modify_labels(&b.provider_id(ms[0]), &["Label_2"], &["INBOX"]);
+    b.fake
+        .modify_labels(&b.provider_id(ms[1]), &["Label_1"], &[]);
+    assert_ne!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
+    let a = b.approved("archive", &ms, PERSON);
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (2, 1));
+    for &m in &ms {
+        assert_eq!(b.mirror_labels(m), b.gmail_labels(m));
+    }
+}
+
+/// A withdraw after the first call keeps the action approved: the next
+/// apply ends it, also in the mode observe.
+#[test]
+fn a_withdraw_during_the_apply_keeps_the_action() {
+    let b = setup("withdraw", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let a = b.approved("trash", &ms, PERSON);
+    b.fake.fail_next_write(&[0, 503], true);
+    assert!(matches!(b.apply(a), Err(Error::Gmail(_))));
+    b.store
+        .write(|tx| {
+            tx.execute("UPDATE changeset SET state = 'withdrawn'", [])?;
+            tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES ('version = 0\nmode = \"observe\"\n', 'h3', 3)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(b.state(a).0, "approved");
+    let c = applied(b.apply(a));
+    assert_eq!((c.changed, c.unchanged), (0, 2));
+    assert_eq!(b.state(a), ("applied".into(), "person".into()));
+}
+
 /// More than 1,000 messages: one batchModify call for each 1,000.
 #[test]
 fn a_large_action_streams_in_pages() {

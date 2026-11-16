@@ -639,7 +639,8 @@ only the calls that Gmail did not make.
 | HTTP 401, or a read that fails | Gmail did not run the call | The action stays `approved`. The caller gets a new access token and applies again. |
 | An unknown result of a write (a timeout, a lost connection, HTTP 5xx) | Gmail can have applied the call | The action stays `approved`. The next apply reads the labels again (step 2), and changes only the messages that do not have the target state. |
 | A clear refusal (HTTP 400, another 4xx) | The rest of the action is not valid | The action becomes `failed`. The messages of the earlier calls keep the change. The result has the error. |
-| A withdraw during the apply | Gmail changed messages of a cancelled action | The move to `applied` fails, and the result is an error. The ledger migration adds the `writing` exception (section 5.5). |
+| A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | Before step 2, the apply marks the action `applying` (migration 8). A withdraw keeps a marked action `approved`, and no move other than `applied` or `failed` is possible for it. The next apply ends it, also in the mode `observe`. The ledger row in `writing` replaces the mark in R2-03 (section 5.5). |
+| A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of step 2 for each message: as read for a message with the target state, with the change of the call for a changed message, and as the `trash` answer gives them. |
 | A store error after a provider call | The mirror does not have the new labels | The next sync writes the labels from the history of Gmail. |
 
 ### 7.3 Recovery

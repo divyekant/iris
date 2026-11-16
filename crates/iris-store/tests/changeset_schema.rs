@@ -881,6 +881,47 @@ fn the_apply_keeps_the_decision() {
         "UPDATE changeset_action SET state = 'denied', decided_by = 'person', reason = 'No.',
            flags = '[\"bulk\"]'",
     );
+    // The mark of the apply: only on an approved action, from 0 to 1. A
+    // withdraw keeps a marked action approved, and it ends only as applied
+    // or failed.
+    fails(
+        &s,
+        "UPDATE changeset_action SET applying = 1, state = 'applied'",
+    );
+    for end in ["applied", "failed"] {
+        works(
+            &s,
+            &format!(
+                "UPDATE changeset_action SET applying = 1;
+                 UPDATE changeset SET state = 'withdrawn';
+                 UPDATE changeset_action SET state = '{end}'"
+            ),
+        );
+    }
+    for other in [
+        "state = 'denied', decided_by = 'person', reason = 'No.'",
+        "state = 'in_review', decided_by = 'engine', rule = NULL, policy = NULL, reason = 'r'",
+        "applying = 0",
+    ] {
+        fails(
+            &s,
+            &format!(
+                "UPDATE changeset_action SET applying = 1;
+                 UPDATE changeset_action SET {other}"
+            ),
+        );
+    }
+    fails(
+        &s,
+        "UPDATE changeset SET state = 'withdrawn';
+         UPDATE changeset_action SET applying = 1",
+    );
+    fails(
+        &s,
+        "UPDATE changeset SET revision = 2, submitted_at = NULL;
+         INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, applying)
+         VALUES (1, 2, 1, 'archive', '{}', '{}', 1)",
+    );
     // A withdrawn changeset applies nothing more.
     fails(
         &s,

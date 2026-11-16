@@ -15,6 +15,10 @@
 //!    after each call.
 //! 4. Set the state `applied`, or `failed` after a clear refusal.
 //!
+//! Before step 2, the apply marks the action `applying` (migration 8). A
+//! withdraw then keeps it approved, and an apply again ends it, also in
+//! the mode `observe`.
+//!
 //! This release has no ledger (R2-03). Each verb here is idempotent, and
 //! step 2 reads the labels again at each apply. So after HTTP 401 or an
 //! unknown result, the action stays `approved`, and the next apply makes
@@ -24,7 +28,7 @@
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
 use iris_store::{format_id, Kind, Store};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug)]
@@ -35,7 +39,8 @@ pub enum Error {
     /// or a read that failed. An apply again is safe.
     Gmail(iris_gmail::Error),
     /// The action is not `approved`: it does not exist, or another write
-    /// changed its state (for example a withdraw during the apply).
+    /// changed its state before its first provider call (for example a
+    /// withdraw).
     NotApproved(i64),
     /// The verb has no Gmail apply yet: `label` and `unlabel` (issue #164)
     /// and the state verbs.
@@ -159,51 +164,34 @@ pub fn apply(
     account: i64,
     action: i64,
 ) -> Result<Outcome> {
-    let head: Option<(String, Option<String>, String)> = store.read(|c| {
+    let head: Option<(String, Option<String>, String, bool)> = store.read(|c| {
         Ok(c.query_row(
-            "SELECT verb, hash, decided_by FROM changeset_action
+            "SELECT verb, hash, decided_by, applying FROM changeset_action
              WHERE id = ?1 AND state = 'approved'",
             [action],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?)
     })?;
-    let (verb, approved_hash, decided_by) = head.ok_or(Error::NotApproved(action))?;
+    let (verb, approved_hash, decided_by, applying) = head.ok_or(Error::NotApproved(action))?;
     let change = Change::of(&verb).ok_or(Error::Verb(verb))?;
-
-    let active = store.read(iris_policy::active)?;
-    if active.policy.mode == Mode::Observe {
-        return Ok(Outcome::Waiting);
+    // The calls of an earlier apply started: the checks passed then, and
+    // the action ends as applied or failed (migration 8), in each mode.
+    if !applying {
+        if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
+            return Ok(o);
+        }
     }
-    // Section 5.4 evaluates a rule approval again before the apply, with
-    // the bulk count of the last hour from the ledger. With no ledger, the
-    // count is not known, so only a person approves an apply.
-    // shortcut: each rule approval goes to review; evaluate it again with
-    // the ledger (issue #168).
-    if decided_by == "rule" {
-        let reason = "A person must approve the action: Iris cannot check the rule again \
-                      before the ledger exists.";
-        decide(store, action, "in_review", reason)?;
-        return Ok(Outcome::Review(reason.into()));
-    }
-    let other_account: bool = store.read(|c| {
-        Ok(c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM action_message am JOIN message m ON m.id = am.message_id
-               WHERE am.action_id = ?1 AND m.account_id <> ?2)",
-            params![action, account],
-            |r| r.get(0),
+    let marked = store.write(|tx| {
+        Ok(tx.execute(
+            "UPDATE changeset_action SET applying = 1 WHERE id = ?1 AND state = 'approved'
+               AND (applying = 1 OR (SELECT state FROM changeset c WHERE c.id = changeset_id)
+                                    <> 'withdrawn')",
+            [action],
         )?)
     })?;
-    let reason = if store.read(|c| Ok(hash(c, action)?))? != approved_hash.unwrap_or_default() {
-        Some("The action changed after its approval.")
-    } else if other_account {
-        Some("The action has messages of another account.")
-    } else {
-        None
-    };
-    if let Some(reason) = reason {
-        decide(store, action, "denied", reason)?;
-        return Ok(Outcome::Denied(reason.into()));
+    if marked == 0 {
+        return Err(Error::NotApproved(action));
     }
 
     let mut counts = Counts::default();
@@ -226,19 +214,24 @@ pub fn apply(
             break;
         };
         after = last;
-        let mut todo: Vec<(i64, String)> = Vec::new();
+        // The messages to change, with their labels at Gmail. The mirror
+        // gets the labels of each other message as Gmail gave them.
+        let mut todo: Vec<(i64, String, Vec<String>)> = Vec::new();
+        let mut same: Vec<(i64, Vec<String>)> = Vec::new();
         for (id, provider_id) in page {
             let Some(provider_id) = provider_id else {
                 counts.gone.push(id);
                 continue;
             };
             match gmail.minimal(token, &provider_id) {
-                Ok(m) if change.needed(&m.label_ids) => todo.push((id, provider_id)),
-                Ok(_) => counts.unchanged += 1,
+                Ok(m) if change.needed(&m.label_ids) => todo.push((id, provider_id, m.label_ids)),
+                Ok(m) => same.push((id, m.label_ids)),
                 Err(iris_gmail::Error::NotFound) => counts.gone.push(id),
                 Err(e) => return Err(Error::Gmail(e)),
             }
         }
+        counts.unchanged += same.len() as u64;
+        mirror(store, account, &same);
         if let Err(e) = change_page(store, gmail, token, account, &change, &todo, &mut counts) {
             if e.write_result_unknown() || matches!(e, iris_gmail::Error::Unauthorized) {
                 return Err(Error::Gmail(e));
@@ -254,6 +247,53 @@ pub fn apply(
     Ok(Outcome::Applied(counts))
 }
 
+/// The checks before the first provider call of an action. Gives the
+/// outcome if the action does not apply now.
+fn check(
+    store: &Store,
+    account: i64,
+    action: i64,
+    decided_by: &str,
+    approved_hash: Option<String>,
+) -> Result<Option<Outcome>> {
+    let active = store.read(iris_policy::active)?;
+    if active.policy.mode == Mode::Observe {
+        return Ok(Some(Outcome::Waiting));
+    }
+    // Section 5.4 evaluates a rule approval again before the apply, with
+    // the bulk count of the last hour from the ledger. With no ledger, the
+    // count is not known, so only a person approves an apply.
+    // shortcut: each rule approval goes to review; evaluate it again with
+    // the ledger (issue #168).
+    if decided_by == "rule" {
+        let reason = "A person must approve the action: Iris cannot check the rule again \
+                      before the ledger exists.";
+        decide(store, action, "in_review", reason)?;
+        return Ok(Some(Outcome::Review(reason.into())));
+    }
+    let other_account: bool = store.read(|c| {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM action_message am JOIN message m ON m.id = am.message_id
+               WHERE am.action_id = ?1 AND m.account_id <> ?2)",
+            params![action, account],
+            |r| r.get(0),
+        )?)
+    })?;
+    let reason = if store.read(|c| Ok(hash(c, action)?))? != approved_hash.unwrap_or_default() {
+        Some("The action changed after its approval.")
+    } else if other_account {
+        Some("The action has messages of another account.")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        decide(store, action, "denied", reason)?;
+        return Ok(Some(Outcome::Denied(reason.into())));
+    }
+
+    Ok(None)
+}
+
 /// The provider calls of one page, each with its mirror write.
 fn change_page(
     store: &Store,
@@ -261,21 +301,13 @@ fn change_page(
     token: &str,
     account: i64,
     change: &Change,
-    todo: &[(i64, String)],
+    todo: &[(i64, String, Vec<String>)],
     counts: &mut Counts,
 ) -> std::result::Result<(), iris_gmail::Error> {
-    let mirror = |f: &dyn Fn(&Transaction) -> rusqlite::Result<()>| {
-        // The provider made the change, so a store error here is fatal for
-        // the mirror only: the next sync writes the labels from Gmail.
-        let _ = store.write(|tx| Ok(f(tx)?));
-    };
     if change.trash {
-        for (id, provider_id) in todo {
+        for (id, provider_id, _) in todo {
             let m = gmail.trash(token, provider_id)?;
-            mirror(&|tx| {
-                tx.execute("DELETE FROM message_label WHERE message_id = ?1", [id])?;
-                add_labels(tx, account, *id, &m.label_ids)
-            });
+            mirror(store, account, &[(*id, m.label_ids)]);
             counts.changed += 1;
         }
         return Ok(());
@@ -283,41 +315,48 @@ fn change_page(
     if todo.is_empty() {
         return Ok(());
     }
-    let ids: Vec<&str> = todo.iter().map(|(_, p)| p.as_str()).collect();
+    let ids: Vec<&str> = todo.iter().map(|(_, p, _)| p.as_str()).collect();
     gmail.batch_modify(token, &ids, change.add, change.remove)?;
-    mirror(&|tx| {
-        let mut remove = tx.prepare_cached(
-            "DELETE FROM message_label WHERE message_id = ?1 AND label_id IN
-               (SELECT id FROM label WHERE account_id = ?2 AND provider_id = ?3)",
-        )?;
-        for (id, _) in todo {
-            add_labels(tx, account, *id, change.add)?;
-            for l in change.remove {
-                remove.execute(params![id, account, l])?;
-            }
-        }
-        Ok(())
-    });
+    // The labels after the call: the labels of step 2 with the change.
+    let after: Vec<(i64, Vec<String>)> = todo
+        .iter()
+        .map(|(id, _, labels)| {
+            let mut l: Vec<String> = labels
+                .iter()
+                .filter(|l| !change.remove.contains(&l.as_str()))
+                .cloned()
+                .collect();
+            l.extend(change.add.iter().map(|a| a.to_string()));
+            (*id, l)
+        })
+        .collect();
+    mirror(store, account, &after);
     counts.changed += todo.len() as u64;
     Ok(())
 }
 
-/// Add labels to a message of the mirror. A label that the store does not
-/// have adds no row (specification 1, section 4.3).
-fn add_labels(
-    tx: &Transaction,
-    account: i64,
-    message: i64,
-    labels: &[impl AsRef<str>],
-) -> rusqlite::Result<()> {
-    let mut st = tx.prepare_cached(
-        "INSERT OR IGNORE INTO message_label(message_id, label_id)
-         SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
-    )?;
-    for l in labels {
-        st.execute(params![message, account, l.as_ref()])?;
+/// Write the labels of messages to the mirror, in one transaction. A label
+/// that the store does not have adds no row (specification 1, section
+/// 4.3). The provider made the change, so a store error here loses only
+/// the mirror write: the next sync writes the labels from Gmail.
+fn mirror(store: &Store, account: i64, messages: &[(i64, Vec<String>)]) {
+    if messages.is_empty() {
+        return;
     }
-    Ok(())
+    let _ = store.write(|tx| {
+        let mut clear = tx.prepare_cached("DELETE FROM message_label WHERE message_id = ?1")?;
+        let mut add = tx.prepare_cached(
+            "INSERT OR IGNORE INTO message_label(message_id, label_id)
+             SELECT ?1, id FROM label WHERE account_id = ?2 AND provider_id = ?3",
+        )?;
+        for (id, labels) in messages {
+            clear.execute([id])?;
+            for l in labels {
+                add.execute(params![id, account, l])?;
+            }
+        }
+        Ok(())
+    });
 }
 
 /// Move an approved action to `applied` or `failed`. The decision that
