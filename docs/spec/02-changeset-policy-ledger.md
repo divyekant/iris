@@ -613,17 +613,22 @@ changes:
   change items, not mail.
 - A candidate is one verb and one condition: the `sender` address or the
   `sender_kind` that each message of one approved action has. An action on
-  hostile mail gives no candidate, and `hostile` is never a candidate.
+  hostile mail (a hostile mark, or a sender of the kind `hostile`) gives no
+  candidate, and `hostile` is never a candidate.
 - The candidate rule is added to the active policy. An action counts for it
   only when the rule changes the decision of that action to approved
-  (section 6.4). The engine proposes the rule when 10 or more approvals
-  count and no refusal counts.
+  (section 6.4), with the author, the job and the flag `bulk` of the
+  action. The engine proposes the rule when 10 or more approvals count and
+  no refusal counts.
 - A refusal that the engine cannot read again (a message row is gone)
   stops each proposal of its verb.
 - The person accepts or dismisses a proposal in the web client. An accept
   is a change of section 6.3: the engine adds the rule at the end of the
   file, with the next rule ID, `by = "proposal"`, the date and a comment,
-  and marks the row `accepted` in the same transaction. A dismiss changes
+  and marks the row `accepted` in the same transaction. The accept runs the
+  same count again in that transaction. If a decision after the last pass
+  breaks the pattern, the accept adds nothing and the web client gets a
+  409. A dismiss changes
   no file. Iris never proposes an accepted or a dismissed rule again.
 - An open row that no longer has the pattern goes away.
 

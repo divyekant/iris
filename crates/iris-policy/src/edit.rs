@@ -93,7 +93,7 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
             _ => return Ok(Edited::FileChanged),
         }
         let added = match change {
-            Change::Accept(id) => match crate::propose::get(tx, id)? {
+            Change::Accept(id) => match crate::propose::current(tx, id, now)? {
                 Some(p) => Some((
                     id,
                     p.rule(crate::next_rule_id(tx)?, &crate::propose::date(now)),

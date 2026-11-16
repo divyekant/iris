@@ -300,3 +300,59 @@ fn each_proposal_agrees_with_the_decisions() {
     }
     assert!(proposed > 0, "the test makes no proposal");
 }
+
+#[test]
+fn an_accept_after_a_new_refusal_adds_nothing() {
+    let (dir, store) = store("stale");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided(&store, "archive", &[m], "approved");
+    }
+    let p = find(&refresh(&store), "deals@shop.example").unwrap().id;
+    // The refusal comes before the next pass.
+    let m = message(&store, "deals@shop.example", false);
+    decided(&store, "archive", &[m], "denied");
+    assert_eq!(
+        change(&store, None, Change::Accept(p), NOW).unwrap(),
+        Edited::NoRule
+    );
+    assert!(!dir.0.join(FILE).exists());
+}
+
+#[test]
+fn a_hostile_sender_kind_gives_no_proposal() {
+    let (_dir, store) = store("hostile-kind");
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind) VALUES ('bad@far.example', 'hostile')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "bad@far.example", false);
+        decided(&store, "archive", &[m], "approved");
+    }
+    assert!(refresh(&store).is_empty());
+}
+
+#[test]
+fn bulk_approvals_do_not_count() {
+    let (_dir, store) = store("bulk");
+    for _ in 0..MIN_APPROVALS {
+        let m = message(&store, "deals@shop.example", false);
+        decided(&store, "archive", &[m], "approved");
+    }
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE changeset_action SET flags = '[\"bulk\"]' WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(find(&refresh(&store), "deals@shop.example").is_none());
+}

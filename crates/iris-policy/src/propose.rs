@@ -100,6 +100,27 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Proposal>> {
     Ok(open(conn)?.into_iter().find(|p| p.id == id))
 }
 
+/// The open proposal `id`, only if the decisions of now still give it
+/// (the same pass as [`refresh`]), with the count of now. A decision that
+/// came after the last pass can make a proposal stale: the accept of
+/// [`crate::change`] calls this in its transaction, so it never adds a rule
+/// that a refusal contradicts.
+pub(crate) fn current(tx: &Connection, id: i64, now: i64) -> Result<Option<Proposal>> {
+    let Some(mut p) = get(tx, id)? else {
+        return Ok(None);
+    };
+    let (cond, value) = match (&p.when.sender, p.when.sender_kind) {
+        (Some(s), _) => ("sender", s.clone()),
+        (None, Some(k)) => ("sender_kind", k.name().to_string()),
+        (None, None) => return Ok(None),
+    };
+    let key = (p.verb.name().to_string(), cond.to_string(), value);
+    Ok(pass(tx, now)?.get(&key).map(|&n| {
+        p.approvals = n;
+        p
+    }))
+}
+
 /// Marks the open proposal `id` as accepted with the rule `rule`. Only the
 /// accept of [`crate::change`] calls this, in its transaction.
 pub(crate) fn accepted(tx: &Connection, id: i64, rule: u32, now: i64) -> Result<bool> {
@@ -183,6 +204,8 @@ struct Decided {
     verb: Verb,
     author: Author,
     job: Option<String>,
+    /// The flag `bulk` of the action (spec 2, section 5.3).
+    bulk: bool,
     /// True for an approval by the person, false for a denial or an undo.
     approved: bool,
     messages: Vec<Facts>,
@@ -206,7 +229,7 @@ fn pass(tx: &Connection, now: i64) -> Result<BTreeMap<Key, i64>> {
     // a rule from it, even one that the hard limits allow.
     for a in actions
         .iter()
-        .filter(|a| a.approved && !a.messages.iter().any(|m| m.hostile))
+        .filter(|a| a.approved && !a.messages.iter().any(|m| kind(m) == SenderKind::Hostile))
     {
         if let Some(s) = same(&a.messages, |m| {
             crate::check_sender(m.sender.clone())
@@ -245,7 +268,7 @@ fn pass(tx: &Connection, now: i64) -> Result<BTreeMap<Key, i64>> {
                 verb,
                 author: a.author,
                 job: a.job.as_deref(),
-                bulk: false,
+                bulk: a.bulk,
                 now,
             };
             let allow = |p: &Policy| {
@@ -273,7 +296,8 @@ fn pass(tx: &Connection, now: i64) -> Result<BTreeMap<Key, i64>> {
 /// [`VERBS`] that the person approved, denied or that was undone.
 fn decided(tx: &Connection, now: i64) -> Result<Vec<Decided>> {
     let mut st = tx.prepare(
-        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job
+        "SELECT a.id, a.verb, a.state, c.author_kind, c.author_job,
+                EXISTS (SELECT 1 FROM json_each(a.flags) WHERE value = 'bulk')
          FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
          WHERE a.verb IN ('archive', 'read', 'unread', 'inbox', 'trash')
            AND c.author_kind <> 'person'
@@ -282,16 +306,24 @@ fn decided(tx: &Connection, now: i64) -> Result<Vec<Decided>> {
                 OR a.state = 'undone')
          ORDER BY a.id DESC LIMIT ?1",
     )?;
-    let rows: Vec<(i64, String, String, String, Option<String>)> = st
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(i64, String, String, String, Option<String>, bool)> = st
         .query_map([MAX_ACTIONS as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let mut ids =
         tx.prepare_cached("SELECT message_id FROM action_message WHERE action_id = ?1")?;
     let mut out = Vec::new();
     let mut blocked = BTreeSet::new();
-    for (id, verb, state, author, job) in rows {
+    for (id, verb, state, author, job, bulk) in rows {
         let (Some(verb), Some(author)) = (Verb::from_name(&verb), Author::from_name(&author))
         else {
             continue;
@@ -321,6 +353,7 @@ fn decided(tx: &Connection, now: i64) -> Result<Vec<Decided>> {
             verb,
             author,
             job,
+            bulk,
             approved,
             messages,
         });
