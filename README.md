@@ -123,6 +123,20 @@ calls run only inside an approved budget (see "Understand the mail").
 The text of a message is data. `iris show` removes the control characters, so
 a message cannot send commands to your terminal.
 
+## Watch for a mail
+
+A watch tells you one time when a new mail matches a search text.
+
+| Command | Does |
+|---|---|
+| `iris watch add "<text>"` | Starts a watch, for example `iris watch add "visa from:embassy"`. The text uses the syntax of `iris search`. |
+| `iris watch list` | Shows each watch. A watch `waits`, or it `arrived` with the mail that matched. |
+| `iris watch remove <id>` | Removes the watch (`w-3`). |
+
+Test the text with `iris search` first. Only mail that arrives after the
+watch can match. `iris serve` checks each minute. Mail that you send, drafts
+and hostile mail never match.
+
 ## Understand the mail
 
 The understanding step reads each message once and stores its items. Fixed

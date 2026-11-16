@@ -40,6 +40,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
+| `/api/watches` | `[watch]`, newest first. A watch is `{"id", "text", "created", "state", "arrived", "message"}`. `state` is `waits`, or `arrived` after its one notice. `message` is the summary of the first new message that matched, or `null` while the watch waits or when the message is gone. See [Watches](#watches). |
 
 A message summary is `{"id", "thread", "date", "from": {"name", "address"},
 "subject", "labels"}`.
@@ -200,3 +201,18 @@ another site cannot read the API through DNS rebinding. A request with no
 A dev server of the client must forward `/api` with the `Host` and the
 `Origin` of the engine (in Vite: `changeOrigin: true`, and set `Origin` to the
 target in `headers`).
+
+## Watches
+
+A watch is a search text (specification 1, section 5.6) that gives one notice
+when a new mail matches (card R5-07, `docs/specs/2026-11-16-watch.md`).
+
+| Route | Effect |
+|---|---|
+| `POST /api/watches` | Body `{"text"}`. Adds a watch and gives it with the status 201. An empty text, a text over 500 characters, a text that is not a valid search, or a 101st watch that waits is a 400. |
+| `POST /api/watches/{id}/remove` | Removes the watch (`w-3`) and gives `{"removed"}`. A watch that is not there is a 404. An ID that is not a `w-` ID is a 400. |
+
+Only a message that the mirror gets after the watch can match. It must also
+have its clean text, no hostile mark, no hostile sender, no label `SENT` or
+`DRAFT`, and a date at most 1 hour before the watch. The engine checks each
+minute. Each watch matches one time only.
