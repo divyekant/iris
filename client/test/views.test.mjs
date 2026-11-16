@@ -138,7 +138,9 @@ test("the setup flow says mirror ready and that nothing changed", async () => {
 test("an item shows the quote of its mail first, its fields, and opens each source mail", async () => {
   const html = await render("/src/views/Item.svelte", { item: item("v-88"), now: NOW });
   const t = text(html);
-  assert.ok(t.indexOf("Dinner on Thursday? Sam Ortiz, in the mail that made this item") < t.indexOf("With Sam Ortiz"));
+  // The client does not know who wrote the origin mail, so the caption names no sender.
+  assert.ok(t.indexOf("Dinner on Thursday? From the mail that made this item") < t.indexOf("With Sam Ortiz"));
+  assert.doesNotMatch(t, /Sam Ortiz, in the mail/);
   assert.match(t, /Next step Your reply/);
   for (const m of ["m-55380", "m-55390", "m-55400"]) assert.match(html, new RegExp(`href="#/mail/${m}"`));
 });
@@ -324,6 +326,18 @@ test("due dates read as words, with a tone for soon and late", async () => {
   assert.deepEqual(due(at("2026-11-17"), now), { text: "due tomorrow", tone: "soon" });
   assert.deepEqual(due(at("2026-11-26"), now), { text: "due in 10 days", tone: "" });
   assert.deepEqual(due(at("2026-11-14"), now), { text: "was due 2 days ago", tone: "late" });
+  // A due time earlier today has passed.
+  const time = (value) => ({ ...item("c-311"), due: { at: value } });
+  assert.deepEqual(due(time(new Date(2026, 10, 16, 9).toISOString()), now), { text: "was due today", tone: "late" });
+  assert.deepEqual(due(time(new Date(2026, 10, 16, 18).toISOString()), now), { text: "due today", tone: "soon" });
+});
+
+test("a conversation line names a party that is not you", async () => {
+  const { other } = await load("/src/format.ts");
+  const talk = item("v-88");
+  const sam = talk.participants.find((p) => p.kind !== "self");
+  assert.deepEqual(other({ ...talk, latest: { ...talk.latest, from: { kind: "self" } } }), sam);
+  assert.deepEqual(other(talk), talk.latest.from);
 });
 
 test("the API client asks for the sign-in address on 401 and gives the API error text", async () => {
