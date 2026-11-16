@@ -514,6 +514,56 @@ fn section_sql(now: i64) -> [(String, String); 6] {
     [you_owe, owed, conversations, feed, signals, strangers]
 }
 
+/// The terms of an `ORDER BY` list: each expression, and true for `DESC`.
+/// A comma inside parentheses is part of its term.
+fn sort_keys(order: &str) -> Vec<(String, bool)> {
+    let (mut keys, mut depth, mut start) = (Vec::new(), 0, 0);
+    let mut push = |term: &str| {
+        let term = term.trim();
+        keys.push(match term.strip_suffix(" DESC") {
+            Some(k) => (k.trim().to_string(), true),
+            None => (term.to_string(), false),
+        });
+    };
+    for (i, ch) in order.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                push(&order[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push(&order[start..]);
+    keys
+}
+
+/// A condition true for a row that sorts after the row whose sort keys are
+/// the parameters `?1`, `?2`, ... In SQLite, NULL sorts first with `ASC`
+/// and last with `DESC`.
+fn seek_sql(keys: &[(String, bool)]) -> String {
+    (0..keys.len())
+        .map(|i| {
+            let mut terms: Vec<String> = keys[..i]
+                .iter()
+                .enumerate()
+                .map(|(j, (k, _))| format!("({k}) IS ?{}", j + 1))
+                .collect();
+            let (k, desc) = &keys[i];
+            let n = i + 1;
+            terms.push(if *desc {
+                format!("(({k}) IS NULL AND ?{n} IS NOT NULL OR ({k}) < ?{n})")
+            } else {
+                format!("(?{n} IS NULL AND ({k}) IS NOT NULL OR ({k}) > ?{n})")
+            });
+            format!("({})", terms.join(" AND "))
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// One page of a list section of the brief: `limit` items after the item row
 /// `after` (from the start with `None`), in the order of the brief.
 fn read_section(
@@ -534,17 +584,37 @@ fn read_section(
         [],
         |r| r.get(0),
     )?;
-    // The cursor item takes its place in the order also when it left the
-    // section, so an item that leaves between two pages moves no other item.
+    // Seek past the sort keys of the cursor item, so SQLite keeps only
+    // `limit` rows in its sort. The cursor item has a place in the order
+    // also when it left the section, so a change between two pages moves
+    // no other item.
+    let keys = sort_keys(order);
+    let (seek, values) = match after {
+        None => ("1".to_string(), Vec::new()),
+        Some(row) => {
+            let list = keys
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let values = c.query_row(
+                &format!("SELECT {list} FROM item WHERE id = ?1"),
+                [row],
+                |r| {
+                    (0..keys.len())
+                        .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                },
+            )?;
+            (seek_sql(&keys), values)
+        }
+    };
     let mut st = c.prepare(&format!(
-        "WITH s AS (SELECT id, form, status, doc, row_number() OVER (ORDER BY {order}) AS n
-                    FROM item WHERE ({shown}) OR id IS ?1)
-         SELECT id, form, status, doc FROM s
-         WHERE id IS NOT ?1 AND n > coalesce((SELECT n FROM s WHERE id IS ?1), 0)
-         ORDER BY n LIMIT {limit}"
+        "SELECT id, form, status, doc FROM item WHERE ({shown}) AND ({seek})
+         ORDER BY {order} LIMIT {limit}"
     ))?;
     let items = st
-        .query_map([after], doc_of)?
+        .query_map(rusqlite::params_from_iter(values), doc_of)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut duplicates = serde_json::Map::new();
     // Only a duplicate that this section would show is part of the pair.
