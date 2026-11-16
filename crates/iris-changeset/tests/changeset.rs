@@ -208,6 +208,8 @@ fn submit_denies_an_action_that_is_not_valid() {
             (33, r#"{"messages":[]}"#, "{}"),
             (35, r#"{"messages":["m-1"]}"#, " { } "),
             (36, r#"{"messages":["m-1"]}"#, r#""x""#),
+            (37, r#"{"messages":["m-1","m-1"]}"#, "{}"),
+            (38, r#"{"messages":["m-01"]}"#, "{}"),
         ] {
             tx.execute(
                 "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
@@ -1093,13 +1095,13 @@ fn label_takes_one_user_label() {
     s.write(|tx| {
         Ok(tx.execute(
             "INSERT INTO label(account_id, provider_id, name, kind)
-             VALUES (1, 'Label_9', 'Muted', 'system')",
+             VALUES (1, 'Label_9', 'Muted', 'system'), (1, 'Label_10', 'Épinglé', 'system')",
             [],
         )?)
     })
     .unwrap();
     let cs = create(&s, &agent(), NOW).unwrap();
-    let cases: [(Verb, Value, bool); 16] = [
+    let cases: [(Verb, Value, bool); 18] = [
         (Verb::Label, json!({"label": "Finance"}), true),
         (Verb::Unlabel, json!({"label": "Finance"}), true),
         // A new label: the apply makes it (section 7.2).
@@ -1117,6 +1119,9 @@ fn label_takes_one_user_label() {
         (Verb::Label, json!({"name": "Finance"}), false),
         (Verb::Unlabel, json!({"label": ["Finance"]}), false),
         (Verb::Unlabel, json!({"label": "SENT"}), false),
+        // No regard to case, also outside ASCII.
+        (Verb::Label, json!({"label": "épinglé"}), false),
+        (Verb::Label, json!({"label": "ÉPINGLÉ"}), false),
     ];
     for (verb, a, _) in &cases {
         add_action(&s, cs, &agent(), *verb, &["t-1"], &args(a.clone()), None).unwrap();
@@ -1130,4 +1135,33 @@ fn label_takes_one_user_label() {
             assert_eq!(d["resolved"]["messages"], json!(["m-1", "m-2"]), "{d}");
         }
     }
+}
+
+/// An action names each target once: two spellings of one ID are one
+/// target. The check is linear: 200,000 targets take well under a second.
+#[test]
+fn an_action_names_each_target_once() {
+    let dir = TempDir::new("once");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for targets in [
+        &["m-1", "m-1"][..],
+        &["m-1", "m-01"],
+        &["t-2", "t-1", "t-02"],
+    ] {
+        refused(add_action(
+            &s,
+            cs,
+            &agent(),
+            Verb::Archive,
+            targets,
+            &Map::new(),
+            None,
+        ));
+    }
+    let many: Vec<String> = (1..=200_000).map(|n| format!("m-{n}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let start = std::time::Instant::now();
+    add_action(&s, cs, &agent(), Verb::Archive, &many, &Map::new(), None).unwrap();
+    assert!(start.elapsed().as_secs() < 10, "{:?}", start.elapsed());
 }

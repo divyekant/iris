@@ -17,6 +17,7 @@
 //! resolves them with `INSERT ... SELECT`, and [`write_document`] streams
 //! them, so no list of message IDs is in memory (section 9).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::io::Write;
 
@@ -316,6 +317,8 @@ fn targets_json(targets: &[&str]) -> Result<String> {
     let mut group = None;
     let mut first = None;
     let mut ids = Vec::with_capacity(targets.len());
+    // One kind for all targets, so the row ID names one target.
+    let mut seen = HashSet::with_capacity(targets.len());
     for t in targets {
         let (kind, row) = parse_id(t).ok_or_else(|| refused(format!("{t:?} is not an ID")))?;
         let g = match kind {
@@ -329,11 +332,10 @@ fn targets_json(targets: &[&str]) -> Result<String> {
         }
         first = Some(kind);
         group = Some(g);
-        let id = Value::String(format_id(kind, row));
-        if ids.contains(&id) {
+        if !seen.insert(row) {
             return Err(refused(format!("{t} is a target two times")));
         }
-        ids.push(id);
+        ids.push(Value::String(format_id(kind, row)));
     }
     let g = group.ok_or_else(|| refused("an action needs a target".into()))?;
     Ok(Value::Object(Map::from_iter([(g.to_string(), Value::Array(ids))])).to_string())
@@ -618,17 +620,17 @@ fn label_name(
             ))
         }
     };
-    // `upper` of SQLite changes only ASCII letters, so both sides use the
-    // ASCII upper case.
-    let upper = name.to_ascii_uppercase();
-    let system = SYSTEM_LABELS.contains(&upper.as_str())
-        || upper.starts_with("CATEGORY_")
-        || c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM label WHERE kind = 'system'
-               AND (upper(name) = ?1 OR upper(provider_id) = ?1))",
-            [&upper],
-            |r| r.get(0),
-        )?;
+    // Unicode lower case on both sides: `upper` and `lower` of SQLite change
+    // only ASCII letters. The store has a few system labels for each account.
+    let lower = name.to_lowercase();
+    let mut system =
+        SYSTEM_LABELS.iter().any(|l| l.to_lowercase() == lower) || lower.starts_with("category_");
+    let mut st = c.prepare("SELECT name, provider_id FROM label WHERE kind = 'system'")?;
+    let mut rows = st.query([])?;
+    while let (false, Some(r)) = (system, rows.next()?) {
+        let (n, id): (String, String) = (r.get(0)?, r.get(1)?);
+        system = n.to_lowercase() == lower || id.to_lowercase() == lower;
+    }
     Ok(if system {
         Err(format!("{name} is a system label: use its own verb"))
     } else {
@@ -651,12 +653,13 @@ fn resolve(c: &Connection, action: i64, targets: &str) -> Result<Option<String>>
     if group != "threads" && group != "messages" {
         return Ok(Some("a mailbox verb takes threads or messages".into()));
     }
-    for (i, id) in ids.iter().enumerate() {
+    let mut seen = HashSet::with_capacity(ids.len());
+    for id in ids {
         let Some((kind, row)) = id.as_str().and_then(parse_id) else {
             return bad();
         };
         // The short form, once: the document shows the targets as stored.
-        if id.as_str() != Some(format_id(kind, row).as_str()) || ids[..i].contains(id) {
+        if id.as_str() != Some(format_id(kind, row).as_str()) || !seen.insert(id.as_str()) {
             return bad();
         }
         let found: bool = match (kind, group.as_str()) {
