@@ -390,3 +390,24 @@ fn a_message_that_fails_does_not_stop_the_first_sync() {
         1
     );
 }
+
+#[test]
+fn an_expired_h1_of_a_stopped_resync_starts_a_new_resync() {
+    let (fake, store, account) = synced("resync-h1", 17, 100);
+    assert!(fake.delete_message(&FakeGmail::id_of(6)));
+    fake.expire_history_before(latest(&fake));
+    let at_fake = fake.clone();
+    let cut = client(hook_proxy(fake.addr(), "format=minimal", move || {
+        at_fake.fail_next(&[401]);
+    }));
+    assert!(sync(&store, &cut, account, TOKEN).is_err());
+    assert_eq!(sync_state(&store).2, Some(RESYNC_GONE));
+    // H1 gets too old before the resync ends.
+    assert!(fake.modify_labels(&FakeGmail::id_of(2), &["STARRED"], &[]));
+    fake.expire_history_before(latest(&fake));
+
+    let s = sync(&store, &client(fake.base_url()), account, TOKEN).unwrap();
+    assert!(s.resync);
+    assert_eq!(sync_state(&store).0, None);
+    assert_eq!(mirror_state(&store), fake_state(&fake));
+}
