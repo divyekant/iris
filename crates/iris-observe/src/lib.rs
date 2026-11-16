@@ -92,7 +92,8 @@ impl Rule {
     }
 
     /// The message row IDs of the rule, minus the messages of earlier rules.
-    fn query(self) -> String {
+    /// Read the rules in one transaction, so no message is in two rules.
+    pub fn query(self) -> String {
         let mut q = self.select().to_string();
         for earlier in Rule::ALL.iter().take_while(|r| **r != self) {
             q.push_str(" EXCEPT ");
@@ -202,18 +203,6 @@ impl Write for Hasher {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-
-/// The message IDs of `rule` (`m-` short IDs), in order. Read them in the
-/// transaction of the other rules, so no message is in two lists.
-pub fn message_ids(
-    c: &rusqlite::Connection,
-    rule: Rule,
-    account: i64,
-) -> iris_store::Result<Vec<String>> {
-    let mut st = c.prepare(&format!("{} ORDER BY 1", rule.query()))?;
-    let ids = st.query_map([account], |r| Ok(format_id(Kind::Message, r.get(0)?)))?;
-    Ok(ids.collect::<rusqlite::Result<_>>()?)
 }
 
 fn write_ids(

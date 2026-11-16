@@ -3,11 +3,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use iris_changeset::{add_action, create, Verb};
 use iris_observe::Rule;
 use iris_store::{NewMessage, Store};
-use iris_triage::{author, run, Outcome, WHY};
-use serde_json::Map;
+use iris_triage::{run, Outcome, CHUNK, WHY};
 
 struct TempDir(PathBuf);
 
@@ -169,36 +167,125 @@ fn new_revision_only_on_change() {
     assert_eq!(rows[1].5, r#"{"messages":["m-1","m-4"]}"#);
 }
 
-/// A run that stopped before its submit left a draft with actions. The next
-/// run submits it, and its own revision replaces those actions.
+/// A failure in a run writes nothing: no changeset and no draft stay.
 #[test]
-fn a_stopped_run_is_finished_and_replaced() {
-    let dir = TempDir::new("draft");
+fn a_failed_run_writes_nothing() {
+    let dir = TempDir::new("fail");
     let (s, a) = store(&dir);
     item(&s, a, "record", "g2");
-    let who = author(a);
-    let cs = create(&s, &who, NOW).unwrap();
-    add_action(
-        &s,
-        cs,
-        &who,
-        Verb::Archive,
-        &["m-3"],
-        &Map::new(),
-        Some("old"),
-    )
+    s.write(|tx| {
+        tx.execute_batch(
+            "CREATE TRIGGER test_fail BEFORE INSERT ON changeset_action
+             BEGIN SELECT RAISE(ABORT, 'test'); END;",
+        )?;
+        Ok(())
+    })
     .unwrap();
+    assert!(run(&s, a, NOW).is_err());
+    let n: i64 = s
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM changeset", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(n, 0);
+    s.write(|tx| Ok(tx.execute_batch("DROP TRIGGER test_fail")?))
+        .unwrap();
+    assert!(matches!(run(&s, a, NOW).unwrap(), Outcome::Submitted { revision: 1, .. }));
+}
+
+/// Two runs at the same time, also from two store handles (two
+/// processes), make at most one open triage changeset.
+#[test]
+fn concurrent_runs_make_one_changeset() {
+    let dir = TempDir::new("race");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    drop(s);
+    let threads: Vec<_> = (0..4)
+        .map(|i| {
+            let path = dir.0.clone();
+            std::thread::spawn(move || {
+                let s = Store::open(&path).unwrap();
+                // A run that loses the race to the write lock gives an error.
+                let _ = run(&s, a, NOW + i);
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let s = Store::open(&dir.0).unwrap();
+    let n: i64 = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM changeset WHERE author_kind = 'triage'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(n <= 1, "{n} changesets");
+    assert!(matches!(
+        run(&s, a, NOW + 9).unwrap(),
+        Outcome::Same { .. } | Outcome::Submitted { revision: 1, .. }
+    ));
+}
+
+/// A large rule gives one action for each CHUNK messages, and a second run
+/// sees the same proposal. An empty proposal leaves the open actions.
+#[test]
+fn large_rule_is_split_and_empty_keeps_open_actions() {
+    let dir = TempDir::new("large");
+    let s = Store::open(&dir.0).unwrap();
+    let a = s.add_account("gmail", "owner@example.com").unwrap();
+    s.put_labels(a, &[("INBOX", "INBOX", "system")]).unwrap();
+    let msgs: Vec<NewMessage> = (0..=CHUNK)
+        .map(|i| NewMessage {
+            provider_id: format!("g{i}"),
+            thread_provider_id: format!("t{i}"),
+            labels: vec!["INBOX".into()],
+            ..Default::default()
+        })
+        .collect();
+    s.put_messages(a, &msgs).unwrap();
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+               SELECT 'feed', account_id, 'new', '{}', 0, 0 FROM message;
+             INSERT INTO item_source(item_id, message_id, role)
+               SELECT id, id, 'origin' FROM item;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
+        panic!("a proposal");
+    };
+    let rows = actions(&s, changeset);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].5, format!(r#"{{"messages":["m-{}"]}}"#, CHUNK + 1));
+    assert_eq!(run(&s, a, NOW + 1).unwrap(), Outcome::Same { changeset });
+    // The feed items go away: the proposal is empty.
+    s.write(|tx| Ok(tx.execute_batch("UPDATE item SET status = 'gone'")?))
+        .unwrap();
+    assert_eq!(run(&s, a, NOW + 2).unwrap(), Outcome::Same { changeset });
+    assert_eq!(actions(&s, changeset).len(), 2);
+}
+
+/// A smaller proposal is a change too.
+#[test]
+fn fewer_actions_give_a_new_revision() {
+    let dir = TempDir::new("fewer");
+    let (s, a) = store(&dir);
+    item(&s, a, "feed", "g1");
+    item(&s, a, "record", "g2");
+    let Outcome::Submitted { changeset, .. } = run(&s, a, NOW).unwrap() else {
+        panic!("a proposal");
+    };
+    s.write(|tx| Ok(tx.execute_batch("UPDATE item SET status = 'gone' WHERE form = 'record'")?))
+        .unwrap();
     assert_eq!(
         run(&s, a, NOW + 1).unwrap(),
-        Outcome::Submitted {
-            changeset: cs,
-            revision: 2
-        }
+        Outcome::Submitted { changeset, revision: 2 }
     );
-    let rows = actions(&s, cs);
-    assert_eq!(rows[0].4.as_deref(), Some("replaced"));
-    assert_eq!(rows[1].3.as_deref(), Some(Rule::Record.why()));
-    assert_eq!(rows[1].4.as_deref(), Some("proposed"));
 }
 
 /// Each account gets its own changeset: one action changes one account.
