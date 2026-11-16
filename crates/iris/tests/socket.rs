@@ -491,4 +491,93 @@ fn a_large_document_streams_and_a_stalled_reader_frees_its_slot() {
         start.elapsed()
     );
     drop(stalled);
+    // A peer that reads slowly but without a stop also holds the slot only
+    // until the deadline of the whole answer.
+    let mut slow = UnixStream::connect(d.join(socket::SOCKET)).unwrap();
+    slow.write_all(
+        format!("{{\"v\":1,\"verb\":\"show\",\"args\":{{\"changeset\":\"{id}\"}}}}\n").as_bytes(),
+    )
+    .unwrap();
+    std::thread::spawn(move || {
+        let mut b = [0u8; 64];
+        while std::io::Read::read(&mut slow, &mut b).unwrap_or(0) > 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let start = std::time::Instant::now();
+    let list = socket::request_with(&d, "drafts", json!({}), Duration::from_secs(5)).unwrap();
+    assert_eq!(list, json!({ "changesets": [id] }));
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_request_over_64_kib_gives_code_2_before_the_connect() {
+    let d = dir("big");
+    std::fs::create_dir_all(&d).unwrap();
+    // No engine: code 2 comes before code 4.
+    let e = socket::request(&d, "add", json!({ "why": "w".repeat(socket::MAX_LINE) })).unwrap_err();
+    assert_eq!(e.code, code::USAGE, "{e}");
+    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .arg("--data")
+        .arg(&d)
+        .args(["close", "c-1", "--why", &"w".repeat(socket::MAX_LINE)])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+/// Random answer lines: the parser never gives success without the result
+/// shape of the verb, and never a code outside 1 to 5.
+#[test]
+fn an_answer_that_is_not_valid_is_not_a_success() {
+    let mut lines: Vec<Vec<u8>> = [
+        r#"{"ok":true}"#,
+        r#"{"ok":true,"result":null}"#,
+        r#"{"ok":true,"result":{}}"#,
+        r#"{"ok":true,"result":{"changesets":[1]}}"#,
+        r#"{"ok":false,"code":0,"error":"x"}"#,
+        r#"{"ok":false,"code":9,"error":"x"}"#,
+        r#"{"ok":false,"code":3}"#,
+        r#"{"ok":"true","result":{"id":"cs-1","state":"draft","actions":[]}}"#,
+    ]
+    .iter()
+    .map(|l| l.as_bytes().to_vec())
+    .collect();
+    let mut seed = 7u64;
+    for _ in 0..2000 {
+        let line: Vec<u8> = (0..(seed % 90))
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 n";
+                abc[(seed >> 33) as usize % abc.len()]
+            })
+            .collect();
+        lines.push(line);
+    }
+    for line in &lines {
+        for verb in ["show", "drafts", "add", "submit", "withdraw"] {
+            match socket::parse_answer(verb, line) {
+                None => {}
+                Some(Ok(r)) => assert!(
+                    r.is_object()
+                        && (r["changesets"].is_array()
+                            || r["changeset"].is_string()
+                            || r["id"].is_string()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
+                Some(Err(f)) => assert!((1..=5).contains(&f.code)),
+            }
+        }
+    }
+    let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
+    assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
+    assert!(socket::parse_answer("drafts", ok).is_none());
 }

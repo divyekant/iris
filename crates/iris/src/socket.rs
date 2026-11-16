@@ -194,14 +194,17 @@ async fn connection(
         Ok(Err(e)) => return Err(e),
         Ok(Ok(_)) => {}
     }
-    // The work and the answer run on a blocking thread, with a write
-    // deadline: the answer streams, so memory stays at one buffer, and a
-    // peer that stops reading cannot hold the slot for more than WRITE_WAIT.
+    // The work and the answer run on a blocking thread, with one deadline
+    // for the whole answer: the answer streams, so memory stays at one
+    // buffer, and a peer that reads slowly or not at all cannot hold the
+    // slot for more than the write wait.
     let stream = stream.into_std()?;
     tokio::task::spawn_blocking(move || {
         stream.set_nonblocking(false)?;
-        stream.set_write_timeout(Some(limits.write_wait))?;
-        let mut out = std::io::BufWriter::new(&stream);
+        let mut out = std::io::BufWriter::new(Deadline {
+            stream: &stream,
+            end: Instant::now() + limits.write_wait,
+        });
         if line.last() != Some(&b'\n') {
             out.write_all(&failure_line(&usage(
                 "the request is longer than 64 KiB, or has no newline",
@@ -215,6 +218,27 @@ async fn connection(
     })
     .await
     .unwrap_or_else(|_| Err(std::io::Error::other("the engine failed")))
+}
+
+/// A writer that fails after `end`: one deadline for all writes.
+struct Deadline<'a> {
+    stream: &'a std::os::unix::net::UnixStream,
+    end: Instant,
+}
+
+impl Write for Deadline<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_write_timeout(Some(left))?;
+        (&mut &*self.stream).write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The longest time that the engine writes an answer to a peer.
@@ -438,6 +462,12 @@ pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
 
 /// [`request`] with another wait for the whole answer, for tests.
 pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Result<Value, Failure> {
+    let mut line =
+        serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
+    line.push(b'\n');
+    if line.len() > MAX_LINE {
+        return Err(usage("the request is longer than 64 KiB"));
+    }
     let path = dir.join(SOCKET);
     let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|_| {
         Failure::new(
@@ -455,9 +485,6 @@ pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Resu
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| "--drafts".into());
-    let mut line =
-        serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
-    line.push(b'\n');
     stream
         .set_read_timeout(Some(wait))
         .and_then(|()| stream.set_write_timeout(Some(wait)))
@@ -481,20 +508,35 @@ pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Resu
             Ok(n) => answer.extend_from_slice(&chunk[..n]),
         }
     }
-    let answer: Value = serde_json::from_slice(&answer).map_err(|_| unknown(&hint))?;
-    if answer["ok"] == json!(true) {
-        return Ok(answer["result"].clone());
+    parse_answer(verb, &answer).ok_or_else(|| unknown(&hint))?
+}
+
+/// Read one answer line of the engine for `verb`. `None` when the line is
+/// not a valid answer: the result is then not known. A success must carry
+/// the result shape of the verb; a failure must carry a code of 1 to 5.
+pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
+    let answer: Value = serde_json::from_slice(line).ok()?;
+    match answer["ok"].as_bool()? {
+        true => {
+            let r = &answer["result"];
+            let valid = match verb {
+                "drafts" => r["changesets"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().all(Value::is_string)),
+                "add" => r["changeset"].is_string() && r["n"].is_u64(),
+                _ => r["id"].is_string() && r["state"].is_string() && r["actions"].is_array(),
+            };
+            valid.then(|| Ok(r.clone()))
+        }
+        false => {
+            let code = answer["code"]
+                .as_u64()
+                .and_then(|c| u8::try_from(c).ok())
+                .filter(|c| (1..=5).contains(c))?;
+            Some(Err(Failure::new(
+                code,
+                answer["error"].as_str()?.to_string(),
+            )))
+        }
     }
-    let code = answer["code"]
-        .as_u64()
-        .and_then(|c| u8::try_from(c).ok())
-        .filter(|c| (1..=5).contains(c))
-        .unwrap_or(code::ERROR);
-    Err(Failure::new(
-        code,
-        answer["error"]
-            .as_str()
-            .unwrap_or("the engine failed")
-            .to_string(),
-    ))
 }
