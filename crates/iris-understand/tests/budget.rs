@@ -275,6 +275,25 @@ fn a_cost_over_the_reservation_takes_the_real_cost() {
     assert!(m.state().overrun);
     assert_eq!(r.budget(), Some(2 * WORST - 5_010));
     assert_eq!(r.counts()[3], Some(5_010));
+    // A second try of the same message cannot go out after the overrun.
+    assert!(is_budget(m.ask("i", "d")));
+    assert_eq!(*fake.calls.borrow(), 1);
+}
+
+#[test]
+fn a_hosted_model_must_have_a_price() {
+    let r = setup("noprice", true, None);
+    for sql in [
+        "UPDATE model_setting SET price_in = NULL, price_out = NULL",
+        "UPDATE model_setting SET price_out = NULL",
+        "UPDATE model_setting SET provider = 'local'",
+    ] {
+        let e = r.store.write(|tx| Ok(tx.execute(sql, [])?));
+        assert!(e.is_err(), "{sql}");
+    }
+    let fake = Fake::default();
+    assert!(is_budget(r.model(&fake).ask("i", "d")));
+    assert_eq!(*fake.calls.borrow(), 0);
 }
 
 #[test]

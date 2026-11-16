@@ -16,7 +16,11 @@ CREATE TABLE model_setting (
   api_key          BLOB,
   max_tokens       INTEGER NOT NULL CHECK (max_tokens > 0),
   timeout_s        INTEGER NOT NULL CHECK (timeout_s > 0),
-  budget_micro_usd INTEGER
+  budget_micro_usd INTEGER,
+  -- A hosted model always has both prices, so each of its calls needs a
+  -- reservation. Only a local model has no price.
+  CHECK ((provider = 'local' AND price_in IS NULL AND price_out IS NULL)
+      OR (provider <> 'local' AND price_in IS NOT NULL AND price_out IS NOT NULL))
 );
 
 CREATE TABLE understand_run (

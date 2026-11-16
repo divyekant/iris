@@ -19,7 +19,7 @@ pub struct ModelRow {
     pub base_url: String,
     pub model: String,
     pub version: i64,
-    /// `None` only when both prices are NULL (a local model).
+    /// `None` only for a local model.
     pub price: Option<Price>,
     /// The key, sealed with the store key.
     pub api_key: Option<Vec<u8>>,
@@ -35,15 +35,17 @@ pub fn model_row(c: &Connection) -> rusqlite::Result<Option<ModelRow>> {
          FROM model_setting WHERE id = 1",
         [],
         |r| {
+            let provider: String = r.get(0)?;
             let (pin, pout): (Option<i64>, Option<i64>) = (r.get(4)?, r.get(5)?);
-            // One NULL price with one set price counts as priced, at 0 for
-            // the NULL one: the reservation still applies.
-            let price = (pin.is_some() || pout.is_some()).then(|| Price {
-                input_micro_usd_per_mtok: pin.unwrap_or(0).max(0) as u64,
-                output_micro_usd_per_mtok: pout.unwrap_or(0).max(0) as u64,
+            // Only a local model is free. A missing price of another model
+            // (the schema refuses it) gives the largest price, so the
+            // budget refuses each call.
+            let price = (provider != "local").then(|| Price {
+                input_micro_usd_per_mtok: pin.map_or(u64::MAX, |p| p.max(0) as u64),
+                output_micro_usd_per_mtok: pout.map_or(u64::MAX, |p| p.max(0) as u64),
             });
             Ok(ModelRow {
-                provider: r.get(0)?,
+                provider,
                 base_url: r.get(1)?,
                 model: r.get(2)?,
                 version: r.get(3)?,
@@ -237,8 +239,11 @@ impl Model for Budgeted<'_> {
         let Some(price) = self.price else {
             return self.ask_free(instruction, data);
         };
-        if self.state.get().unknown {
-            return Err(refuse("an earlier call of this run has an unknown charge"));
+        // After a call whose charge was not inside its reservation, no
+        // call goes out until the runner stops.
+        let s = self.state.get();
+        if s.unknown || s.overrun {
+            return Err(refuse("an earlier call of this run passed its reservation"));
         }
         let worst = cost(
             Usage {

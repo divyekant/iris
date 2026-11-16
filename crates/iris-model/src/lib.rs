@@ -362,74 +362,7 @@ impl Client {
             }
             Err(e) => return Err(Error::Transport(self.scrub(e.to_string()))),
         };
-        let v: Value = serde_json::from_str(&text).map_err(|e| Error::BadAnswer(e.to_string()))?;
-        let bad = |what: &str| Error::BadAnswer(what.to_string());
-        let (text, stop, input, output) = match c.provider {
-            Provider::Anthropic => {
-                let blocks = v["content"].as_array().ok_or_else(|| bad("no content"))?;
-                // Only text blocks: thinking blocks are not part of the answer.
-                let text: String = blocks
-                    .iter()
-                    .filter(|b| b["type"] == "text")
-                    .filter_map(|b| b["text"].as_str())
-                    .collect();
-                // The model has no tools, so `tool_use` or `pause_turn` is not a valid end.
-                let stop = match v["stop_reason"].as_str() {
-                    Some("end_turn" | "stop_sequence") => Stop::End,
-                    Some("max_tokens") => Stop::Truncated,
-                    Some("refusal") => Stop::Refused,
-                    _ => return Err(bad("unknown stop_reason")),
-                };
-                let u = &v["usage"];
-                (
-                    text,
-                    stop,
-                    u["input_tokens"].as_u64(),
-                    u["output_tokens"].as_u64(),
-                )
-            }
-            Provider::OpenAiCompatible => {
-                let message = v["choices"][0]["message"]
-                    .as_object()
-                    .ok_or_else(|| bad("no choices[0].message"))?;
-                let refused = message
-                    .get("refusal")
-                    .and_then(Value::as_str)
-                    .is_some_and(|r| !r.is_empty());
-                let stop = match v["choices"][0]["finish_reason"].as_str() {
-                    // OpenAI puts a refusal in `message.refusal`, with `finish_reason` "stop".
-                    Some("stop") if refused => Stop::Refused,
-                    Some("stop") => Stop::End,
-                    Some("length") => Stop::Truncated,
-                    Some("content_filter") => Stop::Refused,
-                    _ => return Err(bad("unknown finish_reason")),
-                };
-                let text = match message.get("content").and_then(Value::as_str) {
-                    Some(t) => t.to_string(),
-                    // A cut or refused answer can have no text.
-                    None if stop != Stop::End => String::new(),
-                    None => return Err(bad("no message content")),
-                };
-                let u = &v["usage"];
-                (
-                    text,
-                    stop,
-                    u["prompt_tokens"].as_u64(),
-                    u["completion_tokens"].as_u64(),
-                )
-            }
-        };
-        let usage = Usage {
-            input_tokens: input.unwrap_or(0),
-            output_tokens: output.unwrap_or(0),
-            cost_micro_usd: None,
-            known: input.is_some() && output.is_some(),
-        };
-        let usage = Usage {
-            cost_micro_usd: c.price.map(|p| cost(usage, p)),
-            ..usage
-        };
-        Ok(Reply { text, usage, stop })
+        parse_answer(c.provider, c.price, &text)
     }
 
     /// Removes the key from a text that came from the server or the network.
@@ -455,6 +388,79 @@ fn parse_retry_after(v: &str) -> Option<Duration> {
 }
 
 /// The cost in micro-USD, rounded up so that many small calls do not count as 0.
+/// Reads an HTTP 200 answer of the provider. The usage is known only when
+/// the answer gives both token counts as integers that are not negative.
+fn parse_answer(provider: Provider, price: Option<Price>, text: &str) -> Result<Reply, Error> {
+    let v: Value = serde_json::from_str(text).map_err(|e| Error::BadAnswer(e.to_string()))?;
+    let bad = |what: &str| Error::BadAnswer(what.to_string());
+    let (text, stop, input, output) = match provider {
+        Provider::Anthropic => {
+            let blocks = v["content"].as_array().ok_or_else(|| bad("no content"))?;
+            // Only text blocks: thinking blocks are not part of the answer.
+            let text: String = blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect();
+            // The model has no tools, so `tool_use` or `pause_turn` is not a valid end.
+            let stop = match v["stop_reason"].as_str() {
+                Some("end_turn" | "stop_sequence") => Stop::End,
+                Some("max_tokens") => Stop::Truncated,
+                Some("refusal") => Stop::Refused,
+                _ => return Err(bad("unknown stop_reason")),
+            };
+            let u = &v["usage"];
+            (
+                text,
+                stop,
+                u["input_tokens"].as_u64(),
+                u["output_tokens"].as_u64(),
+            )
+        }
+        Provider::OpenAiCompatible => {
+            let message = v["choices"][0]["message"]
+                .as_object()
+                .ok_or_else(|| bad("no choices[0].message"))?;
+            let refused = message
+                .get("refusal")
+                .and_then(Value::as_str)
+                .is_some_and(|r| !r.is_empty());
+            let stop = match v["choices"][0]["finish_reason"].as_str() {
+                // OpenAI puts a refusal in `message.refusal`, with `finish_reason` "stop".
+                Some("stop") if refused => Stop::Refused,
+                Some("stop") => Stop::End,
+                Some("length") => Stop::Truncated,
+                Some("content_filter") => Stop::Refused,
+                _ => return Err(bad("unknown finish_reason")),
+            };
+            let text = match message.get("content").and_then(Value::as_str) {
+                Some(t) => t.to_string(),
+                // A cut or refused answer can have no text.
+                None if stop != Stop::End => String::new(),
+                None => return Err(bad("no message content")),
+            };
+            let u = &v["usage"];
+            (
+                text,
+                stop,
+                u["prompt_tokens"].as_u64(),
+                u["completion_tokens"].as_u64(),
+            )
+        }
+    };
+    let usage = Usage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cost_micro_usd: None,
+        known: input.is_some() && output.is_some(),
+    };
+    let usage = Usage {
+        cost_micro_usd: price.map(|p| cost(usage, p)),
+        ..usage
+    };
+    Ok(Reply { text, usage, stop })
+}
+
 /// The cost of `u` at price `p` in micro-USD, rounded up. It saturates at
 /// `u64::MAX`, which no budget holds.
 pub fn cost(u: Usage, p: Price) -> u64 {
@@ -516,5 +522,78 @@ mod tests {
             stop: Stop::End,
         };
         assert_eq!(r.json().unwrap(), json!({"a": 1}));
+    }
+
+    /// Random usage fields: the usage is known exactly when both counts
+    /// are integers from 0 to u64::MAX; else the tokens are 0 and unknown.
+    #[test]
+    fn usage_is_known_only_with_two_valid_counts() {
+        let values: [Option<Value>; 9] = [
+            None,
+            Some(Value::Null),
+            Some(json!(0)),
+            Some(json!(17)),
+            Some(json!(u64::MAX)),
+            Some(json!(-1)),
+            Some(json!(2.5)),
+            Some(json!("12")),
+            Some(json!({"n": 1})),
+        ];
+        let valid = |v: &Option<Value>| v.as_ref().and_then(Value::as_u64);
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..2000 {
+            let (i, o) = (&values[next(9)], &values[next(9)]);
+            let mut usage = serde_json::Map::new();
+            for (p, names) in [
+                (Provider::Anthropic, ["input_tokens", "output_tokens"]),
+                (
+                    Provider::OpenAiCompatible,
+                    ["prompt_tokens", "completion_tokens"],
+                ),
+            ] {
+                usage.clear();
+                if let Some(v) = i {
+                    usage.insert(names[0].into(), v.clone());
+                }
+                if let Some(v) = o {
+                    usage.insert(names[1].into(), v.clone());
+                }
+                let mut body = match p {
+                    Provider::Anthropic => json!({
+                        "content": [{"type": "text", "text": "{}"}], "stop_reason": "end_turn"
+                    }),
+                    Provider::OpenAiCompatible => json!({
+                        "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]
+                    }),
+                };
+                // Sometimes no usage object at all, or a usage that is not an object.
+                match next(4) {
+                    0 => {}
+                    1 => body["usage"] = json!([1, 2]),
+                    _ => body["usage"] = Value::Object(usage.clone()),
+                }
+                let has_object = body["usage"].is_object();
+                let price = Some(Price {
+                    input_micro_usd_per_mtok: 1,
+                    output_micro_usd_per_mtok: 1,
+                });
+                let u = parse_answer(p, price, &body.to_string()).unwrap().usage;
+                let want = if has_object {
+                    valid(i).zip(valid(o))
+                } else {
+                    None
+                };
+                assert_eq!(u.known, want.is_some(), "{p:?} {body}");
+                if let Some((a, b)) = want {
+                    assert_eq!((u.input_tokens, u.output_tokens), (a, b));
+                }
+            }
+        }
     }
 }

@@ -179,7 +179,10 @@ is an upper bound. `iris-model` gives this count before it sends
 (`Client::request_bytes`). The second try of `decide` is reserved on its own.
 
 After a call with unknown usage to a priced model, the wrapper refuses each
-later call of the run with `Error::Unknown` (no request goes out). So the second try of
+later call of the run with `Error::Budget` (no request goes out). The
+runner tells an unknown charge from a spent budget by the state of the
+wrapper, not by the error. The same refusal follows a known cost that is
+larger than its reservation. So the second try of
 `decide` in the same message cannot go out: `store::understand` returns
 `Error::Model`, no try counts, and the message stays pending for the next
 run. The runner then stops with `stop = unknown`.
