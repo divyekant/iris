@@ -2,9 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_changeset::{
-    add_action, add_action_in, approve, create, create_in, decide, decide_in, revise, submit,
-    submit_in, transaction, write_document, ActionId, Author, AuthorKind, By, Error, State, Verb,
-    BULK,
+    add_action, add_action_in, approve, approve_in, create, create_in, decide, decide_in, revise,
+    submit, submit_in, transaction, write_document, ActionId, Author, AuthorKind, By, Error, State,
+    Verb, BULK,
 };
 use iris_store::{NewMessage, Store};
 use serde_json::{json, Map, Value};
@@ -1025,4 +1025,35 @@ fn one_transaction_for_a_whole_run() {
     .unwrap();
     assert_eq!(count(&s), 1);
     assert_eq!(hash_doc(&s, cs, 1, 1)["decision"]["state"], "in_review");
+}
+
+/// A review sends one decision for a whole changeset: a stale hash on one
+/// action rolls back the approvals and denials before it.
+#[test]
+fn one_review_decision_is_all_or_nothing() {
+    let dir = TempDir::new("review-tx");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for m in ["m-1", "m-2", "m-4"] {
+        add_action(&s, cs, &agent(), Verb::Archive, &[m], &Map::new(), None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    let (h1, h2) = (hash(&s, cs, 1, 1), hash(&s, cs, 1, 2));
+    refused(transaction(&s, |c| {
+        approve_in(c, at(cs, 1, 1), &h1, NOW)?;
+        decide_in(c, at(cs, 1, 3), State::Denied, By::Person, Some("No."), NOW)?;
+        approve_in(c, at(cs, 1, 2), "stale", NOW)
+    }));
+    for n in 1..=3 {
+        assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], "proposed");
+    }
+    transaction(&s, |c| {
+        approve_in(c, at(cs, 1, 1), &h1, NOW)?;
+        approve_in(c, at(cs, 1, 2), &h2, NOW)?;
+        decide_in(c, at(cs, 1, 3), State::Denied, By::Person, Some("No."), NOW)
+    })
+    .unwrap();
+    for (n, state) in [(1, "approved"), (2, "approved"), (3, "denied")] {
+        assert_eq!(hash_doc(&s, cs, 1, n)["decision"]["state"], state);
+    }
 }
