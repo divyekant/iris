@@ -59,6 +59,15 @@ impl Head {
             .collect()
     }
 
+    /// The (address, display name) of each `To`, `Cc` and `Bcc` entry.
+    pub(crate) fn recipient_names(&self) -> Vec<(String, Option<String>)> {
+        self.0
+            .iter()
+            .filter(|(n, _)| n == "to" || n == "cc" || n == "bcc")
+            .flat_map(|(_, v)| addresses(v))
+            .collect()
+    }
+
     /// Spec 1 section 6.7: `List-Unsubscribe`, `List-Id`, `Precedence: bulk`,
     /// or `Auto-Submitted` other than `no`.
     pub fn automated(&self) -> bool {

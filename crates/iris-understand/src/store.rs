@@ -121,10 +121,18 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let start = store.read(|c| Ok(state(c, message, true)?))?;
     let row = read_row(store, message)?;
     if row.gone {
-        // A gone message leaves the conversation of its thread (section 4.5).
-        store.write(|tx| Ok(iris_talk::update(tx, row.thread, None, now_ms)?))?;
+        // A gone message leaves the conversation of its thread (section 4.5),
+        // if a sync did not restore it after the first read.
+        let same = store.write(|tx| {
+            let same = state(tx, message, true)? == start;
+            if same {
+                iris_talk::update(tx, row.thread, None, now_ms)?;
+            }
+            Ok(same)
+        })?;
         return Ok(Outcome {
-            gone: true,
+            gone: same,
+            changed: !same,
             ..Outcome::default()
         });
     }

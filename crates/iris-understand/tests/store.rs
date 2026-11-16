@@ -801,7 +801,14 @@ I will send you the signed lease by Friday.
     let answer = r#"{"items": [{"form": "commitment", "title": "Send Bo the signed lease",
       "quote": "I will send you the signed lease by Friday.", "confidence": 0.9,
       "direction": "you_owe", "kind": "task"}], "phishing": false}"#;
-    understand(&b.store, m, &Fake::with(&[answer]), NOW).unwrap();
+    let fake = Fake::with(&[answer]);
+    understand(&b.store, m, &fake, NOW).unwrap();
+    // The name that you wrote goes to the model before Bo writes back.
+    let data = fake.calls.borrow()[0].1.clone();
+    assert!(
+        data.contains("Known party: Bo Ren <bo@example.org>\n"),
+        "{data}"
+    );
     let item = &b.items()[0];
     assert_eq!(item["owner"]["kind"], "self");
     assert_eq!(item["counterparty"]["address"], "bo@example.org");
