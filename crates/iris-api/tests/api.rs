@@ -213,9 +213,9 @@ async fn refuses_a_host_or_origin_that_is_not_local() {
     for (headers, want) in cases {
         let (code, _, h) = call(&store, "/api/status", headers).await;
         assert_eq!(code, want, "{headers:?}");
-        if code == StatusCode::OK {
-            assert_eq!(h["x-content-type-options"], "nosniff");
-        }
+        // Each answer has the headers, also a refusal.
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert_eq!(h["cache-control"], "no-store");
     }
     // No Host header at all.
     let (code, _, _) = call(&store, "/api/status", &[]).await;
@@ -443,6 +443,21 @@ async fn items_by_id_and_by_page() {
         get(&store, "/api/items?before=zz").await.0,
         StatusCode::BAD_REQUEST
     );
+    // A status or a type that no form has, or a limit out of range, is a 400.
+    for bad in [
+        "/api/items?status=opn",
+        "/api/items?form=record&status=open",
+        "/api/items?form=record&type=reciept",
+        "/api/items?limit=0",
+        "/api/items?limit=201",
+        "/api/search?q=a&limit=0",
+    ] {
+        assert_eq!(get(&store, bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(
+        get(&store, "/api/items?status=open").await.0,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -473,6 +488,15 @@ async fn brief_follows_the_queries_of_section_8() {
         2,
         20,
         owe(&service, json!({"at": "2026-11-17T09:00:00Z"})),
+    );
+    // Later as text than `soon`, but earlier in time (08:00Z).
+    let sooner = add_item(
+        &store,
+        "commitment",
+        "open",
+        2,
+        21,
+        owe(&service, json!({"at": "2026-11-17T10:00:00+02:00"})),
     );
     let no_due = add_item(
         &store,
@@ -587,6 +611,24 @@ async fn brief_follows_the_queries_of_section_8() {
         1,
         json!({"publisher": party(&service), "published": "2026-11-01T00:00:00Z"}),
     );
+    // Two publishers with no address in the documents: the items of one
+    // publisher stay together.
+    let f_newer = add_item(
+        &store,
+        "feed",
+        "new",
+        13,
+        3,
+        json!({"publisher": party(&service), "published": "2026-11-05T00:00:00Z"}),
+    );
+    let f_other = add_item(
+        &store,
+        "feed",
+        "new",
+        13,
+        4,
+        json!({"publisher": party(&stranger), "published": "2026-11-03T00:00:00Z"}),
+    );
     add_item(
         &store,
         "feed",
@@ -663,16 +705,36 @@ async fn brief_follows_the_queries_of_section_8() {
         [],
     );
 
+    // A possible duplicate of `late`: the brief shows the pair once.
+    let dup = add_item(
+        &store,
+        "commitment",
+        "open",
+        1,
+        11,
+        owe(&person, json!({"date": "2026-12-01"})),
+    );
+    exec(
+        &store,
+        "UPDATE item SET duplicate_of = ?1 WHERE id = ?2",
+        [late, dup],
+    );
+
     let b = iris_api::brief(&store, NOW).unwrap();
     let b = serde_json::to_value(b).unwrap();
     let c = |n: i64| format!("c-{n}");
     let v = |n: i64| format!("v-{n}");
-    assert_eq!(ids(&b["you_owe"]["items"]), [c(soon), c(late), c(no_due)]);
-    assert_eq!(b["you_owe"]["count"], 3);
+    assert_eq!(
+        ids(&b["you_owe"]["items"]),
+        [c(sooner), c(soon), c(late), c(no_due)]
+    );
+    assert_eq!(b["you_owe"]["count"], 4);
+    assert_eq!(b["you_owe"]["duplicates"], json!({ c(late): [c(dup)] }));
     assert_eq!(ids(&b["owed_to_you"]["items"]), [c(old_owed), c(new_owed)]);
     assert_eq!(ids(&b["conversations"]["items"]), [v(c_turn), v(c_new)]);
     assert_eq!(b["records"], json!({"booking": 1, "receipt": 2}));
-    assert_eq!(ids(&b["feed"]["items"]), [format!("f-{f_new}")]);
+    let f = |n: i64| format!("f-{n}");
+    assert_eq!(ids(&b["feed"]["items"]), [f(f_newer), f(f_new), f(f_other)]);
     assert_eq!(ids(&b["signals"]["items"]), [format!("s-{s_live}")]);
     assert_eq!(
         ids(&b["strangers"]["items"]),
@@ -685,6 +747,8 @@ async fn brief_follows_the_queries_of_section_8() {
     );
     assert_eq!(b["hostile"], 2);
     assert_eq!(b["not_understood"], 1);
+    // Message 21 got the date 0 above: it is the oldest fetched message.
+    assert_eq!(b["oldest_fetched"], "1970-01-01T00:00:00Z");
 
     // The HTTP route gives the same shape.
     let (code, http) = get(&store, "/api/brief").await;
