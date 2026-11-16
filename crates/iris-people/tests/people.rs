@@ -613,3 +613,40 @@ fn a_quoted_local_part_can_have_a_colon() {
         ])
     );
 }
+
+#[test]
+fn a_name_from_the_person_wins_over_a_name_you_gave() {
+    let mut h = Hand::new("nick");
+    h.add(
+        "t1",
+        "INBOX",
+        "ana@example.org",
+        "Ana Lind",
+        "me@example.com",
+    );
+    h.add(
+        "t1",
+        "SENT",
+        "me@example.com",
+        "Me",
+        "Nickname <ana@example.org>",
+    );
+    h.add(
+        "t2",
+        "SENT",
+        "me@example.com",
+        "Me",
+        r#""Moss, \"Cy\", Jr" <cy@example.org>"#,
+    );
+    let all = h.people();
+    let ana = all
+        .iter()
+        .find(|p| addrs(p) == ["ana@example.org"])
+        .unwrap();
+    assert_eq!(ana.name.as_deref(), Some("Ana Lind"));
+    assert_eq!(ana.names, ["Ana Lind"]);
+    // An escaped quote before a comma does not split the mailbox.
+    let cy = all.iter().find(|p| addrs(p) == ["cy@example.org"]).unwrap();
+    assert_eq!(cy.name.as_deref(), Some(r#"Moss, "Cy", Jr"#));
+    assert_eq!(all.len(), 2, "{all:?}");
+}
