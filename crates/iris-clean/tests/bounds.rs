@@ -145,6 +145,25 @@ fn memory_and_time_stay_bounded() {
     );
     assert!(peak < 10 * 1024 * 1024, "peak {peak}");
 
+    // A PDF stream of 4 MiB with many short strings before one operator.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    let stream = format!("BT {} Tj ET", "(a) ".repeat(4 * 1024 * 1024 / 4 - 4));
+    let pdf = format!(
+        "%PDF-1.4\n1 0 obj\n<< /Length {} >>\nstream\n{stream}\nendstream\nendobj\n",
+        stream.len()
+    );
+    drop(stream);
+    for chunk in pdf.as_bytes().chunks(57) {
+        raw.extend_from_slice(b64_line(chunk).as_bytes());
+        raw.extend_from_slice(b"\r\n");
+    }
+    drop(pdf);
+    raw.extend_from_slice(b"--m--\r\n");
+    let (peak, _, _) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (PDF with many strings before one operator)");
+    assert!(peak < 10 * 1024 * 1024, "peak {peak}");
+
     // Base64 with a few characters and very much white space.
     let mut raw = message(1000, 0);
     raw.truncate(raw.len() - b"--m--\r\n".len());

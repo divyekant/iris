@@ -212,8 +212,15 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Read the text operators of one content stream into `out`.
 fn content_text(c: &[u8], out: &mut String, limit: usize) {
-    let mut strings: Vec<Vec<u8>> = Vec::new();
-    let mut array: Option<Vec<u8>> = None;
+    // The string operands since the last operator, in one buffer. The output
+    // can hold at most `limit` bytes, and each byte gives at least one byte
+    // of text, so more bytes have no use.
+    let mut strings: Vec<u8> = Vec::new();
+    let mut in_array = false;
+    let add = |strings: &mut Vec<u8>, s: &[u8]| {
+        let room = limit.saturating_sub(strings.len());
+        strings.extend_from_slice(&s[..s.len().min(room)]);
+    };
     let mut last_num = 0.0f64;
     // A viewer shows text only inside a text object (`BT` to `ET`).
     let mut in_text = false;
@@ -225,10 +232,7 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
             b'(' => {
                 let (s, n) = literal(&c[i..]);
                 i += n;
-                match array.as_mut() {
-                    Some(a) => a.extend(s),
-                    None => strings.push(s),
-                }
+                add(&mut strings, &s);
             }
             b'<' if c.get(i + 1) == Some(&b'<') => i += 2,
             b'<' => {
@@ -238,17 +242,14 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                     .map_or(c.len(), |n| i + n);
                 let s = hex(&c[i + 1..end]);
                 i = (end + 1).min(c.len());
-                match array.as_mut() {
-                    Some(a) => a.extend(s),
-                    None => strings.push(s),
-                }
+                add(&mut strings, &s);
             }
             b'[' => {
-                array = Some(Vec::new());
+                in_array = true;
                 i += 1;
             }
             b']' => {
-                strings.extend(array.take());
+                in_array = false;
                 i += 1;
             }
             b'%' => {
@@ -268,9 +269,10 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(0.0);
                 // In a `TJ` array, a large negative number moves to the next word.
-                match array.as_mut() {
-                    Some(a) if n < -200.0 => a.push(b' '),
-                    _ => last_num = n,
+                if in_array && n < -200.0 {
+                    add(&mut strings, b" ");
+                } else {
+                    last_num = n;
                 }
             }
             b if b.is_ascii_alphabetic() || b == b'\'' || b == b'"' || b == b'*' => {
@@ -310,12 +312,13 @@ fn content_text(c: &[u8], out: &mut String, limit: usize) {
 }
 
 /// Add the strings to `out`, which never grows past `limit` bytes.
-fn emit(out: &mut String, strings: &mut Vec<Vec<u8>>, limit: usize) {
-    for s in strings.drain(..) {
-        let t = encoding_rs::WINDOWS_1252.decode_without_bom_handling(&s).0;
-        let room = limit.saturating_sub(out.len());
-        out.push_str(&t[..crate::mime::floor_char(&t, room)]);
-    }
+fn emit(out: &mut String, strings: &mut Vec<u8>, limit: usize) {
+    let t = encoding_rs::WINDOWS_1252
+        .decode_without_bom_handling(strings)
+        .0;
+    let room = limit.saturating_sub(out.len());
+    out.push_str(&t[..crate::mime::floor_char(&t, room)]);
+    strings.clear();
 }
 
 fn newline(out: &mut String) {
