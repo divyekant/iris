@@ -253,13 +253,19 @@ content:
    when a delete moves the list pages. For each mirror message that the list
    does not have, call `messages.get` (`format=raw`). Only HTTP 404 makes it
    a difference. Otherwise, compare its thread ID and its labels from that
-   answer.
+   answer. A label list can also miss a message when a delete moves its
+   pages. Before you report a label difference, get the labels of the
+   message (`format=minimal`). Report it only if those labels are not the
+   labels of the mirror.
 8. For each message that is not gone, read its content file and compute the
    SHA-256 hash. A missing file, or a hash that is not `content_sha256`, is a
    difference. Fetch the message again to repair the file. If a fetch gets
    an error that stops each fetch (for example HTTP 401), start no more
    fetches. Save the result, then give the error to the caller.
 9. Print each difference, and the total. Save the result in the sync log.
+
+If an error ends the compare, save the differences found before the error,
+and start a full resync if one of them is a difference of step 7.
 
 However verify ends (a result, an error or a crash), the engine starts the
 sync of the account again. After a crash, the next start does this. A

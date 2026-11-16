@@ -109,23 +109,28 @@ impl Report {
 /// the result is that error: get a new token and call again. If the
 /// history of `V` is too old at the end, the result is
 /// [`iris_gmail::Error::HistoryExpired`]. Verify adds one row to `sync_log`.
+/// After an error, that row holds the differences found before the error,
+/// and a difference of step 7 among them still starts the resync.
 pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result<Report> {
     let _lock = lock(store, account)?;
     // Step 1.
     let v = sync_locked(store, gmail, account, token)?.history_id;
     let started = now_ms();
-    let result = compare(store, gmail, account, token, v);
-    let text = match &result {
-        Ok((r, _)) => {
-            let mut t = format!("{} differences, {} skipped", r.total, r.skipped);
-            for d in r.differences.iter().take(100) {
-                t.push_str(&format!("\n{d}"));
-            }
-            t
-        }
-        Err(e) => format!("error: {e}"),
+    let mut report = Report {
+        history_id: v,
+        ..Report::default()
     };
-    let resync = result.as_ref().is_ok_and(|(r, _)| r.resync);
+    // After an error, the differences found before it are still true: save
+    // them and their resync too.
+    let result = compare(store, gmail, account, token, v, &mut report);
+    let mut text = format!("{} differences, {} skipped", report.total, report.skipped);
+    if let Err(e) = &result {
+        text.push_str(&format!(", then error: {e}"));
+    }
+    for d in report.differences.iter().take(100) {
+        text.push_str(&format!("\n{d}"));
+    }
+    let resync = report.resync;
     // One transaction: a logged sync difference always has its resync.
     let saved = store.write(|tx| {
         tx.execute(
@@ -141,24 +146,23 @@ pub fn verify(store: &Store, gmail: &Gmail, account: i64, token: &str) -> Result
         }
         Ok(())
     });
-    let (report, stop) = result?;
+    // The log and the resync are saved. The caller must see an error, for
+    // example HTTP 401 of a repair fetch, to get a new token.
+    result?;
     saved?;
-    // The log and the resync are saved. The caller must see the error that
-    // stopped the repair, for example HTTP 401, to get a new token.
-    match stop {
-        Some(e) => Err(e),
-        None => Ok(report),
-    }
+    Ok(report)
 }
 
-/// The report, and the error that stopped the content repair, if any.
+/// Add each difference to `report` as it is found. An error ends the
+/// compare and leaves the differences found before it in `report`.
 fn compare(
     store: &Store,
     gmail: &Gmail,
     account: i64,
     token: &str,
     v: u64,
-) -> Result<(Report, Option<Error>)> {
+    report: &mut Report,
+) -> Result<()> {
     // Steps 2 to 5.
     let before = gmail.labels(token)?;
     store.write(|tx| {
@@ -198,11 +202,7 @@ fn compare(
         .collect();
 
     // Step 7.
-    let mut report = Report {
-        history_id: v,
-        skipped: changed.len() as u64,
-        ..Report::default()
-    };
+    report.skipped = changed.len() as u64;
     let mirror_labels: Vec<(String, String)> = store.read(|c| {
         let mut st = c.prepare("SELECT provider_id, name FROM label WHERE account_id = ?1")?;
         let rows = st.query_map([account], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -314,8 +314,19 @@ fn compare(
                     .map(str::to_string)
                     .collect()
             };
-            if keep(&id) && set(&gmail_labels) != set(&mirror_labels) {
-                report.push(Difference::Labels(id));
+            let mirror = set(&mirror_labels);
+            if !keep(&id) || set(&gmail_labels) == mirror {
+                return Ok(());
+            }
+            // A label list can miss a message when a delete moves its
+            // pages. The label set of the message itself has the last word.
+            match gmail.minimal(token, &id) {
+                Ok(m) if set(&m.label_ids.join(" ")) != mirror => {
+                    report.push(Difference::Labels(id))
+                }
+                // Gmail deleted it during verify: the next sync marks it gone.
+                Ok(_) | Err(iris_gmail::Error::NotFound) => {}
+                Err(e) => return Err(e.into()),
             }
             Ok(())
         },
@@ -378,7 +389,10 @@ fn compare(
         tx.execute("DELETE FROM sync_seen WHERE account_id = ?1", [account])?;
         Ok(())
     })?;
-    Ok((report, stop))
+    match stop {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// The thread, the fetched state and the labels of a message in the mirror.
