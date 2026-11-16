@@ -1,6 +1,10 @@
 //! The few headers that the sender rules read. Mail text is data: this code
 //! only compares bytes and follows nothing in the text.
 
+/// The most bytes of a message that [`Head::parse`] reads. A message with
+/// no blank line is all head, so the limit bounds the memory of one call.
+pub(crate) const HEAD_MAX: usize = 256 * 1024;
+
 /// The headers of one message, in order from the top, with folded lines
 /// joined. Names are lowercase.
 pub(crate) struct Head(Vec<(String, String)>);
@@ -218,6 +222,16 @@ mod tests {
                 "dee@example.net"
             ]
         );
+    }
+
+    #[test]
+    fn mail_with_no_blank_line_reads_a_bounded_head() {
+        let mut raw = b"From: a@example.org\r\nX-Big: ".to_vec();
+        raw.resize(raw.len() + 8 * 1024 * 1024, b'a');
+        let h = Head::parse(&raw);
+        assert_eq!(h.from().unwrap().0, "a@example.org");
+        let kept: usize = h.0.iter().map(|(n, v)| n.len() + v.len()).sum();
+        assert!(kept <= HEAD_MAX, "{kept}");
     }
 
     #[test]

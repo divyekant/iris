@@ -755,6 +755,32 @@ fn a_changed_sent_message_compares_new_recipients_after_the_old_ones_go() {
 }
 
 #[test]
+fn a_look_alike_that_came_first_is_hostile_when_its_domain_becomes_known() {
+    let mut c = Case::new("late-known");
+    let d = c.put("t1", &[], "From: alerts@paypa1.com");
+    assert_eq!(d.kind, Kind::Stranger);
+    let id = d.sender.unwrap();
+    // paypal.com becomes known. The look-alike row changes at once, and the
+    // caller must run understanding again on its mail.
+    let d = c.put(
+        "t2",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: support@paypal.com"),
+    );
+    assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("hostile"));
+    assert_eq!(d.rerun, vec![id]);
+    // paypal.com stops being known (a person sets it): the row goes back.
+    set(&c, "UPDATE sender SET kind = 'stranger', decided_by = 'person' WHERE address = 'support@paypal.com'");
+    let d = c.put(
+        "t3",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: support@paypal.com"),
+    );
+    assert_eq!(c.row("alerts@paypa1.com").1.as_deref(), Some("stranger"));
+    assert_eq!(d.rerun, vec![id]);
+}
+
+#[test]
 fn another_qualifying_message_keeps_a_service() {
     let mut c = Case::new("service-two");
     // Messages 3 and 4 each have 2 earlier messages.

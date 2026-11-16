@@ -617,6 +617,7 @@ mod tests {
             ("mail2.shop.com", "mail.shop.com"),
             ("eu.shop.com", "us.shop.com"),
             ("a.b.shop.com", "b.shop.com"),
+            ("bi1ling.example.com", "billing.example.com"),
         ];
         for (d, k) in no {
             assert!(!near_copy(d, k), "{d} {k}");
