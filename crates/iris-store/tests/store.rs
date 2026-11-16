@@ -524,7 +524,7 @@ fn new_content_without_a_body_removes_the_old_text() {
     let dir = TempDir::new("newcontent");
     let (store, acc) = setup(&dir);
     let mut m = msg("a", "t1", 1, &[], "s", "apple");
-    m.content_sha256 = Some("a".repeat(64));
+    m.content_sha256 = Some(store.put_content(b"raw a").unwrap());
     let a = store.put_messages(acc, &[m.clone()]).unwrap()[0];
     store
         .write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 4 WHERE id = ?1", [a])?))
@@ -536,7 +536,7 @@ fn new_content_without_a_body_removes_the_old_text() {
     assert_eq!(store.search("apple", 10).unwrap(), [a]);
 
     // New content with no new text: the old text must not stay searchable.
-    m.content_sha256 = Some("b".repeat(64));
+    m.content_sha256 = Some(store.put_content(b"raw b").unwrap());
     store.put_messages(acc, &[m]).unwrap();
     assert_eq!(store.search("apple", 10).unwrap(), Vec::<i64>::new());
     let (bodies, understood): (i64, Option<i64>) = store
