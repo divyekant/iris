@@ -88,7 +88,8 @@ fn shown_host(shown: &str) -> Option<String> {
         .split(['/', '?', '#', ':'])
         .next()?
         .trim_end_matches('.');
-    // A host name has letters in its last label: `1.5` is a number.
+    // A host name has letters in its last label: `1.5` is a number. A
+    // punycode label (`xn--p1ai`) is letters in another form.
     let last = host.rsplit('.').next()?;
     // Letters of each script count: a person reads `pаypal.com` as a web
     // address, whatever the script of its letters.
@@ -97,8 +98,8 @@ fn shown_host(shown: &str) -> Option<String> {
         && host
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
-        && last.chars().count() >= 2
-        && last.chars().all(char::is_alphabetic);
+        && (last.starts_with("xn--")
+            || last.chars().count() >= 2 && last.chars().all(char::is_alphabetic));
     if !ok {
         return None;
     }
@@ -290,6 +291,8 @@ mod tests {
             ("paypal.example.com", "https://xn--pypal-4ve.example.net/"),
             ("p\u{430}ypal.example.com", "https://login.example.net/"),
             ("PAYPAL.com", "https://xn--pypal-4ve.com/"),
+            ("https://bank.xn--p1ai", "https://login.example.net/"),
+            ("bank.\u{440}\u{444}/login", "https://login.example.net/"),
         ] {
             assert!(one(s, t, "mx.example.org", true), "{s}");
         }
@@ -299,6 +302,7 @@ mod tests {
             ("www.m\u{fc}nchen.de", "https://www.m\u{fc}nchen.de/"),
             ("www.M\u{dc}NCHEN.de", "https://xn--mnchen-3ya.de/a"),
             ("xn--mnchen-3ya.de", "https://www.m\u{fc}nchen.de/"),
+            ("https://bank.xn--p1ai/x", "https://bank.\u{440}\u{444}/"),
         ] {
             assert!(!one(s, t, "x.org", false), "{s} {t}");
         }
