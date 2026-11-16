@@ -111,7 +111,15 @@ pub fn decide(
     if has("SENT") {
         let known = known_domains(conn, "")?;
         let mut rerun = Vec::new();
-        for (to, bcc) in head.recipients() {
+        // The store keeps `Bcc` only for the sender rule: save it here.
+        let bcc: Vec<String> = head
+            .recipients()
+            .into_iter()
+            .filter_map(|(a, b)| b.then_some(a))
+            .collect();
+        conn.prepare_cached("UPDATE header SET bcc_addrs = ?1 WHERE message_id = ?2")?
+            .execute(params![(!bcc.is_empty()).then(|| bcc.join(",")), message])?;
+        for (to, _) in head.recipients() {
             if to.eq_ignore_ascii_case(&account) {
                 continue;
             }
@@ -132,11 +140,7 @@ pub fn decide(
                     &to,
                     None,
                     Kind::Person,
-                    &evidence(
-                        if bcc { "sent (bcc)" } else { "sent" },
-                        message,
-                        sha.as_deref(),
-                    ),
+                    &evidence("sent", message, sha.as_deref()),
                     now_ms,
                 )?,
             };
@@ -213,18 +217,20 @@ pub fn decide(
     })
 }
 
-/// True when the message `s` has the label `SENT` and not `DRAFT`.
+/// True when the message `s` is not gone and has the label `SENT` and not
+/// `DRAFT`.
 const SENT_NOT_DRAFT: &str =
-    "(EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+    "(s.gone_at IS NULL AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'SENT')
       AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = s.id AND l.provider_id = 'DRAFT'))";
 
 /// SQL that is true when the header `h` names the address of parameter
-/// `?n` in `To` or `Cc`.
+/// `?n` in `To`, `Cc` or `Bcc`.
 fn to_addr(n: u8) -> String {
     format!(
-        "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ',', ',' || ?{n} || ',') > 0"
+        "instr(',' || coalesce(h.to_addrs, '') || ',' || coalesce(h.cc_addrs, '') || ','
+                || coalesce(h.bcc_addrs, '') || ',', ',' || ?{n} || ',') > 0"
     )
 }
 
@@ -278,15 +284,14 @@ fn rules(
     // The `sent` rule. Each sent message makes its recipients `person` when
     // it is decided, and `basis` names the message and its content hash.
     // So only a `person` row needs the check that the sent message is still
-    // there, with the same bytes: first the message of the basis, then each
-    // sent message. The same bytes prove the same headers, also `Bcc`, which
-    // the store has no column for.
+    // there, with the same bytes, and names the address in `To`, `Cc` or
+    // `Bcc`: first the message of the basis, then each sent message.
     if previous == Some(Kind::Person) {
         if let Some((rule, m, old_sha)) = old_basis.and_then(parse_evidence) {
-            let to = match rule {
-                "sent" => to_addr(3),
-                "sent (bcc)" => "?3 IS NOT NULL".to_string(),
-                _ => "0".to_string(),
+            let to = if rule == "sent" {
+                to_addr(3)
+            } else {
+                "?3 IS NULL".to_string()
             };
             let still: bool = conn.query_row(
                 &format!(
@@ -330,7 +335,7 @@ fn rules(
                SELECT 1 FROM header hm JOIN message m ON m.id = hm.message_id
                  JOIN message s ON s.thread_id = m.thread_id AND s.id != m.id
                  JOIN header h ON h.message_id = s.id
-                WHERE hm.from_addr = ?1 AND {SENT_NOT_DRAFT}
+                WHERE hm.from_addr = ?1 AND m.gone_at IS NULL AND {SENT_NOT_DRAFT}
                   AND (s.internal_date >= m.internal_date OR {}))",
             to_addr(1)
         ),
@@ -344,7 +349,7 @@ fn rules(
     if head.automated() && head.dkim_pass(domain) {
         let earlier: i64 = conn.query_row(
             "SELECT count(*) FROM (SELECT 1 FROM header h JOIN message m ON m.id = h.message_id
-              WHERE h.from_addr = ?1 AND m.internal_date < ?2 LIMIT 2)",
+              WHERE h.from_addr = ?1 AND m.internal_date < ?2 AND m.gone_at IS NULL LIMIT 2)",
             params![addr, date.unwrap_or(i64::MIN)],
             |r| r.get(0),
         )?;
@@ -361,9 +366,10 @@ fn rules(
         if let Some(("service", m, old_sha)) = old_basis.and_then(parse_evidence) {
             let still: bool = conn.query_row(
                 "SELECT EXISTS (SELECT 1 FROM message q JOIN header hq ON hq.message_id = q.id
-                  WHERE q.id = ?1 AND q.content_sha256 IS ?2 AND hq.from_addr = ?3
+                  WHERE q.id = ?1 AND q.content_sha256 IS ?2 AND hq.from_addr = ?3 AND q.gone_at IS NULL
                     AND (SELECT count(*) FROM (SELECT 1 FROM header h JOIN message e ON e.id = h.message_id
-                          WHERE h.from_addr = ?3 AND e.internal_date < q.internal_date LIMIT 2)) >= 2)",
+                          WHERE h.from_addr = ?3 AND e.internal_date < q.internal_date
+                            AND e.gone_at IS NULL LIMIT 2)) >= 2)",
                 params![m, old_sha, addr],
                 |r| r.get(0),
             )?;

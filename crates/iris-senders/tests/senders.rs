@@ -404,15 +404,25 @@ fn a_service_without_its_qualifying_message_is_decided_again() {
 fn gone_mail_is_no_evidence() {
     // A sent message that is gone (spec 1 section 4.5).
     let mut c = Case::new("gone-sent");
-    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nTo: bo@example.net"));
+    c.put(
+        "t1",
+        &["SENT"],
+        &format!("From: {OWNER}\r\nTo: bo@example.net"),
+    );
     set(&c, "UPDATE message SET gone_at = 1 WHERE id = 1");
-    assert_eq!(c.put("t2", &[], "From: bo@example.net").kind, Kind::Stranger);
+    assert_eq!(
+        c.put("t2", &[], "From: bo@example.net").kind,
+        Kind::Stranger
+    );
     // A gone reply in the thread.
     let mut c = Case::new("gone-reply");
     c.put("t1", &[], "From: bo@example.net");
     c.put("t1", &["SENT"], &format!("From: {OWNER}"));
     set(&c, "UPDATE message SET gone_at = 1 WHERE id = 2");
-    assert_eq!(c.put("t2", &[], "From: bo@example.net").kind, Kind::Stranger);
+    assert_eq!(
+        c.put("t2", &[], "From: bo@example.net").kind,
+        Kind::Stranger
+    );
     // Gone earlier mail of a service.
     let mut c = Case::new("gone-service");
     c.put("t1", &[], &service_mail());
@@ -449,7 +459,12 @@ fn a_bcc_person_whose_sent_message_changed_is_decided_again() {
         &format!("From: {OWNER}\r\nBcc: eve@example.org"),
     );
     assert_eq!(c.put("t2", &[], "From: eve@example.org").kind, Kind::Person);
-    // The raw bytes of the sent message are no longer the bytes that named Eve.
+    // The sent message no longer names Eve (a fetch of other bytes, with
+    // another Bcc, and a new content hash).
+    set(
+        &c,
+        "UPDATE header SET bcc_addrs = 'zed@example.org' WHERE message_id = 1",
+    );
     set(
         &c,
         "UPDATE message SET content_sha256 = 'other' WHERE id = 1",
