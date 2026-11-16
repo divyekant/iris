@@ -100,10 +100,7 @@ pub fn update(
         let Some(origin) = mails.iter().copied().find(|m| !m.service) else {
             return Ok(None);
         };
-        // The quote of a rule is the line that it matched (section 7.5).
-        let subject = Some(line(&origin.subject))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| NO_SUBJECT.to_string());
+        let subject = subject_line(origin);
         let (title, quote) = (cut(&subject, TITLE_CHARS), cut(&subject, QUOTE_CHARS));
         let origin = origin.id;
         conn.execute(
@@ -140,6 +137,27 @@ pub fn update(
             .to_string(),
         created: old.created,
     };
+    let mut parts = parts;
+    // The origin does not change, also when it is gone (section 7.3). If a
+    // live origin becomes hostile mail or a draft, the first message that
+    // counts from you, a person or a stranger becomes the origin.
+    let bad_origin = all
+        .iter()
+        .any(|m| m.id == old.origin && !m.gone && !m.clean);
+    if let Some(next) = mails.iter().find(|m| !m.service).filter(|_| bad_origin) {
+        let subject = subject_line(next);
+        parts.title = cut(&subject, TITLE_CHARS);
+        parts.quote = cut(&subject, QUOTE_CHARS);
+        parts.origin = next.id;
+        conn.execute(
+            "DELETE FROM item_source WHERE item_id = ?1 AND message_id = ?2",
+            params![old.id, next.id],
+        )?;
+        conn.execute(
+            "UPDATE item_source SET message_id = ?2 WHERE item_id = ?1 AND role = 'origin'",
+            params![old.id, next.id],
+        )?;
+    }
     let mut status = match old.status.as_str() {
         "gone" => old.before_gone.clone(),
         s => Some(s.to_string()),
@@ -153,7 +171,7 @@ pub fn update(
     // keeps its status (section 4.5). The origin row stays through the
     // content cleanup, so the rule does not need its header.
     let gone =
-        mails.is_empty() || (mails.iter().all(|m| m.service) && !origin_only_gone(old.origin));
+        mails.is_empty() || (mails.iter().all(|m| m.service) && !origin_only_gone(parts.origin));
     let mut doc = match doc(
         conn,
         thread,
@@ -545,6 +563,14 @@ fn decode_name(name: &str) -> String {
         [(_, Some(decoded))] => decoded.clone(),
         _ => name.to_string(),
     }
+}
+
+/// The subject of a message for the title and the quote. The quote of a rule
+/// is the line that it matched (section 7.5).
+fn subject_line(m: &Mail) -> String {
+    Some(line(&m.subject))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| NO_SUBJECT.to_string())
 }
 
 /// The text as one line: each run of white space becomes one space.
