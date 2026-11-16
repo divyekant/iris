@@ -181,7 +181,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 | `actions[].decision.state` | See section 5.2. |
 | `actions[].decision.rule`, `actions[].decision.policy` | For a decision by a rule: the rule `id` and the policy version (section 6.3). Together they name one rule text. |
 | `actions[].decision.by` | Who decided: `rule` (with `rule`, its ID), `person`, `policy` (the default or the mode), `limit` (a hard limit), `engine` (a target or an argument that is not valid), `author` (a withdraw or a new revision) or `expiry`. A draft action has the decision `null`. An `applied` or `failed` action keeps the decision that approved it. The ledger names it, and records the apply (section 7.1). |
-| `actions[].ledger` | The ledger entry, after apply. Required for `applied`, `failed` and `undone`. An action that was applied before the ledger (migration 10) has an entry with no messages and no undo. |
+| `actions[].ledger` | The ledger entry, after apply. Required for `applied`, `failed` and `undone`. An action that was applied before the ledger (migration 11) has an entry with no messages and no undo. |
 
 ### 5.2 States of an action
 
@@ -318,7 +318,7 @@ section 5.1) keep other users out.
 | The submit of a new revision while older actions are `proposed` or `in_review` | An action that the author revised gets an approval | The trigger `changeset_submit` replaces them in the same write. Only that submit replaces an action, with no check of the clock (the marker `changeset.replacing` is set once for each revision, in its submit): an older action that comes back to review after the submit stays for the person. |
 | A new revision with a new reason | The reason that the person saw for an older revision is lost | The table `changeset_revision` keeps the reason and the submit time of each submitted revision. Its rows do not change. |
 | A withdraw while an action is open | A withdrawn changeset applies an action | The trigger `changeset_withdraw` cancels each open action and each draft action in the same write. A withdrawn changeset stays withdrawn. |
-| A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | The trigger `changeset_withdraw` (migration 10) keeps such an action `approved`. The trigger `action_state` then allows only `applied` or `failed`, as the row ends. Migration 10 replaces the mark `applying` of migration 9 with the row. |
+| A withdraw while the ledger has a row in `writing` for an action (section 5.5) | The provider changed the messages, and recovery cannot record the result | The trigger `changeset_withdraw` (migration 11) keeps such an action `approved`. The trigger `action_state` then allows only `applied` or `failed`, as the row ends. Migration 11 replaces the mark `applying` of migration 9 with the row. |
 | A move to `applied`, `failed` or `undone` | A state with no ledger entry, or an apply that changes the decision | Only the state of the ledger entry moves the action: the trigger `ledger_state` writes the same state to the action, and the trigger `action_state` refuses the move when the entry has another state. The action keeps the decision that approved it (section 7.1). |
 | An approval while a new revision is a draft, of a replaced action, or with another hash | The person approves what they did not see | `approve` refuses it. An older action that a rule approved and that came back to review gets the approval with its hash (section 5.5). |
 | Two writers at the same time | Two moves of one action | The engine has one write connection. Each request is one transaction, and the trigger checks the state at the time of the write. |
@@ -656,7 +656,7 @@ action that has a message of that row. The other action waits.
 #### Failure list of the apply and the ledger
 
 The crate `iris-apply` applies the verbs `archive`, `inbox`, `read`,
-`unread` and `trash`, with the ledger (migration 10). No provider call of
+`unread` and `trash`, with the ledger (migration 11). No provider call of
 an action is made two times. The ledger row in `writing` is the claim of
 the action: the transaction that adds it checks the expiry and the mode
 again.
@@ -682,7 +682,7 @@ again.
 | A withdraw or an expiry during the apply | Gmail changed messages of a cancelled action | A withdraw keeps an action with a row in `writing` `approved`, and it cancels an action with no row. Such an action can only become `applied` or `failed`, as its row ends (section 5.5). |
 | A message that changed at Gmail after the last sync | The mirror keeps labels that Gmail does not have | The mirror gets the labels of each read of step 2 and of the recovery. After a `batchModify` call, the mirror gets the change of the call; after a `trash` call, the labels of the answer. The apply changes only the label rows that differ, so the triggers on the labels of a message (the model wait, the attention) see only real changes. |
 | A store error after a provider call | The ledger does not have `done`, or the mirror does not have the new labels | The row stays in `writing` at the number of the call, and the recovery reads the messages of the call. The next sync writes the labels from the history of Gmail. |
-| An action applied before the ledger (migration 9) | An applied action with no entry, or a marked action whose calls are not known | Migration 10 adds an entry with no messages and the undo `none`. An action with the mark `applying` becomes `failed`, with no call. |
+| An action applied before the ledger (migration 9) | An applied action with no entry, or a marked action whose calls are not known | Migration 11 adds an entry with no messages and the undo `none`. An action with the mark `applying` becomes `failed`, with no call. |
 
 ### 7.3 Recovery
 

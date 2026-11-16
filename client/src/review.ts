@@ -74,7 +74,15 @@ export const messageRow = (m: Target): Row =>
   m.gone ? { id: m.id, gone: true } : { id: m.id, gone: false, href: href.mail(m.id), who: m.from.name || m.from.address || "Unknown sender", what: m.subject || "(no subject)", when: m.date };
 
 export const itemRow = (id: string, item: Item | null): Row =>
-  item ? { id, gone: false, href: href.item(id), who: FORMS[item.form] ?? item.form, what: item.title, when: null } : { id, gone: true };
+  item && item.status !== "gone" ? { id, gone: false, href: href.item(id), who: FORMS[item.form] ?? item.form, what: item.title, when: null } : { id, gone: true };
+
+/** The words of the decide button: what happens to the ticked and the unticked changes. */
+export function plan(chosen: number, open: number): string {
+  const no = open - chosen;
+  if (chosen === 0) return open === 1 ? "Deny the change" : `Deny all ${open}`;
+  if (no === 0) return open === 1 ? "Approve the change" : `Approve all ${open}`;
+  return `Approve ${chosen}, deny ${no}`;
+}
 
 /** The IDs that an action changes: its items, or the messages that submit resolved. */
 export const targets = (a: Action) => (a.targets.items?.length ? a.targets.items : a.resolved.messages);
@@ -109,7 +117,8 @@ export function pages(fetch: (ids: string[], items: boolean) => Promise<Row[]>) 
 
 /** Why a person must look (spec 2 section 5.3), in words. */
 export const FLAGS: Record<string, string> = {
-  bulk: "Changes more than 500 messages",
+  // Spec 2 section 5.3: the action, its changeset or the recent actions of the author cross 500 messages.
+  bulk: "Part of a change to more than 500 messages",
   first_contact: "The thread is with a sender you do not know",
   new_recipient: "Goes to an address you never wrote to",
   outside_thread: "Goes to an address that is not in the thread",

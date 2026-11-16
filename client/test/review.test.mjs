@@ -55,7 +55,7 @@ test("the review says who asks and why, and each change with its count and flags
   assert.match(t, /Add the label “Finance” to 2 messages The Q4 thread/);
   assert.match(t, /Archive 3 messages in 2 threads/);
   assert.match(t, /The thread is with a sender you do not know/);
-  assert.match(t, /Iris triage .*Archive 612 messages Changes more than 500 messages/);
+  assert.match(t, /Iris triage .*Archive 612 messages Part of a change to more than 500 messages/);
   // The action that a rule approved is not a question: it shows under the decisions.
   assert.match(t, /One more change has a decision Archive 1 message Approved by rule 1/);
   assert.match(t, /Iris makes none of these changes before you approve them\./);
@@ -129,4 +129,21 @@ test("the pages of each action are keyed by revision and number, and a slow load
   // With all rows loaded, nothing more is asked.
   assert.deepEqual((await loader.more(now, 5)).map((x) => x.id), ["m-8", "m-9"]);
   assert.equal(calls.length, 3);
+});
+
+test("the decide button says what happens to the ticked and the unticked changes", () => {
+  assert.equal(r.plan(3, 3), "Approve all 3");
+  assert.equal(r.plan(1, 1), "Approve the change");
+  assert.equal(r.plan(2, 3), "Approve 2, deny 1");
+  assert.equal(r.plan(0, 3), "Deny all 3");
+  assert.equal(r.plan(0, 1), "Deny the change");
+});
+
+test("an item with the status gone shows as gone, and the bulk flag names no count of the action", () => {
+  const item = { ...fx.items[0], status: "gone" };
+  assert.deepEqual(r.itemRow(item.id, item), { id: item.id, gone: true });
+  assert.equal(r.itemRow(fx.items[0].id, fx.items[0]).gone, false);
+  // Spec 2 section 5.3: the flag can come from the changeset or the author, so a small action can have it.
+  assert.doesNotMatch(r.FLAGS.bulk, /^Changes/);
+  assert.match(r.FLAGS.bulk, /Part of a change to more than 500 messages/);
 });

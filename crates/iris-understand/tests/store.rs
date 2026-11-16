@@ -412,6 +412,56 @@ fn a_new_run_keeps_a_corrected_item_and_marks_the_new_one() {
     );
 }
 
+/// An item that an open changeset action names is pinned too (`item_pin`,
+/// specification 1, section 7.5). A decided action does not pin.
+#[test]
+fn a_new_run_keeps_an_item_that_an_open_action_names() {
+    let b = store("rerun-action");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let item = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    // A submitted `close` action on the item: the triggers of migration 7
+    // propose it at submit.
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+                 INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                 VALUES (1, 1, 1, 'close', '{}', '{\"reason\":\"Done.\"}');",
+            )?;
+            tx.execute(
+                "INSERT INTO action_item(action_id, item_id) VALUES (1, ?1)",
+                [item],
+            )?;
+            tx.execute_batch(
+                "UPDATE changeset_action SET hash = 'h' WHERE id = 1;
+                 UPDATE changeset SET why = 'Done.', submitted_at = 1 WHERE id = 1;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let out = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 2, "the pinned item stays");
+    assert_eq!(
+        b.col::<Option<i64>>("SELECT duplicate_of FROM item WHERE id = ?1", out.items[0]),
+        Some(item)
+    );
+    // After a denial the action does not pin: the next run replaces both.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE changeset_action SET state = 'denied', decided_by = 'person',
+                   reason = 'No.', decided_at = 2 WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW).unwrap();
+    assert_eq!(b.items().len(), 1);
+}
+
 #[test]
 fn the_phishing_mark_stays_on_a_new_run() {
     let b = store("phishing-stays");

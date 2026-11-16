@@ -834,7 +834,7 @@ fn a_submitted_action_does_not_change() {
     );
 }
 
-/// Migration 10: the state of the ledger entry moves the action. The
+/// Migration 11: the state of the ledger entry moves the action. The
 /// action keeps the decision that approved it. A row in `writing` keeps the
 /// action through a withdraw, and the action then ends only as its row
 /// ends.
@@ -1048,11 +1048,11 @@ fn refused(s: &Store, sql: &str) {
     );
 }
 
-/// Migration 10 gives each applied or failed action of migration 9 an
+/// Migration 11 gives each applied or failed action of migration 9 an
 /// entry with no undo, and fails an action with the mark `applying`: its
 /// calls started, and nothing lists them.
 #[test]
-fn migration_10_keeps_the_rule_of_migration_9() {
+fn migration_11_keeps_the_rule_of_migration_9() {
     let dir = TempDir::new("migrate10");
     fs::create_dir_all(&dir.0).unwrap();
     // A store at migration 9: Store::open makes the key and the folder,
@@ -1183,4 +1183,39 @@ fn the_changeset_closes_with_its_last_open_action() {
     })
     .unwrap();
     assert_eq!(state(&s), "closed");
+}
+
+/// Migration 11: a ledger entry pins the items of its action (specification
+/// 1, section 7.5), also after the action left the open states.
+#[test]
+fn a_ledger_entry_pins_its_items() {
+    let dir = TempDir::new("pin");
+    let s = store(&dir);
+    s.write(|tx| {
+        let cs = draft(tx)?;
+        tx.execute(
+            "INSERT INTO action_item(action_id, item_id) VALUES (1, 42)",
+            [],
+        )?;
+        submit(tx, cs)?;
+        tx.execute_batch(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 5;
+             INSERT INTO ledger(action_id, ops, state, undo, at)
+             VALUES (1, '{}', 'writing', 'inverse', 7);
+             UPDATE ledger SET state = 'applied';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let pinned: bool = s
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM item_pin WHERE item_id = 42)",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(pinned);
 }

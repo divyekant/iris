@@ -28,7 +28,7 @@ edit an old entry. If a decision changes, add a new entry that names the old one
 - Options not chosen: The engine writes both states (two writes that can
   disagree after a defect). A copy of the action columns in each entry (more
   bytes, and two copies of one fact).
-- Links: card R2-03, migration 10 (`schema_10.sql`), specification 2,
+- Links: card R2-03, migration 11 (`schema_11.sql`), specification 2,
   section 7
 
 ## D4 (2026-11-16): The client uses the "Iris" palette, not the gold

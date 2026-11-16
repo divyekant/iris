@@ -10,7 +10,10 @@
   let { changesets, mode = "apply" }: { changesets: Changeset[]; mode?: Mode } = $props();
 
   // Each open changeset shows, also one whose actions all have a decision. The headline counts only the waiting ones.
-  let asks = $derived(changesets.filter((c) => shown(c).some(waits)));
+  // A changeset after a decision on this screen, by its ID. It takes the place of the one that the page loaded.
+  let now: Record<string, Changeset> = $state({});
+  let all = $derived(changesets.map((c) => now[c.id] ?? c));
+  let asks = $derived(all.filter((c) => shown(c).some(waits)));
   let count = $derived(asks.reduce((sum, c) => sum + shown(c).filter(waits).length, 0));
   let headline = $derived(
     count === 0
@@ -33,7 +36,7 @@
   <p class="note">Iris is in observe mode. A change that you approve waits until you choose apply mode in <a href="#/rules">Rules</a>.</p>
 {/if}
 
-{#each changesets as c (c.id)}<Request changeset={c} />{/each}
+{#each all as c (c.id)}<Request changeset={c} onchange={(d) => (now[d.id] = d)} />{/each}
 
 <style>
   .opening {

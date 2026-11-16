@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iris_apply::{apply, hash, Error, Outcome, Token};
+use iris_apply::{apply, Error, Outcome, Token};
 use iris_fakegmail::FakeGmail;
 use iris_gmail::{Config, Gmail};
 use iris_store::Store;
@@ -115,7 +115,7 @@ impl Box {
                         params![a, m],
                     )?;
                 }
-                let h = hash(tx, a)?;
+                let (_, h) = iris_changeset::hash(tx, a).unwrap();
                 tx.execute(
                     "UPDATE changeset_action SET hash = ?2 WHERE id = ?1",
                     params![a, h],
@@ -956,4 +956,44 @@ fn the_apply_refuses_what_was_not_approved() {
     assert!(matches!(b.apply(label), Err(Error::Verb(_))));
     assert_eq!(b.state(label).0, "approved");
     assert_eq!(b.calls("messages"), 0);
+}
+
+/// A stop between two calls: the recovery confirms the call that started,
+/// never makes it again, and makes each call that never started.
+#[test]
+fn the_recovery_continues_after_the_call_that_started() {
+    let b = setup("between-calls", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 3);
+    let a = b.approved("trash", &ms, PERSON);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{}', 'writing', 'inverse', 1)",
+                params![a, b.account],
+            )?;
+            let l = tx.last_insert_rowid();
+            for (i, m) in ms.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                     VALUES (?1, ?2, ?3, '[\"INBOX\"]', '[\"TRASH\"]')",
+                    params![l, m, i as i64 + 1],
+                )?;
+            }
+            Ok(tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?)
+        })
+        .unwrap();
+    // Call 1 reached Gmail before the stop.
+    b.gmail.trash(TOKEN, &b.provider_id(ms[0])).unwrap();
+    let before = b.calls("trash");
+    let c = applied(b.apply(a));
+    assert_eq!(c.changed, 3);
+    assert_eq!(b.calls("trash") - before, 2);
+    let (state, call, rows) = b.ledger(a);
+    assert_eq!((state.as_str(), call), ("applied", 3));
+    assert!(rows.iter().all(|r| r.3));
+    for &m in &ms {
+        assert!(b.gmail_labels(m).contains(&"TRASH".to_string()));
+        assert_eq!(b.mirror_labels(m), b.gmail_labels(m));
+    }
 }
