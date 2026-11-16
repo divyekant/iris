@@ -362,12 +362,13 @@ fn check_rule(raw: RawRule, line: usize) -> Result<Rule, String> {
         .ok()
         .filter(|&id| id > 0)
         .ok_or_else(|| format!("the id {} is not a positive integer", raw.id))?;
+    // Check the text as written, before the trim can remove a line break.
+    if raw.name.chars().any(char::is_control) {
+        return Err("the name must be one line of text".into());
+    }
     let name = raw.name.trim().to_string();
     if name.is_empty() {
         return Err("the name is empty".into());
-    }
-    if name.chars().any(char::is_control) {
-        return Err("the name must be one line of text".into());
     }
     let effect = match raw.effect.as_str() {
         "allow" => Effect::Allow,

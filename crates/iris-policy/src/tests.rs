@@ -97,6 +97,9 @@ fn errors_name_the_line() {
         ("id = 1", "id = 0", "positive"),
         ("name = \"N\"", "name = \"  \"", "name is empty"),
         ("name = \"N\"", "name = \"a\\nb\"", "one line"),
+        ("name = \"N\"", "name = \"\\na\"", "one line"),
+        ("name = \"N\"", "name = \"a\\r\\n\"", "one line"),
+        ("name = \"N\"", "name = \"\\t\"", "one line"),
         ("by = \"person\"", "by = \"agent\"", "by \"agent\""),
         (
             "added = 2026-11-10",
