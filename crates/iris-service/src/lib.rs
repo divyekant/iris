@@ -277,12 +277,25 @@ fn uid() -> io::Result<String> {
 /// Stop the launchd agent in `domain` if it is loaded. A failed stop of a
 /// loaded agent is an error.
 fn stop_agent(domain: &str) -> io::Result<()> {
+    stop_agent_with("launchctl", domain)
+}
+
+/// The exit code of `launchctl print` for a service that is not loaded
+/// ("Could not find service").
+const LAUNCHCTL_NOT_FOUND: i32 = 113;
+
+fn stop_agent_with(launchctl: &str, domain: &str) -> io::Result<()> {
     let target = format!("{domain}/{LABEL}");
-    // `launchctl print` fails only when the agent is not loaded.
-    if output("launchctl", &["print", &target])?.status.success() {
-        run("launchctl", &["bootout", &target])?;
+    let out = output(launchctl, &["print", &target])?;
+    match out.status.code() {
+        Some(0) => run(launchctl, &["bootout", &target]).map(|_| ()),
+        Some(LAUNCHCTL_NOT_FOUND) => Ok(()),
+        // Any other result does not say if the agent runs: stop with an error.
+        _ => Err(io::Error::other(format!(
+            "cannot find out if the service runs: launchctl print {target} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
     }
-    Ok(())
 }
 
 fn output(program: &str, args: &[&str]) -> io::Result<std::process::Output> {
@@ -349,6 +362,53 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// A fake launchctl: `print` exits with `code`, other calls go to `log`.
+    fn fake_launchctl(dir: &Path, code: i32) -> PathBuf {
+        let tool = dir.join(format!("launchctl-{code}"));
+        let log = dir.join(format!("calls-{code}"));
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = print ]; then echo why >&2; exit {code}; fi\necho \"$@\" >> '{}'\n",
+            log.display()
+        );
+        std::fs::write(&tool, script).unwrap();
+        assert!(Command::new("chmod")
+            .arg("755")
+            .arg(&tool)
+            .status()
+            .unwrap()
+            .success());
+        tool
+    }
+
+    #[test]
+    fn stop_agent_stops_only_a_loaded_agent_and_fails_when_unsure() {
+        let dir =
+            std::env::temp_dir().join(format!("iris-service-launchctl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let call = |code| {
+            let tool = fake_launchctl(&dir, code);
+            let result = stop_agent_with(tool.to_str().unwrap(), "gui/501");
+            (
+                result,
+                std::fs::read_to_string(dir.join(format!("calls-{code}"))).ok(),
+            )
+        };
+        let (ok, calls) = call(0);
+        assert!(ok.is_ok());
+        assert_eq!(
+            calls.as_deref(),
+            Some(format!("bootout gui/501/{LABEL}\n").as_str())
+        );
+        let (ok, calls) = call(LAUNCHCTL_NOT_FOUND);
+        assert!(ok.is_ok());
+        assert_eq!(calls, None);
+        let (err, calls) = call(5);
+        assert!(err.unwrap_err().to_string().contains("cannot find out"));
+        assert_eq!(calls, None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
