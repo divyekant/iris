@@ -424,3 +424,33 @@ Content-Type: text/html
     );
     assert_eq!(clean(&raw).text, "Yes, Friday.");
 }
+
+#[test]
+fn a_discarded_alternative_lists_no_attachments() {
+    let raw = crlf(
+        "Subject: Alt
+Content-Type: multipart/alternative; boundary=a
+
+--a
+Content-Type: text/plain
+
+Plain words.
+--a
+Content-Type: multipart/related; boundary=r
+
+--r
+Content-Type: text/html
+
+<div hidden>x</div>
+--r
+Content-Type: text/plain; name=notes.txt
+
+Notes.
+--r--
+--a--
+",
+    );
+    let c = clean(&raw);
+    assert_eq!(c.text, "Plain words.");
+    assert!(c.attachments.is_empty());
+}

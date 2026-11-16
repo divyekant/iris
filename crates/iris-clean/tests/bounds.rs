@@ -120,6 +120,16 @@ fn memory_and_time_stay_bounded() {
     assert_eq!(c.attachments[0].text.as_deref(), Some("Hello raw words"));
     assert!(peak < 12 * 1024 * 1024, "peak {peak}");
 
+    // Base64 with a few characters and very much white space.
+    let mut raw = message(1000, 0);
+    raw.truncate(raw.len() - b"--m--\r\n".len());
+    raw.extend_from_slice(b"JVBERi0x");
+    raw.extend(std::iter::repeat_n(b' ', 20_000_000));
+    raw.extend_from_slice(b"\r\n--m--\r\n");
+    let (peak, _, _) = peak_of(&raw);
+    eprintln!("peak: {peak} bytes (base64 with white space)");
+    assert!(peak < 1024 * 1024, "peak {peak}");
+
     // A very large header block.
     let raw = format!(
         "Subject: {}\r\n{}Content-Type: text/plain\r\n\r\nbody",
