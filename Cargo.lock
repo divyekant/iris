@@ -637,7 +637,15 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "clap",
+ "iris-auth",
+ "iris-fakegmail",
+ "iris-gmail",
+ "iris-store",
+ "iris-sync",
+ "iris-synth",
  "iris-web",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

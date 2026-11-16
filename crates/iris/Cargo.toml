@@ -14,5 +14,15 @@ path = "src/main.rs"
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 clap = { version = "4", features = ["derive"] }
+iris-auth = { version = "0.0.0", path = "../iris-auth" }
+iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal"] }
+
+[dev-dependencies]
+iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }
