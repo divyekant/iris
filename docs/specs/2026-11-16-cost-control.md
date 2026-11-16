@@ -114,8 +114,9 @@ approval).
   always belongs to the model and the price that make the calls.
 - A model with no price (a local model) needs no budget.
 - With a price, the budget is the money that the person approved for all
-  runs together, not for one run. The person approves more with
-  `iris understand --approve <code> --budget <usd>`.
+  runs together, not for one run. The person sets a new budget with
+  `iris understand --approve <code> --budget <usd>`, which replaces what
+  is left.
 - The runner reserves money before each message and settles after it
   (below). The budget never pays for a call that it did not reserve first.
 
@@ -208,7 +209,7 @@ Stop conditions, checked before each message:
 
 ### Counts
 
-A new migration (`schema_3.sql`) adds `model_setting` and this table:
+A new migration (`schema_3.sql`) adds `model_setting` and these tables:
 
 ```sql
 CREATE TABLE understand_run (
@@ -224,12 +225,29 @@ CREATE TABLE understand_run (
   cost_micro_usd INTEGER,
   unknown_calls INTEGER NOT NULL DEFAULT 0,
   unknown_cost_micro_usd INTEGER,
+  -- For a priced model, the runner inserts cost_micro_usd and
+  -- unknown_cost_micro_usd as 0. They stay NULL only with no price.
   reserved_micro_usd INTEGER NOT NULL DEFAULT 0,
   stop TEXT
 );
+
+CREATE TABLE understand_estimate (
+  code TEXT PRIMARY KEY,          -- 16 random bytes, hex
+  model_version INTEGER NOT NULL, -- model_setting.version
+  messages INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  cost_micro_usd INTEGER,
+  created_at INTEGER NOT NULL
+);
 ```
 
-- `cost_micro_usd` is NULL for a model with no price.
+- `iris understand --approve` deletes the receipt in the write of the
+  budget, so a code works one time. A receipt older than 24 hours does not
+  approve; each `--estimate` deletes such old receipts.
+- `cost_micro_usd` and `unknown_cost_micro_usd` start at 0 for a priced
+  model and stay NULL for a model with no price. The run cost uses
+  `coalesce(…, 0)` for both, so a NULL never hides a cost.
 - A call with usage counts its usage.
 - A call that the provider can charge for but whose usage Iris does not know
   (a time-out, a lost response, HTTP 5xx, an HTTP 200 answer with no usage
@@ -299,7 +317,9 @@ message. No path calls `store::understand` with a priced model outside
   It takes the run lock. It writes the budget only if a receipt with that
   code exists, its `version` is the `version` of the row now, and it is not
   older than 24 hours. Then it deletes the receipt, so a code works one
-  time. It also needs a terminal: if standard input is not a TTY, it
+  time. `--budget <usd>` replaces the budget that is left: after the
+  approval, `budget_micro_usd` is that amount. The confirmation shows the
+  budget that is left now and the new budget. It also needs a terminal: if standard input is not a TTY, it
   refuses. It shows the estimate of the receipt again and asks the person
   to type the budget again. The TTY check stops scripts with no terminal.
   It does not prove that a person types: a program that runs as the same OS

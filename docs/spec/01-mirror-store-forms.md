@@ -436,6 +436,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `by` TEXT, `at` INTEGER | Each change of an item by a person, or by an applied action of specification 2. `by` is `person` or the changeset ID. The item stays through a rebuild (section 7.5). |
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
 | `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
+| `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
 | `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
