@@ -1,7 +1,8 @@
 //! Understanding of one message of the store (specification 1, section 7.1).
 //!
 //! Three writes:
-//! 1. Steps 1 to 3: the header row, the clean text and the hostile marks.
+//! 1. Steps 1 to 3: the header row, the clean text and the hostile marks,
+//!    after a check that the message did not change since it was read.
 //!    It also sets `understood_at` to NULL.
 //! 2. No write while the model works, so the model never holds the write lock.
 //! 3. Step 8: the items, their sources and `understood_at`, in one
@@ -167,11 +168,24 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // After write 1, `seen` is the full state of the message. Each later
     // write checks it first, so a sync or a second run between the writes
     // makes this run save nothing.
+    let sender = match (&a.head.from_name, &a.head.from_addr) {
+        (Some(n), Some(ad)) => format!("{n} <{ad}>"),
+        (_, Some(ad)) => ad.clone(),
+        _ => String::new(),
+    };
+    let body = Body {
+        subject: a.text.subject.clone(),
+        sender,
+        text: a.text.text.clone(),
+    };
     let seen = store.write(|tx| {
         if state(tx, message, false)? != start {
             return Ok(None);
         }
         put_header(tx, message, &a)?;
+        // The clean text goes in the same checked write, so a sync between
+        // two writes cannot leave the text of old content.
+        iris_store::put_body(tx, message, &body)?;
         // The message is not understood until write 3 commits, so a stop
         // between the writes leaves it for the next run (section 7.1).
         tx.execute(
@@ -190,20 +204,6 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             ..Outcome::default()
         });
     };
-    let sender = match (&a.head.from_name, &a.head.from_addr) {
-        (Some(n), Some(ad)) => format!("{n} <{ad}>"),
-        (_, Some(ad)) => ad.clone(),
-        _ => String::new(),
-    };
-    store.put_body(
-        message,
-        &Body {
-            subject: a.text.subject.clone(),
-            sender,
-            text: a.text.text.clone(),
-        },
-    )?;
-
     // The engine does not understand a draft. It stays not understood, so
     // it runs when it is sent and loses the label DRAFT.
     if draft {
@@ -310,12 +310,13 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
 }
 
 /// The state of a message that understanding depends on: the content, the
-/// gone state and the labels. With `full`, also the hostile marks and
+/// gone state, the thread, the date and the labels. With `full`, also the hostile marks and
 /// `understood_at`, which a second run of the same message changes. The
 /// sender kind is checked apart.
 fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result<Option<String>> {
     c.query_row(
         "SELECT coalesce(m.content_sha256, '') || '|' || (m.gone_at IS NOT NULL) || '|' ||
+           m.thread_id || '|' || coalesce(m.internal_date, '') || '|' ||
            coalesce((SELECT group_concat(provider_id, ',') FROM (
               SELECT l.provider_id FROM message_label ml JOIN label l ON l.id = ml.label_id
               WHERE ml.message_id = m.id ORDER BY l.provider_id)), '') ||
@@ -328,21 +329,14 @@ fn state(c: &rusqlite::Connection, message: i64, full: bool) -> rusqlite::Result
     .optional()
 }
 
-/// The most bytes of a content file that understanding reads. iris-clean
-/// bounds each decoded part, so with this bound the peak memory of one
-/// message stays far below the 50 MB budget (specification 1, M3).
-pub const RAW_LIMIT: u64 = 8 * 1024 * 1024;
+/// The most bytes of the copy of one message that understanding reads: all
+/// headers and the parts that iris-clean decodes, not the other attachment
+/// bodies. So the memory of one message stays bounded (specification 1, M3).
+pub const RAW_LIMIT: u64 = crate::skeleton::TOTAL_LIMIT as u64;
 
-/// The first `RAW_LIMIT` bytes of a content file.
-// shortcut: a message over 8 MiB loses the MIME parts after the cut (in
-// most mail, attachments). Stream the parts if such mail shows misses.
 fn read_raw(path: &std::path::Path) -> Result<Vec<u8>> {
-    use std::io::Read;
-    let mut raw = Vec::new();
-    std::fs::File::open(path)?
-        .take(RAW_LIMIT)
-        .read_to_end(&mut raw)?;
-    Ok(raw)
+    let file = std::io::BufReader::new(std::fs::File::open(path)?);
+    Ok(crate::skeleton::read(file)?)
 }
 
 fn read_row(store: &Store, message: i64) -> Result<Row> {

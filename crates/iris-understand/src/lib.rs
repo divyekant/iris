@@ -18,6 +18,7 @@ mod head;
 mod prompt;
 mod rules;
 mod schema;
+mod skeleton;
 mod store;
 pub mod time;
 

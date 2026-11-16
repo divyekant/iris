@@ -451,7 +451,8 @@ fn bound<'a>(text: &'a str, limit: usize, mark: &str) -> Cow<'a, str> {
     }
 }
 
-fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
+/// [`Store::put_body`] inside a transaction of the caller.
+pub fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
     let text = bound(&b.text, TEXT_LIMIT, CUT_MARK);
     let subject = bound(&b.subject, FIELD_LIMIT, "");
     let sender = bound(&b.sender, FIELD_LIMIT, "");
