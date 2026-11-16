@@ -27,7 +27,7 @@ pub use search::Query;
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
 /// Migrations go forward only. Never change a migration after it merged: add one.
-const MIGRATIONS: &[&str] = &[include_str!("schema_1.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema_1.sql"), include_str!("schema_2.sql")];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
 /// after `journal_mode` (see [`settings`]).
