@@ -302,12 +302,12 @@ export function answer(path: string): unknown {
   if (name === "records") return { receipt: 1, booking: 1 };
   if (name === "brief" && id === "hidden") return { count: hidden.length, items: hidden, next: null };
   if (name === "handled") return handled;
-  if (name === "gate") return id === "declined" ? ignored : gate;
+  if (name === "gate") return page(id === "declined" ? "declined" : "waiting");
   if (name === "brief" && id) {
-    const section = brief[id as "you_owe"];
+    const section = briefNow()[id as "you_owe"];
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
   }
-  if (name === "brief") return brief;
+  if (name === "brief") return briefNow();
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
@@ -322,9 +322,33 @@ export function answer(path: string): unknown {
 }
 
 /** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
+// The answers at the gate in the dev server: the state of each sender, from the fixtures.
+const senders = [...gate.senders, ...ignored.senders];
+const state = new Map<string, "waiting" | "declined" | "accepted">(senders.map((s) => [s.id, gate.senders.includes(s) ? "waiting" : "declined"]));
+const page = (want: string): GatePage => {
+  const list = senders.filter((s) => state.get(s.id) === want);
+  return { count: list.length, senders: list, next: null };
+};
+/** The brief after the answers: an accepted sender's items go to their sections. */
+function briefNow(): Brief {
+  const moved = senders.filter((s) => state.get(s.id) === "accepted").flatMap((s) => s.items);
+  const waiting = senders.filter((s) => state.get(s.id) === "waiting").flatMap((s) => s.items);
+  const add = (section: Brief["you_owe"], more: Item[]) => ({ ...section, ...of([...section.items, ...more.filter((i) => !section.items.includes(i))]) });
+  return {
+    ...brief,
+    you_owe: add(brief.you_owe, moved.filter((i) => i.form === "commitment")),
+    conversations: add(brief.conversations, moved.filter((i) => i.form === "conversation")),
+    strangers: of(strangers.filter((i) => waiting.includes(i))),
+    gate: page("waiting"),
+    declined: page("declined").count,
+  };
+}
+
+/** Accept, decline or reopen a sender of the gate, as the engine does. */
 export function answerSender(id: string, answer: string): GateAnswer | undefined {
-  const sender = [...gate.senders, ...ignored.senders].find((s) => s.id === id);
+  const sender = senders.find((s) => s.id === id);
   if (!sender || !["accept", "decline", "reopen"].includes(answer)) return undefined;
+  state.set(id, answer === "accept" ? "accepted" : answer === "decline" ? "declined" : "waiting");
   const accepted = answer === "accept";
   return { id, address: sender.address, name: sender.name, kind: accepted ? "person" : "stranger", decided_by: accepted ? "person" : "engine", declined: answer === "decline" };
 }
