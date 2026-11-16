@@ -1720,6 +1720,13 @@ fn a_refused_correction_writes_nothing() {
         (&format!("c-0{row}"), "kind", json!("reply")),
         ("c-999", "kind", json!("reply")),
         ("seven", "kind", json!("reply")),
+        (&id, "kind.0", json!("reply")),
+        (&id, "counterparty.sender", json!("p-999")),
+        (
+            &id,
+            "counterparty",
+            json!({"kind": "sender", "sender": "p-999"}),
+        ),
     ] {
         let out = correct(&b.store, id, field, value.clone(), NOW);
         assert!(out.is_err(), "{id} {field} {value} must be refused");
@@ -1787,4 +1794,70 @@ fn a_corrected_record_is_corrected_and_stays_so_after_gone() {
         row,
     );
     assert_eq!(by, "cs-9");
+}
+
+#[test]
+fn a_correction_reaches_an_array_element_and_a_known_sender_but_not_a_conversation() {
+    let b = store("correct-paths");
+    b.kind("ana@example.org", "Ana Lee", "person");
+    let m = b.add("1", ASK, &["INBOX"]);
+    let receipt = r#"{"items": [{"form": "record", "title": "Lease",
+      "quote": "Can you send me the signed lease by Friday?", "confidence": 0.8,
+      "type": "receipt", "fields": {"vendor": "Bo", "date": "2025-12-31",
+      "amount": {"value": "10.00", "currency": "EUR"},
+      "items": [{"name": "a"}, {"name": "b"}]}}], "phishing": false}"#;
+    let row = understand(&b.store, m, &Fake::with(&[receipt]), NOW)
+        .unwrap()
+        .items[0];
+    let doc = correct(
+        &b.store,
+        &format!("r-{row}"),
+        "fields.items.1.name",
+        json!("c"),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        doc["fields"]["items"],
+        json!([{"name": "a"}, {"name": "c"}])
+    );
+    assert!(correct(
+        &b.store,
+        &format!("r-{row}"),
+        "fields.items.2.name",
+        json!("c"),
+        NOW
+    )
+    .is_err());
+
+    let c = understand(&b.store, m, &Fake::with(&[COMMITMENT]), NOW)
+        .unwrap()
+        .items[0];
+    let ana: i64 = b.col(
+        "SELECT id FROM sender WHERE address = 'ana@example.org' AND ?1 = ?1",
+        0,
+    );
+    let party =
+        json!({"kind": "sender", "sender": format!("p-{ana}"), "address": "ana@example.org"});
+    let doc = correct(
+        &b.store,
+        &format!("c-{c}"),
+        "counterparty",
+        party.clone(),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(doc["counterparty"], party);
+
+    let v: i64 = b.col(
+        "SELECT id FROM item WHERE form = 'conversation' AND ?1 = ?1",
+        0,
+    );
+    for (field, value) in [("summary", json!("x")), ("thread", json!("t-1"))] {
+        assert!(correct(&b.store, &format!("v-{v}"), field, value, NOW).is_err());
+    }
+    assert_eq!(
+        b.col::<i64>("SELECT COUNT(*) FROM correction WHERE item_id = ?1", v),
+        0
+    );
 }

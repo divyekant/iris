@@ -11,6 +11,8 @@
 //! item, never changes its ID, and gives the model the corrected document as
 //! an existing item (`store.rs`, `DROPPABLE` and `pinned`).
 
+use std::collections::BTreeSet;
+
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 
@@ -40,8 +42,10 @@ const COMMON: [&str; 12] = [
 /// section 5.5).
 ///
 /// Gives `Ok(Err(reason))` and writes nothing when the change is not
-/// allowed: no such item, a common field, or a document that is not valid
-/// against the schemas. Else writes the `correction` row and the new
+/// allowed: no such item, a common field, a conversation, a path that does
+/// not fit the document (`iris_talk::set_field`), a new sender ID that is
+/// not a row of the store, or a document that is not valid against the
+/// schemas. Else writes the `correction` row and the new
 /// document, and gives the new document. A record gets the status
 /// `corrected` (section 6.8). If the record is gone, `corrected` is its
 /// status after it comes back.
@@ -54,9 +58,6 @@ pub fn correct(
     now_ms: i64,
 ) -> rusqlite::Result<Result<Value, String>> {
     let top = field.split('.').next().unwrap_or("");
-    if field.split('.').any(str::is_empty) {
-        return Ok(Err(format!("the field {field:?} is not a dotted path")));
-    }
     if COMMON.contains(&top) {
         return Ok(Err(format!(
             "the field {top} is a common field, and a correction cannot change it"
@@ -82,7 +83,30 @@ pub fn correct(
     if doc["id"].as_str() != Some(id) {
         return no_item();
     }
-    iris_talk::set_field(&mut doc, field, value.clone());
+    // The conversation rule makes each field of a conversation from the
+    // store (`iris-talk`), for example its thread.
+    if form == "conversation" {
+        return Ok(Err("the conversation rule owns a conversation".into()));
+    }
+    let before = senders(&doc);
+    if !iris_talk::set_field(&mut doc, field, value.clone()) {
+        return Ok(Err(format!("the field {field:?} does not fit the item")));
+    }
+    // Each sender that a party names is a row of the store.
+    for p in senders(&doc).difference(&before) {
+        let row = match iris_store::parse_id(p) {
+            Some((iris_store::Kind::Sender, row)) => row,
+            _ => 0,
+        };
+        let known: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sender WHERE id = ?1)",
+            [row],
+            |r| r.get(0),
+        )?;
+        if !known {
+            return Ok(Err(format!("no sender has the ID {p:?}")));
+        }
+    }
     doc["updated"] = iris_talk::rfc3339(now_ms).into();
     // The status column holds `gone` while the record is gone, and the
     // sync does not change the document (`iris-sync`, section 4.5).
@@ -106,4 +130,24 @@ pub fn correct(
         params![item, doc.to_string(), now_ms],
     )?;
     Ok(Ok(doc))
+}
+
+/// The string values of each `sender` key of `doc`: the sender rows that its
+/// parties name (specification 1, section 6.1).
+fn senders(doc: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![doc];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::String(s)) = m.get("sender") {
+                    out.insert(s.clone());
+                }
+                stack.extend(m.values());
+            }
+            Value::Array(a) => stack.extend(a),
+            _ => {}
+        }
+    }
+    out
 }
