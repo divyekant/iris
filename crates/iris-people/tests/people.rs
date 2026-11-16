@@ -447,7 +447,7 @@ fn spam_sent_mail_does_not_make_a_thread_yours() {
 #[test]
 fn a_bcc_recipient_is_a_known_person() {
     let mut h = Hand::new("bcc");
-    let raw = b"From: Me <me@example.com>\r\nTo: ana@example.org\r\nBcc: Bo Hart\r\n <Bo@Example.org>, cy@example.org\r\nSubject: hi\r\n\r\nBcc: not@example.org\r\n";
+    let raw = b"From: Me <me@example.com>\r\nTo: ana@example.org\r\nBcc: Bo Hart\r\n <Bo@Example.org>, cy@example.org (Cy Moss)\r\nSubject: hi\r\n\r\nBcc: not@example.org\r\n";
     let sha = h.store.put_content(raw).unwrap();
     h.next += 1;
     h.store
@@ -474,6 +474,8 @@ fn a_bcc_recipient_is_a_known_person() {
         found,
         BTreeSet::from(["ana@example.org", "bo@example.org", "cy@example.org"])
     );
+    let cy = all.iter().find(|p| addrs(p) == ["cy@example.org"]).unwrap();
+    assert_eq!(cy.name.as_deref(), Some("Cy Moss"));
 }
 
 #[test]
