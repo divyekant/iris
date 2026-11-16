@@ -306,6 +306,8 @@ pub struct HandledAction {
     pub revision: i64,
     pub n: i64,
     pub verb: String,
+    /// The arguments of the verb, for example the label of `label`.
+    pub args: Value,
     /// The count of messages of the action.
     pub messages: i64,
     /// `approved`, `held` or `applied`.
@@ -323,6 +325,8 @@ pub struct HandledAction {
 /// One page of [`handled`].
 #[derive(Debug, Serialize, PartialEq)]
 pub struct HandledPage {
+    /// The count of all such actions, not only of this page.
+    pub count: i64,
     pub actions: Vec<HandledAction>,
     /// The `after` value of the next page, or `None` on the last page.
     pub next: Option<String>,
@@ -346,11 +350,19 @@ pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<Handled
             .filter(|n| *n > 0 && n.to_string() == t)
             .ok_or_else(|| Error::Query(format!("after {t} is not the next value of a page")))?,
     };
-    let mut rows: Vec<(i64, HandledAction)> = store.read(|c| {
+    let (count, mut rows): (i64, Vec<(i64, HandledAction)>) = store.read(|c| {
+        let count = c.query_row(
+            &format!(
+                "SELECT count(*) FROM changeset_action a WHERE {}",
+                crate::read::BY_RULE
+            ),
+            [],
+            |r| r.get(0),
+        )?;
         let mut st = c.prepare_cached(&format!(
             "SELECT a.id, a.changeset_id, a.revision, a.n, a.verb,
                     (SELECT count(*) FROM action_message m WHERE m.action_id = a.id),
-                    a.state, a.rule, a.policy, a.why, a.reason, a.decided_at
+                    a.state, a.rule, a.policy, a.why, a.reason, a.decided_at, a.args
              FROM changeset_action a
              WHERE {} AND a.id < ?1 ORDER BY a.id DESC LIMIT ?2",
             crate::read::BY_RULE
@@ -371,11 +383,13 @@ pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<Handled
                         why: r.get(9)?,
                         reason: r.get(10)?,
                         at: r.get::<_, Option<i64>>(11)?.map(crate::rfc3339),
+                        // A CHECK of the store keeps `args` valid JSON.
+                        args: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or(Value::Null),
                     },
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
+        Ok((count, rows))
     })?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
@@ -383,6 +397,7 @@ pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<Handled
         .then(|| rows.last().map(|(id, _)| id.to_string()))
         .flatten();
     Ok(HandledPage {
+        count,
         actions: rows.into_iter().map(|(_, a)| a).collect(),
         next,
     })

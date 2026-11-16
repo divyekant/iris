@@ -506,7 +506,9 @@ async fn lists_the_actions_that_a_rule_approved() {
     loop {
         let (code, p) = get(&s, &format!("/api/handled?limit=2{after}")).await;
         assert_eq!(code, StatusCode::OK);
+        assert_eq!(p["count"], 5);
         for a in p["actions"].as_array().unwrap() {
+            assert_eq!(a["args"], json!({}));
             assert_eq!(a["n"], 1);
             assert_eq!(a["verb"], "archive");
             assert_eq!(a["messages"], 2);
