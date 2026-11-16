@@ -241,7 +241,10 @@ pub fn remove() -> io::Result<Option<PathBuf>> {
                 other => other?,
             };
             std::fs::remove_file(&file)?;
-            run("systemctl", &["--user", "daemon-reload"])?;
+            // The unit is stopped and disabled, so the remove is complete. The
+            // reload only drops the old definition from memory; systemd reads
+            // the folder again at the next login, so a failed reload is no error.
+            let _ = output("systemctl", &["--user", "daemon-reload"]);
         }
     }
     Ok(Some(file))
