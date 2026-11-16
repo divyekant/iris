@@ -195,7 +195,12 @@ impl Walker {
                 for part in parts.into_iter().rev() {
                     let before = (self.body_left, self.cut);
                     let bodies = self.entity(part, depth + 1);
-                    if bodies.iter().any(|t| !t.trim().is_empty()) {
+                    // Visible means text that stays after the quote and signature steps.
+                    let visible = bodies.iter().any(|t| {
+                        let t = quote::strip_quotes(&t.replace('\r', ""), self.is_reply);
+                        !quote::strip_signature(&t).trim().is_empty()
+                    });
+                    if visible {
                         return bodies;
                     }
                     // A version with no visible text gives its budget back.

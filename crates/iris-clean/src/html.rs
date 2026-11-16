@@ -172,7 +172,18 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         ..Writer::default()
     };
     let mut stack: Vec<Open> = Vec::new();
+    // A style rule applies to elements before it too, so read all rules first.
     let mut css = Css::default();
+    let mut at = 0;
+    while let Some(n) = b[at..]
+        .windows(6)
+        .position(|w| w.eq_ignore_ascii_case(b"<style"))
+    {
+        let open_end = find(b, at + n, b">").map_or(b.len(), |e| e + 1);
+        let end = find_close(b, open_end, "style");
+        css.read(&html[floor(html, open_end)..floor(html, end)]);
+        at = end.max(at + n + 6).min(b.len());
+    }
     let mut hidden = 0usize;
     // Elements past the stack limit. Their content goes out, so that a hidden
     // element deep in the tree cannot show its text.
@@ -230,11 +241,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
             continue;
         }
         if RAW.contains(&name) {
-            let end = find_close(b, i, name);
-            if name == "style" {
-                css.read(&html[i..floor(html, end)]);
-            }
-            i = end;
+            i = find_close(b, i, name);
             continue;
         }
         if drop_quotes && matches!(tag.attr("id"), Some("appendonsend" | "divRplyFwdMsg")) {
@@ -859,6 +866,11 @@ mod tests {
                  .shown{color:red}</style><div class=\"a hidden\">secret</div><span id=pre>pre</span>\
                  <p class=x>tiny</p><div class=m>m</div><div class=shown>ok</div>";
         assert_eq!(md(h), "m\nok");
+        // A rule after the element hides it too.
+        assert_eq!(
+            md("<div class=h>secret</div>ok<style>.h{display:none}</style>"),
+            "ok"
+        );
     }
 
     #[test]

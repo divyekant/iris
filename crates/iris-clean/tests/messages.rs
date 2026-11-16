@@ -403,3 +403,24 @@ fn a_big_hidden_html_version_gives_its_budget_back() {
     assert_eq!(c.text, "Plain words.");
     assert!(!c.cut);
 }
+
+#[test]
+fn an_html_version_with_only_quoted_history_falls_back_to_plain_text() {
+    let raw = crlf(
+        "Subject: Re: Plan
+In-Reply-To: <a@example.org>
+Content-Type: multipart/alternative; boundary=a
+
+--a
+Content-Type: text/plain
+
+Yes, Friday.
+--a
+Content-Type: text/html
+
+<div>On Mon, Ana wrote:</div><blockquote>Can you?</blockquote>
+--a--
+",
+    );
+    assert_eq!(clean(&raw).text, "Yes, Friday.");
+}
