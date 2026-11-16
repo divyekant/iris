@@ -110,12 +110,6 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             ..Outcome::default()
         });
     }
-    if row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms) {
-        return Ok(Outcome {
-            waiting: true,
-            ..Outcome::default()
-        });
-    }
     let path = row
         .sha
         .as_deref()
@@ -185,6 +179,15 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
             ..Outcome::default()
         });
     }
+    // The retry gate holds only the model call: steps 1 to 3 ran, so a new
+    // label set or mark is saved, and hostile mail still drops its items.
+    let hostile = !a.marks.is_empty() || cx.kind == Kind::Hostile;
+    if !hostile && (row.tries >= MAX_TRIES || row.retry_at.is_some_and(|t| t > now_ms)) {
+        return Ok(Outcome {
+            waiting: true,
+            ..Outcome::default()
+        });
+    }
     let d = decide(&a, &cx, model).map_err(Error::Model)?;
     let ids = Ids {
         message,
@@ -203,6 +206,8 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     let mut invalid = None;
     let written = store.write(|tx| {
         if d.failed {
+            // The old items are not supported by this run: remove them.
+            drop_old_items(tx, message)?;
             tx.execute(
                 "UPDATE message SET tries = tries + 1, retry_at = ?2 WHERE id = ?1",
                 params![message, now_ms + RETRY_MS],

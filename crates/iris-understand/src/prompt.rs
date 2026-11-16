@@ -66,6 +66,9 @@ pub fn data(a: &Analysis, cx: &Context) -> String {
     }
     d.push('\n');
     d.push_str(&a.text.text);
+    for (name, text) in &a.text.attachment_text {
+        d.push_str(&format!("\n\nText of the attachment {name}:\n{text}"));
+    }
     d
 }
 

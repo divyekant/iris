@@ -109,11 +109,32 @@ pub struct Text {
     pub text: String,
     /// `(name, MIME type, size in bytes)`.
     pub attachments: Vec<(String, String, u64)>,
+    /// `(name, text)` of each attachment with text (a plain-text file, an
+    /// attached message or a simple PDF), at most [`ATTACHMENT_TEXT_CHARS`]
+    /// characters in all.
+    pub attachment_text: Vec<(String, String)>,
 }
+
+/// The most characters of attachment text that the model gets for one
+/// message, in addition to the clean text. It bounds the cost of a call.
+pub const ATTACHMENT_TEXT_CHARS: usize = 32_000;
 
 impl Text {
     pub fn of(raw: &[u8]) -> Text {
         let c = iris_clean::clean(raw);
+        let mut left = ATTACHMENT_TEXT_CHARS;
+        let mut attachment_text = Vec::new();
+        for a in &c.attachments {
+            let Some(t) = a.text.as_deref().filter(|t| !t.trim().is_empty()) else {
+                continue;
+            };
+            if left == 0 {
+                break;
+            }
+            let t = cut(t, left);
+            left -= t.chars().count();
+            attachment_text.push((a.name.clone(), t));
+        }
         Text {
             subject: c.subject,
             text: c.text,
@@ -122,6 +143,7 @@ impl Text {
                 .into_iter()
                 .map(|a| (a.name, a.mime_type, a.size))
                 .collect(),
+            attachment_text,
         }
     }
 }
@@ -404,8 +426,16 @@ pub fn decide(
         };
         d.calls += 1;
         add(&mut d.usage, reply.usage);
-        if reply.stop != iris_model::Stop::End {
-            continue;
+        match reply.stop {
+            iris_model::Stop::End => {}
+            // A refusal is not an answer that is not valid: no try counts.
+            iris_model::Stop::Refused => {
+                return Err(iris_model::Error::Rejected {
+                    status: 200,
+                    message: "the model refused to answer".into(),
+                })
+            }
+            iris_model::Stop::Truncated => continue,
         }
         let Some((drafts, phishing)) = reply.json().ok().and_then(|j| prompt::read(&j, a, cx))
         else {
