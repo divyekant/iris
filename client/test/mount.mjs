@@ -6,7 +6,7 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { createServer } from "vite";
 
 const window = new Window({ url: "http://localhost/" });
-for (const name of ["window", "document", "navigator", "Node", "Element", "HTMLElement", "Text", "Comment", "Event", "MouseEvent", "getComputedStyle", "requestAnimationFrame"]) {
+for (const name of ["window", "document", "navigator", "Node", "Element", "HTMLElement", "Text", "Comment", "Event", "MouseEvent", "getComputedStyle", "requestAnimationFrame", "HTMLMediaElement"]) {
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: name === "window" ? window : window[name] });
 }
 

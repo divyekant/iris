@@ -13,6 +13,8 @@
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
+  import WatchView from "./views/WatchView.svelte";
+  import { loadWatches } from "./watches";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
 
@@ -74,7 +76,8 @@
           <Setup {status} />
         {:else}
           <PolicyNotice />
-          {#await loadBrief() then brief}<Brief {brief} {status} />{:catch error}{@render failed(error)}{/await}
+          <!-- The watches never stop the brief: with no answer, the brief shows none. -->
+          {#await Promise.all([loadBrief(), loadWatches().catch(() => [])]) then [brief, watches]}<Brief {brief} {status} {watches} />{:catch error}{@render failed(error)}{/await}
         {/if}
       {:catch error}{@render failed(error)}
       {/await}
@@ -108,6 +111,8 @@
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
       {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "watches"}
+      {#await loadWatches() then watches}<WatchView {watches} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "rules"}
       {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}
     {/if}
@@ -117,6 +122,7 @@
 <footer class="site">
   <a href="#/rules">Rules</a>
   <a href="#/measures">Measures</a>
+  {#if import.meta.env.VITE_WATCH_LAYOUT === "B"}<a href="#/watches">Watches</a>{/if}
   <span>Iris runs on your machine.</span>
 </footer>
 
