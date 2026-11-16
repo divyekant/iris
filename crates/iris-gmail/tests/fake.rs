@@ -286,6 +286,12 @@ fn a_draft_is_created_read_and_sent_in_its_thread() {
         .unwrap()
         .is_empty());
 
+    // With no thread ID, the sent message goes into a new thread: the
+    // thread ID of the request decides.
+    let lone_raw = b"From: owner@example.com\r\nSubject: Hi\r\nMessage-ID: <iris.9@example.com>\r\n\r\nHello\r\n";
+    let other = gmail.create_draft(TOKEN, lone_raw, Some(&thread)).unwrap();
+    let lone = gmail.send_draft(TOKEN, &other.id, lone_raw, None).unwrap();
+    assert_ne!(lone.thread_id, thread);
     let sent = gmail
         .send_draft(TOKEN, &d.id, DRAFT, Some(&thread))
         .unwrap();

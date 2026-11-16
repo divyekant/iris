@@ -282,10 +282,10 @@ mod tests {
             let len = (next() % 3000) as usize;
             let raw: Vec<u8> = (0..len).map(|_| next() as u8).collect();
             let ws = [" ", "", "\n", "\t "][(next() % 4) as usize];
-            let mut fields = vec![
+            let mut fields = [
                 format!(r#""id"{ws}:{ws}"m1""#),
-                format!(r#""threadId":"t1""#),
-                format!(r#""labelIds":["DRAFT",{{"raw":"QQ"}}]"#),
+                r#""threadId":"t1""#.to_string(),
+                r#""labelIds":["DRAFT",{"raw":"QQ"}]"#.to_string(),
                 format!(r#""raw"{ws}:{ws}"{}""#, encode_url(&raw)),
             ];
             let k = (next() % 4) as usize;

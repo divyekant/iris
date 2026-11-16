@@ -7,7 +7,7 @@
 //! Supported: `users.getProfile`, `users.labels.list`, `users.labels.get`,
 //! `users.messages.list` (paging, `labelIds`, `includeSpamTrash`, and `q`
 //! only as `rfc822msgid:<id>`), `users.messages.get` (`raw`, `metadata`,
-//! `minimal`), `users.messages.send`, `users.drafts.create`, `.update`,
+//! `minimal`), `users.messages.send`, `users.drafts.create`,
 //! `.get` (`raw`), `.list` (`q` as above) and `.send`,
 //! `users.messages.batchModify`, `users.messages.trash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
@@ -1220,7 +1220,8 @@ struct SendDraftBody {
 
 /// Like Gmail: the draft leaves the drafts, and its text goes out as a new
 /// message with the label `SENT` in the thread of the draft. A `message`
-/// in the request replaces the text of the draft first.
+/// in the request replaces the text of the draft first, and its `threadId`
+/// (or none: a new thread) is the thread of the sent message.
 async fn send_draft(
     State(s): State<Shared>,
     Path(user): Path<String>,
@@ -1248,10 +1249,16 @@ async fn send_draft(
         s.replace_draft(&body.id, raw);
     }
     let (_, old) = s.drafts.remove(pos);
-    let (raw, thread) = (s.raw(old), s.msgs[old].thread.clone());
+    // A message in the request goes into the thread of its `threadId`, or
+    // into a new thread with none, so a test sees a dropped thread ID.
+    let thread = match &body.message {
+        Some(m) => m.thread_id.clone(),
+        None => Some(s.msgs[old].thread.clone()),
+    };
+    let raw = s.raw(old);
     s.msgs[old].deleted = true;
     s.record(old, Kind::Deleted, Vec::new());
-    let i = s.add(raw, Some(thread), BTreeSet::from(["SENT".to_string()]));
+    let i = s.add(raw, thread, BTreeSet::from(["SENT".to_string()]));
     Json(json!({ "id": gmail_id(i as u64), "threadId": s.msgs[i].thread, "labelIds": ["SENT"] }))
         .into_response()
 }
