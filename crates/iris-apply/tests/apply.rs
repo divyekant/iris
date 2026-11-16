@@ -1386,7 +1386,20 @@ fn an_entry_has_one_open_undo() {
     let a = b.approved("archive", &ms, PERSON);
     applied(b.apply(a));
     let entry = b.entry(a);
+    let can_undo = |l: i64| -> bool {
+        b.store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM ledger_can_undo WHERE ledger_id = ?1)",
+                    [l],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    assert!(can_undo(entry));
     let first = iris_apply::undo(&b.store, entry, now()).unwrap();
+    assert!(!can_undo(entry), "an open undo");
     assert!(matches!(
         iris_apply::undo(&b.store, entry, now()),
         Err(Error::Undo(_))
@@ -1395,6 +1408,7 @@ fn an_entry_has_one_open_undo() {
     // An action whose messages had the target state changed nothing.
     let again = b.approved("inbox", &b.messages(IN_INBOX, 2), PERSON);
     assert_eq!(applied(b.apply(again)).changed, 0);
+    assert!(!can_undo(b.entry(again)), "no changed message");
     assert!(matches!(
         iris_apply::undo(&b.store, b.entry(again), now()),
         Err(Error::Undo(_))
@@ -1786,4 +1800,33 @@ fn the_undo_saves_the_label_name_of_now() {
     for &m in &ms {
         assert!(b.mirror_labels(m).contains(&id));
     }
+}
+
+/// After Gmail deleted each message of a `trash` entry, the entry is final:
+/// the view has no undo for it, and `undo` refuses it.
+#[test]
+fn a_deleted_trash_entry_is_final() {
+    let b = setup("undo-final", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    let a = b.approved("trash", &ms, PERSON);
+    applied(b.apply(a));
+    let entry = b.entry(a);
+    b.store
+        .write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE id = ?1", [ms[0]])?))
+        .unwrap();
+    let listed: bool = b
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM ledger_can_undo WHERE ledger_id = ?1)",
+                [entry],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(!listed);
+    assert!(matches!(
+        iris_apply::undo(&b.store, entry, now()),
+        Err(Error::Undo(_))
+    ));
 }

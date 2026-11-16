@@ -89,3 +89,16 @@ WHEN EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = old.id)
 BEGIN
   SELECT RAISE(ABORT, 'iris: the action of an undo link does not change');
 END;
+
+-- The entries that have an undo now (section 7.1): applied or failed, with
+-- an undo, a changed message that is not gone, and no open undo. After
+-- Gmail deleted each message of a `trash` entry, the entry is final.
+CREATE VIEW ledger_can_undo AS
+  SELECT l.id AS ledger_id FROM ledger l
+  WHERE l.state IN ('applied', 'failed') AND l.undo = 'inverse'
+    AND EXISTS (SELECT 1 FROM ledger_message lm
+                JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+                WHERE lm.ledger_id = l.id AND lm.done = 1)
+    AND NOT EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
+                    WHERE u.ledger_id = l.id
+                      AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'));

@@ -78,7 +78,8 @@ not have the label `SPAM` or `TRASH`.
 
 Iris has no verb for a permanent delete, and no verb to empty the trash.
 Gmail deletes a message in the trash for good after 30 days. After that time,
-the undo of `trash` is not possible, and the ledger shows the entry as final.
+the undo of `trash` is not possible, and the ledger shows the entry as final:
+the view `ledger_can_undo` of migration 12 no longer lists it (section 7.1).
 
 `label` and `unlabel` accept only a label of kind `user` (specification 1,
 section 5.5). At submit, the engine refuses a label name that is the same as
@@ -593,13 +594,13 @@ or with a change of Iris state:
 | `id` | `l-` and a number. |
 | `action` | The action that the entry applies. One entry for each action. The changeset, the revision, the verb, the author and the decision (`rule` with its ID and the policy version of section 6.3, or `person`) come from the action row. That row does not change after the submit, and an applied action keeps the decision that approved it. |
 | `account` | The mailbox of the provider calls. None for a state verb. |
-| `ops` | The provider operations, as JSON: the call (`batchModify` or `trash`), the labels to add and remove, and the number of calls. For a state verb, the field. |
+| `ops` | The provider operations, as JSON: the call (`batchModify` for each 1,000 messages, or `trash` or `untrash` for each message), the labels to add and remove, and the number of calls. Only an undo of `trash` writes `untrash` (section 7.4). For a state verb, the field. |
 | `pre`, `post` | For a state verb only: the old and the new values. |
 | `call` | The number of the last provider call that the engine started, from 1. 0 before the first call. |
 | `state` | `writing`, `applied`, `failed` or `undone`. The trigger `ledger_state` moves the action to the same state. |
 | `error` | The refusal of the provider, or why the engine could not confirm each message. |
 | `history_id` | The Gmail history ID after the apply. |
-| `undo` | `inverse` (an undo exists) or `none` (final, for example a sent message, or an action applied before the ledger). |
+| `undo` | `inverse` (the verb has an undo) or `none` (final, for example a sent message, or an action applied before the ledger). The column records the verb, and does not change. An undo is available now only if the entry is `applied` or `failed`, has `inverse`, and has a message with `done` that is not gone (section 7.4). The view `ledger_can_undo` (migration 12) lists these entries, and `iris_apply::undo` refuses each other entry. Else the ledger shows the entry as final, for example after Gmail deleted each message of a `trash` entry. |
 | `undone_by` | The ledger entry of the undo. |
 | `at` | The time. |
 
