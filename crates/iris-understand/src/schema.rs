@@ -77,6 +77,11 @@ pub(crate) fn valid_draft(d: &crate::Draft) -> bool {
             v[key]["sender"] = Value::from("p-1");
         }
     }
+    if let Some(Value::Array(list)) = v.pointer_mut("/fields/parties") {
+        for p in list.iter_mut().filter(|p| p["kind"] == "sender") {
+            p["sender"] = Value::from("p-1");
+        }
+    }
     let prefix = d.form().chars().next().unwrap_or('x');
     let derived = match d.by {
         crate::By::Rule(r) => serde_json::json!({"by": "rule", "rule": r}),
