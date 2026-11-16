@@ -268,6 +268,15 @@ fn the_text_limits() {
     refused(ask(&store, job, "", None, NOW));
     refused(ask(&store, job, &"q".repeat(2001), None, NOW));
     refused(ask(&store, job, "Which?", Some(""), NOW));
+    refused(ask(
+        &store,
+        job,
+        &format!("x\0{}", "y".repeat(3000)),
+        None,
+        NOW,
+    ));
+    refused(create(&store, "G", Some(-1), NOW));
+    refused(create(&store, "G", None, 253_402_300_800_000));
     ask(&store, job, "Which?", None, NOW).unwrap();
     refused(answer(&store, job, &"a".repeat(10_001), NOW));
     answer(&store, job, &"a".repeat(10_000), NOW).unwrap();
@@ -301,6 +310,30 @@ fn raw_sql_cannot_change_a_job_without_an_event() {
         // An event with an ID lower than the newest event.
         "INSERT INTO job_event (id, job_id, at, state, by, question)
            VALUES (0, 1, 1763283423000, 'needs_you', 'agent', 'Q')",
+        // A job ID that is not positive: j-0 is not a job ID.
+        "INSERT INTO job (id, goal, created_at, state, updated_at) VALUES (0, 'G', 1, 'working', 1)",
+        "INSERT INTO job (id, goal, created_at, state, updated_at) VALUES (-3, 'G', 1, 'working', 1)",
+        // A value that does not fit the job document: a NUL in a text (SQLite
+        // length() stops at a NUL), a blob, a time that is not an integer or
+        // not in the years 1970 to 9999, a thread ID that is not positive.
+        "INSERT INTO job (goal, created_at, state, updated_at)
+           VALUES ('x' || char(0) || printf('%.3000c', 'y'), 1, 'working', 1)",
+        "INSERT INTO job (goal, created_at, state, updated_at) VALUES (x'41', 1, 'working', 1)",
+        "INSERT INTO job (goal, created_at, state, updated_at) VALUES ('G', 'soon', 'working', 'soon')",
+        "INSERT INTO job (goal, created_at, state, updated_at) VALUES ('G', -1, 'working', -1)",
+        "INSERT INTO job (goal, due_at, created_at, state, updated_at)
+           VALUES ('G', 253402300800000, 1, 'working', 1)",
+        "INSERT INTO job (goal, due_at, created_at, state, updated_at) VALUES ('G', 1.5, 1, 'working', 1)",
+        "INSERT INTO job_event (job_id, at, state, by, question)
+           VALUES (1, 1763283423000, 'needs_you', 'agent', 'Q' || char(0) || 'more')",
+        "INSERT INTO job_event (job_id, at, state, by, wait_thread, wait_until)
+           VALUES (1, 1763283423000, 'waiting', 'agent', 0, 1763283424000)",
+        "INSERT INTO job_event (job_id, at, state, by, wait_until)
+           VALUES (1, 1763283423000, 'waiting', 'agent', '1763283424000x')",
+        "INSERT INTO job_event (job_id, at, state, by, end_kind, why)
+           VALUES (1, 1763283423000, 'done', 'person', 'cancel', char(0))",
+        "INSERT INTO job_event (id, job_id, at, state, by, question)
+           VALUES (-1, 1, 1763283423000, 'needs_you', 'agent', 'Q')",
         // An event of a job that does not exist.
         "INSERT INTO job_event (job_id, at, state, by, end_kind)
            VALUES (9, 1763283423000, 'done', 'person', 'cancel')",
