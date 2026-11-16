@@ -157,7 +157,7 @@ fn matched(a: &Analysis, cx: &Context) -> Option<Vec<Draft>> {
                 .unwrap_or_default();
             let item = json!({
                 "form": "signal",
-                "status": if expires <= cx.now_ms { "expired" } else { "active" },
+                "status": crate::signal_status(Some(expires), cx.now_ms),
                 "title": cut(&format!("Code from {who}"), 200),
                 "kind": "code",
                 "issuer": issuer,

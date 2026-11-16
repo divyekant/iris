@@ -11,6 +11,7 @@
 
 pub mod batch;
 pub mod budget;
+pub mod correct;
 pub mod head;
 pub mod prompt;
 pub mod rules;
@@ -296,17 +297,36 @@ impl Draft {
             By::Rule(r) => json!({"by": "rule", "rule": r}),
             By::Model => json!({"by": "model", "model": model, "prompt": PROMPT}),
         };
-        for key in ["owner", "counterparty", "issuer", "publisher"] {
-            if let Some(p) = v.get_mut(key) {
-                set_sender(p, sender);
-            }
-        }
-        if let Some(Value::Array(list)) = v.pointer_mut("/fields/parties") {
-            for p in list {
-                set_sender(p, sender);
-            }
-        }
+        set_senders(&mut v, sender);
         v
+    }
+}
+
+/// Set the `p-` ID of each sender party of the item `v` from its address:
+/// the one rule that links a party to its sender row, for a new item and
+/// for a correction. A party that is not of the kind `sender`, or that has
+/// no address, gets no ID.
+pub fn set_senders(v: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) {
+    for key in ["owner", "counterparty", "issuer", "publisher"] {
+        if let Some(p) = v.get_mut(key) {
+            set_sender(p, sender);
+        }
+    }
+    if let Some(Value::Array(list)) = v.pointer_mut("/fields/parties") {
+        for p in list {
+            set_sender(p, sender);
+        }
+    }
+}
+
+/// The status of a signal that a person did not use or dismiss: `expired`
+/// from its expiry on (section 6.8), else `active`. The one rule for the
+/// fixed rules, the model and a correction.
+pub(crate) fn signal_status(expires_ms: Option<i64>, now_ms: i64) -> &'static str {
+    if expires_ms.is_some_and(|e| e <= now_ms) {
+        "expired"
+    } else {
+        "active"
     }
 }
 
@@ -321,10 +341,14 @@ pub struct Ids {
 /// Add the `p-` ID to a `sender` party with an address.
 fn set_sender(p: &mut Value, sender: &mut dyn FnMut(&str, Option<&str>) -> i64) {
     let Some(o) = p.as_object_mut() else { return };
+    // Only a `sender` party names a sender row.
     if o.get("kind").and_then(Value::as_str) != Some("sender") {
+        o.remove("sender");
         return;
     }
+    // A sender ID that no address supports goes.
     let Some(addr) = o.get("address").and_then(Value::as_str).map(str::to_string) else {
+        o.remove("sender");
         return;
     };
     let name = o.get("name").and_then(Value::as_str).map(str::to_string);
