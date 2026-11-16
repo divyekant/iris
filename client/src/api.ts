@@ -75,7 +75,7 @@ export type Status = {
   messages: { total: number; fetched: number; understood: number; gone: number };
 };
 
-// `next` is the item ID where the next page starts (`before=` for a form list, `after=` for a brief section), or null.
+// `next` goes back unchanged as `before=` (a form list) or `after=` (a brief section, an opaque cursor). Null on the last page.
 export type Page = { items: Item[]; next: string | null; duplicates?: Record<string, string[]> };
 
 export type Summary = {
