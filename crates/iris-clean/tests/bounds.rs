@@ -196,6 +196,24 @@ fn memory_and_time_stay_bounded() {
     assert_eq!(c.text, "body");
     assert!(peak < 1024 * 1024, "peak {peak}");
 
+    // Large values of each kind of field: addresses, dates, IDs, trace
+    // fields, MIME fields with many parameters, in the top and in a part.
+    let big = "a".repeat(2_000_000);
+    let params = "; p=\"=?utf-8?B?w5w=?=\"".repeat(100_000);
+    let raw = format!(
+        "To: {big}@example.org\r\nFrom: <{big}>\r\nDate: {big}\r\nMessage-ID: <{big}>\r\n\
+         References: <{big}>\r\nReceived: from {big}\r\nList-Id: <{big}>\r\n\
+         Content-Type: multipart/mixed; boundary=m{params}\r\n\r\n--m\r\n\
+         Content-Type: text/plain{params}\r\nContent-Disposition: inline; filename*0*=utf-8''{big}\r\n\
+         Content-Transfer-Encoding: 7bit{params}\r\n\r\nbody\r\n--m--\r\n"
+    );
+    let (peak, _, c) = peak_of(raw.as_bytes());
+    eprintln!("peak: {peak} bytes (large fields of each kind)");
+    assert!(c.attachments.len() <= 1);
+    // mail-parser parses the MIME fields in full, so their parameters cost
+    // memory. Measured: about 2.3 bytes for each byte of the message.
+    assert!(peak < 3 * raw.len(), "peak {peak} for {} bytes", raw.len());
+
     // One HTML tag with very many attributes.
     let raw = format!(
         "Subject: Attrs\r\nContent-Type: text/html\r\n\r\n<p {}>text</p>",

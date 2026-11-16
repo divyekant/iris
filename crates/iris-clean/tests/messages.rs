@@ -856,3 +856,53 @@ fn text_on_the_line_after_max_lines_is_cut() {
     assert!(!c.cut);
     assert_eq!(c.text, "last");
 }
+
+#[test]
+fn a_header_after_the_header_limit_does_not_count() {
+    // 300 KiB of filler fields, then a Content-Type past the 256 KiB limit.
+    let mut raw = String::from("Subject: Fill\r\n");
+    while raw.len() < 300 * 1024 {
+        raw.push_str("X-Fill: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+    }
+    raw.push_str("Content-Type: text/html\r\n\r\n<p>Tag <b>kept</b></p>");
+    let c = clean(raw.as_bytes());
+    assert_eq!(c.text, "<p>Tag <b>kept</b></p>");
+}
+
+#[test]
+fn a_header_value_past_the_value_limit_is_cut() {
+    // The charset parameter starts after 16 KiB of the value, so it does not count.
+    let pad = "a".repeat(17 * 1024);
+    let raw = format!(
+        "Subject: Long\r\nContent-Type: text/plain; x=\"{pad}\"; charset=utf-16le\r\n\r\nHi"
+    );
+    assert_eq!(clean(raw.as_bytes()).text, "Hi");
+}
+
+#[test]
+fn the_first_of_two_content_type_fields_counts() {
+    let raw = "Subject: Two\r\nContent-Type: text/plain\r\nContent-Type: text/html\r\n\r\n<b>x</b>";
+    assert_eq!(clean(raw.as_bytes()).text, "<b>x</b>");
+}
+
+#[test]
+fn a_quoted_printable_escape_at_the_cap_decodes() {
+    // The attachment text budget ends after the escape `=41`. The text after
+    // it changes the path of a search for the cut, so try several lengths.
+    for tail in 1..24 {
+        let body = format!(
+            "{}=41{}",
+            "a".repeat(iris_clean::ATTACHMENT_TEXT_LIMIT - 1),
+            "x".repeat(tail)
+        );
+        let raw = format!(
+            "Subject: QP\nContent-Type: multipart/mixed; boundary=m\n\n--m\n\nHi\n--m\n\
+         Content-Type: text/plain; name=a.txt\nContent-Transfer-Encoding: quoted-printable\n\n\
+         {body}\n--m--\n"
+        );
+        let c = clean(raw.as_bytes());
+        let t = c.attachments[0].text.as_deref().unwrap();
+        let t = t.strip_suffix(iris_clean::CUT_MARK).expect("a cut");
+        assert!(t.ends_with("aaaA"), "tail {tail}: {:?}", &t[t.len() - 8..]);
+    }
+}
