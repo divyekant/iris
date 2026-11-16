@@ -220,6 +220,36 @@ fn a_sent_message_before_a_new_participant_does_not_make_it_a_person() {
 }
 
 #[test]
+fn a_bcc_recipient_becomes_a_person() {
+    let mut c = Case::new("bcc");
+    c.put("t1", &["SENT"], &format!("From: {OWNER}\r\nBcc: Eve <eve@example.org>"));
+    assert_eq!(c.row("eve@example.org").1.as_deref(), Some("person"));
+    let d = c.put("t2", &["INBOX"], "From: Eve <eve@example.org>");
+    assert_eq!(d.kind, Kind::Person);
+    // The row stays a person on the next message too.
+    assert_eq!(c.put("t3", &["INBOX"], "From: Eve <eve@example.org>").kind, Kind::Person);
+}
+
+#[test]
+fn older_mail_of_a_known_service_keeps_the_service() {
+    // Three service messages are in the store; the engine reads newest first.
+    let mut c = Case::new("older");
+    let mut ids = Vec::new();
+    for t in ["t1", "t2", "t3"] {
+        c.n += 1;
+        let raw = format!("{}\r\nSubject: x\r\n\r\nBody.\r\n", service_mail());
+        let m = new_message(&format!("m{}", c.n), t, c.n * 1000, &[], raw.as_bytes());
+        ids.push((c.store.put_messages(c.acc, &[m]).unwrap()[0], raw));
+    }
+    for (id, raw) in ids.iter().rev() {
+        c.store
+            .write(|tx| Ok(decide(tx, *id, raw.as_bytes(), 7)?))
+            .unwrap();
+    }
+    assert_eq!(c.row("no-reply@shop.example.com").1.as_deref(), Some("service"));
+}
+
+#[test]
 fn a_service_needs_automated_mail_gmail_dkim_and_two_earlier_messages() {
     let mut c = Case::new("service");
     assert_eq!(c.put("t1", &[], &service_mail()).kind, Kind::Stranger);
