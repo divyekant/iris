@@ -122,6 +122,11 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
             }
         }
 
+        #[cfg(test)]
+        if let Some(hook) = BETWEEN.with(|b| b.get()) {
+            hook(store);
+        }
+
         // Pass 2: the history of each address.
         let mut stats: HashMap<String, Stats> = HashMap::new();
         let mut known: HashSet<String> = HashSet::new();
@@ -288,6 +293,12 @@ pub fn people(store: &Store, account: i64) -> Result<Vec<Person>> {
         .collect();
     out.sort_by(|a, b| b.last_at.cmp(&a.last_at).then_with(|| a.id.cmp(&b.id)));
     Ok(out)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test runs this between the two passes of [`people`].
+    static BETWEEN: std::cell::Cell<Option<fn(&Store)>> = const { std::cell::Cell::new(None) };
 }
 
 /// One message row: ID, thread, date, `From` address and name, `To`, `Cc`,
@@ -484,6 +495,72 @@ fn name_key(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_passes_read_one_snapshot() {
+        let dir = std::env::temp_dir().join(format!("iris-people-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::open(&dir).unwrap();
+        let account = store.add_account("gmail", "me@example.com").unwrap();
+        store
+            .put_labels(
+                account,
+                &[("SENT", "SENT", "system"), ("INBOX", "INBOX", "system")],
+            )
+            .unwrap();
+        let msg = |id: &str, label: &str, from: &str, to: &str| iris_store::NewMessage {
+            provider_id: id.into(),
+            thread_provider_id: "t1".into(),
+            internal_date: Some(1000),
+            labels: vec![label.into()],
+            header: iris_store::Header {
+                from_addr: Some(from.into()),
+                to_addrs: Some(to.into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        store
+            .put_messages(
+                account,
+                &[msg("in", "INBOX", "bo@example.org", "me@example.com")],
+            )
+            .unwrap();
+        // The sync writes your reply between the two passes.
+        BETWEEN.with(|b| {
+            b.set(Some(|store: &Store| {
+                let m = iris_store::NewMessage {
+                    provider_id: "out".into(),
+                    thread_provider_id: "t1".into(),
+                    internal_date: Some(2000),
+                    labels: vec!["SENT".into()],
+                    header: iris_store::Header {
+                        from_addr: Some("me@example.com".into()),
+                        to_addrs: Some("ana@example.org".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                store.put_messages(1, &[m]).unwrap();
+            }))
+        });
+        let first: Vec<String> = people(&store, account)
+            .unwrap()
+            .into_iter()
+            .flat_map(|p| p.addresses.into_iter().map(|a| a.address))
+            .collect();
+        BETWEEN.with(|b| b.set(None));
+        // The snapshot before the reply: nobody is known yet.
+        assert_eq!(first, Vec::<String>::new());
+        let mut after: Vec<String> = people(&store, account)
+            .unwrap()
+            .into_iter()
+            .flat_map(|p| p.addresses.into_iter().map(|a| a.address))
+            .collect();
+        after.sort();
+        assert_eq!(after, ["ana@example.org", "bo@example.org"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn address_lists() {
