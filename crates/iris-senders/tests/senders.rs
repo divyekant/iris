@@ -168,7 +168,10 @@ fn sent_mail_makes_each_recipient_a_person() {
     );
     assert_eq!((d.kind, d.sender), (Kind::SelfOwner, None));
     assert_eq!(c.row("ana@example.org").1.as_deref(), Some("person"));
-    assert_eq!(c.row("bo@example.net").2.as_deref(), Some("sent: m-1 sha:-"));
+    assert_eq!(
+        c.row("bo@example.net").2.as_deref(),
+        Some("sent: m-1 sha:-")
+    );
     // A new thread from Ana: still a person.
     let d = c.put(
         "t2",
