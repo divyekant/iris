@@ -117,11 +117,15 @@ The granted messages of a job:
 - A job in the state `done` grants nothing. The build of a done job writes
   the job files and no thread, item or person file. The read verbs of a
   session of a done job see nothing (R4-04 ends the session).
-- Each caller that moves a job to `done` (`iris_job::finish`) builds its
-  workspace after the move, so the mail files go at once. The engine also
+- Each caller that moves a job to `done` (`iris_job::finish`) does these
+  steps in this order: move the job, end the session of the job if one
+  runs and wait until it ended (R4-04), then build the workspace. So the
+  mail files go at once, and no build runs while a session runs. The engine also
   builds, at each start, the workspace of each done job that still has a
-  `threads/` folder. If the build after `finish` fails or the engine
-  stops, the mail files stay only until that start. The callers come with
+  `threads/` folder. If the engine stops between the move and the
+  build, the session ends with the engine, and the mail files stay only
+  until that start. If the build fails, the engine tries it again at that
+  start. The callers come with
   R4-04 and R4-09 (known limit until then, with a GitHub issue).
 
 - A thread of the scope grants each clean message of the thread.
@@ -154,14 +158,15 @@ the granted messages:
      message that became hostile mail, gone or a signal source after the run
      makes the document short. Understanding gives no draft text to the
      model.
-   - The short document: for an item of the scope whose source thread is
-     not a thread of the scope. It holds only `id`, `form`, `status` and
+   - The short document: for each other item that passes the source check
+     above, also an item of a thread of the scope with a message outside
+     the grant. It holds only `id`, `form`, `status` and
      `sources` (the `m-` IDs of its source messages). Each value comes from
      the store rows of the item, not from the text of the model. The agent
      reads the text in the thread file of the sources.
 
-   An item that is not in the scope, with a source in a thread of the scope,
-   gets the full document by the same check. The forms `feed`, `signal` and
+   An item of the scope and an item with a source in a granted message go
+   through the same two checks. The forms `feed`, `signal` and
    `conversation` never go into a workspace: a signal can hold a security
    code, the feed is not about the job, and the conversation is the thread
    file.
