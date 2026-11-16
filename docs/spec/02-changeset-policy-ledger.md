@@ -70,7 +70,7 @@ not have the label `SPAM` or `TRASH`.
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `correct` | any item | field, value | none (Iris state) | set the old value (below) | 2 |
-| `draft` | thread, or none for new mail | file with the text | a later specification (section 7.5) | a later specification | 3 |
+| `draft` | thread, a draft, or none for new mail | recipients, subject, text | `drafts.create` or `drafts.update` (section 7.5) | a later specification | 3 |
 | `send` | a draft | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
 | `wait` | thread, or a date | until | none | not applicable | 5 |
@@ -783,7 +783,8 @@ An undo of an undo is a new action, not a delete of the record.
 ### 7.5 Release 3: draft, send and the held outbox
 
 A later specification defines the verbs `draft`, `send` and `nudge`, and the
-held outbox. That specification must meet these constraints:
+held outbox. `docs/specs/2026-11-16-send.md` (R3-01) defines `draft`, `send`
+and the release step. That specification must meet these constraints:
 
 - A `send` never goes at once. After the approval, it waits in the held
   outbox for the hold delay (default 60 seconds). The outbox survives a
