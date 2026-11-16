@@ -1,0 +1,8 @@
+subject: Edbel News: new sign-in to your account
+cut: false
+---
+A new sign-in to your Edbel News account.
+Device: Ulri 14
+If this was you, you do not need to do anything.
+
+Edbel

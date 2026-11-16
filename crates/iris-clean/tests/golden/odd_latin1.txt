@@ -1,0 +1,21 @@
+subject: Lunte Air weekly: 10 new stories
+cut: false
+---
+* Xooein (Einri)
+  https://news.example.org/lunte/0
+* Quivelul (Belsia)
+  https://news.example.org/lunte/1
+* Eindorte (Anka)
+  https://news.example.org/lunte/2
+* Einvoszan (Lunsia)
+  https://news.example.org/lunte/3
+* Okaed (Belein)
+  https://news.example.org/lunte/4
+* Olovel (Tasbel)
+  https://news.example.org/lunte/5
+* Papatas (Tasmar)
+  https://news.example.org/lunte/6
+Unsubscribe: https://lunte.example.com/unsubscribe
+
+Lunte
+Café crème, déjà vu.

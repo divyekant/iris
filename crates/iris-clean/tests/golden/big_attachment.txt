@@ -1,0 +1,9 @@
+subject: Can you send the contract by Tuesday?
+cut: false
+attachment: "scan-27375.pdf" application/pdf 3142228 bytes, text: false
+---
+Hi Avel,
+Can you send me the contract by Tuesday? I need it for the meeting.
+No rush on this.
+
+Rennor
