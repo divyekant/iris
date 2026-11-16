@@ -277,9 +277,15 @@
           "maximum": 1
         },
         "matter": {
-          "type": [
-            "string",
-            "null"
+          "description": "The g- ID of the confirmed matter of the item, or null. See docs/specs/2026-11-16-matters.md.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^g-[1-9][0-9]*$"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "attention": {
