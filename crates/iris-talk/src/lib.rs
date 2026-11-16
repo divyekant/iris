@@ -128,7 +128,9 @@ pub fn update(
         "gone" => old.before_gone.clone(),
         s => Some(s.to_string()),
     };
-    if mails.is_empty() {
+    // A conversation needs a message from you, a person or a stranger
+    // (section 7.3). Service mail alone does not keep it.
+    if mails.iter().all(|m| m.service) {
         if old.status != "gone" {
             let mut doc = old.doc;
             doc["status"] = json!("gone");
@@ -156,6 +158,7 @@ pub fn update(
     )?
     .expect("a message counts");
     parts.fill(&mut doc, thread, &mails, now);
+    corrections(conn, old.id, &mut doc)?;
     // Compare without the time of the change, so a call that changes nothing
     // writes nothing.
     doc["updated"] = old.doc["updated"].clone();
@@ -219,6 +222,33 @@ fn save(
     )?;
     for m in mails.iter().filter(|m| m.id != origin) {
         add.execute(params![id, m.id])?;
+    }
+    Ok(())
+}
+
+/// Apply the corrections of the item (section 7.5), oldest first, so that a
+/// change by a person stays. `field` is a dotted path, for example `summary`.
+/// The status columns hold a status change, so `status` is not applied here.
+fn corrections(conn: &Connection, item: i64, doc: &mut Value) -> rusqlite::Result<()> {
+    let mut q = conn.prepare_cached(
+        "SELECT field, value FROM correction WHERE item_id = ?1 AND field <> 'status' ORDER BY at, id",
+    )?;
+    let rows = q.query_map([item], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (field, value) = row?;
+        let Ok(value) = serde_json::from_str::<Value>(&value) else {
+            continue;
+        };
+        let mut at = &mut *doc;
+        for key in field.split('.') {
+            if !at.is_object() {
+                *at = json!({});
+            }
+            at = &mut at[key];
+        }
+        *at = value;
     }
     Ok(())
 }
@@ -425,20 +455,49 @@ fn party(conn: &Connection, address: &str, name: Option<&str>) -> rusqlite::Resu
 }
 
 /// The addresses in an address list header, lowercase, in order, each one
-/// time. An address is a word with one `@` and text on each side.
-// shortcut: a display name in quotes that contains a word with an `@` gives
-// an extra address; upgrade to an RFC 5322 address parser if real mail shows it.
+/// time. Text in quotes and in comments is a display name or a note, never an
+/// address. In each item of the list, the address is in `<>`, or it is the
+/// item itself.
 fn addresses(list: &str) -> Vec<String> {
+    let mut bare = String::with_capacity(list.len());
+    let (mut quoted, mut depth, mut escape) = (false, 0u32, false);
+    for c in list.chars() {
+        if escape {
+            escape = false;
+        } else if c == '\\' && (quoted || depth > 0) {
+            escape = true;
+        } else if quoted {
+            quoted = c != '"';
+        } else if c == '"' && depth == 0 {
+            quoted = true;
+        } else if c == '(' {
+            depth += 1;
+        } else if c == ')' && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            bare.push(c);
+        }
+    }
     let mut out: Vec<String> = Vec::new();
-    for w in list.split(|c: char| c.is_whitespace() || ",;<>\"()[]".contains(c)) {
-        let w = w.trim_matches(|c: char| c == '.' || c == '\'' || c == ':');
-        let ok = match w.split_once('@') {
-            Some((l, d)) => !l.is_empty() && !d.is_empty() && !d.contains('@') && d.contains('.'),
+    for item in bare.split([',', ';']) {
+        // A group ("team: a@x, b@y;") puts a name and a colon first.
+        let item = item.rsplit(':').next().unwrap_or(item);
+        let a = match item.rfind('<') {
+            Some(i) => item[i + 1..].split('>').next().unwrap_or(""),
+            None => item,
+        };
+        let a = a.trim().to_lowercase();
+        let ok = match a.split_once('@') {
+            Some((l, d)) => {
+                !l.is_empty()
+                    && d.contains('.')
+                    && !d.contains('@')
+                    && !a.contains(char::is_whitespace)
+            }
             None => false,
         };
-        let w = w.to_lowercase();
-        if ok && !out.contains(&w) {
-            out.push(w);
+        if ok && !out.contains(&a) {
+            out.push(a);
         }
     }
     out
@@ -501,6 +560,19 @@ mod tests {
             ["a@example.com", "b@example.net"]
         );
         assert!(addresses("undisclosed-recipients:;").is_empty());
+        // An address in a display name or a comment is not a recipient.
+        assert_eq!(
+            addresses("\"billing@acme.example\" <sam@fabrikam.example>"),
+            ["sam@fabrikam.example"]
+        );
+        assert_eq!(
+            addresses("\"a \\\" b@c.example\" <d@e.example> (f@g.example)"),
+            ["d@e.example"]
+        );
+        assert_eq!(
+            addresses("team: a@x.example, b@y.example;"),
+            ["a@x.example", "b@y.example"]
+        );
         assert!(addresses("a@b@c.d, @x.org, y@").is_empty());
     }
 
