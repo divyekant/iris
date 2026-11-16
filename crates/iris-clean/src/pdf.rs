@@ -41,12 +41,18 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         if kw >= 3 && &pdf[kw - 3..kw] == b"end" {
             continue;
         }
-        let Some(len) = find(&pdf[start..], b"endstream") else {
-            break;
+        let dict = dict_before(pdf, kw);
+        // A direct `/Length` gives the end, so `endstream` inside the data
+        // does not cut the stream. Without it, search for the keyword.
+        let len = match declared_len(dict).filter(|&n| ends_at(pdf, start, n)) {
+            Some(n) => n,
+            None => match find(&pdf[start..], b"endstream") {
+                Some(n) => n,
+                None => break,
+            },
         };
         let data = &pdf[start..start + len];
-        at = start + len + 9;
-        let dict = dict_before(pdf, kw);
+        at = start + len;
         if !is_content(dict) {
             continue;
         }
@@ -76,6 +82,43 @@ pub fn text(pdf: &[u8], limit: usize) -> Option<String> {
         .collect();
     let text = lines.join("\n");
     readable(&text).then_some(text)
+}
+
+/// The value of a direct `/Length` entry. `None` for a reference (`5 0 R`).
+fn declared_len(dict: &[u8]) -> Option<usize> {
+    let p = find(dict, b"/Length")?;
+    let rest = &dict[p + 7..];
+    let digits = rest.iter().skip_while(|b| b.is_ascii_whitespace());
+    let num: Vec<u8> = digits
+        .clone()
+        .take_while(|b| b.is_ascii_digit())
+        .copied()
+        .collect();
+    let after: Vec<u8> = digits.skip(num.len()).take(8).copied().collect();
+    let is_ref = after
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|w| !w.is_empty())
+        .nth(1)
+        .is_some_and(|w| w.starts_with(b"R"));
+    if num.is_empty() || num.len() > 12 || is_ref || rest.first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(&num).ok()?.parse().ok()
+}
+
+/// True if the stream data of `len` bytes from `start` ends before `endstream`.
+fn ends_at(pdf: &[u8], start: usize, len: usize) -> bool {
+    start
+        .checked_add(len)
+        .and_then(|end| pdf.get(end..))
+        .is_some_and(|tail| {
+            let tail = &tail[..tail.len().min(16)];
+            let p = tail
+                .iter()
+                .position(|b| !b.is_ascii_whitespace())
+                .unwrap_or(tail.len());
+            tail[p..].starts_with(b"endstream")
+        })
 }
 
 /// The stream dictionary: the bytes from the last `obj` keyword before the
@@ -348,6 +391,18 @@ mod tests {
         let mut bad = b"%PDF-1.4\nstream\n(((((\\".to_vec();
         bad.extend(std::iter::repeat_n(b'(', 10_000));
         text(&bad, 1000);
+    }
+
+    #[test]
+    fn endstream_inside_a_string_does_not_end_the_stream() {
+        let t = b"BT (the endstream report) Tj ET";
+        assert_eq!(
+            text(&sample(t, false), 100).as_deref(),
+            Some("the endstream report")
+        );
+        assert_eq!(declared_len(b"<< /Length 5 0 R >>"), None);
+        assert_eq!(declared_len(b"<< /Length1 9 /Length 31 >>"), None);
+        assert_eq!(declared_len(b"<< /Length 31 >>"), Some(31));
     }
 
     #[test]
