@@ -964,6 +964,10 @@ fn a_change_during_the_model_call_saves_nothing() {
          SELECT ?1, id FROM label WHERE provider_id = 'SPAM'",
         // A second run failed its try while this run waited for the model.
         "UPDATE message SET tries = tries + 1, retry_at = 5 WHERE id = ?1",
+        // Another message made the display name of the sender a known
+        // person at another address: the spoof check must run again.
+        "INSERT INTO sender(address, name, kind, decided_by)
+         SELECT 'bo@other.example', 'Bo Ren', 'person', 'person' WHERE ?1 = ?1",
     ] {
         let b = store("changed");
         let m = b.add("1", ASK, &["INBOX"]);

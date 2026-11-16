@@ -116,7 +116,9 @@ struct Row {
 /// message that a person did not correct are made again, not duplicated.
 pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -> Result<Outcome> {
     // The state that this run reads. Write 1 checks it again.
-    let start = store.read(|c| Ok(state(c, message, false)?))?;
+    // The full state, also the marks and `understood_at`: a run that ends
+    // between this read and write 1 makes this run save nothing.
+    let start = store.read(|c| Ok(state(c, message, true)?))?;
     let row = read_row(store, message)?;
     if row.gone {
         // A gone message leaves the conversation of its thread (section 4.5).
@@ -138,7 +140,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     // The spoof check needs this lookup: a read error stops understanding
     // before any model call.
     let known_list = match &head.from_name {
-        Some(n) => known_person(store, n)?,
+        Some(n) => store.read(|c| Ok(known_person(c, n)?))?,
         None => Vec::new(),
     };
     let known = |_: &str| known_list.clone();
@@ -183,8 +185,16 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
     };
     let mut decided = None;
     let mut parties = Vec::new();
+    let mut known_after = Vec::new();
     let seen = store.write(|tx| {
-        if state(tx, message, false)? != start {
+        // Each input of steps 1 to 3 that comes from the store: the state
+        // of the message, and the known persons of the spoof check.
+        let name = a.head.from_name.as_deref();
+        let known_now = name
+            .map(|n| known_person(tx, n))
+            .transpose()?
+            .unwrap_or_default();
+        if state(tx, message, true)? != start || known_now != known_list {
             return Ok(None);
         }
         put_header(tx, message, &a)?;
@@ -207,6 +217,10 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         iris_talk::update(tx, row.thread, None, now_ms)?;
         // After the header row and the sender kinds of this message.
         parties = known_parties(tx, row.thread)?;
+        known_after = name
+            .map(|n| known_person(tx, n))
+            .transpose()?
+            .unwrap_or_default();
         Ok(Some(state(tx, message, true)?))
     })?;
     drop(raw);
@@ -286,7 +300,16 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
         // The model saw this thread context: it must still be the context
         // now, for example with no later SPAM label on an earlier message.
         let context_now = thread_context(tx, message, row.thread, row.internal_date)?;
-        if state(tx, message, true)? != seen || kind_now != kind_read || context_now != earlier {
+        let name = a.head.from_name.as_deref();
+        let known_now = name
+            .map(|n| known_person(tx, n))
+            .transpose()?
+            .unwrap_or_default();
+        if state(tx, message, true)? != seen
+            || kind_now != kind_read
+            || context_now != earlier
+            || known_now != known_after
+        {
             changed = true;
             return Ok(Vec::new());
         }
@@ -471,16 +494,15 @@ fn known_parties(c: &rusqlite::Connection, thread: i64) -> rusqlite::Result<Vec<
 }
 
 /// The addresses of the known persons with this display name.
-fn known_person(store: &Store, name: &str) -> Result<Vec<String>> {
-    Ok(store.read(|c| {
-        let mut st = c.prepare_cached(
-            "SELECT address FROM sender WHERE kind = 'person' AND name = ?1 COLLATE NOCASE",
-        )?;
-        let v = st
-            .query_map([name], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(v)
-    })?)
+fn known_person(c: &rusqlite::Connection, name: &str) -> rusqlite::Result<Vec<String>> {
+    let mut st = c.prepare_cached(
+        "SELECT address FROM sender WHERE kind = 'person' AND name = ?1 COLLATE NOCASE
+         ORDER BY address",
+    )?;
+    let v = st
+        .query_map([name], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(v)
 }
 
 /// The most earlier messages of the same sender for the repeated end block.
