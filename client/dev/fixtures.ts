@@ -259,6 +259,35 @@ export function act(id: string, verb: string, body: { date?: string }): Item | u
   return item;
 }
 
+/** Watches (R5-07): one mail that came, and two watches that wait. */
+export const watches = [
+  {
+    id: "w-3",
+    text: "visa from:consulate",
+    created: "2026-11-09T08:00:00Z",
+    state: "arrived",
+    arrived: "2026-11-16T09:42:00Z",
+    message: { id: "m-90", thread: "t-90", date: "2026-11-16T09:41:00Z", from: { name: "Consulate Visa Office", address: "visa@consulate.example" }, subject: "Your visa application: decision", labels: ["INBOX"] },
+  },
+  { id: "w-2", text: "\"lease renewal\" from:harbor", created: "2026-11-12T10:00:00Z", state: "waits", arrived: null, message: null },
+  { id: "w-1", text: "invoice from:dana", created: "2026-11-02T10:00:00Z", state: "waits", arrived: null, message: null },
+];
+
+export function watchPost(path: string, body: { text?: string }): [number, unknown] {
+  const remove = path.match(/^\/watches\/([^/?]+)\/remove$/);
+  if (remove) {
+    const i = watches.findIndex((w) => w.id === decodeURIComponent(remove[1]));
+    if (i < 0) return [404, { error: "not found" }];
+    watches.splice(i, 1);
+    return [200, { removed: remove[1] }];
+  }
+  const text = (body.text ?? "").trim();
+  if (!text) return [400, { error: "watch: the watch has no search text" }];
+  const w = { id: `w-${watches.length + 10}`, text, created: new Date().toISOString(), state: "waits", arrived: null, message: null };
+  watches.unshift(w);
+  return [201, w];
+}
+
 export function answer(path: string): unknown {
   const url = new URL(path, "http://local/");
   const q = url.searchParams;
@@ -286,5 +315,6 @@ export function answer(path: string): unknown {
   if (name === "changesets") return { changesets };
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
+  if (name === "watches") return watches;
   return undefined;
 }
