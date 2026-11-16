@@ -48,23 +48,33 @@
     );
   });
   let rows: Record<string, Row[]> = $state({});
+  // The rows that show of each change: the first few, more with the button.
+  let visible: Record<string, number> = $state({});
+  // The changes whose last load failed. They load again only with "Try again".
+  let failed: Record<string, boolean> = $state({});
   let problem = $state("");
-  function load(a: (typeof actions)[number], count: number) {
-    loader.more(a, count).then(
+  const complete = (a: (typeof actions)[number]) => (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size;
+  function load(a: (typeof actions)[number]) {
+    loader.more(a, PAGE).then(
       (list) => {
         if (list) rows[key(a)] = list;
       },
-      (e) => (problem = e instanceof Error ? e.message : String(e)),
+      (e) => {
+        failed[key(a)] = true;
+        problem = e instanceof Error ? e.message : String(e);
+      },
     );
   }
+  // Spec 2 section 5.5: the review shows each action fully resolved. Each page of rows that
+  // arrives starts the next one, until each waiting change has all of its rows.
   $effect(() => {
-    for (const a of actions) if (!(key(a) in rows)) load(a, FIRST);
+    for (const a of open) if (!complete(a) && !failed[key(a)]) load(a);
   });
-  // The person decides only on what the screen shows: the first rows of each waiting change.
-  let missing = $derived(open.filter((a) => !(key(a) in rows)));
+  // The person decides only when the screen has every row of each waiting change.
+  let missing = $derived(open.filter((a) => !complete(a)));
   function retry() {
     problem = "";
-    for (const a of missing) load(a, FIRST);
+    failed = {};
   }
 
   // The engine takes at most this many decisions in one request (issue 197).
@@ -113,8 +123,9 @@
 </script>
 
 {#snippet lines(a: (typeof actions)[number])}
-  {@const list = rows[key(a)] ?? []}
-  {@const all = targets(a).length}
+  {@const have = rows[key(a)] ?? []}
+  {@const list = have.slice(0, visible[key(a)] ?? FIRST)}
+  {@const all = new Set(targets(a)).size}
   {#if list.length}
     <ul class="messages">
       {#each list as m (m.id)}
@@ -132,8 +143,8 @@
       {/each}
     </ul>
   {/if}
-  {#if all > list.length && list.length}
-    <button type="button" class="more" onclick={() => load(a, PAGE)}>
+  {#if have.length > list.length}
+    <button type="button" class="more" onclick={() => (visible[key(a)] = list.length + PAGE)}>
       {all - list.length > PAGE ? `Show ${PAGE} more` : `Show all ${all.toLocaleString("en-US")}`}
     </button>
   {/if}
@@ -175,6 +186,7 @@
     <div class="decide">
       <button type="button" class="primary" class:deny={!chosen.length} disabled={!ready} onclick={decide}>{plan(chosen.length, open.length)}</button>
       <p>{blocked || "Iris makes none of these changes before you approve them."}</p>
+      {#if missing.length && !problem && !blocked}<p>Iris loads everything that these changes touch, so that you see it before you decide.</p>{/if}
     </div>
   {/if}
   {#if problem}

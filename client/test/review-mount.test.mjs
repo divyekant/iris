@@ -31,7 +31,8 @@ test("a request loads the rows of each message, shows a gone message, and loads 
     await until(() => rows().length === 3);
     assert.match(text(rows()[0]), /not in your mailbox any more/);
     assert.ok(rows()[1].querySelector("a[href]"), "a message row links to the message");
-    assert.equal(asked.filter((p) => p.startsWith("messages?")).length, 1);
+    // All rows of the change load at once (one page of up to 200), and three show.
+    assert.deepEqual(asked.filter((p) => typeof p === "string" && p.startsWith("messages?")), ["messages?ids=m-50140,m-1,m-2,m-3,m-4"]);
 
     const more = view.target.querySelector("button.more");
     assert.equal(more.textContent.trim(), "Show all 5");
@@ -39,7 +40,7 @@ test("a request loads the rows of each message, shows a gone message, and loads 
     await until(() => rows().length === 5);
     view.flushSync();
     assert.equal(view.target.querySelector("button.more"), null);
-    assert.deepEqual(asked.filter((p) => p.startsWith("messages?")), ["messages?ids=m-50140,m-1,m-2", "messages?ids=m-3,m-4"]);
+    assert.equal(asked.filter((p) => typeof p === "string" && p.startsWith("messages?")).length, 1, "the button shows rows that loaded");
   } finally {
     view.destroy();
   }
@@ -249,6 +250,32 @@ test("a decision with no answer loads the request again and does not say that no
     assert.doesNotMatch(text(view.target), /did not save/);
     assert.equal(view.target.querySelector("[role=status]"), null);
     assert.equal(view.target.querySelector("button.primary"), null);
+  } finally {
+    view.destroy();
+  }
+});
+
+test("the button waits for every row of a change of more than one page", async () => {
+  serve();
+  const answer = globalThis.fetch;
+  let release;
+  const later = new Promise((r) => (release = r));
+  let pages = 0;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("messages?") && ++pages === 2) await later;
+    return answer(url, init);
+  };
+  const ids = Array.from({ length: 250 }, (_, i) => `m-${i + 1}`);
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset([act({ resolved: { messages: ids } })]) });
+  try {
+    await until(() => view.target.querySelectorAll(".messages li").length === 3);
+    await until(() => pages === 2);
+    view.flushSync();
+    assert.equal(view.target.querySelector("button.primary").disabled, true, "no decision with 50 rows not loaded");
+    assert.match(text(view.target), /Iris loads everything that these changes touch/);
+    release();
+    await until(() => !view.target.querySelector("button.primary").disabled);
+    assert.equal(view.target.querySelector("button.more").textContent.trim(), "Show 200 more");
   } finally {
     view.destroy();
   }
