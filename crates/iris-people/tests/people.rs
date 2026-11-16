@@ -588,3 +588,28 @@ fn group_labels_and_encoded_names_do_not_stop_a_merge() {
     assert_eq!(addrs(bo), ["bo@a.example.org", "bo@b.example.org"]);
     assert_eq!(bo.names, ["Bo Härt"]);
 }
+
+#[test]
+fn a_quoted_local_part_can_have_a_colon() {
+    let mut h = Hand::new("colon");
+    h.add(
+        "t1",
+        "SENT",
+        "me@example.com",
+        "Me",
+        r#""a:b"@example.org, team: "c:d"@example.org;"#,
+    );
+    let found: BTreeSet<String> = h
+        .people()
+        .iter()
+        .flat_map(addrs)
+        .map(String::from)
+        .collect();
+    assert_eq!(
+        found,
+        BTreeSet::from([
+            r#""a:b"@example.org"#.to_string(),
+            r#""c:d"@example.org"#.to_string()
+        ])
+    );
+}
