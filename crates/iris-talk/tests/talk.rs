@@ -964,3 +964,99 @@ fn a_gone_origin_with_a_live_service_update_keeps_the_status() {
     );
     assert_eq!(doc["sources"][0]["message"], format!("m-{p}"));
 }
+
+#[test]
+fn a_received_message_from_an_alias_is_from_a_party() {
+    let b = Box_::new("aliasin");
+    let v = validator();
+    let alias = ("Avel", "avel@alias.example");
+    b.put(M {
+        id: "a",
+        at: NOW - 2 * DAY,
+        from: alias,
+        to: "sam@fabrikam.example",
+        labels: &["SENT"],
+        ..M::default()
+    });
+    b.put(M {
+        id: "b",
+        from: alias,
+        to: OWNER,
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["latest"]["from"]["address"], "avel@alias.example");
+}
+
+#[test]
+fn cleanup_of_a_gone_service_header_does_not_bring_a_talk_back() {
+    let b = Box_::new("purged");
+    let v = validator();
+    b.kind("news@shop.example", "service");
+    let svc = ("Shop", "news@shop.example");
+    let p = b.put(M {
+        id: "a",
+        at: NOW - 3 * DAY,
+        ..M::default()
+    });
+    let s1 = b.put(M {
+        id: "s1",
+        at: NOW - 2 * DAY,
+        from: svc,
+        ..M::default()
+    });
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = {p}"
+    ));
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW} WHERE id = {s1}"
+    ));
+    assert_eq!(b.talk("t1", NOW).unwrap()["status"], "gone");
+    // The content cleanup removes the header and the body of the gone message.
+    b.sql(&format!(
+        "DELETE FROM body WHERE message_id = {s1}; DELETE FROM header WHERE message_id = {s1}"
+    ));
+    b.put(M {
+        id: "s2",
+        from: svc,
+        ..M::default()
+    });
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    assert_eq!(doc["status"], "gone");
+}
+
+#[test]
+fn a_gone_update_with_a_hostile_mark_is_no_source() {
+    let b = Box_::new("gonehostileupd");
+    let v = validator();
+    let m1 = b.put(M {
+        id: "a",
+        at: NOW - 3 * DAY,
+        ..M::default()
+    });
+    let m2 = b.put(M {
+        id: "b",
+        at: NOW - 2 * DAY,
+        ..M::default()
+    });
+    let m3 = b.put(M {
+        id: "c",
+        at: NOW - DAY,
+        ..M::default()
+    });
+    b.talk("t1", NOW).unwrap();
+    b.sql(&format!(
+        "UPDATE message SET gone_at = {NOW}, hostile = '[\"spam\"]' WHERE id = {m2}"
+    ));
+    let doc = b.talk("t1", NOW).unwrap();
+    check(&v, &doc);
+    let id = doc["id"].as_str().unwrap();
+    assert_eq!(
+        b.sources(id),
+        [(m1, "origin".into()), (m3, "update".into())]
+    );
+    assert_eq!(doc["sources"].as_array().unwrap().len(), 2);
+}
