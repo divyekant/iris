@@ -758,13 +758,16 @@ rebuild uses the same order.
 ### 7.3 Fixed rules
 
 Fixed rules run before the model. They are fast, free and the same each time.
+The engine tries the rules in the order of the table. The first rule that
+matches gives the result, and the next rules do not run.
 
-| Rule | Result |
-|---|---|
-| `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item, unless the subject or the body matches a receipt or a statement pattern. |
-| A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. |
-| A calendar invitation (`text/calendar` with `METHOD:REQUEST`) | Commitment of kind `invitation`. |
-| Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+| Order | Rule | Result |
+|---|---|---|
+| 1 | Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+| 2 | The subject or the body matches a receipt or a statement pattern | No fixed rule. The model reads the message, so that the record and the payment commitment (section 6.4) are not lost. This applies also to an invitation, a code and a list message. |
+| 3 | A calendar invitation (`text/calendar` with `METHOD:REQUEST`), not from you | Commitment of kind `invitation`. A request from you is your own invitation: the model reads it. |
+| 4 | A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. A code comes before the list rule: a login code from a list sender is a signal that you need now. If the line with the code word has more than one number that can be the code, the rule does not match, and the model reads the message. |
+| 5 | `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item. |
 
 The conversation rule runs for each message that is not hostile mail:
 

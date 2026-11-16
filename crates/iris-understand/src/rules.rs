@@ -120,12 +120,18 @@ fn looks_like_record(a: &Analysis) -> bool {
     RECORD_WORDS.iter().any(|w| hay.contains(w))
 }
 
-/// The first code in the order of the message. A code is a run of 4 to 8
-/// digits bound to a code word on its line:
-/// - strong: the word, then only `:`, `-`, `=`, `#` or `is`, then the code;
-/// - weak: at most 3 other words between the code and the word, before or
-///   after it. A weak code that looks like a year (1900 to 2099) does not
+/// The code of the first line in the order of the message that has a code
+/// word and a number bound to it. A code is a run of 4 to 8 digits:
+/// - strong: the code word, then only `:`, `-`, `=`, `#` or `is`, then the
+///   code;
+/// - weak: at most 3 other words between the code and the code word, before
+///   or after it. A weak code that looks like a year (1900 to 2099) does not
 ///   count (shortcut: issue #94).
+///
+/// The line gives one code only if one number is strong, or if no number is
+/// strong and the weak number is the only number of the line. Other lines
+/// with a bound number are not clear, and give no code: the model reads the
+/// message.
 ///
 /// If a line has a code word and no number, the next line continues it: a
 /// number there binds to the code word by the same rules, with the words of
@@ -139,45 +145,66 @@ fn find_code<'a>(subject: &'a str, text: &'a str) -> Option<(String, &'a str)> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    lines.iter().enumerate().find_map(|(i, &l)| {
+    let pick = lines.iter().enumerate().find_map(|(i, &l)| {
         let cues = cues(l);
         if cues.is_empty() {
             return None;
         }
         let nums = numbers(l);
         if !nums.is_empty() {
-            let (s, e) = first_bound(l, &cues, &nums, 0)?;
-            return Some((l[s..e].to_string(), excerpt(l, s, e - s)));
+            let one = the_code(l, &cues, &nums, 0)?;
+            return Some(one.map(|(s, e)| (l[s..e].to_string(), excerpt(l, s, e - s))));
         }
         // The cue line and the next line as one text, with the cues at their
         // own offsets and the numbers after the line break.
         let next = *lines.get(i + 1)?;
         let both = format!("{l}\n{next}");
         let shift = l.len() + 1;
-        let (s, e) = first_bound(&both, &cues, &numbers(next), shift)?;
-        let (s, e) = (s - shift, e - shift);
-        Some((next[s..e].to_string(), excerpt(next, s, e - s)))
-    })
+        let one = the_code(&both, &cues, &numbers(next), shift)?;
+        Some(one.map(|(s, e)| {
+            let (s, e) = (s - shift, e - shift);
+            (next[s..e].to_string(), excerpt(next, s, e - s))
+        }))
+    });
+    pick.flatten()
 }
 
-/// The first number of `nums` (moved by `shift` in `text`) that binds to one
-/// of `cues` in `text`, as a range of `text`.
-fn first_bound(
+/// The code among `nums` (moved by `shift` in `text`) for the `cues` of
+/// `text`, as a range of `text`:
+/// - `None`: no number binds;
+/// - `Some(None)`: numbers bind, but not one clear code;
+/// - `Some(Some(range))`: one clear code.
+fn the_code(
     text: &str,
     cues: &[(usize, usize)],
     nums: &[(usize, usize)],
     shift: usize,
-) -> Option<(usize, usize)> {
-    nums.iter()
-        .map(|&(s, e)| (s + shift, e + shift))
-        .find(|&(s, e)| {
-            let year = e - s == 4 && matches!(&text[s..s + 2], "19" | "20");
-            cues.iter().any(|&cue| match bind(text, (s, e), cue) {
-                Bind::Strong => true,
-                Bind::Weak => !year,
-                Bind::None => false,
-            })
-        })
+) -> Option<Option<(usize, usize)>> {
+    let level = |(s, e): (usize, usize)| {
+        let year = e - s == 4 && matches!(&text[s..s + 2], "19" | "20");
+        let binds = cues.iter().map(|&cue| bind(text, (s, e), cue));
+        if binds.clone().any(|b| b == Bind::Strong) {
+            Bind::Strong
+        } else if !year && binds.into_iter().any(|b| b == Bind::Weak) {
+            Bind::Weak
+        } else {
+            Bind::None
+        }
+    };
+    let all: Vec<_> = nums.iter().map(|&(s, e)| (s + shift, e + shift)).collect();
+    let of = |want| {
+        all.iter()
+            .copied()
+            .filter(|&n| level(n) == want)
+            .collect::<Vec<_>>()
+    };
+    let (strong, weak) = (of(Bind::Strong), of(Bind::Weak));
+    match (strong.as_slice(), weak.as_slice()) {
+        ([one], _) => Some(Some(*one)),
+        ([], [one]) if all.len() == 1 => Some(Some(*one)),
+        ([], []) => None,
+        _ => Some(None),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -302,6 +329,16 @@ mod tests {
             Some("7731".into())
         );
         assert_eq!(code("Weekly news", "Read 2024 stories"), None);
+        // An account number next to the code makes the line not clear.
+        assert_eq!(
+            code("Your verification code for account 123456 is 482913", ""),
+            None
+        );
+        assert_eq!(
+            code("Account 123456: your code is 482913", ""),
+            Some("482913".into())
+        );
+        assert_eq!(code("Your code is 482913, old code is 123456", ""), None);
         assert_eq!(
             code("Your verification code", "Use 482913 to sign in"),
             Some("482913".into())
