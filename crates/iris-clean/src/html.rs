@@ -66,6 +66,8 @@ impl Tag {
 struct Open {
     name: String,
     hidden: bool,
+    /// The element and its content are visible (`visibility`, inherited).
+    visible: bool,
     /// The element opened while the converter wrote output. Only such an
     /// element has an effect when it closes.
     shown: bool,
@@ -187,7 +189,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
                 .iter()
                 .position(|&c| c == b'<')
                 .map_or(b.len(), |n| i + n);
-            if hidden == 0 {
+            if hidden == 0 && stack.last().is_none_or(|o| o.visible) {
                 w.text(&decode_entities(&html[i..end]));
             }
             i = end;
@@ -204,7 +206,7 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         let closing = b.get(i + 1) == Some(&b'/');
         let name_start = i + 1 + closing as usize;
         if !b.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
-            if hidden == 0 {
+            if hidden == 0 && stack.last().is_none_or(|o| o.visible) {
                 w.text("<");
             }
             i += 1;
@@ -246,7 +248,13 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         }
         close_implied(name, &mut stack, &mut hidden, &mut w);
         let own_hidden = hides(&tag, drop_quotes, &css);
-        if hidden == 0 && !own_hidden {
+        let visible = tag
+            .attr("style")
+            .and_then(css_visibility)
+            .or_else(|| css.visibility(&tag))
+            .unwrap_or_else(|| stack.last().is_none_or(|o| o.visible));
+        let shown = hidden == 0 && !own_hidden && visible;
+        if shown {
             open_effect(&tag, &mut w);
         }
         if VOID.contains(&name) {
@@ -264,7 +272,8 @@ pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
         stack.push(Open {
             name: tag.name.clone(),
             hidden: own_hidden,
-            shown: hidden == 0 && !own_hidden,
+            visible,
+            shown,
         });
         hidden += own_hidden as usize;
     }
@@ -442,6 +451,8 @@ struct Css {
     rules: Vec<(String, String)>,
     classes: Vec<String>,
     ids: Vec<String>,
+    /// Each name (`.class` or `#id`) with the visibility that its rules set.
+    visibility: Vec<(String, bool)>,
 }
 
 /// The most names that a message can hide with style rules.
@@ -518,6 +529,9 @@ impl Css {
     /// Keep the names whose last declarations hide the content.
     fn finish(&mut self) {
         for (key, decls) in self.rules.drain(..) {
+            if let Some(v) = css_visibility(&decls) {
+                self.visibility.push((key.clone(), v));
+            }
             if !css_hidden(&decls) {
                 continue;
             }
@@ -526,6 +540,23 @@ impl Css {
                 (_, class) => self.classes.push(class.to_string()),
             }
         }
+    }
+
+    /// The visibility that the style rules give the element. An ID rule
+    /// wins over a class rule.
+    fn visibility(&self, tag: &Tag) -> Option<bool> {
+        let rule = |key: String| {
+            self.visibility
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| *v)
+        };
+        let by_id = tag.attr("id").and_then(|id| rule(format!("#{id}")));
+        by_id.or_else(|| {
+            tag.attr("class")?
+                .split_whitespace()
+                .find_map(|c| rule(format!(".{c}")))
+        })
     }
 
     fn hides(&self, tag: &Tag) -> bool {
@@ -566,20 +597,42 @@ fn hides(tag: &Tag, drop_quotes: bool, css: &Css) -> bool {
             || (tag.name == "blockquote" && tag.attr("type") == Some("cite")))
 }
 
-fn css_hidden(style: &str) -> bool {
-    let s: String = style
+/// The value of each property in a declaration list, as the cascade picks
+/// it: the last `!important` declaration, else the last declaration.
+fn css_get(decls: &[(&str, &str)], p: &str) -> Option<String> {
+    let all = decls.iter().rev().filter(|(k, _)| *k == p);
+    let important = all.clone().find(|(_, v)| v.ends_with("!important"));
+    important
+        .or_else(|| all.clone().next())
+        .map(|(_, v)| v.trim_end_matches("!important").to_string())
+}
+
+fn css_decls(style: &str) -> String {
+    style
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+/// `Some(false)` if the style sets `visibility: hidden` (or `collapse`),
+/// `Some(true)` if it sets `visibility: visible`. A child can show itself
+/// again inside a parent with `visibility: hidden`.
+fn css_visibility(style: &str) -> Option<bool> {
+    let s = css_decls(style);
     let decls: Vec<(&str, &str)> = s.split(';').filter_map(|d| d.split_once(':')).collect();
-    let get = |p: &str| {
-        decls
-            .iter()
-            .rev()
-            .find(|(k, _)| *k == p)
-            .map(|(_, v)| v.trim_end_matches("!important"))
-    };
+    match css_get(&decls, "visibility")?.as_str() {
+        "hidden" | "collapse" => Some(false),
+        "visible" => Some(true),
+        _ => None,
+    }
+}
+
+/// True if the style hides the element and all its content.
+fn css_hidden(style: &str) -> bool {
+    let s = css_decls(style);
+    let decls: Vec<(&str, &str)> = s.split(';').filter_map(|d| d.split_once(':')).collect();
+    let get = |p: &str| css_get(&decls, p);
     let zero = |v: &str| {
         let n: String = v
             .chars()
@@ -587,14 +640,13 @@ fn css_hidden(style: &str) -> bool {
             .collect();
         n.parse::<f64>().is_ok_and(|x| x == 0.0)
     };
-    let clipped = get("overflow") == Some("hidden")
+    let clipped = get("overflow").as_deref() == Some("hidden")
         && ["height", "max-height", "width", "max-width"]
             .iter()
-            .any(|p| get(p).is_some_and(zero));
-    get("display") == Some("none")
-        || get("visibility") == Some("hidden")
-        || get("font-size").is_some_and(zero)
-        || get("opacity").is_some_and(zero)
+            .any(|p| get(p).is_some_and(|v| zero(&v)));
+    get("display").as_deref() == Some("none")
+        || get("font-size").is_some_and(|v| zero(&v))
+        || get("opacity").is_some_and(|v| zero(&v))
         || clipped
 }
 
@@ -950,6 +1002,20 @@ mod tests {
         assert_eq!(
             md("<div class=h>secret</div>ok<style>.h{display:none}</style>"),
             "ok"
+        );
+        // An important declaration wins over a later normal one.
+        assert_eq!(
+            md(
+                "<div style=\"display:none!important;display:block\">secret</div>\
+                <style>.i{display:none !important}.i{display:block}</style><p class=i>also</p>ok"
+            ),
+            "ok"
+        );
+        // A child can show itself inside a parent with visibility: hidden.
+        assert_eq!(
+            md("<div style=\"visibility:hidden\">no <span style=\"visibility:visible\">Shown</span> no</div>\
+                <style>.v{visibility:hidden}</style><p class=v>gone</p>"),
+            "Shown"
         );
         // A later rule for the same name wins.
         assert_eq!(

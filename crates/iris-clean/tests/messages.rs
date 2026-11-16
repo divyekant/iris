@@ -512,3 +512,30 @@ fn long_quoted_history_leaves_room_for_a_later_part() {
     let c = clean(&raw);
     assert_eq!(c.text, "Short reply.\n\nThe new part.");
 }
+
+#[test]
+fn a_named_multipart_is_an_attachment() {
+    let raw = crlf(
+        "Subject: Page
+Content-Type: multipart/mixed; boundary=m
+
+--m
+Content-Type: text/plain
+
+See the page.
+--m
+Content-Type: multipart/related; boundary=r; name=page.mht
+
+--r
+Content-Type: text/html
+
+<p>Saved page text</p>
+--r--
+--m--
+",
+    );
+    let c = clean(&raw);
+    assert_eq!(c.text, "See the page.");
+    assert_eq!(c.attachments.len(), 1);
+    assert_eq!(c.attachments[0].name, "page.mht");
+}

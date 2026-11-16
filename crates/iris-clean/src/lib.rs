@@ -179,7 +179,8 @@ impl Walker {
         let charset = mime::param(&ct.params, "charset");
         if let Some(sub) = mime_type
             .strip_prefix("multipart/")
-            .filter(|_| disp.main != "attachment")
+            // A named multipart (for example a saved web page) is a file.
+            .filter(|_| disp.main != "attachment" && name.is_none())
         {
             let Some(boundary) = mime::param(&ct.params, "boundary") else {
                 return Vec::new();
