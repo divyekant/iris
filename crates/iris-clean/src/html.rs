@@ -928,10 +928,14 @@ fn entity(t: &str) -> Option<(char, usize)> {
                 }
             })
             .count();
-        if digits == 0 || digits > 8 {
+        if digits == 0 {
             return None;
         }
-        let n = u32::from_str_radix(&t[start..start + digits], if hex { 16 } else { 10 }).ok()?;
+        // Leading zeros are allowed. A value past Unicode stays past it.
+        let radix = if hex { 16 } else { 10 };
+        let n = t[start..start + digits].chars().fold(0u32, |n, c| {
+            (n * radix + c.to_digit(radix).unwrap_or(0)).min(0x11_0000)
+        });
         let mut len = start + digits;
         if b.get(len) == Some(&b';') {
             len += 1;

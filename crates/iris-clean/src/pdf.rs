@@ -14,6 +14,8 @@
 const STREAM_LIMIT: usize = 4 * 1024 * 1024;
 /// The most bytes of decompressed streams for one PDF.
 const TOTAL_LIMIT: usize = 32 * 1024 * 1024;
+/// The most bytes of one stream dictionary.
+const DICT_LIMIT: usize = 4096;
 
 /// The text of a PDF, at most `limit` bytes. `None` if the file has no text
 /// that this module can read.
@@ -29,25 +31,15 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         return (None, false);
     }
     let mut stopped = false;
-    let mut data_end = 0;
     let mut out = String::new();
     let mut total = 0;
     let mut at = 0;
-    while let Some(n) = find(&pdf[at..], b"stream") {
-        let kw = at + n;
-        at = kw + 6;
-        // The keyword `stream` ends with a line end. `endstream` does not match.
-        let start = match &pdf[at..] {
-            [b'\r', b'\n', ..] => at + 2,
-            [b'\n', ..] => at + 1,
-            _ => continue,
-        };
-        if kw >= 3 && &pdf[kw - 3..kw] == b"end" {
-            continue;
-        }
-        // The dictionary is after the data of the stream before: each byte
-        // is in one window only, so many streams do not rescan the same bytes.
-        let dict = dict_before(pdf, kw, data_end);
+    while let Some((kw, start, header_end)) = next_stream(pdf, at) {
+        // The dictionary is the text from the object header to the keyword.
+        // A longer dictionary than 4 KiB is not read.
+        let dict = header_end
+            .filter(|&h| kw - h <= DICT_LIMIT)
+            .map_or(&b""[..], |h| &pdf[h..kw]);
         // A direct `/Length` gives the end, so `endstream` inside the data
         // does not cut the stream. Without it, search for the keyword.
         let len = match declared_len(dict).filter(|&n| ends_at(pdf, start, n)) {
@@ -59,7 +51,6 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
         };
         let data = &pdf[start..start + len];
         at = start + len;
-        data_end = at;
         if !is_content(dict) {
             continue;
         }
@@ -102,6 +93,77 @@ pub fn text_cut(pdf: &[u8], limit: usize) -> (Option<String>, bool) {
     (readable(&text).then_some(text), stopped)
 }
 
+/// The position after the literal string that starts at `i` (a `(`), with
+/// nested parentheses and `\` escapes. The end of the input if it does not close.
+fn skip_string(b: &[u8], mut i: usize) -> usize {
+    let mut open = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'(' => open += 1,
+            b')' => {
+                open -= 1;
+                if open == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// The position of the line end after the comment that starts at `i` (a `%`).
+fn skip_comment(b: &[u8], i: usize) -> usize {
+    b[i..]
+        .iter()
+        .position(|&c| matches!(c, b'\r' | b'\n'))
+        .map_or(b.len(), |n| i + n)
+}
+
+/// The next `stream` keyword outside strings and comments, from `at`: the
+/// position of the keyword, the start of its data, and the start of its
+/// dictionary (after the last object header). One forward pass: each byte
+/// is read once.
+fn next_stream(pdf: &[u8], mut at: usize) -> Option<(usize, usize, Option<usize>)> {
+    let delimiter = |b: u8| b.is_ascii_whitespace() || b"()<>[]{}/%".contains(&b);
+    let mut header_end = None;
+    while at < pdf.len() {
+        match pdf[at] {
+            b'(' => at = skip_string(pdf, at),
+            b'%' => at = skip_comment(pdf, at),
+            b'<' if pdf.get(at + 1) != Some(&b'<') => {
+                // A hex string.
+                at = pdf[at..]
+                    .iter()
+                    .position(|&c| c == b'>')
+                    .map_or(pdf.len(), |n| at + n + 1);
+            }
+            c if !delimiter(c) => {
+                let end = pdf[at..]
+                    .iter()
+                    .position(|&c| delimiter(c))
+                    .map_or(pdf.len(), |n| at + n);
+                let word = &pdf[at..end];
+                if word == b"obj" && is_header(&pdf[..at]) {
+                    header_end = Some(end);
+                } else if word == b"stream" {
+                    // The keyword `stream` ends with a line end.
+                    match &pdf[end..] {
+                        [b'\r', b'\n', ..] => return Some((at, end + 2, header_end)),
+                        [b'\n', ..] => return Some((at, end + 1, header_end)),
+                        _ => {}
+                    }
+                }
+                at = end;
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
 /// The position of a name (for example `/Length`) in the outer dictionary.
 /// A name inside a string, a comment or an inner dictionary does not count.
 /// With `exact`, a longer name does not match: `/Length1` is not `/Length`.
@@ -110,29 +172,8 @@ fn direct_name(dict: &[u8], name: &[u8], exact: bool) -> Option<usize> {
     let (mut i, mut depth) = (0, 0usize);
     while i < dict.len() {
         match dict[i] {
-            b'(' => {
-                // A literal string: nested parentheses and `\` escapes.
-                let mut open = 0usize;
-                while i < dict.len() {
-                    match dict[i] {
-                        b'\\' => i += 1,
-                        b'(' => open += 1,
-                        b')' => {
-                            open -= 1;
-                            if open == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
-                }
-            }
-            b'%' => {
-                while i < dict.len() && !matches!(dict[i], b'\r' | b'\n') {
-                    i += 1;
-                }
-            }
+            b'(' => i = skip_string(dict, i) - 1,
+            b'%' => i = skip_comment(dict, i) - 1,
             b'<' if dict.get(i + 1) == Some(&b'<') => {
                 depth += 1;
                 i += 1;
@@ -189,19 +230,6 @@ fn ends_at(pdf: &[u8], start: usize, len: usize) -> bool {
                 .unwrap_or(tail.len());
             tail[p..].starts_with(b"endstream")
         })
-}
-
-/// The stream dictionary: the bytes after the last object header
-/// (`<number> <number> obj`) before the stream, at most 4 KiB back. An
-/// `obj` in a value, for example `(obj)`, is not a header.
-fn dict_before(pdf: &[u8], kw: usize, floor: usize) -> &[u8] {
-    let from = kw.saturating_sub(4096).max(floor);
-    let window = &pdf[from..kw];
-    let start = (0..window.len().saturating_sub(2))
-        .rev()
-        .find(|&p| &window[p..p + 3] == b"obj" && is_header(&window[..p]))
-        .map_or(0, |p| p + 3);
-    &window[start..]
 }
 
 /// True if `before` ends with `<number> <number> ` (the start of an object header).
@@ -585,6 +613,25 @@ mod tests {
         assert!(only_flate(flate.as_bytes()));
         assert!(!is_content(b"<< /Subtype /Image /Length 3 >>"));
         assert!(!is_content(b"<< /FontFile2 4 0 R >>"));
+    }
+
+    #[test]
+    fn header_and_keyword_text_inside_strings_do_not_count() {
+        let t = b"BT (the endstream report) Tj ET";
+        for info in [
+            "/Info ( 1 0 obj)",
+            "/Info (stream\n)",
+            "/Info <73747265616d>",
+        ] {
+            let pdf = String::from_utf8(sample(t, false))
+                .unwrap()
+                .replace(" >>\nstream", &format!(" {info} >>\nstream"));
+            assert_eq!(
+                text(pdf.as_bytes(), 100).as_deref(),
+                Some("the endstream report"),
+                "{info}"
+            );
+        }
     }
 
     #[test]

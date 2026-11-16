@@ -833,3 +833,9 @@ fn a_utf16_attachment_uses_the_budget_by_its_decoded_text() {
         Some("next")
     );
 }
+
+#[test]
+fn numeric_entities_with_leading_zeros() {
+    let raw = crlf("Subject: E\nContent-Type: text/html\n\n<p>&#00000000065;&#x0000000042; &#99999999999;</p>\n");
+    assert_eq!(clean(&raw).text, "AB \u{fffd}");
+}

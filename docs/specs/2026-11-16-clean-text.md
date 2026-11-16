@@ -136,7 +136,9 @@ hidden HTML) makes no cut.
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
   At most 8 quote marks show.
 - Entities: the numeric forms and the named entities of the table in
-  `html.rs`. An unknown name stays as it is.
+  `html.rs`. A numeric form can have any count of leading zeros. A value
+  past Unicode, a surrogate or 0 gives U+FFFD. An unknown name stays as it
+  is.
 
 ### Hidden HTML
 
@@ -249,14 +251,15 @@ history go out.
 A PDF gives text only if its decoded size is at most `PDF_LIMIT` (10 MiB) and
 its first 1 KiB holds `%PDF`.
 
-- Streams: the reader finds each `stream` keyword. Its dictionary is the
-  text after the last object header (`<number> <number> obj`) before it, at
-  most 4 KiB back and not before the data of the stream before. The data
-  ends at the
-  direct `/Length` key (not `/Length1` or another key that starts with
-  `/Length`) of the stream dictionary, outside its strings, comments and
-  inner dictionaries, if `endstream` follows that
-  length. If not, the data ends at the next `endstream`.
+- Streams: the reader reads the PDF once from the start, outside strings
+  and comments, and finds each `stream` keyword. Its dictionary is the text
+  after the last object header (`<number> <number> obj`) before it. A
+  dictionary longer than 4 KiB is not read. The data ends at the direct
+  `/Length` key (not `/Length1` or another key that starts with `/Length`)
+  of the stream dictionary, outside its strings, comments and inner
+  dictionaries, if `endstream` follows that length. If not, the data ends
+  at the next `endstream`. The search for the next keyword starts after
+  the data.
 - A stream with no filter is read in place. A stream whose `/Filter` is
   `/FlateDecode` or `[/FlateDecode]` is inflated, at most 4 MiB for each stream and 32 MiB for each PDF. A
   stream with another filter is skipped.
