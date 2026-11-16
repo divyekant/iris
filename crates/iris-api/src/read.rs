@@ -130,6 +130,11 @@ pub struct Message {
     pub gone: bool,
     /// The hostile marks of the message (specification 1, section 6.7).
     pub hostile: Vec<String>,
+    /// The kind of the sender row of the `From` address: `person`,
+    /// `service`, `stranger` or `hostile` (specification 1, section 6.7). A
+    /// sender with no row or no kind yet is a `stranger`. A hostile sender can
+    /// send a message with no hostile mark.
+    pub sender_kind: String,
     /// The items that are not gone and that have this message as a source.
     pub items: Vec<String>,
 }
@@ -422,7 +427,19 @@ fn kind_sql(doc: &str, path: &str) -> String {
 }
 
 /// The first brief at the time `now` (milliseconds since the Unix epoch).
-pub fn brief(store: &Store, now: i64) -> Result<Brief> {
+/// The names of the list sections of the brief, as in [`Brief`].
+pub const SECTIONS: [&str; 6] = [
+    "you_owe",
+    "owed_to_you",
+    "conversations",
+    "feed",
+    "signals",
+    "strangers",
+];
+
+/// The filter and the order of each list section of the brief, in the
+/// order of [`SECTIONS`].
+fn section_sql(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
@@ -484,6 +501,65 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         ),
         "created_at DESC, id DESC".to_string(),
     );
+    [you_owe, owed, conversations, feed, signals, strangers]
+}
+
+/// One page of a list section of the brief: `limit` items from `offset`, in
+/// the order of the brief.
+fn read_section(
+    c: &Connection,
+    (filter, order): &(String, String),
+    limit: u32,
+    offset: u64,
+) -> iris_store::Result<Section> {
+    // A possible duplicate whose original is in the same section
+    // shows with the original, not as a line of its own. The inner
+    // `item` of the subquery is the original.
+    let shown = format!(
+        "{filter} AND NOT (duplicate_of IS NOT NULL
+               AND duplicate_of IN (SELECT id FROM item WHERE {filter}))"
+    );
+    let count = c.query_row(
+        &format!("SELECT count(*) FROM item WHERE {shown}"),
+        [],
+        |r| r.get(0),
+    )?;
+    let mut st = c.prepare(&format!(
+            "SELECT id, form, status, doc FROM item WHERE {shown} ORDER BY {order} LIMIT {limit} OFFSET {offset}"
+        ))?;
+    let items = st
+        .query_map([], doc_of)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut duplicates = serde_json::Map::new();
+    // Only a duplicate that this section would show is part of the pair.
+    let mut st = c.prepare(&format!(
+        "SELECT id, form FROM item WHERE duplicate_of = ?1 AND {filter} ORDER BY id"
+    ))?;
+    for doc in &items {
+        let Some(id) = doc["id"].as_str() else {
+            continue;
+        };
+        let Some((_, row)) = parse_id(id) else {
+            continue;
+        };
+        let dups: Vec<Value> = st
+            .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
+            .filter_map(|d| d.transpose())
+            .map(|d| d.map(Value::String))
+            .collect::<rusqlite::Result<_>>()?;
+        if !dups.is_empty() {
+            duplicates.insert(id.to_string(), dups.into());
+        }
+    }
+    Ok(Section {
+        count,
+        items,
+        duplicates,
+    })
+}
+
+pub fn brief(store: &Store, now: i64) -> Result<Brief> {
+    let [you_owe, owed, conversations, feed, signals, strangers] = section_sql(now);
     // Outside the read of the brief: a nested read can wait for the
     // connection that this thread holds.
     let accounts: Vec<i64> = store.read(|c| {
@@ -500,44 +576,7 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
         }
     }
     let mut brief = store.read(|c| {
-        let section = |(filter, order): &(String, String)| -> iris_store::Result<Section> {
-            // A possible duplicate whose original is in the same section
-            // shows with the original, not as a line of its own. The inner
-            // `item` of the subquery is the original.
-            let shown = format!(
-                "{filter} AND NOT (duplicate_of IS NOT NULL
-                   AND duplicate_of IN (SELECT id FROM item WHERE {filter}))"
-            );
-            let count = c.query_row(
-                &format!("SELECT count(*) FROM item WHERE {shown}"),
-                [],
-                |r| r.get(0),
-            )?;
-            let mut st = c.prepare(&format!(
-                "SELECT id, form, status, doc FROM item WHERE {shown} ORDER BY {order} LIMIT {MAX_LIMIT}"
-            ))?;
-            let items = st
-                .query_map([], doc_of)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut duplicates = serde_json::Map::new();
-            // Only a duplicate that this section would show is part of the pair.
-            let mut st = c.prepare(&format!(
-                "SELECT id, form FROM item WHERE duplicate_of = ?1 AND {filter} ORDER BY id"
-            ))?;
-            for doc in &items {
-                let Some(id) = doc["id"].as_str() else { continue };
-                let Some((_, row)) = parse_id(id) else { continue };
-                let dups: Vec<Value> = st
-                    .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
-                    .filter_map(|d| d.transpose())
-                    .map(|d| d.map(Value::String))
-                    .collect::<rusqlite::Result<_>>()?;
-                if !dups.is_empty() {
-                    duplicates.insert(id.to_string(), dups.into());
-                }
-            }
-            Ok(Section { count, items, duplicates })
-        };
+        let section = |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, 0);
         let mut records = serde_json::Map::new();
         let mut st = c.prepare(
             "SELECT json_extract(doc, '$.type'), count(*) FROM item
@@ -594,6 +633,36 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     Ok(brief)
 }
 
+/// One page of a list section of the brief.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SectionPage {
+    #[serde(flatten)]
+    pub section: Section,
+    /// The `offset` of the next page, or `None` on the last page.
+    pub next: Option<u64>,
+}
+
+/// One page of the list section `name` (one of [`SECTIONS`]) of the brief at
+/// the time `now`, with the same filter and order as [`brief`]. An offset
+/// keeps the order of the section: an ID cannot page an order by date.
+pub fn brief_section(
+    store: &Store,
+    now: i64,
+    name: &str,
+    limit: u32,
+    offset: u64,
+) -> Result<Option<SectionPage>> {
+    check_limit(limit)?;
+    let Some(index) = SECTIONS.iter().position(|n| *n == name) else {
+        return Ok(None);
+    };
+    let sql = &section_sql(now)[index];
+    let section = store.read(|c| read_section(c, sql, limit, offset))?;
+    let end = offset.saturating_add(section.items.len() as u64);
+    let next = (end < section.count as u64 && !section.items.is_empty()).then_some(end);
+    Ok(Some(SectionPage { section, next }))
+}
+
 /// The triage proposal of specification 1, section 8, in the changeset
 /// format of specification 2: `{"changesets": [...]}`, one changeset for each
 /// account, with the message IDs of each action. Each action is `proposed`.
@@ -623,7 +692,9 @@ fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSumm
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
-                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile
+                    h.subject, h.to_addrs, h.cc_addrs, b.text, m.gone_at IS NOT NULL, m.hostile,
+                    coalesce((SELECT s.kind FROM sender s
+                              WHERE s.address = h.from_addr COLLATE NOCASE), 'stranger')
              FROM message m LEFT JOIN header h ON h.message_id = m.id
              LEFT JOIN body b ON b.message_id = m.id WHERE m.id = ?1",
             [row],
@@ -650,6 +721,7 @@ fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSumm
                         hostile: hostile
                             .and_then(|h| serde_json::from_str(&h).ok())
                             .unwrap_or_default(),
+                        sender_kind: r.get(10)?,
                         items: Vec::new(),
                     },
                 ))

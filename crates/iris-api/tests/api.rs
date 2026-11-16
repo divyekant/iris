@@ -888,6 +888,66 @@ async fn brief_follows_the_queries_of_section_8() {
         .sum();
     assert_eq!(targets as u64, want);
 
+    // Pages of one section: the same items in the same order as the brief.
+    let mut paged = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (code, p) = get(
+            &store,
+            &format!("/api/brief/you_owe?limit=3&offset={offset}"),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(p["count"], 4);
+        paged.extend(ids(&p["items"]).into_iter().map(str::to_string));
+        match p["next"].as_u64() {
+            Some(n) => offset = n,
+            None => break,
+        }
+    }
+    assert_eq!(paged, ids(&b["you_owe"]["items"]));
+    // A page has the duplicates of its own items only.
+    let (_, p) = get(&store, "/api/brief/you_owe?limit=1").await;
+    assert_eq!(p["duplicates"], Value::Null);
+    let (_, p) = get(&store, "/api/brief/you_owe?limit=1&offset=2").await;
+    assert_eq!(p["duplicates"], json!({ c(late): [c(dup)] }));
+    assert_eq!(
+        get(&store, "/api/brief/records").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&store, "/api/brief/you_owe?limit=0").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get(&store, "/api/brief/you_owe?offset=x").await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // The kind of the sender of a message.
+    assert_eq!(
+        get(&store, "/api/messages/m-23").await.1["sender_kind"],
+        "hostile"
+    );
+    exec(
+        &store,
+        "UPDATE header SET from_addr = 'DANA@contoso.example' WHERE message_id = 24",
+        [],
+    );
+    assert_eq!(
+        get(&store, "/api/messages/m-24").await.1["sender_kind"],
+        "person"
+    );
+    exec(
+        &store,
+        "UPDATE header SET from_addr = 'nobody@nowhere.example' WHERE message_id = 25",
+        [],
+    );
+    assert_eq!(
+        get(&store, "/api/messages/m-25").await.1["sender_kind"],
+        "stranger"
+    );
+
     // The HTTP route gives the same shape.
     let (code, http) = get(&store, "/api/brief").await;
     assert_eq!(code, StatusCode::OK);
