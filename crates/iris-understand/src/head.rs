@@ -154,19 +154,19 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
             })
         })
         // `a@b.example (Ana Lee)`: the comment shows as the display name.
+        // `iris-senders` decodes a display name; a comment is decoded here.
         .map(|(a, n)| {
-            let n = n.or_else(|| comment_name(v, &a));
+            let n = n.or_else(|| {
+                comment_name(v, &a)
+                    .map(|c| decode_name(&c.replace("\\\"", "\"")))
+                    .filter(|c| !c.is_empty())
+            });
             (a, n)
-        })
-        .map(|(a, n)| {
-            (
-                a,
-                n.map(|n| decode_name(&n.replace("\\\"", "\"")))
-                    .filter(|n| !n.is_empty()),
-            )
         })
         .collect()
 }
+
+use iris_senders::head::decode_name;
 
 /// The comment right after a bare address in `v`, as in
 /// `ana@example.org (Ana Lee)`.
@@ -177,16 +177,6 @@ fn comment_name(v: &str, addr: &str) -> Option<String> {
     let inner = rest.strip_prefix('(')?;
     let end = inner.find(')')?;
     Some(inner[..end].trim().to_string()).filter(|n| !n.is_empty())
-}
-
-/// Decode RFC 2047 encoded words of a display name with the decoder of
-/// `iris-clean`, which decodes the `Subject` of a message.
-fn decode_name(n: &str) -> String {
-    if !n.contains("=?") {
-        return n.trim().to_string();
-    }
-    let one = n.replace(['\r', '\n'], " ");
-    iris_clean::clean(format!("Subject: {one}\r\n\r\n").as_bytes()).subject
 }
 
 /// The results of one `Authentication-Results` value, if its authserv-id is

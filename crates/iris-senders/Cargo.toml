@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+iris-clean = { version = "0.0.0", path = "../iris-clean" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 rusqlite = "=0.43.0"
 

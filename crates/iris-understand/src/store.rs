@@ -511,14 +511,14 @@ fn inputs(
 
 /// The SQL condition on an earlier message `m` that may shape this run:
 /// one rule for the thread context and the texts of the same sender.
-/// Hostile mail never goes to a model, also as context. Only a message that
-/// understanding judged has its marks, and a SPAM label counts now, also one
-/// that came later. A draft is not mail of the thread yet.
+/// Hostile mail never shapes a run. Write 1 saves the clean text and the
+/// hostile marks together, so a message with a clean text has its marks. A
+/// SPAM label counts now, also one that came later. A draft is not mail of
+/// the thread yet.
 macro_rules! earlier_ok {
     () => {
         "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
          AND m.internal_date < ?3
-         AND m.understood_at IS NOT NULL
          AND coalesce(m.hostile, '[]') = '[]'
          AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'DRAFT'))
@@ -620,8 +620,10 @@ fn thread_context(
     };
     let mut v: Vec<String> = {
         let mut st = c.prepare_cached(concat!(
+            // The model gets only a message that a run understood, so the
+            // model step judged it for phishing too.
             "SELECT b.sender, b.subject, b.text FROM message m JOIN body b ON b.message_id = m.id
-             WHERE ",
+             WHERE m.understood_at IS NOT NULL AND ",
             earlier_ok!(),
             " ORDER BY m.internal_date DESC, m.id DESC LIMIT ?4"
         ))?;

@@ -902,6 +902,68 @@ Lease Office, 12 High Street
 }
 
 #[test]
+fn an_earlier_text_of_the_sender_after_a_failed_model_step_still_counts() {
+    let b = store("repeated-failed");
+    let first = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: The lease
+
+Here is the plan.
+
+Bo Ren
+Lease Office, 12 High Street
+";
+    let second = "From: Bo Ren <bo@example.org>
+To: owner@example.com
+Subject: Re: The lease
+
+Can you call me today?
+
+Bo Ren
+Lease Office, 12 High Street
+";
+    let a = b.add_in("1", "t1", NOW - 3 * DAY, first, &["INBOX"]);
+    let s = b.add_in("2", "t1", NOW - 2 * DAY, second, &["INBOX"]);
+    let bad = COMMITMENT.replace("2026-01-02", "Friday");
+    assert!(
+        understand(&b.store, a, &Fake::with(&[&bad, &bad]), NOW)
+            .unwrap()
+            .failed
+    );
+    understand(&b.store, s, &Fake::default(), NOW).unwrap();
+    let text: String = b.col("SELECT text FROM body WHERE message_id = ?1", s);
+    assert_eq!(text.trim(), "Can you call me today?");
+}
+
+#[test]
+fn an_encoded_name_that_you_wrote_makes_a_later_forged_name_a_spoof() {
+    let b = store("spoof-sent-encoded");
+    let sent = "From: owner@example.com
+To: =?utf-8?B?QW5hIExlZQ==?= <ana@example.org>
+Subject: Hi
+
+See you soon.
+";
+    let s = b.add_in("1", "t1", NOW - 2 * DAY, sent, &["SENT"]);
+    understand(&b.store, s, &Fake::default(), NOW).unwrap();
+    let name: String = b.col(
+        "SELECT name FROM sender WHERE address = 'ana@example.org' AND ?1 = ?1",
+        0,
+    );
+    assert_eq!(name, "Ana Lee");
+    let forged = "From: Ana Lee <ana@evil.example>
+To: owner@example.com
+Subject: Pay
+
+Pay this.
+";
+    let m = b.add_in("2", "t2", NOW - DAY, forged, &["INBOX"]);
+    let fake = Fake::default();
+    assert!(understand(&b.store, m, &fake, NOW).unwrap().hostile);
+    assert_eq!(fake.calls.borrow().len(), 0);
+}
+
+#[test]
 fn a_rerun_that_stops_after_the_first_write_is_not_understood() {
     let b = store("rerun-stop");
     let m = b.add("1", ASK, &["INBOX"]);

@@ -149,6 +149,19 @@ fn strip_comments(v: &str) -> String {
         .collect()
 }
 
+/// Decode RFC 2047 encoded words of a display name with the decoder of
+/// `iris-clean`, which decodes the `Subject` of a message.
+pub fn decode_name(n: &str) -> String {
+    if !n.contains("=?") {
+        return n.trim().to_string();
+    }
+    let one = n.replace(['\r', '\n'], " ");
+    iris_clean::clean(format!("Subject: {one}\r\n\r\n").as_bytes())
+        .subject
+        .trim()
+        .to_string()
+}
+
 /// Split an address list at the commas that are outside quotes and angle
 /// brackets. Each entry gives (lowercase address, display name).
 pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
@@ -163,10 +176,10 @@ pub fn addresses(v: &str) -> Vec<(String, Option<String>)> {
         };
         let addr = addr.trim().to_ascii_lowercase();
         if addr.contains('@') {
-            // shortcut: an RFC 2047 encoded name stays encoded; decode it if
-            // a reader of the name needs the text.
-            let name = name.trim_matches('"').trim();
-            out.push((addr, (!name.is_empty()).then(|| name.to_string())));
+            // The sender rows keep the decoded name: the spoof check
+            // compares it with the decoded name of a later `From`.
+            let name = decode_name(&name.trim_matches('"').replace("\\\"", "\""));
+            out.push((addr, (!name.is_empty()).then_some(name)));
         }
     };
     for (i, c) in v.char_indices() {
