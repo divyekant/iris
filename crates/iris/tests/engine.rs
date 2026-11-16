@@ -537,3 +537,39 @@ fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
         iris::cost::AfterSync::Idle
     );
 }
+
+/// Each tick stores the triage proposal of each account (R2-05), and a
+/// second tick with no change adds no revision.
+#[test]
+fn the_engine_stores_the_triage_proposal() {
+    let s = setup("engine-triage", 5);
+    s.worker(s.account).sync().unwrap();
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('feed', ?1, 'new', '{}', 0, 0)",
+                [s.account],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), min(ml.message_id), 'origin'
+                 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                 WHERE l.provider_id = 'INBOX'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mut e = Engine::new(
+        s.store.clone(),
+        config(s.fake.base_url()),
+        Some(s.tokens.uri.clone()),
+    );
+    e.tick().unwrap();
+    let triage = "SELECT count(*) FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
+                  WHERE c.author_kind = 'triage' AND a.state = 'proposed'";
+    assert_eq!(count(&s.store, triage), 1);
+    e.tick().unwrap();
+    assert_eq!(count(&s.store, triage), 1);
+}

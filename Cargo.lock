@@ -705,6 +705,7 @@ dependencies = [
  "iris-store",
  "iris-sync",
  "iris-synth",
+ "iris-triage",
  "iris-understand",
  "iris-web",
  "rusqlite",
