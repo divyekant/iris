@@ -27,7 +27,14 @@
   let busy = $state("");
 
   const n = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
-  const STATE = { approved: "Approved, waits to apply", held: "On hold", applied: "Done" } as const;
+  const STATE = {
+    approved: "Approved, waits to apply",
+    held: "On hold",
+    applied: "Done",
+    failed: "Failed. Some messages can have changed",
+    undone: "Undone",
+    denied: "Denied",
+  } as const;
   // The review words of the verb need the parts of an action that the list gives.
   const words = (a: HandledAction) => verb({ verb: a.verb, args: a.args } as Parameters<typeof verb>[0]);
   const key = (a: HandledAction) => `${a.changeset}/${a.revision}/${a.n}`;

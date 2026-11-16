@@ -189,7 +189,8 @@ export type HandledAction = {
   args: Record<string, unknown>;
   /** The count of messages of the action. */
   messages: number;
-  state: "approved" | "held" | "applied";
+  /** The state after the rule decision. A failed action can have changed some of its messages. */
+  state: "approved" | "held" | "applied" | "failed" | "undone" | "denied";
   rule: number;
   policy: number;
   why: string | null;

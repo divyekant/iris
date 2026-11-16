@@ -449,11 +449,15 @@ async fn refuses_a_decision_that_is_not_valid() {
     assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
 }
 
+fn parse(id: &str) -> i64 {
+    id.strip_prefix("cs-").unwrap().parse().unwrap()
+}
+
 /// What Iris handled without the person: each action that an `allow` rule
 /// approved, with the message count and the reason, and no other action.
 /// The brief count and the full list agree, page by page.
 #[tokio::test]
-async fn lists_the_actions_that_a_rule_approved() {
+async fn lists_each_action_that_a_rule_decided() {
     let dir = temp("handled");
     let s = store(&dir);
     s.write(|tx| {
@@ -525,6 +529,39 @@ async fn lists_the_actions_that_a_rule_approved() {
         }
     }
     assert_eq!(got, want);
+    // A rule decision in each later state stays: a failed apply can have
+    // changed some messages (spec 2 section 7.2). The moves after approved
+    // need the ledger (R2-03), so the test writes the state with no trigger.
+    let first = parse(&want[4]);
+    s.write(|tx| {
+        tx.execute_batch("DROP TRIGGER action_state")?;
+        for (state, n) in [("failed", 1), ("undone", 2)] {
+            tx.execute(
+                "UPDATE changeset_action SET state = ?1
+                     WHERE changeset_id = ?2 AND n = ?3",
+                rusqlite::params![state, first + n, 1],
+            )?;
+        }
+        // In review waits for the person: not handled.
+        tx.execute(
+            "UPDATE changeset_action SET state = 'in_review'
+                 WHERE changeset_id = ?1 AND n = 1",
+            [first + 3],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, b) = get(&s, "/api/brief").await;
+    assert_eq!(b["handled"], json!({"count": 8, "verbs": {"archive": 8}}));
+    let (_, p) = get(&s, "/api/handled?limit=200").await;
+    assert_eq!(p["count"], 4);
+    let states: Vec<&str> = p["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["approved", "undone", "failed", "approved"]);
     for bad in [
         "/api/handled?after=x",
         "/api/handled?after=01",

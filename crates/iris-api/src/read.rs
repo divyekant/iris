@@ -158,8 +158,8 @@ pub struct Proposal {
 }
 
 /// The work that Iris did without the person: the items that a `hide` rule
-/// leaves out of the brief, and the messages of the actions that an `allow`
-/// rule approved (specification 2, sections 5.4 and 6.4).
+/// leaves out of the brief, and the messages of the actions that a rule
+/// decided ([`BY_RULE`], specification 2, sections 5.4 and 6.4).
 #[derive(Debug, Serialize, PartialEq, Default)]
 pub struct Handled {
     /// `hidden` and the messages of `verbs` together.
@@ -191,10 +191,12 @@ fn verb_counts(c: &Connection, filter: &str) -> rusqlite::Result<Proposal> {
 const TRIAGE_OPEN: &str =
     "c.author_kind = 'triage' AND c.state = 'open' AND a.state IN ('proposed', 'in_review')";
 
-/// The actions that an `allow` rule approved. The apply keeps the decision
-/// of the rule on `applied` (schema 7, trigger `action_state`).
-pub(crate) const BY_RULE: &str =
-    "a.decided_by = 'rule' AND a.state IN ('approved', 'held', 'applied')";
+/// The actions that a rule decided without the person, in each later state:
+/// `approved`, `held`, `applied`, `failed` (some messages can have changed),
+/// `undone` and `denied`. The apply keeps the decision of the rule on
+/// `applied` and `failed` (schema 7, trigger `action_state`). An action in
+/// `in_review` waits for the person, so the review counts it, not this.
+pub(crate) const BY_RULE: &str = "a.decided_by = 'rule' AND a.state <> 'in_review'";
 
 /// The first brief (specification 1, section 8).
 #[derive(Debug, Serialize, PartialEq, Default)]

@@ -1039,8 +1039,9 @@ From release 2, the brief reads the stored triage changesets, and computes no
 proposal. Its proposal totals count the messages of the triage actions that
 wait for a person (`proposed` or `in_review`). The review lists these
 changesets. The brief also gives the count of what Iris handled without the
-person: the hidden items and the messages of the actions that an `allow` rule
-approved. One step shows the list of each, with the reason of each item and
+person: the hidden items and the messages of the actions that a rule decided
+without the person (each state but `in_review`, also `failed`, because a
+failed action can have changed some messages). One step shows the list of each, with the reason of each item and
 action.
 
 The triage proposal of release 1 (crate `iris-observe`) has these rules:

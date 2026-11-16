@@ -305,6 +305,11 @@ test("the handled view lists each change and each hidden item with its reason", 
   const t2 = text(await render("/src/views/Handled.svelte", { changes: { count: 1, actions: [plain], next: null }, hidden: { count: 0, items: [], next: null } }));
   assert.match(t2, /Feed items that you did not open in 30 days\. Approved, waits to apply/);
   assert.doesNotMatch(t2, /Hidden from your brief|Show more/);
+  // Each later state of a rule decision says what happened.
+  for (const [state, words] of [["failed", /Failed\. Some messages can have changed/], ["undone", /Undone/], ["denied", /Denied/], ["held", /On hold/]]) {
+    const one = text(await render("/src/views/Handled.svelte", { changes: { count: 1, actions: [{ ...plain, state }], next: null }, hidden: { count: 0, items: [], next: null } }));
+    assert.match(one, words, state);
+  }
   // Nothing: one sentence and a link to the rules.
   const none = await render("/src/views/Handled.svelte", { changes: { count: 0, actions: [], next: null }, hidden: { count: 0, items: [], next: null } });
   assert.match(text(none), /Iris has handled nothing without you yet\./);

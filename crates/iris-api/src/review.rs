@@ -349,8 +349,8 @@ mod tests {
     }
 }
 
-/// One action that an `allow` rule approved: a change that Iris made, or
-/// makes, without the person (specification 2, section 5.4).
+/// One action that a rule decided without the person (specification 2,
+/// section 5.4), in its state now.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct HandledAction {
     pub changeset: String,
@@ -361,7 +361,8 @@ pub struct HandledAction {
     pub args: Value,
     /// The count of messages of the action.
     pub messages: i64,
-    /// `approved`, `held` or `applied`.
+    /// The state after the rule decision: `approved`, `held`, `applied`,
+    /// `failed`, `undone` or `denied`.
     pub state: String,
     /// The rule and the confirmed policy version that approved it.
     pub rule: i64,
@@ -391,7 +392,7 @@ fn parse_after(t: &str) -> Option<i64> {
         .filter(|n| *n > 0 && n.to_string() == t)
 }
 
-/// The actions that an `allow` rule approved, newest first. `after` is the
+/// The actions that a rule decided without the person, newest first. `after` is the
 /// `next` value of the page before. Keyset on the row ID: a row ID never
 /// changes, so a page does not repeat or skip an action.
 pub fn handled(store: &Store, limit: u32, after: Option<&str>) -> Result<HandledPage> {
