@@ -100,14 +100,39 @@ approval).
 - The caller of `batch::run` gives no model. The runner reads the row and
   makes the model with `connect(&row)`. The program passes a `connect` that
   builds the `iris-model` client; tests pass a fake.
-- `iris model set` writes a new row and sets `budget_micro_usd` to NULL. So
-  a budget always belongs to the model and the price that make the calls.
+- `iris model set` takes the run lock too. It writes a new row and sets
+  `budget_micro_usd` to NULL. While a run holds the lock, it fails with "a
+  run is in progress". So the row cannot change during a run, and a budget
+  always belongs to the model and the price that make the calls.
 - A model with no price (a local model) needs no budget.
 - With a price, the budget is the money that the person approved for all
-  runs together, not for one run. Each run takes its cost from the budget
-  (see "Counts"). When the budget is less than the worst case of one call,
-  the runner stops with `stop = budget` before the call. The person approves
-  more with `iris understand --budget <usd> --yes`.
+  runs together, not for one run. The person approves more with
+  `iris understand --budget <usd> --yes`.
+- The runner reserves money before each message and settles after it
+  (below). The budget never pays for a call that it did not reserve first.
+
+### Reservation
+
+The worst case of one message is the worst case of two calls (`decide` makes
+at most two). The worst case of one call is the instruction bytes plus
+`MAX_DATA` as input tokens (a token covers at least one byte; the data
+block stays inside `MAX_DATA`), and `max_tokens` as output tokens, at the
+price of the row.
+
+1. Before the message, in one write: if `budget_micro_usd` is less than the
+   worst case of the message, stop with `stop = budget`. Else take the worst
+   case from `budget_micro_usd` and add it to `reserved_micro_usd` of the
+   run row.
+2. Call `store::understand`.
+3. After it, in one write: give back the worst case minus the real cost
+   (known cost plus the worst case of each call with unknown usage) to
+   `budget_micro_usd`, take it from `reserved_micro_usd`, and add the counts
+   to the run row.
+
+A crash between steps 1 and 3 keeps the whole worst case taken from the
+budget. Iris never gives it back, because it cannot know the real charge.
+So a crash can only make the budget smaller than the real spend, never
+larger.
 
 So an automatic run (R1-28) after each sync can spend only what is left of
 the approved budget.
@@ -124,9 +149,7 @@ the approved budget.
 3. Read `model_setting` and make the model. Check the budget.
 4. For each thread in order, and for each pending message of it:
    1. Check the stop conditions.
-   2. Call `store::understand`.
-   3. In one write: add the calls, tokens and cost of the message to the run
-      row, and take the cost from `budget_micro_usd`.
+   2. Reserve, call `store::understand`, and settle (see "Reservation").
    4. If the outcome has sender rows in `rerun`, set `understood_at` to NULL
       on the messages of these senders, as in step 2.
 5. After each `Limits::batch` (default 50) messages, run step 2 again.
@@ -135,7 +158,8 @@ the approved budget.
 Stop conditions, checked before each message:
 
 - No pending message is left: `stop = done`.
-- The budget cannot pay the worst case of one more call: `stop = budget`.
+- The budget cannot pay the worst case of one more message: `stop =
+  budget`.
 - The run cost reached `Limits::max_cost_micro_usd`: `stop = cost`. A run
   can pass this limit by the cost of one message.
 - `Limits::max_messages` messages are done: `stop = messages`. The next run
@@ -164,6 +188,7 @@ CREATE TABLE understand_run (
   cost_micro_usd INTEGER,
   unknown_calls INTEGER NOT NULL DEFAULT 0,
   unknown_cost_micro_usd INTEGER,
+  reserved_micro_usd INTEGER NOT NULL DEFAULT 0,
   stop TEXT
 );
 ```
@@ -248,7 +273,9 @@ more calls.
 |---|---|---|---|
 | A second run | All mail understood | Zero calls. | Counting fake, two runs. |
 | A crash after the call, before write 3 | The model ran, no items | The message stays pending; the next run pays for it again (one message). | Fake model, stop after the call. |
-| A crash between write 3 and the count write | Items saved, counts not | The run row and the budget miss one message. | Limit #113. |
+| A crash between the reservation and the settle write | Items saved, counts not | The budget keeps the whole worst case taken. The run row misses the tokens of one message. | Limit #113 (counts only); batch test of the reservation. |
+| The budget covers one call but not two | A second try outside the budget | The reservation covers two calls, so the run stops before the message. | Batch test. |
+| `iris model set` during a run | Calls on an old row with a new budget | `iris model set` needs the run lock and fails. | Command test. |
 | A priced model and no budget | Paid calls with no approval | `stop = budget`, no call, also from R1-28. | Batch test. |
 | Automatic runs after each sync | Each run spends again | All runs take from one budget. | Batch test: two runs, one budget. |
 | A changed model row after the approval | The approval of another price | `iris model set` clears the budget; the runner makes its own model from the row. | Batch test. |
