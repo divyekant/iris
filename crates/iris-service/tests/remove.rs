@@ -1,5 +1,5 @@
-//! `remove` keeps the service file when the stop fails, so that a second
-//! remove can try again. A fake `systemctl` on PATH stands in for systemd.
+//! A failed install leaves the service file as it was before. `remove` keeps
+//! the service file when the stop fails, so that a second remove can try again. A fake `systemctl` on PATH stands in for systemd.
 //! This file has one test, because the test changes HOME and PATH.
 #![cfg(target_os = "linux")]
 
@@ -22,7 +22,7 @@ fn fake(bin: &Path, body: &str) {
 }
 
 #[test]
-fn a_failed_stop_keeps_the_file_and_a_good_stop_removes_it() {
+fn failed_service_manager_calls_leave_a_file_state_that_a_retry_can_fix() {
     let dir = std::env::temp_dir().join(format!("iris-service-remove-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let (home, bin) = (dir.join("home"), dir.join("bin"));
@@ -39,6 +39,22 @@ fn a_failed_stop_keeps_the_file_and_a_good_stop_removes_it() {
         "no file, nothing to stop"
     );
     assert!(!home.join("calls").exists());
+
+    // A failed install leaves no new unit file, and keeps an old one as it was.
+    let unit = home.join(".config/systemd/user/iris.service");
+    fake(&bin, "echo 'Failed to connect to bus' >&2; exit 1");
+    let err = iris_service::install(Path::new("/opt/iris")).unwrap_err();
+    assert!(
+        err.to_string().contains("Failed to connect to bus"),
+        "{err}"
+    );
+    assert!(!unit.exists(), "a failed install must remove its new file");
+    std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    std::fs::write(&unit, "old unit").unwrap();
+    assert!(iris_service::install(Path::new("/opt/iris")).is_err());
+    assert_eq!(std::fs::read_to_string(&unit).unwrap(), "old unit");
+    std::fs::remove_file(&unit).unwrap();
+    std::fs::remove_file(home.join("calls")).unwrap();
 
     let file = iris_service::write(
         iris_service::System::Systemd,
