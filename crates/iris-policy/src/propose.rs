@@ -1,16 +1,21 @@
-//! Rules that Iris proposes from the approvals of the person (spec 2,
-//! section 6.6). A proposal is a row of `rule_proposal` (store migration 15),
-//! never a line in the file. Only an accept by the person
+//! Rules that Iris proposes from the approvals and the choices of the
+//! person (spec 2, section 6.6). A proposal is a row of `rule_proposal`
+//! (store migrations 15 and 24), never a line in the file. Only an accept by the person
 //! ([`crate::Change::Accept`]) adds the rule to the file, with
 //! `by = "proposal"`.
 //!
 //! The invariant: a proposal counts exactly the actions that its rule,
 //! added to the active policy, would approve. Each count comes from
 //! [`Policy::decide`] on that policy, so the proposal and the rule cannot
-//! disagree.
+//! disagree. A `hide` proposal (card R5-02) counts exactly the choices
+//! (`skip`, `mute`, `dismiss`) whose items its rule would hide, from
+//! [`Policy::attention`].
 
 use crate::attention::facts;
-use crate::{Action, Author, By, Effect, Facts, Outcome, Policy, Rule, SenderKind, Verb, When};
+use crate::{
+    Action, Attention, Author, By, Effect, Facts, Form, Outcome, Policy, Rule, SenderKind, Verb,
+    When,
+};
 use iris_store::{Result, Store};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,26 +38,46 @@ pub const VERBS: [Verb; 5] = [
     Verb::Trash,
 ];
 
+/// The forms of a `hide` proposal, with the verb of the person's choice
+/// for each one.
+pub const CHOICES: [(&str, Form); 3] = [
+    ("skip", Form::Feed),
+    ("mute", Form::Conversation),
+    ("dismiss", Form::Signal),
+];
+
 /// One open proposal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal {
     pub id: i64,
-    pub verb: Verb,
+    /// The verb of an `allow` proposal. `None` for a `hide` proposal, whose
+    /// `when` has a `sender` and a `form`.
+    pub verb: Option<Verb>,
     pub when: When,
-    /// The number of approvals that the rule would have decided.
+    /// The number of approvals (or choices, for `hide`) that the rule would
+    /// have decided.
     pub approvals: i64,
     /// Seconds since 1970-01-01 UTC.
     pub created_at: i64,
 }
 
 impl Proposal {
+    /// The effect of the rule: `allow` or `hide`.
+    pub fn effect(&self) -> Effect {
+        if self.verb.is_some() {
+            Effect::Allow
+        } else {
+            Effect::Hide
+        }
+    }
+
     /// The rule that an accept adds, with the ID `id` and the date `added`.
     pub fn rule(&self, id: u32, added: &str) -> Rule {
         Rule {
             id,
             name: name(self.verb, &self.when),
-            effect: Effect::Allow,
-            verbs: vec![self.verb],
+            effect: self.effect(),
+            verbs: self.verb.into_iter().collect(),
             when: self.when.clone(),
             by: By::Proposal,
             added: added.to_string(),
@@ -65,24 +90,27 @@ impl Proposal {
 /// The open proposals, the oldest first.
 pub fn open(conn: &Connection) -> Result<Vec<Proposal>> {
     let mut st = conn.prepare(
-        "SELECT id, verb, cond, value, approvals, created_at FROM rule_proposal
+        "SELECT id, verb, cond, value, form, approvals, created_at FROM rule_proposal
          WHERE state = 'open' ORDER BY id",
     )?;
     let rows = st.query_map([], |r| {
         Ok((
             r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, i64>(4)?,
+            (
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ),
             r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, verb, cond, value, approvals, created_at) = row?;
+        let (id, key, approvals, created_at) = row?;
         // A row that this program cannot read is not shown, and cannot be accepted.
-        if let (Some(verb), Some(when)) = (Verb::from_name(&verb), when(&cond, &value)) {
+        if let Some((verb, when)) = parse_key(&key) {
             out.push(Proposal {
                 id,
                 verb,
@@ -100,6 +128,38 @@ pub fn get(conn: &Connection, id: i64) -> Result<Option<Proposal>> {
     Ok(open(conn)?.into_iter().find(|p| p.id == id))
 }
 
+/// The verb and the condition of a row key, or `None` if this program cannot
+/// read it.
+fn parse_key((verb, cond, value, form): &Key) -> Option<(Option<Verb>, When)> {
+    let mut w = when(cond, value)?;
+    if verb == "hide" {
+        let form = CHOICES.iter().find(|(_, f)| f.name() == form)?.1;
+        if w.sender.is_none() {
+            return None;
+        }
+        w.form = Some(form);
+        Some((None, w))
+    } else if form.is_empty() {
+        Some((Some(Verb::from_name(verb)?), w))
+    } else {
+        None
+    }
+}
+
+/// The row key of a proposal.
+fn key_of(p: &Proposal) -> Option<Key> {
+    let (cond, value) = match (&p.when.sender, p.when.sender_kind) {
+        (Some(s), _) => ("sender", s.clone()),
+        (None, Some(k)) => ("sender_kind", k.name().to_string()),
+        (None, None) => return None,
+    };
+    let (verb, form) = match p.verb {
+        Some(v) => (v.name(), ""),
+        None => ("hide", p.when.form?.name()),
+    };
+    Some((verb.into(), cond.into(), value, form.into()))
+}
+
 /// The open proposal `id`, only if the decisions of now still give it
 /// (the same pass as [`refresh`]), with the count of now. A decision that
 /// came after the last pass can make a proposal stale: the accept of
@@ -109,12 +169,9 @@ pub(crate) fn current(tx: &Connection, id: i64, now: i64) -> Result<Option<Propo
     let Some(mut p) = get(tx, id)? else {
         return Ok(None);
     };
-    let (cond, value) = match (&p.when.sender, p.when.sender_kind) {
-        (Some(s), _) => ("sender", s.clone()),
-        (None, Some(k)) => ("sender_kind", k.name().to_string()),
-        (None, None) => return Ok(None),
+    let Some(key) = key_of(&p) else {
+        return Ok(None);
     };
-    let key = (p.verb.name().to_string(), cond.to_string(), value);
     Ok(pass(tx, now)?.proposals.get(&key).map(|&n| {
         p.approvals = n;
         p
@@ -128,43 +185,30 @@ pub(crate) fn current(tx: &Connection, id: i64, now: i64) -> Result<Option<Propo
 /// commit of an accept.
 pub(crate) fn accepted(tx: &Connection, policy: &Policy, now: i64) -> Result<()> {
     for r in &policy.rules {
-        if r.by != By::Proposal
-            || r.effect != Effect::Allow
-            || r.verbs.len() != 1
-            || r.job.is_some()
-        {
+        if r.by != By::Proposal || r.job.is_some() {
             continue;
         }
-        let (cond, value) = match &r.when {
-            w if *w
-                == When {
-                    sender: w.sender.clone(),
-                    ..When::default()
-                }
-                && w.sender.is_some() =>
-            {
-                ("sender", w.sender.clone().unwrap_or_default())
-            }
-            w if *w
-                == When {
-                    sender_kind: w.sender_kind,
-                    ..When::default()
-                }
-                && w.sender_kind.is_some() =>
-            {
-                (
-                    "sender_kind",
-                    w.sender_kind
-                        .map(|k| k.name().to_string())
-                        .unwrap_or_default(),
-                )
-            }
+        let verb = match (r.effect, r.verbs.as_slice()) {
+            (Effect::Allow, [v]) => Some(*v),
+            (Effect::Hide, []) => None,
             _ => continue,
         };
+        let p = Proposal {
+            id: 0,
+            verb,
+            when: r.when.clone(),
+            approvals: 0,
+            created_at: 0,
+        };
+        // Only the exact rule of a proposal: the key gives the rule again.
+        let Some(key) = key_of(&p) else { continue };
+        if parse_key(&key).map(|(_, w)| w) != Some(r.when.clone()) {
+            continue;
+        }
         tx.execute(
-            "UPDATE rule_proposal SET state = 'accepted', rule = ?4, updated_at = ?5
-             WHERE state = 'open' AND verb = ?1 AND cond = ?2 AND value = ?3",
-            params![r.verbs[0].name(), cond, value, r.id, now],
+            "UPDATE rule_proposal SET state = 'accepted', rule = ?5, updated_at = ?6
+             WHERE state = 'open' AND verb = ?1 AND cond = ?2 AND value = ?3 AND form = ?4",
+            params![key.0, key.1, key.2, key.3, r.id, now],
         )?;
     }
     Ok(())
@@ -205,25 +249,26 @@ pub fn refresh(store: &Store, now: i64, last: &mut Option<Mark>) -> Result<Optio
     };
     let n = store.write(|tx| {
         let mut keep = BTreeSet::new();
-        for ((verb, cond, value), approvals) in &found.proposals {
+        for (key, approvals) in &found.proposals {
+            let (verb, cond, value, form) = key;
             tx.execute(
-                "INSERT INTO rule_proposal (verb, cond, value, approvals, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                 ON CONFLICT (verb, cond, value) DO UPDATE
+                "INSERT INTO rule_proposal (verb, cond, value, form, approvals, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                 ON CONFLICT (verb, cond, value, form) DO UPDATE
                  SET approvals = excluded.approvals, updated_at = excluded.updated_at
                  WHERE state = 'open' AND approvals <> excluded.approvals",
-                params![verb, cond, value, approvals, now],
+                params![verb, cond, value, form, approvals, now],
             )?;
-            keep.insert((verb.clone(), cond.clone(), value.clone()));
+            keep.insert(key.clone());
         }
         // A pattern that is gone (a refusal, an undo, a new rule) is no longer proposed.
-        let open: Vec<(i64, String, String, String)> = tx
-            .prepare("SELECT id, verb, cond, value FROM rule_proposal WHERE state = 'open'")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        let open: Vec<(i64, Key)> = tx
+            .prepare("SELECT id, verb, cond, value, form FROM rule_proposal WHERE state = 'open'")?
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))))?
             .collect::<rusqlite::Result<_>>()?;
         let mut n = 0;
-        for (id, verb, cond, value) in open {
-            if keep.contains(&(verb, cond, value)) {
+        for (id, key) in open {
+            if keep.contains(&key) {
                 n += 1;
             } else {
                 tx.execute("DELETE FROM rule_proposal WHERE id = ?1", [id])?;
@@ -248,7 +293,9 @@ fn mark(tx: &Connection, now: i64) -> Result<Mark> {
     Ok(Mark([count, at, undone, version, now.div_euclid(3600)]))
 }
 
-type Key = (String, String, String);
+/// The key of a row: the verb (`hide` for a `hide` rule), the condition,
+/// its value, and the form (`''` for an `allow` rule).
+type Key = (String, String, String, String);
 
 /// The counts of one key in a pass.
 #[derive(Default)]
@@ -344,7 +391,7 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
             };
             let rule = Proposal {
                 id: 0,
-                verb,
+                verb: Some(verb),
                 when,
                 approvals: 0,
                 created_at: 0,
@@ -370,14 +417,161 @@ pub(crate) fn pass(conn: &Connection, now: i64) -> Result<Found> {
             && c.no == 0
             && c.yes >= MIN_APPROVALS
             && !blocked.contains(&verb)
-            && !decided_before(conn, verb, cond, &value)?
+            && !decided_before(
+                conn,
+                &(
+                    verb.name().to_string(),
+                    cond.to_string(),
+                    value.clone(),
+                    String::new(),
+                ),
+            )?
         {
-            found
-                .proposals
-                .insert((verb.name().to_string(), cond.to_string(), value), c.yes);
+            found.proposals.insert(
+                (
+                    verb.name().to_string(),
+                    cond.to_string(),
+                    value,
+                    String::new(),
+                ),
+                c.yes,
+            );
         }
     }
+    choices(conn, &mut policy, now, &mut found)?;
     Ok(found)
+}
+
+/// The `hide` proposals of card R5-02: one pass over the newest
+/// [`MAX_ACTIONS`] actions of the person with a verb of [`CHOICES`], `applied`
+/// (a choice) or `undone` (a refusal). The candidate of a choice is a `hide`
+/// rule with the `sender` of the origin message of its item and the form of
+/// the item. A choice counts only when the rule, added to the active policy,
+/// changes the attention of the item from shown to hidden.
+fn choices(conn: &Connection, policy: &mut Policy, now: i64, found: &mut Found) -> Result<()> {
+    let mut st = conn.prepare(
+        "SELECT a.id, a.verb, a.state FROM changeset_action a
+         JOIN changeset c ON c.id = a.changeset_id
+         WHERE a.verb IN ('skip', 'mute', 'dismiss') AND c.author_kind = 'person'
+           AND a.state IN ('applied', 'undone')
+         ORDER BY a.id DESC LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String, String)> = st
+        .query_map([MAX_ACTIONS as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    // Keyed by the index of the form in CHOICES.
+    let mut counts: BTreeMap<(usize, String), Count> = BTreeMap::new();
+    let mut blocked = BTreeSet::new();
+    for (id, verb, state) in rows {
+        let Some(f) = CHOICES.iter().position(|(v, _)| *v == verb) else {
+            continue;
+        };
+        let form = CHOICES[f].1;
+        let chosen = state == "applied";
+        let Some((facts, at)) = chosen_item(conn, id, form, now)? else {
+            if !chosen {
+                // A refusal that cannot be read again blocks each rule of its form.
+                blocked.insert(f);
+            }
+            continue;
+        };
+        let msg = facts.message();
+        let item = &facts.items[at];
+        // A conversation that the person started has the person's own
+        // message as its origin: a rule from it would hide each such
+        // conversation, not the mail of one correspondent.
+        if facts.sender_kind == SenderKind::SelfOwner {
+            continue;
+        }
+        let hostile = kind(&facts) == SenderKind::Hostile;
+        let Ok(sender) = crate::check_sender(facts.sender.clone()) else {
+            if !chosen {
+                blocked.insert(f);
+            }
+            continue;
+        };
+        if sender.starts_with('@') {
+            continue;
+        }
+        let base = policy.attention(item, &msg, now);
+        policy.rules.push(Rule {
+            id: u32::MAX,
+            name: String::new(),
+            effect: Effect::Hide,
+            verbs: vec![],
+            when: When {
+                sender: Some(sender.clone()),
+                form: Some(form),
+                ..When::default()
+            },
+            by: By::Proposal,
+            added: String::new(),
+            job: None,
+            line: 0,
+        });
+        let with = policy.attention(item, &msg, now);
+        policy.rules.pop();
+        let changed = base == Attention::Shown && with == Attention::Hidden { rule: u32::MAX };
+        let c = counts.entry((f, sender)).or_default();
+        c.sourced |= chosen && !hostile;
+        match (changed, chosen) {
+            (true, true) if !hostile => c.yes += 1,
+            (true, false) => c.no += 1,
+            _ => {}
+        }
+    }
+    for ((f, sender), c) in counts {
+        let key = (
+            "hide".to_string(),
+            "sender".to_string(),
+            sender,
+            CHOICES[f].1.name().to_string(),
+        );
+        if c.sourced
+            && c.no == 0
+            && c.yes >= MIN_APPROVALS
+            && !blocked.contains(&f)
+            && !decided_before(conn, &key)?
+        {
+            found.proposals.insert(key, c.yes);
+        }
+    }
+    Ok(())
+}
+
+/// The facts of the origin message of the one item of action `id`, with the
+/// index of the item in them, or `None` when the action cannot be read
+/// again: no single item of the form `form`, no single origin message, no
+/// `header` row (a cleanup of a gone message deletes it, spec 1 section
+/// 5.5) or no sender address.
+fn chosen_item(conn: &Connection, id: i64, form: Form, now: i64) -> Result<Option<(Facts, usize)>> {
+    let items: Vec<i64> = conn
+        .prepare_cached("SELECT item_id FROM action_item WHERE action_id = ?1")?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let [item] = items[..] else {
+        return Ok(None);
+    };
+    let origins: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT s.message_id FROM item_source s JOIN header h ON h.message_id = s.message_id
+             WHERE s.item_id = ?1 AND s.role = 'origin'",
+        )?
+        .query_map([item], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let [origin] = origins[..] else {
+        return Ok(None);
+    };
+    let Some(facts) = facts(conn, origin, now)? else {
+        return Ok(None);
+    };
+    let at = facts.item_ids.iter().position(|&i| i == item);
+    Ok(match at {
+        Some(at) if facts.items[at].form == form && !facts.sender.is_empty() => Some((facts, at)),
+        _ => None,
+    })
 }
 
 /// True when `policy` approves the action.
@@ -407,12 +601,12 @@ fn read(conn: &Connection, id: i64, now: i64) -> Result<Option<Vec<Facts>>> {
     Ok(Some(out))
 }
 
-fn decided_before(tx: &Connection, verb: Verb, cond: &str, value: &str) -> Result<bool> {
+fn decided_before(tx: &Connection, (verb, cond, value, form): &Key) -> Result<bool> {
     Ok(tx
         .query_row(
             "SELECT 1 FROM rule_proposal WHERE verb = ?1 AND cond = ?2 AND value = ?3
-             AND state <> 'open'",
-            params![verb.name(), cond, value],
+             AND form = ?4 AND state <> 'open'",
+            params![verb, cond, value, form],
             |_| Ok(()),
         )
         .optional()?
@@ -452,7 +646,7 @@ fn when(cond: &str, value: &str) -> Option<When> {
 }
 
 /// The name of the rule: one line in the words of the brief.
-fn name(verb: Verb, when: &When) -> String {
+fn name(verb: Option<Verb>, when: &When) -> String {
     let who = match (&when.sender, when.sender_kind) {
         (Some(s), _) => s.clone(),
         (None, Some(SenderKind::SelfOwner)) => "you".into(),
@@ -460,6 +654,13 @@ fn name(verb: Verb, when: &When) -> String {
         (None, Some(SenderKind::Service)) => "services".into(),
         (None, Some(SenderKind::Stranger)) => "strangers".into(),
         _ => "this sender".into(),
+    };
+    let Some(verb) = verb else {
+        return match when.form {
+            Some(Form::Conversation) => format!("Hide conversations with {who}"),
+            Some(Form::Signal) => format!("Hide signals from {who}"),
+            _ => format!("Hide feed items from {who}"),
+        };
     };
     match verb {
         Verb::Read => format!("Mark mail from {who} as read"),
@@ -546,6 +747,7 @@ mod tests {
             "archive".to_string(),
             "sender".to_string(),
             "x@y.example".to_string(),
+            String::new(),
         );
         assert_eq!(
             found.proposals.get(&key),
@@ -569,13 +771,22 @@ mod tests {
             ..When::default()
         };
         assert_eq!(
-            name(Verb::Archive, &w),
+            name(Some(Verb::Archive), &w),
             "Archive mail from deals@acme.example"
         );
         let w = When {
             sender_kind: Some(SenderKind::Service),
             ..When::default()
         };
-        assert_eq!(name(Verb::Read, &w), "Mark mail from services as read");
+        assert_eq!(
+            name(Some(Verb::Read), &w),
+            "Mark mail from services as read"
+        );
+        let w = When {
+            sender: Some("news@shop.example".into()),
+            form: Some(Form::Feed),
+            ..When::default()
+        };
+        assert_eq!(name(None, &w), "Hide feed items from news@shop.example");
     }
 }

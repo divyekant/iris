@@ -129,12 +129,17 @@ pub fn change(store: &Store, seen: Option<i64>, change: Change, now: i64) -> Res
         let added = match &change {
             Change::Accept(id) => match crate::propose::current(tx, *id, now)? {
                 Some(p) => {
-                    let verb = p.verb.name();
                     let n = p.approvals;
-                    Some((
-                        p.rule(crate::next_rule_id(tx)?, &today),
-                        format!("Iris proposed this rule after you approved {n} of {n} {verb} actions."),
-                    ))
+                    let why = match p.verb {
+                        Some(verb) => format!(
+                            "Iris proposed this rule after you approved {n} of {n} {} actions.",
+                            verb.name()
+                        ),
+                        None => format!(
+                            "Iris proposed this rule after you hid {n} items like this, and never undid one."
+                        ),
+                    };
+                    Some((p.rule(crate::next_rule_id(tx)?, &today), why))
                 }
                 None => return Ok(Edited::NoRule),
             },
@@ -265,26 +270,40 @@ pub fn edit_text(text: &str, change: Change) -> std::result::Result<Option<Strin
 }
 
 /// Adds `rule` at the end of the text, as one `[[rule]]` table with the
-/// comment `why` above it. Keeps all other text. It writes the conditions
-/// that a proposal or a grant can have: `sender`, `sender_kind` and
-/// `author`.
+/// comment `why` above it. Keeps all other text. It writes each condition
+/// of `when`, so the file reads back the same rule.
 fn add_rule(text: &str, rule: &crate::Rule, why: &str) -> std::result::Result<String, Error> {
     let mut doc = parse_doc(text)?;
     let mut t = toml_edit::Table::new();
     t.insert("id", toml_edit::value(i64::from(rule.id)));
     t.insert("name", toml_edit::value(rule.name.as_str()));
     t.insert("effect", toml_edit::value(rule.effect.name()));
-    let verbs: toml_edit::Array = rule.verbs.iter().map(|v| v.name()).collect();
-    t.insert("verbs", toml_edit::value(verbs));
+    // A hide, bundle or notify rule has no `verbs` key (spec 2, section 6.2).
+    if !rule.verbs.is_empty() {
+        let verbs: toml_edit::Array = rule.verbs.iter().map(|v| v.name()).collect();
+        t.insert("verbs", toml_edit::value(verbs));
+    }
+    let w = &rule.when;
     let mut when = toml_edit::InlineTable::new();
-    if let Some(s) = &rule.when.sender {
-        when.insert("sender", s.as_str().into());
+    let texts = [
+        ("form", w.form.map(|f| f.name().to_string())),
+        ("sender", w.sender.clone()),
+        ("sender_kind", w.sender_kind.map(|k| k.name().to_string())),
+        ("label", w.label.clone()),
+        ("record_type", w.record_type.map(|r| r.name().to_string())),
+        (
+            "commitment_kind",
+            w.commitment_kind.map(|c| c.name().to_string()),
+        ),
+        ("author", w.author.map(|a| a.name().to_string())),
+    ];
+    for (key, value) in texts {
+        if let Some(v) = value {
+            when.insert(key, v.as_str().into());
+        }
     }
-    if let Some(k) = rule.when.sender_kind {
-        when.insert("sender_kind", k.name().into());
-    }
-    if let Some(a) = rule.when.author {
-        when.insert("author", a.name().into());
+    if let Some(d) = w.older_than_days {
+        when.insert("older_than_days", i64::from(d).into());
     }
     t.insert("when", toml_edit::value(when));
     t.insert("by", toml_edit::value(rule.by.name()));
@@ -372,6 +391,72 @@ mod tests {
             shared_comments("\n# all rules\n \n# about rule 1\n"),
             "\n# all rules\n \n"
         );
+    }
+
+    /// The file reads back each condition that `add_rule` gets.
+    #[test]
+    fn an_added_rule_reads_back_the_same() {
+        use crate::{Author, By, CommitmentKind, Effect, Form, RecordType, Rule, SenderKind, Verb};
+        let one = |f: fn(&mut When)| {
+            let mut w = When::default();
+            f(&mut w);
+            w
+        };
+        let cases = [
+            (
+                Effect::Allow,
+                one(|w| w.sender = Some("a@b.example".into())),
+            ),
+            (
+                Effect::Allow,
+                one(|w| w.sender_kind = Some(SenderKind::Service)),
+            ),
+            (Effect::Allow, one(|w| w.label = Some("Finance".into()))),
+            (Effect::Allow, one(|w| w.author = Some(Author::Agent))),
+            (Effect::Allow, one(|w| w.older_than_days = Some(30))),
+            (
+                Effect::Allow,
+                one(|w| {
+                    w.form = Some(Form::Record);
+                    w.record_type = Some(RecordType::Receipt);
+                }),
+            ),
+            (
+                Effect::Allow,
+                one(|w| {
+                    w.form = Some(Form::Commitment);
+                    w.commitment_kind = Some(CommitmentKind::Payment);
+                }),
+            ),
+            (
+                Effect::Hide,
+                one(|w| {
+                    w.sender = Some("news@shop.example".into());
+                    w.form = Some(Form::Feed);
+                }),
+            ),
+        ];
+        for (effect, when) in cases {
+            let rule = Rule {
+                id: 1,
+                name: "r".into(),
+                effect,
+                verbs: if effect == Effect::Allow {
+                    vec![Verb::Archive]
+                } else {
+                    vec![]
+                },
+                when: when.clone(),
+                by: By::Proposal,
+                added: "2027-01-15".into(),
+                job: None,
+                line: 0,
+            };
+            let text = add_rule("version = 0\nmode = \"observe\"\n", &rule, "why").unwrap();
+            let back = crate::parse(&text).unwrap_or_else(|e| panic!("{e:?}: {text}"));
+            assert_eq!(back.rules[0].when, when, "{text}");
+            assert_eq!(back.rules[0].verbs, rule.verbs, "{text}");
+        }
     }
 
     #[test]

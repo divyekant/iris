@@ -327,6 +327,7 @@ async fn a_proposal_goes_into_the_file_only_on_accept() {
     let v = d.get().await;
     let p = &v["proposals"][0];
     assert_eq!((&p["id"], &p["approvals"]), (&json!(1), &json!(12)), "{v}");
+    assert_eq!(p["kind"], json!("approvals"), "{v}");
     assert_eq!(p["rule"]["name"], "Archive mail from deals@acme.example");
     assert_eq!(p["rule"]["by"], "proposal");
     assert_eq!(p["rule"]["when"], json!({ "sender": "deals@acme.example" }));
