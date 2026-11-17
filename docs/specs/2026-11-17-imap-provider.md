@@ -122,23 +122,37 @@ The cursor is text with one line for each folder:
 `<UIDVALIDITY> <UIDNEXT> <HIGHESTMODSEQ> <count> <folder>`. `profile` makes
 it from an `EXAMINE` of each folder.
 
-`changes(from, page)` gives one window of at most 2,000 UIDs of one
-folder for each page, from the highest UID down. So a page holds at most
-2,000 `Added` records and the `Deleted` records of the same UID range. The
-page token holds:
+`changes(from, page)` gives one window of one folder for each page, from
+the newest message down. A window is a range of sequence numbers, not of
+UIDs: sequence numbers are dense (1 to `EXISTS`), so the page count follows
+the message count, and a folder with large or sparse UIDs needs no empty
+pages. A window is `FETCH <low>:<high> (UID FLAGS ...)`:
 
-- the next UID window (its highest UID),
-- the cursor line of the folder of the page, from the `EXAMINE` before its
-  first window,
-- the count of UIDs below the `UIDNEXT` of that `EXAMINE` and at or above
-  the `UIDNEXT` of `from`, from the windows so far (for `CONDSTORE` only),
-- the cursor lines of the folders before it.
+- for a folder that is not in `from`: 2,000 sequence numbers, so at most
+  2,000 `Added` records;
+- for a known folder: 20,000 sequence numbers with `(CHANGEDSINCE
+  <modseq>)`, so at most 20,000 `Added` records, and only the changed
+  messages come back.
 
-The cursor line of a folder joins the lines of the folders before it only
-after its last window. The first window of a folder reaches UID
-4294967295, so that it gets the `VANISHED` UIDs above the last message.
-Each window is `UID FETCH <low>:<high> (...) (CHANGEDSINCE <modseq>
-[VANISHED])`, or a plain `UID FETCH` for a folder that is not in `from`.
+A removal during the sequence moves the messages above it down by one
+sequence number. The windows go from the top down, so a message can come
+two times (the same `Added` two times gives the same mirror), but no
+message is skipped. Mail that comes after the `EXAMINE` has a higher
+sequence number and a higher mod-sequence: the next `changes` gives it.
+Each page clamps its window to the `EXISTS` of now.
+
+The removals of a known folder come after its last window, at most
+20,000 for each folder, else `HistoryExpired`:
+
+- `QRESYNC`: `UID FETCH 1:4294967295 (UID) (CHANGEDSINCE <modseq>
+  VANISHED)`. The provider reads only the `VANISHED` ranges.
+- `CONDSTORE` only: `UID SEARCH UID <UIDNEXT of from>:<UIDNEXT now - 1>`
+  gives the new UIDs that are here now (see the table).
+
+The page token holds the next window (its highest sequence number), the
+cursor line of the folder of the page (from the `EXAMINE` before its first
+window), and the cursor lines of the folders before it. The cursor line of
+a folder joins them only after its last page.
 
 For each folder of the list now:
 
@@ -147,8 +161,8 @@ For each folder of the list now:
 | The folder is not in `from` | `Added` for each message of the folder |
 | A new `UIDVALIDITY` | `HistoryExpired` |
 | `HIGHESTMODSEQ`, `UIDNEXT` and the count are the same | nothing |
-| `QRESYNC` | `changes(since)`: `Added` (the full label set) for each changed message, `Deleted` for each `VANISHED` UID |
-| `CONDSTORE` only | `changes(since)` as above. A UID of the window, from the `UIDNEXT` of `from` up to the `UIDNEXT` of now, that is not in the folder now came and went after `from` (the first sync can list it): `Deleted`. At the last window: removed = count in `from` - (count now - the counted new UIDs). If removed is not 0, `HistoryExpired`. A removal after the `EXAMINE` makes it `HistoryExpired` too, which is safe |
+| `QRESYNC` | Windows with `CHANGEDSINCE`: `Added` (the full label set) for each changed message. Then `Deleted` for each `VANISHED` UID |
+| `CONDSTORE` only | Windows as above. Then the search of the new UIDs: removed = count in `from` - (count now - the new UIDs here now). If removed is not 0, `HistoryExpired`. A removal after the `EXAMINE` makes it `HistoryExpired` too, which is safe. A UID from the `UIDNEXT` of `from` up to the `UIDNEXT` of now that is not here now came and went after `from` (the first sync can list it): `Deleted` |
 
 A folder in `from` that is not in the list now gives `HistoryExpired`. The
 last page carries the cursor of now, made from the `EXAMINE` results of
@@ -169,12 +183,14 @@ mirror does not have.
   `iris account add-imap` (section 8), not the IMAP user name. The sync
   and the apply compare it with the address of the account row. Counts 0
   (the trait allows 0), and the cursor of now.
-- `messages(label, page)`: the page token is `<UID>` and the folder name
-  (section 2). Each page is up to 500 messages of one folder, from the
-  highest UID down: newest first in each folder, `INBOX` first. The
+- `messages(label, page)`: the page token is a bound and the folder name
+  (section 2). Each page is one window of 2,000 sequence numbers of one
+  folder, from the top down: newest first in each folder, `INBOX` first. The
   provider spec (`messages`) allows this order for a folder provider.
   With a folder label, `INBOX`, `SPAM` or `TRASH`, only that folder. With `UNREAD`, `STARRED` or a keyword
-  label, `UID SEARCH` (`UNSEEN`, `FLAGGED`, `KEYWORD <k>`) in each folder.
+  label, `UID SEARCH` (`UNSEEN`, `FLAGGED`, `KEYWORD <k>`) in each folder,
+  then a `UID FETCH` of at most 500 of the found UIDs, from the highest
+  down. The bound of the token is then a UID.
 - `minimal` and `raw`: `EXAMINE` of the folder of the ID, then
   a `UID FETCH`. A new `UIDVALIDITY`, or no message with the UID, is
   `NotFound`. A refused `EXAMINE` of a folder that is not in the LIST now
@@ -203,8 +219,11 @@ different value before any `STORE` was sent is `NotFound`, and nothing is
 written. A different value after a `STORE` of an earlier folder is
 `Transport` (unknown), and nothing more is written. An error after the first `STORE` was sent is
 `Transport` (unknown), as the provider spec (section 6) says for a
-`modify` in parts. A `NO` to the first `STORE` with nothing sent before is
-`Api` 400.
+`modify` in parts. A `NO` or `BAD` to a `STORE` is `Transport` too: a
+server can change some of the UIDs of one `STORE` and then refuse the
+rest, so a refusal does not prove that no flag changed. The apply reads
+the labels of each target (spec 2 section 7.2). Only a refusal before any
+`STORE` was sent (an unknown folder, a new `UIDVALIDITY`) is definite.
 
 `UID STORE` without `.SILENT` gives an untagged `FETCH` with the flags of
 each message that it changed or matched. An `OK` counts as success only if
@@ -264,6 +283,8 @@ times after an unknown result (spec 2 section 7.2).
 | A lost connection after the first `STORE` | `Transport` | `modify_unknown` |
 | A wrong password | `Unauthorized` | `wrong_password` |
 | A new folder with more than 2,000 messages | pages of at most 2,000 records | `changes_pages` |
+| A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
+| A `NO` to a `STORE` | `Transport` | `modify_refused` |
 | A read of a message in a deleted folder | `NotFound` | `folder_gone` |
 | A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_unconfirmed` |
 | `add-imap` of an address that another mailbox has | refused, nothing written | `add_imap_other_mailbox` |
@@ -295,10 +316,12 @@ times after an unknown result (spec 2 section 7.2).
 
 - Success: the server answers `OK`, and each target UID came back in a
   `FETCH` with the asked flags. The apply marks the action applied.
-- Definite rejection: `NO` or `BAD` to the first `STORE`, before any other
-  write. `Api` 400. The apply marks the action failed.
-- Unknown: a lost connection or a time-out after a `STORE` was sent, or a
-  `NO` after another `STORE` of the same call. `Transport`. The apply reads
+- Definite rejection: a check before any `STORE` was sent fails (a
+  label that moves mail, a new `UIDVALIDITY`). `Api` 400 or `NotFound`.
+  The apply marks the action failed.
+- Unknown: a lost connection or a time-out after a `STORE` was sent, a
+  `NO` or `BAD` to any `STORE`, or a target UID that did not come back
+  with the asked flags. `Transport`. The apply reads
   the labels and never calls again (spec 2 section 7.2).
 - Retry: none. The provider never sends a `STORE` again.
 

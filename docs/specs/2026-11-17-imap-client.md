@@ -19,7 +19,8 @@ does not depend on it, so it is built first.
    folder, the changes since the last sync, a full list for a compare, and
    a streamed raw fetch.
 2. The client uses `CONDSTORE` and `QRESYNC` (RFC 7162) when the server has
-   them, and a full compare when it does not.
+   them. The part B spec (`docs/specs/2026-11-17-imap-provider.md`)
+   changes the plan for a server without them: see section 3.
 3. A test IMAP server (`crates/iris-fakeimap`) runs in local CI with no
    network. A property test shows that a mirror kept with the client agrees
    with the server after random changes, in each of the three modes.
@@ -108,6 +109,12 @@ All reads use UIDs, never message sequence numbers.
   (RFC 3501 section 6.4.8). The client drops such a message.
 
 ### 3. Sync of a folder (for part B)
+
+The part B spec (`docs/specs/2026-11-17-imap-provider.md`, section 5)
+replaces this section. The changes: a server without `CONDSTORE` cannot
+sync (limit issue #629), and a full compare is a full resync of the
+mirror (`HistoryExpired`), because the provider cursor cannot hold the
+UID set of a folder. The text below is the first plan.
 
 The client gives the reads. Part B does the sync with them. The mode is
 chosen for each folder at each sync, from the `EXAMINE` result, not from
