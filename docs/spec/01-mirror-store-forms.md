@@ -1098,7 +1098,9 @@ is in no section. The client uses the counts of the engine and does not remove
 duplicates between sections.
 
 The web client opens the brief with Due soon, after the live login codes
-(card R3-08). Due soon holds each item of You owe that is due in 2 days or
+(card R3-08). Only the question of an agent (card R5-05) comes between the
+codes and Due soon: the section "A question for you" with the job whose
+question is the newest (`updated` of the job) and a field for the answer. Due soon holds each item of You owe that is due in 2 days or
 less, or that is late, in the local day of the viewer. The engine does not
 know that day (it has no time zone of the owner), so the client makes this
 split from the You owe items, and the API keeps one You owe section. The

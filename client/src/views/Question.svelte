@@ -1,18 +1,18 @@
 <!--
   The question of an agent in the brief (card R5-05): the goal of the job, the
   question, and one field for your answer. The answer starts a new session of
-  the job. The question is text of the agent: it shows as text only.
+  the job: the brief then says so and loads the questions again. The question
+  is text of the agent: it shows as text only.
 -->
 <script lang="ts">
   import { own, type Job } from "../api";
   import { answerJob } from "../jobs";
   import { href } from "../route";
 
-  let { job, onchanged }: { job: Job; onchanged: () => void } = $props();
+  let { job, onanswered, onchanged }: { job: Job; onanswered: (job: Job) => void; onchanged: () => void } = $props();
 
   let text = $state("");
   let busy = $state(false);
-  let sent = $state(false);
   let error = $state("");
   let empty = $derived(!text.trim());
 
@@ -23,7 +23,7 @@
     error = "";
     try {
       await answerJob(job.id, text);
-      sent = true;
+      onanswered(job);
     } catch (e) {
       const status = (e as { status?: number }).status;
       if (status === 409 || status === 404) {
@@ -47,21 +47,14 @@
 <article class="question" aria-label="An agent asks you">
   <p class="for"><span class="mark" aria-hidden="true"></span>An agent asks you, for the job <a href={href.job(job.id)}>{job.goal}</a></p>
   <p class="text">{job.question}</p>
-  {#if sent}
-    <p class="sent" role="status">
-      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-      Sent. The agent continues with your answer.
-    </p>
-  {:else}
-    <form onsubmit={send}>
-      <label class="hidden" for={`answer-${job.id}`}>Your answer</label>
-      <textarea id={`answer-${job.id}`} bind:value={text} onkeydown={keys} rows="2" maxlength="10000" placeholder="Your answer" disabled={busy}></textarea>
-      <div class="row">
-        <button type="submit" disabled={empty || busy}>{busy ? "Sending" : "Answer"}</button>
-        <span class="hint">The agent reads it in a new session.</span>
-      </div>
-    </form>
-  {/if}
+  <form onsubmit={send}>
+    <label class="hidden" for={`answer-${job.id}`}>Your answer</label>
+    <textarea id={`answer-${job.id}`} bind:value={text} onkeydown={keys} rows="2" maxlength="10000" placeholder="Your answer" disabled={busy}></textarea>
+    <div class="row">
+      <button type="submit" disabled={empty || busy}>{busy ? "Sending" : "Answer"}</button>
+      <span class="hint">The agent reads it in a new session.</span>
+    </div>
+  </form>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </article>
 
@@ -155,13 +148,6 @@
   .hint {
     color: var(--color-text-faint);
     font-size: var(--font-size--1);
-  }
-  .sent {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-top: var(--space-3);
-    color: var(--color-text-muted);
   }
   .error {
     margin-top: var(--space-3);

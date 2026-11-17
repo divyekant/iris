@@ -118,6 +118,9 @@
   }
   // svelte-ignore state_referenced_locally
   if (firstQuestions === undefined) reloadQuestions();
+  // After an answer: one quiet line names the job, and the next question (or none) shows at once.
+  let sent = $state<Job | null>(null);
+  const answeredJob = (job: Job) => ((sent = job), (questions = questions.filter((q) => q.id !== job.id)), reloadQuestions());
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
@@ -229,10 +232,17 @@
 {/if}
 
 <!-- The question of an agent (R5-05): one card, the newest question, answered in place. -->
-{#if questions.length}
+{#if questions.length || sent}
   <section aria-labelledby="questions">
     <h2 id="questions"><span>{questions.length === 1 ? "A question for you" : "Questions for you"}</span> <span class="count">{questions.length}</span></h2>
-    {#key questions[0].id}<Question job={questions[0]} onchanged={reloadQuestions} />{/key}
+    {#if sent}
+      <p class="sent" role="status">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        Sent. The agent of “{sent.goal}” continues with your answer.
+      </p>
+    {/if}
+    <!-- A new question of the same job is a new card: the key has the time of the question. -->
+    {#if questions.length}{#key `${questions[0].id} ${questions[0].updated}`}<Question job={questions[0]} onanswered={answeredJob} onchanged={reloadQuestions} />{/key}{/if}
     {#if questions.length > 1}<a class="all touch" href="#/jobs">All {questions.length} questions</a>{/if}
   </section>
 {/if}
@@ -421,6 +431,14 @@
   }
   .all:hover {
     color: var(--color-text);
+  }
+  .sent {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-3);
+    color: var(--color-text-muted);
+    overflow-wrap: anywhere;
   }
   .note {
     margin: var(--space-2) 0 0;

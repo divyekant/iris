@@ -137,10 +137,11 @@ export function steps(d: JobDetail): Step[] {
   return [...out, ...changes.slice(c)];
 }
 
-/** The jobs whose agent asks you a question now (card R5-05), newest first: at most 20. */
+/** The jobs whose agent asks you a question now (card R5-05), the newest question first (`updated` of the job, not its ID). */
 export async function loadQuestions(): Promise<Job[]> {
-  const page = await get<JobPage>("jobs?state=needs_you&limit=20");
-  return page.jobs.filter((j) => j.state === "needs_you" && j.question);
+  // shortcut: one page of 200 jobs that ask you; page with `next` if one person has more open questions.
+  const page = await get<JobPage>("jobs?state=needs_you&limit=200");
+  return page.jobs.filter((j) => j.state === "needs_you" && j.question).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
 }
 
 /** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */
