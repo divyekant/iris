@@ -62,8 +62,8 @@ pub struct Sessions {
     /// lock is held. A stop waits here for at most one gate.
     stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
-    /// The wakes (job, time of the wake) whose session this engine tried to
-    /// start: one try for each wake and engine. After a failed start, the
+    /// The wakes (job, last session before the wake) whose session this
+    /// engine tried to start: one try for each wake and engine. After a failed start, the
     /// person runs `iris job run`.
     tried: Mutex<HashSet<(i64, i64)>>,
     /// The done jobs whose workspace the build thread builds again. A
@@ -696,7 +696,7 @@ impl Sessions {
         let Ok(woken) = iris_job::woken(&self.store) else {
             return;
         };
-        for (job, at, agent) in woken {
+        for (job, last, agent) in woken {
             if self.live_of(job).is_some() || self.state().launching.contains(&job) {
                 continue;
             }
@@ -704,7 +704,7 @@ impl Sessions {
                 .tried
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert((job, at));
+                .insert((job, last));
             if !first {
                 continue;
             }

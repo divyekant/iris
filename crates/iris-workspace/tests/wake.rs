@@ -122,11 +122,13 @@ fn the_end_of_the_wait_wakes_the_job_once() {
     assert!(wake_due(&f.store, NOW + 4 * DAY).unwrap().is_empty());
     // The job waits for its session, with the agent of the last session.
     let w = woken(&f.store).unwrap();
-    assert_eq!(w, vec![(f.job, NOW + 3 * DAY, "claude-code".to_string())]);
+    assert_eq!(w, vec![(f.job, 1, "claude-code".to_string())]);
     // The session of the wait (row 1) ended at the wait; after its reap, a
     // new session registers.
     iris_job::reap(&f.store, 1, NOW + 2).unwrap();
-    register(&f.store, f.job, "claude-code", NOW + 3 * DAY).unwrap();
+    // A new session leaves the list, also with a clock that went back
+    // before the wake.
+    register(&f.store, f.job, "claude-code", NOW).unwrap();
     assert!(woken(&f.store).unwrap().is_empty());
 }
 

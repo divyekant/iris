@@ -276,32 +276,23 @@ pub fn wake_in(c: &Connection, job: i64, by: By, why: Option<&str>, now_ms: i64)
 }
 
 /// The jobs that wait for a new session after a wake by the engine: the
-/// job is `working`, its newest event is the wake, and no session of the
-/// job registered at or after the wake. Gives each job, the time of the
-/// wake and the agent of the last session of the job. A job with no
-/// session has no agent and is not in the list.
+/// job is `working`, its newest event is a wake by the engine, and the last
+/// session of the job ended with `job_state` (the move to `waiting`). A
+/// session that starts after the wake becomes the last session, so the job
+/// leaves the list. The order is the order of the rows, not of the clock.
+/// Gives each job, its last session and the agent of that session.
 pub fn woken(store: &Store) -> Result<Vec<(i64, i64, String)>> {
     Ok(store.read(|c| {
         let mut st = c.prepare_cached(
-            "SELECT j.id, j.updated_at,
-                    (SELECT agent FROM job_session WHERE job_id = j.id ORDER BY id DESC LIMIT 1)
-             FROM job j
-             WHERE j.state = 'working'
+            "SELECT j.id, s.id, s.agent FROM job j
+             JOIN job_session s
+               ON s.id = (SELECT max(id) FROM job_session WHERE job_id = j.id)
+             WHERE j.state = 'working' AND s.end_reason = 'job_state'
                AND (SELECT by FROM job_event WHERE job_id = j.id
-                    ORDER BY id DESC LIMIT 1) = 'engine'
-               AND NOT EXISTS (SELECT 1 FROM job_session
-                               WHERE job_id = j.id AND registered_at >= j.updated_at)",
+                    ORDER BY id DESC LIMIT 1) = 'engine'",
         )?;
-        let rows = st.query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            if let (job, at, Some(agent)) = row? {
-                out.push((job, at, agent));
-            }
-        }
-        Ok(out)
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     })?)
 }
 
