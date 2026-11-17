@@ -127,7 +127,12 @@ A token that Graph does not accept any more gives HTTP 410, or another 4xx
 with a code such as `syncStateNotFound` (A1). The client gives
 `Error::DeltaReset` for 410 and for each 4xx of a call with a stored link,
 except 401, 403 and 429. The caller then starts that folder again with no
-link: a full resync of one folder.
+link: a full resync of one folder. A round with no link lists only the
+messages that are in the folder now, so a message that went away while
+the link was expired is not in it. After such a full round, each mirror
+message of that folder that the round did not list counts as `Removed`,
+and gets the same read by ID as above: 404 means gone, a message means a
+move to its new folder.
 
 ### 4. Raw message
 
@@ -192,10 +197,21 @@ of a send does these steps:
    each later recovery turn searches again. Recovery never calls
    `send_mime` again. After 24 hours with no copy, the row fails with
    the unknown result kept, as for Gmail (issue #280).
-5. After the completion, `delete_draft` deletes the server draft with `If-Match` and the kept
+5. The transaction that sets the ledger row `applied` also sets the
+   draft row `cleanup = pending`, with the checked etag. Then
+   `delete_draft` deletes the server draft with `If-Match` and that
    etag, so that the person does not send it a second time from Outlook.
    A draft that changed after step 2 gives 412, and Iris leaves it in
    place. A failed delete leaves a draft and changes no sent mail.
+6. The cleanup ends in one transaction that clears `cleanup`: after 204
+   or 404 (the draft is gone), or after 412 (the draft changed; a notice
+   says "The draft stays in Outlook. Delete it there."). A crash or an
+   unknown result keeps `cleanup = pending`. Each recovery turn runs the
+   pending cleanups again, before each apply and each release. The
+   cleanup is not a changeset action: it changes no sent mail, and a
+   repeat of the conditional delete can only remove the draft in the
+   checked state, which is the target. After 3 turns with no definite
+   answer, Iris clears `cleanup` and shows the same notice.
 
 If Graph ignores `If-Match` on `DELETE` (A14), Iris does not delete the
 draft: it stays in Drafts, and the outbox tells the person.
