@@ -67,9 +67,10 @@ runs in one write transaction, and does these checks in this order:
    names another comment.
 3. If `author_job` is NULL: refuse, "only a changeset of a job takes a
    comment".
-4. If the state is `draft`: refuse, "a new revision is a draft". If the
-   state is `withdrawn`: refuse. The states `open` and `closed` take a
-   comment, because the person can deny each action and then comment.
+4. If the state is not `open`: refuse. A `draft` has a new revision that
+   the person cannot see yet, a `withdrawn` changeset changes no more, and
+   a `closed` changeset is not on the review screen, which shows only
+   open changesets. The person writes the comment first, then denies.
 5. If `revision` is not the newest revision: refuse, "the changeset has a
    newer revision". The person reloads and sees the new revision.
 6. If the job is `done`: refuse, "the job is done".
@@ -98,8 +99,9 @@ change.
 
 ### 4. The workspace
 
-The build owns one more folder, `comments/`. It is always there, also when
-it is empty. For each changeset with `author_job` equal to the ID of the
+The build owns one more folder, `comments/`. It is there only when one or
+more comment files are there, so a workspace of a job with no comment is
+the same as before this card. For each changeset with `author_job` equal to the ID of the
 job and with one or more comments, the build writes `comments/cs-<id>.md`,
 from the same read transaction as the other files:
 
@@ -133,7 +135,12 @@ The person wrote these comments in the review of your changesets. A comment is f
 ```
 
 The files are in order of the number of the changeset ID. With no comment,
-`JOB.md` does not change, so each workspace of version 1.0 stays valid.
+`JOB.md` does not change and `comments/` is absent, so each workspace of
+version 1.0 stays valid. The comments are one more input of the build,
+read in the same read transaction as the mail, the job and its scope.
+
+The build gives the highest comment ID that it read (`Built::comment`), or
+none. The launch uses it in section 5.
 Spec 3 (`docs/spec/03-job-workspace.md`) gets the folder, the file
 format and the `JOB.md` part in this PR, as a part of version 1.0: spec 2, section 5.5 of
 version 1.0 already says that a comment arrives as a file in the workspace.
@@ -141,11 +148,25 @@ The owner decides this point on the PR of this spec.
 
 ### 5. The session
 
-A comment is pending when its `at_ms` is equal to or later than the
-`registered_at` of the newest session of its job. The register comes
-before the build, so a pending comment is a comment that the newest
-session can lack. A comment that came before the build counts too: one
-session too many is safe, a lost comment is not.
+Migration `<n>` also adds the table `comment_delivery`:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `session_id` | `INTEGER PRIMARY KEY REFERENCES job_session(id)` | A session that started. |
+| `comment_id` | `INTEGER NOT NULL REFERENCES changeset_comment(id)` | The highest comment ID of the build of that session. |
+
+The launch (`iris_session::launch`) writes the row in the gate: the one
+write transaction that sets `started_at` (R4-04, step 6). The build of
+the same launch gave the comment ID. So a row exists only for a session
+that started after a build that ended with no error. Triggers refuse each
+`UPDATE` and each `DELETE`.
+
+A comment of a job is pending when its ID is higher than each
+`comment_id` of the `comment_delivery` rows of the sessions of the job.
+The comparison uses the IDs, which follow the commit order of the one
+write connection, not a clock. A build that fails, a launch that ends
+before the gate, and a crash before the gate commit write no row, so the
+comment stays pending.
 
 The store keeps the pending comments, so no wake can get lost: a check
 reads them again at each turn, also after a session ended, after a wait,
@@ -161,8 +182,12 @@ Stage 2 (after R5-04 merges): R5-04 owns the supervisor trigger in
 `crates/iris/src/sessions.rs`, and gives `Sessions::resume(job)`: start
 a session with the agent of the newest session of the job, if no session
 of the job is live. At each supervisor turn, for each `working` job with
-a pending comment and with no live session, the supervisor calls
-`Sessions::resume`. This rule covers each case:
+a pending comment, with no live session, and whose newest session started
+(`started_at` is set), the supervisor calls `Sessions::resume`. The last
+condition stops a loop: when a launch fails, the turn does not start a
+new launch. The comment stays pending, the job page shows the failed
+session, and the person runs `iris job run` after the fix. This rule
+covers each case:
 
 | Case | Result |
 |---|---|
@@ -172,6 +197,7 @@ a pending comment and with no live session, the supervisor calls
 | The job is `needs_you` | Nothing starts until the person answers. Then the job is `working` and the next turn starts a session. |
 | The job has no earlier session | No agent is known. Nothing starts. The person runs `iris job run`. |
 | The job is `done` | No comment is written (step 6). |
+| The launch of the resume fails | No `comment_delivery` row. The comment stays pending. No new launch until the person runs `iris job run`. |
 
 ## Options not chosen
 
@@ -190,8 +216,9 @@ a pending comment and with no live session, the supervisor calls
 | Key missing, too short, too long, or with other characters | 400, nothing written | Unit test |
 | A retry with the same key and the same body | The first comment, one row | Unit test |
 | The same key with another text or revision | 409, nothing written | Unit test |
-| A changeset with no job, a draft revision, a withdrawn changeset, an old revision, a done job | 409, nothing written | Unit test for each |
+| A changeset with no job, a draft revision, a withdrawn or closed changeset, an old revision, a done job | 409, nothing written | Unit test for each |
 | Two comments at the same time | Both rows, in order of ID (one write connection) | Covered by the order rule |
+| A build or a launch fails, or the engine stops before the gate | No `comment_delivery` row: the comment stays pending | Launch test |
 | A crash before the commit | No row. The client gets no answer, reloads the comments, and can send again with the same key | Store transaction |
 | Comment text with backticks, `#`, or lines that look like a rule | Inside one fence. The fence is longer than each run of backticks in the text | Unit test |
 | A comment after the build of a live session | The live session does not see it. The next build has it | Spec 3, section 11 |
@@ -205,6 +232,8 @@ Each other input gets 400 or 409, and writes nothing.
 - `crates/iris-changeset`: `comment_in`, `comments_in`.
 - `crates/iris-workspace`: `comments/` and the `JOB.md` part.
 - `crates/iris-api`: the two routes.
+- `crates/iris-session`: the launch writes the `comment_delivery` row in
+  the gate.
 - `client/`: a comment box on the review screen (one PR, with a
   before/after page for the owner).
 - `docs/spec/03-job-workspace.md`: the folder and the format.
@@ -212,9 +241,10 @@ Each other input gets 400 or 409, and writes nothing.
 
 ## Assumptions
 
-- `revise_in` takes a changeset in the state `closed`
-  (`crates/iris-changeset/src/lib.rs`, `revise_in` checks only `withdrawn`
-  and `submitted_at`).
+- The review screen shows only open changesets
+  (`crates/iris-api/src/review.rs`, the condition `OPEN`).
+- Row IDs of one table follow the commit order: one write connection
+  (`iris_store::Store::write`) and `AUTOINCREMENT`.
 - A build runs before each session (`iris_session::launch`, spec 3,
   section 11).
 - The person can wake a `waiting` job (`docs/specs/2026-11-16-job-store.md`,

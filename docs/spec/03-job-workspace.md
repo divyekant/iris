@@ -11,7 +11,8 @@
 A job workspace is a folder for one job. An agent of the job works in this
 folder. This specification gives the layout of the folder and the format of
 each file, so that another tool can build the same folder (section 10) from
-the same inputs: the mail, the job and its scope, as one read transaction
+the same inputs: the mail, the job, its scope and the review comments of
+its changesets, as one read transaction
 gives them.
 
 This specification is a part of version 1 of the open model. The schemas in
@@ -59,8 +60,9 @@ and a schema do not agree, the schema is correct and this text has a defect.
   never reads or changes them after that.
 - The build makes `.iris/` new and empty on each build. The session of the
   job (R4-04) uses it.
-- The folders `threads/`, `commitments/`, `records/`, `people/` and
-  `comments/` are always there, also when they are empty.
+- The folders `threads/`, `commitments/`, `records/` and `people/` are
+  always there, also when they are empty. The folder `comments/` is there
+  only when it holds one or more files (section 7a).
 - The build does not touch other paths in the folder.
 
 ## 4. The granted messages
