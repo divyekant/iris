@@ -72,9 +72,19 @@ export type Brief = {
   hidden?: number;
   /** The open changesets, and their actions that wait for a person (spec 2 section 5.5). */
   review?: { changesets: number; actions: number };
+  /** The senders that wait at the stranger gate: the first 20 (spec 1 section 6.7). */
+  gate?: GatePage;
+  /** The count of senders that you ignored at the gate. */
+  declined?: number;
 };
 
 export type Bundle = Section & { rule: number; name: string };
+
+/** One sender at the stranger gate (spec 1 section 6.7): its count of items, and the newest 3. */
+export type GateSender = { id: string; address: string; name: string | null; count: number; items: Item[] };
+export type GatePage = { count: number; senders: GateSender[]; next: string | null };
+/** The sender row after an answer at the gate. */
+export type GateAnswer = { id: string; address: string; name: string | null; kind: string; decided_by: string | null; declined: boolean };
 
 export type Account = {
   id: number;
@@ -108,6 +118,9 @@ export type Rule = {
 
 export type Mode = "observe" | "apply";
 
+/** A rule that Iris proposes. `rule` is the rule that an accept adds to the file; its `line` is 0. */
+export type Proposal = { id: number; approvals: number; created_at: number; rule: Rule };
+
 /** GET /api/policy: the active policy and the file on disk, compared to it. */
 export type Policy = {
   mode: Mode;
@@ -115,6 +128,8 @@ export type Policy = {
   /** One more than the highest rule ID that a rule had: the ID of a removed rule is never used again. */
   next_id: number;
   rules: Rule[];
+  /** The open rules that Iris proposes from your approvals (spec 2 section 6.6). */
+  proposals?: Proposal[];
   error: { line: number; message: string } | null;
   file:
     | { state: "same" | "missing" }
@@ -135,6 +150,10 @@ export type Summary = {
   subject: string | null;
   labels: string[];
 };
+
+/** POST /api/ask (card R5-09). `answer` has a mark `[n]` after each fact: the source with that `n`. */
+export type AskSource = { n: number; quote: string | null; message: Summary };
+export type AskAnswer = { answer: string | null; sources: AskSource[]; read: number; cost_micro_usd: number | null };
 
 export type Message = Summary & {
   /** The To and Cc headers as text, or null. */
@@ -206,6 +225,36 @@ export type HandledPage = { count: number; actions: HandledAction[]; next: strin
 
 /** A message summary, or only the ID of a message that is not in the mirror any more. */
 export type Target = (Summary & { gone?: false }) | { id: string; gone: true };
+
+/** A job of an agent (card R4-01, docs/spec/schema/job.schema.json). */
+export type JobState = "working" | "waiting" | "needs_you" | "done";
+export type JobWait = { thread?: string; until: string };
+export type JobEvent = {
+  at: string;
+  state: JobState;
+  by: "person" | "agent" | "engine";
+  wait?: JobWait;
+  question?: string;
+  answer?: string;
+  end?: "complete" | "cancel";
+  why?: string;
+};
+export type Job = {
+  id: string;
+  goal: string;
+  due?: string;
+  created: string;
+  updated: string;
+  state: JobState;
+  wait?: JobWait;
+  question?: string;
+  end?: "complete" | "cancel";
+};
+export type JobPage = { jobs: Job[]; next: string | null };
+/** A submitted changeset of a job: `actions` counts the actions of its newest revision in each state. */
+export type JobChangeset = { id: string; at: string; state: string; why: string | null; actions: Record<string, number> };
+/** One job (GET /api/jobs/{id}): the job with its events, its changesets, and the newest mail of each wait thread. */
+export type JobDetail = { job: Job & { events: JobEvent[] }; changesets: JobChangeset[]; threads: Record<string, Target> };
 
 export const SIGN_IN = "Open the sign-in address that iris serve printed.";
 export const SIGN_IN_FAILED = "This sign-in address was used or is not valid. Start iris serve again, then open the new address.";
@@ -409,4 +458,9 @@ export async function loadBrief(): Promise<Brief> {
   } while (next);
   // A signal that came in between the calls makes the pages longer than the first count.
   return { ...brief, signals: { ...brief.signals, count: Math.max(brief.signals.count, items.length), items } };
+}
+
+/** Your answer to a sender at the stranger gate: `accept`, `decline` (the screen says "Ignore") or `reopen` (undo). */
+export function answerSender(id: string, answer: "accept" | "decline" | "reopen"): Promise<GateAnswer> {
+  return post<GateAnswer>(`senders/${encodeURIComponent(id)}/${answer}`, {});
 }

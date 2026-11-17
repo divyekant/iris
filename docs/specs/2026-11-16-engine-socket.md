@@ -2,7 +2,7 @@
 
 - Date: 2026-11-16
 - Card: R2-15
-- Status: Draft
+- Status: Agreed
 
 ## Problem
 

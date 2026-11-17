@@ -1,14 +1,65 @@
 <!--
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
+  With `ondone`, an open commitment starts with a round tick box: a click marks
+  it done after the same Undo time as the item view, then calls `ondone`. The
+  view that passes `ondone` calls `flushHolds` when the person leaves it.
 -->
 <script lang="ts">
   import type { Item } from "../api";
   import { due, initials, money, origin, other, party, timeLeft, when } from "../format";
   import { href } from "../route";
+  import { post } from "../api";
+  import { hold, HOLD } from "../act";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
-  let { item, now = new Date(), twins = [], note = "" }: { item: Item; now?: Date; twins?: string[]; note?: string } = $props();
+  // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
+  let {
+    item,
+    now = new Date(),
+    twins = [],
+    note = "",
+    ondone,
+    delay = HOLD,
+  }: { item: Item; now?: Date; twins?: string[]; note?: string; ondone?: (id: string) => void; delay?: number } = $props();
+
+  let box = $derived(
+    !!ondone && item.form === "commitment" && (item.status === "open" || item.status === "deferred"),
+  );
+  type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "done" } | { at: "failed"; why: string; known: boolean };
+  let phase: Phase = $state({ at: "idle" });
+  let pending: ReturnType<typeof hold> | undefined;
+
+  function tick() {
+    phase = { at: "held" };
+    pending = hold(send, delay);
+  }
+
+  function undo() {
+    pending?.cancel();
+    pending = undefined;
+    phase = { at: "idle" };
+  }
+
+  async function send() {
+    pending = undefined;
+    phase = { at: "sending" };
+    try {
+      await post(`items/${encodeURIComponent(item.id)}/close`, {});
+      phase = { at: "done" };
+      ondone?.(item.id);
+    } catch (error) {
+      const status = (error as { status?: number }).status ?? 0;
+      // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.
+      const known = status >= 400 && status < 500;
+      phase = { at: "failed", why: (error as Error).message, known };
+      // A 409: the item changed after the brief loaded it. The brief loads again.
+      if (status === 409) ondone?.(item.id);
+    }
+  }
+
+  // The hold outlives this line: a brief refresh can remove the row while Undo
+  // time remains. The brief sends each hold when the person leaves it.
 
   let who = $derived(other(item));
   let date = $derived(item.form === "commitment" ? due(item, now) : null);
@@ -31,8 +82,38 @@
   let waits = $derived(item.form === "conversation" && (item.your_turn || (item.new ?? 0) > 0));
 </script>
 
+{#if phase.at !== "idle"}
+  <li class="line said" class:error={phase.at === "failed"} role="status">
+    {#if phase.at === "failed"}
+      <span class="why">
+        {phase.known ? `Iris did not record it: ${phase.why}` : "Iris does not know if it recorded the change. Reload the page to see."}
+      </span>
+      {#if phase.known}<button class="undo" type="button" onclick={() => (phase = { at: "idle" })}>Close</button>{/if}
+    {:else}
+      <svg class="tick" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+        <circle cx="10" cy="10" r="9" />
+        <path d="M6 10.5l2.75 2.75L14 8" />
+      </svg>
+      <span class="struck">{item.title}</span>
+      <span class="muted">Done. It leaves your brief.</span>
+      {#if phase.at === "held"}
+        <button class="undo" type="button" onclick={undo}>Undo</button>
+        <span class="bar" style:animation-duration={`${delay}ms`} aria-hidden="true"></span>
+      {/if}
+    {/if}
+  </li>
+{:else}
 <li class="line">
-  <span class="mark" aria-hidden="true">{initials(who)}</span>
+  {#if box}
+    <button class="box" type="button" aria-label={`Done: ${item.title}`} title="Done" onclick={tick}>
+      <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+        <circle cx="10" cy="10" r="9" />
+        <path d="M6 10.5l2.75 2.75L14 8" />
+      </svg>
+    </button>
+  {:else}
+    <span class="mark" aria-hidden="true">{initials(who)}</span>
+  {/if}
   <div class="body">
     <a class="title" href={href.item(item.id)}>{item.title}</a>
     <p class="detail">
@@ -53,6 +134,7 @@
     </svg>
   </a>
 </li>
+{/if}
 
 <style>
   .line {
@@ -175,10 +257,137 @@
   .source:focus-visible {
     box-shadow: 0 0 0 2px var(--color-primary);
   }
+  /* The tick box: a ring that shows the tick on hover or focus. */
+  .box {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: var(--space-8);
+    height: var(--space-8);
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-full);
+    background: transparent;
+    cursor: pointer;
+  }
+  .box circle {
+    fill: none;
+    /* A control edge needs a contrast of 3 or more (WCAG 1.4.11): the muted text color has it. */
+    stroke: var(--color-text-muted);
+    stroke-width: 1.5;
+    transition: stroke var(--transition-fast);
+  }
+  .box path {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: stroke var(--transition-fast);
+  }
+  .box:hover circle,
+  .box:focus-visible circle,
+  .box:hover path,
+  .box:focus-visible path {
+    stroke: var(--color-primary);
+  }
+  .box:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .said {
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    background: var(--color-background-elevated);
+    overflow: hidden;
+  }
+  .said:hover {
+    background: var(--color-background-elevated);
+  }
+  .said.error {
+    border-left: 4px solid var(--color-error);
+  }
+  .tick {
+    flex: none;
+    margin: 0 var(--space-2);
+    animation: pop var(--transition-normal);
+  }
+  .tick circle {
+    fill: var(--color-primary);
+  }
+  .tick path {
+    fill: none;
+    stroke: var(--color-on-primary);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .struck {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-muted);
+    text-decoration: line-through;
+  }
+  .muted {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
+  .why {
+    flex: 1;
+    color: var(--color-text);
+  }
+  .undo {
+    margin-left: auto;
+    padding: var(--space-1) var(--space-2);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .undo:focus-visible {
+    outline: 2px solid var(--color-primary);
+  }
+  /* The time left to undo: a primary line that shrinks. */
+  .bar {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: 100%;
+    background: var(--color-primary);
+    transform-origin: left;
+    animation-name: shrink;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+  @keyframes shrink {
+    to {
+      transform: scaleX(0);
+    }
+  }
+  @keyframes pop {
+    from {
+      transform: scale(0.6);
+      opacity: 0;
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
     .line,
-    .source {
+    .source,
+    .box circle,
+    .box path {
       transition: none;
+    }
+    .tick {
+      animation: none;
     }
   }
 </style>

@@ -42,7 +42,10 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | `/api/search?q=&limit=` | `{"messages": [summary]}`, newest first. `q` is the search text of specification 1, section 5.6. `limit` is 1 to 200, default 50. |
 | `/api/messages/{id}` | One message: the summary, and `to`, `cc`, `text` (the clean text, or `null`), `gone`, `hostile` (the hostile marks, for example `["dmarc"]`), `sender_kind` (the kind of the sender row of the `From` address: `person`, `service`, `stranger` or `hostile`; a sender with no row or no kind is a `stranger`; if two rows have the address in a different case, the first kind of `hostile`, `stranger`, `service`, `person` is used, and a row with no kind counts as `stranger`) and `items` (the IDs of the items that are not gone and that have the message as a source). |
 | `/api/messages/{id}/raw` | The raw source (RFC 5322) of the message, as a download (`message/rfc822`, `Content-Disposition: attachment`). |
+| `/api/jobs?state=&limit=&after=` | `{"jobs": [...], "next"}`: the jobs of the agents (card R4-09), newest first. `state` is `open` (the default: `working`, `waiting` and `needs_you`) or one state: `working`, `waiting`, `needs_you` or `done`. Each job is the job document of `docs/spec/schema/job.schema.json` without `events`. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before (a job ID, `j-12`); the page holds the jobs with a lower ID. Another `state`, or an `after` that is not a job ID, is a 400. |
+| `/api/jobs/{id}` | One job (`j-12`): `{"job", "changesets", "threads"}`. `job` is the job document with its events. `changesets` holds each submitted changeset whose author names the job, the first submit first: `{"id", "at", "state", "why", "actions"}`, where `at` is the first submit and `actions` counts the actions of the newest revision in each state (`{"applied": 2}`). A changeset that was never submitted is not in the list. `threads` has one entry for each thread of a wait of the job: the summary of the newest message of the thread that is not gone, with `"gone": false`, or `{"id", "gone": true}`. The answer streams. If a row of the job does not parse, the answer is a 500 with no part of the job. An ID that no job has is a 404. |
 | `/api/watches` | `[watch]`, newest first. A watch is `{"id", "text", "created", "state", "arrived", "message"}`. `state` is `waits`, or `arrived` after its one notice. `message` is the summary of the first new message that matched, or `null` while the watch waits or when the message is gone. See [Watches](#watches). |
+| `/api/notices` | `[notice]`, newest first, at most 50: the notices by rule that are not done (card R5-08). A notice is `{"id", "rule", "rule_name", "title", "text", "created", "message"}`. `title` is the sender and `text` the subject, one line each. `rule` and `rule_name` are the `notify` rule at the time of the notice. `message` is the summary of the mail, or `null` when the mail is gone. |
 
 A message summary is `{"id", "thread", "date", "from": {"name", "address"},
 "subject", "labels"}`.
@@ -101,6 +104,8 @@ endpoint gives the policy object below. `POST` endpoints take a JSON body.
 | `POST /api/policy/discard` | Body `{}`. Keeps the file on disk as a copy, then writes the text of the active policy to `policy.toml`. With no active version, no new file is written. The answer has `saved`: the name of the copy in the data folder (`policy.toml.saved-<seconds>`), or `null` when there was no file. |
 | `POST /api/policy/mode` | Body `{"version", "mode"}`. Writes the new mode to the file and makes it active. |
 | `POST /api/policy/remove` | Body `{"version", "id"}`. Removes the rule from the file and makes the file active. The ID is never used again. |
+| `POST /api/policy/accept` | Body `{"version", "id"}`: the ID of an open proposal. Adds its rule at the end of the file, with `by = "proposal"`, the next rule ID and the date of today, and makes the file active. A proposal that is not open is a 409. |
+| `POST /api/policy/dismiss` | Body `{"id"}`. Dismisses an open proposal and changes no file. Iris does not propose the same rule again. A proposal that is not open is a 409. |
 
 `version` is the active version that the person saw, `null` for the policy
 of the first start. If it is not the active version, or if the file on disk
@@ -118,6 +123,7 @@ The policy object:
 | `version` | The active version, or `null` at the first start. |
 | `next_id` | One more than the highest rule ID that a rule had. A new rule can use it, because the ID of a removed rule is never used again. |
 | `rules` | The rules of the active policy, in the order of the file. |
+| `proposals` | The open rules that Iris proposes from your approvals (spec 2, section 6.6), the oldest first. Each is `{"id", "approvals", "created_at", "rule"}`. `rule` is the rule that an accept adds, with `next_id` and the date of today; its `line` is 0. |
 | `error` | `{"line", "message"}` when the active text is not valid any more (for example after a program update), else `null`. The active policy then applies nothing. |
 | `file` | The file on disk, compared to the active policy. `state` is `same`, `missing`, `invalid` (with `error`) or `changed`. A `changed` file has `sha256`, `text`, `mode`, and the rules that it `added`, `removed` and `changed` (`{"before", "after"}`). A rule that keeps its ID and changes any field other than `line` is changed. |
 
@@ -248,6 +254,34 @@ A dev server of the client must forward `/api` with the `Host` and the
 `Origin` of the engine (in Vite: `changeOrigin: true`, and set `Origin` to the
 target in `headers`).
 
+## Ask
+
+A question of the person about their mail (card R5-09). The engine searches
+the mail for the words of the question, gives the best 12 messages to the
+model as data, and answers with the messages that the answer comes from.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/ask` | Body `{"question"}`, 1 to 500 characters. The answer is `{"answer", "sources", "read", "cost_micro_usd"}`. |
+
+| Field | Content |
+|---|---|
+| `answer` | The answer, or `null` when the mail does not answer the question. The model gives the answer as claims, each with the numbers of its messages. A claim is one fact, in one or more sentences. One or more marks `[n]` come before the end mark of its last sentence, and name the sources of all of its text. The engine drops a claim with a number that names no message of the data. The text of a claim has no other mark. |
+| `sources` | `{"n", "quote", "message"}` for each source, in the order of `n` from 1. `message` is a message summary. `quote` is words of the message that support the answer, or `null`. The engine checks that the message has the words. |
+| `read` | The count of messages that the model read. 0 means that no message matched, and no model call went out. |
+| `cost_micro_usd` | The cost of the call, or `null` with no call or for a local model. |
+
+The search leaves out gone mail, hostile mail, the mail of a hostile sender,
+SPAM and TRASH. After the call, the engine checks each source again: against
+these rules, and for a change of the date, sender, subject or text that the
+model saw. A claim with a source that fails the check goes. The call
+takes from the one model budget (see
+`docs/specs/2026-11-16-cost-control.md`) and holds the run lock. With no
+model, with a budget that cannot pay the worst case of the call, or while a
+run of understanding holds the lock, the answer is a 503. A failed
+model call, or a model answer that is not valid, is a 502. The text of the
+answer is data: show it as text, never as markup.
+
 ## Watches
 
 A watch is a search text (specification 1, section 5.6) that gives one notice
@@ -257,6 +291,7 @@ when a new mail matches (card R5-07, `docs/specs/2026-11-16-watch.md`).
 |---|---|
 | `POST /api/watches` | Body `{"text"}`. Adds a watch and gives it with the status 201. An empty text, a text over 500 characters, a text that is not a valid search, or a 101st watch that waits is a 400. |
 | `POST /api/watches/{id}/remove` | Removes the watch (`w-3`) and gives `{"removed"}`. A watch that is not there is a 404. An ID that is not a `w-` ID is a 400. |
+| `POST /api/notices/{id}/done` | Marks the notice (`n-3`) done and gives `{"done"}`. A notice that is done already gives 200. A notice that is not there is a 404. An ID that is not an `n-` ID is a 400. |
 
 Only a message that the mirror gets after the watch can match. It must also
 have its clean text, no hostile mark, no hostile sender, no label `SENT` or

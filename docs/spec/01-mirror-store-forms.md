@@ -434,7 +434,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
-| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
+| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
@@ -442,6 +442,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
 | `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
 | `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
+| `matter`, `matter_item`, `matter_run` | See `docs/specs/2026-11-16-matters.md` (migration 16). | Matters: the proposals of Iris, the decisions of the person, and the last proposal call. |
 | `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
@@ -482,7 +483,9 @@ Iris gives short IDs that a person and an agent can type:
 | `r-` | Record |
 | `f-` | Feed item |
 | `s-` | Signal |
+| `g-` | Matter (`docs/specs/2026-11-16-matters.md`) |
 | `w-` | Watch (card R5-07) |
+| `n-` | Notice by rule (card R5-08) |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
 Iris install and the engine never uses it again, also after a rebuild deletes
@@ -514,7 +517,7 @@ Each item of each form has these fields:
 | `updated` | date-time | yes | The last change. |
 | `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model, and `prompt` names the prompt version. |
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
-| `matter` | string or null | no | Reserved for release 6. |
+| `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 
 A source has these fields:
@@ -665,11 +668,14 @@ The person gives one answer for each sender:
 | Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
 | Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
 
-The engine and the local API give the gate first (card R5-03, part 1). The
-view of the gate in the web client is a separate change (part 2), because
-each view gets its own change and the owner picks its layout first. Until
-part 2 merges, the web client shows the strangers section as a list of
-items, as in release 1, and the person cannot answer the gate from it.
+The web client shows the gate in the brief: one row for each sender, with
+the newest 3 items, "Ignore" and "Accept". After an answer, the row keeps
+its place and shows one line with "Undo" (reopen, or decline again after a
+reopen from the list of declined senders). The brief shows the first 20
+senders and links all of them. The list of declined senders has "Ask again"
+(reopen) and "Accept". An API without the gate gives no `gate` in the
+brief, and the web client then shows the strangers section as a list of
+items, as in release 1.
 
 A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
 "stranger"` (specification 2, section 6.2) takes the items of strangers out of
@@ -1077,6 +1083,15 @@ split from the You owe items, and the API keeps one You owe section. The
 client shows You owe with the rest of its items, and with the engine count
 less the Due soon items. The "All" link of You owe, and the link of Due soon,
 give the engine count, because the full list holds both.
+
+A watch whose mail came (card R5-07) leads the brief. The opening sentence
+starts with one sentence that counts these mails ("The mail that you watched
+for came." for one, "Two mails that you watched for came." for two), and one
+card for each such
+watch comes before the live login codes. The card opens the mail. Done
+removes the watch. Near the end, "Iris watches for" lists the watches that
+wait, and a quiet button starts a new watch. The client reads the watches
+from `/api/watches`, not from the brief.
 
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is

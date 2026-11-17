@@ -110,8 +110,7 @@ impl Policy {
             .rules
             .iter()
             .filter(|r| {
-                r.effect != Effect::Hide
-                    && r.effect != Effect::Bundle
+                r.effect.is_action()
                     && r.verbs.contains(&action.verb)
                     && r.when.author.is_none_or(|a| a == action.author)
                     && r.job.as_deref().is_none_or(|j| action.job == Some(j))
@@ -213,6 +212,23 @@ impl Policy {
                 Effect::Hide => Attention::Hidden { rule: r.id },
                 _ => Attention::Bundled { rule: r.id },
             })
+    }
+}
+
+impl Policy {
+    /// The `notify` rule with the lowest `id` that matches the message, with
+    /// the reading of a `review` rule (spec 2, section 6.4). Hostile mail
+    /// (section 6.5) and mail from you give no notice.
+    pub fn notice(&self, msg: &Message, now: i64) -> Option<u32> {
+        if matches!(msg.kind(), SenderKind::Hostile | SenderKind::SelfOwner) {
+            return None;
+        }
+        self.rules
+            .iter()
+            .filter(|r| r.effect == Effect::Notify)
+            .filter(|r| matches(&r.when, msg, now, Items::Some))
+            .map(|r| r.id)
+            .min()
     }
 }
 

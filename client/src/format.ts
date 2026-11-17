@@ -152,8 +152,8 @@ export const RECORD_FIELDS: Record<string, string[]> = {
 };
 
 const WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
-const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
-const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
+export const count = (n: number, one: string, many: string) => `${WORDS[n] ?? n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
+export const capital = (s: string) => s[0].toUpperCase() + s.slice(1);
 
 /** The start of the next local day, as an ISO date-time. */
 export function nextDay(now = new Date()): string {
@@ -177,6 +177,8 @@ export async function copyText(text: string, clipboard: Pick<Clipboard, "writeTe
 }
 
 /** The first lines of the brief: what needs you, in words. */
+export const NOTHING = "Nothing needs you now.";
+
 export function summary(brief: Brief): string {
   // Use the section counts, not the items: the API gives at most 200 items of a section.
   const talks = brief.conversations.count;
@@ -186,9 +188,12 @@ export function summary(brief: Brief): string {
   if (brief.you_owe.count) parts.push(`You owe ${count(brief.you_owe.count, "thing", "things")}.`);
   if (brief.owed_to_you.count) parts.push(`${capital(count(brief.owed_to_you.count, "thing is", "things are"))} owed to you.`);
   if (talks) parts.push(`${capital(count(talks, "conversation waits", "conversations wait"))} for you.`);
+  // An API with the stranger gate counts the senders that wait for an answer.
+  const gate = brief.gate?.count;
   const odd = brief.strangers.count;
-  if (odd) parts.push(`${capital(count(odd, "item is from a sender", "items are from senders"))} you do not know.`);
-  return parts.length ? parts.join(" ") : "Nothing needs you now.";
+  if (gate) parts.push(`${capital(count(gate, "sender that you do not know waits", "senders that you do not know wait"))} for an answer.`);
+  else if (odd && gate === undefined) parts.push(`${capital(count(odd, "item is from a sender", "items are from senders"))} you do not know.`);
+  return parts.length ? parts.join(" ") : NOTHING;
 }
 
 /** The accounts whose first sync is not complete (spec 1 section 4.2): the brief then covers only the mail fetched so far. */

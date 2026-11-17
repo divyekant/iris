@@ -11,6 +11,8 @@ macro_rules! say {
 
 pub mod cost;
 pub mod engine;
+pub mod notify;
+pub mod socket;
 pub mod verbs;
 
 use std::io::BufRead;
@@ -102,6 +104,92 @@ pub enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
+    Close {
+        id: String,
+        /// The reason. The default is "Done.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Decline a commitment in a draft changeset. Needs the engine.
+    Decline {
+        id: String,
+        /// The reason. The default is "Declined.".
+        #[arg(long)]
+        reason: Option<String>,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Defer a commitment to a date in a draft changeset. Needs the engine.
+    Defer {
+        id: String,
+        /// The day it opens again, YYYY-MM-DD.
+        #[arg(long)]
+        date: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Correct one field of an item in a draft changeset. Needs the engine.
+    Correct {
+        id: String,
+        /// The field, a dotted path, for example due.date.
+        #[arg(long)]
+        field: String,
+        /// The new value, as JSON. A value that is not JSON is a text.
+        #[arg(long)]
+        value: String,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Archive threads or messages in a draft changeset. Needs the engine.
+    Archive(Targets),
+    /// Move threads or messages to the inbox in a draft changeset.
+    Inbox(Targets),
+    /// Mark threads or messages read in a draft changeset.
+    Read(Targets),
+    /// Mark threads or messages unread in a draft changeset.
+    Unread(Targets),
+    /// Move threads or messages to the trash in a draft changeset.
+    Trash(Targets),
+    /// Add a label in a draft changeset.
+    Label(LabelTargets),
+    /// Remove a label in a draft changeset.
+    Unlabel(LabelTargets),
+    /// Submit a draft changeset. Prints the state of each action. Needs the engine.
+    Submit {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// The reason of the changeset, for the person.
+        #[arg(long)]
+        why: String,
+        /// Print the changeset document.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
+    #[command(arg_required_else_help = true)]
+    Changeset {
+        /// The changeset ID, for example cs-12.
+        #[arg(required_unless_present = "drafts", conflicts_with = "drafts")]
+        id: Option<String>,
+        /// List the drafts of the author `local`, the newest first.
+        #[arg(long)]
+        drafts: bool,
+        /// Print the changeset document (specification 2, section 5.1).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Withdraw a changeset that this command made. Applied actions stay.
+    /// Needs the engine.
+    Withdraw {
+        /// The changeset ID, for example cs-12.
+        id: String,
+        /// Print the changeset document after the withdraw.
+        #[arg(long)]
+        json: bool,
+    },
     /// Understand the mail: an estimate, the approval of a budget, or a run.
     Understand {
         /// Print the estimate and an approval code. No model call.
@@ -140,6 +228,73 @@ pub enum WatchCommand {
     },
     /// Remove a watch (`w-3`): one that waits, or one that you saw.
     Remove { id: String },
+}
+
+/// The draft changeset of a verb that adds an action.
+#[derive(clap::Args, Clone)]
+pub struct Draft {
+    /// Add to this draft changeset. Without it, the command makes a new one.
+    #[arg(long)]
+    pub changeset: Option<String>,
+    /// The reason of the action.
+    #[arg(long)]
+    pub why: Option<String>,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct Targets {
+    /// Thread (`t-3`) or message (`m-42`) IDs.
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    #[command(flatten)]
+    pub to: Draft,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct LabelTargets {
+    #[arg(required = true)]
+    pub ids: Vec<String>,
+    /// The label name.
+    #[arg(long)]
+    pub label: String,
+    #[command(flatten)]
+    pub to: Draft,
+}
+
+/// The action of a verb that adds one: the verb, the targets, the
+/// arguments and the draft.
+fn action(c: &Command) -> Option<(&'static str, Vec<String>, serde_json::Value, &Draft)> {
+    use serde_json::json;
+    let reason = |r: &Option<String>, default: &str| json!({ "reason": r.clone().unwrap_or_else(|| default.into()) });
+    Some(match c {
+        Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
+        Command::Decline { id, reason: r, to } => {
+            ("decline", vec![id.clone()], reason(r, "Declined."), to)
+        }
+        Command::Defer { id, date, to } => ("defer", vec![id.clone()], json!({ "date": date }), to),
+        Command::Correct {
+            id,
+            field,
+            value,
+            to,
+        } => {
+            let value = serde_json::from_str(value).unwrap_or_else(|_| json!(value));
+            (
+                "correct",
+                vec![id.clone()],
+                json!({ "field": field, "value": value }),
+                to,
+            )
+        }
+        Command::Archive(t) => ("archive", t.ids.clone(), json!({}), &t.to),
+        Command::Inbox(t) => ("inbox", t.ids.clone(), json!({}), &t.to),
+        Command::Read(t) => ("read", t.ids.clone(), json!({}), &t.to),
+        Command::Unread(t) => ("unread", t.ids.clone(), json!({}), &t.to),
+        Command::Trash(t) => ("trash", t.ids.clone(), json!({}), &t.to),
+        Command::Label(t) => ("label", t.ids.clone(), json!({ "label": t.label }), &t.to),
+        Command::Unlabel(t) => ("unlabel", t.ids.clone(), json!({ "label": t.label }), &t.to),
+        _ => return None,
+    })
 }
 
 #[derive(Subcommand)]
@@ -247,8 +402,165 @@ pub fn version_line() -> String {
     format!("iris {VERSION}")
 }
 
-/// Run one command. Gives the error text for standard error.
-pub fn run(cli: Cli) -> Result<(), String> {
+/// Run one command. Gives the exit code (specification 2, section 8.4) and
+/// the error text for standard error.
+pub fn run(cli: Cli) -> Result<(), socket::Failure> {
+    // The verbs that change changesets go through the engine socket, never
+    // through the store (specification 2, section 8.1).
+    let data = engine::data_dir(cli.data.clone()).map_err(|e| socket::Failure {
+        code: socket::code::ERROR,
+        error: e.to_string(),
+    });
+    if let Some((verb, targets, args, to)) = action(&cli.command) {
+        let mut request = serde_json::json!({ "verb": verb, "targets": targets, "args": args });
+        if let Some(cs) = &to.changeset {
+            request["changeset"] = cs.clone().into();
+        }
+        if let Some(why) = &to.why {
+            request["why"] = why.clone().into();
+        }
+        let r = socket::request(&data?, "add", request)?;
+        println!("{} {}", r["changeset"].as_str().unwrap_or_default(), r["n"]);
+        return Ok(());
+    }
+    if let Command::Submit { id, why, json } = &cli.command {
+        let doc = socket::request(
+            &data?,
+            "submit",
+            serde_json::json!({ "changeset": id, "why": why }),
+        )?;
+        print!("{}", changeset_text(&doc, *json));
+        return match submit_code(&doc) {
+            0 => Ok(()),
+            code => Err(socket::Failure {
+                code,
+                error: format!("{id}: not each action is applied (exit code {code})"),
+            }),
+        };
+    }
+    let text = match &cli.command {
+        Command::Changeset { id, drafts, json } => {
+            let dir = data?;
+            if *drafts {
+                let r = socket::request(&dir, "drafts", serde_json::json!({}))?;
+                Some(drafts_text(&r, *json))
+            } else {
+                let id = id.as_deref().unwrap_or_default();
+                let r = socket::request(&dir, "show", serde_json::json!({ "changeset": id }))?;
+                Some(changeset_text(&r, *json))
+            }
+        }
+        Command::Withdraw { id, json } => {
+            let r = socket::request(&data?, "withdraw", serde_json::json!({ "changeset": id }))?;
+            Some(changeset_text(&r, *json))
+        }
+        _ => None,
+    };
+    if let Some(text) = text {
+        print!("{text}");
+        return Ok(());
+    }
+    run_store(cli).map_err(|error| socket::Failure {
+        code: socket::code::ERROR,
+        error,
+    })
+}
+
+/// The exit code of `iris submit` (specification 2, section 8.4), from the
+/// actions of the revision that it submitted, in the order 2, 1, 3, 5, 0.
+pub fn submit_code(doc: &serde_json::Value) -> u8 {
+    let mut codes = Vec::new();
+    for a in doc["actions"].as_array().into_iter().flatten() {
+        if a["revision"] != doc["revision"] {
+            continue;
+        }
+        let d = &a["decision"];
+        codes.push(match (d["state"].as_str(), d["by"].as_str()) {
+            (Some("denied"), Some("engine")) => socket::code::USAGE,
+            (Some("failed"), _) => socket::code::ERROR,
+            (Some("denied"), _) => socket::code::DENIED,
+            (Some("applied"), _) => 0,
+            _ => socket::code::OPEN,
+        });
+    }
+    [
+        socket::code::USAGE,
+        socket::code::ERROR,
+        socket::code::DENIED,
+        socket::code::OPEN,
+    ]
+    .into_iter()
+    .find(|c| codes.contains(c))
+    .unwrap_or(0)
+}
+
+/// `iris changeset --drafts`: one changeset ID on each line.
+fn drafts_text(r: &serde_json::Value, json: bool) -> String {
+    let ids = r["changesets"].as_array().cloned().unwrap_or_default();
+    if json {
+        return ids.iter().map(|i| format!("{i}\n")).collect();
+    }
+    if ids.is_empty() {
+        return "No draft.\n".into();
+    }
+    ids.iter()
+        .map(|i| format!("{}\n", i.as_str().unwrap_or_default()))
+        .collect()
+}
+
+/// A changeset as text (specification 2, section 8.3): a label line for the
+/// changeset, then one line for each action, which starts with
+/// `<revision>.<n>`.
+pub fn changeset_text(doc: &serde_json::Value, json: bool) -> String {
+    if json {
+        return format!("{doc}\n");
+    }
+    let s = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+    let mut out = format!(
+        "ID: {}\nState: {}\nRevision: {}\n",
+        s(&doc["id"]),
+        s(&doc["state"]),
+        doc["revision"]
+    );
+    if let Some(why) = doc["why"].as_str() {
+        out.push_str(&format!("Why: {}\n", verbs::field(why)));
+    }
+    for a in doc["actions"].as_array().into_iter().flatten() {
+        let state = a["decision"]["state"].as_str().unwrap_or("draft");
+        let targets: Vec<String> = a["targets"]
+            .as_object()
+            .into_iter()
+            .flat_map(|t| t.values())
+            .flat_map(|v| v.as_array().cloned().unwrap_or_default())
+            .map(|v| verbs::field(v.as_str().unwrap_or_default()))
+            .collect();
+        let mut line = format!(
+            "{}.{} {} {} {state}",
+            a["revision"],
+            a["n"],
+            s(&a["verb"]),
+            targets.join(",")
+        );
+        if let Some(args) = a["args"].as_object().filter(|o| !o.is_empty()) {
+            line.push_str(&format!(
+                " args: {}",
+                verbs::field(&serde_json::Value::from(args.clone()).to_string())
+            ));
+        }
+        if let Some(why) = a["why"].as_str() {
+            line.push_str(&format!(" why: {}", verbs::field(why)));
+        }
+        if let Some(reason) = a["decision"]["reason"].as_str() {
+            line.push_str(&format!(" reason: {}", verbs::field(reason)));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Run one command that uses the store. Gives the error text for standard error.
+fn run_store(cli: Cli) -> Result<(), String> {
     let data = || engine::data_dir(cli.data.clone()).map_err(|e| e.to_string());
     let open =
         || -> Result<Store, String> { Store::open(&data()?).map_err(|e| format!("store: {e}")) };
@@ -319,6 +631,20 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             println!("{text}");
             Ok(())
         }
+        Command::Changeset { .. }
+        | Command::Withdraw { .. }
+        | Command::Submit { .. }
+        | Command::Close { .. }
+        | Command::Decline { .. }
+        | Command::Defer { .. }
+        | Command::Correct { .. }
+        | Command::Archive(_)
+        | Command::Inbox(_)
+        | Command::Read(_)
+        | Command::Unread(_)
+        | Command::Trash(_)
+        | Command::Label(_)
+        | Command::Unlabel(_) => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,
@@ -587,8 +913,11 @@ fn test_token_uri(client: iris_auth::Client) -> Result<iris_auth::Client, String
 
 /// Return all the routes of the engine.
 pub fn app(store: Arc<Store>, auth: Arc<iris_api::Auth>) -> axum::Router {
+    // The model client of `POST /api/ask`, from the model row of each call.
+    let model_store = store.clone();
+    let connect: iris_api::Connect = Arc::new(move |row| cost::connect(&model_store, row));
     // The API routes come before the fallback of the web client.
-    iris_api::router(store, auth).merge(iris_web::router())
+    iris_api::router_with_model(store, auth, connect).merge(iris_web::router())
 }
 
 /// The API has no TLS, so only this machine may connect (specification 2,
@@ -608,6 +937,8 @@ fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     check_loopback(addr)?;
     let gmail = gmail_config().map_err(std::io::Error::other)?;
+    // The engine lock and the socket come first: a second engine stops here.
+    let bound = socket::bind(store.dir())?;
     let api_store = store.clone();
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
@@ -615,8 +946,10 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         .spawn(move || sync.run())?;
 
     // One thread: the lightest memory footprint has priority.
+    // The time driver: the socket waits at most READ_WAIT for a request.
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
+        .enable_time()
         .build()?;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -624,15 +957,27 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
         // The API checks the Host against the bound address.
         let auth = Arc::new(iris_api::Auth::new(local)?);
         say!("iris: serving on http://{local}");
+        say!("iris: commands connect to {}", bound.path.display());
+        let socket_store = api_store.clone();
+        let commands = async {
+            if let Err(e) = socket::serve(&bound, socket_store).await {
+                say!("iris: socket: {e}");
+            }
+            std::future::pending::<()>().await
+        };
         // The one-time code of the API sign-in (specification 2, section 8.6).
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }
-        axum::serve(listener, app(api_store, auth))
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
+        let web = axum::serve(listener, app(api_store, auth)).with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        });
+        // The web server ends at Ctrl-C. Then `bound` drops: the socket file
+        // goes, and the lock is released.
+        tokio::select! {
+            r = web => r,
+            () = commands => Ok(()),
+        }
     })
 }
 

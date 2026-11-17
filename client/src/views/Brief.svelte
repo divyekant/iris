@@ -4,19 +4,26 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, newest, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
+  import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
   import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
+  import Gate from "./Gate.svelte";
+  import Arrived from "./Arrived.svelte";
+  import Watches from "./Watches.svelte";
+  import { arrivedLine, loadWatches, type Watch } from "../watches";
+  import { flushHolds, HOLD } from "../act";
 
   let {
     brief: firstBrief,
     status: firstStatus = null,
+    watches: firstWatches,
     now: start = new Date(),
     poll = 5000,
-  }: { brief: Brief; status?: Status | null; now?: Date; poll?: number } = $props();
+    hold = HOLD,
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -24,8 +31,36 @@
   // svelte-ignore state_referenced_locally
   let status = $state(firstStatus);
   // svelte-ignore state_referenced_locally
+  let watches = $state(firstWatches ?? []);
+  // svelte-ignore state_referenced_locally
   let now = $state(start);
+  let arrived = $derived(watches.filter((w) => w.state === "arrived"));
+  let waiting = $derived(watches.filter((w) => w.state === "waits"));
+  // A watched mail that came leads the brief. With nothing else, it is the whole sentence.
+  let opening = $derived.by(() => {
+    const rest = summary(brief);
+    if (!arrived.length) return rest;
+    return rest === NOTHING ? arrivedLine(arrived) : `${arrivedLine(arrived)} ${rest}`;
+  });
+  // Each watch load and each change takes a ticket. A load applies only while its ticket is the newest,
+  // so an older answer never undoes a newer change. A failed load keeps the last list.
+  const ticket = newest();
+  async function reloadWatches() {
+    const fresh = ticket();
+    try {
+      const w = await loadWatches();
+      if (fresh()) watches = w;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  const change = (next: (w: Watch[]) => Watch[]) => (ticket(), (watches = next(watches)));
+  const removed = (id: string) => change((w) => w.filter((x) => x.id !== id));
   const ready = (s: Status | null) => copying(s).length === 0;
+
+  // Two loads of the brief can answer out of order (a poll, an answer at the gate):
+  // each takes a ticket, and a brief shows only while its ticket is the newest.
+  const briefTicket = newest();
 
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
@@ -33,13 +68,47 @@
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([loadBrief(), get<Status>("status")]),
-      ([b, s]) => ((brief = b), (status = s)),
+      () => {
+        const fresh = briefTicket();
+        return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
+      },
+      ([b, s, fresh]) => (fresh() && (brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });
+  // A quick Done holds for Undo. If the person leaves the brief or the page, the click stands: send it now.
+  $effect(() => {
+    window.addEventListener("pagehide", flushHolds);
+    return () => {
+      window.removeEventListener("pagehide", flushHolds);
+      flushHolds();
+    };
+  });
+  // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
+  // svelte-ignore state_referenced_locally
+  if (firstWatches === undefined) reloadWatches();
+  $effect(() => {
+    if (!poll) return;
+    const timer = setInterval(reloadWatches, poll * 12);
+    return () => clearInterval(timer);
+  });
 
   const SHOWN = 7;
+  // After an answer at the gate, the items of the sender move: load the brief again.
+  // The gate stays after the last answer, so that its Undo stays too.
+  let answered = $state(false);
+  const reload = () => {
+    answered = true;
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
+
+  // After a quick Done, load the brief again, so the item and the counts change. The ticket keeps a poll
+  // that started before the close from putting the item back. A failed load waits for the next poll.
+  const done = () => {
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
@@ -93,8 +162,14 @@
 
 <div class="opening">
   <p class="day">{greeting(now)} It is {day}.</p>
-  <h1>{summary(brief)}</h1>
+  <h1>{opening}</h1>
 </div>
+
+{#if arrived.length}
+  <div class="arrivals">
+    {#each arrived as w (w.id)}<Arrived watch={w} ondone={removed} />{/each}
+  </div>
+{/if}
 
 
 {#if progress}
@@ -121,7 +196,7 @@
   <section class="soon" aria-labelledby="soon">
     <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
     <ul>
-      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} />{/each}
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
     </ul>
     {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
@@ -138,13 +213,20 @@
 {/if}
 
 {#each parts as part (part.key)}
-  {#if part.count > 0}
+  {#if part.key === "strangers" && brief.gate}
+    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0 || answered}
+      <section aria-labelledby="strangers">
+        <h2 id="strangers"><span>{part.title}</span> <span class="count">{brief.gate.count}</span></h2>
+        <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />
+      </section>
+    {/if}
+  {:else if part.count > 0}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
       {#if part.items.length}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
         </ul>
       {/if}
       <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
@@ -168,6 +250,12 @@
     <a class="all" href="#/handled">See what and why</a>
   </section>
 {/if}
+
+<!-- Watches (R5-07, option A of the owner): the watches that wait, and the quiet button that starts one. -->
+<section class="watching" aria-labelledby={waiting.length ? "watching" : undefined} aria-label={waiting.length ? undefined : "Watches"}>
+  {#if waiting.length}<h2 id="watching"><span>Iris watches for</span> <span class="count">{waiting.length}</span></h2>{/if}
+  <Watches watches={waiting} onadded={(w) => (w ? change((all) => [w, ...all.filter((x) => x.id !== w.id)]) : reloadWatches())} onstopped={removed} />
+</section>
 
 {#if publishers.length || records.length}
   <section class="also" aria-labelledby="also">
@@ -236,6 +324,12 @@
     width: 100%;
     height: var(--space-1);
     accent-color: var(--color-primary);
+  }
+  .arrivals {
+    display: grid;
+    gap: var(--space-3);
+    margin-bottom: var(--space-12);
+    animation: arrive var(--transition-normal) both;
   }
   .codes {
     display: grid;
@@ -335,6 +429,7 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .arrivals,
     .opening {
       animation: none;
     }
