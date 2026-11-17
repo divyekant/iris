@@ -480,10 +480,12 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
-  list writes it), the bytes in each direction, and the result. For a
-  refused request, the line has only a fixed reason (`not_connect`,
-  `host_not_allowed`, `port_not_allowed`, `address_not_public`, `too_long`) and no text of the
-  request. Only the proxy writes this file,
+  list writes it), the bytes in each direction, and the result
+  (`closed`, `stopped` or `connect_failed`). For a refused request, the
+  line has only a fixed reason (`not_connect`, `host_not_allowed`,
+  `port_not_allowed`, `address_not_public`, `too_long`, `too_many` for a
+  ninth open connection, `timeout` for a head that does not come in
+  10 s) and no text of the request. Only the proxy writes this file,
   so it needs no shared append path with the helper. The file has a limit
   of 1 MiB. At the limit the proxy writes one line that says the rest is
   dropped, then only counts: at the end of the session it writes one last
@@ -659,7 +661,7 @@ is refused before a row is written.
 | The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
 | A revoke or a stop during the build, then at once a second `run` | The first session stays live until its launch thread returns after its cleanup; the second `run` is refused at the register until then | Launch test: a build hook that waits, a stop, then a second `run` that fails until the first thread returned |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `iris job session` shows the end with no start | Launch test with a stop hook |
-| An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
+| An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
@@ -683,8 +685,8 @@ is refused before a row is written.
 
 Memory: the supervisor holds one small record for each running session
 (the child handle, the pipes, the session ID, the egress listener). The
-proxy uses one thread and two 16 KiB buffers for each open connection, at
-most 8 connections for each session. The helper reads the output of the
+proxy uses two threads (one for each direction) and two 16 KiB buffers
+for each open connection, at most 8 connections for each session. The helper reads the output of the
 agent with one 16 KiB buffer. The helper is a second copy of the program, but it
 only waits: its resident memory is small, and the build measures it
 (open question 1).
