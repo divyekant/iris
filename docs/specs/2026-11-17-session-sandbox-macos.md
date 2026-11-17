@@ -177,13 +177,26 @@ with no agent. Its record names a coalition that ends with it, so a later
       to a process outside the session. Each member is stopped, and the
       profile denies signals outside the sandbox.
 
-   Crash recovery of the journal: at the start of each `stop` (also the
-   `stop` of a new engine after a crash), read the journal of the
-   session. For each entry whose process ID still has the same unique ID
-   and is not in the coalition of the session, send `SIGCONT`. So a
-   process that got a `SIGSTOP` by mistake continues, also after a crash
-   between the `SIGSTOP` and the `SIGCONT`. The reap removes the journal
-   after `ended` is true.
+   Recovery of the journal: at the start of each `stop` (also the `stop`
+   of a new engine after a crash), and before `stop` returns, `stop`
+   resolves each entry of the journal of the session:
+
+   | State of the entry | Result |
+   |---|---|
+   | No process has the process ID, or it has another unique ID | Resolved: the process is gone |
+   | The process is in the coalition of the session | Resolved: it is a process of the session |
+   | Another coalition, and its status is not `SSTOP` | Resolved: it runs |
+   | Another coalition, stopped | Send `SIGCONT`, then read the status again. Not `SSTOP`: resolved. Else, or if the signal or a read fails: not resolved |
+
+   `stop` rewrites the journal with the entries that are not resolved
+   (temporary file, `fsync`, `rename`). It returns `Ok` only if `ended`
+   is true and the journal is empty. Else it returns an error, so the
+   reap check fails and the engine tries again at its next turn. The reap
+   removes the journal file only after `stop` returned `Ok`. So no
+   process that Iris stopped by mistake stays stopped with no record, also
+   after a crash between the `SIGSTOP` and the `SIGCONT`. A process that
+   the person had stopped on purpose, and whose process ID Iris read in
+   the same moment, continues: see the known limit below.
 
    macOS gives no signal by process identity (no `pidfd`). So one race
    stays, which the session cannot cause: between the last read and the
@@ -204,7 +217,7 @@ The profile starts with `(deny default)` and allows only these:
 |---|---|
 | `process-exec`, `process-fork` | Each program that the profile lets the session read |
 | `signal`, `process-info*` | `(target same-sandbox)` only |
-| `sysctl-read` | All |
+| `sysctl-read` | Only a list of names that tell the system and the hardware: the prefixes `hw.` and `machdep.cpu.`, and the names `kern.ostype`, `kern.osrelease`, `kern.osversion`, `kern.osproductversion`, `kern.version`, `kern.hostname`, `kern.boottime`, `kern.argmax`, `kern.maxfiles`, `kern.maxfilesperproc`, `kern.usrstack64`, `kern.secure_kernel`, `vm.loadavg`, `vm.pagesize` and `sysctl.proc_translated`. Never `kern.proc`, `kern.procargs` or `kern.procargs2`, which give the arguments and the environment of other processes |
 | `file-read*` | The system folders: `/usr` without `/usr/local`, `/bin`, `/sbin`, `/System/Library`, `/System/Cryptexes`, `/System/Volumes/Preboot/Cryptexes`, `/Library/Apple`, `/private/var/db/dyld` (never all of `/System`: `/System/Volumes/Data` holds the home folders and the data folder); the device files `/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`; in `/private/etc` only `hosts`, `passwd`, `group`, `localtime` and the public certificate files (`ssl/cert.pem`, `ssl/certs`); the adapter program file and the `iris` program file (each one a literal real path); the workspace; the private home and `/tmp` of the session |
 | `file-read-metadata` | The paths above, and each folder above them (literal paths), so that a program can resolve its paths |
 | `file-write*` | The workspace, the private home and `/tmp` of the session, `/dev/null` |
@@ -302,6 +315,8 @@ before the agent runs, or `ended` is false.
 | The agent reads the store key or a home file through `/System/Volumes/Data/...` | Refused | Mac acceptance 1 |
 | The job of a session starts with the environment of launchd, not of the launch | The handoff gives the agent environment and the workspace; the job sets both before the hold | Mac acceptance 2 (the tool finds its key and its token, and runs in the workspace) |
 | The engine crashes between a `SIGSTOP` to a reused process ID and the `SIGCONT` | The journal names the process; the next `stop` sends `SIGCONT` to it | Unit test: a journal entry of a stopped process of another coalition gets `SIGCONT` |
+| `SIGCONT` to a journal entry fails, or the process stays stopped | The entry stays; `stop` returns an error and the reap waits | Unit test: an entry whose read fails stays in the journal, and `stop` gives an error |
+| The agent reads the arguments or the environment of another process (`sysctl kern.procargs2`, `ps`) | Refused | Mac acceptance 1 |
 | The shim ends after the job process got the descriptors, before the agent starts | The record exists (it comes before the handoff), so `ended` reads the coalition | Unit test: the shim refuses the handoff with no record |
 | The agent connects to another port, a public address, UDP or a Unix socket | Refused | Mac acceptance 1 |
 | The agent calls `launchctl`, `open`, `pbpaste` or another system service | Refused (no `mach-lookup`) | Mac acceptance 1 |
