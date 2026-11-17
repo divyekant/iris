@@ -8,7 +8,7 @@
   import { get, post, type Item, type Job } from "../api";
   import { when } from "../format";
   import { href } from "../route";
-  import { byThread, dueDate, dueValue, reads, type Preview } from "../start";
+  import { byThread, dueDate, dueValue, reads, subjectOf, type Preview } from "../start";
 
   let { item, oncancel, onitem }: { item: Item; oncancel?: () => void; onitem?: (item: Item) => void } = $props();
 
@@ -109,7 +109,7 @@
                 <span class="when">{m.date ? when(m.date) : ""}</span>
                 {#if !m.readable}<span class="hidden">Hidden from the agent for now</span>{/if}
                 <!-- A thread can hold more than one subject: each message that the job reads shows its own. -->
-                {#if (m.subject ?? "(no subject)") !== g.subject}<span class="what">{m.subject ?? "(no subject)"}</span>{/if}
+                {#if subjectOf(m) !== g.subject}<span class="what">{subjectOf(m)}</span>{/if}
               </li>
             {/each}
           </ul>

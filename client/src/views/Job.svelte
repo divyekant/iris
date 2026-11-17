@@ -7,6 +7,7 @@
 <script lang="ts">
   import type { JobDetail } from "../api";
   import { clock, day, due, now, steps, waitMail } from "../jobs";
+  import Grants from "./Grants.svelte";
 
   let { detail }: { detail: JobDetail } = $props();
 
@@ -34,6 +35,8 @@
     {#if mail}<p class="mail"><a href={mail.link}>{mail.subject}</a></p>{/if}
   {/if}
 </section>
+
+<Grants {job} />
 
 <section aria-labelledby="steps">
   <h2 id="steps"><span>Each step</span> <span class="count">{list.length}</span></h2>

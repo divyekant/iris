@@ -174,12 +174,14 @@ const rules: Rule[] = [
   rule({ id: 7, name: "Mail from the clinic", effect: "notify", when: { sender: "@clinic.example" }, added: "2026-11-16", line: 44 }),
   rule({ id: 8, name: "Replies from Dana", effect: "notify", when: { sender: "dana@harbor.example" }, added: "2026-11-16", line: 51 }),
   rule({ id: 9, name: "Bank security codes", effect: "notify", when: { sender: "@bank.example", form: "signal" }, added: "2026-11-16", line: 58 }),
+  // A grant inside job j-12 (card R4-10): the verbs of "Tidy the mail".
+  rule({ id: 11, name: "In job j-12, allow archive, label, unlabel, read, unread and inbox without review", effect: "allow", verbs: ["archive", "label", "unlabel", "read", "unread", "inbox"], when: { author: "agent" }, job: "j-12", added: "2026-11-16", line: 65 }),
 ];
 
 export const policy: Policy = {
   mode: "observe",
   version: 3,
-  next_id: 10,
+  next_id: 12,
   rules,
   proposals: [
     {
@@ -592,4 +594,15 @@ function startPreview(id: string) {
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
 export function startJob(): [number, unknown] {
   return [201, jobs["j-12"]];
+}
+/** POST /api/policy/grant and /api/policy/remove on the fixture policy. */
+export function policyPost(path: string, body: { job?: string; verbs?: string[]; id?: number }): [number, unknown] {
+  if (path === "/policy/grant" && body.job && body.verbs?.length) {
+    const r = rule({ id: policy.next_id++, name: `In job ${body.job}, allow ${body.verbs.join(", ")} without review`, effect: "allow", verbs: body.verbs, when: { author: "agent" }, job: body.job, added: "2026-11-17", line: 70 });
+    policy.rules = [...policy.rules, r];
+  } else if (path === "/policy/remove" && body.id) {
+    policy.rules = policy.rules.filter((r) => r.id !== body.id);
+  } else return [404, { error: "Not found." }];
+  policy.version = (policy.version ?? 0) + 1;
+  return [200, policy];
 }
