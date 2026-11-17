@@ -52,8 +52,8 @@ job does not need gives the agent mail that the person did not give it.
 
 ### The scope
 
-Migration 18 adds the table `job_scope`. If another migration merges first,
-this one takes the next free number.
+Migration 19 adds the table `job_scope`. Migration 18 went to the verbs
+`draft` and `send` (R3-01).
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -523,7 +523,7 @@ Markdown and JSON with `serde_json`.
 
 ## Impact
 
-- `crates/iris-store/src/schema_18.sql` and the migration list.
+- `crates/iris-store/src/schema_19.sql` and the migration list.
 - `docs/spec/schema/jobitem.schema.json`: the job item, with samples.
 - `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`,
   `revoked_count`.
@@ -589,7 +589,8 @@ cargo test -p iris-workspace
 
 ## Rollout
 
-The migration adds one table. The builder has no caller until R4-04.
+The migration adds two tables: `job_scope` and `job_scope_message`. The
+builder has no caller until R4-04.
 
 ## Risks
 
@@ -600,5 +601,5 @@ The migration adds one table. The builder has no caller until R4-04.
 ## Plan
 
 1. R4-02 PR 1: this spec.
-2. R4-02 PR 2: migration 18, the scope in `iris-job`, and the crate
-   `iris-workspace`.
+2. R4-02 PR 2: migration 19 and the scope in `iris-job`.
+3. R4-02 PR 3: the crate `iris-workspace`.

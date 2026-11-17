@@ -299,6 +299,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-apply/` | The apply of an approved changeset action to Gmail (`archive`, `inbox`, `read`, `unread`, `trash`, `label`, `unlabel`), with the mirror update. The apply of the state verbs (`close`, `decline`, `defer`, `correct`) to the items, with no provider call. | `engine` |
 | `crates/iris-observe/` | Observe mode: the triage changeset from the forms, with a count of each rule. It applies nothing. | `engine` |
 | `crates/iris-triage/` | Triage: stores the proposal of observe mode as a changeset of the author `triage`, one for each account, with a new revision only when the proposal changes. No provider client and no model call. | `engine` |
+| `crates/iris-job/` | The job of release 4: a goal with limits for an agent, its states (working, waiting, needs you, done), the events of each move, and the scope (the threads and items that the person gives to the job). | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions
