@@ -52,7 +52,7 @@ job does not need gives the agent mail that the person did not give it.
 
 ### The scope
 
-Migration 15 adds the table `job_scope`. If another migration merges first,
+Migration 18 adds the table `job_scope`. If another migration merges first,
 this one takes the next free number.
 
 | Column | Type | Meaning |
@@ -454,7 +454,7 @@ Markdown and JSON with `serde_json`.
 
 ## Impact
 
-- `crates/iris-store/src/schema_15.sql` and the migration list.
+- `crates/iris-store/src/schema_18.sql` and the migration list.
 - `docs/spec/schema/jobitem.schema.json`: the job item, with samples.
 - `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`,
   `revoked_count`.
@@ -528,5 +528,5 @@ The migration adds one table. The builder has no caller until R4-04.
 ## Plan
 
 1. R4-02 PR 1: this spec.
-2. R4-02 PR 2: migration 15, the scope in `iris-job`, and the crate
+2. R4-02 PR 2: migration 18, the scope in `iris-job`, and the crate
    `iris-workspace`.
