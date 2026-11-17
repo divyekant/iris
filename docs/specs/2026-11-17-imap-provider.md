@@ -324,6 +324,7 @@ times after an unknown result (spec 2 section 7.2).
 | A folder deleted at the server | `HistoryExpired` | `folder_gone` |
 | A removal with `CONDSTORE` only | `HistoryExpired` | `removal_condstore` |
 | A server without `CONDSTORE` | `Api` 400 `noCondstore` | `no_condstore` |
+| No `UIDNEXT` with `CONDSTORE` only | `Api` 400 `noUidnext` | `no_uidnext` |
 | Header fields that do not parse | thread = the message ID | `thread_rules` |
 | A `modify` with a label that moves mail | `Api` 400, nothing sent | `modify_refuses_moves` |
 | A lost connection after the first `STORE` | `Transport` | `modify_unknown` |
@@ -356,8 +357,13 @@ times after an unknown result (spec 2 section 7.2).
   can. `pending`: a folder with `NOMODSEQ` stops the sync of the account
   with `noCondstore` (limit issue #629), so a wrong assumption gives a
   clear refusal, not a wrong mirror.
-- `UIDNEXT` comes with each `EXAMINE`. `pending`: without it, the
-  provider uses the highest UID + 1 from a `UID FETCH *`.
+- `UIDNEXT` comes with each `EXAMINE` (RFC 3501 requires it). `pending`:
+  on a server with `CONDSTORE` and no `QRESYNC`, `profile` refuses a
+  folder with no `UIDNEXT` (`Api` 400 `noUidnext`), because the removal
+  rule of section 5 needs a value that only grows. The highest UID + 1 is
+  no such value: a message that came and went after the cursor leaves it
+  as it was. With `QRESYNC`, the `VANISHED` list covers removals, and a
+  missing `UIDNEXT` does not matter.
 
 ## External writes
 
