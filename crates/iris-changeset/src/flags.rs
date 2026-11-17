@@ -257,7 +257,7 @@ fn copied(c: &Connection, text: &str) -> Result<bool> {
                                           WHERE ml.message_id = f.rowid
                                             AND l.provider_id IN ('SENT', 'DRAFT')))",
     )?;
-    for run in w.chunks_exact(RUN) {
+    for run in w.as_chunks::<RUN>().0 {
         // The words are letters and digits only: no FTS5 syntax inside.
         let phrase = format!("text : \"{}\"", run.join(" "));
         if st.query_row([phrase], |r| r.get::<_, bool>(0))? {
