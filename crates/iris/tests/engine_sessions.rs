@@ -630,6 +630,59 @@ fn a_stop_with_a_failed_end_write_starts_no_agent() {
     assert_eq!(row.end, Some(EndReason::Stop), "{row:?}");
 }
 
+/// Issue #517, when no end write works until the launch is over: no
+/// agent starts, the session stays open, and the supervisor ends it with
+/// `launch_failed` when the store takes the end.
+fn a_stop_with_no_end_write_leaves_the_session_to_the_supervisor() {
+    let f = fixture("stopnowrite", "sleep 30");
+    let s = sessions(&f);
+    let no_end = "CREATE TRIGGER no_end BEFORE UPDATE OF ended_at ON job_session
+                  BEGIN SELECT RAISE(ABORT, 'no end'); END;";
+    f.store
+        .write(|tx| {
+            tx.execute_batch(no_end)?;
+            Ok(())
+        })
+        .unwrap();
+    let (job, me) = (f.job, s.clone());
+    s.set_after(Arc::new(move |step, _| {
+        if step == Step::Bound {
+            assert!(me.stop(job).is_err(), "the end write did not fail");
+        }
+    }));
+    let id = s.run(f.job, "script").unwrap();
+    // The launch writes its end before it waits for the helper: when the
+    // helper is gone, no end write of the launch comes.
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let pid = session(&f.store, id).unwrap().helper_pid;
+        let gone = pid.is_some_and(|p| {
+            !Process::new("kill")
+                .args(["-0", &p.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        });
+        if gone {
+            break;
+        }
+        assert!(Instant::now() < end, "the helper did not stop");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let row = session(&f.store, id).unwrap();
+    assert_eq!((row.started_ms, row.end), (None, None), "{row:?}");
+    f.store
+        .write(|tx| {
+            tx.execute_batch("DROP TRIGGER no_end;")?;
+            Ok(())
+        })
+        .unwrap();
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.started_ms, None, "{row:?}");
+    assert_eq!(row.end, Some(EndReason::LaunchFailed), "{row:?}");
+}
+
 fn a_job_done_during_the_launch_gets_its_workspace_again() {
     let f = fixture("donelaunch", "sleep 30");
     let s = sessions(&f);
@@ -824,6 +877,10 @@ fn main() {
         (
             "a_stop_with_a_failed_end_write_starts_no_agent",
             a_stop_with_a_failed_end_write_starts_no_agent,
+        ),
+        (
+            "a_stop_with_no_end_write_leaves_the_session_to_the_supervisor",
+            a_stop_with_no_end_write_leaves_the_session_to_the_supervisor,
         ),
         (
             "a_job_done_during_the_launch_gets_its_workspace_again",
