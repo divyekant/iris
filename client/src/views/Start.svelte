@@ -10,7 +10,7 @@
   import { href } from "../route";
   import { byThread, dueDate, dueValue, reads, type Preview } from "../start";
 
-  let { item, oncancel }: { item: Item; oncancel?: () => void } = $props();
+  let { item, oncancel, onitem }: { item: Item; oncancel?: () => void; onitem?: (item: Item) => void } = $props();
 
   // svelte-ignore state_referenced_locally
   let due = $state(dueDate(item));
@@ -32,6 +32,13 @@
   $effect(() => {
     load();
   });
+  async function reload() {
+    try {
+      onitem?.(await get<Item>(`items/${encodeURIComponent(item.id)}`));
+    } catch {
+      // The note says why the start failed. The page keeps the item that it has.
+    }
+  }
 
   let groups = $derived(preview ? byThread(preview.messages) : []);
   let ready = $derived(goal.trim().length > 0 && preview !== null && !sending);
@@ -56,8 +63,8 @@
         return;
       }
       note = e.message;
-      // The mail changed after the form loaded it: show the new list.
-      if (e.status === 409) await load();
+      // The item or its mail changed after the form loaded them: show both as they are now.
+      if (e.status === 409) await Promise.all([reload(), load()]);
     } finally {
       sending = false;
     }
@@ -93,6 +100,8 @@
                 <span class="who">{m.from.name ?? m.from.address ?? "Unknown sender"}</span>
                 <span class="when">{m.date ? when(m.date) : ""}</span>
                 {#if !m.readable}<span class="hidden">Hidden from the agent for now</span>{/if}
+                <!-- A thread can hold more than one subject: each message that the job reads shows its own. -->
+                {#if (m.subject ?? "(no subject)") !== g.subject}<span class="what">{m.subject ?? "(no subject)"}</span>{/if}
               </li>
             {/each}
           </ul>
@@ -185,6 +194,10 @@
     font-variant-numeric: tabular-nums;
   }
   .hidden {
+    color: var(--color-text-muted);
+  }
+  .what {
+    flex-basis: 100%;
     color: var(--color-text-muted);
   }
   .row {

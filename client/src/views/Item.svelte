@@ -84,7 +84,7 @@
 
   <Act {item} onchange={(next) => (item = next)} more={handle} />
   {#if item.form !== "commitment" && startable && !starting}<div class="alone">{@render handle()}</div>{/if}
-  {#if starting}<Start {item} oncancel={() => (starting = false)} />{/if}
+  {#if starting}<Start {item} oncancel={() => (starting = false)} onitem={(next) => (item = next)} />{/if}
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>

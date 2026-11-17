@@ -110,3 +110,40 @@ test("a 409 with a job opens that job; another 409 shows the reason and loads th
   assert.equal(location.hash, "", "no job opens");
   view.destroy();
 });
+
+test("each message shows its subject when it is not the subject of its thread", async () => {
+  const base = preview("c-311").messages;
+  const list = { messages: [base[0], { ...base[1], subject: "Re: Q4 numbers for the board" }, { ...base[2], subject: "Salary review, private" }, { ...base[2], id: "m-1", subject: null }] };
+  serve(() => [200, list]);
+  const view = await mount("/src/views/Start.svelte", { item: commitment() });
+  await until(() => view.target.querySelector(".thread"));
+  const rows = [...view.target.querySelectorAll("li")].map(text);
+  assert.equal(rows.length, 4);
+  assert.match(rows[1], /Re: Q4 numbers for the board/);
+  assert.match(rows[2], /Salary review, private/);
+  assert.match(rows[3], /\(no subject\)/);
+  assert.doesNotMatch(rows[0], /Q4 numbers/, "the heading names the subject of the first message");
+  view.destroy();
+});
+
+test("an item that closed after the preview: the page shows the item as it is now, and the reason", async () => {
+  const asked = serve((method, path) => {
+    if (method === "POST") return [409, { error: "The item is not open any more." }];
+    if (path.endsWith("/job")) return asked.some(([m]) => m === "POST") ? [409, { error: "The item is not open any more." }] : [200, preview("c-311")];
+    return [200, commitment("done")];
+  });
+  location.hash = "";
+  const view = await mount("/src/views/Item.svelte", { item: commitment() });
+  button(view, "Handle this").click();
+  view.flushSync();
+  await until(() => view.target.querySelector(".thread"));
+  type(view, "Go.");
+  button(view, "Start the job").click();
+  await until(() => asked.some(([m, p]) => m === "GET" && p === "items/c-311"));
+  await until(() => !button(view, "Done"));
+  assert.match(text(view.target.querySelector("[role=alert]")), /The item is not open any more\./);
+  assert.ok(button(view, "Start the job").disabled, "no second start from a closed item");
+  assert.equal(button(view, "Handle this"), undefined);
+  assert.equal(location.hash, "");
+  view.destroy();
+});
