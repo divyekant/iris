@@ -1,5 +1,6 @@
 //! Tests of the state verbs of the web client (specification 2, section 4):
-//! `POST /api/items/{id}/close`, `/decline` and `/defer`.
+//! `POST /api/items/{id}/close`, `/decline`, `/defer`, `/skip`, `/mute` and
+//! `/dismiss`.
 
 use std::sync::Arc;
 
@@ -13,6 +14,12 @@ use tower::ServiceExt;
 /// A store with the commitment `c-1` of the status `status`, in the mode
 /// `observe` (no policy).
 fn store(name: &str, status: &str) -> Arc<Store> {
+    store_of(name, "commitment", "commitment-you-owe.json", "c-1", status)
+}
+
+/// A store with one item of the form `form` (row 1, ID `id`), from the
+/// schema example `example`, with the status `status`.
+fn store_of(name: &str, form: &str, example: &str, id: &str, status: &str) -> Arc<Store> {
     let dir = std::env::temp_dir().join(format!("iris-api-verbs-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let s = Store::open(&dir).unwrap();
@@ -23,18 +30,14 @@ fn store(name: &str, status: &str) -> Arc<Store> {
         ..Default::default()
     };
     s.put_messages(a, &[m]).unwrap();
-    let mut doc = iris_spec::read_json(
-        &iris_spec::schema_dir()
-            .join("examples")
-            .join("commitment-you-owe.json"),
-    );
-    doc["id"] = json!("c-1");
+    let mut doc = iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(example));
+    doc["id"] = json!(id);
     doc["status"] = json!(status);
     s.write(|tx| {
         tx.execute(
             "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
-             VALUES ('commitment', ?1, ?2, ?3, 0, 0)",
-            rusqlite::params![a, status, doc.to_string()],
+             VALUES (?4, ?1, ?2, ?3, 0, 0)",
+            rusqlite::params![a, status, doc.to_string(), form],
         )?;
         tx.execute(
             "INSERT INTO item_source(item_id, message_id, role) VALUES (1, 1, 'origin')",
@@ -200,6 +203,79 @@ async fn a_bad_request_writes_nothing() {
     let long = format!(r#"{{"reason":"{}"}}"#, "x".repeat(iris_api::MAX_REASON + 1));
     let (code, _) = post(&s, "/api/items/c-1/close", &long).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(count(&s, "SELECT count(*) FROM changeset"), 0);
+    assert_eq!(one(&s, "SELECT status FROM item"), "open");
+}
+
+/// The verbs of R5-02 (docs/specs/2026-11-17-preference-rules.md): each
+/// moves its form from each allowed status to its own status, through a
+/// person changeset and the ledger. Each other status gives 409 and no
+/// change. Another form gives 400 and writes nothing.
+#[tokio::test]
+async fn skip_mute_and_dismiss_change_their_form_only() {
+    let cases = [
+        (
+            "skip",
+            "feed",
+            "feed.json",
+            "f-1",
+            "skipped",
+            &["new", "read"][..],
+            &["skipped", "gone"][..],
+        ),
+        (
+            "mute",
+            "conversation",
+            "conversation.json",
+            "v-1",
+            "muted",
+            &["active", "quiet"][..],
+            &["muted", "gone"][..],
+        ),
+        (
+            "dismiss",
+            "signal",
+            "signal-code.json",
+            "s-1",
+            "dismissed",
+            &["active"][..],
+            &["expired", "used", "dismissed", "gone"][..],
+        ),
+    ];
+    for (verb, form, example, id, to, from, not) in cases {
+        for status in from {
+            let s = store_of(&format!("{verb}-{status}"), form, example, id, status);
+            let (code, item) = post(&s, &format!("/api/items/{id}/{verb}"), "{}").await;
+            assert_eq!(code, StatusCode::OK, "{verb} {status}: {item}");
+            assert_eq!(item["status"], json!(to), "{verb} {status}");
+            assert_eq!(one(&s, "SELECT status FROM item"), to);
+            assert_eq!(
+                one(
+                    &s,
+                    "SELECT c.author_kind || ' ' || a.decided_by || ' ' || l.state || ' ' || l.pre || ' ' || l.post
+                     FROM changeset c JOIN changeset_action a ON a.changeset_id = c.id
+                     JOIN ledger l ON l.action_id = a.id"
+                ),
+                format!(
+                    r#"person person applied {{"{id}":{{"status":"{status}"}}}} {{"{id}":{{"status":"{to}"}}}}"#
+                ),
+                "{verb} {status}"
+            );
+        }
+        for status in not {
+            let s = store_of(&format!("{verb}-no-{status}"), form, example, id, status);
+            let (code, body) = post(&s, &format!("/api/items/{id}/{verb}"), "{}").await;
+            assert_eq!(code, StatusCode::CONFLICT, "{verb} {status}: {body}");
+            assert_eq!(one(&s, "SELECT state FROM ledger"), "failed");
+            assert_eq!(one(&s, "SELECT status FROM item"), *status);
+        }
+    }
+    // Another form: the submit denies the action, and nothing stays.
+    let s = store("skip-commitment", "open");
+    for verb in ["skip", "mute", "dismiss"] {
+        let (code, body) = post(&s, &format!("/api/items/c-1/{verb}"), "{}").await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{verb}: {body}");
+    }
     assert_eq!(count(&s, "SELECT count(*) FROM changeset"), 0);
     assert_eq!(one(&s, "SELECT status FROM item"), "open");
 }

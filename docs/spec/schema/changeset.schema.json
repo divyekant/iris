@@ -458,7 +458,7 @@
       }
     },
     "verb": {
-      "$comment": "The verbs of release 2 (section 4), and draft and send of release 3 (docs/specs/2026-11-16-send.md). Only the undo of a trash makes untrash (section 7.4).",
+      "$comment": "The verbs of release 2 (section 4), and draft and send of release 3 (docs/specs/2026-11-16-send.md). Only the undo of a trash makes untrash (section 7.4). skip, mute and dismiss are of release 5 (docs/specs/2026-11-17-preference-rules.md).",
       "enum": [
         "archive",
         "inbox",
@@ -473,7 +473,10 @@
         "decline",
         "correct",
         "draft",
-        "send"
+        "send",
+        "skip",
+        "mute",
+        "dismiss"
       ]
     },
     "flag": {
@@ -781,7 +784,10 @@
               "verb": {
                 "enum": [
                   "close",
-                  "decline"
+                  "decline",
+                  "skip",
+                  "mute",
+                  "dismiss"
                 ]
               }
             }
@@ -858,7 +864,7 @@
           }
         },
         {
-          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments. correct changes any item (section 4). draft takes one account or one thread; send takes one draft (release 3).",
+          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments; skip, mute and dismiss change a feed item, a conversation and a signal. correct changes any item (section 4). draft takes one account or one thread; send takes one draft (release 3).",
           "if": {
             "properties": {
               "verb": {
@@ -866,7 +872,10 @@
                   "close",
                   "defer",
                   "decline",
-                  "correct"
+                  "correct",
+                  "skip",
+                  "mute",
+                  "dismiss"
                 ]
               }
             }
@@ -940,6 +949,75 @@
                   "items": {
                     "items": {
                       "$ref": "#/$defs/commitmentId"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "skip"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "string",
+                      "pattern": "^f-[1-9][0-9]*$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "mute"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "string",
+                      "pattern": "^v-[1-9][0-9]*$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "dismiss"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "string",
+                      "pattern": "^s-[1-9][0-9]*$"
                     }
                   }
                 }

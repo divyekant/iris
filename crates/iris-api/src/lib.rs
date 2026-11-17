@@ -434,14 +434,17 @@ async fn get_item(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result
     Ok(item(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
-/// A state verb of the person on one item: `close`, `decline` or `defer`
-/// (specification 2, section 4). The answer is the item after the change.
+/// A state verb of the person on one item: `close`, `decline`, `defer`,
+/// `skip`, `mute` or `dismiss` (specification 2, section 4). The answer is the item after the change.
 async fn post_verb(
     State(s): State<Arc<Store>>,
     Path((id, verb)): Path<(String, String)>,
     b: std::result::Result<Json<VerbBody>, JsonRejection>,
 ) -> Result<Response> {
-    if !matches!(verb.as_str(), "close" | "decline" | "defer") {
+    if !matches!(
+        verb.as_str(),
+        "close" | "decline" | "defer" | "skip" | "mute" | "dismiss"
+    ) {
         return Ok(not_found());
     }
     let b = body(b)?;

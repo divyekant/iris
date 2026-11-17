@@ -117,12 +117,14 @@ names!(
 );
 
 names!(
-    /// The verbs of release 2 (section 4), and `draft` and `send` of
-    /// release 3 (`docs/specs/2026-11-16-send.md`).
+    /// The verbs of release 2 (section 4), `draft` and `send` of release 3
+    /// (`docs/specs/2026-11-16-send.md`), and `skip`, `mute` and `dismiss`
+    /// of release 5 (`docs/specs/2026-11-17-preference-rules.md`).
     Verb {
         Archive = "archive", Inbox = "inbox", Label = "label", Unlabel = "unlabel",
         Read = "read", Unread = "unread", Trash = "trash", Untrash = "untrash", Close = "close",
         Defer = "defer", Decline = "decline", Correct = "correct", Draft = "draft", Send = "send",
+        Skip = "skip", Mute = "mute", Dismiss = "dismiss",
     }
 );
 
@@ -926,13 +928,15 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
             }
         }
         Verb::Label | Verb::Unlabel => label_name(c, &args)?,
-        Verb::Close | Verb::Decline => match (args.get("reason"), args.len()) {
-            (Some(Value::String(r)), 1) if !r.trim().is_empty() => Ok(()),
-            _ => Err(format!(
-                "{} needs one reason: {{\"reason\": \"...\"}}",
-                verb.as_str()
-            )),
-        },
+        Verb::Close | Verb::Decline | Verb::Skip | Verb::Mute | Verb::Dismiss => {
+            match (args.get("reason"), args.len()) {
+                (Some(Value::String(r)), 1) if !r.trim().is_empty() => Ok(()),
+                _ => Err(format!(
+                    "{} needs one reason: {{\"reason\": \"...\"}}",
+                    verb.as_str()
+                )),
+            }
+        }
         Verb::Defer => match (args.get("date"), args.len()) {
             (Some(Value::String(d)), 1) if is_date(d) => Ok(()),
             _ => Err("defer needs one date: {\"date\": \"YYYY-MM-DD\"}".into()),
@@ -993,7 +997,9 @@ fn label_name(
 
 /// The verbs that change Iris state, not a mailbox (section 4). Their
 /// targets are items.
-const STATE_VERBS: [&str; 4] = ["close", "defer", "decline", "correct"];
+const STATE_VERBS: [&str; 7] = [
+    "close", "defer", "decline", "correct", "skip", "mute", "dismiss",
+];
 
 /// The verbs that write mail (release 3). A `draft` takes one account, one
 /// thread or one draft; a `send` takes one draft.
@@ -1010,7 +1016,8 @@ fn clear(c: &Connection, action: i64) -> Result<()> {
 /// Resolve the targets of an action (section 4). A mailbox verb takes
 /// threads or messages and gives `action_message` rows: a thread gives each
 /// of its messages that is not gone and has no `SPAM` or `TRASH`. A state
-/// verb takes items (`close`, `defer` and `decline` take commitments only)
+/// verb takes items (`close`, `defer` and `decline` take commitments only;
+/// `skip` a feed item, `mute` a conversation and `dismiss` a signal)
 /// and gives `action_item` rows, which pin the items while the action is
 /// open, and the origin messages of the items as `action_message` rows, for
 /// the rules (section 6.2). Gives the reason of the denial, or `None`.
@@ -1110,8 +1117,15 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                 return bad()
             }
             (_, "items") => {
-                if verb != Verb::Correct && kind != Kind::Commitment {
-                    return Ok(Some(format!("{} takes only commitments", verb.as_str())));
+                let (want, words) = match verb {
+                    Verb::Correct => (kind, ""),
+                    Verb::Skip => (Kind::Feed, "feed items"),
+                    Verb::Mute => (Kind::Conversation, "conversations"),
+                    Verb::Dismiss => (Kind::Signal, "signals"),
+                    _ => (Kind::Commitment, "commitments"),
+                };
+                if kind != want {
+                    return Ok(Some(format!("{} takes only {words}", verb.as_str())));
                 }
                 // The document holds its ID, so the prefix must fit the item.
                 let found = c.execute(

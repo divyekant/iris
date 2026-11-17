@@ -111,7 +111,10 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         )
         .optional()?;
     let (verb, hash, decided_by, changeset, args) = row.ok_or(Inner::NotApproved)?;
-    if !matches!(verb.as_str(), "close" | "decline" | "defer" | "correct") {
+    if !matches!(
+        verb.as_str(),
+        "close" | "decline" | "defer" | "correct" | "skip" | "mute" | "dismiss"
+    ) {
         return Err(Inner::Verb(verb));
     }
     if expire(tx, action)? {
@@ -149,6 +152,8 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
         // A correction can change the status too (a record becomes
         // `corrected`, a signal follows `expires`).
         "correct" => vec![args["field"].as_str().unwrap_or("").into(), "status".into()],
+        // `skip`, `mute` and `dismiss` change the status only.
+        "skip" | "mute" | "dismiss" => vec!["status".into()],
         // `close` and `decline` remove `deferred_until`: the undo needs it.
         _ => vec!["status".into(), "deferred_until".into()],
     };
@@ -292,6 +297,23 @@ fn plan(
                     .into_iter()
                     .collect()
             }
+            "skip" | "mute" | "dismiss" => {
+                // Specification 1, section 6.8: the form and the statuses of each verb.
+                let (want, from): (&str, &[&str]) = match verb {
+                    "skip" => ("feed", &["new", "read"]),
+                    "mute" => ("conversation", &["active", "quiet"]),
+                    _ => ("signal", &["active"]),
+                };
+                if form != want || !from.contains(&status.as_str()) {
+                    return Ok(Err(format!(
+                        "{id} is {status}: {verb} changes a {want} that is {}",
+                        from.join(" or ")
+                    )));
+                }
+                [("status".to_string(), json!(new_status(verb)))]
+                    .into_iter()
+                    .collect()
+            }
             _ => {
                 // Specification 1, section 6.8: from `open` (or `deferred`) only.
                 if form != "commitment" || !matches!(status.as_str(), "open" | "deferred") {
@@ -393,6 +415,9 @@ fn new_status(verb: &str) -> &'static str {
     match verb {
         "close" => "done",
         "decline" => "declined",
+        "skip" => "skipped",
+        "mute" => "muted",
+        "dismiss" => "dismissed",
         _ => "deferred",
     }
 }
