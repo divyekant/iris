@@ -60,6 +60,43 @@ fn a_session_id_is_se_and_the_row() {
     }
 }
 
+/// For each string, the parse gives `n` only if the format of `n` gives the
+/// same string: no other form of an ID parses. Random strings over the
+/// characters of an ID, and random valid IDs.
+#[test]
+fn only_the_canonical_session_id_parses() {
+    let chars: Vec<char> = "se-0123456789j+ x\u{0}é".chars().collect();
+    let mut seed: u64 = 0x1d;
+    let mut next = |n: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    for _ in 0..20_000 {
+        let len = next(24) as usize;
+        let mut text: String = (0..len)
+            .map(|_| chars[next(chars.len() as u64) as usize])
+            .collect();
+        if next(2) == 0 {
+            text = format!("se-{text}");
+        }
+        if let Some(n) = parse_session_id(&text) {
+            assert!(n > 0, "{text:?}");
+            assert_eq!(format_session_id(n), text);
+        }
+    }
+    for _ in 0..20_000 {
+        let n = 1 + next(i64::MAX as u64) as i64;
+        assert_eq!(parse_session_id(&format_session_id(n)), Some(n));
+    }
+    assert_eq!(
+        parse_session_id(&format!("se-{}", i64::MAX)),
+        Some(i64::MAX)
+    );
+    assert_eq!(parse_session_id("se-9223372036854775808"), None);
+}
+
 #[test]
 fn one_live_session_for_each_job() {
     let (_d, store, job) = setup("live");
@@ -95,7 +132,16 @@ fn one_live_session_for_each_job() {
 #[test]
 fn a_session_starts_only_for_a_working_job_and_a_good_agent_name() {
     let (_d, store, job) = setup("register");
-    for bad in ["", "Claude", "a b", "a_b", "é", &"a".repeat(65)] {
+    for bad in [
+        "",
+        "Claude",
+        "a b",
+        "a_b",
+        "é",
+        "codex\u{0}x",
+        "codex\u{0}",
+        &"a".repeat(65),
+    ] {
         refused(register(&store, job, bad, NOW));
     }
     register(&store, job, &"a".repeat(64), NOW)
