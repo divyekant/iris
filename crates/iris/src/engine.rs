@@ -492,6 +492,10 @@ fn attention_loop(store: Arc<Store>) {
             }),
             Err(e) => say!("iris: notices: {e}"),
         }
+        // The measure "time to the first brief" ends at the first brief with content.
+        if let Err(e) = iris_api::measures::check_brief(&store, now_ms()) {
+            say!("iris: measures: {e}");
+        }
         std::thread::sleep(ATTENTION_EVERY);
     }
 }

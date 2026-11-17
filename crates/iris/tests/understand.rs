@@ -616,3 +616,38 @@ fn an_idle_turn_runs_the_hourly_proposal_step() {
     iris::engine::understand_turn(&store, now + 10_000);
     assert_eq!(calls.load(Ordering::SeqCst), before + 1);
 }
+
+/// The measure "time to the first brief" ends with no person and no API
+/// request: `iris understand` checks the brief after its run, also when
+/// the run fails.
+#[test]
+fn iris_understand_records_the_first_brief() {
+    let (store, _fake) = synced("first-brief");
+    let brief = |s: &Store| {
+        col(
+            s,
+            "SELECT count(*) FROM measure_time WHERE name = 'brief' AND at IS NOT NULL",
+        )
+    };
+    assert_eq!(brief(&store), Some(0));
+    let mut doc = iris_spec::read_json(&iris_spec::schema_dir().join("examples").join("feed.json"));
+    doc["id"] = serde_json::json!("f-1");
+    doc["status"] = serde_json::json!("new");
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 SELECT 'feed', account_id, 'new', ?1, 0, 0 FROM message LIMIT 1",
+                [doc.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), min(id), 'origin' FROM message",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let _ = iris(&store, &["understand"]);
+    assert_eq!(brief(&store), Some(1));
+}

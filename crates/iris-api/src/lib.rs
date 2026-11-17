@@ -1,4 +1,4 @@
-//! The local API of Iris (tracker item R1-17): read-only JSON from the store
+//! The local API of Iris (tracker item R1-17): JSON from the store
 //! for the web client and the read verbs. `crates/iris-api/README.md` gives
 //! the endpoints.
 //!
@@ -31,6 +31,7 @@ pub mod gate;
 mod jobs;
 mod ledger;
 mod matters;
+pub mod measures;
 mod notice;
 mod outbox;
 pub mod policy;
@@ -156,6 +157,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
+        .route("/api/measures", get(get_measures))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
         .route("/api/policy/discard", post(post_discard))
@@ -179,10 +181,15 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
-        .with_state(store)
+        .with_state(store.clone())
         .merge(ask)
         // The code exchange has no handler: the guard answers it.
         .route(SIGN_IN, any(|| async { not_found() }))
+        // Inside the guard: only a request with the sign-in counts.
+        .layer(middleware::from_fn_with_state(
+            measures::Counter::new(store),
+            measures::count,
+        ))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
@@ -199,7 +206,11 @@ async fn get_records(State(s): State<Arc<Store>>) -> Result<Response> {
 }
 
 async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
-    Ok(Json(brief(&s, now_ms())?).into_response())
+    let now = now_ms();
+    let b = brief(&s, now)?;
+    // The first brief with content ends the measure "time to the first brief".
+    measures::mark_brief(&s, &b, now)?;
+    Ok(Json(b).into_response())
 }
 
 async fn get_handled(
@@ -558,6 +569,14 @@ async fn get_raw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
         ),
     ];
     Ok((headers, Body::from_stream(parts)).into_response())
+}
+
+async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
+    let rss = tokio::task::spawn_blocking(measures::rss_kib)
+        .await
+        .ok()
+        .flatten();
+    Ok(Json(measures::measures(&s, rss)?).into_response())
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
