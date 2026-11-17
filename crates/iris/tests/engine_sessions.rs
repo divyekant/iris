@@ -1165,6 +1165,89 @@ fn a_failed_start_for_a_comment_is_tried_once() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// A fixture whose first session submitted a changeset, still live. Gives
+/// the sessions, the first session and the changeset ID.
+fn commented(name: &str) -> (Fixture, Arc<Sessions>, i64, String) {
+    let f = fixture(name, "sleep 30");
+    f.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (1, 1, 5, 'm1', 1000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (1, 1000, 'dana@example.com', 'me@example.com', 'Contract');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    add_scope(&f.store, f.job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "archive", "targets": ["m-1"]}),
+    )
+    .unwrap();
+    let cs = v["result"]["changeset"].as_str().unwrap().to_string();
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Old."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let row = iris_changeset::parse_changeset_id(&cs).unwrap();
+    iris_changeset::transaction(&f.store, |c| {
+        iris_changeset::comment_in(c, row, 1, "Keep it.", "k-0123456789abcdef", now())
+    })
+    .unwrap();
+    (f, s, first, cs)
+}
+
+/// A comment while a session is live: no second session starts while it
+/// runs, and exactly one session starts after it ends (spec, section 5).
+fn a_comment_during_a_session_starts_one_session_after_it() {
+    let (f, s, first, cs) = commented("comment-live");
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// The live session moves the job to `waiting` after a comment: the wake
+/// of the engine moves it back, and one session starts with the comment.
+fn a_comment_wakes_a_job_that_waits_after_it() {
+    let (f, s, first, cs) = commented("comment-wait");
+    let (until_day, _) = day(3);
+    let v = ask(
+        &f,
+        "wait",
+        serde_json::json!({ "until": until_day, "why": "Later." }),
+    )
+    .unwrap();
+    assert_eq!(v["result"]["state"], "waiting", "{v}");
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    s.wake(now());
+    let woke = iris_job::events(&f.store, f.job).unwrap().pop().unwrap();
+    assert_eq!(
+        (woke.by, woke.why.as_deref()),
+        (By::Engine, Some("comment"))
+    );
+    let next = next_session(&s, &f, first);
+    assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -1176,6 +1259,14 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "a_comment_during_a_session_starts_one_session_after_it",
+            a_comment_during_a_session_starts_one_session_after_it,
+        ),
+        (
+            "a_comment_wakes_a_job_that_waits_after_it",
+            a_comment_wakes_a_job_that_waits_after_it,
+        ),
         (
             "a_failed_start_for_a_comment_is_tried_once",
             a_failed_start_for_a_comment_is_tried_once,
