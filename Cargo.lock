@@ -741,6 +741,7 @@ dependencies = [
  "iris-triage",
  "iris-understand",
  "iris-web",
+ "iris-workspace",
  "rusqlite",
  "serde",
  "serde_json",
@@ -790,6 +791,7 @@ version = "0.0.0"
 dependencies = [
  "iris-compose",
  "iris-job",
+ "iris-senders",
  "iris-spec",
  "iris-store",
  "iris-talk",

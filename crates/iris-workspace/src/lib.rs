@@ -361,6 +361,16 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
     Ok(built)
 }
 
+/// True if the message `id` can go into a workspace, by the rule of the
+/// build: understood, and [`clean`]. A job starts only with such mail
+/// (`docs/specs/2026-11-17-start-job.md`).
+pub fn readable(c: &Connection, id: i64) -> rusqlite::Result<bool> {
+    match iris_talk::message(c, id)? {
+        Some(m) => clean(c, &m),
+        None => Ok(false),
+    }
+}
+
 /// True if `m` can go into a workspace: clean for the conversation rule, not
 /// gone, and not the source of a signal, which can hold a security code.
 fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {

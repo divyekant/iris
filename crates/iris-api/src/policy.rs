@@ -207,3 +207,49 @@ fn difference(active: &Policy, file: &Policy) -> Value {
         "changed": changed,
     })
 }
+
+/// A grant inside one open job (`docs/specs/2026-11-17-start-job.md`,
+/// section 2): one `allow` rule for the agent of `job`, for `verbs`. Gives
+/// `None` when no job has the ID. `seen` is the active version that the
+/// person saw.
+pub fn grant(
+    store: &Store,
+    job: &str,
+    verbs: &[String],
+    seen: Option<i64>,
+    now: i64,
+) -> Result<Option<Value>> {
+    let Some(row) = iris_job::parse_job_id(job) else {
+        return Ok(None);
+    };
+    let mut list: Vec<iris_policy::Verb> = Vec::new();
+    for v in verbs {
+        match iris_policy::Verb::from_name(v) {
+            Some(v) if !list.contains(&v) => list.push(v),
+            Some(_) => return Err(Error::Query(format!("the verb {v:?} is in the list twice"))),
+            None => {
+                return Err(Error::Query(format!(
+                    "not a verb that a rule can allow: {v:?}"
+                )))
+            }
+        }
+    }
+    if list.is_empty() {
+        return Err(Error::Query("a grant needs one or more verbs".into()));
+    }
+    let state = match iris_job::get(store, row) {
+        Ok(j) => j.state,
+        Err(iris_job::Error::NotFound) => return Ok(None),
+        Err(iris_job::Error::Store(e)) => return Err(Error::Store(e)),
+        Err(e) => return Err(Error::Conflict(e.to_string())),
+    };
+    // A job that ends after this check keeps a rule that matches nothing.
+    if state == iris_job::State::Done {
+        return Err(conflict("The job ended."));
+    }
+    let change = Change::Grant {
+        job: iris_job::format_job_id(row),
+        verbs: list,
+    };
+    self::change(store, seen, change, now).map(Some)
+}

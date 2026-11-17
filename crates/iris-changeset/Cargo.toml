@@ -11,6 +11,7 @@ publish.workspace = true
 iris-compose = { version = "0.0.0", path = "../iris-compose" }
 iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-talk = { version = "0.0.0", path = "../iris-talk" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
 iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
