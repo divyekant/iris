@@ -16,6 +16,7 @@
   import { href } from "../route";
   import { get, post, type ThreadDraft } from "../api";
   import { hold, HOLD, quiet, said, type Verb } from "../act";
+  import { access } from "../access.svelte.ts";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
   // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
@@ -109,6 +110,8 @@
         return party(who);
     }
   });
+  // With two or more accounts, the line names the mailbox of the item (card R6-02).
+  let account = $derived(item.account ? access.accounts[item.account] : undefined);
   let waits = $derived(item.form === "conversation" && (item.your_turn || (item.new ?? 0) > 0));
 </script>
 
@@ -147,7 +150,7 @@
   <div class="body">
     <a class="title" href={href.item(item.id)}>{item.title}</a>
     <p class="detail">
-      {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
+      {#if account}<span class="account" title={`From your account ${account}`}>{account}</span>{/if}{detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
     {#if item.ready?.includes("draft")}
       <p class="prepared">
@@ -249,6 +252,14 @@
     position: relative;
     z-index: 1;
     color: var(--color-text-muted);
+  }
+  /* The account leads the detail line, so a clamp of a long detail never hides it. */
+  .account {
+    font-weight: 600;
+  }
+  .account::after {
+    content: "·";
+    margin: 0 var(--space-2);
   }
   .due::after {
     content: "";

@@ -28,6 +28,7 @@
   import SignInNotice from "./views/SignInNotice.svelte";
   import Notices from "./views/Notices.svelte";
   import Stop, { refresh as refreshStop } from "./views/Stop.svelte";
+  import Accounts from "./views/Accounts.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
@@ -204,6 +205,8 @@
       {#await get<MatterList>("matters") then list}<Matters {list} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "matter"}
       {#await get<MatterView>(`matters/${encodeURIComponent(route.id)}`) then view}<Matter {view} />{:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "accounts"}
+      {#await get<Status>("status") then status}<Accounts {status} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "rules"}
       {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}
     {/if}
@@ -213,6 +216,7 @@
 <footer class="site">
   <a class="touch" href="#/rules">Rules</a>
   <a class="touch" href="#/measures">Measures</a>
+  <a class="touch" href="#/accounts">Accounts</a>
   <span>Iris runs on your machine.</span>
 </footer>
 
