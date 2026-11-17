@@ -1203,26 +1203,13 @@ fn cancel_send(store: &Store, id: &str, now: i64) -> Result<&'static str, String
         Some((iris_store::Kind::Draft, n)) => n,
         _ => return Err(format!("{id} is not a draft ID such as d-4")),
     };
-    let action: Option<i64> = store
-        .read(|c| {
-            use rusqlite::OptionalExtension;
-            Ok(c.query_row(
-                "SELECT a.id FROM action_draft ad JOIN changeset_action a ON a.id = ad.action_id
-                 WHERE ad.draft_id = ?1 AND a.verb = 'send'
-                 ORDER BY a.state IN ('approved', 'held') DESC, a.id DESC LIMIT 1",
-                [draft],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })
-        .map_err(|e| e.to_string())?;
-    let Some(action) = action else {
-        return Err(format!("{id} has no send"));
-    };
-    match iris_changeset::cancel(store, action, now).map_err(|e| e.to_string())? {
-        iris_changeset::Cancel::Done => Ok("Cancelled. The send does not leave."),
-        iris_changeset::Cancel::Started => Err("The send started. It cannot be cancelled.".into()),
-        iris_changeset::Cancel::NotOpen => Err(format!("{id} has no send that waits")),
+    match iris_changeset::cancel_draft(store, draft, now).map_err(|e| e.to_string())? {
+        None => Err(format!("{id} has no send")),
+        Some(iris_changeset::Cancel::Done) => Ok("Cancelled. The send does not leave."),
+        Some(iris_changeset::Cancel::Started) => {
+            Err("The send started. It cannot be cancelled.".into())
+        }
+        Some(iris_changeset::Cancel::NotOpen) => Err(format!("{id} has no send that waits")),
     }
 }
 

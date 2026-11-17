@@ -152,12 +152,26 @@ sign-in, as after a sync.
   transaction. Both run on the one write connection of the store, so only
   one of the two commits. A cancel after the claim changes nothing and
   says "The send started. It cannot be cancelled."
-- The command `iris cancel <d-N>` takes the ID of a draft, finds the send
-  action of the draft and calls it. The API
-  `POST /api/actions/<id>/cancel` calls it with the action ID. Each is
-  local only, as each command and each API call.
+- `iris_changeset::cancel_draft(store, draft, now)` finds the open send of
+  a draft (`approved` or `held` first, then the newest) and calls `cancel`
+  on it. `cancel` checks the state again in its own transaction, so a
+  release between the two steps gives `Started`. It gives `None` if the
+  draft has no send.
+- The command `iris cancel <d-N>` and the API
+  `POST /api/outbox/<d-N>/cancel` take the ID of a draft and call
+  `cancel_draft`. The outbox shows drafts, not actions, so the person
+  names a send by its draft. The API answers 200 for `Done`, 409 "The send
+  started. It cannot be cancelled." for `Started`, and 404 for all other
+  cases. Each is local only, as each command and each API call.
 
 ### 6. The outbox view
+
+`GET /api/outbox` gives the state of the switch (`on`, `since`) and each
+`approved` and `held` send, oldest decision first, with no more than 200
+sends. Each send has its draft ID, its state, the time of the approval,
+the time that it can leave (`null` while the switch is off), its flags,
+and the recipients and subject from the stored raw bytes of the draft. The
+API reads the switch, but it has no call that changes it.
 
 `#/outbox` lists each `approved` and `held` send: the recipients, the
 subject, the warnings (the words of `FLAGS`), the time left, and a Cancel

@@ -33,7 +33,7 @@ pub use flags::{
     action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
     has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,
 };
-pub use outbox::{cancel, hold, Cancel, CANCELLED};
+pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
 
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
