@@ -274,6 +274,43 @@ async fn a_body_that_is_not_valid_writes_nothing() {
     let mut v = base.clone();
     v["account"] = json!("a-9");
     cases.push(v);
+    // Target IDs that are not IDs of their kind (issue #499).
+    for bad in [
+        "bad",
+        "",
+        "a-",
+        "a-x",
+        "a-0",
+        "a--1",
+        "t-1",
+        "m-1",
+        "cs-1",
+        "a-1 ",
+        " a-1",
+        "a-99999999999999999999",
+    ] {
+        let mut v = base.clone();
+        v["account"] = json!(bad);
+        cases.push(v);
+    }
+    for bad in [
+        "bad",
+        "",
+        "t-",
+        "t-x",
+        "t-0",
+        "a-1",
+        "m-1",
+        "t-1x",
+        "t-99999999999999999999",
+    ] {
+        let mut v = base.clone();
+        v.as_object_mut().unwrap().remove("account");
+        v.as_object_mut().unwrap().remove("subject");
+        v["thread"] = json!(bad);
+        v["parent"] = json!("m-2");
+        cases.push(v);
+    }
     for body in cases {
         let (code, v) = call(&s, "POST", "/api/write", Some(body.clone())).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{body} gave {v}");
@@ -328,24 +365,131 @@ async fn a_reply_names_the_newest_mail() {
     assert_eq!(code, StatusCode::CONFLICT);
 }
 
-/// The person wrote the newest mail: the reply goes to its recipients.
-#[tokio::test]
-async fn a_reply_after_your_own_mail_goes_to_its_recipients() {
-    let dir = temp("own");
-    let s = store(&dir);
+/// Add the newest mail of thread 1 (message 3), from `from` to `to`, with
+/// the label `SENT` if `sent`.
+fn newest(s: &Store, from: &str, to: &str, sent: bool) {
     s.write(|tx| {
-        tx.execute_batch(
+        tx.execute(
             "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
-               VALUES (1, 1, 'p3', 3000);
-             INSERT INTO header(message_id, from_addr, to_addrs, subject)
-               VALUES (3, 'owner@example.com', 'priya@example.com,bad address,sam@example.com', 'Re: Q4');",
+               VALUES (1, 1, 'p3', 3000)",
+            [],
         )?;
+        tx.execute(
+            "INSERT INTO header(message_id, from_addr, to_addrs, subject)
+               VALUES (3, ?1, ?2, 'Re: Q4')",
+            [from, to],
+        )?;
+        if sent {
+            tx.execute_batch(
+                "INSERT INTO label(account_id, provider_id, name, kind)
+                   VALUES (1, 'SENT', 'SENT', 'system');
+                 INSERT INTO message_label(message_id, label_id)
+                   SELECT 3, id FROM label WHERE provider_id = 'SENT';",
+            )?;
+        }
         Ok(())
     })
     .unwrap();
+}
+
+/// The person wrote the newest mail (the label `SENT` says so): the reply
+/// goes to its recipients. Each entry of the list counts, with a display
+/// name, a quoted comma or a comment too; an entry with no address does
+/// not.
+#[tokio::test]
+async fn a_reply_after_your_own_mail_goes_to_its_recipients() {
+    let lists = [
+        (
+            "priya@example.com,bad address,sam@example.com",
+            vec!["priya@example.com", "sam@example.com"],
+        ),
+        (
+            "Priya Shah <priya@example.com>, \"Okafor, Sam\" <SAM@example.com>",
+            vec!["priya@example.com", "sam@example.com"],
+        ),
+        (
+            "priya@example.com (Priya), <sam@example.com>",
+            vec!["priya@example.com", "sam@example.com"],
+        ),
+        ("", vec![]),
+    ];
+    for (i, (to, want)) in lists.into_iter().enumerate() {
+        let dir = temp(&format!("own-{i}"));
+        let s = store(&dir);
+        newest(&s, OWNER, to, true);
+        let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+        assert_eq!(v["to"], json!(want), "{to}");
+        assert_eq!(v["subject"], "Re: Q4");
+    }
+}
+
+/// For random text in the `To` list of mail of the person, each start
+/// address of the reply passes the address check of a draft (R3-01): text
+/// that is not a list gives no address that is not valid.
+#[tokio::test]
+async fn property_each_start_address_is_valid() {
+    const SIGNS: &[&str] = &[
+        "a",
+        "Z",
+        "@",
+        ".",
+        ",",
+        ";",
+        ":",
+        "<",
+        ">",
+        "(",
+        ")",
+        "\"",
+        " ",
+        "é",
+        "example.com",
+        "b@example.org",
+    ];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = |n: usize| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % n as u64) as usize
+    };
+    let dir = temp("own-any");
+    let s = store(&dir);
+    newest(&s, OWNER, "", true);
+    for _ in 0..300 {
+        let n = next(16);
+        let text: String = (0..n).map(|_| SIGNS[next(SIGNS.len())]).collect();
+        s.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE header SET to_addrs = ?1 WHERE message_id = 3",
+                [&text],
+            )?)
+        })
+        .unwrap();
+        let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+        for a in v["to"].as_array().unwrap() {
+            let a = a.as_str().unwrap().to_string();
+            let c = iris_compose::Content {
+                to: vec![a.clone()],
+                cc: vec![],
+                subject: "s".into(),
+                body: String::new(),
+            };
+            assert!(c.check().is_ok(), "{text:?} gave {a:?}");
+        }
+    }
+}
+
+/// From can be forged: mail that comes in with the address of the person
+/// in From (no label `SENT`) is mail of a stranger. The reply goes to that
+/// From address, never to the recipients that the stranger chose.
+#[tokio::test]
+async fn a_forged_from_does_not_choose_the_recipients() {
+    let dir = temp("forged");
+    let s = store(&dir);
+    newest(&s, OWNER, "victim@example.com, other@example.com", false);
     let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
-    assert_eq!(v["to"], json!(["priya@example.com", "sam@example.com"]));
-    assert_eq!(v["subject"], "Re: Q4");
+    assert_eq!(v["to"], json!([OWNER]));
 }
 
 /// A changeset that is not a write has no write state.

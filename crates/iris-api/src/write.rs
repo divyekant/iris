@@ -97,7 +97,13 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
         flags: &b.flags,
     };
     let cs = iris_changeset::format_changeset_id;
-    match iris_changeset::write_mail(store, &press, now_ms).map_err(changeset_error)? {
+    // A refusal of the store is a refusal of the input of the press (for
+    // example a target that is not an ID of its kind): 400, nothing written.
+    let written = iris_changeset::write_mail(store, &press, now_ms).map_err(|e| match e {
+        iris_changeset::Error::Refused(why) => Error::Query(why),
+        e => changeset_error(e),
+    })?;
+    match written {
         Ok(Written::New(row)) => Ok(Pressed::New(cs(row))),
         Ok(Written::Again(row)) => Ok(Pressed::Again(cs(row))),
         Err(Refusal::Denied(why)) => Err(Error::Query(why)),
@@ -245,11 +251,14 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
             "This thread has no mail to reply to.".into(),
         ));
     };
-    let (account, address, subject, to): (i64, String, Option<String>, Option<String>) = c
+    // `sent`: the label `SENT` is the evidence that the person wrote the
+    // mail. From is not: anyone can put the address of the person there.
+    let (account, subject, to, sent): (i64, Option<String>, Option<String>, bool) = c
         .query_row(
-            "SELECT m.account_id, a.address, h.subject, h.to_addrs FROM message m
-             JOIN account a ON a.id = m.account_id
-             LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
+            "SELECT m.account_id, h.subject, h.to_addrs,
+                    EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                            WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+             FROM message m LEFT JOIN header h ON h.message_id = m.id WHERE m.id = ?1",
             [parent],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -257,15 +266,13 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
     let m = message_in(c, parent)
         .map_err(iris_store::Error::from)?
         .expect("reply_parent gives a message");
-    let from = m.summary.from.address.clone().unwrap_or_default();
     // The person wrote the newest mail: the reply goes to its recipients.
-    let to: Vec<String> = if from.eq_ignore_ascii_case(&address) {
-        to.unwrap_or_default()
-            .split(',')
-            .map(|a| a.trim().to_string())
-            .collect()
+    let to: Vec<String> = if sent {
+        let mut out = vec![];
+        iris_senders::head::each_address(to.as_deref().unwrap_or(""), |a, _| out.push(a));
+        out
     } else {
-        vec![from]
+        vec![m.summary.from.address.clone().unwrap_or_default()]
     };
     let to: Vec<String> = to.into_iter().filter(|a| valid_address(a)).collect();
     let text = m
