@@ -870,6 +870,9 @@ async fn brief_follows_the_queries_of_section_8() {
     // The triage proposal: the stored triage changeset, not a count of the
     // brief. Before the first triage run, nothing waits.
     assert_eq!(b["proposal"], json!({"count": 0, "verbs": {}}));
+    // Triage leaves out mail that waits for its link check: end the checks,
+    // as the first step of a batch run does.
+    iris_understand::store::recheck_links(&store, NOW, None).unwrap();
     iris_triage::run(&store, 1, NOW).unwrap();
     let want: u64 = iris_observe::counts(&store, 1)
         .unwrap()

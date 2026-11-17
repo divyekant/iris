@@ -79,7 +79,8 @@
             "review",
             "deny",
             "hide",
-            "bundle"
+            "bundle",
+            "notify"
           ]
         },
         "verbs": {
@@ -124,7 +125,7 @@
         ]
       },
       "else": {
-        "$comment": "An item has no verb, no author and no job, so a hide or a bundle rule with one could never match.",
+        "$comment": "An item has no verb, no author and no job, so a hide, a bundle or a notify rule with one could never match.",
         "properties": {
           "verbs": false,
           "job": false,

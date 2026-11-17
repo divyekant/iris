@@ -49,7 +49,9 @@ pub fn undo(store: &Store, ledger: i64, now_ms: i64) -> Result<Vec<i64>> {
     iris_changeset::transaction(store, |c| make(c, &author, ledger, now_ms)).map_err(|e| match e {
         iris_changeset::Error::Store(e) => Error::Store(e),
         iris_changeset::Error::NotFound => Error::Undo(format!("l-{ledger} is not in the ledger")),
-        iris_changeset::Error::Refused(why) => Error::Undo(why),
+        iris_changeset::Error::Refused(why) | iris_changeset::Error::Denied(why) => {
+            Error::Undo(why)
+        }
     })
 }
 
@@ -145,7 +147,7 @@ fn done(c: &Connection, ledger: i64, no_inbox: bool) -> rusqlite::Result<bool> {
 }
 
 /// Add action `n` of the undo to the draft `cs`, with its link to the entry
-/// (migration 12). The target is the entry: submit takes its messages from
+/// (migration 23). The target is the entry: submit takes its messages from
 /// the ledger, so no list of message IDs is in memory (section 9).
 fn add(
     c: &Connection,

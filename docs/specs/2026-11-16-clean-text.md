@@ -36,7 +36,8 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool }
+pub struct Link { pub text: String, pub href: String }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
 pub const TEXT_LIMIT: usize = 32_000;           // characters of `text`
@@ -185,11 +186,44 @@ not used makes no cut in either case.
 - These elements go out with their content, as raw text: `script`, `style`,
   `title`, `template`, `textarea`, `xmp`, `noembed`, `noframes`, `iframe`.
   These go out with their content: `head`, `svg`, `math`.
-- Links: `[text](href)` for an `http`, `https` or `mailto` target. If the
+- Links: `[text](href)` for an `http`, `https` or `mailto` target. The
+  href is read as a browser reads it first (`browser_href`): no control
+  character or space at the ends, and no tab or line end inside. So
+  `https:x.example` and ` ht<tab>tps://x.example` are web targets. If the
   text is the target, only the text shows. If the text has more than one
-  line, the form is `text (<href>)`. In the target, a space, `(`, `)`, `<`
-  and `>` become percent codes (`%20`, `%28`, `%29`, `%3C`, `%3E`). Other
-  targets (for example `javascript:`) show the text only.
+  line, the form is `text (<href>)`. In the target, `(`, `)`, `<`, `>` and
+  each white space or control character become percent codes of their
+  UTF-8 bytes (`%28`, `%29`, `%3C`, `%3E`, `%20`, `%09`, `%C2%A0`), so the
+  target is one token. Other targets (for example `javascript:`) show the
+  text only.
+- `Clean.links` lists each link whose text is not empty and is not its
+  target (card R5-10, the hostile mark `link` of spec 1 section 6.7): the
+  text as a person sees it (trimmed, with its lines, with no Markdown marks
+  such as `> ` or `- ` and no invisible characters), and the href
+  as the HTML gives it (entities decoded, not percent-encoded). Each HTML
+  part that the walker reads adds its links. Each HTML version of a
+  `multipart/alternative` adds its links too, also a version that the text
+  does not use, because a mail client can show it. The walker reads these
+  versions for their links only: they add no text and no attachment.
+  A hidden link has no text, so it is not in the list. The texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
+  true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
+  its output limit or past `PART_LIMIT`; a shown HTML element past the
+  stack limit (its content goes out); a shown link whose text or href
+  holds a named character reference that the decoder does not know (a
+  browser decodes it, for example `&period;`); `MAX_PARTS`, `MAX_DEPTH` or a
+  parser limit; a message that Iris cannot parse. `clean_cut(raw, true)`
+  reads the first bytes of a longer message: `links_cut` is also true when
+  an HTML part reaches the end of `raw`. The caller reads the rest of the
+  file with `html_part_in`. It reads the message from its start, for the
+  boundaries that the `multipart` headers declare, and is true when a MIME
+  part header past the cut (after a delimiter line of a declared boundary,
+  up to the empty line) has the type `text/html`, with any case, white
+  space or folding. `text/html` in a part body does not count, also after
+  a line that starts with `--` but is not a delimiter. The scan is also
+  true when a limit can hide a boundary or a type: a `Content-Type` field
+  past 8 KiB or with a line past 1,000 bytes, or more than 64 boundaries. The caller then sets `links_cut` too,
+  because the rest can hold an HTML part that a mail client shows. The
+  links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.

@@ -53,11 +53,22 @@ impl Auth {
     /// True if a DKIM signature of `domain` or of a parent domain of it
     /// passes (relaxed alignment, the rule of `iris-senders`).
     pub fn dkim_pass(&self, domain: &str) -> bool {
-        let domain = domain.to_ascii_lowercase();
+        let domain = ascii_domain(domain);
         self.dkim.iter().any(|(d, r)| {
-            let d = d.to_ascii_lowercase();
+            let d = ascii_domain(d);
             r == "pass" && !d.is_empty() && (domain == d || domain.ends_with(&format!(".{d}")))
         })
+    }
+}
+
+/// One form for each name of a domain: lowercase punycode, as a browser
+/// reads it. A header can name `münchen.de` and an authentication result
+/// `xn--mnchen-3ya.de`; both give `xn--mnchen-3ya.de`. A name that is not a
+/// valid domain stays as it is, in lowercase.
+pub fn ascii_domain(d: &str) -> String {
+    match url::Host::parse(d) {
+        Ok(url::Host::Domain(a)) => a,
+        _ => d.to_lowercase(),
     }
 }
 

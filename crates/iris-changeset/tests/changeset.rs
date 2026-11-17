@@ -33,7 +33,7 @@ fn agent() -> Author {
         kind: AuthorKind::Agent,
         name: Some("Claude Code".into()),
         session: Some("se-12".into()),
-        job: Some("j-142".into()),
+        job: None,
     }
 }
 
@@ -534,11 +534,26 @@ fn first_contact_flag_for_a_stranger_thread() {
 /// Fuzz test of the target rows that the product does not control: random
 /// verbs, JSON shapes, IDs and arguments, written as another writer would.
 /// Submit never panics. A mailbox action is `proposed` only with one or
-/// more messages, a state action only with items of its kind.
+/// more messages, a state action only with items of its kind, a draft only
+/// with one account or one thread, and a send only with the one draft.
 #[test]
 fn random_target_rows() {
     let dir = TempDir::new("fuzz");
     let s = store(&dir);
+    // Draft d-1: a reply in thread t-1, from a draft action of its own.
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0);
+             INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+               VALUES (last_insert_rowid(), 1, 1, 'draft', '{}', '{}');
+             INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content,
+                               hash, raw, action_id, created_at, updated_at)
+               VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', 'h', x'00',
+                       last_insert_rowid(), 0, 0);",
+        )?;
+        Ok(())
+    })
+    .unwrap();
     let mut x: u64 = 0x2545_f491_4f6c_dd1d;
     let mut next = move |n: u64| {
         x ^= x << 13;
@@ -546,12 +561,17 @@ fn random_target_rows() {
         x ^= x << 17;
         x % n
     };
-    let keys = ["threads", "messages", "items", "x", ""];
+    let keys = [
+        "threads", "messages", "items", "accounts", "drafts", "x", "",
+    ];
     let ids = [
         "t-1", "t-2", "t-3", "t-9", "m-1", "m-3", "m-5", "c-1", "r-2", "p-1", "x", "m-0", "1",
+        "a-1", "a-2", "d-1", "d-9",
     ];
-    let verbs = ["archive", "close", "decline", "defer", "correct"];
-    let (mut proposed, mut state) = (0, 0);
+    let verbs = [
+        "archive", "close", "decline", "defer", "correct", "draft", "send",
+    ];
+    let (mut proposed, mut state, mut write) = (0, 0, 0);
     for round in 0..400 {
         let cs = create(&s, &agent(), NOW).unwrap();
         s.write(|tx| {
@@ -571,6 +591,23 @@ fn random_target_rows() {
                     };
                     targets.insert(keys[next(keys.len() as u64) as usize].into(), v);
                 }
+                let v = next(verbs.len() as u64) as usize;
+                let verb = verbs[v];
+                // A third of the rows get a target of the right kind for the verb.
+                if next(3) == 0 {
+                    let fits = [
+                        json!({"threads": ["t-1"]}),
+                        json!({"items": ["c-1"]}),
+                        json!({"items": ["c-1"]}),
+                        json!({"items": ["c-1"]}),
+                        json!({"items": ["r-2"]}),
+                        [json!({"accounts": ["a-1"]}), json!({"threads": ["t-1"]})]
+                            [next(2) as usize]
+                            .clone(),
+                        json!({"drafts": ["d-1"]}),
+                    ];
+                    targets = fits[v].as_object().unwrap().clone();
+                }
                 let args = [
                     "{\"reason\":\"Done.\"}",
                     "{\"date\":\"2028-02-29\"}",
@@ -585,12 +622,19 @@ fn random_target_rows() {
                     "\"x\"",
                     "0",
                     "{\"\":{}}",
+                    "{\"to\":[\"p@x.org\"],\"subject\":\"Hi\",\"body\":\"B\"}",
+                    "{\"to\":[\"p@x.org\"],\"body\":\"B\"}",
+                    "{\"to\":[\"p@x.org\"],\"subject\":\"\",\"body\":\"B\"}",
+                    "{\"to\":[],\"body\":\"B\"}",
+                    "{\"to\":\"p@x.org\",\"body\":1}",
                 ];
-                let v = next(verbs.len() as u64) as usize;
-                let verb = verbs[v];
                 // Half the rows get the valid shape of the verb, the rest any shape.
-                let fit = [5, 0, 0, 1, 3 + next(2) as usize][v];
-                let args = args[if next(2) == 0 { fit } else { next(13) as usize }];
+                let fit = [5, 0, 0, 1, 3 + next(2) as usize, 13 + next(2) as usize, 5][v];
+                let args = args[if next(2) == 0 {
+                    fit
+                } else {
+                    next(args.len() as u64) as usize
+                }];
                 tx.execute(
                     "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
                      VALUES (?1, 1, ?2, ?3, ?4, ?5)",
@@ -621,6 +665,24 @@ fn random_target_rows() {
         for a in &all {
             let resolved = a["resolved"]["messages"].as_array().unwrap();
             match a["decision"]["state"].as_str().unwrap() {
+                "proposed" if a["verb"] == "draft" => {
+                    let t = &a["targets"];
+                    assert!(
+                        t == &json!({"accounts": ["a-1"]})
+                            || t["threads"].as_array().is_some_and(|l| l.len() == 1),
+                        "round {round}: {a}"
+                    );
+                    write += 1;
+                }
+                "proposed" if a["verb"] == "send" => {
+                    assert_eq!(
+                        a["targets"],
+                        json!({"drafts": ["d-1"]}),
+                        "round {round}: {a}"
+                    );
+                    assert_eq!(a["args"], json!({}), "round {round}: {a}");
+                    write += 1;
+                }
                 "proposed" if a["verb"] == "archive" => {
                     assert!(!resolved.is_empty(), "round {round}: {a}");
                     assert_eq!(a["args"], json!({}), "round {round}: {a}");
@@ -646,6 +708,7 @@ fn random_target_rows() {
     }
     assert!(proposed > 0, "the test reaches the proposed path");
     assert!(state > 0, "the test reaches a proposed state action");
+    assert!(write > 0, "the test reaches a proposed draft or send");
 }
 
 /// Submit gives the messages from the targets only: a row of another
@@ -1609,7 +1672,7 @@ fn random_ledger_targets() {
                 Ok(tx.last_insert_rowid())
             })
             .unwrap();
-        // The link needs the whole entry as the target (migration 12).
+        // The link needs the whole entry as the target (migration 23).
         let linked = next(3) != 0
             && s.write(|tx| {
                 Ok(tx.execute(

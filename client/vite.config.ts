@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { answer, decide, raw, withdraw } from "./dev/fixtures.ts";
+import { act, answer, answerSender, askAnswer, decide, noticePost, outboxPost, policyPost, raw, startJob, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -23,6 +23,28 @@ export default defineConfig(({ mode }) => {
             res.end(source);
             return;
           }
+          if (url === "/ask" && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              res.setHeader("content-type", "application/json");
+              let question: unknown;
+              try {
+                question = JSON.parse(text)?.question;
+              } catch {
+                question = undefined;
+              }
+              // As the engine: a body with no question text is a 400.
+              if (typeof question !== "string" || !question.trim()) {
+                res.statusCode = 400;
+                res.end(JSON.stringify({ error: "A question has 1 to 500 characters." }));
+                return;
+              }
+              // A pause, so the wait of the view shows.
+              setTimeout(() => res.end(JSON.stringify(askAnswer(question))), 900);
+            });
+            return;
+          }
           const decision = url.match(/^\/changesets\/([^/?]+)\/(decide|withdraw)$/);
           if (decision && req.method === "POST") {
             let text = "";
@@ -33,6 +55,69 @@ export default defineConfig(({ mode }) => {
               res.statusCode = done ? 200 : 404;
               res.setHeader("content-type", "application/json");
               res.end(JSON.stringify(done ?? { error: "Not found." }));
+            });
+            return;
+          }
+          const gate = url.match(/^\/senders\/([^/?]+)\/([a-z]+)$/);
+          if (gate && req.method === "POST") {
+            const done = answerSender(decodeURIComponent(gate[1]), gate[2]);
+            res.statusCode = done ? 200 : 404;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(done ?? { error: "Not found." }));
+            return;
+          }
+          const verb = url.match(/^\/items\/([^/?]+)\/(close|decline|defer)$/);
+          if (verb && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              const done = act(decodeURIComponent(verb[1]), verb[2], JSON.parse(text || "{}"));
+              res.statusCode = done ? 200 : 404;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(done ?? { error: "Not found." }));
+            });
+            return;
+          }
+          const cancel = req.method === "POST" ? outboxPost(url) : undefined;
+          if (cancel) {
+            res.statusCode = cancel[0];
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(cancel[1]));
+            return;
+          }
+          const notice = req.method === "POST" ? noticePost(url) : undefined;
+          if (notice) {
+            res.statusCode = notice[0];
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(notice[1]));
+            return;
+          }
+          if ((url === "/policy/grant" || url === "/policy/remove") && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              const [code, out] = policyPost(url, JSON.parse(text || "{}"));
+              res.statusCode = code;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(out));
+            });
+            return;
+          }
+          if (url === "/jobs" && req.method === "POST") {
+            const [code, out] = startJob();
+            res.statusCode = code;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify(out));
+            return;
+          }
+          if (url.startsWith("/watches") && req.method === "POST") {
+            let text = "";
+            req.on("data", (part: Buffer) => (text += part));
+            req.on("end", () => {
+              const [code, out] = watchPost(url, JSON.parse(text || "{}"));
+              res.statusCode = code;
+              res.setHeader("content-type", "application/json");
+              res.end(JSON.stringify(out));
             });
             return;
           }

@@ -28,9 +28,13 @@
 //! reads the labels at Gmail. See the failure list in specification 2,
 //! section 7.2.
 
+mod send;
 mod state;
+mod step;
 
+pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
+pub use step::{step, Step};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;
@@ -60,10 +64,14 @@ pub enum Error {
     /// stays as it was. Apply again after the other apply.
     Busy,
     /// The verb has no Gmail apply: a state verb applies with
-    /// [`apply_state`].
+    /// [`apply_state`], and a `send` with [`release`].
     Verb(String),
     /// The ledger entry has no undo now, with the reason ([`undo`]).
     Undo(String),
+    /// A sent copy had other content than the approved content (ledger
+    /// error [`SENT_OTHER`]). Each release stops until the owner checks
+    /// assumption 6 of the send spec. The action stays as it was.
+    SendStopped,
 }
 
 impl std::fmt::Display for Error {
@@ -76,6 +84,7 @@ impl std::fmt::Display for Error {
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
             Error::Undo(why) => write!(f, "no undo: {why}"),
+            Error::SendStopped => write!(f, "{SENT_OTHER}: each send stops until the owner checks"),
         }
     }
 }
@@ -128,6 +137,16 @@ pub enum Outcome {
     Waiting,
     /// 14 days passed after the submit: the state is `expired`.
     Expired,
+    /// A send waits for its hold delay until this time, in milliseconds
+    /// since 1970. The action stays `held`.
+    Hold(i64),
+    /// The send switch is off (`iris sending on` turns it on). The send
+    /// stays `held`, and no call is made.
+    SendingOff,
+    /// The result of a `drafts.create` or `drafts.send` call is not known
+    /// yet. The ledger row stays in `writing`, and the recovery decides
+    /// later. No call is made again.
+    Pending,
 }
 
 /// The name of the `batchModify` call in `ops`.
@@ -349,6 +368,7 @@ pub fn apply(
         })?;
     let (verb, approved_hash, decided_by, writing, writing_account) =
         head.ok_or(Error::NotApproved(action))?;
+    let write_verb = verb == "draft" || verb == "send";
     // The label name of `label` and `unlabel`; submit checked the argument.
     let label: Option<String> = match verb.as_str() {
         "label" | "unlabel" => store.read(|c| {
@@ -362,6 +382,11 @@ pub fn apply(
     };
     let mut change = match (verb.as_str(), &label) {
         ("label" | "unlabel", Some(_)) => Change {
+            add: Vec::new(),
+            remove: Vec::new(),
+            call: BATCH,
+        },
+        _ if write_verb => Change {
             add: Vec::new(),
             remove: Vec::new(),
             call: BATCH,
@@ -386,6 +411,10 @@ pub fn apply(
         r.recover_account()?;
         run = Some(r);
     }
+    // A send leaves only through the release, after its hold.
+    if verb == "send" {
+        return Err(Error::Verb(verb));
+    }
     if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
         return Ok(o);
     }
@@ -397,6 +426,9 @@ pub fn apply(
             r
         }
     };
+    if verb == "draft" {
+        return send::draft(&mut run, action);
+    }
     // The undo of `label` or `unlabel` changes the label of the entry, by
     // its ID: a rename at Gmail after the entry does not change it.
     let undo_label: Option<String> = match &label {
@@ -737,7 +769,19 @@ impl<'a, 'b> Run<'a, 'b> {
                 .iter()
                 .filter_map(|(id, p)| p.clone().map(|p| (*id, p)))
                 .collect();
-            self.store.write(|tx| {
+            // The cutoff: a revoke that commits before this transaction
+            // stops the call and each later call of the action.
+            let action = self.store.read(|c| {
+                Ok(c.query_row(
+                    "SELECT action_id FROM ledger WHERE id = ?1",
+                    [ledger],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })?;
+            let outside = self.store.write(|tx| {
+                if let Some(why) = outside_grant(tx, action)? {
+                    return Ok(Some(why));
+                }
                 tx.execute(
                     "UPDATE ledger SET call = ?2 WHERE id = ?1",
                     params![ledger, k],
@@ -746,8 +790,12 @@ impl<'a, 'b> Run<'a, 'b> {
                 for (id, _) in messages.iter().filter(|(_, p)| p.is_none()) {
                     set_listed(tx, ledger, *id, "gone")?;
                 }
-                Ok(())
+                Ok(None)
             })?;
+            if let Some(why) = outside {
+                // The calls that ran stay done; the rest never run.
+                return self.end(ledger, Some(why));
+            }
             if live.is_empty() {
                 continue;
             }
@@ -910,6 +958,9 @@ impl<'a, 'b> Run<'a, 'b> {
     /// never started is read again for its `pre`. Then the calls that never
     /// started continue.
     fn recover(&mut self, ledger: i64) -> Result<Outcome> {
+        if send::is_write(self.store, ledger)? {
+            return send::recover(self, ledger);
+        }
         let (call, change) = self.store.read(|c| {
             let call: i64 =
                 c.query_row("SELECT call FROM ledger WHERE id = ?1", [ledger], |r| {
@@ -1087,7 +1138,7 @@ fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_sto
 }
 
 /// Milliseconds since the Unix epoch.
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -1135,17 +1186,57 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
     if first_open || (!undo && iris_policy::active(tx)?.policy.mode == Mode::Observe) {
         return Ok(Some(Outcome::Waiting));
     }
+    if let Some(why) = deny_outside_grant(tx, action)? {
+        return Ok(Some(Outcome::Denied(why)));
+    }
     Ok(None)
 }
 
-/// Expire an approved action 14 days after its submit (section 5.5), if it
+/// Why an action of a job session is outside the grant of its job now
+/// (docs/specs/2026-11-17-job-verbs.md, section 4), or `None`.
+pub(crate) fn outside_grant(tx: &Connection, action: i64) -> iris_store::Result<Option<String>> {
+    iris_changeset::grant_denial(tx, action).map_err(|e| match e {
+        iris_changeset::Error::Store(e) => e,
+        other => iris_store::Error::Query(other.to_string()),
+    })
+}
+
+/// Deny an approved action that is outside the grant of its job, in the
+/// transaction of the caller, before any provider call of the action. An
+/// action with a ledger row in `writing` is not denied here: the check
+/// before each of its calls stops it.
+pub(crate) fn deny_outside_grant(
+    tx: &Connection,
+    action: i64,
+) -> iris_store::Result<Option<String>> {
+    let writing: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')",
+        [action],
+        |r| r.get(0),
+    )?;
+    if writing {
+        return Ok(None);
+    }
+    let Some(why) = outside_grant(tx, action)? else {
+        return Ok(None);
+    };
+    tx.execute(
+        "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
+           policy = NULL, reason = ?2, decided_at = ?3
+         WHERE id = ?1 AND state IN ('approved', 'held')",
+        params![action, why, now()],
+    )?;
+    Ok(Some(why))
+}
+
+/// Expire an approved action or a held send 14 days after its submit (section 5.5), if it
 /// has no ledger row in `writing`. Gives `true` if it expired.
 fn expire(tx: &Connection, action: i64) -> iris_store::Result<bool> {
     let expired = tx.execute(
         "UPDATE changeset_action SET state = 'expired', decided_by = 'expiry', rule = NULL,
            policy = NULL, reason = NULL,
            decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
-         WHERE id = ?1 AND state = 'approved'
+         WHERE id = ?1 AND state IN ('approved', 'held')
            AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
            AND NOT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)
            AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
@@ -1177,10 +1268,17 @@ fn check(
         decide(store, action, "in_review", reason)?;
         return Ok(Some(Outcome::Review(reason.into())));
     }
+    // Each mailbox that the action names: the account of each message,
+    // of its draft, and each account target of a new mail. All must be the
+    // mailbox of this apply.
     let other_account: bool = store.read(|c| {
         Ok(c.query_row(
             "SELECT EXISTS (SELECT 1 FROM action_message am JOIN message m ON m.id = am.message_id
-               WHERE am.action_id = ?1 AND m.account_id <> ?2)",
+               WHERE am.action_id = ?1 AND m.account_id <> ?2)
+             OR EXISTS (SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               WHERE ad.action_id = ?1 AND d.account_id <> ?2)
+             OR EXISTS (SELECT 1 FROM changeset_action a, json_each(a.targets, '$.accounts') t
+               WHERE a.id = ?1 AND t.value <> 'a-' || ?2)",
             params![action, account],
             |r| r.get(0),
         )?)
@@ -1195,7 +1293,7 @@ fn check(
     let reason = if now_hash.1 != approved_hash.unwrap_or_default() {
         Some("The action changed after its approval.")
     } else if other_account {
-        Some("The action has messages of another account.")
+        Some("The action names another account.")
     } else {
         None
     };
@@ -1279,7 +1377,7 @@ fn decide(store: &Store, action: i64, state: &str, reason: &str) -> Result<()> {
         Ok(tx.execute(
             "UPDATE changeset_action SET state = ?2, decided_by = 'engine', rule = NULL,
                policy = NULL, reason = ?3, decided_at = ?4
-             WHERE id = ?1 AND state = 'approved'",
+             WHERE id = ?1 AND state IN ('approved', 'held')",
             params![action, state, reason, now],
         )?)
     })?;

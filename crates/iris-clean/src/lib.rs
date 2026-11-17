@@ -81,7 +81,199 @@ pub struct Clean {
     /// (spec 1 section 7.3): its `method` parameter is `REQUEST`, or its
     /// decoded body has a `METHOD:REQUEST` line.
     pub invitation: bool,
+    /// Each HTML link of the body whose text is not its target, in order
+    /// (the link check of spec 1 section 6.7). A version of the body that
+    /// the text does not use adds its links too: a mail client can show it.
+    pub links: Vec<Link>,
+    /// True if links went out: past [`LINK_BYTES`], or past the output
+    /// limit of an HTML part.
+    pub links_cut: bool,
 }
+
+/// One HTML link whose text is not its target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    /// The link text as the clean text shows it, trimmed. It can have lines.
+    pub text: String,
+    /// The `href` as the HTML gives it, with its entities decoded, after
+    /// [`browser_href`].
+    pub href: String,
+}
+
+/// True when `rest`, the part of a message past a cut, has a MIME part
+/// header with the type `text/html`: a mail client can show an HTML part
+/// there. `before` is the message from its start up to the cut: the scan
+/// reads it first, for the boundaries that the headers declare and to know
+/// if the cut is in a header or in a body. Its HTML parts do not count.
+///
+/// The message header starts the scan. A part header starts after a
+/// delimiter line of a declared boundary (`--` and the boundary) and ends
+/// at an empty line. `text/html` in a part body (an attachment) does not
+/// count, also after a line that starts with `--` but is not a delimiter.
+/// Folded header lines count. Case and white space in the type do not
+/// matter, and boundaries match with no case, so the scan finds a part
+/// header in more places, not fewer. One pass that keeps at most
+/// `LINE_BYTES` of each line and `MAX_BOUNDARIES` boundaries, so the
+/// memory does not grow with the input.
+pub fn html_part_in(before: &[u8], mut rest: impl std::io::Read) -> std::io::Result<bool> {
+    let mut scan = PartScan {
+        header: true,
+        value: None,
+        line: Vec::with_capacity(PartScan::LINE_BYTES),
+        long: false,
+        bounds: Vec::new(),
+        incomplete: false,
+    };
+    for &b in before {
+        scan.byte(b);
+    }
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = rest.read(&mut buf)?;
+        if n == 0 {
+            // The end of the input also ends the open header field.
+            let last = scan.end_line();
+            return Ok(last || scan.end_field() || scan.incomplete);
+        }
+        if buf[..n].iter().any(|&b| scan.byte(b)) || scan.incomplete {
+            return Ok(true);
+        }
+    }
+}
+
+/// The state of [`html_part_in`].
+struct PartScan {
+    /// True in a header: the message header, or a part header.
+    header: bool,
+    /// The `Content-Type` value of the open header field, lowercase, with
+    /// its folded lines, at most `LINE_BYTES`.
+    value: Option<Vec<u8>>,
+    /// The first bytes of the open line, lowercase.
+    line: Vec<u8>,
+    /// True when the open line is longer than `LINE_BYTES`.
+    long: bool,
+    /// The declared boundaries, lowercase.
+    bounds: Vec<Vec<u8>>,
+    /// True when a limit can hide a boundary or a type: a `Content-Type`
+    /// field past `VALUE_BYTES` or with a line past `LINE_BYTES`, or more
+    /// than `MAX_BOUNDARIES` boundaries. Then the scan is true: an HTML
+    /// part can be past the cut.
+    incomplete: bool,
+}
+
+impl PartScan {
+    /// The longest header line of RFC 5322, with its line end.
+    const LINE_BYTES: usize = 1000;
+    /// The most bytes of one `Content-Type` field, with its folded lines.
+    const VALUE_BYTES: usize = 8 * 1024;
+    const MAX_BOUNDARIES: usize = 64;
+
+    /// Reads one byte. True when a header field ends at it with the type
+    /// `text/html`.
+    fn byte(&mut self, b: u8) -> bool {
+        if b == b'\n' {
+            return self.end_line();
+        }
+        if self.line.len() < Self::LINE_BYTES {
+            self.line.push(b.to_ascii_lowercase());
+        } else {
+            self.long = true;
+        }
+        false
+    }
+
+    /// Ends the open line. True when it ends a header field with the type
+    /// `text/html`.
+    fn end_line(&mut self) -> bool {
+        let line = std::mem::take(&mut self.line);
+        let text = line.strip_suffix(b"\r").unwrap_or(&line);
+        let long = std::mem::take(&mut self.long);
+        let mut html = false;
+        if self.header && matches!(text.first(), Some(b' ' | b'\t')) {
+            if let Some(v) = &mut self.value {
+                v.extend_from_slice(text);
+                if long || v.len() > Self::VALUE_BYTES {
+                    self.incomplete = true;
+                    v.truncate(Self::VALUE_BYTES);
+                }
+            }
+        } else {
+            html = self.end_field();
+            if self.delimiter(text) {
+                self.header = true;
+            } else if text.is_empty() {
+                self.header = false;
+            } else if self.header {
+                if let Some(v) = text.strip_prefix(b"content-type:") {
+                    self.incomplete |= long;
+                    self.value = Some(v.to_vec());
+                }
+            }
+        }
+        self.line = line;
+        self.line.clear();
+        html
+    }
+
+    /// Ends the open `Content-Type` field: keeps its boundary, and is true
+    /// for the type `text/html`.
+    fn end_field(&mut self) -> bool {
+        let Some(v) = self.value.take() else {
+            return false;
+        };
+        let kind: Vec<u8> = v
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        if kind.starts_with(b"multipart/") {
+            if let Some(b) = boundary(&v) {
+                if self.bounds.len() < Self::MAX_BOUNDARIES {
+                    self.bounds.push(b);
+                } else {
+                    self.incomplete = true;
+                }
+            }
+        }
+        kind.starts_with(b"text/html")
+    }
+
+    /// True for a delimiter line of a declared boundary: `--`, the
+    /// boundary, then `--` or nothing, then only white space.
+    fn delimiter(&self, text: &[u8]) -> bool {
+        let Some(t) = text.strip_prefix(b"--") else {
+            return false;
+        };
+        self.bounds.iter().any(|b| {
+            t.strip_prefix(b.as_slice()).is_some_and(|r| {
+                let r = r.strip_prefix(b"--").unwrap_or(r);
+                r.iter().all(u8::is_ascii_whitespace)
+            })
+        })
+    }
+}
+
+/// The `boundary` parameter of a lowercase `Content-Type` value, through
+/// the MIME parser (quotes, white space and RFC 2231 forms). `None` if
+/// there is none, or if it is empty.
+fn boundary(value: &[u8]) -> Option<Vec<u8>> {
+    let field = [&b"Content-Type:"[..], value, b"\r\n\r\n"].concat();
+    let head = MessageParser::new().parse_headers(&field)?;
+    let b = head.content_type()?.attribute("boundary")?;
+    (!b.is_empty()).then(|| b.to_ascii_lowercase().into_bytes())
+}
+
+/// An href as the URL standard reads it before the parse: no control
+/// characters or spaces at the ends, and no tab or line end inside.
+pub fn browser_href(href: &str) -> String {
+    href.trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect()
+}
+
+/// The most bytes of link texts and hrefs in [`Clean::links`].
+pub const LINK_BYTES: usize = 1024 * 1024;
 
 /// One attachment: a name, a type and a size, and the text if there is one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +290,15 @@ pub struct Attachment {
 
 /// Make the clean text of one raw RFC 5322 message.
 pub fn clean(raw: &[u8]) -> Clean {
+    clean_cut(raw, false)
+}
+
+/// [`clean`] for the first bytes of a message: `raw_cut` is true when
+/// `raw` is a prefix of a longer message. Then the link list is cut
+/// (`links_cut`) when an HTML body part reaches the end of `raw`. An HTML
+/// part that starts past the cut is the work of the caller
+/// ([`html_part_in`]).
+pub fn clean_cut(raw: &[u8], raw_cut: bool) -> Clean {
     let mut parts = 0;
     let mut attach_left = ATTACHMENT_TEXT_LIMIT;
     if !mime_fields_fit(raw) {
@@ -107,6 +308,9 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: true,
             attachments: Vec::new(),
             invitation: false,
+            // Iris could not read the message, so it cannot check its links.
+            links: Vec::new(),
+            links_cut: true,
         };
     }
     let Some(parsed) = parser().parse(raw) else {
@@ -116,10 +320,14 @@ pub fn clean(raw: &[u8]) -> Clean {
             cut: false,
             attachments: Vec::new(),
             invitation: false,
+            // Iris could not read the message, so it cannot check its links.
+            links: Vec::new(),
+            links_cut: true,
         };
     };
     let invitation = calendar_request(parsed.root().root_part(), 0, &mut 0);
-    let (subject, text, cut, files) = message(parsed.root(), 0, &mut parts);
+    let at_end = raw_cut.then_some(raw.len());
+    let (subject, text, cut, files, links) = message(parsed.root(), 0, &mut parts, at_end);
     let mut attachments = Vec::new();
     for f in files {
         attachment(f, &mut parts, &mut attach_left, &mut attachments);
@@ -130,6 +338,30 @@ pub fn clean(raw: &[u8]) -> Clean {
         cut,
         attachments,
         invitation,
+        links_cut: links.cut,
+        links: links.list,
+    }
+}
+
+/// The links of one message, inside [`LINK_BYTES`].
+#[derive(Default)]
+struct Links {
+    list: Vec<Link>,
+    bytes: usize,
+    cut: bool,
+}
+
+impl Links {
+    fn add(&mut self, found: Vec<(String, String)>) {
+        for (text, href) in found {
+            let size = text.len() + href.len();
+            if self.cut || self.bytes + size > LINK_BYTES {
+                self.cut = true;
+                return;
+            }
+            self.bytes += size;
+            self.list.push(Link { text, href });
+        }
     }
 }
 
@@ -261,7 +493,8 @@ fn message<'a>(
     m: MessageRef<'a>,
     depth: usize,
     parts: &mut usize,
-) -> (String, String, bool, Vec<File<'a>>) {
+    at_end: Option<usize>,
+) -> (String, String, bool, Vec<File<'a>>, Links) {
     let root = m.root_part();
     let subject = field(root, HeaderName::Subject).map_or(String::new(), |raw| {
         let parsed = HeaderForm::Text.parse(raw);
@@ -284,6 +517,9 @@ fn message<'a>(
         dropped: 0,
         files: Vec::new(),
         is_reply,
+        links: Links::default(),
+        at_end,
+        links_only: false,
     };
     w.entity(root, depth);
     *parts = w.parts;
@@ -291,7 +527,7 @@ fn message<'a>(
     if w.cut {
         text.push_str(CUT_MARK);
     }
-    (subject, text, w.cut, w.files)
+    (subject, text, w.cut, w.files, w.links)
 }
 
 /// True if a `text/calendar` part in the MIME tree of `part` is a request.
@@ -410,17 +646,28 @@ struct Walker<'a> {
     files: Vec<File<'a>>,
     /// True if the message is a reply. Quoted history then goes out.
     is_reply: bool,
+    /// The links of each HTML part that the walker reads.
+    links: Links,
+    /// The length of the raw message when it is a prefix of a longer
+    /// message ([`clean_cut`]).
+    at_end: Option<usize>,
+    /// True while the walker reads a version of `multipart/alternative`
+    /// that the text does not use: only its links count.
+    links_only: bool,
 }
 
 impl<'a> Walker<'a> {
     fn entity(&mut self, part: MessagePart<'a>, depth: usize) {
         self.parts += 1;
+        // Each limit that skips bytes of the message can skip a link too.
         if self.parts > MAX_PARTS || depth > MAX_DEPTH {
             self.cut = true;
+            self.links.cut = true;
             return;
         }
         if part.flags().contains(PartFlags::LIMIT_REACHED) {
             self.cut = true;
+            self.links.cut = true;
         }
         let ct_field =
             field(part, HeaderName::ContentType).map(|v| HeaderForm::ContentType.parse(v));
@@ -464,6 +711,7 @@ impl<'a> Walker<'a> {
             let max = MAX_PARTS.saturating_sub(self.parts) + 1;
             let list: Vec<MessagePart<'a>> = part.children().take(max).collect();
             self.cut |= part.children().len() > max;
+            self.links.cut |= part.children().len() > max;
             if sub == "alternative" {
                 self.alternative(list, depth);
             } else {
@@ -476,6 +724,9 @@ impl<'a> Walker<'a> {
         let is_text = mime_type == "text/plain" || mime_type == "text/html";
         if is_text && !attachment && name.is_none() {
             self.body_part(part, enc, mime_type == "text/html", charset.as_deref());
+            return;
+        }
+        if self.links_only {
             return;
         }
         self.files.push(File {
@@ -492,14 +743,24 @@ impl<'a> Walker<'a> {
     /// the clean text uses it too. The walker reads the versions from the
     /// end and uses the first one with text after the quote and signature
     /// steps. A version that is not used adds no text, no attachment and no cut.
+    ///
+    /// Each version adds its links, also a version that the text does not
+    /// use: a mail client can show any version.
     fn alternative(&mut self, list: Vec<MessagePart<'a>>, depth: usize) {
-        for part in list.into_iter().rev() {
+        let mut versions = list.into_iter().rev();
+        while let Some(part) = versions.next() {
             let before = (self.texts.len(), self.chars, self.cut, self.files.len());
             let dropped = self.dropped;
             self.entity(part, depth + 1);
             // A version with text is used, also when the text is full and
             // its text did not fit: its cut stays.
             if self.texts.len() > before.0 || self.dropped > dropped {
+                let (cut, only) = (self.cut, self.links_only);
+                self.links_only = true;
+                for rest in versions {
+                    self.entity(rest, depth + 1);
+                }
+                (self.cut, self.links_only) = (cut, only);
                 return;
             }
             let texts;
@@ -522,12 +783,30 @@ impl<'a> Walker<'a> {
         // a later part with clean text makes a cut.
         let (bytes, truncated) = decode_capped(part.raw_body(), enc, PART_LIMIT);
         self.cut |= truncated;
+        let reaches_end = self
+            .at_end
+            .is_some_and(|end| part.offset_end() as usize >= end);
+        if html && (truncated || reaches_end) {
+            self.links.cut = true;
+        }
+        if self.links_only {
+            if html {
+                let c = html::convert(&mime::decode(&bytes, charset), self.is_reply);
+                self.links.add(c.links);
+                self.links.cut |= c.links_cut;
+            }
+            return;
+        }
         let text = mime::decode(&bytes, charset);
         drop(bytes);
         let text = if html {
-            let (md, full) = html::to_markdown(&text, self.is_reply);
-            self.cut |= full;
-            md
+            let c = html::convert(&text, self.is_reply);
+            self.cut |= c.full;
+            self.links.add(c.links);
+            // The links after the output limit, or deep past the stack
+            // limit, are not in the list.
+            self.links.cut |= c.links_cut;
+            c.md
         } else {
             text
         };
@@ -601,7 +880,10 @@ fn attachment(f: File, parts: &mut usize, attach_left: &mut usize, out: &mut Vec
             });
             return;
         };
-        let (subject, mut t, inner_cut, files) = message(parsed.root(), f.depth + 1, parts);
+        // shortcut: the links of an attached message do not count; count
+        // them if phishing comes as an attached message.
+        let (subject, mut t, inner_cut, files, _) =
+            message(parsed.root(), f.depth + 1, parts, None);
         // The cut mark is not part of the budget: take it off, and put one
         // mark on below.
         if inner_cut {

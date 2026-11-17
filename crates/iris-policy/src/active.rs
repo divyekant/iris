@@ -188,6 +188,7 @@ pub(crate) fn record(
         )?;
     }
     crate::attention::evaluate(tx, policy, now)?;
+    crate::propose::accepted(tx, policy, now)?;
     Ok(version)
 }
 

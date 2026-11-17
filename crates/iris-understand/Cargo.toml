@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+idna_adapter = "=1.1.0"
 iris-clean = { version = "0.0.0", path = "../iris-clean" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-senders = { version = "0.0.0", path = "../iris-senders" }
@@ -17,6 +18,7 @@ jsonschema = { version = "=0.61.2", default-features = false }
 # Same version as iris-store, so the program has one copy of SQLite.
 rusqlite = "=0.43.0"
 serde_json = "1"
+url = "=2.5.4"
 
 [dev-dependencies]
 iris-eval = { version = "0.0.0", path = "../iris-eval" }

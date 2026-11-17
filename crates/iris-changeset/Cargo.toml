@@ -8,9 +8,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+iris-compose = { version = "0.0.0", path = "../iris-compose" }
+iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-senders = { version = "0.0.0", path = "../iris-senders" }
 iris-talk = { version = "0.0.0", path = "../iris-talk" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
+iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
 # Same version as iris-store, so the program has one copy of SQLite.
 rusqlite = "=0.43.0"
 serde_json = "1"

@@ -175,22 +175,35 @@ fn run_in(c: &Connection, account: i64, now_ms: i64) -> Result<Outcome, Error> {
         [changeset],
         |r| r.get(0),
     )?;
-    decide_all(c, changeset, revision, now_ms)?;
+    decide_submitted(c, changeset, revision, iris_policy::Author::Triage, now_ms)?;
     Ok(Outcome::Submitted {
         changeset,
         revision,
     })
 }
 
-/// Spec 2 section 5.4, step 5: in the mode `apply`, the active policy
-/// decides each `proposed` action of the revision, with its reason. In the
-/// mode `observe`, each action stays `proposed`.
-fn decide_all(c: &Connection, changeset: i64, revision: i64, now_ms: i64) -> Result<(), Error> {
+/// Spec 2 section 5.4, step 5, for each author: in the mode `apply`, the
+/// active policy decides each `proposed` action of the revision, with its
+/// reason. In the mode `observe`, a hard limit that denies (section 6.5)
+/// denies the action, and each other action stays `proposed`. Call it in
+/// the transaction of the submit, so a stop leaves no submitted revision
+/// without its decisions.
+pub fn decide_submitted(
+    c: &Connection,
+    changeset: i64,
+    revision: i64,
+    author: iris_policy::Author,
+    now_ms: i64,
+) -> Result<(), Error> {
     let active = iris_policy::active(c)?;
-    if active.policy.mode != Mode::Apply {
-        return Ok(());
-    }
+    let apply = active.policy.mode == Mode::Apply;
     let now = now_ms.div_euclid(1000);
+    // A rule with `job` matches only the actions of that job.
+    let job: Option<String> = c.query_row(
+        "SELECT author_job FROM changeset WHERE id = ?1",
+        [changeset],
+        |r| r.get(0),
+    )?;
     // One action at a time, by its number, so memory holds one action.
     let mut last = 0i64;
     while let Some((id, n, verb, flags)) = c
@@ -211,7 +224,27 @@ fn decide_all(c: &Connection, changeset: i64, revision: i64, now_ms: i64) -> Res
         .optional()?
     {
         last = n;
-        let verb = iris_policy::Verb::from_name(&verb).expect("a triage verb");
+        let id_n = ActionId {
+            changeset,
+            revision,
+            n,
+        };
+        // No rule decides a verb that the policy does not know: `draft` and
+        // `send` (spec R3-01, issue #239). Each goes to a person, in the mode
+        // `apply`; in the mode `observe` it stays proposed, as other actions.
+        let Some(verb) = iris_policy::Verb::from_name(&verb) else {
+            if apply {
+                decide_in(
+                    c,
+                    id_n,
+                    State::InReview,
+                    By::Policy,
+                    Some("No rule can allow a draft or a send: a person decides."),
+                    now_ms,
+                )?;
+            }
+            continue;
+        };
         let bulk = serde_json::from_str::<Vec<String>>(&flags)
             .map_err(|e| Error::Refused(format!("flags: {e}")))?
             .iter()
@@ -228,13 +261,17 @@ fn decide_all(c: &Connection, changeset: i64, revision: i64, now_ms: i64) -> Res
         let d = active.policy.decide(
             &iris_policy::Action {
                 verb,
-                author: iris_policy::Author::Triage,
-                job: None,
+                author,
+                job: job.as_deref(),
                 bulk,
                 now,
             },
             facts.iter().map(Facts::message),
         );
+        // A hard limit: a denial with no rule (spec 2 section 6.5).
+        if !apply && !(d.outcome == Policy::Deny && d.rule.is_none()) {
+            continue;
+        }
         let to = match d.outcome {
             Policy::Allow => State::Approved,
             Policy::Review => State::InReview,
@@ -251,18 +288,7 @@ fn decide_all(c: &Connection, changeset: i64, revision: i64, now_ms: i64) -> Res
             (None, _) if bulk || to == State::Denied => By::Limit,
             (None, _) => By::Policy,
         };
-        decide_in(
-            c,
-            ActionId {
-                changeset,
-                revision,
-                n,
-            },
-            to,
-            by,
-            Some(&d.reason),
-            now_ms,
-        )?;
+        decide_in(c, id_n, to, by, Some(&d.reason), now_ms)?;
     }
     Ok(())
 }

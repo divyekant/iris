@@ -53,10 +53,15 @@ fn allowed(from: Option<&str>) -> &'static [&'static str] {
             "replaced",
         ],
         Some("in_review") => &["approved", "denied", "expired", "cancelled", "replaced"],
-        // approved to held comes with release 3. applied, failed and
-        // undone come only with the state of the ledger entry (migration
-        // 10, trigger ledger_state): see the_ledger_moves_the_action.
+        // approved to held only for a send (migration 22): this action is an
+        // archive. applied, failed and undone come only with the state of
+        // the ledger entry (migration 10, trigger ledger_state): see
+        // the_ledger_moves_the_action.
         Some("approved") => &["in_review", "denied", "expired", "cancelled"],
+        // The moves out of the held outbox (migration 22). The helper denies
+        // by `rule`, and only the engine or a person denies a held send:
+        // iris-changeset tests/outbox.rs covers those moves.
+        Some("held") => &["expired", "cancelled"],
         Some(_) => &[],
     }
 }
@@ -990,7 +995,7 @@ fn the_ledger_moves_the_action() {
     refused(&s, "UPDATE ledger SET history_id = '5'");
     refused(&s, "UPDATE ledger SET state = 'undone', undone_by = 1");
     // The undo is an action of its own, with its own entry, in a changeset
-    // of the person (migration 12). An action with no link is not an undo.
+    // of the person (migration 23). An action with no link is not an undo.
     const UNDO: &str = "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 6);
          INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
          VALUES (2, 1, 1, 'inbox', '{\"ledger\":[\"l-1\"]}', '{}');";
