@@ -61,6 +61,17 @@ fn store(dir: &TempDir) -> Arc<Store> {
 /// approved by `decision`, and its ledger entry in the state `applied`,
 /// with each message done. Gives the ledger row ID.
 fn archived(s: &Store, author: &str, messages: &[i64], decision: &str) -> i64 {
+    archived_why(s, author, messages, decision, Some("Old mail."))
+}
+
+/// As `archived`, with the reason `why` of the action.
+fn archived_why(
+    s: &Store,
+    author: &str,
+    messages: &[i64],
+    decision: &str,
+    why: Option<&str>,
+) -> i64 {
     s.write(|tx| {
         let job = (author == "agent").then_some("j-1");
         tx.execute(
@@ -71,8 +82,8 @@ fn archived(s: &Store, author: &str, messages: &[i64], decision: &str) -> i64 {
         let ids: Vec<String> = messages.iter().map(|m| format!("\"m-{m}\"")).collect();
         tx.execute(
             "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args, why)
-             VALUES (?1, 1, 1, 'archive', ?2, '{}', 'Old mail.')",
-            params![cs, format!("{{\"messages\":[{}]}}", ids.join(","))],
+             VALUES (?1, 1, 1, 'archive', ?2, '{}', ?3)",
+            params![cs, format!("{{\"messages\":[{}]}}", ids.join(",")), why],
         )?;
         let a = tx.last_insert_rowid();
         for m in messages {
@@ -335,4 +346,36 @@ async fn a_state_verb_names_its_item() {
     )
     .await;
     assert_eq!(code, StatusCode::CONFLICT);
+}
+
+/// An action with no reason of its own shows the reason of its revision,
+/// also after the author submits a new revision with another reason.
+#[tokio::test]
+async fn an_entry_keeps_the_reason_of_its_revision() {
+    let dir = temp("revision");
+    let s = store(&dir);
+    archived_why(&s, "person", &[1], PERSON, None);
+    let cs: i64 = s
+        .read(|c| Ok(c.query_row("SELECT id FROM changeset", [], |r| r.get(0))?))
+        .unwrap();
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    iris_changeset::revise(&s, cs, &person).unwrap();
+    iris_changeset::add_action(
+        &s,
+        cs,
+        &person,
+        iris_changeset::Verb::Archive,
+        &["m-2"],
+        &serde_json::Map::new(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(&s, cs, &person, "Another reason.", NOW + 5).unwrap();
+    let (_, p) = call(&s, false, "/api/ledger").await;
+    assert_eq!(p["entries"][0]["why"], "Tidy up.");
 }

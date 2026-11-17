@@ -33,7 +33,8 @@ pub struct LedgerEntry {
     pub decided_by: Option<String>,
     pub rule: Option<i64>,
     pub policy: Option<i64>,
-    /// The reason of the decision, and the reason of the author.
+    /// The reason of the decision, and the reason of the author: of the
+    /// action, else of the revision of the action.
     pub reason: Option<String>,
     pub why: Option<String>,
     /// True when an undo can start now (view `ledger_can_undo`).
@@ -71,7 +72,9 @@ const ENTRY: &str = "SELECT l.id, a.verb, a.args, l.state, l.at, l.error,
         (SELECT json_extract(i.doc, '$.title') FROM action_item ai JOIN item i ON i.id = ai.item_id
          WHERE ai.action_id = a.id ORDER BY ai.item_id LIMIT 1),
         a.changeset_id, c.author_kind, c.author_name, c.author_job, j.goal,
-        a.decided_by, a.rule, a.policy, a.reason, coalesce(a.why, c.why),
+        a.decided_by, a.rule, a.policy, a.reason,
+        coalesce(a.why, (SELECT r.why FROM changeset_revision r
+                         WHERE r.changeset_id = a.changeset_id AND r.revision = a.revision)),
         EXISTS (SELECT 1 FROM ledger_can_undo v WHERE v.ledger_id = l.id),
         EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action o ON o.id = u.action_id
                 WHERE u.ledger_id = l.id
@@ -175,4 +178,65 @@ pub fn undo_entry(store: &Store, id: &str, now_ms: i64) -> Result<Option<LedgerE
         Err(e) => return Err(Error::Store(iris_store::Error::Query(e.to_string()))),
     }
     Ok(store.read(|c| Ok(one(c, n)?))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generated input: `parse_id` takes back each `l-<n>` of a row ID, and
+    /// refuses each other text (no prefix, signs, zeros in front, spaces,
+    /// other characters, 0, a value out of range).
+    #[test]
+    fn the_id_parser_accepts_only_canonical_ids() {
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let canonical = |t: &str| {
+            t.strip_prefix("l-").is_some_and(|n| {
+                !n.is_empty()
+                    && n.bytes().all(|b| b.is_ascii_digit())
+                    && !n.starts_with('0')
+                    && n.parse::<i64>().is_ok()
+            })
+        };
+        const PARTS: [&str; 17] = [
+            "l-",
+            "l",
+            "-",
+            "L-",
+            "0",
+            "1",
+            "7",
+            "42",
+            "+",
+            " ",
+            "x",
+            "\u{e9}",
+            "\0",
+            "9223372036854775807",
+            "9223372036854775808",
+            "00",
+            ".",
+        ];
+        for _ in 0..20_000 {
+            let id = (next() >> 1) as i64;
+            if id > 0 {
+                assert_eq!(parse_id(&format!("l-{id}")), Some(id));
+                assert_eq!(parse_id(&id.to_string()), None);
+            }
+            let t: String = (0..1 + next() % 5)
+                .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+                .collect();
+            let want = canonical(&t).then(|| t[2..].parse::<i64>().unwrap());
+            assert_eq!(parse_id(&t), want, "{t:?}");
+        }
+        for t in ["", "l-", "l-0", "l--1", "l-+1", "l-01", "l-1 ", " l-1"] {
+            assert_eq!(parse_id(t), None, "{t:?}");
+        }
+    }
 }
