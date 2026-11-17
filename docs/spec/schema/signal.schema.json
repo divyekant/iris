@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:signal",
-  "title": "Iris open model 0 (draft): signal",
-  "description": "Draft. A short-lived item that matters at one moment. See docs/spec/01-mirror-store-forms.md, section 6.6.",
+  "$id": "urn:iris:model:1:signal",
+  "title": "Iris open model 1: signal",
+  "description": "A short-lived item that matters at one moment. See docs/spec/01-mirror-store-forms.md, section 6.6.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["kind", "issuer", "expires"],
   "allOf": [
-    { "$ref": "urn:iris:model:0:common#/$defs/item" },
+    { "$ref": "urn:iris:model:1:common#/$defs/item" },
     { "if": { "required": ["code"] }, "then": { "properties": { "kind": { "const": "code" } } } }
   ],
   "properties": {
@@ -15,8 +15,8 @@
     "form": { "const": "signal" },
     "status": { "enum": ["active", "used", "dismissed", "expired", "gone"] },
     "kind": { "enum": ["code", "security", "delivery", "build", "other"] },
-    "issuer": { "$ref": "urn:iris:model:0:common#/$defs/party" },
+    "issuer": { "$ref": "urn:iris:model:1:common#/$defs/party" },
     "code": { "type": "string", "minLength": 1, "maxLength": 32 },
-    "expires": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" }
+    "expires": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" }
   }
 }

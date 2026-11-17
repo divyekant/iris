@@ -1925,12 +1925,13 @@ fn document(c: &Connection, changeset: i64, out: &mut impl Write) -> Result<()> 
     let time = |ms: Option<i64>| ms.map_or(Value::Null, |ms| iris_talk::rfc3339(ms).into());
     write!(
         out,
-        r#"{{"model":"iris/0","id":"{}","revision":{revision},"author":{},"why":{},"created":{},"submitted":{},"state":"{state}","actions":["#,
+        r#"{{"model":"{model}","id":"{}","revision":{revision},"author":{},"why":{},"created":{},"submitted":{},"state":"{state}","actions":["#,
         format_changeset_id(changeset),
         Value::Object(author),
         why.map_or(Value::Null, Value::String),
         time(Some(created)),
         time(submitted),
+        model = iris_store::MODEL,
     )?;
     let mut st = c.prepare(
         "SELECT id, revision, n, verb, targets, args, why, flags, state, decided_by, rule,

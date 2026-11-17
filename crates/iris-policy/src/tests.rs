@@ -140,9 +140,21 @@ fn attention_rules_have_no_verbs_author_or_job() {
         .contains("author or job"));
 }
 
+/// Version 0 and version 1 have the same meaning (spec 4, rule 2.7), so a
+/// policy file of version 0 never puts Iris in observe mode.
+#[test]
+fn version_0_and_1_are_the_same_policy() {
+    let one = parse("version = 1\nmode = \"apply\"\n").unwrap();
+    let zero = parse("version = 0\nmode = \"apply\"\n").unwrap();
+    assert_eq!((one.mode, zero.mode), (Mode::Apply, Mode::Apply));
+    assert!(err("version = 2\nmode = \"apply\"\n")
+        .message
+        .contains("use version = 1"));
+}
+
 #[test]
 fn top_level_errors() {
-    assert_eq!(err("version = 1\nmode = \"apply\"\n").line, 1);
+    assert_eq!(err("version = 2\nmode = \"apply\"\n").line, 1);
     let e = err("version = 0\nmode = \"auto\"\n");
     assert_eq!(e.line, 2);
     assert!(e.message.contains("\"auto\""));

@@ -36,7 +36,7 @@ fn validators() -> &'static [(&'static str, Validator)] {
     V.get_or_init(|| {
         let common: Value = serde_json::from_str(COMMON).expect("common schema is JSON");
         let registry = Registry::new()
-            .add("urn:iris:model:0:common", common)
+            .add(iris_store::COMMON_SCHEMA_ID, common)
             .expect("a valid $id")
             .prepare()
             .expect("the schemas resolve");

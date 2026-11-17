@@ -59,7 +59,7 @@ fn load(
         if last != Some(id) {
             last = Some(id);
             let mut doc = json!({
-                "model": "iris/0",
+                "model": iris_store::MODEL,
                 "id": format_id(Kind::Matter, id),
                 "title": r.get::<_, String>(1)?,
                 "status": r.get::<_, String>(2)?,

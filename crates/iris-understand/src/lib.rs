@@ -330,7 +330,7 @@ impl Draft {
             _ => "x",
         };
         let now = time::rfc3339(ids.now_ms);
-        v["model"] = json!("iris/0");
+        v["model"] = json!(iris_store::MODEL);
         v["id"] = json!(format!("{prefix}-{id}"));
         v["sources"] = json!([{
             "message": format!("m-{}", ids.message),

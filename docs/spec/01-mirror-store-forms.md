@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 0 (draft)
+- Open model version: 1.0
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -15,7 +15,7 @@ This specification defines three parts of the Iris engine:
    exact.
 2. The store: the files and the SQLite tables that hold all state.
 3. The data format of the five forms (commitment, conversation, record, feed,
-   signal) and of the sender axis. This format is version 0 of the open model.
+   signal) and of the sender axis. This format is version 1 of the open model.
 
 It also defines how the engine turns mail into forms (the understanding step),
 and how the first brief reads the forms.
@@ -511,7 +511,7 @@ Gmail.
 
 ## 6. The forms: data format
 
-This section is version 0 of the open model. The schemas in
+This section is version 1 of the open model. The schemas in
 [`schema/`](schema/) are the normative copy. If this text and a schema do not
 agree, the schema is correct and this text has a defect.
 
@@ -523,7 +523,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/0"` | yes | The version of the open model. |
+| `model` | string, `"iris/1.0"` | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -579,7 +579,7 @@ The talk with one person or one group.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `thread` | string, `t-` ID | yes | The thread. One conversation for each thread in version 0. |
+| `thread` | string, `t-` ID | yes | The thread. One conversation for each thread in version 1. |
 | `participants` | array of party, at least 1 | yes | Each party in the thread. |
 | `role` | `direct`, `group` or `cc` | yes | `cc` when you are only in CC. |
 | `latest` | object | yes | `at` (date-time), `from` (party) and `snippet` (up to 200 characters). |
@@ -650,7 +650,7 @@ Each sender row has a kind after the sender step decides it (see the
 paragraph about a row with no kind below). The kind is a property of the
 address, not of one message.
 
-| Kind | Rule in version 0 |
+| Kind | Rule in version 1 |
 |---|---|
 | `person` (known person) | You sent at least one message to the address, or you replied in a thread with it. |
 | `service` (known service) | The mail is automated (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, or `Auto-Submitted` other than `no`), DKIM passes for the domain of the address, and at least 2 messages with an earlier `internalDate` came from it. |
@@ -1291,9 +1291,9 @@ A change that adds a cache must say its size in the pull request.
    production" without verification. See
    `docs/decisions/2026-11-google-sign-in.md`.
 2. Contacts. The rule for `person` uses only sent mail. The Google People API
-   can add contacts, but it needs one more scope. Version 0 does not use it.
+   can add contacts, but it needs one more scope. Version 1 does not use it.
 3. One conversation for each thread. Gmail threads by subject, and a person
-   can talk about two subjects in one thread. Version 0 keeps one conversation
+   can talk about two subjects in one thread. Version 1 keeps one conversation
    for each thread.
 
 ## Assumptions

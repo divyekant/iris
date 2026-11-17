@@ -368,8 +368,7 @@ fn item_doc(c: &Connection, i: i64) -> Result<(serde_json::Value, &'static str)>
         .into_iter()
         .map(|m| format_id(Kind::Message, m))
         .collect();
-    let doc =
-        json!({ "model": "iris/0", "id": format_id(*kind, i), "form": form, "sources": sources });
+    let doc = json!({ "model": iris_store::MODEL, "id": format_id(*kind, i), "form": form, "sources": sources });
     Ok((doc, folder))
 }
 
@@ -628,6 +627,7 @@ fn write_people(c: &Connection, people: &People, folder: &Path) -> Result<u32> {
             .map(|t| format_id(Kind::Thread, *t))
             .collect();
         let doc = json!({
+            "model": iris_store::MODEL,
             "id": id,
             "address": address,
             "names": seen.names,

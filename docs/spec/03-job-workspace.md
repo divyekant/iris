@@ -1,6 +1,6 @@
 # Specification 3: the job workspace layout
 
-- Open model version: 0 (draft)
+- Open model version: 1.0
 - Release: 4
 - Input: `docs/specs/2026-11-16-job-workspace.md` (the design and the
   reasons)
@@ -14,7 +14,7 @@ each file, so that another tool can build the same folder (section 10) from
 the same inputs: the mail, the job and its scope, as one read transaction
 gives them.
 
-This specification is a part of version 0 of the open model. The schemas in
+This specification is a part of version 1 of the open model. The schemas in
 [`schema/`](schema/) are the normative copy of each JSON file. If this text
 and a schema do not agree, the schema is correct and this text has a defect.
 
@@ -160,6 +160,7 @@ from the messages in the thread files where the address is a party:
 
 | Field | Value |
 |---|---|
+| `model` | `"iris/1.0"`. |
 | `id` | The `p-` ID of the sender row. |
 | `address` | The address (section 2). |
 | `names` | Each display name of `From` in the messages that the person sent, in UTF-8 byte order, each name one time. |
@@ -325,7 +326,7 @@ Thanks. MY-REPLY-TEXT
 <!-- sample: commitments/c-1.json -->
 ````json
 {
-  "model": "iris/0",
+  "model": "iris/1.0",
   "id": "c-1",
   "form": "commitment",
   "sources": ["m-1"]
@@ -335,6 +336,7 @@ Thanks. MY-REPLY-TEXT
 <!-- sample: people/p-1.json -->
 ````json
 {
+  "model": "iris/1.0",
   "id": "p-1",
   "address": "dana@example.com",
   "names": ["Dana"],
