@@ -194,6 +194,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the verbs as MCP (Model Context Protocol) tools on standard
+    /// input and output, for an MCP client. The same verbs, author and
+    /// policy as the command.
+    Mcp,
     /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
     #[command(arg_required_else_help = true)]
     Changeset {
@@ -497,63 +501,152 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
-    if let Some((verb, targets, args, to)) = action(&cli.command)? {
-        let mut request = serde_json::json!({ "verb": verb, "targets": targets, "args": args });
-        if let Some(cs) = &to.changeset {
-            request["changeset"] = cs.clone().into();
-        }
-        if let Some(why) = &to.why {
-            request["why"] = why.clone().into();
-        }
-        let r = socket::request(&data?, "add", request)?;
-        println!("{} {}", r["changeset"].as_str().unwrap_or_default(), r["n"]);
-        return Ok(());
-    }
-    if let Command::Submit { id, why, json } = &cli.command {
-        let doc = socket::request(
-            &data?,
+    let request = match &cli.command {
+        Command::Submit { id, why, json } => Some((
             "submit",
             serde_json::json!({ "changeset": id, "why": why }),
-        )?;
-        print!("{}", changeset_text(&doc, *json));
-        return match submit_code(&doc) {
-            0 => Ok(()),
-            code => Err(socket::Failure {
-                code,
-                error: format!("{id}: not each action is applied (exit code {code})"),
-            }),
-        };
-    }
-    let text = match &cli.command {
-        Command::Changeset { id, drafts, json } => {
-            let dir = data?;
-            if *drafts {
-                let r = socket::request(&dir, "drafts", serde_json::json!({}))?;
-                Some(drafts_text(&r, *json))
-            } else {
-                let id = id.as_deref().unwrap_or_default();
-                let r = socket::request(&dir, "show", serde_json::json!({ "changeset": id }))?;
-                Some(changeset_text(&r, *json))
-            }
-        }
+            *json,
+        )),
+        Command::Changeset {
+            drafts: true, json, ..
+        } => Some(("drafts", serde_json::json!({}), *json)),
+        Command::Changeset { id, json, .. } => Some((
+            "show",
+            serde_json::json!({ "changeset": id.as_deref().unwrap_or_default() }),
+            *json,
+        )),
         Command::Withdraw { id, json } => {
-            let r = socket::request(&data?, "withdraw", serde_json::json!({ "changeset": id }))?;
-            Some(changeset_text(&r, *json))
+            Some(("withdraw", serde_json::json!({ "changeset": id }), *json))
         }
         Command::Revise { id, json } => {
-            let r = socket::request(&data?, "revise", serde_json::json!({ "changeset": id }))?;
-            Some(changeset_text(&r, *json))
+            Some(("revise", serde_json::json!({ "changeset": id }), *json))
         }
-        _ => None,
+        c => add_request(c)?.map(|r| ("add", r, false)),
     };
-    if let Some(text) = text {
-        print!("{text}");
-        return Ok(());
+    if let Some((verb, args, json)) = request {
+        let out = socket_verb(&data?, verb, args, json)?;
+        print!("{}", out.text);
+        return out.failure.map_or(Ok(()), Err);
     }
     run_store(cli).map_err(|error| socket::Failure {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// The `add` request on the engine socket of a verb that adds an action.
+/// `None` for the other verbs.
+pub fn add_request(c: &Command) -> Result<Option<serde_json::Value>, socket::Failure> {
+    let Some((verb, targets, args, to)) = action(c)? else {
+        return Ok(None);
+    };
+    let mut request = serde_json::json!({ "verb": verb, "targets": targets, "args": args });
+    if let Some(cs) = &to.changeset {
+        request["changeset"] = cs.clone().into();
+    }
+    if let Some(why) = &to.why {
+        request["why"] = why.clone().into();
+    }
+    Ok(Some(request))
+}
+
+/// What a verb prints, and the failure (exit code and error text) that the
+/// command gives after the print.
+pub struct Printed {
+    pub text: String,
+    pub failure: Option<socket::Failure>,
+}
+
+/// Send the request of a verb on the engine socket, and give what the
+/// command prints. The command and `iris mcp` both use it, so they give the
+/// same result and the same exit code (specification 2, sections 8.3 to 8.5).
+pub fn socket_verb(
+    dir: &std::path::Path,
+    verb: &str,
+    args: serde_json::Value,
+    json: bool,
+) -> Result<Printed, socket::Failure> {
+    let id = args["changeset"].as_str().unwrap_or_default().to_string();
+    let r = socket::request(dir, verb, args)?;
+    let mut failure = None;
+    let text = match verb {
+        "add" if json => format!("{r}\n"),
+        "add" => format!(
+            "{} {}\n",
+            r["changeset"].as_str().unwrap_or_default(),
+            r["n"]
+        ),
+        "drafts" => drafts_text(&r, json),
+        "submit" => {
+            let code = submit_code(&r);
+            if code != 0 {
+                failure = Some(socket::Failure {
+                    code,
+                    error: format!("{id}: not each action is applied (exit code {code})"),
+                });
+            }
+            changeset_text(&r, json)
+        }
+        _ => changeset_text(&r, json),
+    };
+    Ok(Printed { text, failure })
+}
+
+/// The most tool calls of `iris mcp` that run at the same time.
+pub const MCP_CALLS: usize = 4;
+
+/// `iris mcp`: serve the MCP tools on standard input and output. Each tool
+/// call takes the path of its verb: the engine socket, or a read verb on
+/// the store.
+fn mcp(dir: PathBuf) -> Result<(), String> {
+    use iris_mcp::{Call, Outcome};
+    let run = move |c: Call| -> Outcome {
+        let fail = |f: socket::Failure| Outcome::fail(f.code, f.error);
+        // The read verbs give each error with code 1, as `run_store` does.
+        let read = |out: verbs::Output| match out {
+            Ok(text) => Outcome::ok(text),
+            Err(e) => Outcome::fail(socket::code::ERROR, e),
+        };
+        let open = || Store::open(&dir).map_err(|e| format!("store: {e}"));
+        let watch = |c: WatchCommand| read(open().and_then(|s| verbs::watch(&s, &c)));
+        match c {
+            Call::Socket { verb, args } => match socket_verb(&dir, verb, args, true) {
+                Ok(p) => Outcome {
+                    text: p.text,
+                    failure: p.failure.map(|f| (f.code, f.error)),
+                },
+                Err(f) => fail(f),
+            },
+            Call::Status => read(open().and_then(|s| verbs::status(&s, true))),
+            Call::Search { text, limit } => {
+                read(open().and_then(|s| verbs::search(&s, &text, limit, true)))
+            }
+            Call::Show { id } => read(open().and_then(|s| verbs::show(&s, &id, true))),
+            Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
+            Call::WatchList => watch(WatchCommand::List { json: true }),
+            Call::WatchRemove { id } => watch(WatchCommand::Remove { id }),
+            // `iris matters` prints its text with a newline (`println!`).
+            Call::MattersList => read(
+                open()
+                    .and_then(|s| verbs::matters(&s, &MattersCommand::List))
+                    .map(|t| t + "\n"),
+            ),
+            Call::MattersShow { id } => read(
+                open()
+                    .and_then(|s| verbs::matters(&s, &MattersCommand::Show { id }))
+                    .map(|t| t + "\n"),
+            ),
+        }
+    };
+    // rmcp uses timers for its time limits. At most MCP_CALLS calls run at
+    // the same time; the others wait in the queue of the runtime.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .max_blocking_threads(MCP_CALLS)
+        .build()
+        .map_err(|e| format!("mcp: {e}"))?
+        .block_on(iris_mcp::serve(Arc::new(run)))
+        .map_err(|e| format!("mcp: {e}"))
 }
 
 /// The exit code of `iris submit` (specification 2, section 8.4), from the
@@ -687,6 +780,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             command: AccountCommand::Add { client, paste },
         } => account_add(&open()?, client, *paste),
         Command::Mirror { command } => mirror(Arc::new(open()?), command),
+        Command::Mcp => mcp(engine::data_dir(cli.data.clone()).map_err(|e| e.to_string())?),
         Command::Status { json } => print(verbs::status(&open()?, *json)),
         Command::Search { text, limit, json } => {
             print(verbs::search(&open()?, text, *limit, *json))
