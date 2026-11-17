@@ -254,6 +254,7 @@ fn proxy(name: &str, to: SocketAddr, public_only: bool, log_limit: u64) -> Box_ 
         file,
         Box::new(Fixed(to)),
         public_only,
+        None,
         log_limit,
         Arc::new(AtomicUsize::new(0)),
     )
@@ -265,7 +266,10 @@ fn proxy(name: &str, to: SocketAddr, public_only: bool, log_limit: u64) -> Box_ 
 }
 
 fn send(p: &Proxy, head: &str) -> (TcpStream, String) {
-    let mut s = TcpStream::connect(("127.0.0.1", p.port())).unwrap();
+    send_on(TcpStream::connect(("127.0.0.1", p.port())).unwrap(), head)
+}
+
+fn send_on(mut s: TcpStream, head: &str) -> (TcpStream, String) {
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     s.write_all(head.as_bytes()).unwrap();
     let mut r = BufReader::new(s.try_clone().unwrap());
@@ -404,6 +408,7 @@ fn a_stop_does_not_wait_for_a_stalled_resolver() {
         file,
         Box::new(Stalled),
         false,
+        None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
@@ -492,6 +497,7 @@ fn stalled_resolver_workers_stay_bounded_over_proxies() {
             file,
             Box::new(Counted(calls.clone())),
             false,
+            None,
             LOG_LIMIT,
             workers.clone(),
         )
@@ -732,4 +738,90 @@ fn a_stop_during_the_hello_logs_the_host() {
         text.contains("host=api.example.test up=0 down=0 result=stopped"),
         "{text}"
     );
+}
+
+#[test]
+fn session_addresses_are_distinct_loopback_addresses() {
+    assert_eq!(session_peer(0), None);
+    assert_eq!(session_peer(-1), None);
+    assert_eq!(session_peer(SESSION_MAX + 1), None);
+    assert_eq!(session_peer(1), Some(Ipv4Addr::new(127, 128, 0, 1)));
+    assert_eq!(
+        session_peer(SESSION_MAX),
+        Some(Ipv4Addr::new(127, 255, 255, 254))
+    );
+    let mut r = Rng(11);
+    for _ in 0..2000 {
+        let a = 1 + r.next(SESSION_MAX as u64) as i64;
+        let b = 1 + r.next(SESSION_MAX as u64) as i64;
+        let (pa, pb) = (session_peer(a).unwrap(), session_peer(b).unwrap());
+        assert!(pa.is_loopback() && pa != Ipv4Addr::LOCALHOST);
+        assert_eq!(pa == pb, a == b, "{a} {b}");
+    }
+}
+
+/// The relay of session 8 reaches the port of session 7 (for example after
+/// an engine crash gave the port to another session): the proxy refuses it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_proxy_takes_only_its_session_address() {
+    let log = std::env::temp_dir().join(format!("iris-egress-peer-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Fixed(echo())),
+        false,
+        session_peer(7),
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    let head = "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n";
+    let other = connect_from(session_peer(8).unwrap(), proxy.port()).unwrap();
+    let (_s, line) = send_on(other, head);
+    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    let (_s, line) = send(&proxy, head);
+    assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+    let own = connect_from(session_peer(7).unwrap(), proxy.port()).unwrap();
+    let (_s, line) = send_on(own, head);
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    drop(_s);
+    proxy.stop().unwrap();
+    let text = log_text(&guard);
+    assert_eq!(
+        text.matches("refused reason=not_session").count(),
+        2,
+        "{text}"
+    );
+}
+
+/// The grant ends: the tunnel ends at once, a new client gets no tunnel,
+/// and the port stays bound until the stop.
+#[test]
+fn close_ends_each_tunnel_and_keeps_the_port() {
+    let b = proxy("close", echo(), false, LOG_LIMIT);
+    let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    b.proxy.close();
+    let mut x = [0u8; 1];
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(s.read(&mut x).unwrap_or(0), 0, "the tunnel ended");
+    let mut late = TcpStream::connect(("127.0.0.1", b.proxy.port())).unwrap();
+    late.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let _ = late.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert_eq!(late.read(&mut x).unwrap_or(0), 0, "no answer after close");
+    assert!(
+        TcpListener::bind(("127.0.0.1", b.proxy.port())).is_err(),
+        "the port stays bound"
+    );
+    b.proxy.stop().unwrap();
+    let text = log_text(&b.log);
+    assert!(text.contains("ended reason=stopped"), "{text}");
 }
