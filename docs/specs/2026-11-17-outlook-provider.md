@@ -57,10 +57,13 @@ Each request:
 - waits for a free place in a gate of 4 requests at the same time for each
   client (A5), because Graph counts each app and mailbox pair.
 
-A `@odata.nextLink` or a `@odata.deltaLink` is a full URL. The client calls
-it only if it starts with the base URL of the client. Else the client gives
-`Error::Decode` and sends no request. Thus a changed answer cannot send the
-token to another host.
+A `@odata.nextLink` or a `@odata.deltaLink` is a full URL. The client
+parses the link and calls it only if its scheme and its authority (host
+and port, with no user part) are equal to those of the base URL, and its
+path starts with the path of the base URL. A text prefix is not enough:
+`https://graph.microsoft.com@attacker.example/` starts with the base text.
+Else the client gives `Error::Decode` and sends no request. Thus a changed
+answer cannot send the token to another host.
 
 Waits after a refusal:
 
@@ -112,8 +115,13 @@ A change is one of:
 - `Removed(id)`: an item with `@removed`. The message left the folder: a
   delete or a move (A1). The caller does not delete the message at once:
   a move gives `Removed` in one folder and `Message` in another, with the
-  same immutable ID. The caller marks the message gone only when no folder
-  has it after the round of each folder.
+  same immutable ID. The rounds of two folders are not one snapshot: if
+  the round of the new folder ran before the move, only the `Removed` of
+  the old folder shows the move. Thus, after the round of each folder,
+  the caller reads each removed message that no round gave as `Message`
+  with `message(id)` (`GET /me/messages/{id}?$select=...`): HTTP 404 means
+  gone, and a message means a move, with its new folder. The message
+  stays in the mirror until this read gives 404.
 
 A token that Graph does not accept any more gives HTTP 410, or another 4xx
 with a code such as `syncStateNotFound` (A1). The client gives
@@ -256,6 +264,7 @@ and MIME text of `$value`. All other input fails closed: the call gives
 | The connection ends in a page or a body | `Error::Transport`; the caller calls the same link again | fake that cuts |
 | The same message two times in one round | the last one wins | fake replays |
 | A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
+| A message moves after the round of its new folder | `Removed` only; the read by ID finds the new folder, and the message stays | fake move between rounds |
 | An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
 | 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
 | A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
@@ -386,13 +395,8 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-1. This spec.
-2. PR: `iris-graph` read calls and `iris-fakegraph`.
-3. PR: the write calls of `iris-graph`, with the fake.
-4. PR: the Microsoft sign-in in `iris-auth`, and the decision record with
-   the app registration steps for dk.
-5. After R6-10: the provider implementation and the engine wiring.
-6. Release gate after R1-07: dk registers the app, signs in, and runs 7
+1. The cards of "Plan", in their order.
+2. Release gate after R1-07: dk registers the app, signs in, and runs 7
    days on a real Outlook mailbox.
 
 ## Risks
@@ -406,8 +410,15 @@ scripts/local-ci/run.sh
 
 ## Plan
 
-1. R6-04: spec (this PR).
-2. R6-04: read client and fake.
-3. R6-04: write calls.
-4. R6-04: sign-in and the decision record.
-5. R6-04: provider and wiring, after R6-10.
+Each step is one card and one PR. The board has each card with its
+`doneWhen` and `dependsOn`.
+
+1. R6-04: this spec.
+2. R6-11: the read calls of `iris-graph`, and `iris-fakegraph`. Depends
+   on R6-04.
+3. R6-12: the write calls of `iris-graph`, with the fake. Depends on
+   R6-11.
+4. R6-13: the Microsoft sign-in in `iris-auth`, and the decision record
+   with the app registration steps for dk. Depends on R6-04.
+5. R6-14: the provider implementation and the engine wiring. Depends on
+   R6-12, R6-13 and R6-10.
