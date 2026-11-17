@@ -699,6 +699,7 @@ dependencies = [
  "iris-apply",
  "iris-auth",
  "iris-changeset",
+ "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
  "iris-matters",
