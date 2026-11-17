@@ -26,6 +26,11 @@
   async function send(event?: SubmitEvent) {
     event?.preventDefault();
     if (empty || busy) return;
+    // The engine counts characters (code points), not the UTF-16 units of `maxlength`.
+    if ([...text].length > 10_000) {
+      error = "Your answer is longer than 10,000 characters. Make it shorter.";
+      return;
+    }
     busy = true;
     error = "";
     try {
@@ -56,7 +61,7 @@
   <p class="text">{job.question}</p>
   <form onsubmit={send}>
     <label class="hidden" for={`answer-${job.id}`}>Your answer</label>
-    <textarea id={`answer-${job.id}`} bind:value={text} oninput={(e) => ondraft(e.currentTarget.value)} onkeydown={keys} rows="2" maxlength="10000" placeholder="Your answer" disabled={busy}></textarea>
+    <textarea id={`answer-${job.id}`} bind:value={text} oninput={(e) => ondraft(e.currentTarget.value)} onkeydown={keys} rows="2" placeholder="Your answer" disabled={busy}></textarea>
     <div class="row">
       <button type="submit" disabled={empty || busy}>{busy ? "Sending" : "Answer"}</button>
       <span class="hint">The agent reads it in a new session.</span>

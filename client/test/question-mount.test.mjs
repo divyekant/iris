@@ -56,6 +56,29 @@ test("the card shows the goal, the question as text, and sends the answer once",
   }
 });
 
+test("the limit counts characters, so a long answer of emoji goes in full", async () => {
+  const asked = serve(() => [200, { job: { ...job(), state: "working" }, changesets: [], threads: {} }]);
+  let answered = false;
+  const view = await mount("/src/views/Question.svelte", { job: job(), onanswered: () => (answered = true), onchanged: () => {} });
+  try {
+    // 6,000 characters outside the Basic Multilingual Plane are 12,000 UTF-16 units.
+    const emoji = "\u{1F600}".repeat(6000);
+    assert.equal(view.target.querySelector("textarea").hasAttribute("maxlength"), false);
+    await type(view, emoji);
+    button(view).click();
+    await until(() => answered);
+    assert.deepEqual(asked, [["POST", "jobs/j-14/answer", { answer: emoji }]]);
+    asked.length = 0;
+    await type(view, "a".repeat(10_001));
+    button(view).click();
+    await until(() => /longer than 10,000 characters/.test(text(view.target)));
+    assert.deepEqual(asked, []);
+    assert.equal(view.target.querySelector("textarea").value.length, 10_001);
+  } finally {
+    view.destroy();
+  }
+});
+
 test("a job that asks no question now loads the questions again", async () => {
   serve(() => [409, { error: "The job asks no question now." }]);
   let changed = 0;
