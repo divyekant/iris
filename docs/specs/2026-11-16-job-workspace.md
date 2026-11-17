@@ -47,6 +47,7 @@ job does not need gives the agent mail that the person did not give it.
 - The notes between sessions (R5-06). This card makes `notes.md` once and
   never changes it.
 - The published layout of the open model (R4-13). This spec is its input.
+  The published text is `docs/spec/03-job-workspace.md`.
 
 ## Design
 
