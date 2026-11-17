@@ -214,9 +214,12 @@ not the agent:
    - If the start of the agent fails, the helper writes one line `failed`
      on its second pipe and exits with no child.
 
-   The helper itself is started inside the outer part of the isolation, so
-   the isolation binds the life of each process of the session to the
-   helper (see [Isolation](#isolation), lifetime rule).
+   The helper runs outside the sandbox of the agent: it is code of Iris,
+   and it needs `/proc`, the data folder and the host loopback address.
+   The agent is its child, inside the sandbox, and the isolation binds the
+   life of each process of the session to the helper (see
+   [Isolation](#isolation), lifetime rule). On Linux the child is `bwrap`,
+   which ends with the helper (`docs/specs/2026-11-17-session-sandbox.md`).
 3. After the start, the helper waits for two events: the child exits, or
    the pipe ends (the engine stopped, or the engine closed the pipe to stop
    the session).

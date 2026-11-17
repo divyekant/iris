@@ -102,14 +102,16 @@ and arguments of the adapter:
    share one time limit of 1.5 seconds.
    It gives `child-pid`: the init, as a host process ID. The isolation
    reads no other field.
-3. Get the inode of the PID namespace of the init: open a `pidfd` of the
-   process ID, read the inode of `/proc/<pid>/ns/pid`, then check that the
-   `pidfd` is not readable (the init did not exit). The init is blocked on
-   file descriptor 4, so it cannot exit by itself. A process ID stays with
-   its process until the reap, so if the init still runs after the read,
-   the inode is the one of the init. Else `spawn` fails.
+3. Get the identity of the init: open a `pidfd` of the process ID, read
+   the start time of the process (field 22 of `/proc/<pid>/stat`, in clock
+   ticks after the boot) and the inode of `/proc/<pid>/ns/pid`, then check
+   that the `pidfd` is not readable (the init did not exit). The init is
+   blocked on file descriptor 4, so it cannot exit by itself. A process ID
+   stays with its process until the reap, so if the init still runs after
+   the reads, the values are the ones of the init. Else `spawn` fails.
 4. Write the record `<data dir>/sessions/se-<id>.sandbox` (mode `0600`,
-   `create_new`): the init process ID and the namespace inode.
+   `create_new`): the boot ID (`/proc/sys/kernel/random/boot_id`), the
+   init process ID, its start time and the namespace inode.
 5. If the session has an egress port: make the listener of the session in
    its network namespace (see [Egress on Linux](#egress-on-linux)).
 6. Write one byte to file descriptor 4. `bwrap` runs the program of the
@@ -134,18 +136,38 @@ zombie only after each of them ended. So:
   `bwrap` (the agent group of the launcher spec): `bwrap` ends, and the
   same chain ends each process of the session.
 
+The identity of the init is the boot ID, the process ID and the start
+time. Two processes of one boot cannot have the same process ID and the
+same start time, because an ID goes to a new process only after the reap
+of the old one, and the start time of the new process is then the same or
+later; the namespace inode is a fourth check. The identity check: open a
+`pidfd` of the process ID, read the start time and the namespace inode,
+then check that the `pidfd` is not readable, so the reads were of the
+process of the `pidfd`.
+
+- The boot ID differs: the system started again, so each process of the
+  record ended.
+- No process has the ID, or the process has another start time or another
+  namespace inode: the init of the record ended (its ID went to another
+  process). Nothing gets a signal.
+- The four values agree: this is the init of the record.
+
+A tie is possible in one case only: the init ended, and in the same clock
+tick (10 ms) a new process got the same process ID in a PID namespace
+with the same inode. The process ID of Linux goes up to `pid_max` before
+it wraps, so this case needs a full wrap of the process IDs inside one
+tick. The design takes this risk.
+
 `stop(session)` reads the record. If there is no record, `bwrap` did not
 reach step 4, and its init cannot outlive `bwrap`: `stop` returns `Ok`.
-Else it opens a `pidfd` of the init process ID, checks that
-`/proc/<pid>/ns/pid` has the inode of the record (so a reused process ID
-is never signaled), sends `SIGKILL` through the `pidfd`, and waits at most
-5 seconds until the `pidfd` is readable (the init is a zombie, so the
-namespace is empty).
+Else it runs the identity check. Only if the four values agree, it sends
+`SIGKILL` through the `pidfd` and waits at most 5 seconds until the
+`pidfd` is readable (the init is a zombie, so the namespace is empty).
 
-`ended(session)` is true if there is no record, if no process has the init
-process ID, if the process with that ID is in another PID namespace, or if
-the init is a zombie. Each other result is false, and an error is an
-error (a false "still runs", never a false "ended").
+`ended(session)` is true if there is no record, if the identity check says
+that the init of the record ended, or if the init is a zombie. Each other
+result is false, and an error (for example a record that cannot be read)
+is an error: a false "still runs", never a false "ended".
 
 `name(session)` is `bwrap:<path of the record>`.
 
@@ -170,8 +192,17 @@ namespace, so a second listener and a relay connect the two:
    as the egress proxy does, and closes a ninth at once.
 3. The relay threads end with the helper. The proxy of the session keeps
    its port until the reap check confirms that the helper ended (launcher
-   spec, "Model egress", changed in this PR). So the relay never connects
-   to a port that another session got.
+   spec, "Model egress", changed in this PR). So, while the engine runs,
+   the relay never connects to a port that another session got.
+4. The relay connects only while the engine that started the helper (its
+   parent process) runs. `spawn` opens a `pidfd` of the parent. Before
+   each connection to the host, the relay checks that the `pidfd` is not
+   readable. When the check sees the end of the engine, the relay closes
+   its listener and stops. An engine crash frees the port of each proxy,
+   but a port can go to another session only in a new engine, which can
+   start only after the old engine process ended. The window between the
+   check and the `connect` is a few system calls, while a new engine must
+   start, open the store and launch a session first.
 
 The agent reaches only the listener of its own session. The listener
 exists only in the namespace of that session, and the relay connects only
@@ -306,10 +337,12 @@ before the agent runs, or `ended` is false.
 | The agent calls `setsid` and the helper ends with `SIGKILL` | The kernel ends the process | Linux lifetime test |
 | The agent calls `setsid`, then the helper stops the group and calls `stop` | `stop` kills the init; `ended` is true | Linux lifetime test |
 | The engine restarts while a session runs | `stop` and `ended` read the record | Linux test with a new isolation value |
-| The init process ID is reused by another process | The namespace inode differs: no signal; `ended` is true | Unit test with a record of another namespace |
+| The init process ID is reused by another process | The start time or the namespace inode differs: no signal; `ended` is true | Unit test with a record of this test process with another start time, and one with another namespace inode |
+| The system started again after the record | The boot ID differs: no signal; `ended` is true | Unit test with a record of another boot ID |
 | The record cannot be written | `spawn` fails; the program did not run | Linux test with a read-only sessions folder |
 | The info line or the listener does not come in 1.5 seconds, or the line is not JSON | `spawn` fails and kills `bwrap` | Unit test of the parser (property test) |
 | A ninth connection to the relay | Closed at once | Linux relay test |
+| The engine crashes and a new engine starts while the helper of an old session still runs | The relay sees the end of its engine (the `pidfd` of the parent) and makes no new connection | Linux relay test: the parent of the relay ends, and a new listener on the same port gets no connection |
 | A session ends, and its agent connects to the relay during the stop | The relay reaches the proxy of its own session, which keeps its port until the reap check | R4-04e supervisor test: a second session starts while the first one stops, and gets another port |
 | A data folder inside a read path (for example the `iris` program file in a folder of the data folder) | The empty mount of the data folder comes after each read path: the data folder is empty in the view | Linux sandbox test with the program file inside the data folder |
 | A credential file or a Unix socket in a folder that is not in the view (for example `/etc/<file>` not in the list, or `/run`) | Not visible: no read and no connection | Linux sandbox test: a socket and a marker file outside the view, and `/etc/hostname` |
@@ -325,6 +358,12 @@ before the agent runs, or `ended` is false.
   `claude-code` adapter, also in the adapter rule of the launcher spec.
 - The launcher spec, "Model egress": the proxy of a session keeps its port
   until the reap check passes. R4-04e builds it.
+- The launcher spec, "The hold helper": the helper runs outside the
+  sandbox, and the agent (`bwrap` on Linux) is its child.
+- `docs/spec/03-job-workspace.md` and the fixed text of `JOB.md` in
+  `crates/iris-workspace`: the session has no network other than the model
+  host of the agent tool, and the agent tool can send the folder to that
+  host before `iris submit` (launcher spec, "Model egress").
 - `starter.json`: `bubblewrap` in the system packages of the `engine` area,
   for the tests.
 - The engine (R4-04e) calls `system(data_dir)` in the engine and in the
