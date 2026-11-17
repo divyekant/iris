@@ -202,6 +202,13 @@ these rules:
   the apply. A message outside the grant at `submit` makes the submit fail
   with no change. A message that left the grant before the apply makes the
   action refused, with the reason, and nothing changes in the mailbox.
+- The cutoff of the apply check is the write transaction that moves the
+  action to the state before the provider call (spec 2). The check of the
+  grant runs in that same transaction. A revoke is a write transaction
+  too, and SQLite runs one write transaction at a time. So a revoke that
+  commits before the cutoff makes the action refused. A revoke that
+  commits after the cutoff does not stop that one provider call: the
+  action was in the grant at the cutoff. The ledger shows the call.
 - Each item that an action of a session targets (a state action such as
   `close`, `defer`, `decline` or `correct`, or an item target of a mailbox
   action) must be an item of the workspace now: a commitment or a record,
@@ -414,6 +421,7 @@ Markdown and JSON with `serde_json`.
 | A change or a delete of a scope row, other than one revoke | Refused by the trigger | Unit test |
 | A revoke of a thread or an item of the scope | The next build has no file of its mail. The row stays, with `revoked_by` and `revoked_at` | Unit test |
 | A revoke by an agent | Refused | Unit test, and raw SQL |
+| A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
 | An agent copy of granted text in `notes.md` or `drafts/`, and the grant ends | The copy stays (known limit) | None: the build does not read agent files |
