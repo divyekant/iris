@@ -86,7 +86,12 @@ Waits after a refusal:
 ### 2. Folders
 
 `folders(token)` reads `/me/mailFolders?includeHiddenFolders=true` and, for
-each folder with `childFolderCount > 0`, its `childFolders`, page by page.
+each folder with `childFolderCount > 0`, its `childFolders` with
+`includeHiddenFolders=true` too (Graph leaves hidden child folders out by
+default), page by page. A search folder (`@odata.type` is
+`#microsoft.graph.mailSearchFolder`) is a view: its messages are in
+other folders. The client leaves each search folder and its children out
+of the list, so that each message has one folder.
 It gives each folder with its ID, parent ID, display name, the counts, and
 the well-known name when the folder is one of `inbox`, `sentitems`,
 `drafts`, `deleteditems`, `junkemail`, `archive` or `outbox` (A7). It finds
@@ -232,7 +237,7 @@ This mapping is a proposal for R6-10, which owns the provider interface:
 
 | Graph | Mirror label |
 |---|---|
-| The folder of the message | exactly one folder label: `INBOX`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `drafts`, `deleteditems` and `junkemail`; `Folders/Archive`, `Folders/Outbox` and `Folders/Sent Items` for `archive`, `outbox` and `sentitems` (not `SENT`, see below); `Folders/<path>` for each other folder |
+| The folder of the message | exactly one folder label: `INBOX`, `TRASH` and `SPAM` for `inbox`, `deleteditems` and `junkemail`; for `drafts`, `DRAFT` only when `isDraft` is true, else `Folders/Drafts` (see below); `Folders/Archive`, `Folders/Outbox` and `Folders/Sent Items` for `archive`, `outbox` and `sentitems` (not `SENT`, see below); `Folders/<path>` for each other folder |
 | Each category | one user label (see the names below) |
 | `isRead` false | `UNREAD` |
 | `flag.flagStatus` `flagged` | `STARRED` |
@@ -251,6 +256,12 @@ person or a sender can set. Two existing rules read such data as proof:
   own issue: mail that the owner sends from another Outlook client is not
   owner evidence, until the release gate confirms a provenance field
   (A16).
+- `DRAFT` is also proof that the owner wrote the message. The person can
+  move a received message into Drafts. `isDraft` is set by the server: it
+  is true only for an item that was never sent, which only a client of
+  the mailbox can make. For an Outlook account, `DRAFT` needs the folder
+  `drafts` and `isDraft` true. A message in `drafts` with `isDraft` false
+  gets `Folders/Drafts` and counts as received mail.
 - `Authentication-Results`: the header parsers trust only the header of
   the Gmail receiver (`mx.google.com`). An Outlook message can carry a
   forged header with that authserv-id. For an Outlook account, Iris
@@ -265,7 +276,8 @@ person or a sender can set. Two existing rules read such data as proof:
 Label names must stay distinct, because search, policy rules and label
 actions match label names (spec 2). The names:
 
-- `archive`, `outbox` and `sentitems`: the fixed names above, in each
+- `archive`, `outbox`, `sentitems` and a non-draft in `drafts`: the fixed
+  names above, in each
   language of the mailbox.
 - A folder that is not well-known: the label `Folders/<path>`, where the
   path is the display names from the top folder, joined with `/`. For
@@ -384,6 +396,9 @@ and MIME text of `$value`. All other input fails closed: the call gives
 | A message moves after the round of its new folder | `Removed` only; the read by ID finds the new folder, and the message stays | fake move between rounds |
 | A folder of the mirror is not in the folder list | its link goes; each of its messages is read by ID: 404 is gone, else its new folder | fake folder delete |
 | An Outlook message with a forged `Authentication-Results: mx.google.com; dmarc=pass` | the header counts as absent; DMARC is unknown | unit test of the parser with the provider `outlook` |
+| A search folder in the folder list | left out with its children; its messages come from their real folders | fake search folder |
+| A hidden child folder | listed, its messages synced | fake hidden child |
+| A received message moved into Drafts (`isDraft` false) | label `Folders/Drafts`, no `DRAFT` | fake move to `drafts` |
 | A received message moved into Sent Items | label `Folders/Sent Items`, no `SENT`; the sender axis treats it as received mail | fake move to `sentitems` |
 | An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
 | 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
