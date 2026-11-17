@@ -39,13 +39,15 @@ command. Each tool has its own command line.
    the data folder, `iris.sock` and the network, other than the model hosts
    of the adapter through the egress proxy of the engine (see
    [Isolation](#isolation) and [Model egress](#model-egress)). This card defines the isolation interface.
-   R4-05 gives the isolation of macOS and of Linux. Until R4-05 merges,
-   `iris job run` refuses each run.
+   R4-05 gives the isolation of Linux (sandbox spec,
+   `docs/specs/2026-11-17-session-sandbox.md`). R4-05m gives the
+   isolation of macOS. Until the card of a system merges, `iris job run`
+   refuses each run on that system.
 
 ## Not in scope
 
 - The isolation of each system: no network other than the egress proxy, no
-  data folder and no host socket (R4-05). This card gives the interface and refuses a run with no
+  data folder and no host socket (R4-05 for Linux, R4-05m for macOS). This card gives the interface and refuses a run with no
   isolation, so no agent runs outside an isolation.
 - The write verbs in a session and the one draft changeset of a session
   (R4-03).
@@ -166,7 +168,11 @@ the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 adapters pass `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` (a token
 of `claude setup-token`, for a Claude subscription) (`claude-code`), and
 `OPENAI_API_KEY` and `CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
-mailbox. A session with an egress port also gets `HTTPS_PROXY` and
+mailbox. The Linux sandbox shows no host folder other than the workspace
+and the program files: `HOME` is an empty private folder, and a
+`CODEX_HOME` outside the view is not visible. So the agent tool reads no
+settings or login files of the person, and authenticates only with a key
+variable (sandbox spec, "Files"; known limit with an issue). A session with an egress port also gets `HTTPS_PROXY` and
 `https_proxy`, set by the engine to the port of the session (see
 [Model egress](#model-egress)); a value of the engine for these names is
 never passed. No variable of Iris goes to the agent.
@@ -452,10 +458,10 @@ An isolation runs the agent so that it cannot reach the data folder, the
 engine socket `iris.sock`, the socket of another session, or the network.
 The one exception is the egress port of the session (see
 [Model egress](#model-egress)).
-It shows the agent only the workspace (read and write), the programs of the
-system and the folders that the adapter needs (read only, for example the
-settings of the agent tool). It ends each process in it when the session
-ends.
+It shows the agent only the workspace (read and write), a private empty
+home and `/tmp` (read and write), and the programs and system files of the
+sandbox spec (read only). It shows no settings or credential file of the
+person. It ends each process in it when the session ends.
 
 `iris_session::Isolation` is the interface. It gives:
 
@@ -475,18 +481,18 @@ ends.
   call from the engine. For example on Linux, the agent runs in a new PID
   namespace whose first process is a child of the helper with
   `PR_SET_PDEATHSIG`; when the first process of a PID namespace ends, the
-  kernel kills each process in it. R4-05 gives the mechanism of each
+  kernel kills each process in it. R4-05 (Linux) and R4-05m (macOS) give the mechanism of each
   system, and an isolation that cannot keep this rule does not pass the
   check of the system.
 
-The engine calls `stop` on each end of a session, in step 4 of the
+The engine calls `stop` on each end of a session, in step 5 of the
 shutdown order (see [Supervisor](#supervisor)): on a stop, a revoke, a job
 move, a time limit, an exit of the agent, a failed helper, a failed launch,
 and at the engine start for each live session. The
 supervisor calls `stop` again on each turn while the reap check fails. So
 no process of a session runs past its end, also when the helper is gone.
 
-This card gives no isolation for a real system: R4-05 gives one for macOS and one for Linux. With no
+This card gives no isolation for a real system: R4-05 gives one for Linux, and R4-05m one for macOS. With no
 isolation, `iris job run` fails with the reason, so no agent runs as the
 OS user with access to the data folder (spec 2, C2 and C6).
 
@@ -890,7 +896,7 @@ who does not run `iris job run`.
 
 ## Risks
 
-- `iris job run` does nothing for the person until R4-05 merges. This is
+- `iris job run` does nothing for the person until R4-05 merges (Linux) or R4-05m merges (macOS). This is
   on purpose: no agent runs without an isolation.
 - A wrong adapter line makes the agent fail at once. The log shows the exit
   code, not the error text, because no agent output is stored. The person
@@ -920,7 +926,7 @@ and `dependsOn` on the board.
 | R4-04e | The engine: supervisor (it calls the reap check of R4-04h), requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
 | R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
 
-R4-05 (the isolation of each system) depends on R4-04c, R4-04d and R4-04g. The
+R4-05 (the isolation of Linux) and R4-05m (macOS) depend on R4-04c, R4-04d and R4-04g. The
 cards that need a running session (R4-08, R4-11, R5-04) depend on R4-04e.
 
 ## Spec checks

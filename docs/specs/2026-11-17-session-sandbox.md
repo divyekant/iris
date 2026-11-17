@@ -412,9 +412,10 @@ before the agent runs, or `ended` is false.
 - The launcher spec, "The hold helper": the helper runs outside the
   sandbox, and the agent (`bwrap` on Linux) is its child.
 - `docs/spec/03-job-workspace.md` and the fixed text of `JOB.md` in
-  `crates/iris-workspace`: the session has no network other than the model
-  host of the agent tool, and the agent tool can send the folder to that
-  host before `iris submit` (launcher spec, "Model egress").
+  `crates/iris-workspace`: the session has no network other than the hosts
+  that `agents.toml` allows for the agent tool (its model host), and the
+  agent tool can send the folder to those hosts before `iris submit`
+  (launcher spec, "Model egress").
 - `starter.json`: `bubblewrap` in the system packages of the `engine` area,
   for the tests.
 - The engine (R4-04e) calls `system(data_dir)` in the engine and in the
