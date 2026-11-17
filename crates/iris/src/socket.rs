@@ -485,10 +485,14 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             let (session, reaped) = sessions()?
                 .stop(job)
                 .map_err(|e| Failure::new(code::DENIED, e))?;
-            Ok(Done::Value(json!({
+            let mut answer = json!({
                 "session": iris_job::format_session_id(session),
-                "reaped": reaped,
-            })))
+                "reaped": reaped.is_ok(),
+            });
+            if let Err(why) = reaped {
+                answer["why"] = why.into();
+            }
+            Ok(Done::Value(answer))
         }
         Some("submit") => {
             only(&["changeset", "why"])?;

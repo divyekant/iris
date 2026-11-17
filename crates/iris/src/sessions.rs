@@ -61,6 +61,8 @@ struct State {
     launching: HashSet<i64>,
     /// The sessions whose helper this engine started, by session ID.
     running: HashMap<i64, Live>,
+    /// The reason of the last failed reap check of each session.
+    left: HashMap<i64, String>,
 }
 
 struct Live {
@@ -173,16 +175,25 @@ impl Sessions {
     /// launch thread. Gives the session ID after the register.
     pub fn run(self: &Arc<Self>, job: i64, agent: &str) -> Result<i64, String> {
         let isolation = self.isolation.clone()?;
-        {
-            let mut st = self.state();
-            if !st.launching.insert(job) {
-                return Err("a launch of this job runs".into());
-            }
-        }
-        let begun = {
-            let launcher = self.launcher(&*isolation, None, &|_, _| {});
-            launcher.begin(job, agent)
+        // A second run names the live session (a retry after a lost answer).
+        let refuse = |live: Option<i64>| match live {
+            Some(id) => format!("{}: a session of this job is live", format_session_id(id)),
+            None => "a launch of this job starts".into(),
         };
+        if !self.state().launching.insert(job) {
+            return Err(refuse(self.live_of(job)));
+        }
+        if let Some(id) = self.live_of(job) {
+            self.state().launching.remove(&job);
+            return Err(refuse(Some(id)));
+        }
+        let hook = self.hook();
+        let after = |step: Step, s: i64| {
+            if let Some(h) = &hook {
+                h(step, s);
+            }
+        };
+        let begun = self.launcher(&*isolation, None, &after).begin(job, agent);
         let begun = match begun {
             Ok(b) => b,
             Err(e) => {
@@ -202,6 +213,19 @@ impl Sessions {
             return Err(format!("the launch thread did not start: {e}"));
         }
         Ok(session)
+    }
+
+    /// The live session of `job`, if one exists.
+    fn live_of(&self, job: i64) -> Option<i64> {
+        iris_job::live_sessions(&self.store)
+            .ok()?
+            .into_iter()
+            .find(|s| s.job_id == job)
+            .map(|s| s.id)
+    }
+
+    fn hook(&self) -> Option<Arc<AfterStep>> {
+        self.after.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn launcher<'a>(
@@ -226,16 +250,13 @@ impl Sessions {
     fn launch(&self, isolation: &dyn Isolation, begun: iris_session::launch::Begun) {
         let job = begun.job();
         let session = begun.session;
-        let limit_ms = iris_session::config::read_agents(self.data_dir())
-            .map(|f| f.max_minutes)
-            .unwrap_or(iris_session::config::DEFAULT_MINUTES);
-        let limit_ms = i64::from(limit_ms) * 60_000;
+        let limit_ms = i64::from(begun.max_minutes()) * 60_000;
         let proxy = if begun.allow_hosts().is_empty() {
             Ok(None)
         } else {
             self.egress(session, begun.allow_hosts().to_vec()).map(Some)
         };
-        let hook = self.after.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let hook = self.hook();
         let outcome = match proxy {
             Ok(proxy) => {
                 let port = proxy.as_ref().map(Proxy::port);
@@ -333,9 +354,10 @@ impl Sessions {
     }
 
     /// `job.stop`: ends the open session of `job` with `stop`, then waits
-    /// up to [`STOP_WAIT`] for the reap. Gives the session and true if it
-    /// was reaped.
-    pub fn stop(&self, job: i64) -> Result<(i64, bool), String> {
+    /// up to [`STOP_WAIT`] for the reap. Gives the session, and `Ok` if it
+    /// was reaped, else the reason of the last failed reap check.
+    #[allow(clippy::type_complexity)]
+    pub fn stop(&self, job: i64) -> Result<(i64, Result<(), String>), String> {
         let open = iris_job::open_session(&self.store, job).map_err(|e| e.to_string())?;
         let session = match open {
             Some(s) => {
@@ -354,44 +376,56 @@ impl Sessions {
             self.turn(now_ms());
             let s = iris_job::session(&self.store, session).map_err(|e| e.to_string())?;
             if s.reaped_ms.is_some() {
-                return Ok((session, true));
+                return Ok((session, Ok(())));
             }
             if Instant::now() >= end {
-                return Ok((session, false));
+                let why = self.state().left.get(&session).cloned();
+                return Ok((session, Err(why.unwrap_or_else(|| "not known".into()))));
             }
             std::thread::sleep(Duration::from_millis(200));
         }
     }
 
-    /// One supervisor turn over each live session.
+    /// One supervisor turn over each live session. The builds of done jobs
+    /// come after the release of the state, so a slow build does not hold
+    /// a stop or a run.
     pub fn turn(&self, now: i64) {
         let Ok(live) = iris_job::live_sessions(&self.store) else {
             return;
         };
-        let mut st = self.state();
-        for s in live {
-            if st.launching.contains(&s.job_id) {
-                continue;
-            }
-            let reaped = match st.running.get_mut(&s.id) {
-                Some(l) => {
-                    let reaped = self.supervise(&s, l, now);
-                    if reaped {
-                        let l = st.running.remove(&s.id).expect("present");
-                        let _ = std::fs::remove_file(&l.socket_path);
-                    }
-                    reaped
+        let mut done = Vec::new();
+        {
+            let mut st = self.state();
+            for s in live {
+                if st.launching.contains(&s.job_id) {
+                    continue;
                 }
-                None => self.orphan(&s, now),
-            };
-            if reaped {
-                self.build_done(s.job_id);
+                let reaped = match st.running.get_mut(&s.id) {
+                    Some(l) => self.supervise(&s, l, now),
+                    None => self.orphan(&s, now),
+                };
+                match reaped {
+                    Ok(()) => {
+                        if let Some(l) = st.running.remove(&s.id) {
+                            let _ = std::fs::remove_file(&l.socket_path);
+                        }
+                        st.left.remove(&s.id);
+                        done.push(s.job_id);
+                    }
+                    Err(why) => {
+                        st.left.insert(s.id, why);
+                    }
+                }
             }
+        }
+        for job in done {
+            self.build_done(job);
         }
     }
 
-    /// One running session of this engine. Gives true when it is reaped.
-    fn supervise(&self, s: &Session, l: &mut Live, now: i64) -> bool {
+    /// One running session of this engine. Gives `Ok` when it is reaped,
+    /// else the reason that it is not.
+    fn supervise(&self, s: &Session, l: &mut Live, now: i64) -> Result<(), String> {
         if l.exit.is_none() {
             if let Ok(Some(_)) = l.child.try_wait() {
                 // The helper exited: its last line is in the pipe.
@@ -419,14 +453,14 @@ impl Sessions {
                 Some(start) if now - start >= l.limit_ms => {
                     let _ = iris_job::end(&self.store, s.id, EndReason::TimeLimit, None, now);
                 }
-                _ => return false,
+                _ => return Err("the session runs".into()),
             }
         }
         // The session ended in the store (a stop, a revoke, a job move, a
         // time limit): the helper stops the group when the pipe closes. The
         // next turns reap the helper.
         self.shutdown(s.id, l);
-        false
+        Err("the helper still stops the agent".into())
     }
 
     /// The shutdown order: the grant ended in the store; close the socket,
@@ -447,8 +481,8 @@ impl Sessions {
     /// a session of the last engine, or a launch that could not write its
     /// end. End it, stop its isolation (on each turn: a process of the
     /// agent can still run), then run the reap check. Gives true when it is
-    /// reaped.
-    fn orphan(&self, s: &Session, now: i64) -> bool {
+    /// reaped, else the reason that it is not.
+    fn orphan(&self, s: &Session, now: i64) -> Result<(), String> {
         if s.ended_ms.is_none() {
             let _ = iris_job::end(&self.store, s.id, EndReason::LaunchFailed, None, now);
         }
@@ -458,15 +492,14 @@ impl Sessions {
         self.reap(s.id, false, now)
     }
 
-    fn reap(&self, session: i64, helper_reaped: bool, now: i64) -> bool {
-        let Ok(iso) = &self.isolation else {
-            return false;
-        };
-        let Ok(s) = iris_job::session(&self.store, session) else {
-            return false;
-        };
+    fn reap(&self, session: i64, helper_reaped: bool, now: i64) -> Result<(), String> {
+        let iso = self
+            .isolation
+            .as_ref()
+            .map_err(|e| format!("no isolation: {e}"))?;
+        let s = iris_job::session(&self.store, session).map_err(|e| e.to_string())?;
         match reap_check(&self.store, &**iso, &s, helper_reaped, now) {
-            Ok(()) => true,
+            Ok(()) => Ok(()),
             Err(why) => {
                 // One line in the engine log for a session still live 10
                 // minutes after its end.
@@ -475,7 +508,7 @@ impl Sessions {
                         say!("iris: {} is not reaped: {why}", format_session_id(session));
                     }
                 }
-                false
+                Err(why)
             }
         }
     }

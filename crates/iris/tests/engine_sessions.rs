@@ -168,7 +168,7 @@ fn a_stop_ends_the_session_and_waits_for_the_reap() {
     // After the reap, a new run registers.
     let second = s.run(f.job, "script").unwrap();
     assert!(second > id);
-    s.stop(f.job).unwrap();
+    let _ = s.stop(f.job).unwrap();
 }
 
 fn a_revoke_stops_a_running_session() {
@@ -373,7 +373,7 @@ fn a_revoke_retry_gives_the_egress_log_to_the_new_session() {
         !log(first).exists(),
         "no log has the name of the first session"
     );
-    s.stop(f.job).unwrap();
+    let _ = s.stop(f.job).unwrap();
 }
 
 fn a_slow_rebuild_does_not_hold_a_stop_of_another_job() {
@@ -463,7 +463,7 @@ fn a_second_run_names_the_live_session() {
     until(&s, &f, id, |r| r.started_ms.is_some());
     let e = s.run(f.job, "script").unwrap_err();
     assert!(e.contains(&name), "after the launch: {e}");
-    s.stop(f.job).unwrap();
+    let _ = s.stop(f.job).unwrap();
 }
 
 fn main() {

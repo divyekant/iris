@@ -611,8 +611,9 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
                     _ => Err(socket::Failure {
                         code: socket::code::ERROR,
                         error: format!(
-                            "{session}: the session ended, but its processes still stop; \
-                         run `iris job session {id}` later"
+                            "{session}: the session ended, but its processes still stop ({}); \
+                         run `iris job session {id}` later",
+                            r["why"].as_str().unwrap_or("reason not known")
                         ),
                     }),
                 }

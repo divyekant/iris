@@ -73,6 +73,7 @@ pub struct Begun {
     pub session: i64,
     job: i64,
     adapter: Adapter,
+    max_minutes: u32,
 }
 
 impl Begun {
@@ -85,6 +86,12 @@ impl Begun {
     /// gets no egress port.
     pub fn allow_hosts(&self) -> &[String] {
         &self.adapter.allow_hosts
+    }
+
+    /// The time limit of the session, in minutes, from the same read of
+    /// `agents.toml` as the adapter.
+    pub fn max_minutes(&self) -> u32 {
+        self.max_minutes
     }
 }
 
@@ -157,6 +164,7 @@ impl Launcher<'_> {
             session,
             job,
             adapter,
+            max_minutes: file.max_minutes,
         })
     }
 
@@ -167,6 +175,7 @@ impl Launcher<'_> {
             mut session,
             job,
             adapter,
+            ..
         } = begun;
         let mut retried = false;
         loop {
