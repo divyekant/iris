@@ -3,7 +3,7 @@
   source mail in one step. An unread dot marks a conversation that waits for you.
   A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09).
   On a commitment owed to you, the pill says "Nudge ready" when the draft is a
-  reminder to a late person (card R3-07), and the text of the reminder follows.
+  reminder to a late person (card R3-07, option A: the pill only).
   With `ondone`, an open commitment starts with a round tick box: a click marks
   it done after the same Undo time as the item view, then calls `ondone`. The
   view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
@@ -158,7 +158,6 @@
           {nudge ? "Nudge ready" : "Draft ready"}
         </span>
       </p>
-      {#if nudge}<p class="nudge">{nudge.body}</p>{/if}
     {/if}
     {#if note}<p class="note">{note}</p>{/if}
     {#if twins.length}
@@ -269,18 +268,6 @@
   /* What Iris prepared: quiet pills under the detail. They are no control, so a click opens the item. */
   .prepared {
     margin: var(--space-1) 0 0;
-  }
-  .nudge {
-    margin: var(--space-1) 0 0;
-    padding-left: var(--space-2);
-    border-left: 2px solid var(--color-border);
-    color: var(--color-text-muted);
-    font-size: var(--font-size--1);
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    overflow: hidden;
   }
   .ready {
     display: inline-flex;
