@@ -66,7 +66,8 @@ export const ignored: GatePage = {
 export const brief: Brief = {
   // Iris prepared a reply for the first item (card R3-09).
   you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
-  owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you")),
+  // Alex is late: Iris prepared a nudge (card R3-07).
+  owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },
   // The feed example is bundled by rule 3 ("Bundle the feed"), so it is only in its bundle.
@@ -395,6 +396,11 @@ export const changesets: Changeset[] = [
   },
 ];
 
+/** The comments of the person on each changeset of a job (card R4-08), oldest first. */
+export const comments: Record<string, { id: number; changeset: string; revision: number; text: string; at: string }[]> = {
+  "cs-79": [{ id: 1, changeset: "cs-79", revision: 1, text: "Use the price of the October quote, not the list price.", at: "2026-11-17T08:20:00Z" }],
+};
+
 /** The draft of each draft and send action of a changeset, with the parts that gave each flag (card R4-07). */
 export const drafts: Record<string, DraftView[]> = {
   "cs-79": [
@@ -599,6 +605,7 @@ export function answer(path: string): unknown {
   }
   if (name === "messages" && id) return message(id);
   if (name === "messages" && q.get("ids")) return { messages: q.get("ids")!.split(",").map(summaryOf) };
+  if (name === "changesets" && id && url.pathname.endsWith("/comments")) return changesets.some((c) => c.id === id) ? { comments: comments[id] ?? [] } : undefined;
   if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
@@ -612,6 +619,7 @@ export function answer(path: string): unknown {
   if (name === "notices") return notices;
   if (name === "measures") return measures;
   if (name === "threads" && id === "t-8841" && url.pathname.endsWith("/reply")) return replyStart;
+  if (name === "threads" && id === "t-8700" && url.pathname.endsWith("/draft")) return nudgeDraft;
   return undefined;
 }
 
@@ -752,6 +760,16 @@ export const measures: Measures = {
   memory: { rss_kib: 31_744, messages: 18_402 },
   approvals: { decided: 50, approved: 47 },
   undo: { applied: 48, undone: 1 },
+};
+
+/** GET /api/threads/t-8700/draft: the nudge to Alex, who is late with the SDK examples (R3-07). */
+export const nudgeDraft = {
+  thread: "t-8700",
+  based_on: "m-54001",
+  nudge: true,
+  to: "alex@example.com",
+  item: "c-207",
+  body: "Hi Alex,\n\nA quick check on the SDK examples. When can you send them?\n\nThanks",
 };
 
 /** POST /api/threads/t-8841/draft: a draft of the reply in your voice (R3-04 intent path). */

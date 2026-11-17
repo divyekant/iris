@@ -321,6 +321,9 @@ export async function loadOutbox(): Promise<Outbox> {
   return { ...first, sends, next: null };
 }
 
+/** GET /api/threads/{t}/draft: the ready draft of a thread (R3-09). `nudge` is true for a reminder to a late person (R3-07), with `to` and its commitment `item`. */
+export type ThreadDraft = { thread: string; based_on: string; nudge: boolean; to: string | null; item: string | null; body: string };
+
 /** GET /api/threads/{t}/reply: the start values of a reply (write spec, section 5). */
 export type ReplyStart = {
   account: string;

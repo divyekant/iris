@@ -2,6 +2,8 @@
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
   A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09).
+  On a commitment owed to you, the pill says "Nudge ready" when the draft is a
+  reminder to a late person (card R3-07, option A: the pill only).
   With `ondone`, an open commitment starts with a round tick box: a click marks
   it done after the same Undo time as the item view, then calls `ondone`. The
   view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
@@ -12,7 +14,7 @@
   import type { Item } from "../api";
   import { due, initials, money, origin, other, party, timeLeft, when } from "../format";
   import { href } from "../route";
-  import { post } from "../api";
+  import { get, post, type ThreadDraft } from "../api";
   import { hold, HOLD, quiet, said, type Verb } from "../act";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
@@ -31,6 +33,27 @@
   );
   // A feed item, a conversation or a signal gets its one quiet verb (Skip, Mute, Dismiss).
   let away = $derived(ondone && !box ? quiet(item) : null);
+  // The reminder of a late person (R3-07). Only a line owed to you asks the
+  // engine, so a brief makes at most one request for each of these lines.
+  let nudge: ThreadDraft | null = $state(null);
+  $effect(() => {
+    nudge = null;
+    if (item.form !== "commitment" || item.direction !== "owed_to_you" || !item.ready?.includes("draft")) return;
+    const thread = (item.sources.find((s) => s.role === "origin") ?? item.sources[0])?.thread;
+    if (!thread) return;
+    let live = true;
+    // A failure or a 404 (the draft became stale) keeps "Draft ready".
+    get<ThreadDraft>(`threads/${encodeURIComponent(thread)}/draft`).then(
+      (d) => {
+        // A thread can hold two commitments: the nudge is for one of them only.
+        if (live && d.nudge && d.item === item.id) nudge = d;
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
   let verb: Verb = $state("close");
   type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "done" } | { at: "failed"; why: string; known: boolean };
   let phase: Phase = $state({ at: "idle" });
@@ -128,11 +151,11 @@
     </p>
     {#if item.ready?.includes("draft")}
       <p class="prepared">
-        <span class="ready" title="Iris wrote a reply in your voice">
+        <span class="ready" title={nudge ? "Iris wrote a reminder in your voice. Nothing is sent." : "Iris wrote a reply in your voice"}>
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
             <path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
-          Draft ready
+          {nudge ? "Nudge ready" : "Draft ready"}
         </span>
       </p>
     {/if}

@@ -160,6 +160,13 @@ export default defineConfig(({ mode }) => {
             });
             return;
           }
+          // A write that no route above handles saves nothing: never answer it with a read.
+          if (req.method !== "GET" && req.method !== "HEAD") {
+            res.statusCode = 405;
+            res.setHeader("content-type", "application/json");
+            res.end(JSON.stringify({ error: "The fixtures do not save this change." }));
+            return;
+          }
           const body = answer(url);
           res.statusCode = body === undefined ? 404 : 200;
           res.setHeader("content-type", "application/json");

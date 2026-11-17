@@ -1580,15 +1580,15 @@ async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
         [newest],
     );
     let dana = sender(&store, "dana@contoso.example", Some("person"));
-    add_item(
-        &store,
-        "commitment",
-        "open",
-        1,
-        10,
-        json!({"direction": "owed_to_you", "kind": "task", "owner": party(&dana),
-               "counterparty": {"kind": "self"}, "due": {"date": "2026-11-01"}}),
-    );
+    let owed = |p: &str| {
+        json!({"direction": "owed_to_you", "kind": "task", "owner": party(p),
+               "counterparty": {"kind": "self"}, "due": {"date": "2026-11-01"}})
+    };
+    let first = add_item(&store, "commitment", "open", 1, 10, owed(&dana));
+    // A second commitment of the same thread, owed by Eli: the nudge is
+    // for the first one only, so only its line is ready.
+    let eli = sender(&store, "eli@contoso.example", Some("person"));
+    let second = add_item(&store, "commitment", "open", 1, 20, owed(&eli));
     // The nudge that the engine saved: its `ask` is the key of now.
     let key = iris_voice::nudge_key_sql("?1", None);
     exec(
@@ -1604,16 +1604,23 @@ async fn the_draft_route_gives_a_ready_nudge_with_its_person() {
     assert_eq!(
         draft,
         json!({"thread": format!("t-{thread}"), "based_on": format!("m-{newest}"),
-               "nudge": true, "to": "dana@contoso.example", "body": "Any news, Dana?"})
+               "nudge": true, "to": "dana@contoso.example", "item": format!("c-{first}"),
+               "body": "Any news, Dana?"})
     );
+    let want = vec![
+        (format!("c-{first}"), json!(["draft"])),
+        (format!("c-{second}"), Value::Null),
+    ];
     let (_, brief) = get(&store, "/api/brief").await;
-    assert_eq!(
-        brief["owed_to_you"]["items"][0]["ready"],
-        json!(["draft"]),
-        "{brief}"
-    );
+    assert_eq!(ready_marks(&brief["owed_to_you"]), want);
+    let (_, page) = get(&store, "/api/brief/owed_to_you").await;
+    assert_eq!(ready_marks(&page), want);
     // The promise is kept: the nudge is stale.
-    exec(&store, "UPDATE item SET status = 'done' WHERE ?1", [1]);
+    exec(
+        &store,
+        "UPDATE item SET status = 'done' WHERE id = ?1",
+        [first],
+    );
     let (status, _) = get(&store, &format!("/api/threads/t-{thread}/draft")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
