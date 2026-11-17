@@ -828,6 +828,10 @@ async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
 #[derive(Deserialize)]
 struct JobAnswerBody {
     answer: String,
+    /// The question that the person answers, and the `updated` of the job
+    /// when the person saw it. An answer to an older question gets 409.
+    question: String,
+    updated: String,
 }
 
 /// The answer of the person to the question of a job (card R5-05). The
@@ -841,7 +845,11 @@ async fn post_job_answer(
     let Some(row) = job_row(&s, &id)? else {
         return Ok(not_found());
     };
-    answer_job(&s, row, &b.answer, now_ms())?;
+    let asked = iris_job::Asked {
+        question: &b.question,
+        updated: &b.updated,
+    };
+    answer_job(&s, row, &b.answer, Some(asked), now_ms())?;
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 

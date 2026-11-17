@@ -34,13 +34,13 @@
     busy = true;
     error = "";
     try {
-      await answerJob(job.id, text);
+      await answerJob(job, text);
       onanswered(job);
     } catch (e) {
       const status = (e as { status?: number }).status;
       if (status === 409 || status === 404) {
-        // Another tab answered, or the person ended the job: the brief loads the questions again.
-        error = "This job asks no question now.";
+        // Another tab answered, the agent asked again, or the person ended the job: the brief loads the questions again.
+        error = "This job does not ask this question now.";
         onchanged();
       } else if (status === undefined) {
         error = own(e) || "Iris does not know if your answer arrived. Open the job to see.";

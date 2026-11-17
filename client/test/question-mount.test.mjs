@@ -50,7 +50,7 @@ test("the card shows the goal, the question as text, and sends the answer once",
     button(view).click();
     await until(() => answered);
     assert.equal(answered, "j-14");
-    assert.deepEqual(asked, [["POST", "jobs/j-14/answer", { answer: "Ask Brightline first." }]]);
+    assert.deepEqual(asked, [["POST", "jobs/j-14/answer", { answer: "Ask Brightline first.", question: q.question, updated: q.updated }]]);
   } finally {
     view.destroy();
   }
@@ -67,7 +67,7 @@ test("the limit counts characters, so a long answer of emoji goes in full", asyn
     await type(view, emoji);
     button(view).click();
     await until(() => answered);
-    assert.deepEqual(asked, [["POST", "jobs/j-14/answer", { answer: emoji }]]);
+    assert.deepEqual(asked, [["POST", "jobs/j-14/answer", { answer: emoji, question: job().question, updated: job().updated }]]);
     asked.length = 0;
     await type(view, "a".repeat(10_001));
     button(view).click();
@@ -80,14 +80,14 @@ test("the limit counts characters, so a long answer of emoji goes in full", asyn
 });
 
 test("a job that asks no question now loads the questions again", async () => {
-  serve(() => [409, { error: "The job asks no question now." }]);
+  serve(() => [409, { error: "The job does not ask this question now." }]);
   let changed = 0;
   const view = await mount("/src/views/Question.svelte", { job: job(), onanswered: () => {}, onchanged: () => changed++ });
   try {
     await type(view, "Yes.");
     button(view).click();
     await until(() => view.target.querySelector("[role=alert]"));
-    assert.match(text(view.target), /This job asks no question now\./);
+    assert.match(text(view.target), /This job does not ask this question now\./);
     assert.equal(changed, 1);
   } finally {
     view.destroy();
@@ -193,11 +193,14 @@ test("the newest question can be on a later page", async () => {
 
 test("the preview keeps an answer as the person wrote it", () => {
   const given = "  card: blue\n  limit: 2400\n";
-  const [code, doc] = fx.answerJob("j-14", given);
+  const seen = { question: job().question, updated: job().updated };
+  // An answer to an older question of the job: the same text at another time.
+  assert.equal(fx.answerJob("j-14", { answer: given, ...seen, updated: "2000-01-01T00:00:00.000Z" })[0], 409);
+  const [code, doc] = fx.answerJob("j-14", { answer: given, ...seen });
   assert.equal(code, 200);
   assert.equal(doc.job.events.at(-1).answer, given);
-  assert.equal(fx.answerJob("j-14", "again")[0], 409);
-  assert.equal(fx.answerJob("j-15", "  ")[0], 400);
+  assert.equal(fx.answerJob("j-14", { answer: "again", ...seen })[0], 409);
+  assert.equal(fx.answerJob("j-15", { answer: "  " })[0], 400);
 });
 
 test("a draft answer stays when a newer question of another job comes", async () => {

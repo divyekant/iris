@@ -129,11 +129,11 @@ export default defineConfig(({ mode }) => {
             let text = "";
             req.on("data", (part: Buffer) => (text += part));
             req.on("end", () => {
-              let said: unknown;
+              let said = {};
               try {
-                said = JSON.parse(text)?.answer;
+                said = JSON.parse(text) ?? {};
               } catch {
-                said = undefined;
+                said = {};
               }
               const [code, out] = answerJob(decodeURIComponent(job[1]), said);
               res.statusCode = code;

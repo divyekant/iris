@@ -151,6 +151,7 @@ export async function loadQuestions(): Promise<Job[]> {
 }
 
 /** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */
-export function answerJob(id: string, answer: string): Promise<JobDetail> {
-  return post<JobDetail>(`jobs/${encodeURIComponent(id)}/answer`, { answer });
+export function answerJob(job: Pick<Job, "id" | "question" | "updated">, answer: string): Promise<JobDetail> {
+  // The question and the time that the person saw: the engine refuses (409) an answer to an older question.
+  return post<JobDetail>(`jobs/${encodeURIComponent(job.id)}/answer`, { answer, question: job.question, updated: job.updated });
 }

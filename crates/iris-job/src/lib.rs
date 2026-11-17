@@ -380,12 +380,42 @@ pub fn woken(store: &Store) -> Result<Vec<(i64, i64, String)>> {
     })?)
 }
 
-/// The person answers the question.
-pub fn answer(store: &Store, job: i64, text: &str, now_ms: i64) -> Result<()> {
-    transaction(store, |c| answer_in(c, job, text, now_ms))
+/// The question that the person saw: its text and the `updated` of the job
+/// document (RFC 3339 with milliseconds) at that time.
+#[derive(Clone, Copy, Debug)]
+pub struct Asked<'a> {
+    pub question: &'a str,
+    pub updated: &'a str,
 }
 
-pub fn answer_in(c: &Connection, job: i64, text: &str, now_ms: i64) -> Result<()> {
+/// The person answers the question. With `asked`, the answer applies only
+/// if the job still asks that question: an answer to an older question
+/// gets [`Error::Refused`], in the same transaction as the move.
+pub fn answer(
+    store: &Store,
+    job: i64,
+    text: &str,
+    asked: Option<Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| answer_in(c, job, text, asked, now_ms))
+}
+
+pub fn answer_in(
+    c: &Connection,
+    job: i64,
+    text: &str,
+    asked: Option<Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    if let Some(a) = asked {
+        let j = get_in(c, job)?;
+        if j.question.as_deref() != Some(a.question)
+            || iris_talk::rfc3339(j.updated_ms) != a.updated
+        {
+            return Err(Error::Refused("the job asks another question now".into()));
+        }
+    }
     let m = Move {
         answer: Some(text),
         ..Move::default()

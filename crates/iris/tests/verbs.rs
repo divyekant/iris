@@ -304,7 +304,7 @@ fn job_answer_answers_the_question_once() {
     let job = iris_job::create(&store, "Pay the invoice.", None, 1).unwrap();
     let id = iris_job::format_job_id(job);
     let (ok, _, err) = iris(&store, &["job", "answer", &id, "The blue card."]);
-    assert!(!ok && err.contains("no question"), "{err}");
+    assert!(!ok && err.contains("does not ask this question"), "{err}");
     iris_job::ask(&store, job, "Which card?", None, 2).unwrap();
     let (ok, _, err) = iris(&store, &["job", "answer", "j-999", "Yes."]);
     assert!(!ok && err.contains("no job"), "{err}");

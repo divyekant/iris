@@ -63,12 +63,21 @@ pub fn jobs(store: &Store, state: &str, limit: u32, after: Option<&str>) -> Resu
 
 /// The answer of the person to the question of the job `row` (card
 /// R5-05). The job moves to `working`, and the engine starts a new session
-/// with the answer in `JOB.md`. A job that asks no question now gives
-/// `Conflict`: for example a second answer, or a job that the person ended.
-pub fn answer_job(store: &Store, row: i64, text: &str, now_ms: i64) -> Result<()> {
+/// with the answer in `JOB.md`. A job that does not ask the question now
+/// gives `Conflict`: for example a second answer, a job that the person
+/// ended, or a newer question when `asked` names an older one. With no
+/// `asked` (the command `iris job answer`), the answer applies to the
+/// question that the job asks now.
+pub fn answer_job(
+    store: &Store,
+    row: i64,
+    text: &str,
+    asked: Option<iris_job::Asked>,
+    now_ms: i64,
+) -> Result<()> {
     iris_job::check_text(text, 10_000).map_err(Error::Query)?;
-    iris_job::answer(store, row, text, now_ms).map_err(|e| match e {
-        iris_job::Error::Refused(_) => Error::Conflict("The job asks no question now.".into()),
+    iris_job::answer(store, row, text, asked, now_ms).map_err(|e| match e {
+        iris_job::Error::Refused(_) => Error::Conflict("The job does not ask this question now.".into()),
         e => job_error(e),
     })
 }

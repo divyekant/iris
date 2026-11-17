@@ -1343,7 +1343,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             iris_api::job_row(&store, id)
                 .map_err(|e| e.to_string())?
                 .ok_or(format!("no job has the ID {id}"))?;
-            iris_api::answer_job(&store, job, text, engine::now_ms()).map_err(|e| e.to_string())?;
+            iris_api::answer_job(&store, job, text, None, engine::now_ms())
+                .map_err(|e| e.to_string())?;
             println!("{id}: answered. Iris starts a new session of the job.");
             Ok(())
         }
