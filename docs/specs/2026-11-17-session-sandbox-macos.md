@@ -171,11 +171,13 @@ waits for the lock, then sees the result of the first.
    `stop` of the engine, which runs outside the coalition, does the work
    (see below). The `ended` of the engine stays false while the helper
    runs, so this early `Ok` does not let the reap pass.
-1. `launchctl bootout` of the job. A job that is not loaded is not an
-   error. The label holds the full SHA-256 of the data folder and the
+1. `launchctl bootout` of the job, inside the 5 seconds of the stop: at
+   the time limit, `stop` kills `launchctl` and returns an error. A job
+   that is not loaded is not an error. The label holds the full SHA-256 of the data folder and the
    session ID, so `bootout` never acts on a job of another data folder or
    another session.
-2. Until `ended` is true or 5 seconds pass, do a freeze, then a kill:
+2. Until `ended` is true or the 5 seconds of the stop pass, do a freeze,
+   then a kill:
    1. Freeze: scan the processes (`proc_listallpids`). For each process
       in the coalition of the record, send `SIGSTOP`, then read its
       coalition again. If the process is not in the coalition now (its
@@ -198,7 +200,11 @@ waits for the lock, then sees the result of the first.
 
    Recovery of the journal: at the start of each `stop` (also the `stop`
    of a new engine after a crash), and before `stop` returns, `stop`
-   resolves each entry of the journal of the session:
+   resolves each entry of the journal of the session. If there is no
+   record, or the record is of an earlier boot, `stop` removes the journal
+   and resolves nothing: each process of an earlier boot is gone, and its
+   process ID can belong to another process now. A journal with no record
+   cannot exist, because a freeze needs the record.
 
    | State of the entry | Result |
    |---|---|
@@ -478,5 +484,13 @@ Close issue #508.
 ## Plan
 
 1. R4-05m spec: this file.
-2. R4-05m code: the macOS isolation, the shim and the job verb, the egress
-   peer, and the Mac acceptance.
+2. R4-05m code, in three PRs, so that each one stays small:
+   1. The egress token and peer (PR #611).
+   2. The isolation logic (`isolation_macos.rs`): the profile, the
+      record, `ended`, `stop` with the freeze and the journal, and
+      `check`, with the real process facts (`isolation_macos_sys.rs`).
+      `system()` still refuses macOS after this PR, because no code makes
+      the launchd job and the record yet.
+   3. The shim, the `session-job` verb and the handoff, the private home
+      and `/tmp`, their removal at the reap, and `system()` on macOS.
+3. The Mac acceptance, after the third code PR.
