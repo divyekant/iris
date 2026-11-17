@@ -618,3 +618,59 @@ fn the_command_adds_and_submits_draft_and_send() {
         assert_eq!(a["decision"]["state"], json!("proposed"), "{doc}");
     }
 }
+
+/// `iris draft <target> <file>` and `iris send <draft>` add their actions
+/// through the socket (specification 2, section 8.2). A file that is not
+/// JSON is a usage error.
+#[test]
+fn the_cli_adds_draft_and_send() {
+    let (store, d) = engine("cli-write");
+    mailbox(&store);
+    let iris = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .arg("--data")
+            .arg(&d)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let file = d.join("mail.json");
+    let mail = json!({ "to": ["p@example.org"], "subject": "Hi", "body": "Hello" });
+    std::fs::write(&file, mail.to_string()).unwrap();
+    let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = iris(&["send", "d-7"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: Vec<(String, String, String)> = store
+        .read(|c| {
+            let mut st =
+                c.prepare("SELECT verb, targets, args FROM changeset_action ORDER BY id")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        (rows[0].0.as_str(), parse(&rows[0].1)),
+        ("draft", json!({ "accounts": ["a-1"] }))
+    );
+    assert_eq!(parse(&rows[0].2), mail);
+    assert_eq!(
+        (rows[1].0.as_str(), parse(&rows[1].1)),
+        ("send", json!({ "drafts": ["d-7"] }))
+    );
+    std::fs::write(&file, "to: p@example.org").unwrap();
+    let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
+}

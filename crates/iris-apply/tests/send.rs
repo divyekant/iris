@@ -501,7 +501,11 @@ fn a_deleted_draft_is_not_sent() {
 #[test]
 fn the_send_carries_the_approved_bytes() {
     let b = setup("bytes");
-    let (s, _) = b.new_mail(AGED);
+    let (s, provider) = b.new_mail(AGED);
+    // The person edits the draft after the release reads it and before
+    // the `drafts.send` call.
+    b.fake
+        .edit_draft_after_get(&provider, b"From: <owner@example.com>\r\nTo: <spy@example.org>\r\nSubject: Q4 numbers\r\n\r\nOther text.\r\n");
     assert!(matches!(b.release(s), Ok(Outcome::Applied(_))));
     let (raw, sent): (Vec<u8>, String) = b
         .store
@@ -512,6 +516,14 @@ fn the_send_carries_the_approved_bytes() {
         })
         .unwrap();
     assert_eq!(b.raw(&sent).as_bytes(), raw.as_slice());
+    assert!(!b.raw(&sent).contains("spy@example.org"));
+    // The edit happened: the release read the draft before the send.
+    let log = b.fake.requests();
+    let read = log
+        .iter()
+        .rposition(|r| r.starts_with("GET") && r.contains(&format!("/drafts/{provider}")));
+    let send = log.iter().rposition(|r| r.ends_with("/drafts/send"));
+    assert!(read < send && read.is_some(), "{log:#?}");
     let error: Option<String> = b
         .store
         .read(|c| {
@@ -595,4 +607,66 @@ fn a_new_mail_of_another_account_makes_no_draft() {
     }
     assert_eq!(b.posts("/drafts"), 0);
     assert_eq!(b.state(a), "denied");
+}
+
+/// The ledger state of each write action, by action.
+fn ledger(store: &Store, action: i64) -> (String, i64) {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state, call FROM ledger WHERE action_id = ?1",
+                [action],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+}
+
+/// A crash after the claim of a create and before its request: the row
+/// stays in `writing` with `call` 1. After a restart, the recovery finds
+/// no draft at Gmail, fails the row, and never calls `drafts.create`.
+#[test]
+fn a_crash_after_the_create_claim_never_creates() {
+    let b = setup("crash-create");
+    let a = b.approved(Verb::Draft, "a-1", mail(), 0);
+    // The create does not reach the state of Gmail, and the search of the
+    // recovery in the same run fails: the store keeps the state of a crash
+    // after the claim (the row in `writing`, `call` 1, no draft at Gmail).
+    b.fake.fail_next_write(&[503], false);
+    b.fake.fail_next_matching("rfc822msgid", 400);
+    assert!(b.apply(a).is_err());
+    assert_eq!(ledger(&b.store, a), ("writing".into(), 1));
+    let creates = b.posts("/drafts");
+    // The restart: a new store handle, then the recovery of the account.
+    let store = Store::open(b.store.dir()).unwrap();
+    iris_apply::recover(&store, &b.gmail, &mut tok(), b.account).unwrap();
+    assert_eq!(ledger(&store, a).0, "failed");
+    assert!(matches!(
+        apply(&store, &b.gmail, &mut tok(), b.account, a),
+        Err(Error::NotApproved(_)) | Ok(Outcome::Failed { .. })
+    ));
+    assert_eq!(b.posts("/drafts"), creates);
+    assert!(b.fake.draft_ids().is_empty());
+}
+
+/// A crash after the claim of a send: the row stays in `writing` and the
+/// `ledger_send` row keeps the draft. After a restart, neither the
+/// recovery nor a new release calls `drafts.send` again.
+#[test]
+fn a_crash_after_the_send_claim_never_sends() {
+    let b = setup("crash-send");
+    let (s, _) = b.new_mail(AGED);
+    // The send request fails and Gmail does not apply it: the same state
+    // at Gmail and in the store as a crash after the claim.
+    b.fake.fail_next_write(&[503], false);
+    assert_eq!(b.release(s).unwrap(), Outcome::Pending);
+    assert_eq!(ledger(&b.store, s), ("writing".into(), 1));
+    let sends = b.sends();
+    let store = Store::open(b.store.dir()).unwrap();
+    for _ in 0..3 {
+        iris_apply::recover(&store, &b.gmail, &mut tok(), b.account).unwrap();
+        let _ = release(&store, &b.gmail, &mut tok(), b.account, s);
+    }
+    assert_eq!(ledger(&store, s).0, "writing");
+    assert_eq!(b.sends(), sends);
 }
