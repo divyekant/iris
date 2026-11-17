@@ -257,6 +257,36 @@ export type HandledAction = {
   at: string | null;
 };
 
+/** GET /api/ledger: one change that Iris made, with who decided it and if an undo can start (card R2-07). */
+export type LedgerEntry = {
+  id: string;
+  verb: string;
+  /** Only `label`, `until`, `date` and `field`. */
+  args: Record<string, unknown>;
+  state: "writing" | "applied" | "failed" | "undone";
+  at: string;
+  error: string | null;
+  /** The messages of the entry, and the messages that Gmail confirmed. */
+  messages: number;
+  changed: number;
+  /** The items of a state verb, and the title of the first item. */
+  items: number;
+  title: string | null;
+  changeset: string;
+  author: { kind: "person" | "agent" | "triage" | "local"; name: string | null; job: string | null; goal: string | null };
+  decided_by: "rule" | "person" | null;
+  rule: number | null;
+  policy: number | null;
+  reason: string | null;
+  why: string | null;
+  can_undo: boolean;
+  undo_open: boolean;
+  undone_by: string | null;
+  undo_of: string | null;
+};
+
+export type LedgerPage = { entries: LedgerEntry[]; next: string | null };
+
 /** `count` is the count of all such actions, not only of this page. */
 export type HandledPage = { count: number; actions: HandledAction[]; next: string | null };
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type LedgerPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import type { Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
@@ -16,6 +16,7 @@
   import Rules from "./views/Rules.svelte";
   import Review from "./views/Review.svelte";
   import Handled from "./views/Handled.svelte";
+  import Ledger from "./views/Ledger.svelte";
   import Outbox from "./views/Outbox.svelte";
   import Gate from "./views/Gate.svelte";
   import Jobs from "./views/Jobs.svelte";
@@ -127,16 +128,20 @@
     {:else if route.view === "section"}
       {@const key = route.key}
       {#await get<Page>(`brief/${key}?limit=50`) then page}
-        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" expiring={key === "signals"} />
+        <List title={SECTIONS[key]} {page} more={`brief/${key}?limit=50`} cursor="after" expiring={key === "signals"} act />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "bundle"}
       {@const rule = route.rule}
       {#await Promise.all([get<Page>(`brief/bundle-${rule}?limit=50`), get<Policy>("policy").catch(() => null)]) then [page, policy]}
-        <List title={policy?.rules.find((r) => r.id === rule)?.name ?? `Rule ${rule}`} {page} more={`brief/bundle-${rule}?limit=50`} cursor="after" />
+        <List title={policy?.rules.find((r) => r.id === rule)?.name ?? `Rule ${rule}`} {page} more={`brief/bundle-${rule}?limit=50`} cursor="after" act />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "handled"}
       {#await Promise.all([get<HandledPage>("handled?limit=50"), get<Page & { count: number }>("brief/hidden?limit=50")]) then [changes, hidden]}
         <Handled {changes} {hidden} />
+      {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "history"}
+      {#await get<LedgerPage>("ledger?limit=50") then page}
+        <Ledger {page} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "outbox"}
       {#await loadOutbox() then first}

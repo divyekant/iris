@@ -1,11 +1,20 @@
-// The state verbs of the person on a commitment (spec 2 section 4): Done
-// (`close`), Later (`defer`) and Decline (`decline`). The engine applies a
-// verb through a changeset and the ledger (POST /api/items/{id}/{verb}).
+// The state verbs of the person (spec 2 section 4): on a commitment, Done
+// (`close`), Later (`defer`) and Decline (`decline`); on a feed item, a
+// conversation or a signal, Skip, Mute or Dismiss (R5-02). The engine applies
+// a verb through a changeset and the ledger (POST /api/items/{id}/{verb}).
 
 /** The time between a click and the request, so that the person can undo a wrong click. */
 export const HOLD = 5000;
 
-export type Verb = "close" | "defer" | "decline";
+export type Verb = "close" | "defer" | "decline" | "skip" | "mute" | "dismiss";
+
+/** The one verb that takes an item out of the brief, with its button label, or null (spec 1 section 6.8). */
+export function quiet(item: { form: string; status: string }): { verb: Verb; label: string } | null {
+  if (item.form === "feed" && (item.status === "new" || item.status === "read")) return { verb: "skip", label: "Skip" };
+  if (item.form === "conversation" && (item.status === "active" || item.status === "quiet")) return { verb: "mute", label: "Mute" };
+  if (item.form === "signal" && item.status === "active") return { verb: "dismiss", label: "Dismiss" };
+  return null;
+}
 
 /** The local day of `d` as `YYYY-MM-DD`. */
 export function ymd(d: Date): string {
@@ -61,6 +70,9 @@ export function day(value: string): string {
 export function said(verb: Verb, date?: string): string {
   if (verb === "close") return "Done.";
   if (verb === "decline") return "Declined.";
+  if (verb === "skip") return "Skipped.";
+  if (verb === "mute") return "Muted.";
+  if (verb === "dismiss") return "Dismissed.";
   return `Later, on ${day(date ?? "")}.`;
 }
 

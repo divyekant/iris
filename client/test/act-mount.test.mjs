@@ -227,3 +227,31 @@ test("only an open or deferred commitment has the actions", async () => {
     view.destroy();
   }
 });
+
+// R5-02: the item view of a feed item, a conversation or a signal shows its one quiet verb.
+test("the item view sends skip, mute or dismiss after the hold", async () => {
+  for (const [id, label, verb] of [
+    ["f-5001", "Skip", "skip"],
+    ["v-88", "Mute", "mute"],
+    ["s-901", "Dismiss", "dismiss"],
+  ]) {
+    const item = fx.items.find((i) => i.id === id);
+    const asked = serve(() => [200, item]);
+    let changed = null;
+    const view = await mount("/src/views/Act.svelte", { item, clock: () => NOW, delay: 30, onchange: (i) => (changed = i) });
+    try {
+      assert.ok(!button(view, "Done"), "no commitment verb");
+      button(view, label).click();
+      await until(() => text(view.target).includes("Undo"));
+      await until(() => changed);
+      assert.deepEqual(asked, [[`items/${id}/${verb}`, {}]]);
+    } finally {
+      view.destroy();
+    }
+  }
+  const quiet = act.quiet;
+  assert.equal(quiet({ form: "feed", status: "skipped" }), null);
+  assert.equal(quiet({ form: "signal", status: "expired" }), null);
+  assert.equal(quiet({ form: "conversation", status: "muted" }), null);
+  assert.equal(quiet({ form: "record", status: "kept" }), null);
+});
