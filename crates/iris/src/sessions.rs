@@ -156,20 +156,23 @@ impl Sessions {
         *self.after.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
-    /// Removes the files of `sessions/` older than [`LOG_DAYS`].
+    /// Removes the session logs (`se-<id>.log`, `se-<id>.egress.log`) of
+    /// `sessions/` older than [`LOG_DAYS`]. Other files there stay.
     fn remove_old_logs(&self) {
         let Ok(entries) = std::fs::read_dir(self.data_dir().join("sessions")) else {
             return;
         };
         let age = Duration::from_secs(LOG_DAYS * 86_400);
         for e in entries.flatten() {
-            let old = e
-                .metadata()
-                .ok()
-                .filter(|m| m.is_file())
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|a| a > age);
+            let name = e.file_name();
+            let log = name.to_str().is_some_and(is_session_log);
+            let old = log
+                && e.metadata()
+                    .ok()
+                    .filter(|m| m.is_file())
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|a| a > age);
             if old {
                 let _ = std::fs::remove_file(e.path());
             }
@@ -613,6 +616,15 @@ fn build_done(store: &Store, job: i64) {
             iris_job::format_job_id(job)
         );
     }
+}
+
+/// True for the name of a session log: `se-<id>.log` or
+/// `se-<id>.egress.log`.
+fn is_session_log(name: &str) -> bool {
+    let id = name
+        .strip_suffix(".egress.log")
+        .or_else(|| name.strip_suffix(".log"));
+    id.and_then(iris_job::parse_session_id).is_some()
 }
 
 /// Moves a log file to a new name, and never over a file of that name.
