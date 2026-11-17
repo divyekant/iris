@@ -18,7 +18,7 @@
 
 use std::io::{Read, Write};
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -56,8 +56,11 @@ pub struct Config {
     pub backoff_start: Duration,
     /// The longest wait after a refused call.
     pub backoff_max: Duration,
-    /// The longest time for one call, the body included.
+    /// The longest time for one call: each try, each wait after a refused
+    /// try and the body.
     pub timeout: Duration,
+    /// The largest raw message. Tests set a small value.
+    pub raw_limit: u64,
 }
 
 impl Default for Config {
@@ -67,6 +70,7 @@ impl Default for Config {
             backoff_start: Duration::from_secs(1),
             backoff_max: Duration::from_secs(300),
             timeout: Duration::from_secs(300),
+            raw_limit: RAW_LIMIT,
         }
     }
 }
@@ -145,11 +149,8 @@ pub struct Folder {
     pub id: String,
     pub display_name: String,
     pub parent_folder_id: Option<String>,
-    #[serde(default)]
     pub child_folder_count: u64,
-    #[serde(default)]
     pub total_item_count: u64,
-    #[serde(default)]
     pub unread_item_count: u64,
     /// The well-known name, from [`WELL_KNOWN`]. Graph does not send it: the
     /// client sets it.
@@ -161,7 +162,6 @@ pub struct Folder {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Flag {
-    #[serde(default)]
     pub flag_status: String,
 }
 
@@ -170,16 +170,11 @@ pub struct Flag {
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     pub id: String,
-    #[serde(default)]
     pub conversation_id: String,
-    #[serde(default)]
     pub parent_folder_id: String,
-    #[serde(default)]
     pub categories: Vec<String>,
-    #[serde(default)]
     pub is_read: bool,
-    pub flag: Option<Flag>,
-    #[serde(default)]
+    pub flag: Flag,
     pub is_draft: bool,
     /// ISO 8601 in UTC, for example `2026-11-17T10:00:00Z`.
     pub received_date_time: Option<String>,
@@ -188,9 +183,7 @@ pub struct Message {
 
 impl Message {
     pub fn flagged(&self) -> bool {
-        self.flag
-            .as_ref()
-            .is_some_and(|f| f.flag_status == "flagged")
+        self.flag.flag_status == "flagged"
     }
 }
 
@@ -231,7 +224,6 @@ struct DeltaItem {
 
 #[derive(Deserialize)]
 struct DeltaJson {
-    #[serde(default)]
     value: Vec<DeltaItem>,
     #[serde(rename = "@odata.nextLink")]
     next_link: Option<String>,
@@ -241,7 +233,6 @@ struct DeltaJson {
 
 #[derive(Deserialize)]
 struct FolderPage {
-    #[serde(default)]
     value: Vec<Folder>,
     #[serde(rename = "@odata.nextLink")]
     next_link: Option<String>,
@@ -408,7 +399,8 @@ impl Graph {
         let url = self.url(&format!("/me/messages/{}/$value", segment(id)));
         let _running = self.gate.enter();
         let response = self.call(token, &url, false)?;
-        let mut body = response.into_body().into_reader().take(RAW_LIMIT + 1);
+        let limit = self.config.raw_limit;
+        let mut body = response.into_body().into_reader().take(limit + 1);
         let mut buf = vec![0u8; 64 * 1024];
         let mut total = 0u64;
         loop {
@@ -419,8 +411,8 @@ impl Graph {
                 Err(e) => return Err(Error::Transport(e.to_string())),
             };
             total += n as u64;
-            if total > RAW_LIMIT {
-                return Err(Error::Decode(format!("a message above {RAW_LIMIT} bytes")));
+            if total > limit {
+                return Err(Error::Decode(format!("a message above {limit} bytes")));
             }
             sink.write_all(&buf[..n]).map_err(Error::Sink)?;
         }
@@ -434,6 +426,7 @@ impl Graph {
     /// A link from an answer, only if its scheme and authority equal those
     /// of the base URL and its path is below the base path. A text prefix
     /// is not enough: `https://graph.microsoft.com@evil.example/` has one.
+    /// A `.` or `..` segment (also as `%2e`) could leave the base path.
     fn checked(&self, link: &str) -> Result<String> {
         use ureq::http::Uri;
         let bad = || Error::Decode("a link to another host".into());
@@ -442,10 +435,13 @@ impl Graph {
         let (Some(a), Some(b)) = (uri.authority(), base.authority()) else {
             return Err(bad());
         };
-        let below = uri
-            .path()
-            .strip_prefix(base.path())
-            .is_some_and(|rest| rest.starts_with('/'));
+        let below = uri.path().strip_prefix(base.path()).is_some_and(|rest| {
+            rest.starts_with('/')
+                && !rest.split('/').any(|seg| {
+                    let seg = seg.to_ascii_lowercase().replace("%2e", ".");
+                    seg == "." || seg == ".."
+                })
+        });
         if uri.scheme() == base.scheme() && a.as_str() == b.as_str() && below {
             Ok(link.to_string())
         } else {
@@ -477,13 +473,22 @@ impl Graph {
         } else {
             "IdType=\"ImmutableId\"".to_string()
         };
+        let deadline = Instant::now() + self.config.timeout;
+        let late = || Error::Transport("no answer before the time limit of the call".into());
         let mut wait = self.config.backoff_start;
         loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(late());
+            }
             let response = self
                 .agent
                 .get(url)
                 .header("Authorization", &auth)
                 .header("Prefer", &prefer)
+                .config()
+                .timeout_global(Some(left))
+                .build()
                 .call()
                 .map_err(|e| Error::Transport(e.to_string()))?;
             let status = response.status().as_u16();
@@ -491,8 +496,13 @@ impl Graph {
                 return Ok(response);
             }
             if status == 429 || status >= 500 {
-                let after = retry_after(&response).unwrap_or_else(|| jitter(wait));
-                std::thread::sleep(after.min(self.config.backoff_max));
+                let after = retry_after(&response)
+                    .unwrap_or_else(|| jitter(wait))
+                    .min(self.config.backoff_max);
+                if Instant::now() + after >= deadline {
+                    return Err(late());
+                }
+                std::thread::sleep(after);
                 wait = (wait * 2).min(self.config.backoff_max);
                 continue;
             }
@@ -580,6 +590,88 @@ mod tests {
         ] {
             assert!(matches!(g.checked(bad), Err(Error::Decode(_))), "{bad}");
         }
+    }
+
+    /// A small random number source for the property test.
+    struct Rng(u64);
+
+    impl Rng {
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            from[((self.0 >> 33) % from.len() as u64) as usize]
+        }
+    }
+
+    /// Property: a link passes only if its scheme, user part, host, port
+    /// and base path are those of the base URL, with no dot segment.
+    #[test]
+    fn only_links_of_the_base_origin_and_path_pass() {
+        let g = Graph::new(Config {
+            base_url: "http://127.0.0.1:9/v1.0".into(),
+            ..Config::default()
+        });
+        let schemes = ["http", "https", "ftp", "HTTP", ""];
+        let users = ["", "u@", "u:p@", "127.0.0.1:9@", "@"];
+        let hosts = [
+            "127.0.0.1",
+            "evil.example",
+            "127.0.0.1.evil",
+            "127.0.0.2",
+            "[::1]",
+        ];
+        let ports = [":9", ":99", ":09", "", ":"];
+        let paths = [
+            "/v1.0", "/v1.0/", "/v1.0x", "/v1", "/", "", "/V1.0", "/x/v1.0",
+        ];
+        let rests = [
+            "",
+            "me",
+            "me/x?$deltatoken=1",
+            "..",
+            ".",
+            "%2e%2E",
+            "a/../b",
+            "a/./b",
+            "a@b",
+            "#f",
+            "?q=/v1.0",
+            "%2F..",
+            "a.b",
+            "...",
+        ];
+        let mut rng = Rng(7);
+        let mut passed = 0;
+        for _ in 0..20_000 {
+            let (scheme, user, host, port, path, rest) = (
+                rng.pick(&schemes),
+                rng.pick(&users),
+                rng.pick(&hosts),
+                rng.pick(&ports),
+                rng.pick(&paths),
+                rng.pick(&rests),
+            );
+            let link = format!("{scheme}://{user}{host}{port}{path}{rest}");
+            let dots = rest
+                .split(['/', '?', '#'])
+                .any(|s| matches!(s.to_ascii_lowercase().as_str(), "." | ".." | "%2e%2e"));
+            // The scheme has no case (RFC 3986 section 3.1).
+            let expect = scheme.eq_ignore_ascii_case("http")
+                && user.is_empty()
+                && host == "127.0.0.1"
+                && port == ":9"
+                && path == "/v1.0/"
+                && !dots;
+            let got = g.checked(&link);
+            assert_eq!(got.is_ok(), expect, "{link}");
+            if let Ok(l) = got {
+                assert_eq!(l, link);
+                passed += 1;
+            }
+        }
+        assert!(passed > 0, "no generated link passed");
     }
 
     #[test]

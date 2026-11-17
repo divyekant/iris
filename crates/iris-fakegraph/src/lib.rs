@@ -70,6 +70,9 @@ struct Msg {
     categories: Vec<String>,
     read: bool,
     flagged: bool,
+    /// `isDraft`. It does not follow the folder: a received message moved
+    /// to Drafts stays `false` (spec section 5).
+    draft: bool,
     /// The `Message-ID` header, with no angle brackets.
     mid: String,
     /// `None`: the raw message comes from the synthetic mailbox.
@@ -94,6 +97,8 @@ struct Store {
     floor: u64,
     page_limit: usize,
     failures: VecDeque<(u16, Option<u64>)>,
+    /// Bodies of 200 answers in place of the real answers.
+    bodies: VecDeque<String>,
     requests: Vec<String>,
     running: usize,
     most_running: usize,
@@ -115,6 +120,7 @@ impl Store {
                     categories: first_categories(i, t.form),
                     read: !i.is_multiple_of(3),
                     flagged: i % 30 == 2,
+                    draft: first_folder(i, t.form, t.sender) == "F-drafts",
                     mid: t.message_id,
                     raw: None,
                     deleted: false,
@@ -136,6 +142,7 @@ impl Store {
             floor: 0,
             page_limit: PAGE_MAX,
             failures: VecDeque::new(),
+            bodies: VecDeque::new(),
             requests: Vec::new(),
             running: 0,
             most_running: 0,
@@ -178,7 +185,7 @@ impl Store {
             "categories": m.categories,
             "isRead": m.read,
             "flag": { "flagStatus": if m.flagged { "flagged" } else { "notFlagged" } },
-            "isDraft": m.folder == "F-drafts",
+            "isDraft": m.draft,
             "receivedDateTime": date,
             "internetMessageId": format!("<{}>", m.mid),
         })
@@ -322,6 +329,7 @@ impl FakeGraph {
             categories: Vec::new(),
             read: false,
             flagged: false,
+            draft: folder == "F-drafts",
             mid: format!("added-{i}@fake.example"),
             raw: Some(raw.to_vec()),
             deleted: false,
@@ -387,6 +395,13 @@ impl FakeGraph {
         self.store.lock().unwrap().failures.extend(failures);
     }
 
+    /// The next requests get a 200 answer with these JSON bodies, in place
+    /// of the real answers. A test sends answers in a wrong shape this way.
+    pub fn answer_next(&self, bodies: &[&str]) {
+        let mut s = self.store.lock().unwrap();
+        s.bodies.extend(bodies.iter().map(|b| b.to_string()));
+    }
+
     /// Each request waits this long before its answer, so that a test sees
     /// the requests that run at the same time.
     pub fn set_delay(&self, delay: Duration) {
@@ -426,12 +441,18 @@ fn router(store: Shared) -> Router {
 /// Log, count, check the token and the `Prefer` header, and answer with an
 /// injected failure if one is queued.
 async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
-    let (failure, delay) = {
+    let (failure, body, delay) = {
         let mut s = s.lock().unwrap();
         s.requests.push(format!("{} {}", req.method(), req.uri()));
         s.running += 1;
         s.most_running = s.most_running.max(s.running);
-        (s.failures.pop_front(), s.delay)
+        let failure = s.failures.pop_front();
+        let body = if failure.is_none() {
+            s.bodies.pop_front()
+        } else {
+            None
+        };
+        (failure, body, s.delay)
     };
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
@@ -456,7 +477,10 @@ async fn gate(State(s): State<Shared>, req: Request, next: Next) -> Response {
             }
             r
         }
-        (None, None) => next.run(req).await,
+        (None, None) => match body {
+            Some(b) => ([("Content-Type", "application/json")], b).into_response(),
+            None => next.run(req).await,
+        },
     };
     s.lock().unwrap().running -= 1;
     response

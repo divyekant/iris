@@ -203,3 +203,109 @@ fn a_redirect_is_not_followed() {
     }
     assert_eq!(fake.requests().len(), 1);
 }
+
+#[test]
+fn a_call_stops_at_its_time_limit_when_graph_keeps_refusing() {
+    let (fake, _, _) = setup(5);
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        backoff_start: Duration::from_millis(20),
+        backoff_max: Duration::from_millis(40),
+        timeout: Duration::from_millis(400),
+        ..Config::default()
+    });
+    fake.fail_next(&[(429, None); 1000]);
+    let start = std::time::Instant::now();
+    let got = graph.me(TOKEN);
+    assert!(matches!(got, Err(Error::Transport(_))), "{got:?}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    // A Retry-After past the limit also ends the call, with no wait.
+    let (fake, _, _) = setup(5);
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        timeout: Duration::from_millis(400),
+        ..Config::default()
+    });
+    fake.fail_next(&[(503, Some(60))]);
+    let start = std::time::Instant::now();
+    assert!(matches!(graph.me(TOKEN), Err(Error::Transport(_))));
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn an_answer_in_another_shape_is_a_decode_error() {
+    let (fake, graph, _) = setup(5);
+    let inbox = FakeGraph::folder_id("Inbox").to_string();
+    let link = format!(
+        "{}/v1.0/me/mailFolders/{inbox}/messages/delta?$deltatoken=1",
+        fake.base_url().trim_end_matches("/v1.0")
+    );
+    // A delta link with no `value`: no link may be stored.
+    let body = format!(r#"{{"@odata.deltaLink":"{link}"}}"#);
+    fake.answer_next(&[&body]);
+    let got = graph.delta(TOKEN, &inbox, None);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // A message with no isRead.
+    let id = FakeGraph::id_of(0);
+    fake.answer_next(&[&format!(
+        r#"{{"id":"{id}","conversationId":"c","parentFolderId":"{inbox}","categories":[],
+        "flag":{{"flagStatus":"notFlagged"}},"isDraft":false}}"#
+    )]);
+    let got = graph.message(TOKEN, &id);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // A folder list with no `value`, after 7 well-known folders not found.
+    fake.fail_next(&[(404, None); 7]);
+    fake.answer_next(&["{}"]);
+    let got = graph.folders(TOKEN);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+}
+
+#[test]
+fn a_received_message_moved_to_drafts_is_not_a_draft() {
+    let (fake, graph, _) = setup(30);
+    let inbox = FakeGraph::folder_id("Inbox");
+    let drafts = FakeGraph::folder_id("Drafts");
+    let (_, link) = round(&graph, drafts, None);
+    let id = fake
+        .messages()
+        .into_iter()
+        .find(|(_, f)| *f == inbox)
+        .unwrap()
+        .0;
+    assert!(fake.move_message(&id, drafts));
+    let page = graph.delta(TOKEN, drafts, Some(&link)).unwrap();
+    let m = page
+        .changes
+        .iter()
+        .find_map(|c| match c {
+            Change::Message(m) if m.id == id => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!m.is_draft);
+    // A message that was a draft from the start is one.
+    let draft = fake.add_message(b"Subject: d\r\n\r\nx\r\n", drafts);
+    assert!(graph.message(TOKEN, &draft).unwrap().is_draft);
+}
+
+#[test]
+fn a_raw_message_above_the_limit_is_refused() {
+    let (fake, _, _) = setup(5);
+    let graph = Graph::new(Config {
+        base_url: fake.base_url(),
+        raw_limit: 1000,
+        ..Config::default()
+    });
+    let big = fake.add_message(&vec![b'a'; 1001], FakeGraph::folder_id("Inbox"));
+    let mut sink = Vec::new();
+    let got = graph.raw(TOKEN, &big, &mut sink);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    assert!(sink.len() <= 1000, "{}", sink.len());
+    let fits = fake.add_message(&vec![b'a'; 1000], FakeGraph::folder_id("Inbox"));
+    let mut sink = Vec::new();
+    assert_eq!(graph.raw(TOKEN, &fits, &mut sink).unwrap(), 1000);
+}
