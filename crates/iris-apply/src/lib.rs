@@ -506,43 +506,17 @@ pub fn apply(
     let mut after = 0;
     loop {
         // A gone message has no provider ID here. An undo of the entry `o`
-        // changes a message only if `o` changed it, and no later entry
-        // changed it, except the actions of the undos of `o`. A later entry
-        // `e` does not count for a message that the undo of `e` (its
-        // `undone_by`) changed back, and the rows of that undo do not count
-        // either: undo, then undo again, works. A message that the undo of
-        // `e` skipped, or with an unknown result, still blocks. Step 2 of the
-        // undo of a `trash` changes only a message that an `untrash` of an
-        // undo of `o` changed (section 7.4).
+        // changes a message only if `o` changed it, and no later change of
+        // the message stands ([`later_change_stands`]). Step 2 of the undo
+        // of a `trash` changes only a message that an `untrash` of an undo
+        // of `o` changed (section 7.4).
         let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
             let mut st = c.prepare_cached(
-                "SELECT am.message_id, m.provider_id,
+                "SELECT am.message_id, m.provider_id, u.ledger_id,
                    u.ledger_id IS NULL
                    OR (EXISTS (SELECT 1 FROM ledger_message lm
                                WHERE lm.ledger_id = u.ledger_id
                                  AND lm.message_id = am.message_id AND lm.done = 1)
-                       AND NOT EXISTS (
-                         SELECT 1 FROM ledger_message lm JOIN ledger l ON l.id = lm.ledger_id
-                         WHERE lm.message_id = am.message_id AND l.id > u.ledger_id
-                           AND (lm.done = 1 OR lm.listed = 'unknown')
-                           AND l.action_id NOT IN (SELECT action_id FROM ledger_undo
-                                                   WHERE ledger_id = u.ledger_id)
-                           -- A later entry that its undo reversed on this message.
-                           AND NOT (l.state = 'undone' AND EXISTS (
-                             SELECT 1 FROM ledger_message r
-                             WHERE r.ledger_id = l.undone_by
-                               AND r.message_id = am.message_id AND r.done = 1))
-                           -- The row of that undo, by any step of its changeset.
-                           AND NOT (lm.done = 1 AND EXISTS (
-                             SELECT 1 FROM ledger_undo x
-                             JOIN ledger e ON e.id = x.ledger_id AND e.state = 'undone'
-                             JOIN ledger ub ON ub.id = e.undone_by
-                             JOIN changeset_action ua ON ua.id = ub.action_id
-                             JOIN changeset_action la ON la.id = l.action_id
-                             JOIN ledger_message r ON r.ledger_id = ub.id
-                             WHERE x.action_id = l.action_id
-                               AND la.changeset_id = ua.changeset_id
-                               AND r.message_id = am.message_id AND r.done = 1)))
                        AND (u.step = 1 OR EXISTS (
                          SELECT 1 FROM ledger_undo f JOIN ledger l ON l.action_id = f.action_id
                          JOIN ledger_message lm ON lm.ledger_id = l.id
@@ -555,9 +529,24 @@ pub fn apply(
                  ORDER BY am.message_id LIMIT ?3",
             )?;
             let rows = st.query_map(params![action, after, BATCH_LIMIT as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<i64>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
             })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            let rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
+            let mut page = Vec::with_capacity(rows.len());
+            for (id, provider_id, undo_of, eligible) in rows {
+                let eligible = eligible
+                    && match undo_of {
+                        Some(o) => !later_change_stands(c, o, id)?,
+                        None => true,
+                    };
+                page.push((id, provider_id, eligible));
+            }
+            Ok(page)
         })?;
         let Some(&(last, ..)) = page.last() else {
             break;
@@ -1147,6 +1136,76 @@ impl Run<'_, '_> {
             error,
         })
     }
+}
+
+/// True if a change of `message` by Iris after the ledger entry `o` still
+/// stands, so an undo of `o` must not change the message (section 7.4).
+///
+/// Each later entry with a `done` row of the message is a change. An undo
+/// entry (a link in `ledger_undo`) reverses the change of its target on the
+/// message when its own change stands: a change stands if no undo of it
+/// with a `done` row of the message stands. So an undo of an undo makes
+/// the first change stand again, and a retry of an undo counts as each
+/// other undo. Only an entry that is not the undo of an entry from `o` on
+/// is a root: its chain gives its net change. The undos of `o`, and their
+/// undos, are not later changes. A row with an unknown result outside the
+/// undos of `o` blocks, because its effect is not known.
+fn later_change_stands(c: &Connection, o: i64, message: i64) -> iris_store::Result<bool> {
+    use std::collections::{HashMap, HashSet};
+    // The later rows of the message: entry -> done.
+    let mut done: HashMap<i64, bool> = HashMap::new();
+    let mut unknown: HashSet<i64> = HashSet::new();
+    let mut st = c.prepare_cached(
+        "SELECT lm.ledger_id, lm.done, lm.listed = 'unknown' FROM ledger_message lm
+         WHERE lm.message_id = ?1 AND lm.ledger_id > ?2",
+    )?;
+    for r in st.query_map(params![message, o], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, bool>(1)?,
+            r.get::<_, Option<bool>>(2)?,
+        ))
+    })? {
+        let (l, d, u) = r?;
+        done.insert(l, d);
+        if u == Some(true) {
+            unknown.insert(l);
+        }
+    }
+    if done.is_empty() {
+        return Ok(false);
+    }
+    // The undo links from `o` on: target entry -> its undo entries.
+    let mut undos: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut target_of: HashMap<i64, i64> = HashMap::new();
+    let mut st = c.prepare_cached(
+        "SELECT x.ledger_id, l.id FROM ledger_undo x JOIN ledger l ON l.action_id = x.action_id
+         WHERE x.ledger_id >= ?1",
+    )?;
+    for r in st.query_map([o], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+        let (target, undo) = r?;
+        undos.entry(target).or_default().push(undo);
+        target_of.insert(undo, target);
+    }
+    // The chain of an entry ends in an undo of `o`.
+    let under_o = |mut l: i64| loop {
+        match target_of.get(&l) {
+            Some(&t) if t == o => return true,
+            Some(&t) => l = t,
+            None => return false,
+        }
+    };
+    // Each undo is later than its target, so the recursion ends.
+    fn stands(l: i64, done: &HashMap<i64, bool>, undos: &HashMap<i64, Vec<i64>>) -> bool {
+        done.get(&l).copied().unwrap_or(false)
+            && !undos
+                .get(&l)
+                .is_some_and(|us| us.iter().any(|&u| stands(u, done, undos)))
+    }
+    Ok(done.keys().any(|&l| {
+        !under_o(l)
+            && (unknown.contains(&l) || (!target_of.contains_key(&l) && stands(l, &done, &undos)))
+    }))
 }
 
 fn set_listed(tx: &Connection, ledger: i64, message: i64, why: &str) -> iris_store::Result<()> {
