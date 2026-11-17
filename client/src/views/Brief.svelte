@@ -4,7 +4,7 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, newest, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, newest, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
@@ -14,6 +14,8 @@
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
   import MatterCard from "./MatterCard.svelte";
+  import Question from "./Question.svelte";
+  import { loadQuestions } from "../jobs";
   import { loadProposed, type Proposed } from "../matters";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
   import { flushHolds, HOLD } from "../act";
@@ -23,10 +25,11 @@
     status: firstStatus = null,
     watches: firstWatches,
     proposed: firstProposed,
+    questions: firstQuestions,
     now: start = new Date(),
     poll = 5000,
     hold = HOLD,
-  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; now?: Date; poll?: number; hold?: number } = $props();
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; questions?: Job[]; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -100,6 +103,21 @@
       // The next poll tries again.
     }
   }
+  // The questions of the agents (R5-05) load apart from the brief too, with their own ticket. A failed load keeps the last list.
+  // svelte-ignore state_referenced_locally
+  let questions = $state(firstQuestions ?? []);
+  const questionsTicket = newest();
+  async function reloadQuestions() {
+    const fresh = questionsTicket();
+    try {
+      const q = await loadQuestions();
+      if (fresh()) questions = q;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  // svelte-ignore state_referenced_locally
+  if (firstQuestions === undefined) reloadQuestions();
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
@@ -107,7 +125,7 @@
   if (firstProposed === undefined) reloadProposed();
   $effect(() => {
     if (!poll) return;
-    const timer = setInterval(() => (reloadWatches(), reloadProposed()), poll * 12);
+    const timer = setInterval(() => (reloadWatches(), reloadProposed(), reloadQuestions()), poll * 12);
     return () => clearInterval(timer);
   });
 
@@ -208,6 +226,15 @@
   <div class="codes">
     {#each codes as item (item.id)}<Code {item} {now} />{/each}
   </div>
+{/if}
+
+<!-- The question of an agent (R5-05): one card, the newest question, answered in place. -->
+{#if questions.length}
+  <section aria-labelledby="questions">
+    <h2 id="questions"><span>{questions.length === 1 ? "A question for you" : "Questions for you"}</span> <span class="count">{questions.length}</span></h2>
+    {#key questions[0].id}<Question job={questions[0]} onchanged={reloadQuestions} />{/key}
+    {#if questions.length > 1}<a class="all touch" href="#/jobs">All {questions.length} questions</a>{/if}
+  </section>
 {/if}
 
 {#if soon.length}

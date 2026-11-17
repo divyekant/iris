@@ -1,7 +1,7 @@
 // Words for the jobs of the agents (card R4-09): the state of a job and each
 // step of its timeline, as plain sentences. Pure functions, so the tests need
 // no DOM. Text from an agent or from mail is data: the view shows it as text.
-import type { Job, JobChangeset, JobDetail, JobEvent, Target } from "./api";
+import { get, post, type Job, type JobChangeset, type JobDetail, type JobEvent, type JobPage, type Target } from "./api";
 import { daysFrom } from "./format";
 import { href } from "./route";
 
@@ -135,4 +135,15 @@ export function steps(d: JobDetail): Step[] {
     out.push(e);
   }
   return [...out, ...changes.slice(c)];
+}
+
+/** The jobs whose agent asks you a question now (card R5-05), newest first: at most 20. */
+export async function loadQuestions(): Promise<Job[]> {
+  const page = await get<JobPage>("jobs?state=needs_you&limit=20");
+  return page.jobs.filter((j) => j.state === "needs_you" && j.question);
+}
+
+/** Your answer to the question of a job (card R5-05). The engine starts a new session of the job with it. */
+export function answerJob(id: string, answer: string): Promise<JobDetail> {
+  return post<JobDetail>(`jobs/${encodeURIComponent(id)}/answer`, { answer });
 }
