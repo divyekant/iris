@@ -232,7 +232,7 @@ The engine adds flags. An author cannot remove a flag.
 
 | Flag | When |
 |---|---|
-| `new_recipient` | A `send` goes to an address that the owner never sent mail to. |
+| `new_recipient` | A `draft` or a `send` goes to an address that the owner never sent mail to. |
 | `outside_thread` | A `send` goes to an address that is not in the thread, after the session read external mail (release 4). |
 | `money` | The text of a draft names an amount of money (`docs/specs/2026-11-17-send-checks.md`). |
 | `date` | The text of a draft names a date (`docs/specs/2026-11-17-send-checks.md`). |

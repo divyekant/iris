@@ -82,6 +82,25 @@ fn random_id(address: &str) -> std::result::Result<String, Error> {
     Ok(iris_compose::message_id(bytes, address))
 }
 
+const GROWN: &str = "The warnings of the draft changed after the approval.";
+
+/// True if `content` has a draft flag that the approval of `action` did
+/// not see. Then the action is denied with [`GROWN`].
+fn grown(
+    store: &Store,
+    action: i64,
+    address: &str,
+    content: &iris_compose::Content,
+) -> Result<bool> {
+    let new = store.read(|c| {
+        iris_changeset::new_flags(c, action, address, content).map_err(changeset_error)
+    })?;
+    if !new.is_empty() {
+        decide(store, action, "denied", GROWN)?;
+    }
+    Ok(!new.is_empty())
+}
+
 /// The apply of an approved `draft` action (section 4), after the checks
 /// of [`super::apply`]: the parent of a reply, the claim, one
 /// `drafts.create` call, and the `draft` row.
@@ -151,6 +170,11 @@ pub(crate) fn draft(run: &mut Run<'_, '_>, action: i64) -> Result<Outcome> {
         Ok(c) => c,
         Err(why) => return deny(&why),
     };
+    // The subject of a reply comes from Gmail here, not from the mirror:
+    // check the flags of the final content (send-checks spec, section 4).
+    if grown(store, action, &run.address, &content)? {
+        return Ok(Outcome::Denied(GROWN.into()));
+    }
     let hash = iris_compose::hash(&content, reply.as_ref());
     let message_id = random_id(&run.address)?;
     let ops = Ops::Create {
@@ -562,6 +586,12 @@ pub fn release(
     });
     if !same {
         return changed_at_gmail(store, action, &d, read, &raw);
+    }
+    // The flags of the mail that Gmail holds, the same bytes as the draft
+    // row (docs/specs/2026-11-17-send-checks.md, section 4).
+    let content = &read.as_ref().expect("same").content;
+    if grown(store, action, &run.address, content)? {
+        return Ok(Outcome::Denied(GROWN.into()));
     }
     // Step 3: the claim.
     let ops = Ops::Send {

@@ -66,9 +66,23 @@ fn store(dir: &TempDir) -> Store {
             "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
              INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
                VALUES (1, 1, 1, 'draft', '{\"threads\":[\"t-1\"]}', '{}');
-             INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content, hash,
+",
+        )?;
+        // The draft that the apply made: its raw bytes and their hash.
+        let c = iris_compose::Content {
+            to: vec!["priya@example.com".into()],
+            cc: Vec::new(),
+            subject: "Re: Plan".into(),
+            body: "Thanks".into(),
+        }
+        .check()
+        .unwrap();
+        let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+        tx.execute(
+            "INSERT INTO draft(account_id, thread_id, provider_id, message_id_hdr, content, hash,
                                raw, action_id, created_at, updated_at)
-               VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', 'h1', x'00', 1, 0, 0);",
+             VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
+            rusqlite::params![iris_compose::hash(&c, None), raw],
         )?;
         Ok(())
     })
@@ -396,15 +410,25 @@ fn a_stranger_thread_flags_first_contact_with_gone_messages() {
         )?)
     })
     .unwrap();
+    // A stranger: the owner never wrote to priya, so new_recipient too.
     let flags = |a: &Value| a["flags"].clone();
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["t-1"], REPLY());
-    assert_eq!(flags(&got), json!(["first_contact"]), "{got}");
+    assert_eq!(
+        flags(&got),
+        json!(["first_contact", "new_recipient"]),
+        "{got}"
+    );
     s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE thread_id = 1", [])?))
         .unwrap();
     let got = one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
     assert_eq!(state(&got), "proposed", "{got}");
-    assert_eq!(flags(&got), json!(["first_contact"]), "{got}");
+    // The send flags the raw bytes of its draft: priya is new.
+    assert_eq!(
+        flags(&got),
+        json!(["first_contact", "new_recipient"]),
+        "{got}"
+    );
     // A new mail has no thread, so no thread can make it a first contact.
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], MAIL());
-    assert_eq!(flags(&got), json!([]), "{got}");
+    assert_eq!(flags(&got), json!(["new_recipient"]), "{got}");
 }
