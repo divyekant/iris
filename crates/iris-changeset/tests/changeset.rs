@@ -551,6 +551,22 @@ fn random_target_rows() {
                VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', 'h', x'00',
                        last_insert_rowid(), 0, 0);",
         )?;
+        // A feed item f-3, a conversation v-4 and a signal s-5 for skip,
+        // mute and dismiss.
+        for (row, id, form, file, status) in [
+            (3, "f-3", "feed", "feed.json", "new"),
+            (4, "v-4", "conversation", "conversation.json", "active"),
+            (5, "s-5", "signal", "signal-code.json", "active"),
+        ] {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            doc["id"] = json!(id);
+            tx.execute(
+                "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                rusqlite::params![row, form, status, doc.to_string()],
+            )?;
+        }
         Ok(())
     })
     .unwrap();
@@ -566,12 +582,13 @@ fn random_target_rows() {
     ];
     let ids = [
         "t-1", "t-2", "t-3", "t-9", "m-1", "m-3", "m-5", "c-1", "r-2", "p-1", "x", "m-0", "1",
-        "a-1", "a-2", "d-1", "d-9",
+        "a-1", "a-2", "d-1", "d-9", "f-3", "v-4", "s-5", "f-9",
     ];
     let verbs = [
-        "archive", "close", "decline", "defer", "correct", "draft", "send",
+        "archive", "close", "decline", "defer", "correct", "draft", "send", "skip", "mute",
+        "dismiss",
     ];
-    let (mut proposed, mut state, mut write) = (0, 0, 0);
+    let (mut proposed, mut state, mut write, mut one) = (0, 0, 0, 0);
     for round in 0..400 {
         let cs = create(&s, &agent(), NOW).unwrap();
         s.write(|tx| {
@@ -605,6 +622,9 @@ fn random_target_rows() {
                             [next(2) as usize]
                             .clone(),
                         json!({"drafts": ["d-1"]}),
+                        json!({"items": ["f-3"]}),
+                        json!({"items": ["v-4"]}),
+                        json!({"items": ["s-5"]}),
                     ];
                     targets = fits[v].as_object().unwrap().clone();
                 }
@@ -629,7 +649,18 @@ fn random_target_rows() {
                     "{\"to\":\"p@x.org\",\"body\":1}",
                 ];
                 // Half the rows get the valid shape of the verb, the rest any shape.
-                let fit = [5, 0, 0, 1, 3 + next(2) as usize, 13 + next(2) as usize, 5][v];
+                let fit = [
+                    5,
+                    0,
+                    0,
+                    1,
+                    3 + next(2) as usize,
+                    13 + next(2) as usize,
+                    5,
+                    0,
+                    0,
+                    0,
+                ][v];
                 let args = args[if next(2) == 0 {
                     fit
                 } else {
@@ -688,6 +719,19 @@ fn random_target_rows() {
                     assert_eq!(a["args"], json!({}), "round {round}: {a}");
                     proposed += 1;
                 }
+                "proposed"
+                    if ["skip", "mute", "dismiss"].contains(&a["verb"].as_str().unwrap()) =>
+                {
+                    // One item of the one form of the verb.
+                    let item = match a["verb"].as_str().unwrap() {
+                        "skip" => "f-3",
+                        "mute" => "v-4",
+                        _ => "s-5",
+                    };
+                    assert_eq!(a["targets"], json!({"items": [item]}), "round {round}: {a}");
+                    assert_eq!(a["args"]["reason"], "Done.", "round {round}: {a}");
+                    one += 1;
+                }
                 "proposed" => {
                     // The fixture has the commitment c-1 and the record r-2.
                     let kinds: &[&str] = match a["verb"].as_str().unwrap() {
@@ -709,6 +753,7 @@ fn random_target_rows() {
     assert!(proposed > 0, "the test reaches the proposed path");
     assert!(state > 0, "the test reaches a proposed state action");
     assert!(write > 0, "the test reaches a proposed draft or send");
+    assert!(one > 0, "the test reaches a proposed skip, mute or dismiss");
 }
 
 /// Submit gives the messages from the targets only: a row of another
@@ -1586,6 +1631,194 @@ fn open_actions_expire_14_days_after_the_submit() {
         "the action with a writing ledger row is still open"
     );
     assert!(doc(&s, draft)["actions"][0]["decision"].is_null());
+}
+
+/// No state verb counts toward the bulk limit of a changeset (section 5.3):
+/// a state verb changes no message. For each verb of `STATE_VERBS` but
+/// `correct`, an item with more origin messages than the limit sits next
+/// to an archive of one message, and the archive gets no `bulk` flag.
+#[test]
+fn no_state_verb_counts_toward_bulk() {
+    let dir = TempDir::new("bulk-state");
+    let s = store(&dir);
+    let n = BULK as usize + 1;
+    let batch: Vec<NewMessage> = (0..n)
+        .map(|i| NewMessage {
+            provider_id: format!("o{i}"),
+            thread_provider_id: "ot".into(),
+            ..Default::default()
+        })
+        .collect();
+    s.put_messages(1, &batch).unwrap();
+    let forms = [
+        ("commitment", "commitment-you-owe.json", "c", "open"),
+        ("feed", "feed.json", "f", "new"),
+        ("conversation", "conversation.json", "v", "active"),
+        ("signal", "signal-code.json", "s", "active"),
+    ];
+    let mut ids = Vec::new();
+    s.write(|tx| {
+        for (form, file, prefix, status) in forms {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            let row: i64 = tx.query_row("SELECT coalesce(max(id), 0) + 1 FROM item", [], |r| {
+                r.get(0)
+            })?;
+            doc["id"] = json!(format!("{prefix}-{row}"));
+            doc["status"] = json!(status);
+            tx.execute(
+                "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                rusqlite::params![row, form, status, doc.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT ?1, id, 'origin' FROM message WHERE provider_id LIKE 'o%'",
+                [row],
+            )?;
+            ids.push(format!("{prefix}-{row}"));
+        }
+        Ok(())
+    })
+    .unwrap();
+    for verb in iris_changeset::STATE_VERBS {
+        let verb = Verb::parse(verb).unwrap();
+        let (target, a) = match verb {
+            Verb::Correct => continue,
+            Verb::Defer => (&ids[0], json!({"date": "2099-01-05"})),
+            Verb::Skip => (&ids[1], json!({"reason": "No."})),
+            Verb::Mute => (&ids[2], json!({"reason": "No."})),
+            Verb::Dismiss => (&ids[3], json!({"reason": "No."})),
+            _ => (&ids[0], json!({"reason": "No."})),
+        };
+        let cs = create(&s, &agent(), NOW).unwrap();
+        add_action(&s, cs, &agent(), verb, &[target], &args(a), None).unwrap();
+        add_action(&s, cs, &agent(), Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+        submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+        let state = hash_doc(&s, cs, 1, 1);
+        assert_eq!(state["decision"]["state"], "proposed", "{state}");
+        assert_eq!(
+            state["resolved"]["messages"].as_array().unwrap().len(),
+            n,
+            "{}",
+            verb.as_str()
+        );
+        assert_eq!(
+            hash_doc(&s, cs, 1, 2)["flags"],
+            json!([]),
+            "{}",
+            verb.as_str()
+        );
+    }
+}
+
+/// `skip`, `mute` and `dismiss` take one item each (R5-02): an action with
+/// two items is denied at submit.
+#[test]
+fn skip_mute_and_dismiss_take_one_item() {
+    let dir = TempDir::new("one-item");
+    let s = store(&dir);
+    let forms = [
+        (Verb::Skip, "feed", "feed.json", "f", "new"),
+        (
+            Verb::Mute,
+            "conversation",
+            "conversation.json",
+            "v",
+            "active",
+        ),
+        (Verb::Dismiss, "signal", "signal-code.json", "s", "active"),
+    ];
+    for (verb, form, file, prefix, status) in forms {
+        let mut ids = Vec::new();
+        s.write(|tx| {
+            for _ in 0..2 {
+                let row: i64 =
+                    tx.query_row("SELECT coalesce(max(id), 0) + 1 FROM item", [], |r| {
+                        r.get(0)
+                    })?;
+                let mut doc =
+                    iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+                doc["id"] = json!(format!("{prefix}-{row}"));
+                tx.execute(
+                    "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                     VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                    rusqlite::params![row, form, status, doc.to_string()],
+                )?;
+                ids.push(format!("{prefix}-{row}"));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let cs = create(&s, &agent(), NOW).unwrap();
+        let targets: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let a = args(json!({"reason": "No."}));
+        add_action(&s, cs, &agent(), verb, &targets, &a, None).unwrap();
+        add_action(&s, cs, &agent(), verb, &targets[..1], &a, None).unwrap();
+        // A changeset action needs a reason, as `close` does.
+        add_action(&s, cs, &agent(), verb, &targets[..1], &Map::new(), None).unwrap();
+        submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+        let none = hash_doc(&s, cs, 1, 3);
+        assert_eq!(none["decision"]["state"], "denied", "{none}");
+        assert!(none["decision"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("needs one reason"));
+        let two = hash_doc(&s, cs, 1, 1);
+        assert_eq!(two["decision"]["state"], "denied", "{two}");
+        assert!(two["decision"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("one target"));
+        assert_eq!(hash_doc(&s, cs, 1, 2)["decision"]["state"], "proposed");
+    }
+}
+
+/// Submit refuses a reason longer than `MAX_REASON` for each verb with a
+/// reason, on each path: an agent changeset here, the web client in the
+/// API tests.
+#[test]
+fn submit_refuses_a_long_reason() {
+    let dir = TempDir::new("long-reason");
+    let s = store(&dir);
+    let long = "x".repeat(iris_changeset::MAX_REASON + 1);
+    let fit = "x".repeat(iris_changeset::MAX_REASON);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for verb in [Verb::Close, Verb::Decline] {
+        add_action(
+            &s,
+            cs,
+            &agent(),
+            verb,
+            &["c-1"],
+            &args(json!({"reason": long})),
+            None,
+        )
+        .unwrap();
+    }
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Close,
+        &["c-1"],
+        &args(json!({"reason": fit})),
+        None,
+    )
+    .unwrap();
+    submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+    for n in 1..=2 {
+        let d = hash_doc(&s, cs, 1, n);
+        assert_eq!(d["decision"]["state"], "denied", "{d}");
+        assert!(
+            d["decision"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("longer than 500"),
+            "{d}"
+        );
+    }
+    assert_eq!(hash_doc(&s, cs, 1, 3)["decision"]["state"], "proposed");
 }
 
 /// Random `ledger` targets (section 7.4): submit proposes an undo only for

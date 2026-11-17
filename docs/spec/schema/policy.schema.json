@@ -29,7 +29,7 @@
   },
   "$defs": {
     "verb": {
-      "$comment": "The verbs of release 2 (section 4). untrash is not a verb of a rule: only an undo makes it.",
+      "$comment": "The verbs of release 2 (section 4). untrash is not a verb of a rule: only an undo makes it. skip, mute and dismiss are of release 5 (docs/specs/2026-11-17-preference-rules.md).",
       "enum": [
         "archive",
         "inbox",
@@ -41,7 +41,10 @@
         "close",
         "defer",
         "decline",
-        "correct"
+        "correct",
+        "skip",
+        "mute",
+        "dismiss"
       ]
     },
     "rule": {

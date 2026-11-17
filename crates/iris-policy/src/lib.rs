@@ -75,7 +75,8 @@ impl Effect {
     }
 }
 
-/// The verbs of release 2 (spec 2, section 4).
+/// The verbs of release 2 (spec 2, section 4), and `skip`, `mute` and
+/// `dismiss` of release 5 (docs/specs/2026-11-17-preference-rules.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Verb {
     Archive,
@@ -89,10 +90,13 @@ pub enum Verb {
     Defer,
     Decline,
     Correct,
+    Skip,
+    Mute,
+    Dismiss,
 }
 
 impl Verb {
-    pub const ALL: [Verb; 11] = [
+    pub const ALL: [Verb; 14] = [
         Verb::Archive,
         Verb::Inbox,
         Verb::Label,
@@ -104,6 +108,9 @@ impl Verb {
         Verb::Defer,
         Verb::Decline,
         Verb::Correct,
+        Verb::Skip,
+        Verb::Mute,
+        Verb::Dismiss,
     ];
 
     pub fn name(self) -> &'static str {
@@ -119,6 +126,9 @@ impl Verb {
             Verb::Defer => "defer",
             Verb::Decline => "decline",
             Verb::Correct => "correct",
+            Verb::Skip => "skip",
+            Verb::Mute => "mute",
+            Verb::Dismiss => "dismiss",
         }
     }
 

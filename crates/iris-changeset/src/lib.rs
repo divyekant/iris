@@ -122,14 +122,15 @@ names!(
 );
 
 names!(
-    /// The verbs of release 2 (section 4), and `draft` and `send` of
-    /// release 3 (`docs/specs/2026-11-16-send.md`). Only an undo makes
-    /// `untrash` and `restore` (section 7.4).
+    /// The verbs of release 2 (section 4), `draft` and `send` of release 3
+    /// (`docs/specs/2026-11-16-send.md`), and `skip`, `mute` and `dismiss`
+    /// of release 5 (`docs/specs/2026-11-17-preference-rules.md`). Only an
+    /// undo makes `untrash` and `restore` (section 7.4).
     Verb {
         Archive = "archive", Inbox = "inbox", Label = "label", Unlabel = "unlabel",
         Read = "read", Unread = "unread", Trash = "trash", Untrash = "untrash", Close = "close",
         Defer = "defer", Decline = "decline", Correct = "correct", Draft = "draft", Send = "send",
-        Restore = "restore",
+        Restore = "restore", Skip = "skip", Mute = "mute", Dismiss = "dismiss",
     }
 );
 
@@ -681,12 +682,15 @@ pub fn submit_in(
     // messages: ten actions on the same 100 messages count 1,000
     // (section 10).
     let total: i64 = c.query_row(
-        "SELECT count(*) FROM action_message m
+        &format!(
+            "SELECT count(*) FROM action_message m
              JOIN changeset_action a ON a.id = m.action_id
              WHERE a.changeset_id = ?1
                AND (a.state IS NULL
                     OR a.state IN ('approved', 'held', 'applied'))
-               AND a.verb NOT IN ('close', 'defer', 'decline', 'correct', 'draft', 'send')",
+               AND a.verb NOT IN ({})",
+            sql_list(STATE_VERBS.iter().chain(&WRITE_VERBS))
+        ),
         [changeset],
         |r| r.get(0),
     )?;
@@ -1063,13 +1067,18 @@ fn supported(
             }
         }
         Verb::Label | Verb::Unlabel => label_name(c, &args)?,
-        Verb::Close | Verb::Decline => match (args.get("reason"), args.len()) {
-            (Some(Value::String(r)), 1) if !r.trim().is_empty() => Ok(()),
-            _ => Err(format!(
-                "{} needs one reason: {{\"reason\": \"...\"}}",
-                verb.as_str()
-            )),
-        },
+        Verb::Close | Verb::Decline | Verb::Skip | Verb::Mute | Verb::Dismiss => {
+            match (args.get("reason"), args.len()) {
+                (Some(Value::String(r)), 1) if r.chars().count() > MAX_REASON => {
+                    Err(format!("the reason is longer than {MAX_REASON} characters"))
+                }
+                (Some(Value::String(r)), 1) if !r.trim().is_empty() => Ok(()),
+                _ => Err(format!(
+                    "{} needs one reason: {{\"reason\": \"...\"}}",
+                    verb.as_str()
+                )),
+            }
+        }
         Verb::Defer => match (args.get("date"), args.len()) {
             (Some(Value::String(d)), 1) if is_date(d) => Ok(()),
             _ => Err("defer needs one date: {\"date\": \"YYYY-MM-DD\"}".into()),
@@ -1097,10 +1106,13 @@ fn supported(
         // Only the undo of a state entry makes restore (section 7.4).
         Verb::Restore => {
             let undo: bool = c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id
-                                JOIN changeset_action o ON o.id = l.action_id
-                                WHERE u.action_id = ?1 AND u.step = 1
-                                  AND o.verb IN ('close', 'decline', 'defer', 'correct'))",
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id
+                                    JOIN changeset_action o ON o.id = l.action_id
+                                    WHERE u.action_id = ?1 AND u.step = 1
+                                      AND o.verb IN ({}))",
+                    sql_list(&STATE_VERBS)
+                ),
                 [action],
                 |r| r.get(0),
             )?;
@@ -1158,13 +1170,30 @@ fn label_name(
     })
 }
 
+/// The most characters of the reason of a state verb (spec 2, section 4).
+/// Submit refuses a longer one, so each path (the web client, the command,
+/// an agent) has the same limit.
+pub const MAX_REASON: usize = 500;
+
 /// The verbs that change Iris state, not a mailbox (section 4). Their
-/// targets are items.
-const STATE_VERBS: [&str; 4] = ["close", "defer", "decline", "correct"];
+/// targets are items. Each list of state verbs (the bulk count, the apply,
+/// the tick) reads this one.
+pub const STATE_VERBS: [&str; 7] = [
+    "close", "defer", "decline", "correct", "skip", "mute", "dismiss",
+];
 
 /// The verbs that write mail (release 3). A `draft` takes one account, one
 /// thread or one draft; a `send` takes one draft.
-const WRITE_VERBS: [&str; 2] = ["draft", "send"];
+pub const WRITE_VERBS: [&str; 2] = ["draft", "send"];
+
+/// The SQL list `'a', 'b'` of fixed verb names (no quotes in them).
+pub fn sql_list<'a>(verbs: impl IntoIterator<Item = &'a &'a str>) -> String {
+    verbs
+        .into_iter()
+        .map(|v| format!("'{v}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Delete the rows that submit derives from the targets of an action.
 fn clear(c: &Connection, action: i64) -> Result<()> {
@@ -1177,7 +1206,8 @@ fn clear(c: &Connection, action: i64) -> Result<()> {
 /// Resolve the targets of an action (section 4). A mailbox verb takes
 /// threads or messages and gives `action_message` rows: a thread gives each
 /// of its messages that is not gone and has no `SPAM` or `TRASH`. A state
-/// verb takes items (`close`, `defer` and `decline` take commitments only)
+/// verb takes items (`close`, `defer` and `decline` take commitments only;
+/// `skip` a feed item, `mute` a conversation and `dismiss` a signal)
 /// and gives `action_item` rows, which pin the items while the action is
 /// open, and the origin messages of the items as `action_message` rows, for
 /// the rules (section 6.2). Gives the reason of the denial, or `None`.
@@ -1219,7 +1249,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     if ids.is_empty() {
         return Ok(Some("the action has no target".into()));
     }
-    if write && ids.len() != 1 {
+    // A write verb, and `skip`, `mute` and `dismiss`
+    // (docs/specs/2026-11-17-preference-rules.md), take one target.
+    let one = write || matches!(verb, Verb::Skip | Verb::Mute | Verb::Dismiss);
+    if one && ids.len() != 1 {
         return Ok(Some(format!("{} takes one target", verb.as_str())));
     }
     let mut seen = HashSet::with_capacity(ids.len());
@@ -1296,8 +1329,15 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
                 return bad()
             }
             (_, "items") => {
-                if verb != Verb::Correct && kind != Kind::Commitment {
-                    return Ok(Some(format!("{} takes only commitments", verb.as_str())));
+                let (want, words) = match verb {
+                    Verb::Correct => (kind, ""),
+                    Verb::Skip => (Kind::Feed, "feed items"),
+                    Verb::Mute => (Kind::Conversation, "conversations"),
+                    Verb::Dismiss => (Kind::Signal, "signals"),
+                    _ => (Kind::Commitment, "commitments"),
+                };
+                if kind != want {
+                    return Ok(Some(format!("{} takes only {words}", verb.as_str())));
                 }
                 // The document holds its ID, so the prefix must fit the item.
                 let found = c.execute(
@@ -1380,8 +1420,11 @@ fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<Str
     // while the undo is open. The apply sets back only the items that
     // still have the `post` values of the entry.
     let state: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM ledger l JOIN changeset_action o ON o.id = l.action_id
-                        WHERE l.id = ?1 AND o.verb IN ('close', 'decline', 'defer', 'correct'))",
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM ledger l JOIN changeset_action o ON o.id = l.action_id
+                            WHERE l.id = ?1 AND o.verb IN ({}))",
+            sql_list(&STATE_VERBS)
+        ),
         [ledger],
         |r| r.get(0),
     )?;
