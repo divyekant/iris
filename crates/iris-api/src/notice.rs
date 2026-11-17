@@ -23,21 +23,43 @@ pub struct Notice {
 
 /// The notices that are not done, newest first, at most 50.
 pub fn notices(store: &Store) -> Result<Vec<Notice>> {
+    Ok(store.read(|c| shape(c, iris_policy::notice::list(c)?))?)
+}
+
+/// One page of the notices for the Mac app (`docs/specs/2026-11-17-mac-app.md`):
+/// the notices that are not done with a row ID larger than `after`, oldest
+/// first, at most `limit`. Also the count of notices that are not done, and
+/// the largest row ID of all notices. One snapshot.
+pub fn notices_after(
+    store: &Store,
+    after: i64,
+    limit: i64,
+) -> Result<(Vec<(i64, Notice)>, i64, i64)> {
     Ok(store.read(|c| {
-        let mut out = Vec::new();
-        for n in iris_policy::notice::list(c)? {
-            out.push(Notice {
-                id: format_id(Kind::Notice, n.id),
-                rule: n.rule,
-                rule_name: n.rule_name,
-                title: n.title,
-                text: n.text,
-                created: rfc3339(n.created_at),
-                message: summaries(c, &[n.message_id])?.pop(),
-            });
-        }
-        Ok(out)
+        let page = iris_policy::notice::after(c, after, limit)?;
+        let rows: Vec<i64> = page.iter().map(|n| n.id).collect();
+        let (open, max) = iris_policy::notice::counts(c)?;
+        Ok((rows.into_iter().zip(shape(c, page)?).collect(), open, max))
     })?)
+}
+
+fn shape(
+    c: &rusqlite::Connection,
+    list: Vec<iris_policy::notice::Notice>,
+) -> iris_store::Result<Vec<Notice>> {
+    let mut out = Vec::new();
+    for n in list {
+        out.push(Notice {
+            id: format_id(Kind::Notice, n.id),
+            rule: n.rule,
+            rule_name: n.rule_name,
+            title: n.title,
+            text: n.text,
+            created: rfc3339(n.created_at),
+            message: summaries(c, &[n.message_id])?.pop(),
+        });
+    }
+    Ok(out)
 }
 
 /// Marks a notice done by its `n-` ID. Gives false if there is no such notice.

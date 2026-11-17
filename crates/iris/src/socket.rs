@@ -618,31 +618,30 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
     }
 }
 
+/// The most notices of one `app.notices` answer. The app asks again at
+/// once while an answer is full.
+pub const APP_NOTICES_MAX: i64 = 20;
+
 /// `app.notices`: the notices that are not done and are newer than `after`,
-/// oldest first. With no `after`, no notices: only `last`, so a new app
-/// shows no old notice. `open` counts the notices that are not done (at
-/// most [`iris_policy::notice::LIST_MAX`]).
+/// oldest first, at most [`APP_NOTICES_MAX`]. `last` is the largest row ID of
+/// the answer, or `after`. With no `after`, no notices: `last` is the largest
+/// row ID of all notices, so a new app shows no old notice. `open` counts
+/// the notices that are not done.
 fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
-    let all = iris_api::notices(store).map_err(|e| Failure::new(code::ERROR, e.to_string()))?;
-    let row = |n: &iris_api::Notice| match iris_store::parse_id(&n.id) {
-        Some((Kind::Notice, r)) => r,
-        _ => 0,
-    };
-    let max = all.iter().map(row).max().unwrap_or(0);
-    let new: Vec<Value> = match after {
-        None => Vec::new(),
-        Some(a) => all
-            .iter()
-            .rev()
-            .filter(|n| row(n) > a)
-            .map(|n| serde_json::to_value(n).expect("plain JSON"))
-            .collect(),
+    let error = |e: iris_api::Error| Failure::new(code::ERROR, e.to_string());
+    let (page, open, max) = match after {
+        None => {
+            let (_, open, max) = iris_api::notices_after(store, i64::MAX, 0).map_err(error)?;
+            (Vec::new(), open, max)
+        }
+        Some(a) => iris_api::notices_after(store, a, APP_NOTICES_MAX).map_err(error)?,
     };
     let last = match after {
         None => max,
-        Some(a) => all.iter().map(row).filter(|r| *r > a).max().unwrap_or(a),
+        Some(a) => page.iter().map(|(r, _)| *r).max().unwrap_or(a),
     };
-    Ok(json!({ "notices": new, "last": last, "open": all.len() }))
+    let notices: Vec<&iris_api::Notice> = page.iter().map(|(_, n)| n).collect();
+    Ok(json!({ "notices": notices, "last": last, "open": open }))
 }
 
 /// `status` of a session: the job, and the counts of its grant now.

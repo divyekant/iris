@@ -1097,9 +1097,9 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
             Ok(())
         })
         .unwrap();
-    // A new app gets no old notice, only the last ID.
+    // A new app gets no old notice, only the last ID (a done notice too).
     let r = ask(json!({}));
-    assert_eq!(r["result"], json!({ "notices": [], "last": 2, "open": 2 }));
+    assert_eq!(r["result"], json!({ "notices": [], "last": 3, "open": 2 }));
     let r = ask(json!({ "after": 0 }));
     let ids: Vec<&str> = r["result"]["notices"]
         .as_array()
@@ -1112,6 +1112,28 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
     assert_eq!(r["result"]["last"], json!(2));
     let r = ask(json!({ "after": 2 }));
     assert_eq!(r["result"], json!({ "notices": [], "last": 2, "open": 2 }));
+    // A long list comes in pages of APP_NOTICES_MAX, oldest first.
+    store
+        .write(|tx| {
+            for m in 10..35 {
+                tx.execute(
+                    "INSERT INTO notice(message_id, rule, rule_name, policy_version, title, text, created_at)
+                     VALUES (?1, 7, 'Clinic', 1, 'Dr Lee', 'More', 0)",
+                    [m],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let r = ask(json!({ "after": 3 }));
+    let page = r["result"]["notices"].as_array().unwrap();
+    assert_eq!(page.len(), socket::APP_NOTICES_MAX as usize);
+    assert_eq!(page[0]["id"], json!("n-4"));
+    assert_eq!(r["result"]["last"], json!(23));
+    assert_eq!(r["result"]["open"], json!(27));
+    let r = ask(json!({ "after": 23 }));
+    assert_eq!(r["result"]["notices"].as_array().unwrap().len(), 5);
+    assert_eq!(r["result"]["last"], json!(28));
     for bad in [
         json!({ "after": -1 }),
         json!({ "after": "2" }),

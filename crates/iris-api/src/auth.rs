@@ -35,7 +35,8 @@ pub const SIGN_IN: &str = "/api/session";
 
 /// The life of a code of [`Auth::sign_in`]. The code of the start has no end.
 pub const CODE_LIFE: Duration = Duration::from_secs(120);
-/// The most codes that wait at the same time.
+/// The most codes of [`Auth::sign_in`] that wait at the same time. The code
+/// of the start is not one of them.
 pub const CODES_MAX: usize = 8;
 
 struct Code {
@@ -83,7 +84,8 @@ impl Auth {
     }
 
     /// A new sign-in address with a new one-time code, for [`CODE_LIFE`]. When
-    /// [`CODES_MAX`] codes wait, the oldest code of a call ends.
+    /// [`CODES_MAX`] codes of this call wait, the oldest of them ends. The
+    /// code of the start stays.
     pub fn sign_in(&self) -> std::io::Result<String> {
         self.sign_in_at(Instant::now())
     }
@@ -92,7 +94,7 @@ impl Auth {
         let value = random_hex::<16>()?;
         let mut codes = self.codes.lock().unwrap_or_else(|e| e.into_inner());
         codes.retain(|c| live(c, now));
-        if codes.len() >= CODES_MAX {
+        if codes.iter().filter(|c| c.ends.is_some()).count() >= CODES_MAX {
             if let Some(i) = codes.iter().position(|c| c.ends.is_some()) {
                 codes.remove(i);
             }
@@ -271,13 +273,14 @@ mod tests {
         let auth = auth();
         let start = auth.sign_in_url().unwrap();
         let now = Instant::now();
-        let codes: Vec<String> = (0..CODES_MAX)
+        let codes: Vec<String> = (0..=CODES_MAX)
             .map(|_| {
                 let url = auth.sign_in_at(now).unwrap();
                 url.split_once("code=").unwrap().1.to_string()
             })
             .collect();
-        // The start code took one place, so the first code of a call ended.
+        // The code CODES_MAX + 1 ended the first code of a call, not the
+        // start code.
         assert!(!auth.take_code_at(&codes[0], now));
         assert!(codes[1..].iter().all(|c| auth.take_code_at(c, now)));
         assert_eq!(auth.sign_in_url(), Some(start));
