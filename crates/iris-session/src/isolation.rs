@@ -1,6 +1,7 @@
 //! The isolation interface of a session (launcher spec "Isolation"). The
 //! sandbox of each system is in `docs/specs/2026-11-17-session-sandbox.md`:
-//! [`linux`] on Linux. On another system [`system`] gives none, and a run is
+//! [`linux`] on Linux, [`macos`] on macOS. On another system [`system`]
+//! gives none, and a run is
 //! refused.
 
 use std::ffi::OsString;
@@ -71,6 +72,13 @@ pub trait Isolation: Send + Sync {
     /// True only if the isolation holds no process of the session.
     fn ended(&self, session: i64) -> io::Result<bool>;
 
+    /// Removes the files that the isolation keeps for the session. The reap
+    /// check calls it only after `stop` gave `Ok` and `ended` gave true.
+    fn remove_files(&self, session: i64) -> io::Result<()> {
+        let _ = session;
+        Ok(())
+    }
+
     /// Starts the command that [`Isolation::command`] gave, in the hold
     /// helper. It returns when the agent can run. If it fails after a
     /// process started, it kills and reaps that process first, so no
@@ -90,7 +98,12 @@ pub fn system(data_dir: &Path) -> Result<Box<dyn Isolation>, String> {
     {
         linux::Bwrap::new(data_dir).map(|b| Box::new(b) as Box<dyn Isolation>)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let sys = Box::new(macos_sys::MacSys);
+        macos::Seatbelt::with(data_dir, sys).map(|b| Box::new(b) as Box<dyn Isolation>)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = data_dir;
         Err(
@@ -123,7 +136,7 @@ pub mod test {
         pub fail_stops: Mutex<u32>,
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn a_system_other_than_linux_has_no_isolation() {
         assert!(system(Path::new("/tmp")).is_err());

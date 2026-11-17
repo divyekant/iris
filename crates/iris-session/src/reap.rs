@@ -58,6 +58,11 @@ pub fn reap_check(
         Ok(false) => return Err("the isolation still holds a process of the session".into()),
         Err(e) => return Err(format!("the isolation check failed: {e}")),
     }
+    // The private files of the session go only now; a failure keeps the
+    // session live, and the next turn tries again.
+    isolation
+        .remove_files(session.id)
+        .map_err(|e| format!("the isolation files were not removed: {e}"))?;
     let read = read_notes(&default_dir(store.dir(), session.job_id));
     let saved = iris_job::reap_with_notes(store, session.id, read.as_deref().ok(), now_ms)
         .map_err(|e| format!("the reap write failed: {e}"))?;

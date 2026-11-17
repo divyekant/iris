@@ -10,13 +10,19 @@ fn main() -> std::process::ExitCode {
             eprintln!("iris: session-hold needs the data folder");
             return std::process::ExitCode::from(iris_session::hold::BAD_ARGS as u8);
         }
-        let code = match iris_session::isolation::system(std::path::Path::new(&args[2])) {
-            Ok(isolation) => iris_session::hold::hold_main(&*isolation, &args[3..]),
-            Err(e) => {
-                eprintln!("iris: {e}");
-                1
-            }
-        };
+        let code = iris_session::macos_job::helper_main(std::path::Path::new(&args[2]), &args[3..]);
+        return std::process::ExitCode::from(code.clamp(0, 255) as u8);
+    }
+    // The job process of a macOS session, which launchd starts.
+    if args
+        .get(1)
+        .is_some_and(|a| iris_session::macos_job::is_job(a))
+    {
+        if args.len() < 3 {
+            eprintln!("iris: session-job needs the data folder");
+            return std::process::ExitCode::from(iris_session::hold::BAD_ARGS as u8);
+        }
+        let code = iris_session::macos_job::job_main(std::path::Path::new(&args[2]), &args[3..]);
         return std::process::ExitCode::from(code.clamp(0, 255) as u8);
     }
     match iris::run(iris::Cli::parse()) {

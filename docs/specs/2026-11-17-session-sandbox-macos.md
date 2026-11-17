@@ -89,8 +89,11 @@ still a child of the engine, with the same pipes):
    job `com.iris.session.<tag>.<id>` in the domain `gui/<uid>` with
    `launchctl bootstrap`. `<tag>` is the full SHA-256, in 64 hex digits,
    of the real path of the data folder, so two data folders do not share a
-   label. The job runs `iris session-job <data dir> <id>`, with
-   `RunAtLoad` true and `KeepAlive` false.
+   label. The job runs `iris session-job <data dir> <id> <port or ->`,
+   with `RunAtLoad` true and `KeepAlive` false. The port is the egress
+   port of the session, for the record. The job definition is the file
+   `<data dir>/sessions/se-<id>.plist` (mode `0600`). It holds no token
+   and no key.
 2. The job process first writes the record of the session (see
    [The record of a session](#the-record-of-a-session)). Then it connects
    to the socket. The shim checks that the peer has the same user ID
@@ -120,9 +123,10 @@ still a child of the engine, with the same pipes):
    exit code to the socket before it exits. The shim exits with that code,
    or with 1 if no code came. So the engine reaps the shim as it reaps the
    helper on Linux.
-5. If the socket ends before the code (the shim or the job process ended),
-   the job process stops the agent (as for the end of the engine pipe) and
-   exits.
+5. If the socket ends before the code (the shim ended), the job process
+   stops the agent (as for the end of the engine pipe) and exits. The hold
+   reads one input that ends at the end of the engine pipe or at the end
+   of the socket, whichever comes first.
 
 The shim waits at most 1 second for the connection. If no job connects,
 the shim boots out the job and exits with 1 (`failed`).

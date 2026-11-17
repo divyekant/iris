@@ -102,6 +102,18 @@ an agent:
 If `bwrap` is not installed, or the system does not permit a user
 namespace, `iris job run` stops with the reason, and no agent runs.
 
+### Agent sessions on macOS
+
+On macOS, an agent session runs in a Seatbelt sandbox (`sandbox-exec`) in
+a launchd job of its own. No install is necessary. These conditions apply:
+
+- A person must be signed in to the Mac. The launchd job of a session runs
+  in the GUI domain of the user (`gui/<uid>`). Over SSH with no signed-in
+  person, `iris job run` stops with the reason, and no agent runs.
+- A stop has no time limit on macOS. If a process of a session does not
+  stop, the session keeps its workspace and its egress port, and the engine
+  tries the stop again at its next turn (issue #599).
+
 ### The background service
 
 The crate `iris-service` writes the service file. The service runs

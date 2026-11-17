@@ -737,3 +737,28 @@ fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
         [real(&program), "--task".into(), "a b".into()]
     );
 }
+
+#[test]
+fn remove_files_takes_each_file_of_the_session_and_only_those() {
+    let (_d, s, _f) = setup("remove");
+    s.write_record(1, &rec(50)).unwrap();
+    s.write_record(2, &rec(51)).unwrap();
+    for dir in [s.home(1), s.tmp(1)] {
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/f"), "x").unwrap();
+    }
+    s.journal(1, 5).unwrap();
+    for ext in ["stop.lock", "plist", "hold"] {
+        fs::write(s.file(1, ext), "").unwrap();
+    }
+    s.remove_files(1).unwrap();
+    for p in [s.home(1), s.tmp(1)] {
+        assert!(!p.exists(), "{}", p.display());
+    }
+    for ext in ["sandbox", "stops", "stop.lock", "plist", "hold"] {
+        assert!(!s.file(1, ext).exists(), "{ext}");
+    }
+    assert_eq!(s.record(2).unwrap(), Some(rec(51)));
+    // A second call finds nothing to remove.
+    s.remove_files(1).unwrap();
+}
