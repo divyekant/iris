@@ -466,6 +466,40 @@ fn a_second_run_names_the_live_session() {
     let _ = s.stop(f.job).unwrap();
 }
 
+fn a_stop_during_a_revoke_retry_stops_the_new_session_too() {
+    let f = fixture("stopretry", "sleep 30");
+    let s = sessions(&f);
+    let (revoked_tx, revoked_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (revoked_tx, go_rx) = (Mutex::new(revoked_tx), Mutex::new(go_rx));
+    let (store, job, once) = (f.store.clone(), f.job, AtomicBool::new(false));
+    // A revoke after the first build. The launch then waits until the stop
+    // runs, and only then registers the second session.
+    s.set_after(Arc::new(move |step, _| {
+        if step == Step::Built && !once.swap(true, Ordering::SeqCst) {
+            revoke_scope(&store, job, Ref::Thread(5), By::Person, now()).unwrap();
+            revoked_tx.lock().unwrap().send(()).unwrap();
+            let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }
+    }));
+    s.run(f.job, "script").unwrap();
+    revoked_rx.recv_timeout(Duration::from_secs(20)).unwrap();
+    let stopper = {
+        let s = s.clone();
+        std::thread::spawn(move || s.stop(job))
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    go_tx.send(()).unwrap();
+    let (last, left) = stopper.join().unwrap().unwrap();
+    assert_eq!(left, Ok(()));
+    let row = last_session(&f.store, f.job).unwrap().unwrap();
+    assert_eq!(row.id, last, "the stop answers for the last session");
+    assert!(
+        row.reaped_ms.is_some(),
+        "no session of the job runs: {row:?}"
+    );
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -536,6 +570,10 @@ fn main() {
         (
             "a_second_run_names_the_live_session",
             a_second_run_names_the_live_session,
+        ),
+        (
+            "a_stop_during_a_revoke_retry_stops_the_new_session_too",
+            a_stop_during_a_revoke_retry_stops_the_new_session_too,
         ),
     ];
     let mut failed = 0;

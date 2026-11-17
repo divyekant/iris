@@ -821,3 +821,18 @@ fn a_stop_that_waits_too_long_gives_the_reason() {
         e.error
     );
 }
+
+#[test]
+fn a_bad_job_id_is_a_usage_error_with_no_engine() {
+    let d = dir("badjob");
+    std::fs::create_dir_all(&d).unwrap();
+    for args in [
+        &["run", "bad", "--agent", "script"][..],
+        &["stop", "j-01"][..],
+        &["session", "x"][..],
+    ] {
+        let e = job_command(&d, args).unwrap_err();
+        assert_eq!(e.code, code::USAGE, "{args:?}: {}", e.error);
+        assert!(e.error.contains("not a job ID"), "{args:?}: {}", e.error);
+    }
+}
