@@ -1,18 +1,13 @@
 <!--
   One source mail, as clean text. Mail text is data: Svelte escapes it, and the
-  client never renders the HTML of a mail. Each open adds 1 to the open count (R1-22).
+  client never renders the HTML of a mail. The engine counts each view of a mail as an open (R5-12).
 -->
 <script lang="ts">
   import { download, own, type Address, type Message } from "../api";
   import { initials, when } from "../format";
-  import { countOpen } from "../opens";
   import { href } from "../route";
 
   let { message }: { message: Message } = $props();
-
-  $effect(() => {
-    countOpen();
-  });
 
   let failed = $state("");
   const original = () => download(message.id).then(() => (failed = ""), (e: unknown) => (failed = own(e)));
@@ -50,9 +45,10 @@
   {#if message.text !== null}<pre>{message.text}</pre>{/if}
 
   <footer>
+    {#if !message.gone}<a class="reply touch" href={href.reply(message.thread)}>Reply</a>{/if}
     {#if message.items.length}
       <span>Items from this mail:</span>
-      {#each message.items as id (id)}<a href={href.item(id)}>{id}</a>{/each}
+      {#each message.items as id (id)}<a class="touch" href={href.item(id)}>{id}</a>{/each}
     {/if}
     {#if !(message.gone && message.text === null)}
       <button type="button" class="raw" onclick={original}>Download the original</button>
@@ -128,6 +124,10 @@
     border-top: 1px solid var(--color-border-subtle);
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
+  }
+  .reply {
+    color: var(--color-text);
+    font-weight: 500;
   }
   .raw {
     margin-left: auto;

@@ -1,0 +1,11 @@
+{
+  "model": "iris/1.0",
+  "id": "g-6",
+  "title": "Newsletter",
+  "status": "proposed",
+  "items": ["f-10", "v-901"],
+  "counts": { "commitment": 0, "conversation": 1, "record": 0 },
+  "created": "2026-11-07T09:00:00Z",
+  "updated": "2026-11-07T09:00:00Z",
+  "derived": { "by": "model", "model": "example-model-1", "prompt": "matters/0.1" }
+}

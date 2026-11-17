@@ -87,6 +87,100 @@ impl Query {
     }
 
     pub(crate) fn run(&self, conn: &Connection, limit: u32) -> Result<Vec<i64>> {
+        self.run_with(conn, limit, None)
+    }
+
+    /// [`Query::run`] for a job session: over the granted `messages` only,
+    /// and `form:` counts only the granted `items`. A session decides each
+    /// match only from what its workspace holds, so `label:` is refused: a
+    /// workspace holds no labels. The IDs go in as JSON arrays, so the
+    /// query has one bound value for each set of IDs.
+    pub fn run_granted(
+        &self,
+        conn: &Connection,
+        limit: u32,
+        messages: &std::collections::BTreeSet<i64>,
+        items: &std::collections::BTreeSet<i64>,
+    ) -> Result<Vec<i64>> {
+        self.check_granted()?;
+        self.run_with(conn, limit, Some((messages, items)))
+    }
+
+    /// Refuse a query that a job session cannot run: `label:`, because a
+    /// workspace holds no labels.
+    pub fn check_granted(&self) -> Result<()> {
+        if self.filters.iter().any(|f| matches!(f, Filter::Label(_))) {
+            return Err(Error::Query(
+                "label: is not a filter of a job session: a workspace holds no labels".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn run_with(
+        &self,
+        conn: &Connection,
+        limit: u32,
+        grant: Option<(
+            &std::collections::BTreeSet<i64>,
+            &std::collections::BTreeSet<i64>,
+        )>,
+    ) -> Result<Vec<i64>> {
+        let json = |ids: &std::collections::BTreeSet<i64>| -> Value {
+            let list: Vec<String> = ids.iter().map(i64::to_string).collect();
+            format!("[{}]", list.join(",")).into()
+        };
+        let (mut sql, mut args) = self.select(grant.map(|(_, items)| json(items)));
+        if let Some((messages, _)) = grant {
+            args.push(json(messages));
+            sql.push_str(&format!(
+                " AND m.id IN (SELECT value FROM json_each(?{}))",
+                args.len()
+            ));
+        }
+        sql.push_str(" ORDER BY m.internal_date DESC, m.id DESC LIMIT ");
+        sql.push_str(&limit.to_string());
+        let mut st = conn.prepare(&sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The first message that matches and arrived for a watch (card R5-07):
+    /// a row ID above `after`, a date from `since`, clean text and no
+    /// `link_check` row (so the hostile checks ran), no hostile mark or
+    /// hostile sender, and no label `SENT` or
+    /// `DRAFT`. The lowest row ID is the first arrival.
+    pub(crate) fn first_arrival(
+        &self,
+        conn: &Connection,
+        after: i64,
+        since: i64,
+    ) -> Result<Option<i64>> {
+        let (mut sql, mut args) = self.select(None);
+        args.push(after.into());
+        args.push(since.into());
+        let (a, s) = (args.len() - 1, args.len());
+        sql.push_str(&format!(
+            " AND m.id > ?{a} AND m.internal_date >= ?{s}
+              AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
+              AND NOT {may_be_hostile}
+              AND NOT EXISTS (SELECT 1 FROM header h JOIN sender x
+                    ON x.address = h.from_addr COLLATE NOCASE
+                  WHERE h.message_id = m.id AND x.kind = 'hostile')
+              AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                  WHERE ml.message_id = m.id AND l.provider_id IN ('SENT', 'DRAFT'))
+             ORDER BY m.id LIMIT 1",
+            may_be_hostile = crate::may_be_hostile!(),
+        ));
+        let mut st = conn.prepare(&sql)?;
+        let mut rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// The SELECT of the matching messages that are not gone, with its bound
+    /// values `?1` to `?n`. With `items` (a JSON array of item IDs), `form:`
+    /// counts only those items.
+    fn select(&self, items: Option<Value>) -> (String, Vec<Value>) {
         let mut sql = String::from("SELECT m.id FROM message m WHERE m.gone_at IS NULL");
         let mut args: Vec<Value> = Vec::new();
         let mut arg = |sql: &mut String, cond: &str, v: Value| {
@@ -122,19 +216,25 @@ impl Query {
                        WHERE ml.message_id = m.id AND (l.name = ? COLLATE NOCASE OR l.provider_id = ?))",
                     v.clone().into(),
                 ),
-                Filter::Form(v) => arg(
-                    &mut sql,
-                    " AND EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
-                       WHERE s.message_id = m.id AND i.form = ?)",
-                    v.clone().into(),
-                ),
+                Filter::Form(v) => {
+                    arg(
+                        &mut sql,
+                        " AND EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
+                           WHERE s.message_id = m.id AND i.form = ?",
+                        v.clone().into(),
+                    );
+                    if let Some(items) = &items {
+                        arg(
+                            &mut sql,
+                            " AND i.id IN (SELECT value FROM json_each(?))",
+                            items.clone(),
+                        );
+                    }
+                    sql.push(')');
+                }
             }
         }
-        sql.push_str(" ORDER BY m.internal_date DESC, m.id DESC LIMIT ");
-        sql.push_str(&limit.to_string());
-        let mut st = conn.prepare(&sql)?;
-        let rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        (sql, args)
     }
 }
 

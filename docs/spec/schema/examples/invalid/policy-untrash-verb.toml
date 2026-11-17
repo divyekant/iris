@@ -1,0 +1,11 @@
+version = 1
+mode = "apply"
+
+[[rule]]
+id = 1
+name = "Archive newsletters"
+effect = "allow"
+verbs = ["untrash"]
+when = { form = "feed" }
+by = "person"
+added = 2026-11-10

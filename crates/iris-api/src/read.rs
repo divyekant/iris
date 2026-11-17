@@ -49,7 +49,7 @@ const RECORD_TYPES: [&str; 7] = [
 const DAY_MS: i64 = 86_400_000;
 
 /// A limit must be 1 to [`MAX_LIMIT`].
-fn check_limit(limit: u32) -> Result<()> {
+pub(crate) fn check_limit(limit: u32) -> Result<()> {
     if (1..=MAX_LIMIT).contains(&limit) {
         Ok(())
     } else {
@@ -59,8 +59,7 @@ fn check_limit(limit: u32) -> Result<()> {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Status {
-    /// The policy mode (specification 2). Release 1 applies nothing, so
-    /// the mode is always `observe`.
+    /// The mode of the active policy (specification 2, section 6).
     pub mode: &'static str,
     pub accounts: Vec<Account>,
     pub messages: Counts,
@@ -151,12 +150,56 @@ pub struct Section {
     pub duplicates: serde_json::Map<String, Value>,
 }
 
-/// The count of the proposed actions, in total and for each verb.
+/// A count of messages, in total and for each verb of their actions.
 #[derive(Debug, Serialize, PartialEq, Default)]
 pub struct Proposal {
     pub count: i64,
     pub verbs: serde_json::Map<String, Value>,
 }
+
+/// The work that Iris did without the person: the items that a `hide` rule
+/// leaves out of the brief, and the messages of the actions that a rule
+/// decided ([`BY_RULE`], specification 2, sections 5.4 and 6.4).
+#[derive(Debug, Serialize, PartialEq, Default)]
+pub struct Handled {
+    /// `hidden` and the messages of `verbs` together.
+    pub count: i64,
+    /// The count of messages of each verb.
+    pub verbs: serde_json::Map<String, Value>,
+}
+
+/// The message counts of each verb of the actions that `filter` selects
+/// (columns of `changeset_action a` and `changeset c`).
+fn verb_counts(c: &Connection, filter: &str) -> rusqlite::Result<Proposal> {
+    let mut out = Proposal::default();
+    let mut st = c.prepare_cached(&format!(
+        "SELECT a.verb, count(*) FROM changeset_action a
+         JOIN changeset c ON c.id = a.changeset_id
+         JOIN action_message m ON m.action_id = a.id
+         WHERE {filter} GROUP BY 1 ORDER BY 1"
+    ))?;
+    for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (verb, n) = row?;
+        out.count += n;
+        out.verbs.insert(verb, n.into());
+    }
+    Ok(out)
+}
+
+/// The triage actions that wait for a person: `proposed` or `in_review` in
+/// the open triage changesets.
+const TRIAGE_OPEN: &str =
+    "c.author_kind = 'triage' AND c.state = 'open' AND a.state IN ('proposed', 'in_review')";
+
+/// The actions that a rule decided without the person, in each later state:
+/// `approved`, `held`, `applied`, `failed` (some messages can have changed),
+/// `undone` and `denied`. The apply keeps the decision of the rule on
+/// `applied` and `failed` (schema 7, trigger `action_state`). An action in
+/// `in_review` waits for the person, so the review counts it, not this.
+/// An approved action that expires or is cancelled gets the decision of
+/// `expiry` or `author`, and changed nothing, so it leaves this set.
+pub(crate) const BY_RULE: &str = "a.decided_by = 'rule'
+    AND a.state IN ('approved', 'held', 'applied', 'failed', 'undone', 'denied')";
 
 /// The first brief (specification 1, section 8).
 #[derive(Debug, Serialize, PartialEq, Default)]
@@ -169,6 +212,11 @@ pub struct Brief {
     pub feed: Section,
     pub signals: Section,
     pub strangers: Section,
+    /// The senders that wait at the stranger gate, newest first, with their
+    /// items of `strangers` (specification 1, section 6.7).
+    pub gate: crate::gate::GatePage,
+    /// The count of declined senders with items that would wait at the gate.
+    pub declined: i64,
     /// The count of hostile mail of the last 7 days.
     pub hostile: i64,
     /// The count of messages that the model failed 3 times.
@@ -176,11 +224,35 @@ pub struct Brief {
     /// The date of the oldest fetched message that is not gone: the brief
     /// covers the mail from this date (specification 1, section 4.2).
     pub oldest_fetched: Option<String>,
-    /// The triage proposal of specification 1, section 8: the mailbox
-    /// changes that observe mode would propose, with nothing applied.
-    /// Computed from `iris_observe::counts` for each account; not stored.
+    /// The triage proposal: the messages of the actions of the stored
+    /// triage changesets that wait for a person (specification 2, section 5.4).
     pub proposal: Option<Proposal>,
+    /// What Iris did without the person.
+    pub handled: Handled,
+    /// The items of each `bundle` rule (specification 2, section 6.4), by
+    /// rule ID. A bundled item is in no other section and in no count.
+    pub bundles: Vec<Bundle>,
+    /// The count of items that a `hide` rule leaves out of the brief.
+    pub hidden: i64,
+    /// The open changesets and their actions that wait for a person
+    /// (specification 2, section 5.5).
+    pub review: crate::review::Review,
 }
+
+/// The items of one `bundle` rule: the count, and the newest
+/// [`BUNDLE_ITEMS`] items.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Bundle {
+    pub rule: u32,
+    /// The name of the rule in the active policy.
+    pub name: String,
+    #[serde(flatten)]
+    pub section: Section,
+}
+
+/// The most items of each bundle in the brief: enough for the client to
+/// name who sent them. `/api/brief/bundle-<rule>` gives all.
+pub const BUNDLE_ITEMS: u32 = 20;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Page {
@@ -249,10 +321,8 @@ pub fn status(store: &Store) -> Result<Status> {
                 })
             },
         )?;
-        // shortcut: release 1 has no policy file to read; read its mode when
-        // release 2 adds the policy.
         Ok(Status {
-            mode: "observe",
+            mode: iris_policy::active(c)?.policy.mode.name(),
             accounts,
             messages,
         })
@@ -269,7 +339,7 @@ pub fn search(store: &Store, text: &str, limit: u32) -> Result<Vec<MessageSummar
 
 /// The summaries of the messages `ids`, in order. A message that the sync
 /// marked gone after the search is left out.
-fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary>> {
+pub(crate) fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary>> {
     let mut out = Vec::with_capacity(ids.len());
     for &id in ids {
         if let Some((summary, more)) = message_row(c, id)? {
@@ -284,24 +354,27 @@ fn summaries(c: &Connection, ids: &[i64]) -> rusqlite::Result<Vec<MessageSummary
 /// One message by its `m-` ID, also when it is gone.
 pub fn message(store: &Store, id: &str) -> Result<Option<Message>> {
     let row = row_of(id, Kind::Message)?;
-    Ok(store.read(|c| {
-        let Some((summary, mut more)) = message_row(c, row)? else {
-            return Ok(None);
-        };
-        more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
-        let mut st = c.prepare(
-            "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
-             WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
-        )?;
-        let items = st
-            .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Some(Message {
-            summary,
-            items: items.into_iter().flatten().collect(),
-            ..more
-        }))
-    })?)
+    Ok(store.read(|c| Ok(message_in(c, row)?))?)
+}
+
+/// One message by its row ID, in the transaction of `c`.
+pub(crate) fn message_in(c: &Connection, row: i64) -> rusqlite::Result<Option<Message>> {
+    let Some((summary, mut more)) = message_row(c, row)? else {
+        return Ok(None);
+    };
+    more.sender_kind = sender_kind(c, summary.from.address.as_deref())?;
+    let mut st = c.prepare_cached(
+        "SELECT i.id, i.form FROM item_source s JOIN item i ON i.id = s.item_id
+         WHERE s.message_id = ?1 AND i.status != 'gone' ORDER BY i.id",
+    )?;
+    let items = st
+        .query_map([row], |r| Ok(item_id(r.get(0)?, &r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(Message {
+        summary,
+        items: items.into_iter().flatten().collect(),
+        ..more
+    }))
 }
 
 /// The path of the raw source (RFC 5322) of one message, or `None` if the
@@ -332,7 +405,9 @@ pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
         .ok_or_else(|| bad_id(id))?;
     Ok(store.read(|c| {
         Ok(c.query_row(
-            "SELECT id, form, status, doc FROM item WHERE id = ?1 AND form = ?2",
+            &format!(
+                "SELECT id, form, status, doc, {MATTER} FROM item WHERE id = ?1 AND form = ?2"
+            ),
             params![row, form],
             doc_of,
         )
@@ -392,7 +467,7 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc FROM item
+            "SELECT id, form, status, doc, {MATTER} FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
@@ -420,9 +495,12 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
 
 /// The kind of the sender row of the `p-` ID at the JSON path `path` of the
 /// item document `doc`. A sender with no row or no kind yet is a stranger.
-fn kind_sql(doc: &str, path: &str) -> String {
+/// A stranger that the person declined at the gate is `declined`.
+pub(crate) fn kind_sql(doc: &str, path: &str) -> String {
     format!(
-        "coalesce((SELECT kind FROM sender WHERE id =
+        "coalesce((SELECT CASE WHEN coalesce(kind, 'stranger') = 'stranger'
+                                AND declined_at IS NOT NULL THEN 'declined' ELSE kind END
+                   FROM sender WHERE id =
            CAST(substr(json_extract({doc}, '{path}'), 3) AS INTEGER)), 'stranger')"
     )
 }
@@ -438,18 +516,134 @@ pub const SECTIONS: [&str; 6] = [
     "strangers",
 ];
 
+/// The condition of an item that the brief shows in its section: no `hide`
+/// or `bundle` rule matches it (specification 2, section 6.4). An item with
+/// no `attention` field yet counts as shown.
+pub(crate) const SHOWN: &str =
+    "coalesce(json_extract(doc, '$.attention.state'), 'shown') = 'shown'";
+
 /// The filter and the order of each list section of the brief, in the
-/// order of [`SECTIONS`].
-fn section_sql(now: i64) -> [(String, String); 6] {
+/// order of [`SECTIONS`]. Each filter leaves out hidden and bundled items.
+pub(crate) fn section_sql(now: i64) -> [(String, String); 6] {
+    base_sql(now).map(|(filter, order)| (format!("{} AND {SHOWN}", head(&filter)), order))
+}
+
+/// The filter of each record that the brief counts: not gone.
+const RECORD: &str = "form = 'record' AND status != 'gone'";
+
+/// The filter of the head of each pair in the place `filter`: an item of the
+/// place that is not a possible duplicate of an item of the same place
+/// (specification 1, section 7.5). The attention of the head decides where
+/// the pair goes, so a pair counts once in the brief, whatever the attention
+/// of the duplicate. The inner `item` of the subquery is the original.
+pub(crate) fn head(filter: &str) -> String {
+    format!(
+        "(({filter}) AND NOT (duplicate_of IS NOT NULL
+             AND duplicate_of IN (SELECT id FROM item WHERE {filter})))"
+    )
+}
+
+/// The places of the brief before the attention: the list sections, the
+/// records and the items of declined senders. No item is in two places.
+fn places(now: i64) -> Vec<String> {
+    base_sql(now)
+        .into_iter()
+        .map(|(filter, _)| filter)
+        .chain([RECORD.to_string(), declined_sql()])
+        .collect()
+}
+
+/// The filter of the items that would wait at the stranger gate, but whose
+/// strangers the person declined: an open commitment whose counterparty
+/// (you owe) or owner (owed to you) is declined, or an active conversation
+/// with a declined participant and no stranger that waits. These items are
+/// in no section of the brief (specification 1, section 6.7).
+pub(crate) fn declined_sql() -> String {
+    let counter = kind_sql("doc", "$.counterparty.sender");
+    let owner = kind_sql("doc", "$.owner.sender");
+    format!(
+        "((form = 'commitment' AND status = 'open' AND (
+             (json_extract(doc, '$.direction') = 'you_owe' AND {counter} = 'declined')
+          OR (json_extract(doc, '$.direction') = 'owed_to_you' AND {owner} = 'declined')))
+          OR (form = 'conversation' AND status = 'active'
+              AND {} AND NOT {}))",
+        participant_sql("= 'declined'"),
+        participant_sql("= 'stranger'")
+    )
+}
+
+/// True when the conversation document `doc` has a participant sender whose
+/// kind (as [`kind_sql`] gives it) matches `test`.
+fn participant_sql(test: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM json_each(doc, '$.participants') p
+           WHERE json_extract(p.value, '$.kind') = 'sender'
+             AND {} {test})",
+        kind_sql("p.value", "$.sender")
+    )
+}
+
+/// The filter of the head of each pair of the brief, in any place.
+fn heads(now: i64) -> String {
+    places(now)
+        .iter()
+        .map(|f| head(f.as_str()))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// The filter of each possible duplicate that goes with its original: an
+/// item of the brief that is not a head.
+fn tails(now: i64) -> String {
+    let all = places(now)
+        .iter()
+        .map(|f| format!("({f})"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("({all}) AND NOT ({})", heads(now))
+}
+
+/// The filter and the order of the bundle of rule `rule`: newest first.
+fn bundle_sql(now: i64, rule: u32) -> (String, String) {
+    (
+        format!(
+            "({}) AND json_extract(doc, '$.attention.state') = 'bundled'
+             AND json_extract(doc, '$.attention.rule') = {rule}",
+            heads(now)
+        ),
+        "created_at DESC, id DESC".to_string(),
+    )
+}
+
+/// The section name of the items that a `hide` rule leaves out of the brief.
+pub const HIDDEN: &str = "hidden";
+
+/// The filter and the order of the hidden items: newest first. Each item
+/// has the rule and the reason in its `attention` field.
+fn hidden_sql(now: i64) -> (String, String) {
+    (
+        format!(
+            "({}) AND json_extract(doc, '$.attention.state') = 'hidden'",
+            heads(now)
+        ),
+        "created_at DESC, id DESC".to_string(),
+    )
+}
+
+/// The rule of a bundle section name: `bundle-3` is rule 3.
+fn bundle_rule(name: &str) -> Option<u32> {
+    let n = name.strip_prefix("bundle-")?;
+    // Only the canonical form, so one bundle has one cursor name.
+    n.parse().ok().filter(|r: &u32| r.to_string() == n)
+}
+
+/// The filter and the order of each list section of the brief, with no
+/// attention condition.
+fn base_sql(now: i64) -> [(String, String); 6] {
     let counter = kind_sql("doc", "$.counterparty.sender");
     let owner = kind_sql("doc", "$.owner.sender");
     let known = "IN ('person', 'service')";
-    let stranger_participant = format!(
-        "EXISTS (SELECT 1 FROM json_each(doc, '$.participants') p
-           WHERE json_extract(p.value, '$.kind') = 'sender'
-             AND {} = 'stranger')",
-        kind_sql("p.value", "$.sender")
-    );
+    let stranger_participant = participant_sql("= 'stranger'");
     let commitment = "form = 'commitment' AND status = 'open'";
     // Times are compared as instants: RFC 3339 text with an offset does
     // not sort in time order. A date with no time is midnight UTC.
@@ -467,11 +661,13 @@ fn section_sql(now: i64) -> [(String, String); 6] {
         "created_at, id".to_string(),
     );
     let conversations = (
-        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16).
+        // A conversation with a stranger is only in `strangers` (dk, 2026-11-16),
+        // and a conversation with a declined stranger is in no section.
         format!(
             "form = 'conversation' AND status = 'active'
              AND (json_extract(doc, '$.new') > 0 OR json_extract(doc, '$.your_turn') = 1)
-             AND NOT {stranger_participant}"
+             AND NOT {}",
+            participant_sql("IN ('stranger', 'declined')")
         ),
         "unixepoch(json_extract(doc, '$.latest.at'), 'subsec') DESC, id DESC".to_string(),
     );
@@ -507,7 +703,7 @@ fn section_sql(now: i64) -> [(String, String); 6] {
 
 /// The `next` value of a page of section `name`: the name and the sort keys
 /// of the last item of the page, as hexadecimal text of a JSON array.
-fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
+pub(crate) fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
     let list: Vec<Value> = std::iter::once(Value::from(name))
         .chain(keys.iter().map(|k| match k {
             SqlValue::Integer(n) => (*n).into(),
@@ -525,7 +721,7 @@ fn encode_cursor(name: &str, keys: &[SqlValue]) -> String {
 
 /// The sort keys in an `after` value. A value that is empty, or that is not
 /// a cursor of section `name` with `count` keys, gives [`Error::Query`].
-fn decode_cursor(token: &str, name: &str, count: usize) -> Result<Vec<SqlValue>> {
+pub(crate) fn decode_cursor(token: &str, name: &str, count: usize) -> Result<Vec<SqlValue>> {
     let bad = || Error::Query(format!("after {token} is not the next value of a page"));
     if token.is_empty() || !token.len().is_multiple_of(2) || !token.is_ascii() {
         return Err(bad());
@@ -609,17 +805,11 @@ fn seek_sql(keys: &[(String, bool)]) -> String {
 /// gives the sort keys of each item of the page.
 fn read_section(
     c: &Connection,
-    (filter, order): &(String, String),
+    (shown, order): &(String, String),
+    tails: &str,
     limit: u32,
     after: Option<&[SqlValue]>,
 ) -> iris_store::Result<(Section, Vec<Vec<SqlValue>>)> {
-    // A possible duplicate whose original is in the same section
-    // shows with the original, not as a line of its own. The inner
-    // `item` of the subquery is the original.
-    let shown = format!(
-        "{filter} AND NOT (duplicate_of IS NOT NULL
-               AND duplicate_of IN (SELECT id FROM item WHERE {filter}))"
-    );
     let count = c.query_row(
         &format!("SELECT count(*) FROM item WHERE {shown}"),
         [],
@@ -636,23 +826,30 @@ fn read_section(
         .join(", ");
     let seek = after.map_or_else(|| "1".to_string(), |_| seek_sql(&keys));
     let mut st = c.prepare(&format!(
-        "SELECT id, form, status, doc, {list} FROM item WHERE ({shown}) AND ({seek})
-         ORDER BY {order} LIMIT {limit}"
+        "SELECT id, form, status, doc, {list}, {MATTER}, {} FROM item
+         WHERE ({shown}) AND ({seek})
+         ORDER BY {order} LIMIT {limit}",
+        ready_draft()
     ))?;
     let (items, page_keys): (Vec<_>, Vec<_>) = st
         .query_map(rusqlite::params_from_iter(after.unwrap_or_default()), |r| {
             let row_keys = (4..4 + keys.len())
                 .map(|i| r.get::<_, SqlValue>(i))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok((doc_of(r)?, row_keys))
+            let mut doc = doc_of(r)?;
+            if r.get::<_, bool>("ready_draft")? {
+                doc["ready"] = Value::from(vec!["draft"]);
+            }
+            Ok((doc, row_keys))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .unzip();
     let mut duplicates = serde_json::Map::new();
-    // Only a duplicate that this section would show is part of the pair.
+    // A possible duplicate whose original is in the same place shows with
+    // the original, not as a line of its own.
     let mut st = c.prepare(&format!(
-        "SELECT id, form FROM item WHERE duplicate_of = ?1 AND {filter} ORDER BY id"
+        "SELECT id, form FROM item WHERE duplicate_of = ?1 AND ({tails}) ORDER BY id"
     ))?;
     for doc in &items {
         let Some(id) = doc["id"].as_str() else {
@@ -680,41 +877,39 @@ fn read_section(
     ))
 }
 
+/// The count of each record type that is not gone and whose head matches
+/// `cond`. A possible duplicate pair counts once (specification 1, section
+/// 7.5).
+fn count_records(c: &Connection, cond: &str) -> iris_store::Result<serde_json::Map<String, Value>> {
+    let mut records = serde_json::Map::new();
+    let mut st = c.prepare(&format!(
+        "SELECT json_extract(doc, '$.type'), count(*) FROM item
+         WHERE {} AND {cond}
+         GROUP BY 1 ORDER BY 1",
+        head(RECORD)
+    ))?;
+    for row in st.query_map([], |r| {
+        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+    })? {
+        let (kind, n) = row?;
+        records.insert(kind.unwrap_or_else(|| "other".into()), n.into());
+    }
+    Ok(records)
+}
+
+/// The count of each record type that is not gone, also of the records
+/// that a rule hides or bundles: the counts of the Records view.
+pub fn records(store: &Store) -> Result<serde_json::Map<String, Value>> {
+    Ok(store.read(|c| count_records(c, "1"))?)
+}
+
 pub fn brief(store: &Store, now: i64) -> Result<Brief> {
     let [you_owe, owed, conversations, feed, signals, strangers] = section_sql(now);
-    // Outside the read of the brief: a nested read can wait for the
-    // connection that this thread holds.
-    let accounts: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
-        let ids = st.query_map([], |r| r.get(0))?;
-        Ok(ids.collect::<rusqlite::Result<_>>()?)
-    })?;
-    let mut proposal = Proposal::default();
-    for account in accounts {
-        for (rule, n) in iris_observe::counts(store, account)? {
-            proposal.count += n as i64;
-            let verb = proposal.verbs.entry(rule.verb()).or_insert(0.into());
-            *verb = (verb.as_i64().unwrap_or(0) + n as i64).into();
-        }
-    }
-    let mut brief = store.read(|c| {
+    let tails = tails(now);
+    let brief = store.read(|c| {
         let section =
-            |sql: &(String, String)| read_section(c, sql, MAX_LIMIT, None).map(|(s, _)| s);
-        let mut records = serde_json::Map::new();
-        let mut st = c.prepare(
-            "SELECT json_extract(doc, '$.type'), count(*) FROM item
-             WHERE form = 'record' AND status != 'gone'
-               -- A possible duplicate pair counts once (section 7.5).
-               AND NOT (duplicate_of IS NOT NULL AND duplicate_of IN
-                 (SELECT i.id FROM item i WHERE i.form = 'record' AND i.status != 'gone'))
-             GROUP BY 1 ORDER BY 1",
-        )?;
-        for row in st.query_map([], |r| {
-            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
-        })? {
-            let (kind, n) = row?;
-            records.insert(kind.unwrap_or_else(|| "other".into()), n.into());
-        }
+            |sql: &(String, String)| read_section(c, sql, &tails, MAX_LIMIT, None).map(|(s, _)| s);
+        let records = count_records(c, SHOWN)?;
         let hostile = c.query_row(
             "SELECT count(*) FROM message m LEFT JOIN header h ON h.message_id = m.id
              WHERE m.gone_at IS NULL AND m.internal_date >= ?1
@@ -738,6 +933,38 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
                 |r| r.get::<_, Option<i64>>(0),
             )?
             .map(rfc3339);
+        let all = heads(now);
+        // The same filter as the list of `/api/brief/hidden`.
+        let hidden = c.query_row(
+            &format!("SELECT count(*) FROM item WHERE {}", hidden_sql(now).0),
+            [],
+            |r| r.get(0),
+        )?;
+        let rules: Vec<u32> = c
+            .prepare(&format!(
+                "SELECT DISTINCT json_extract(doc, '$.attention.rule') FROM item
+                 WHERE ({all}) AND json_extract(doc, '$.attention.state') = 'bundled'
+                   AND json_extract(doc, '$.attention.rule') IS NOT NULL
+                 ORDER BY 1"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let policy = iris_policy::active(c)?.policy;
+        let mut bundles = Vec::new();
+        for rule in rules {
+            let (section, _) = read_section(c, &bundle_sql(now, rule), &tails, BUNDLE_ITEMS, None)?;
+            let name = policy
+                .rules
+                .iter()
+                .find(|r| r.id == rule)
+                .map_or_else(|| format!("Rule {rule}"), |r| r.name.clone());
+            bundles.push(Bundle {
+                rule,
+                name,
+                section,
+            });
+        }
+        let by_rule = verb_counts(c, BY_RULE)?;
         Ok(Brief {
             you_owe: section(&you_owe)?,
             owed_to_you: section(&owed)?,
@@ -746,13 +973,21 @@ pub fn brief(store: &Store, now: i64) -> Result<Brief> {
             feed: section(&feed)?,
             signals: section(&signals)?,
             strangers: section(&strangers)?,
+            gate: crate::gate::read_gate(c, now, false, crate::gate::GATE_IN_BRIEF, None)?,
+            declined: crate::gate::count_gate(c, now, true)?,
             hostile,
             not_understood,
             oldest_fetched,
-            proposal: None,
+            proposal: Some(verb_counts(c, TRIAGE_OPEN)?),
+            handled: Handled {
+                count: hidden + by_rule.count,
+                verbs: by_rule.verbs,
+            },
+            bundles,
+            hidden,
+            review: crate::review::review_counts(c)?,
         })
     })?;
-    brief.proposal = Some(proposal);
     Ok(brief)
 }
 
@@ -766,8 +1001,9 @@ pub struct SectionPage {
     pub next: Option<String>,
 }
 
-/// One page of the list section `name` (one of [`SECTIONS`]) of the brief at
-/// the time `now`, with the same filter and order as [`brief`]. `after` is
+/// One page of the list section `name` (one of [`SECTIONS`], or
+/// `bundle-<rule>` for the bundle of a rule) of the brief at the time `now`,
+/// with the same filter and order as [`brief`]. `after` is
 /// the ID of the last item of the page before. The page starts after the
 /// place of that item in the order, also when the item left the section.
 pub fn brief_section(
@@ -778,15 +1014,36 @@ pub fn brief_section(
     after: Option<&str>,
 ) -> Result<Option<SectionPage>> {
     check_limit(limit)?;
-    let Some(index) = SECTIONS.iter().position(|n| *n == name) else {
-        return Ok(None);
+    let sql = &match (SECTIONS.iter().position(|n| *n == name), bundle_rule(name)) {
+        (Some(index), _) => section_sql(now)[index].clone(),
+        (None, Some(rule)) => bundle_sql(now, rule),
+        (None, None) if name == HIDDEN => hidden_sql(now),
+        (None, None) => return Ok(None),
     };
-    let sql = &section_sql(now)[index];
     let after = after
         .map(|token| decode_cursor(token, name, sort_keys(&sql.1).len()))
         .transpose()?;
-    let (mut section, mut page_keys) =
-        store.read(|c| read_section(c, sql, limit + 1, after.as_deref()))?;
+    let rule = bundle_rule(name);
+    let read = store.read(|c| {
+        let page = read_section(c, sql, &tails(now), limit + 1, after.as_deref())?;
+        // A bundle is there while the active policy has its `bundle` rule,
+        // or while an item is in it (until the next attention refresh).
+        let known = |r: u32| -> iris_store::Result<bool> {
+            Ok(page.0.count > 0
+                || iris_policy::active(c)?
+                    .policy
+                    .rules
+                    .iter()
+                    .any(|x| x.id == r && x.effect == iris_policy::Effect::Bundle))
+        };
+        Ok(match rule {
+            Some(r) if !known(r)? => None,
+            _ => Some(page),
+        })
+    })?;
+    let Some((mut section, mut page_keys)) = read else {
+        return Ok(None);
+    };
     let more = section.items.len() > limit as usize;
     section.items.truncate(limit as usize);
     page_keys.truncate(limit as usize);
@@ -802,29 +1059,6 @@ pub fn brief_section(
         .then(|| page_keys.last().map(|k| encode_cursor(name, k)))
         .flatten();
     Ok(Some(SectionPage { section, next }))
-}
-
-/// The triage proposal of specification 1, section 8, in the changeset
-/// format of specification 2: `{"changesets": [...]}`, one changeset for each
-/// account, with the message IDs of each action. Each action is `proposed`.
-/// Nothing is applied or stored. Each changeset streams to `out` from one
-/// read snapshot (specification 2, section 9), so no ID list is in memory.
-pub fn write_proposal(store: &Store, now: i64, out: &mut impl std::io::Write) -> Result<()> {
-    let accounts: Vec<i64> = store.read(|c| {
-        let mut st = c.prepare("SELECT id FROM account ORDER BY id")?;
-        let ids = st.query_map([], |r| r.get(0))?;
-        Ok(ids.collect::<rusqlite::Result<_>>()?)
-    })?;
-    let io = |e: std::io::Error| Error::Store(e.into());
-    out.write_all(b"{\"changesets\":[").map_err(io)?;
-    for (i, account) in accounts.into_iter().enumerate() {
-        if i > 0 {
-            out.write_all(b",").map_err(io)?;
-        }
-        iris_observe::write_changeset(store, account, &rfc3339(now), out)?;
-    }
-    out.write_all(b"]}").map_err(io)?;
-    Ok(())
 }
 
 /// The kind of the sender row of `address`, or `stranger` with no row or no
@@ -852,7 +1086,10 @@ fn sender_kind(c: &Connection, address: Option<&str>) -> rusqlite::Result<String
 
 /// The summary of message `row`, and the other fields of [`Message`]
 /// with no summary and no items.
-fn message_row(c: &Connection, row: i64) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
+pub(crate) fn message_row(
+    c: &Connection,
+    row: i64,
+) -> rusqlite::Result<Option<(MessageSummary, Message)>> {
     let found = c
         .query_row(
             "SELECT m.thread_id, coalesce(h.date, m.internal_date), h.from_name, h.from_addr,
@@ -917,20 +1154,54 @@ fn empty_summary() -> MessageSummary {
     }
 }
 
-/// The document of an item row (id, form, status, doc). The row is the true
-/// copy of the ID and the status, so they replace the values of the document.
-fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
-    let id: i64 = r.get(0)?;
-    let form: String = r.get(1)?;
-    let text: String = r.get(3)?;
+/// The column `matter` of an item row: the row ID of the confirmed matter
+/// that keeps the item, or NULL. The query must name the table `item`.
+pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
+      JOIN matter m ON m.id = mi.matter_id
+     WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter";
+
+/// The column `ready_draft` of an item row: true when the thread of the
+/// mail that made the item has a reply draft that the person can use now
+/// (card R3-09, [`iris_voice::ready_sql`]).
+fn ready_draft() -> String {
+    format!(
+        "{} AS ready_draft",
+        iris_voice::ready_sql(
+            "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
+             WHERE os.item_id = item.id AND os.role = 'origin'"
+        )
+    )
+}
+
+/// The document of an item row (id, form, status, doc, and the column
+/// [`MATTER`] by name). The row is the true copy of the ID, the status and
+/// the matter, so they replace the values of the document. A stored `ready`
+/// is removed: only [`read_section`] sets it, from the store. Each output of
+/// an item (the API, the read verbs, the export) uses this function.
+pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    doc_at(r, 0)
+}
+
+/// As [`doc_of`], with the columns id, form, status and doc from `at`.
+pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
+    let id: i64 = r.get(at)?;
+    let form: String = r.get(at + 1)?;
+    let text: String = r.get(at + 3)?;
     let mut doc: Value = serde_json::from_str(&text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(at + 3, rusqlite::types::Type::Text, Box::new(e))
     })?;
     if let Some(map) = doc.as_object_mut() {
         if let Some(id) = item_id(id, &form) {
             map.insert("id".into(), id.into());
         }
-        map.insert("status".into(), Value::String(r.get(2)?));
+        map.insert("status".into(), Value::String(r.get(at + 2)?));
+        // The engine computes `ready` on each brief read: a stored value is never shown.
+        map.remove("ready");
+        let matter: Option<i64> = r.get("matter")?;
+        map.insert(
+            "matter".into(),
+            matter.map_or(Value::Null, |m| format_id(Kind::Matter, m).into()),
+        );
     }
     Ok(doc)
 }
@@ -942,7 +1213,7 @@ fn item_id(row: i64, form: &str) -> Option<String> {
         .map(|(_, k)| format_id(*k, row))
 }
 
-fn row_of(id: &str, kind: Kind) -> Result<i64> {
+pub(crate) fn row_of(id: &str, kind: Kind) -> Result<i64> {
     match parse_id(id) {
         Some((k, row)) if k == kind => Ok(row),
         _ => Err(bad_id(id)),
@@ -978,6 +1249,55 @@ pub fn rfc3339(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bundle_name_is_canonical_or_no_bundle() {
+        // Property: `bundle_rule(s)` is `Some(r)` exactly when `s` is
+        // `bundle-{r}` for a `u32` `r`. Each rule has one name.
+        for r in [0, 1, 9, 10, 99, u32::MAX - 1, u32::MAX] {
+            assert_eq!(bundle_rule(&format!("bundle-{r}")), Some(r));
+        }
+        let parts = [
+            "bundle-",
+            "bundle",
+            "-",
+            "+",
+            "0",
+            "1",
+            "9",
+            "42",
+            "4294967295",
+            "4294967296",
+            " ",
+            "\u{0663}",
+            "é",
+            "%33",
+            "x",
+            "/",
+            "",
+        ];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..20_000 {
+            let mut name = String::new();
+            for _ in 0..(x % 5) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                name.push_str(parts[(x % parts.len() as u64) as usize]);
+            }
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let canonical = name
+                .strip_prefix("bundle-")
+                .and_then(|n| n.parse::<u32>().ok())
+                .filter(|r| format!("bundle-{r}") == name);
+            assert_eq!(bundle_rule(&name), canonical, "{name:?}");
+            if let Some(r) = bundle_rule(&name) {
+                assert_eq!(format!("bundle-{r}"), name);
+            }
+        }
+    }
 
     #[test]
     fn summaries_leave_out_a_message_that_became_gone() {

@@ -50,6 +50,11 @@ fn split_addr(v: &str) -> (Option<String>, Option<String>) {
 /// A store with the first `COUNT` synthetic messages, in the label INBOX
 /// (and SENT for the mail of the owner). Gives the store and the mailbox.
 fn filled(dir: &TempDir) -> (Arc<Store>, Mailbox) {
+    filled_n(dir, COUNT)
+}
+
+/// [`filled`] with the first `count` synthetic messages.
+fn filled_n(dir: &TempDir, count: usize) -> (Arc<Store>, Mailbox) {
     let store = Store::open(&dir.0).unwrap();
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
     store
@@ -58,9 +63,9 @@ fn filled(dir: &TempDir) -> (Arc<Store>, Mailbox) {
             &[("INBOX", "INBOX", "system"), ("SENT", "SENT", "system")],
         )
         .unwrap();
-    let mailbox = Mailbox::new(11, COUNT);
+    let mailbox = Mailbox::new(11, count);
     let mut batch = Vec::new();
-    for i in 0..COUNT {
+    for i in 0..count {
         let raw = mailbox.raw(i);
         let truth = mailbox.truth(i);
         let text = String::from_utf8_lossy(&raw).replace("\r\n ", " ");
@@ -128,7 +133,7 @@ fn exec_doc(store: &Store, row: i64) -> String {
 /// row `source` as its origin. Gives the row ID.
 fn add_item(store: &Store, form: &str, status: &str, source: i64, created: i64, doc: Value) -> i64 {
     let mut full = json!({
-        "model": "iris/0",
+        "model": "iris/1.0",
         "id": "x-0",
         "form": form,
         "status": "wrong",
@@ -867,33 +872,29 @@ async fn brief_follows_the_queries_of_section_8() {
     assert_eq!(b["not_understood"], 1);
     // Message 21 got the date 0 above: it is the oldest fetched message.
     assert_eq!(b["oldest_fetched"], "1970-01-01T00:00:00Z");
-    // The triage proposal of observe mode, computed when the brief opens.
+    // The triage proposal: the stored triage changeset, not a count of the
+    // brief. Before the first triage run, nothing waits.
+    assert_eq!(b["proposal"], json!({"count": 0, "verbs": {}}));
+    // Triage leaves out mail that waits for its link check: end the checks,
+    // as the first step of a batch run does.
+    iris_understand::store::recheck_links(&store, NOW, None).unwrap();
+    iris_triage::run(&store, 1, NOW).unwrap();
     let want: u64 = iris_observe::counts(&store, 1)
         .unwrap()
         .iter()
         .map(|(_, n)| n)
         .sum();
     assert!(want > 0);
+    let (_, after_run) = get(&store, "/api/brief").await;
     assert_eq!(
-        b["proposal"],
+        after_run["proposal"],
         json!({"count": want, "verbs": {"archive": want}})
     );
-    // The full proposal: a changeset with the message IDs of each action.
-    let (code, p) = get(&store, "/api/proposal").await;
-    assert_eq!(code, StatusCode::OK);
-    let cs = &p["changesets"].as_array().unwrap()[0];
-    assert!(cs["id"].as_str().unwrap().starts_with("cs-"));
-    let actions = cs["actions"].as_array().unwrap();
-    let targets: usize = actions
-        .iter()
-        .map(|a| {
-            assert_eq!(a["decision"]["state"], "proposed");
-            let ids = a["targets"]["messages"].as_array().unwrap();
-            assert!(ids.iter().all(|m| m.as_str().unwrap().starts_with("m-")));
-            ids.len()
-        })
-        .sum();
-    assert_eq!(targets as u64, want);
+    // Observe mode: no rule decided an action, so Iris handled nothing.
+    assert_eq!(after_run["handled"], json!({"count": 0, "verbs": {}}));
+    // The old in-memory proposal is gone: the review lists the stored one.
+    let (code, _) = get(&store, "/api/proposal").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
 
     // Pages of one section: the same items in the same order as the brief.
     let mut paged = Vec::new();
@@ -1122,17 +1123,6 @@ async fn needs_the_token_of_the_one_time_sign_in() {
 }
 
 #[tokio::test]
-async fn a_proposal_that_fails_before_its_first_part_is_a_500() {
-    let dir = temp("proposal-error");
-    let (store, _) = filled(&dir);
-    // The store cannot read the items, so the triage counts fail.
-    exec(&store, "DROP TABLE item_source", []);
-    let (code, v) = get(&store, "/api/proposal").await;
-    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(v["error"].is_string());
-}
-
-#[tokio::test]
 async fn pages_a_section_larger_than_the_brief() {
     let dir = temp("pages");
     let (store, _) = filled(&dir);
@@ -1174,4 +1164,477 @@ async fn pages_a_section_larger_than_the_brief() {
     assert_eq!(unique.len(), 250);
     let (_, brief) = get(&store, "/api/brief").await;
     assert_eq!(ids(&brief["feed"]["items"]), big[..200]);
+}
+
+/// The six list sections of the brief.
+const LISTS: [&str; 6] = [
+    "you_owe",
+    "owed_to_you",
+    "conversations",
+    "feed",
+    "signals",
+    "strangers",
+];
+
+/// The item count of the brief: each list section and each record type.
+fn shown_total(b: &Value) -> i64 {
+    LISTS
+        .iter()
+        .map(|s| b[s]["count"].as_i64().unwrap())
+        .sum::<i64>()
+        + b["records"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|n| n.as_i64().unwrap())
+            .sum::<i64>()
+}
+
+#[tokio::test]
+async fn each_item_of_the_brief_is_shown_bundled_or_hidden_once() {
+    // Invariant (spec 2 section 6.4): each item that the brief can show is
+    // in exactly one place: its section (or record count) when shown, the
+    // bundle of its rule when bundled, or the hidden count. An item with no
+    // `attention` field is shown.
+    for seed in 1..=12u64 {
+        let dir = temp(&format!("attn-{seed}"));
+        let (store, _) = filled(&dir);
+        let person = sender(&store, "pat@one.example", Some("person"));
+        let service = sender(&store, "news@two.example", Some("service"));
+        let stranger = sender(&store, "who@three.example", Some("stranger"));
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let mut rows = Vec::new();
+        for i in 0..60i64 {
+            let (form, status, doc) = match next() % 9 {
+                0 => (
+                    "commitment",
+                    "open",
+                    json!({"direction": "you_owe", "kind": "task", "counterparty": party(&person), "owner": {"kind": "self"}}),
+                ),
+                1 => (
+                    "commitment",
+                    "open",
+                    json!({"direction": "owed_to_you", "kind": "task", "owner": party(&service), "counterparty": {"kind": "self"}}),
+                ),
+                2 => (
+                    "conversation",
+                    "active",
+                    json!({"new": 1, "participants": [{"kind": "self"}, party(&person)]}),
+                ),
+                3 => (
+                    "conversation",
+                    "active",
+                    json!({"new": 1, "participants": [{"kind": "self"}, party(&stranger)]}),
+                ),
+                4 => ("feed", "new", json!({"publisher": party(&service)})),
+                5 => (
+                    "signal",
+                    "active",
+                    json!({"issuer": party(&service), "expires": "2026-11-17T00:00:00Z"}),
+                ),
+                6 => {
+                    let kind = ["receipt", "booking"][(next() % 2) as usize];
+                    (
+                        "record",
+                        "new",
+                        json!({"type": kind, "issuer": party(&service)}),
+                    )
+                }
+                // Not in the brief: never counted, whatever its attention.
+                7 => (
+                    "commitment",
+                    "done",
+                    json!({"direction": "you_owe", "kind": "task", "counterparty": party(&person)}),
+                ),
+                _ => (
+                    "signal",
+                    "active",
+                    json!({"issuer": party(&service), "expires": "2026-11-01T00:00:00Z"}),
+                ),
+            };
+            rows.push(add_item(&store, form, status, 13 + i % 40, i, doc));
+        }
+        // Possible duplicate pairs, one level deep, in the same section or
+        // not. The pair counts once (spec 1 section 7.5), whatever the
+        // attention of each member.
+        let mut originals = Vec::new();
+        for (i, row) in rows.iter().enumerate().skip(1) {
+            if next() % 3 == 0 {
+                let original = rows[(next() % i as u64) as usize];
+                if !originals.contains(row) && original != *row {
+                    exec(
+                        &store,
+                        "UPDATE item SET duplicate_of = ?1
+                         WHERE id = ?2 AND ?1 NOT IN
+                           (SELECT id FROM item WHERE duplicate_of IS NOT NULL)",
+                        [original, *row],
+                    );
+                    originals.push(original);
+                }
+            }
+        }
+        let (_, before) = get(&store, "/api/brief").await;
+        let universe = shown_total(&before);
+        assert_eq!(before["hidden"], 0);
+        assert!(before["bundles"].as_array().unwrap().is_empty());
+        for row in &rows {
+            let attention = match next() % 5 {
+                0 => json!({"state": "hidden", "rule": 2, "reason": "r"}),
+                1 => json!({"state": "bundled", "rule": 3, "reason": "r"}),
+                2 => json!({"state": "bundled", "rule": 7, "reason": "r"}),
+                3 => json!({"state": "shown"}),
+                _ => continue,
+            };
+            exec(
+                &store,
+                "UPDATE item SET doc = json_set(doc, '$.attention', json(?2)) WHERE id = ?1",
+                rusqlite::params![row, attention.to_string()],
+            );
+        }
+        let (_, b) = get(&store, "/api/brief").await;
+        let bundles = b["bundles"].as_array().unwrap();
+        let bundled: i64 = bundles.iter().map(|x| x["count"].as_i64().unwrap()).sum();
+        assert_eq!(
+            shown_total(&b) + bundled + b["hidden"].as_i64().unwrap(),
+            universe,
+            "seed {seed}"
+        );
+        for s in LISTS {
+            for item in b[s]["items"].as_array().unwrap() {
+                let state = item["attention"]["state"].as_str().unwrap_or("shown");
+                assert_eq!(state, "shown", "seed {seed} section {s}");
+            }
+        }
+        let mut rules = Vec::new();
+        for bundle in bundles {
+            let rule = bundle["rule"].as_u64().unwrap();
+            rules.push(rule);
+            // No policy names the rule.
+            assert_eq!(bundle["name"], format!("Rule {rule}"));
+            // The full list of the bundle, page by page.
+            let mut all = Vec::new();
+            let mut after = String::new();
+            loop {
+                let (code, p) =
+                    get(&store, &format!("/api/brief/bundle-{rule}?limit=7{after}")).await;
+                assert_eq!(code, StatusCode::OK);
+                for item in p["items"].as_array().unwrap() {
+                    assert_eq!(item["attention"]["state"], "bundled");
+                    assert_eq!(item["attention"]["rule"], rule);
+                    all.push(item["id"].as_str().unwrap().to_string());
+                }
+                match p["next"].as_str() {
+                    Some(n) => after = format!("&after={n}"),
+                    None => break,
+                }
+            }
+            assert_eq!(
+                all.len() as i64,
+                bundle["count"].as_i64().unwrap(),
+                "seed {seed}"
+            );
+            let first: Vec<&str> = ids(&bundle["items"]);
+            assert_eq!(
+                first,
+                all[..first.len()]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut sorted = rules.clone();
+        sorted.sort();
+        assert_eq!(rules, sorted, "bundles in the order of the rule IDs");
+        // The list of hidden items, page by page, has each hidden item once,
+        // with its rule and reason. With no action, the count of what Iris
+        // handled is the hidden count.
+        let mut hidden = Vec::new();
+        let mut after = String::new();
+        loop {
+            let (code, p) = get(&store, &format!("/api/brief/hidden?limit=5{after}")).await;
+            assert_eq!(code, StatusCode::OK);
+            assert_eq!(p["count"], b["hidden"]);
+            for item in p["items"].as_array().unwrap() {
+                assert_eq!(item["attention"]["state"], "hidden");
+                assert_eq!(item["attention"]["reason"], "r");
+                hidden.push(item["id"].as_str().unwrap().to_string());
+            }
+            match p["next"].as_str() {
+                Some(n) => after = format!("&after={n}"),
+                None => break,
+            }
+        }
+        let mut unique = hidden.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), hidden.len(), "seed {seed}");
+        assert_eq!(
+            hidden.len() as i64,
+            b["hidden"].as_i64().unwrap(),
+            "seed {seed}"
+        );
+        assert_eq!(b["handled"], json!({"count": b["hidden"], "verbs": {}}));
+        // No policy: a bundle page is there only while the brief lists it.
+        for rule in 1..=9u64 {
+            let (code, _) = get(&store, &format!("/api/brief/bundle-{rule}")).await;
+            let listed = rules.contains(&rule);
+            assert_eq!(code == StatusCode::OK, listed, "seed {seed} rule {rule}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
+    let dir = temp("bundle-name");
+    let (store, _) = filled(&dir);
+    let service = sender(&store, "news@two.example", Some("service"));
+    for created in [1, 2] {
+        add_item(
+            &store,
+            "feed",
+            "new",
+            13,
+            created,
+            json!({"publisher": party(&service)}),
+        );
+    }
+    let receipt = json!({"type": "receipt", "issuer": party(&service)});
+    add_item(&store, "record", "new", 14, 3, receipt);
+    std::fs::write(
+        store.dir().join(iris_policy::FILE),
+        "version = 0\nmode = \"observe\"\n[[rule]]\nid = 3\nname = \"Bundle the feed\"\neffect = \"bundle\"\nwhen = { form = \"feed\" }\nby = \"person\"\nadded = 2026-11-10\n[[rule]]\nid = 4\nname = \"Hide receipts\"\neffect = \"hide\"\nwhen = { record_type = \"receipt\" }\nby = \"person\"\nadded = 2026-11-10\n[[rule]]\nid = 5\nname = \"Bundle bookings\"\neffect = \"bundle\"\nwhen = { record_type = \"booking\" }\nby = \"person\"\nadded = 2026-11-10\n",
+    )
+    .unwrap();
+    let confirm = || {
+        let sha = match iris_policy::file_state(&store).unwrap() {
+            iris_policy::FileState::Changed(l) => l.sha256,
+            other => panic!("{other:?}"),
+        };
+        // The confirmation writes the attention of each item.
+        iris_policy::confirm(&store, &sha, NOW / 1000).unwrap();
+    };
+    confirm();
+    let (_, b) = get(&store, "/api/brief").await;
+    assert_eq!(b["bundles"][0]["name"], "Bundle the feed");
+    assert_eq!(b["bundles"][0]["count"], 2);
+    assert_eq!(b["feed"]["count"], 0);
+    // The brief leaves out the hidden receipt. The Records view counts it.
+    assert_eq!(b["hidden"], 1);
+    assert!(b["records"].get("receipt").is_none());
+    let (code, counts) = get(&store, "/api/records").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(counts, json!({"receipt": 1}));
+    // A bundle rule with no item yet has an empty page.
+    let (code, p) = get(&store, "/api/brief/bundle-5").await;
+    assert_eq!((code, p["count"].clone()), (StatusCode::OK, json!(0)));
+    // A rule that is not a bundle rule, or no rule: no bundle.
+    for bad in ["bundle-4", "bundle-999", "bundle-0", "bundle-4294967295"] {
+        let (code, _) = get(&store, &format!("/api/brief/{bad}")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{bad}");
+    }
+    for bad in ["bundle-03", "bundle-", "bundle-x", "bundle-+3", "bundles-3"] {
+        let (code, _) = get(&store, &format!("/api/brief/{bad}")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND, "{bad}");
+    }
+    // A cursor of one bundle is not a cursor of another.
+    let (_, p) = get(&store, "/api/brief/bundle-3?limit=1").await;
+    let next = p["next"].as_str().unwrap();
+    let (code, _) = get(&store, &format!("/api/brief/bundle-4?after={next}")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, p) = get(&store, &format!("/api/brief/bundle-3?after={next}")).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(p["items"].as_array().unwrap().len(), 1);
+    // The owner removes rule 3: its bundle goes, and the feed comes back.
+    let text = std::fs::read_to_string(store.dir().join(iris_policy::FILE)).unwrap();
+    let start = text.find("[[rule]]\nid = 3").unwrap();
+    let end = start + 1 + text[start + 1..].find("[[rule]]").unwrap();
+    std::fs::write(
+        store.dir().join(iris_policy::FILE),
+        format!("{}{}", &text[..start], &text[end..]),
+    )
+    .unwrap();
+    confirm();
+    let (code, _) = get(&store, "/api/brief/bundle-3").await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let (_, b) = get(&store, "/api/brief").await;
+    assert_eq!(b["feed"]["count"], 2);
+    assert!(b["bundles"].as_array().unwrap().is_empty());
+}
+
+/// Gives the answer that the test puts in `next`, once.
+struct Oracle(std::cell::RefCell<Option<String>>);
+
+impl iris_understand::Model for Oracle {
+    fn name(&self) -> &str {
+        "oracle"
+    }
+
+    fn ask(&self, _: &str, _: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        let text = self.0.borrow_mut().take();
+        Ok(iris_model::Reply {
+            text: text.unwrap_or_else(|| r#"{"items": [], "phishing": false}"#.into()),
+            usage: iris_model::Usage::default(),
+            stop: iris_model::Stop::End,
+        })
+    }
+}
+
+/// R3-06: an ask in your own sent mail shows under "Owed to you", with the
+/// person you asked and the date. The whole path runs: understanding of the
+/// sent message (with a model that gives the true answer), the sender axis,
+/// and the brief. The recipient never wrote to you.
+#[tokio::test]
+async fn an_ask_that_you_send_is_owed_to_you_with_the_person_and_the_date() {
+    let dir = temp("owed-sent");
+    // Asks of the owner are rare in the synthetic mailbox.
+    let (store, mb) = filled_n(&dir, 1500);
+    let mut want = Vec::new();
+    for i in 0..mb.len() {
+        let t = mb.truth(i);
+        let f: std::collections::BTreeMap<_, _> = mb.fields(i).into_iter().collect();
+        if t.sender != Sender::Owner
+            || f.get("direction").map(String::as_str) != Some("owed_to_you")
+        {
+            continue;
+        }
+        let raw = String::from_utf8_lossy(&mb.raw(i)).replace("\r\n ", " ");
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        let to = split_addr(&field(head, "To").unwrap()).1.unwrap();
+        // The subject can be MIME encoded: quote the ask in the body.
+        let quote = body.lines().find(|l| l.starts_with("Can you")).unwrap();
+        let item = json!({"form": "commitment", "title": "Send it", "quote": quote,
+                          "direction": "owed_to_you", "kind": "task",
+                          "due": {"date": f["due.date"]}});
+        let model = Oracle(std::cell::RefCell::new(Some(
+            json!({"items": [item], "phishing": false}).to_string(),
+        )));
+        let row: i64 = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT id FROM message WHERE provider_id = ?1",
+                    [format!("g{i}")],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let out = iris_understand::store::understand(&store, row, &model, NOW).unwrap();
+        assert_eq!(out.items.len(), 1, "message {i}: {out:?}");
+        want.push((to, f["due.date"].clone()));
+    }
+    assert!(!want.is_empty(), "the mailbox has no sent ask");
+    let (code, brief) = get(&store, "/api/brief").await;
+    assert_eq!(code, StatusCode::OK);
+    let owed = &brief["owed_to_you"];
+    assert_eq!(owed["count"], want.len(), "{owed}");
+    let mut got: Vec<(String, String)> = owed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            assert_eq!(d["counterparty"]["kind"], "self", "{d}");
+            (
+                d["owner"]["address"].as_str().unwrap().to_string(),
+                d["due"]["date"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+}
+
+/// The draft marks of the items of `section` of a brief: the item ID and
+/// its `ready` field.
+fn ready_marks(section: &Value) -> Vec<(String, Value)> {
+    section["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
+    let dir = temp("ready-draft");
+    let (store, _) = filled_n(&dir, 30);
+    let person = sender(&store, "dana@contoso.example", Some("person"));
+    let owe = json!({"direction": "you_owe", "kind": "task", "owner": {"kind": "self"},
+                     "counterparty": party(&person)});
+    // Two items from messages of two threads. Understanding and the link
+    // check finished each message.
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let (first, other): (i64, i64) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT min(m.id), (SELECT min(o.id) FROM message o WHERE o.thread_id <> m.thread_id)
+                 FROM message m WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = 1)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let with = add_item(&store, "commitment", "open", first, 10, owe.clone());
+    let without = add_item(&store, "commitment", "open", other, 20, owe);
+    // The draft of the thread of `with` answers its newest message.
+    exec(
+        &store,
+        "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+         SELECT m.thread_id, m.id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message m
+         WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
+         ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC LIMIT 1",
+        [first],
+    );
+    let ready = json!(["draft"]);
+    let want = vec![
+        (format!("c-{with}"), ready.clone()),
+        (format!("c-{without}"), Value::Null),
+    ];
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ready_marks(&brief["you_owe"]), want);
+    let (_, page) = get(&store, "/api/brief/you_owe").await;
+    assert_eq!(ready_marks(&page), want);
+    // The open model allows the field: the item with it passes its schema.
+    let schema = iris_spec::validator("commitment");
+    let marked = &brief["you_owe"]["items"][0];
+    assert!(schema.is_valid(marked), "{marked}");
+    let mut wrong = marked.clone();
+    wrong["ready"] = json!(["draft", "draft"]);
+    assert!(!schema.is_valid(&wrong), "{wrong}");
+    wrong["ready"] = json!(["dinner"]);
+    assert!(!schema.is_valid(&wrong), "{wrong}");
+
+    // A `ready` value in the stored document is never shown: the engine
+    // computes the field on each read. Both items store a wrong value.
+    exec(
+        &store,
+        "UPDATE item SET doc = json_set(doc, '$.ready', json('[\"draft\"]')) WHERE ?1",
+        [1],
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ready_marks(&brief["you_owe"]), want);
+    let (_, one) = get(&store, &format!("/api/items/c-{without}")).await;
+    assert_eq!(one["ready"], Value::Null, "{one}");
+
+    // Hostile mail in the thread: the draft is not ready.
+    exec(
+        &store,
+        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+        [first],
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(
+        ready_marks(&brief["you_owe"]),
+        vec![
+            (format!("c-{with}"), Value::Null),
+            (format!("c-{without}"), Value::Null),
+        ]
+    );
 }

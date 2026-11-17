@@ -1,0 +1,46 @@
+{
+  "model": "iris/1.0",
+  "id": "cs-77",
+  "revision": 1,
+  "author": {
+    "kind": "agent",
+    "name": "Claude Code",
+    "session": "se-12",
+    "job": "j-142"
+  },
+  "why": "Priya needs the Q4 numbers by Friday.",
+  "created": "2026-11-16T09:17:02Z",
+  "submitted": "2026-11-16T09:17:40Z",
+  "state": "open",
+  "actions": [
+    {
+      "n": 1,
+      "revision": 1,
+      "verb": "draft",
+      "targets": {
+        "accounts": [
+          "a-1"
+        ]
+      },
+      "resolved": {
+        "messages": [
+          "m-55211"
+        ]
+      },
+      "args": {
+        "to": [
+          "priya@example.com"
+        ],
+        "subject": "Q4 numbers",
+        "body": "Here are the numbers."
+      },
+      "flags": [],
+      "hash": "4f8a0c2e7b13d95a6e0f1b8c3d72a4e95b6c0d1f8e3a7b29c4d05e6f1a8b3c72",
+      "decision": {
+        "state": "in_review",
+        "by": "policy",
+        "reason": "No rule allows draft."
+      }
+    }
+  ]
+}

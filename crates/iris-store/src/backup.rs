@@ -1,13 +1,16 @@
 //! The backup of a live data folder (specification 1, section 5.1), the
 //! backup lock, and the content cleanup of gone messages (section 4.5).
 
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
-use crate::{content, lock, make_private_dir, settings, sync_dir, Error, Result, Store};
+use crate::{
+    content, lock, make_private_dir, new_private_dir, settings, sync_dir, Error, FileLock, Result,
+    Store,
+};
 
 /// How long the store keeps the content of a gone message (section 4.5).
 pub const GONE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -18,7 +21,29 @@ const CLEAN_BATCH: i64 = 500;
 /// The backup lock. While a value of this type exists, no other holder of
 /// the lock can run: in this process or in another one. Drop it to release
 /// the lock.
-pub struct BackupLock(#[allow(dead_code)] File);
+pub struct BackupLock(#[allow(dead_code)] FileLock);
+
+/// What `policy.toml` must hold before [`Store::write_policy`] replaces it.
+#[derive(Clone, Copy, Debug)]
+pub enum PolicyExpect<'a> {
+    /// No file.
+    Missing,
+    /// This text.
+    Text(&'a [u8]),
+    /// Any file, or no file.
+    Any,
+}
+
+/// The result of [`Store::write_policy`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct PolicyWrite {
+    /// The new text is at `policy.toml`. False when the file there was not
+    /// the expected one, or a new file came during the write.
+    pub done: bool,
+    /// The copy of the file that was at `policy.toml`, when it did not go
+    /// back. A done write that replaced a file always keeps one.
+    pub saved: Option<std::path::PathBuf>,
+}
 
 /// What [`Store::clean_gone`] removed.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -32,30 +57,14 @@ pub struct Cleaned {
 }
 
 impl Store {
-    fn lock_file(&self) -> Result<File> {
-        Ok(fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.dir.join("backup.lock"))?)
-    }
-
     /// Take the backup lock. Wait while another holder has it.
     pub fn backup_lock(&self) -> Result<BackupLock> {
-        let f = self.lock_file()?;
-        f.lock()?;
-        Ok(BackupLock(f))
+        Ok(BackupLock(FileLock::take(&self.dir.join("backup.lock"))?))
     }
 
     /// Take the backup lock, or give `None` if another holder has it.
     pub fn try_backup_lock(&self) -> Result<Option<BackupLock>> {
-        let f = self.lock_file()?;
-        match f.try_lock() {
-            Ok(()) => Ok(Some(BackupLock(f))),
-            Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Error(e)) => Err(e.into()),
-        }
+        Ok(FileLock::try_take(&self.dir.join("backup.lock"))?.map(BackupLock))
     }
 
     /// Copy the data folder to `dest` while the engine runs (section 5.1).
@@ -64,14 +73,8 @@ impl Store {
     /// refers to and that is not there is an error: the copy is not complete.
     pub fn backup(&self, dest: &Path) -> Result<u64> {
         let _lock = self.backup_lock()?;
-        if dest.exists() && fs::read_dir(dest)?.next().is_some() {
-            return Err(Error::Io(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "the backup folder is not empty",
-            )));
-        }
         // The copy holds the key and the mail.
-        make_private_dir(dest)?;
+        new_private_dir(dest)?;
         let dest_content = dest.join("content");
         make_private_dir(&dest_content)?;
 
@@ -134,18 +137,99 @@ impl Store {
         Ok(files)
     }
 
-    /// Write `policy.toml` (section 5.1): a temporary file, then a rename.
-    /// Waits while a backup runs, so a backup copies one complete version.
-    pub fn write_policy(&self, text: &[u8]) -> Result<()> {
-        let _lock = self.backup_lock()?;
+    /// Puts `text` at `policy.toml` (section 5.1), or no file for `None`,
+    /// if the file there is `expect`. The caller holds the backup lock, so no
+    /// backup runs; it takes the lock before a database write transaction, in
+    /// the order of [`Store::clean_gone`].
+    ///
+    /// A person can save the file at any time, also through an open file, so
+    /// the write never deletes the file that was there: it goes back to
+    /// `policy.toml`, or it stays as `policy.toml.saved-<seconds>` in the
+    /// data folder ([`PolicyWrite::saved`]).
+    pub fn write_policy(
+        &self,
+        _lock: &BackupLock,
+        expect: PolicyExpect<'_>,
+        text: Option<&[u8]>,
+    ) -> Result<PolicyWrite> {
+        let path = self.dir.join("policy.toml");
         let tmp = self.dir.join("policy.toml.tmp");
-        let mut f = private_file(&tmp)?;
-        f.write_all(text)?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&tmp, self.dir.join("policy.toml"))?;
+        if let Some(text) = text {
+            // After a crash, `tmp` can be a second name of `policy.toml`:
+            // remove the name, never write into that file.
+            match fs::remove_file(&tmp) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            let mut f = private_file(&tmp, true)?;
+            f.write_all(text)?;
+            f.sync_all()?;
+        }
+        // The rename moves the file that is there now, so a save after it
+        // makes a new file and cannot be lost.
+        let aside = self.saved_name();
+        let moved = match fs::rename(&path, &aside) {
+            Ok(()) => true,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e.into()),
+        };
+        let matches = match expect {
+            PolicyExpect::Any => true,
+            PolicyExpect::Missing => !moved,
+            PolicyExpect::Text(t) => moved && fs::read(&aside)? == t,
+        };
+        let mut out = PolicyWrite {
+            done: false,
+            saved: None,
+        };
+        if matches {
+            // A hard link never replaces a file: a save since the rename stays.
+            out.done = match text {
+                None => true,
+                Some(_) => match fs::hard_link(&tmp, &path) {
+                    Ok(()) => true,
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+                    Err(e) => return Err(e.into()),
+                },
+            };
+            // Keep the old file under its new name, never delete it: an
+            // editor can hold it open and save into it after the check.
+            if moved {
+                out.saved = Some(aside);
+            }
+        } else if moved {
+            // Put the file back, unless a new file came since the rename.
+            match fs::hard_link(&aside, &path) {
+                Ok(()) => fs::remove_file(&aside)?,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => out.saved = Some(aside),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if text.is_some() {
+            fs::remove_file(&tmp)?;
+        }
         sync_dir(&self.dir)?;
-        Ok(())
+        Ok(out)
+    }
+
+    /// A name for a copy of `policy.toml` that no file has yet.
+    fn saved_name(&self) -> std::path::PathBuf {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut n = 1;
+        loop {
+            let name = if n == 1 {
+                format!("policy.toml.saved-{secs}")
+            } else {
+                format!("policy.toml.saved-{secs}-{n}")
+            };
+            let path = self.dir.join(name);
+            if !path.exists() {
+                return path;
+            }
+            n += 1;
+        }
     }
 
     /// The content cleanup of section 4.5, step 3. For each message that is
@@ -219,9 +303,14 @@ impl Store {
     }
 }
 
-fn private_file(path: &Path) -> io::Result<File> {
+/// A file with mode 0600 at `path`. With `new`, refuses a file that exists.
+fn private_file(path: &Path, new: bool) -> io::Result<File> {
     let mut o = fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    if new {
+        o.write(true).create_new(true);
+    } else {
+        o.write(true).create(true).truncate(true);
+    }
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     let f = o.open(path)?;
@@ -237,7 +326,7 @@ fn private_file(path: &Path) -> io::Result<File> {
 /// Copy `from` to a new file `to` with mode 0600, and write it to disk.
 fn copy_private(from: &Path, to: &Path) -> io::Result<()> {
     let mut src = File::open(from)?;
-    let mut dst = private_file(to)?;
+    let mut dst = private_file(to, false)?;
     io::copy(&mut src, &mut dst)?;
     dst.sync_all()
 }

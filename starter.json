@@ -50,7 +50,7 @@
         "client/**",
         ".kalos.yaml"
       ],
-      "setup": "cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile",
+      "setup": "cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile && npx playwright-core install --only-shell chromium",
       "setup_inputs": [
         "client/package.json",
         "client/pnpm-lock.yaml",
@@ -62,19 +62,39 @@
         "node --version",
         "npm --version"
       ]
+    },
+    "spec-kit": {
+      "paths": [
+        "docs/spec/schema/**",
+        "docs/spec/conformance/**",
+        "docs/spec/VERSION"
+      ],
+      "setup": "python3 -m venv .local-ci/spec-venv && .local-ci/spec-venv/bin/pip install --quiet --require-hashes -r docs/spec/conformance/requirements.txt",
+      "setup_inputs": [
+        "docs/spec/conformance/requirements.txt"
+      ],
+      "check": ".local-ci/spec-venv/bin/python -m py_compile docs/spec/conformance/run.py docs/spec/conformance/producer/produce.py",
+      "test": ".local-ci/spec-venv/bin/python -m unittest discover -s docs/spec/conformance -p 'test_*.py' -v",
+      "tools": [
+        "python3 --version"
+      ]
     }
   },
   "cloud": {
     "profile": true,
     "keys": [],
-    "apt": [],
+    "apt": [
+      "bubblewrap"
+    ],
     "hosts": [
       "crates.io",
       "index.crates.io",
       "static.crates.io",
       "static.rust-lang.org",
       "registry.npmjs.org",
-      "github.com"
+      "github.com",
+      "pypi.org",
+      "files.pythonhosted.org"
     ]
   },
   "board": "https://claude.ai/artifact/VWqsmpqHNgiop14TpoecjV"

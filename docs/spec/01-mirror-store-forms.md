@@ -2,7 +2,7 @@
 
 - Status: draft, for the approval of the maintainer
 - Applies to: release 1 ("See")
-- Open model version: 0 (draft)
+- Open model version: 1.0
 - Related: [Specification 2](02-changeset-policy-ledger.md), the
   [schemas](schema/), the manifesto and the experience document "Iris: the
   ideal experience"
@@ -15,7 +15,7 @@ This specification defines three parts of the Iris engine:
    exact.
 2. The store: the files and the SQLite tables that hold all state.
 3. The data format of the five forms (commitment, conversation, record, feed,
-   signal) and of the sender axis. This format is version 0 of the open model.
+   signal) and of the sender axis. This format is version 1 of the open model.
 
 It also defines how the engine turns mail into forms (the understanding step),
 and how the first brief reads the forms.
@@ -50,7 +50,7 @@ Each one has a test or a measure.
 | M1 | The mirror matches Gmail with zero differences. | `iris mirror verify` reports 0 differences each day for 7 days on a real mailbox (exit criterion of release 1). |
 | M2 | Release 1 sends no write request to Gmail. | The OAuth scope is `gmail.readonly`. A test of the provider client fails if a code path calls a write endpoint. |
 | M3 | The engine stays inside the memory budget. | 50 MB resident memory with 100,000 messages (`crates/iris/tests/budget.rs`). |
-| M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. |
+| M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. On the machine of the person, the measures page shows the time from the first account to the first brief with content (migration 27, table `measure_time`). The engine checks the brief every 10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and at each `/api/brief`. |
 | M5 | Mail text is data. | No text from a message can start an action. The understanding step has no tools and returns only schema-valid JSON. |
 | M6 | Each item points to its source mail. | Each item has one or more sources. The schemas require the `sources` field. |
 | M7 | The forms can be built again from the mirror. | With a fixed fake model, `iris rebuild` makes the same items from the same mirror, apart from IDs and times. Each pinned item keeps its ID and its corrections. |
@@ -219,8 +219,12 @@ gets its saved status again.
   `userRateLimitExceeded`, and on HTTP 5xx, the engine waits and tries again.
   The wait starts at 1 second, doubles each time to a maximum of 5 minutes,
   and has a random part of up to 50 percent.
-- On HTTP 401, the engine gets a new access token with the refresh token, one
-  time. If the new token gets HTTP 401 too, or Google refuses the refresh
+- On HTTP 401, the engine gets a new access token with the refresh token.
+  An access token lives about 1 hour, and one call of a first sync can run
+  for many hours. A 401 from a token at the end of its life is not a
+  refusal: the engine gets a new token and continues. A 401 from a token
+  that is not at the end of its life is a refusal. If two tokens are
+  refused in one call, or Google refuses the refresh
   token (`invalid_grant`), the account goes to the state "needs sign-in", and
   the brief shows it. A network error or a server error of the token endpoint
   keeps the state: the next sync tries again. A refusal changes the state only
@@ -339,6 +343,7 @@ iris/
       3fa1...c9.eml
   policy.toml        the policy file (specification 2)
   iris.sock          the socket of the iris command (specification 2)
+  workspaces/        the workspace of each agent job (docs/specs/2026-11-16-job-workspace.md)
 ```
 
 To back up Iris, stop the engine and copy the folder. `iris backup <path>`
@@ -357,12 +362,27 @@ makes a copy while the engine runs:
 5. Release the lock.
 
 The engine makes the backup folder with mode `0700`, because it holds the key
-and the mail. The engine writes `policy.toml` to a temporary file and then
-renames it, and it does not write the file during a backup. So the copy has
-one complete version of the policy.
+and the mail. The engine writes `policy.toml` to a temporary file, and it
+does not write the file during a backup. So the copy has one complete version
+of the policy. The person can save the file at any time, so the engine first
+renames the old file to a copy, checks that copy, and then puts the new file
+in place with a hard link, which never replaces a file. The engine never
+deletes the old file: it goes back, or it stays as the copy, because an
+editor can hold it open and save into it later. So a save during the write
+is never lost.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
+
+`iris backup` does not copy `workspaces/`. A copy of the whole folder while
+the engine is stopped copies `workspaces/` too, with the files of the agent.
+The build makes the files of a
+workspace again from the store, before each session. The files of the agent
+(`drafts/` and `notes.md`) are not in a copy of `iris backup`: after a
+restore from it, the next build makes them empty. A draft that the agent submits is in the store
+(specification 2), so only work that the agent did not submit is lost. This
+is a known limit, with a GitHub issue, until the notes between sessions
+(R5-06) move into the store.
 
 ### 5.2 SQLite settings
 
@@ -429,12 +449,17 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `header` | `message_id` PK, `date` INTEGER, `from_addr` TEXT, `from_name` TEXT, `to_addrs` TEXT, `cc_addrs` TEXT, `subject` TEXT, `message_id_hdr` TEXT, `in_reply_to` TEXT, `list_id` TEXT, `auth` TEXT | Parsed headers that queries need. `auth` holds the SPF, DKIM and DMARC results from `Authentication-Results`. `to_addrs` and `cc_addrs` hold bare lowercase addresses joined by `,`. |
 | `body` | `message_id` INTEGER PK, `subject` TEXT, `sender` TEXT, `text` TEXT | The clean text of the message (section 7.2), with the subject and the sender name and address. `message_id` is the row ID. |
 | `message_fts` | FTS5 table on `subject`, `sender`, `text`, with `content='body'` and `content_rowid='message_id'` | Full-text search. Triggers on `body` keep it current. |
-| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER | The sender axis. Gives the `p-` IDs. |
+| `sender` | `id` INTEGER PK, `address` TEXT UNIQUE, `name` TEXT, `kind` TEXT, `basis` TEXT, `decided_by` TEXT, `decided_at` INTEGER, `declined_at` INTEGER | The sender axis. Gives the `p-` IDs. `declined_at`: the time of a decline at the stranger gate (section 6.7), or NULL. |
 | `sender_evidence` | `message_id` FK, `address` TEXT, `rule` TEXT (`sent`, `replied` or `service`), `content_sha256` TEXT; PK (`address`, `rule`, `message_id`) | The messages that prove a `person` or `service` kind (section 6.7). The sender step writes the rows. A `sent` row: the sent message names the address in `To`, `Cc` or `Bcc`. A `replied` row: the sent message comes after a message from the address in its thread. A `service` row: the message from the address is automated mail with a Gmail DKIM pass; the rule counts its 2 earlier messages when it reads the row. A row counts only while its message is not gone and has the same content hash. |
 | `item` | `id` INTEGER PK, `form` TEXT, `account_id`, `status` TEXT, `status_before_gone` TEXT, `doc` TEXT (JSON), `created_at`, `updated_at`, `derived_by` TEXT, `duplicate_of` INTEGER | One row for each item of each form. `doc` is the form document of section 6. `duplicate_of` marks a possible duplicate (section 7.5). |
 | `item_source` | `item_id`, `message_id`, `role` TEXT, PK(`item_id`, `message_id`) | Many to many: one message can feed more than one item. |
 | `correction` | `id` INTEGER PK, `item_id`, `field` TEXT, `value` TEXT (JSON), `by` TEXT, `at` INTEGER | Each change of an item by a person, or by an applied action of specification 2. `by` is `person` or the changeset ID. The item stays through a rebuild (section 7.5). |
 | `sync_log` | `id` INTEGER PK, `account_id`, `kind` TEXT, `started_at`, `ended_at`, `result` TEXT | Each sync, resync and verify. |
+| `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
+| `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
+| `matter`, `matter_item`, `matter_run` | See `docs/specs/2026-11-16-matters.md` (migration 16). | Matters: the proposals of Iris, the decisions of the person, and the last proposal call. |
+| `link_check` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER UNIQUE, FK to `message` | Migration 20: the live messages whose content has not had the link check of the hostile mark `link` (section 6.7). At the migration: each live message. Triggers add a row for new content, for a message that comes back, and for a message that loses the label `SENT` or `DRAFT`. Each batch run first reads all rows (`recheck_links`), before it makes the model, so a model error or failed tries cannot hold the check back. A message with a deceptive link is understood at once, with no model, so it goes to quarantine and its items go. A message that it understands counts toward the message limit of the run. A check that finds no deceptive link removes a `link` mark of earlier content. Each trigger gives the message a new row (a new `id`), and a check removes only the row that it read, so a change during a check queues the message again. A row goes only when the store has the result for the content that the check read. A row whose file Iris cannot read stays. While a message has a row, it counts as hostile mail for each gate that lets the model, a rule, an agent, a notice or a watch use mail (the SQL condition `iris_store::may_be_hostile!()`): rules and agents cannot act on it as on clean mail, Ask, the thread context of the model and job workspaces leave it out, the triage rules of observe mode leave it out, and notices and watches wait. Each start and each end of a check marks the message in `attention_due`. |
+| `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
 AUTOINCREMENT`, so SQLite never gives the row ID of a deleted row to a new
@@ -474,6 +499,9 @@ Iris gives short IDs that a person and an agent can type:
 | `r-` | Record |
 | `f-` | Feed item |
 | `s-` | Signal |
+| `g-` | Matter (`docs/specs/2026-11-16-matters.md`) |
+| `w-` | Watch (card R5-07) |
+| `n-` | Notice by rule (card R5-08) |
 
 The number after the prefix is the row ID of the table. An ID is unique in one
 Iris install and the engine never uses it again, also after a rebuild deletes
@@ -483,7 +511,7 @@ Gmail.
 
 ## 6. The forms: data format
 
-This section is version 0 of the open model. The schemas in
+This section is version 1 of the open model. The schemas in
 [`schema/`](schema/) are the normative copy. If this text and a schema do not
 agree, the schema is correct and this text has a defect.
 
@@ -495,7 +523,7 @@ Each item of each form has these fields:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `model` | string, `"iris/0"` | yes | The version of the open model. |
+| `model` | string, `"iris/1.0"` | yes | The version of the open model: `iris/<major>.<minor>` ([specification 4](04-open-model-versions.md)). |
 | `id` | string, for example `"c-311"` | yes | The ID of the item (section 5.7). |
 | `form` | `commitment`, `conversation`, `record`, `feed` or `signal` | yes | The form. |
 | `status` | string, values for each form | yes | The state of the item. |
@@ -505,7 +533,8 @@ Each item of each form has these fields:
 | `updated` | date-time | yes | The last change. |
 | `derived` | object | yes | Who made the item: `by` is `rule`, `model` or `person`. `rule` names the rule. `model` names the model, and `prompt` names the prompt version. |
 | `confidence` | number from 0 to 1 | no | How sure the understanding step is. Not set when `derived.by` is `person`. |
-| `matter` | string or null | no | Reserved for release 6. |
+| `matter` | string or null | no | The `g-` ID of the confirmed matter of the item, or null (`docs/specs/2026-11-16-matters.md`). The engine sets it when it reads the item. |
+| `ready` | array of `"draft"`, at least 1, no repeats | no | What Iris prepared for the item (card R3-09). `"draft"`: the thread of the `origin` message has a reply draft that is not stale (`iris_voice::ready_sql`). The engine sets it only on the items of the brief lists and pages, when it reads them. A stored value is never shown, and a correction of it is refused. |
 | `attention` | object | no | Reserved for specification 2: `state` is `shown`, `bundled` or `hidden`, with the rule and the reason. |
 
 A source has these fields:
@@ -550,7 +579,7 @@ The talk with one person or one group.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `thread` | string, `t-` ID | yes | The thread. One conversation for each thread in version 0. |
+| `thread` | string, `t-` ID | yes | The thread. One conversation for each thread in version 1. |
 | `participants` | array of party, at least 1 | yes | Each party in the thread. |
 | `role` | `direct`, `group` or `cc` | yes | `cc` when you are only in CC. |
 | `latest` | object | yes | `at` (date-time), `from` (party) and `snippet` (up to 200 characters). |
@@ -621,7 +650,7 @@ Each sender row has a kind after the sender step decides it (see the
 paragraph about a row with no kind below). The kind is a property of the
 address, not of one message.
 
-| Kind | Rule in version 0 |
+| Kind | Rule in version 1 |
 |---|---|
 | `person` (known person) | You sent at least one message to the address, or you replied in a thread with it. |
 | `service` (known service) | The mail is automated (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, or `Auto-Submitted` other than `no`), DKIM passes for the domain of the address, and at least 2 messages with an earlier `internalDate` came from it. |
@@ -643,8 +672,51 @@ than `person`, the profile drops the address.
 
 `basis` records the rule that matched. `decided_by` is `engine` or `person`.
 A decision by a person always wins over the engine, and the engine never
-changes it. From release 2, the person sets the kind in the web client. In
-release 5, the stranger gate makes this a rule in the policy file.
+changes it.
+
+#### The stranger gate
+
+From release 5, the brief shows the items of strangers as a gate, by sender.
+The person gives one answer for each sender:
+
+| Answer | Effect |
+|---|---|
+| Accept | The kind becomes `person`, with `decided_by` `person` and the `basis` "accepted at the gate". The items go to their sections ("You owe", "Owed to you", "Conversations"). |
+| Decline | The engine sets `declined_at` on the sender row. The kind stays with the engine, so a declined sender can still become `hostile`, or known (for example after a reply of the person). The decline applies only while the kind is `stranger`: the items of a declined stranger are in no section of the brief, and the web client lists the declined senders. |
+| Reopen | Removes the accept or the decline of the gate. After an accept, the engine decides the kind again from the evidence in the store. A kind that a person set for another reason (for example, a correction) stays. |
+
+The web client shows the gate in the brief: one row for each sender, with
+the newest 3 items, "Ignore" and "Accept". After an answer, the row keeps
+its place and shows one line with "Undo" (reopen, or decline again after a
+reopen from the list of declined senders). The brief shows the first 20
+senders and links all of them. The list of declined senders has "Ask again"
+(reopen) and "Accept". An API without the gate gives no `gate` in the
+brief, and the web client then shows the strangers section as a list of
+items, as in release 1.
+
+A rule decides first. A `hide` or a `bundle` rule with `sender_kind =
+"stranger"` (specification 2, section 6.2) takes the items of strangers out of
+the gate, as it does for each section. A rule never accepts a sender: only the
+person makes a stranger a known person. Agents get no answer of the gate.
+
+The engine accepts an answer only for a sender at the gate: the stored kind is
+`stranger` (or no kind yet), and, unless a person set the kind, the rules of
+this section give `stranger` for the mail of now. The stored kind can be older
+than the evidence until the next refresh, and a person must never accept a
+sender that is `hostile` now. Also, an item of the sender must wait at the
+gate in the same transaction (for an accept, an item on the list of declined
+senders is enough), because a rule can take the items out after the person
+saw them. A repeated answer is no change. Else the engine refuses the answer
+and changes nothing.
+
+An accept makes the domain of the sender known, and a reopen of an accept can
+make it unknown. So in the same transaction the engine decides again each
+sender whose domain is a near copy of that domain. For each sender that
+becomes `hostile` or stops being `hostile`, the same transaction deletes the
+items that understanding made from its mail and marks that mail for
+understanding again. The understanding worker runs the model later, out of
+the transaction, so the items of such a sender come back after the next
+understanding batch.
 
 The engine decides the kind of a sender again each time it understands a
 message with that address. After each batch of sync or understanding, a
@@ -673,10 +745,14 @@ The `hostile` column of the message holds each mark that applies:
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
 | `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, the link is not deceptive: the sender owns the shown domain and can link through any redirect. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
-The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
+A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
+`spoof` and `link`, because these marks test mail that you receive.
+
+The engine computes the marks `dmarc`, `spoof`, `link` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding
 again on the message (section 7.1).
@@ -687,7 +763,7 @@ The kind changes the treatment of items (from the manifesto):
 |---|---|
 | `person` | An ask becomes a commitment in "You owe" at once. |
 | `service` | Records, feed items and signals. Payment commitments go to "You owe". |
-| `stranger` | Items go to "Strangers" in the brief, not to "You owe". |
+| `stranger` | Items go to "Strangers" in the brief, not to "You owe". From release 5 they wait at the stranger gate until the person accepts or declines the sender. |
 | `hostile` | The understanding step does not send the body to a model. The engine makes no item. The brief shows a count only. |
 
 A message with a hostile mark gets the treatment of `hostile`, whatever the
@@ -700,14 +776,16 @@ mail" is a message with a hostile mark, or a message from a `hostile` sender.
 |---|---|---|
 | Each form | To `gone`, and back | The engine (section 4.5). |
 | Commitment | `open` to `done`, `declined`, `deferred` or `cancelled` | A person, through a changeset (release 2). Understanding sets `done` or `cancelled` when a later message of the thread says so. |
-| Commitment | `deferred` to `open` | The engine, when `deferred_until` passes. |
+| Commitment | `deferred` to `done`, `declined`, or `deferred` with a new date | A person, through a changeset (release 2): `close`, `decline` and `defer` (specification 2, section 4). |
+| Commitment | `deferred` to `open` | The engine, on the `deferred_until` date (UTC). The engine checks once each minute. |
 | Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
-| Conversation | `muted` | Reserved. A later release adds the verb. |
+| Conversation | `active` or `quiet` to `muted` | A person, through a changeset (release 5): `mute` (`docs/specs/2026-11-17-preference-rules.md`). A new message keeps it `muted`. |
 | Record | `kept` to `corrected` | A correction (release 2). |
 | Feed | `new` to `read` | The engine, when the message loses the label `UNREAD`. |
-| Feed | `skipped` | Reserved. A later release adds the verb. |
+| Feed | `new` or `read` to `skipped` | A person, through a changeset (release 5): `skip`. |
 | Signal | `active` to `expired` | The engine, at `expires`. |
-| Signal | `used`, `dismissed` | Reserved. A later release adds the verb. |
+| Signal | `active` to `dismissed` | A person, through a changeset (release 5): `dismiss`. |
+| Signal | `used` | Reserved. A later release adds the verb. |
 
 ## 7. Understanding: from mail to forms
 
@@ -742,6 +820,11 @@ with the newest message first. Older mail gets understood in the background,
 at a low rate, so that the first brief comes early (requirement M4). A
 rebuild uses the same order.
 
+The batch runner, the run counts, the cost limit and the estimate before the
+first run are in `docs/specs/2026-11-16-cost-control.md` (R1-15). One exception to oldest first: mail with the label `SPAM` or from
+a `hostile` sender needs no thread context, so it does not wait for the
+older messages of its thread.
+
 ### 7.2 Clean text
 
 - HTML becomes Markdown. Scripts, styles, tracking images and hidden elements
@@ -754,17 +837,63 @@ rebuild uses the same order.
   size.
 - The clean text has a limit of 32,000 characters for each message. The engine
   cuts longer text and marks the cut.
+- The engine reads at most 8 MiB of the raw message, so that one message
+  stays inside the memory budget (M3). A longer message counts as cut text
+  (section 7.3, rule 2), and parts after the limit are lost.
 
 ### 7.3 Fixed rules
 
 Fixed rules run before the model. They are fast, free and the same each time.
+The engine tries the rules in the order of the table. The first rule that
+matches gives the result, and the next rules do not run.
 
-| Rule | Result |
-|---|---|
-| `List-Id` or `List-Unsubscribe`, and the sender is a `service` | Feed item, unless the subject or the body matches a receipt or a statement pattern. |
-| A code pattern (4 to 8 digits near "code", "verification" or "one-time") from a `service` | Signal of kind `code`. |
-| A calendar invitation (`text/calendar` with `METHOD:REQUEST`) | Commitment of kind `invitation`. |
-| Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+| Order | Rule | Result |
+|---|---|---|
+| 1 | Hostile mail (section 6.7) | No model call and no item. The brief counts it (section 8). |
+| 2 | Any sign that the message can hold other content: the clean text is cut at its limit (section 7.2); the message has an attachment; it has a calendar request (`text/calendar` with `METHOD:REQUEST`); it has `List-Id` or `List-Unsubscribe`; or the subject or the body matches a receipt or a statement pattern, or has a word of a request to pay or to act, of a contract, of a booking, of a ticket or of an event (for example "pay", "due", "contract", "reservation", "ticket", "event") | No fixed rule. The model reads the message, so that no record, request, invitation or feed item is lost. |
+| 3 | A message from a `service` with a sign-in word (for example "sign in", "login", "verify", "passcode") | If the message has no promotion word (for example "discount", "coupon", "promo", "sale") and one clear code: signal of kind `code`. Else no fixed rule, and the model reads the message. |
+
+Release 1 has no fixed list rule (issue #96) and no fixed invitation rule
+(issue #97): list mail and invitations go to the model.
+
+A code is a run of 4 to 8 digits bound to a code word ("code",
+"verification", "one-time", "passcode"):
+
+- After the code word, with only `:`, `-`, `=`, `#` or "is" between them:
+  "Your code: 482913", "Your code is 482913".
+- Before the code word, with only "is", "your", "the" or "a" between them:
+  "482913 is your code".
+- On the next line, if the line with the code word has no number and the
+  next line has no code word: "Your code:" then "482913". If the line after
+  that is also only a number of any length, the code is not clear:
+  "Your code:", "1234", "5678" gives no code.
+
+The message has one clear code when all bound numbers have one value, and each code-shaped number on a line with a code word, or on a line with a bound number, has that value ("Your old code was 5678" makes the code not clear).
+Two values, or no bound number, give no clear code. A number with other
+words between it and the code word is not bound.
+
+#### Failure list of the fixed rules
+
+The fixed rules read mail that Iris does not control. The safe result for
+each case that a rule cannot settle is: no fixed item, and the model reads
+the message. A fixed rule never guesses.
+
+| Input | Failure mode | Result |
+|---|---|---|
+| A message with a hostile mark | A rule acts on text from an attacker | No item and no model call (rule 1). |
+| A receipt, a statement, a payment request, a contract, a booking, a ticket or an event, also with a code | A code signal hides the record or the request | The model reads the message (rule 2). |
+| A message with an attachment | A code signal hides a record in the file | The model reads the message (rule 2). |
+| A message with a clean text cut at its limit | A code signal hides a record after the cut | The model reads the message (rule 2). |
+| A calendar request | An invitation is lost | The model reads the message (rule 2, issue #97). |
+| A list message (`List-Id` or `List-Unsubscribe`) | A code signal or a feed item hides other content | The model reads the message (rule 2, issue #96). |
+| Sign-in mail with two code values (an account number, an old code, "1234 5678" on one line) | The wrong number becomes the code | No clear code: the model reads the message (rule 3). |
+| Sign-in mail with an account number, a duration, a year or another number on a line with a code word ("Account: 123456 - code expires", "Your old code was 5678") | Another number becomes the code, or the wrong code is kept | No clear code: the model reads the message (rule 3). |
+| Sign-in mail with the code in a form that the binding does not know ("Use 482913 to sign in") | The code is missed | No clear code: the model reads the message (rule 3). |
+| A promotion code, or sign-in mail with a promotion word | A promotion becomes a sign-in code signal | The model reads the message (rule 3). |
+| A request in words that the built-in word lists do not have, or in another language | A code signal hides the request | Known limit: the lists are short and in English (issue #95). |
+| A very long line with many code words and numbers | The search takes too long | Only code words within 100 bytes of a number count, so the search is linear in the length of the line. |
+| A rule item that fails the schema | An invalid item goes to the store | The rule gives no item, and the model reads the message. |
+| All other input | | No fixed rule matches, and the model reads the message. |
 
 The conversation rule runs for each message that is not hostile mail:
 
@@ -805,14 +934,51 @@ The conversation rule runs for each message that is not hostile mail:
   text, the headers that the model needs, the sender kind and the known
   parties. The text goes inside a data block with a fixed delimiter.
   The instruction says that the block is data and that it contains no
-  instructions.
+  instructions. The headers include `List-Id` and `List-Unsubscribe`.
+- The data block, with its delimiter lines, has a budget of 96,000 bytes,
+  so that a local model with a
+  small context window can take it. The headers (each value cut to 1,000
+  bytes) go in first, then the clean text of the message. The budget cuts
+  the clean text only when the headers and the text together pass it
+  (32,000 characters can be 128,000 bytes). Existing items, attachment text, and then the earlier
+  messages of the thread, newest first, fill the rest. Text that the
+  budget cuts ends with `[cut]`.
+- The engine, not the model, sets the fields that the headers give: the
+  `issuer` of a record or a signal, and the `publisher`, `published` and
+  `list` of a feed. In sent mail, the party of the sender is the
+  owner, also when `From` is an alias.
+- The `direction` of a commitment gives the side of the owner (`owner` for
+  `you_owe`, else `counterparty`). The model chooses the other side, also
+  a person who is not in the headers. The engine fills the other side only
+  when the model gives no party with an address: with the sender, or in
+  sent mail with the first `To`, `Cc` or `Bcc` recipient that is not an
+  owner address (sent mail keeps `Bcc`). With no such party, the
+  commitment is not valid. The other side is never the owner.
+- The instruction says that the sender kind `self` marks mail that the
+  owner sent. An ask in such mail is `owed_to_you`: the person that the
+  owner asks is the `owner` of the commitment. A promise in such mail is
+  `you_owe`.
+- The owner addresses are the address of the mailbox and, in sent mail,
+  the `From` address (also an alias). A party with an owner address is the
+  owner.
+- The answer must have a boolean `phishing` and a list of at most 20
+  items. When `phishing` is true, the list must be empty. Each party in the answer must be
+  the owner or have an address. A party with the kind `self` and an
+  address that is not an owner address is not clear. Else the answer is
+  not valid.
 - The model has no tools. It returns one JSON document: a list of items
   without the fields `model`, `id`, `created`, `updated` and `derived`, and a
   boolean `phishing`. Parties in the answer have an address, not a `p-` ID.
+  The data lists at most 50 known persons as `Name <address>`, in the
+  budget, so that the model can give the address of a person that the mail
+  names only by name. They are the `person` senders in the `From`, `To` and
+  `Cc` headers of the messages of the thread.
   An item can have `same_as`: the ID of an existing item that the engine gave
   to the model (section 7.5).
 - The engine adds the missing fields, and puts the `p-` ID of the sender row
-  of each address. Then it validates each item against the schemas. If an
+  of each address. Then it validates each item against the schemas. A quote
+  that does not occur in the subject, the clean text or the attachment text
+  makes the answer not valid. If an
   item is not valid, the engine tries one time again. If the second answer is
   not valid, the engine saves no item, adds 1 to `tries` of the message, and
   sets `retry_at` to 1 day later. After 3 tries, the engine stops, and the
@@ -820,6 +986,31 @@ The conversation rule runs for each message that is not hostile mail:
 - If `phishing` is true, the engine sets the hostile mark `phishing` on the
   message, saves no item from it, and gives it the treatment of hostile mail
   (section 7.1, step 7).
+- The budget counts each text from the mail (also an attachment name)
+  after the escape of the data delimiter, so that the block that the
+  client sends stays in the budget.
+- An item with `same_as` adds nothing only when it is valid and has the
+  form of the existing item. A `same_as` with another form makes the answer
+  not valid. A `same_as` with an unknown ID is ignored, and the item is
+  saved.
+
+#### Failure list of the model step
+
+The model answer and the model server are input that Iris does not
+control. The safe result for each case that the engine cannot settle is:
+no item, and the message stays not understood.
+
+| Input | Failure mode | Result |
+|---|---|---|
+| One JSON document with a boolean `phishing` and valid items with quotes from the mail | | The engine saves the items. |
+| `phishing` is true | The mail tries a trick | The hostile mark `phishing`, no item. |
+| No JSON, a cut answer, no `phishing`, more than 20 items, a quote not in the mail, a party with no address, an item that fails the schemas | An answer that is not valid | One more try. A second answer that is not valid: no item, 1 more try in `tries`, `retry_at` 1 day later, a stop after 3 tries. |
+| The model refuses to answer | A new try gets the same refusal | No item and no second call. The try counts as above. |
+| The server refuses the call for this data (HTTP 400, 413, 422 and other 4xx, but not 401, 403 or 429) | A new call fails the same way | No item and no second call. The try counts as above. |
+| A time-out, a lost response, HTTP 429 or 5xx, a refused key (401, 403) | The result is not known, or no call can work now | No item. No try counts. The message stays not understood, and a later run reads it again. A refused key stops the batch. |
+| Data larger than the budget | A local model refuses a long message | The budget cuts the data (above). |
+| All other answers | | Not valid, as above. |
+
 - The worst result of a prompt injection is a wrong item. No item can start an
   action in release 1. In release 2, an item from mail can only become a
   proposal in a changeset (specification 2).
@@ -839,6 +1030,18 @@ The conversation rule runs for each message that is not hostile mail:
 - A correction refers to its item by the item ID (`item_id`). A change of
   the status of an item by a person, or by an applied action of
   specification 2, is also a correction.
+- A correction of a field (the verb `correct` of specification 2, section
+  4) cannot change a field that the engine makes from the store on each
+  change: the common fields (section 6.1), the `sender` ID of a party, and the fields of a conversation
+  that the conversation rule makes (`thread`, `participants`, `role`,
+  `latest`, `messages`, `new` and `your_turn`). The engine makes these
+  fields again at the next message, so a correction of one would disagree
+  with the store. The `sender` ID of a party follows its `address`: a
+  correction of the address sets the ID of the sender row of the new
+  address.
+- The state verbs of specification 2 (`close`, `defer`, `decline`) change
+  `status` and record the change as a correction too. The rule above does
+  not apply to them.
 - An item is pinned when it has one or more corrections, or when an open
   changeset or a ledger entry of specification 2 refers to it. A rebuild
   never deletes a pinned item and never changes its ID, so each correction
@@ -868,22 +1071,49 @@ the kind of a party from the sender row of its `p-` ID (the counterparty, the
 issuer or the publisher), when the query runs. No query shows an item whose
 status is `gone`.
 
+Each query shows only an item whose `attention` state is `shown` or missing
+(specification 2, section 6.4). The brief shows each `bundle` rule as one
+line with the count of its items, and gives the count of the hidden items.
+Each item of the brief is in one place only: its section, its bundle, or the
+hidden count. A possible duplicate pair in one section goes where the
+attention of the original puts it, and counts once there. The duplicate shows
+with the original, whatever its own attention.
+
 | Section | Query |
 |---|---|
 | You owe | Commitments with `direction` `you_owe` and `status` `open`, where the counterparty is a `person` or a `service`. Order by `due`, then by `created`. |
 | Owed to you | Commitments with `direction` `owed_to_you` and `status` `open`, where the owner is a `person` or a `service`. Order by age. |
-| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant. |
+| Conversations | Conversations with `status` `active`, and `new` greater than 0 or `your_turn` true, with no `stranger` participant and no declined participant. |
 | Records | Count for each record type. |
 | Feed | Feed items with `status` `new`, by publisher. |
 | Signals | Signals with `status` `active` and an `expires` time later than now. The engine sets `expired` at `expires`, so this also covers the time before the engine changes the status. |
-| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. |
+| Strangers | Commitments with `status` `open` whose counterparty or owner is a `stranger`, and conversations with `status` `active` with a `stranger` participant. A stranger that the person declined at the gate (section 6.7) does not count. |
 | Hostile | The count of hostile mail in the last 7 days, with no subject and no sender. |
 | Not understood | The count of messages that the model failed 3 times (section 7.4). |
 
 The sections do not overlap. A conversation with a `stranger` participant
 shows only under Strangers, so each item shows one time and each section count
-is exact. The client uses the counts of the engine and does not remove
+is exact. An item whose stranger the person declined, with no other stranger,
+is in no section. The client uses the counts of the engine and does not remove
 duplicates between sections.
+
+The web client opens the brief with Due soon, after the live login codes
+(card R3-08). Due soon holds each item of You owe that is due in 2 days or
+less, or that is late, in the local day of the viewer. The engine does not
+know that day (it has no time zone of the owner), so the client makes this
+split from the You owe items, and the API keeps one You owe section. The
+client shows You owe with the rest of its items, and with the engine count
+less the Due soon items. The "All" link of You owe, and the link of Due soon,
+give the engine count, because the full list holds both.
+
+A watch whose mail came (card R5-07) leads the brief. The opening sentence
+starts with one sentence that counts these mails ("The mail that you watched
+for came." for one, "Two mails that you watched for came." for two), and one
+card for each such
+watch comes before the live login codes. The card opens the mail. Done
+removes the watch. Near the end, "Iris watches for" lists the watches that
+wait, and a quiet button starts a new watch. The client reads the watches
+from `/api/watches`, not from the brief.
 
 In release 1 the brief is read-only. Each line opens its source mail in one
 step. The triage proposal ("Triage proposes 447 mailbox changes. Nothing is
@@ -892,7 +1122,20 @@ changeset format of specification 2, with each action in the state
 `proposed`. The brief gives only the totals of the proposal: the count of
 actions, and the count for each verb. The local API gives the full list
 separately. Release 1 does not store it. From release 2, triage stores it as
-a changeset in the mode `observe`.
+a changeset, in the mode of the active policy (see below).
+
+From release 2, the brief reads the stored triage changesets, and computes no
+proposal. Its proposal totals count the messages of the triage actions that
+wait for a person (`proposed` or `in_review`). The review lists these
+changesets. The brief also gives the count of what Iris handled without the
+person: the hidden items and the messages of the actions that a rule decided
+without the person and that have one of the states `approved`, `held`,
+`applied`, `failed`, `undone` or `denied`. A `failed` action stays, because it
+can have changed some messages. An action in `in_review` waits for the person,
+so the review lists it. An approved action that expires or whose changeset the
+author withdraws gets a new decision (`expiry` or `author`) and changed
+nothing, so it leaves the count and the list. One step shows the list of each, with the reason of each item and
+action.
 
 The triage proposal of release 1 (crate `iris-observe`) has these rules:
 
@@ -907,6 +1150,44 @@ The triage proposal of release 1 (crate `iris-observe`) has these rules:
   IDs of each rule. So the ID names the content: the same content gives the
   same ID, also at a later time, and a different content gives a different
   ID. A client must not use this ID as the ID of a stored changeset.
+
+From release 2, the crate `iris-triage` stores the same proposal as a
+changeset (specification 2, section 5.4):
+
+- The author is `triage`, with the name `Iris` and the session
+  `account-<row ID>`. Each account has its own changeset, because one action
+  changes one account.
+- Each rule gives one action for each 500 of its messages, with the reason of
+  the rule. The changeset has its own reason. Nothing applies without a rule
+  or an approval.
+- A run uses the open triage changeset of the account. It submits a new
+  revision only when the count, the verb, the reason or the targets of the
+  actions that wait for a decision (`proposed` or `in_review`) changed. So an action in review does not change while the mailbox
+  does not change.
+- One run is one write transaction. It reads the IDs of one action at a time.
+- A decision holds. A message that a triage action of the account named
+  does not come back in a later proposal while that action is decided or
+  approved (each state except `proposed`, `in_review` and `replaced`), also
+  when its changeset is closed.
+- In the policy mode `apply`, the active policy decides each `proposed`
+  action of the new revision in the same transaction (specification 2,
+  section 5.4, step 5), and the action keeps the reason of the decision. In
+  the mode `observe`, each action stays `proposed`, except an action that a
+  hard limit denies (specification 2, section 6.5): it gets `denied` by
+  `limit`.
+
+Failure list of a triage run. Supported input: the account row ID and the
+forms, labels and senders in the store.
+
+| Input or event | Failure mode | Safe result |
+|---|---|---|
+| A crash, an error or a refusal in a run | A draft revision that blocks each approval (spec 2, section 5.5), or half a proposal | The transaction rolls back. No changeset, revision or action of the run stays. |
+| Two runs for one account at the same time, in one process or in two | Two open triage changesets for one account | Each run reads and writes in one transaction. In one process, the write lock of the store puts the runs in order. Across processes, SQLite refuses the write of the run whose snapshot is old, and that run gives an error. |
+| A proposal with no action, while a triage changeset is open | A revision with no action, or open actions that triage no longer proposes | The run withdraws the changeset: its proposed and in_review actions become cancelled. If the changeset has an approved or held action, the run writes nothing, because a withdraw cancels that action too (issue #220). The open actions then wait for a person or the expiry. |
+| A proposal with no action, and no open changeset | An empty changeset | The run writes nothing. |
+| A large inbox | Memory that grows with the mailbox | The run keeps the IDs of one action (500 at most) in memory. |
+| A message that leaves the inbox between the run and an apply | The apply changes a message that triage did not propose | Submit resolves the targets in the run. The apply (R2-02) checks each message again. |
+| All other input | | The run gives an error and writes nothing. |
 
 ## 9. Memory
 
@@ -1010,9 +1291,9 @@ A change that adds a cache must say its size in the pull request.
    production" without verification. See
    `docs/decisions/2026-11-google-sign-in.md`.
 2. Contacts. The rule for `person` uses only sent mail. The Google People API
-   can add contacts, but it needs one more scope. Version 0 does not use it.
+   can add contacts, but it needs one more scope. Version 1 does not use it.
 3. One conversation for each thread. Gmail threads by subject, and a person
-   can talk about two subjects in one thread. Version 0 keeps one conversation
+   can talk about two subjects in one thread. Version 1 keeps one conversation
    for each thread.
 
 ## Assumptions

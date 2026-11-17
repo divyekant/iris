@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 2);
+            assert_eq!(iris_store::schema_version(c)?, 31);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;
@@ -637,4 +637,113 @@ fn a_missing_key_with_a_database_is_an_error() {
     fs::remove_file(dir.0.join("key")).unwrap();
     assert!(matches!(Store::open(&dir.0), Err(Error::Key(_))));
     assert!(!dir.0.join("key").exists(), "no new key");
+}
+
+#[test]
+fn dry_write_gives_the_result_and_writes_nothing() {
+    let dir = TempDir::new("dry");
+    let store = Store::open(&dir.0).unwrap();
+    let n = store
+        .dry_write(|tx| {
+            tx.execute(
+                "INSERT INTO account(provider, address) VALUES ('gmail', 'a@x.example')",
+                [],
+            )?;
+            Ok(tx.query_row("SELECT count(*) FROM account", [], |r| r.get::<_, i64>(0))?)
+        })
+        .unwrap();
+    assert_eq!(n, 1);
+    let after: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM account", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(after, 0);
+}
+
+#[test]
+fn a_deferred_commitment_opens_on_its_date() {
+    let dir = TempDir::new("deferred");
+    let (store, acc) = setup(&dir);
+    // 2026-11-16T12:00:00.007Z
+    let now = 1_794_830_400_007;
+    let add = |status: &str, before: Option<&str>, doc: &str| -> i64 {
+        store
+            .write(|tx| {
+                Ok(tx.query_row(
+                    "INSERT INTO item(form, account_id, status, status_before_gone, doc, created_at, updated_at)
+                     VALUES ('commitment', ?1, ?2, ?3, ?4, 0, 0) RETURNING id",
+                    rusqlite::params![acc, status, before, doc],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+    };
+    let past = add(
+        "deferred",
+        None,
+        r#"{"status":"deferred","updated":"2026-11-01T09:00:00.000Z","deferred_until":"2026-11-15","kind":"task"}"#,
+    );
+    let today = add(
+        "deferred",
+        None,
+        r#"{"status":"deferred","deferred_until":"2026-11-16"}"#,
+    );
+    let later = add(
+        "deferred",
+        None,
+        r#"{"status":"deferred","deferred_until":"2026-11-17"}"#,
+    );
+    let gone = add(
+        "gone",
+        Some("deferred"),
+        r#"{"status":"deferred","deferred_until":"2026-11-15"}"#,
+    );
+
+    assert_eq!(store.reopen_deferred(now).unwrap(), 2);
+    let row = |id: i64| -> (String, String, i64) {
+        store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT status, doc, updated_at FROM item WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?)
+            })
+            .unwrap()
+    };
+    let (status, doc, at) = row(past);
+    assert_eq!(status, "open");
+    assert_eq!(
+        doc,
+        r#"{"status":"open","updated":"2026-11-16T12:00:00.007Z","kind":"task"}"#
+    );
+    assert_eq!(at, now);
+    assert_eq!(row(today).0, "open");
+    assert_eq!(row(later).0, "deferred");
+    assert_eq!(row(gone).0, "gone");
+    // A second run finds nothing to change.
+    assert_eq!(store.reopen_deferred(now).unwrap(), 0);
+}
+
+#[test]
+fn a_sender_lookup_without_case_uses_an_index() {
+    // Invariant: each `address = ? COLLATE NOCASE` lookup of a sender is an
+    // index search, not a scan of the sender table.
+    let dir = std::env::temp_dir().join(format!("iris-store-nocase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let plan: Vec<String> = store
+        .read(|c| {
+            Ok(c.prepare(
+                "EXPLAIN QUERY PLAN SELECT kind FROM sender WHERE address = ?1 COLLATE NOCASE",
+            )?
+            .query_map(["A@x.example"], |r| r.get(3))?
+            .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        plan.iter()
+            .any(|p| p.contains("USING INDEX sender_address_nocase")),
+        "{plan:?}"
+    );
 }

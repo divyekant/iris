@@ -92,8 +92,12 @@ impl Rule {
     }
 
     /// The message row IDs of the rule, minus the messages of earlier rules.
-    fn query(self) -> String {
+    /// Read the rules in one transaction, so no message is in two rules.
+    /// No rule takes a message that waits for its link check (store
+    /// migration 20): its items can be of mail that is hostile.
+    pub fn query(self) -> String {
         let mut q = self.select().to_string();
+        q.push_str(" EXCEPT SELECT message_id FROM link_check");
         for earlier in Rule::ALL.iter().take_while(|r| **r != self) {
             q.push_str(" EXCEPT ");
             q.push_str(earlier.select());
@@ -141,7 +145,8 @@ pub fn write_changeset(
         let total: u64 = counts.iter().map(|(_, n)| n).sum();
         write!(
             out,
-            r#"{{"model":"iris/0","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
+            r#"{{"model":"{model}","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
+            model = iris_store::MODEL,
             id = changeset_number(c, account)?,
             state = if total == 0 { "closed" } else { "open" },
         )?;
@@ -151,14 +156,19 @@ pub fn write_changeset(
             if n > 1 {
                 out.write_all(b",")?;
             }
-            write!(out, r#"{{"n":{n},"verb":"{}","targets":{{"messages":["#, rule.verb())?;
+            write!(
+                out,
+                r#"{{"n":{n},"revision":1,"verb":"{}","targets":{{"messages":["#,
+                rule.verb()
+            )?;
             write_ids(c, rule, account, out)?;
             out.write_all(br#"]},"resolved":{"messages":["#)?;
             write_ids(c, rule, account, out)?;
             let bulk = count > BULK || total > BULK;
             write!(
                 out,
-                r#"]}},"args":{{}},"why":"{}","flags":[{}],"decision":{{"state":"proposed"}}}}"#,
+                // No hash: the proposal is not stored, so no one can approve it.
+                r#"]}},"args":{{}},"why":"{}","flags":[{}],"hash":null,"decision":{{"state":"proposed"}}}}"#,
                 rule.why(),
                 if bulk { r#""bulk""# } else { "" },
             )?;

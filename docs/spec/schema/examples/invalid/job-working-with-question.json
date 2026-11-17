@@ -1,0 +1,17 @@
+{
+  "model": "iris/1.0",
+  "id": "j-142",
+  "goal": "Get the signed contract from Dana before Nov 20.",
+  "due": "2026-11-20T00:00:00Z",
+  "created": "2026-11-16T09:00:00Z",
+  "updated": "2026-11-16T09:00:00Z",
+  "state": "working",
+  "question": "Why?",
+  "events": [
+    {
+      "at": "2026-11-16T09:00:00Z",
+      "state": "working",
+      "by": "person"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "iris-triage"
+description = "Triage of Iris: store the proposal of observe mode as a changeset, one for each account."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
+iris-policy = { version = "0.0.0", path = "../iris-policy" }
+iris-observe = { version = "0.0.0", path = "../iris-observe" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+# Same version as iris-store, so the program has one copy of SQLite.
+rusqlite = "=0.43.0"
+serde_json = "1"

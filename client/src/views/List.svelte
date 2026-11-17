@@ -1,5 +1,10 @@
-<!-- A full list, 50 items for each page: all items of one form, or one section of the brief. -->
+<!--
+  A full list, 50 items for each page: all items of one form, or one section of the brief.
+  With `act` (a section or a bundle of the brief), each line has the actions of a brief line:
+  the quick Done and the quiet verb. A line that the person acts on leaves the list.
+-->
 <script lang="ts">
+  import { flushHolds } from "../act";
   import { get, own, type Page } from "../api";
   import { watch } from "../clock";
   import { addPage, nextExpiry, unexpired } from "../format";
@@ -14,8 +19,19 @@
     more = "",
     cursor = "before",
     expiring = false,
+    act = false,
+    delay,
     now: start = new Date(),
-  }: { title: string; page: Page; more?: string; cursor?: "before" | "after"; expiring?: boolean; now?: Date } = $props();
+  }: {
+    title: string;
+    page: Page;
+    more?: string;
+    cursor?: "before" | "after";
+    expiring?: boolean;
+    act?: boolean;
+    delay?: number;
+    now?: Date;
+  } = $props();
   // svelte-ignore state_referenced_locally
   let now = $state(start);
 
@@ -31,6 +47,17 @@
   // Keep the time left of each signal line fresh until the last expiry.
   let until = $derived(nextExpiry(items, now));
   $effect(() => (until ? watch(until, (d) => (now = d)) : undefined));
+
+  const gone = (id: string) => (items = items.filter((i) => i.id !== id));
+  // A held action outlives its line. If the person leaves the list or the page, the click stands: send it now.
+  $effect(() => {
+    if (!act) return;
+    window.addEventListener("pagehide", flushHolds);
+    return () => {
+      window.removeEventListener("pagehide", flushHolds);
+      flushHolds();
+    };
+  });
 
   async function loadMore() {
     busy = true;
@@ -53,7 +80,7 @@
   <p class="empty">Nothing here now. New items show here after the next sync.</p>
 {:else}
   <ul>
-    {#each shown as item (item.id)}<Line {item} {now} twins={duplicates[item.id]} />{/each}
+    {#each shown as item (item.id)}<Line {item} {now} twins={duplicates[item.id]} ondone={act ? gone : undefined} {delay} />{/each}
   </ul>
 {/if}
 {#if next && more}<button type="button" onclick={loadMore} disabled={busy}>{busy ? "Loading" : "Show more"}</button>{/if}

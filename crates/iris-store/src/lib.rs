@@ -5,11 +5,27 @@
 //! the folder, applies the schema migrations, and gives the read and write
 //! paths that the engine uses.
 
+/// The SQL condition "message `m` can be hostile": it has a hostile mark
+/// (specification 1, section 6.7), or it waits for its link check (a
+/// `link_check` row, migration 20). Each gate that lets the model, a rule, an
+/// agent, a notice or a watch use mail reads this condition, not the column
+/// `hostile` alone. The test `each_gate_reads_may_be_hostile` finds other
+/// forms.
+#[macro_export]
+macro_rules! may_be_hostile {
+    () => {
+        "((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]'))
+          OR EXISTS (SELECT 1 FROM link_check lc WHERE lc.message_id = m.id))"
+    };
+}
+
 mod backup;
 mod content;
+mod file_lock;
 mod id;
 mod search;
 mod secret;
+mod watch;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -20,14 +36,48 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OpenFlags, Transaction};
 
-pub use backup::{BackupLock, Cleaned, GONE_KEEP_MS};
+pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
+pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
 pub use search::Query;
+pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
 /// Migrations go forward only. Never change a migration after it merged: add one.
-const MIGRATIONS: &[&str] = &[include_str!("schema_1.sql"), include_str!("schema_2.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("schema_1.sql"),
+    include_str!("schema_2.sql"),
+    include_str!("schema_3.sql"),
+    include_str!("schema_4.sql"),
+    include_str!("schema_5.sql"),
+    include_str!("schema_6.sql"),
+    include_str!("schema_7.sql"),
+    include_str!("schema_8.sql"),
+    include_str!("schema_9.sql"),
+    include_str!("schema_10.sql"),
+    include_str!("schema_11.sql"),
+    include_str!("schema_12.sql"),
+    include_str!("schema_13.sql"),
+    include_str!("schema_14.sql"),
+    include_str!("schema_15.sql"),
+    include_str!("schema_16.sql"),
+    include_str!("schema_17.sql"),
+    include_str!("schema_18.sql"),
+    include_str!("schema_19.sql"),
+    include_str!("schema_20.sql"),
+    include_str!("schema_21.sql"),
+    include_str!("schema_22.sql"),
+    include_str!("schema_23.sql"),
+    include_str!("schema_24.sql"),
+    include_str!("schema_25.sql"),
+    include_str!("schema_26.sql"),
+    include_str!("schema_27.sql"),
+    include_str!("schema_28.sql"),
+    include_str!("schema_29.sql"),
+    include_str!("schema_30.sql"),
+    include_str!("schema_31.sql"),
+];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
 /// after `journal_mode` (see [`settings`]).
@@ -55,6 +105,8 @@ pub enum Error {
     /// the content cleanup deleted it, or the write of the file did not end.
     /// Fetch the message again.
     MissingContent(String),
+    /// The text of a watch is not valid, or too many watches wait.
+    Watch(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -70,6 +122,7 @@ impl fmt::Display for Error {
             Error::Key(why) => write!(f, "secret: {why}"),
             Error::Query(why) => write!(f, "search: {why}"),
             Error::MissingContent(sha) => write!(f, "content file {sha} is missing"),
+            Error::Watch(why) => write!(f, "watch: {why}"),
         }
     }
 }
@@ -94,6 +147,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// section 7.2). The store cuts a longer text before FTS5 indexes it, because
 /// FTS5 holds the terms of a document in memory while it indexes the
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
+/// The `model` value of each open model document that Iris writes
+/// (spec 4, rule 2.1).
+pub const MODEL: &str = "iris/1.0";
+
+/// The `$id` of the common definitions of the open model.
+pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
+
 pub const TEXT_LIMIT: usize = 32_000;
 /// The most characters of the subject and of the sender in `body`.
 pub const FIELD_LIMIT: usize = 1_000;
@@ -244,6 +304,16 @@ impl Store {
         Ok(out)
     }
 
+    /// Run `f` in a write transaction, then roll it back: nothing of `f` is
+    /// written. For a read that needs the result of writes, for example an
+    /// estimate.
+    pub fn dry_write<T>(&self, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
+        let mut conn = lock(&self.writer);
+        let tx = conn.transaction()?;
+        f(&tx)
+        // The drop of `tx` rolls it back.
+    }
+
     /// Run `f` on a read connection. The connection sees one snapshot for
     /// the duration of each statement.
     pub fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -252,6 +322,25 @@ impl Store {
             .ok()
             .unwrap_or_else(|| lock(&self.readers[0]));
         f(&conn)
+    }
+
+    /// Open each deferred commitment again on its `deferred_until` date, in
+    /// UTC (specification 1, section 6.8). The document gets the new status
+    /// and `updated` (RFC 3339 with milliseconds, as `iris_talk::rfc3339`).
+    /// A gone item keeps its status. Gives the number of commitments that
+    /// opened.
+    pub fn reopen_deferred(&self, now: i64) -> Result<usize> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE item SET status = 'open', updated_at = ?1,
+                   doc = json_remove(json_set(doc, '$.status', 'open', '$.updated',
+                     strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch')
+                       || printf('.%03dZ', ?1 % 1000)), '$.deferred_until')
+                 WHERE form = 'commitment' AND status = 'deferred'
+                   AND json_extract(doc, '$.deferred_until') <= date(?1 / 1000, 'unixepoch')",
+                [now],
+            )?)
+        })
     }
 
     /// Add a mailbox, or give the ID of the mailbox with this address.
@@ -465,7 +554,9 @@ fn bound<'a>(text: &'a str, limit: usize, mark: &str) -> Cow<'a, str> {
     }
 }
 
-fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
+/// Save the clean text of a message in an open write transaction, so that
+/// the caller can save it with other rows in one checked write.
+pub fn put_body(tx: &Transaction, message: i64, b: &Body) -> Result<()> {
     let text = bound(&b.text, TEXT_LIMIT, CUT_MARK);
     let subject = bound(&b.subject, FIELD_LIMIT, "");
     let sender = bound(&b.sender, FIELD_LIMIT, "");
@@ -505,6 +596,19 @@ fn lock(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
     // A panic in another thread does not make the connection unsafe: SQLite
     // rolls back an open transaction when the guard of rusqlite drops.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Make the folder `dest` of a copy of mail (a backup or an export) with
+/// mode 0700. `dest` must not exist, or must be an empty folder, so that a
+/// copy never mixes with other files.
+pub fn new_private_dir(dest: &Path) -> Result<()> {
+    if dest.exists() && fs::read_dir(dest)?.next().is_some() {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the folder is not empty",
+        )));
+    }
+    Ok(make_private_dir(dest)?)
 }
 
 /// Make a folder with mode 0700, or set mode 0700 on a folder that exists.

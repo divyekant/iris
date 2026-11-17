@@ -2,7 +2,7 @@
 // WCAG AA contrast (4.5) for each text color on each background color.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 const css = readFileSync(new URL("../src/tokens.css", import.meta.url), "utf8");
 const kalos = readFileSync(new URL("../../.kalos.yaml", import.meta.url), "utf8");
@@ -76,6 +76,25 @@ for (const name of ["dark", "light"]) {
     }
   });
 
+  // success is a text color (Setup). primary may be a link color. Each needs 4.5.
+  // warning, error and info mark lines and dots, not text: WCAG 1.4.11 asks 3.
+  test(`${name} palette accent and semantic colors meet WCAG AA contrast`, () => {
+    const colors = cssPalette(name);
+    const need = { primary: MIN_CONTRAST, success: MIN_CONTRAST, warning: 3, error: 3, info: 3 };
+    for (const [key, min] of Object.entries(need)) {
+      assert.ok(colors[key], `--color-${key} is in the ${name} palette`);
+      for (const bg of BACKGROUNDS) {
+        const ratio = contrast(colors[key], colors[bg]);
+        assert.ok(ratio >= min, `${key} ${colors[key]} on ${bg} ${colors[bg]}: ${ratio.toFixed(2)}`);
+      }
+    }
+  });
+
+  test(`${name} palette has at most 12 unique colors`, () => {
+    const unique = new Set(Object.values(cssPalette(name)));
+    assert.ok(unique.size <= 12, `${unique.size} colors: ${[...unique].join(" ")}`);
+  });
+
   test(`${name} palette text on the primary color meets WCAG AA contrast`, () => {
     const colors = cssPalette(name);
     const ratio = contrast(colors.on_primary, colors.primary);
@@ -84,6 +103,18 @@ for (const name of ["dark", "light"]) {
     assert.ok(Object.entries(colors).some(([k, v]) => k !== "on_primary" && v === colors.on_primary));
   });
 }
+
+// Each color of a view comes from a token, so the palette is the only place to change it.
+test("the views use no color literal", () => {
+  const dir = new URL("../src/", import.meta.url);
+  const files = readdirSync(dir, { recursive: true }).filter((f) => f.endsWith(".svelte"));
+  assert.ok(files.length > 0);
+  for (const f of files) {
+    const text = readFileSync(new URL(f, dir), "utf8");
+    const hit = text.match(/#[0-9a-f]{3,8}\b|\b(rgb|hsl)a?\(/i);
+    assert.equal(hit, null, `${f}: ${hit?.[0]}`);
+  }
+});
 
 test("spacing tokens are the .kalos.yaml scale times the 4px base", () => {
   const scale = JSON.parse(kalos.match(/^ {4}scale: (\[.*\])$/m)[1]);

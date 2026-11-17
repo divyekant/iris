@@ -43,6 +43,9 @@ fn fill_items(store: &Store, mailbox: &Mailbox) {
                     [FakeGmail::id_of(i)],
                 )?;
             }
+            // Each batch run first ends the link check of new mail (store
+            // migration 20).
+            tx.execute("DELETE FROM link_check", [])?;
             // The engine marks hostile mail (specification 1, section 6.7).
             tx.execute(
                 "INSERT INTO sender(address, kind) VALUES ('h@example.net', 'hostile')",
@@ -149,6 +152,12 @@ fn the_first_run_proposes_archives_and_makes_zero_writes_to_gmail() {
     let mut out = Vec::new();
     write_changeset(&store, account, "2026-11-16T09:00:00Z", &mut out).unwrap();
     let cs: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    // The document agrees with the published changeset schema.
+    let errors: Vec<String> = iris_spec::validator("changeset")
+        .iter_errors(&cs)
+        .map(|e| format!("{e} at {}", e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
     assert_eq!(cs["author"]["kind"], "triage");
     assert_eq!(cs["state"], "open");
     let actions = cs["actions"].as_array().unwrap();
@@ -156,6 +165,8 @@ fn the_first_run_proposes_archives_and_makes_zero_writes_to_gmail() {
     for a in actions {
         assert_eq!(a["verb"], "archive");
         assert_eq!(a["decision"]["state"], "proposed");
+        assert_eq!(a["revision"], 1);
+        assert_eq!(a.get("hash"), Some(&serde_json::Value::Null));
         let ids: Vec<String> = a["resolved"]["messages"]
             .as_array()
             .unwrap()
@@ -169,6 +180,22 @@ fn the_first_run_proposes_archives_and_makes_zero_writes_to_gmail() {
             serde_json::json!([]),
             "400 messages is not bulk"
         );
+    }
+
+    // A message that waits for its link check is in no rule: its items can
+    // be of hostile mail. Each rule loses one message.
+    let mut waits = Vec::new();
+    for (rule, ids) in &expected {
+        let row: i64 = ids[0][2..].parse().unwrap();
+        store
+            .write(|tx| Ok(tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [row])?))
+            .unwrap();
+        waits.push((*rule, ids.len() - 1));
+    }
+    let got = counts(&store, account).unwrap();
+    for (rule, n) in &got {
+        let want = waits.iter().find(|(w, _)| *w == rule.why()).unwrap().1;
+        assert_eq!(*n as usize, want, "count of {rule:?} with a queued message");
     }
 
     // Observe mode sends nothing to Gmail, and the first sync only reads.

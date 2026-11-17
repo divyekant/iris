@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:common",
-  "title": "Iris open model 0 (draft): common definitions",
-  "description": "Draft. Definitions that each form schema uses. See docs/spec/01-mirror-store-forms.md, section 6.1.",
+  "$id": "urn:iris:model:1:common",
+  "title": "Iris open model 1: common definitions",
+  "description": "Definitions that each form schema uses. See docs/spec/01-mirror-store-forms.md, section 6.1.",
   "$defs": {
     "messageId": {
       "type": "string",
@@ -19,6 +19,12 @@
     "dateTime": {
       "type": "string",
       "format": "date-time"
+    },
+    "utcDateTime": {
+      "$comment": "A date-time in UTC with three digits of milliseconds and Z, as the engine writes it. See docs/spec/03-job-workspace.md, section 2.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
     },
     "date": {
       "type": "string",
@@ -181,7 +187,7 @@
       ]
     },
     "attention": {
-      "description": "Reserved for specification 2.",
+      "description": "The attention of the item. See docs/spec/02-changeset-policy-ledger.md, section 6.4.",
       "type": "object",
       "required": [
         "state"
@@ -221,7 +227,7 @@
       ],
       "properties": {
         "model": {
-          "const": "iris/0"
+          "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$"
         },
         "id": {
           "type": "string"
@@ -277,10 +283,27 @@
           "maximum": 1
         },
         "matter": {
-          "type": [
-            "string",
-            "null"
+          "description": "The g- ID of the confirmed matter of the item, or null. See docs/specs/2026-11-16-matters.md.",
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^g-[1-9][0-9]*$"
+            },
+            {
+              "type": "null"
+            }
           ]
+        },
+        "ready": {
+          "description": "What Iris prepared for the item, on the items of the brief only (card R3-09). draft: the thread of the origin message has a reply draft that is not stale.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "draft"
+            ]
+          }
         },
         "attention": {
           "$ref": "#/$defs/attention"

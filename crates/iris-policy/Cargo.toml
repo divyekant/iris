@@ -1,0 +1,16 @@
+[package]
+name = "iris-policy"
+description = "The policy file of Iris: the rules in policy.toml, their load and their evaluation, with a reason for each decision."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = { version = "=0.11.1", default-features = false }
+toml_edit = { version = "=0.23.10", default-features = false, features = ["parse", "display"] }
+toml = { version = "=0.9.8", default-features = false, features = ["std", "parse", "serde"] }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+rusqlite = "=0.43.0"

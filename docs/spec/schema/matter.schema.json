@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:iris:model:1:matter",
+  "title": "Iris open model 1: matter",
+  "description": "A title and the items that belong together: a trip, a contract, a hire. Iris proposes a matter and the person confirms it. See docs/specs/2026-11-16-matters.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "id", "title", "status", "items", "counts", "created", "updated", "derived"],
+  "properties": {
+    "model": { "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$" },
+    "id": { "type": "string", "pattern": "^g-[1-9][0-9]*$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "status": { "enum": ["proposed", "confirmed", "declined"] },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[cvr]-[1-9][0-9]*$" }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commitment", "conversation", "record"],
+      "properties": {
+        "commitment": { "type": "integer", "minimum": 0 },
+        "conversation": { "type": "integer", "minimum": 0 },
+        "record": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "created": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+    "updated": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+    "decided": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+    "derived": {
+      "allOf": [{ "$ref": "urn:iris:model:1:common#/$defs/derived" }],
+      "properties": { "by": { "const": "model" } }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "proposed" } } },
+      "then": { "not": { "required": ["decided"] } },
+      "else": { "required": ["decided"] }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["proposed", "declined"] } } },
+      "then": { "properties": { "items": { "minItems": 2 } } }
+    }
+  ]
+}

@@ -4,18 +4,29 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, newest, type Brief, type Item, type Status } from "../api";
   import { poll as every, watch } from "../clock";
-  import { across, copying, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
+  import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
+  import Bundle from "./Bundle.svelte";
   import Line from "./Line.svelte";
+  import Gate from "./Gate.svelte";
+  import Arrived from "./Arrived.svelte";
+  import Watches from "./Watches.svelte";
+  import MatterCard from "./MatterCard.svelte";
+  import { loadProposed, type Proposed } from "../matters";
+  import { arrivedLine, loadWatches, type Watch } from "../watches";
+  import { flushHolds, HOLD } from "../act";
 
   let {
     brief: firstBrief,
     status: firstStatus = null,
+    watches: firstWatches,
+    proposed: firstProposed,
     now: start = new Date(),
     poll = 5000,
-  }: { brief: Brief; status?: Status | null; now?: Date; poll?: number } = $props();
+    hold = HOLD,
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -23,8 +34,36 @@
   // svelte-ignore state_referenced_locally
   let status = $state(firstStatus);
   // svelte-ignore state_referenced_locally
+  let watches = $state(firstWatches ?? []);
+  // svelte-ignore state_referenced_locally
   let now = $state(start);
+  let arrived = $derived(watches.filter((w) => w.state === "arrived"));
+  let waiting = $derived(watches.filter((w) => w.state === "waits"));
+  // A watched mail that came leads the brief. With nothing else, it is the whole sentence.
+  let opening = $derived.by(() => {
+    const rest = summary(brief);
+    if (!arrived.length) return rest;
+    return rest === NOTHING ? arrivedLine(arrived) : `${arrivedLine(arrived)} ${rest}`;
+  });
+  // Each watch load and each change takes a ticket. A load applies only while its ticket is the newest,
+  // so an older answer never undoes a newer change. A failed load keeps the last list.
+  const ticket = newest();
+  async function reloadWatches() {
+    const fresh = ticket();
+    try {
+      const w = await loadWatches();
+      if (fresh()) watches = w;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  const change = (next: (w: Watch[]) => Watch[]) => (ticket(), (watches = next(watches)));
+  const removed = (id: string) => change((w) => w.filter((x) => x.id !== id));
   const ready = (s: Status | null) => copying(s).length === 0;
+
+  // Two loads of the brief can answer out of order (a poll, an answer at the gate):
+  // each takes a ticket, and a brief shows only while its ticket is the newest.
+  const briefTicket = newest();
 
   // Load the brief again while it is open: every 5 seconds while the first sync
   // runs (spec 1 section 4.2), then every minute for new mail.
@@ -32,13 +71,62 @@
   $effect(() => {
     if (!poll) return;
     return every(
-      () => Promise.all([loadBrief(), get<Status>("status")]),
-      ([b, s]) => ((brief = b), (status = s)),
+      () => {
+        const fresh = briefTicket();
+        return Promise.all([loadBrief(), get<Status>("status"), fresh] as const);
+      },
+      ([b, s, fresh]) => (fresh() && (brief = b), (status = s)),
       syncing ? poll : poll * 12,
     );
   });
+  // A quick Done holds for Undo. If the person leaves the brief or the page, the click stands: send it now.
+  $effect(() => {
+    window.addEventListener("pagehide", flushHolds);
+    return () => {
+      window.removeEventListener("pagehide", flushHolds);
+      flushHolds();
+    };
+  });
+  // The proposal of a matter loads apart from the brief too, with its own ticket. A failed load keeps the last card.
+  // svelte-ignore state_referenced_locally
+  let proposed = $state(firstProposed ?? null);
+  const proposedTicket = newest();
+  async function reloadProposed() {
+    const fresh = proposedTicket();
+    try {
+      const p = await loadProposed();
+      if (fresh()) proposed = p;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
+  // svelte-ignore state_referenced_locally
+  if (firstWatches === undefined) reloadWatches();
+  // svelte-ignore state_referenced_locally
+  if (firstProposed === undefined) reloadProposed();
+  $effect(() => {
+    if (!poll) return;
+    const timer = setInterval(() => (reloadWatches(), reloadProposed()), poll * 12);
+    return () => clearInterval(timer);
+  });
 
   const SHOWN = 7;
+  // After an answer at the gate, the items of the sender move: load the brief again.
+  // The gate stays after the last answer, so that its Undo stays too.
+  let answered = $state(false);
+  const reload = () => {
+    answered = true;
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
+
+  // After a quick Done, load the brief again, so the item and the counts change. The ticket keeps a poll
+  // that started before the close from putting the item back. A failed load waits for the next poll.
+  const done = () => {
+    const fresh = briefTicket();
+    loadBrief().then((b) => void (fresh() && (brief = b)), () => {});
+  };
 
   let signal = $derived(signals(brief.signals, now));
   let codes = $derived(signal.codes);
@@ -47,8 +135,11 @@
   let until = $derived([signal.next, nextDay(now)].filter((t): t is string => !!t).sort((a, b) => Date.parse(a) - Date.parse(b))[0]);
   $effect(() => watch(until, (d) => (now = d)));
   let proposal = $derived(brief.proposal && brief.proposal.count > 0 ? brief.proposal : null);
+  // What you owe that is due in 2 days or less, or late, leads the brief (R3-08). It shows only there, so You owe counts the rest.
+  // shortcut: the API gives at most 200 items of You owe, so a due item past them stays in You owe; page the API if one person owes more.
+  let soon = $derived(dueSoon(brief.you_owe.items, now));
   let parts = $derived([
-    { key: "you_owe", title: "You owe", ...brief.you_owe },
+    { key: "you_owe", title: "You owe", count: brief.you_owe.count - soon.length, items: brief.you_owe.items.filter((i) => !soon.includes(i)), duplicates: brief.you_owe.duplicates, total: brief.you_owe.count },
     { key: "owed_to_you", title: "Owed to you", ...brief.owed_to_you },
     { key: "conversations", title: "Conversations", ...brief.conversations },
     { key: "strangers", title: "From senders you do not know", ...brief.strangers },
@@ -75,6 +166,12 @@
   });
   // Counts for each sender are exact only when the API gave every feed item.
   let feedComplete = $derived(brief.feed.items.length >= brief.feed.count);
+  let bundles = $derived(brief.bundles ?? []);
+  let hidden = $derived(brief.hidden ?? 0);
+  // An API from before R2-09 gives only the hidden count.
+  let handled = $derived(brief.handled ?? { count: hidden, verbs: {} });
+  // The messages of the actions that a rule approved. An approved action can still wait to apply, so the brief says decided, not changed.
+  let decided = $derived(Object.values(handled.verbs).reduce((a, b) => a + b, 0));
   let records = $derived(Object.entries(brief.records).filter(([, n]) => n > 0));
   let progress = $derived(status && unfinished(status).length ? status.messages : null);
   let stopped = $derived(copying(status).length === 0);
@@ -83,8 +180,14 @@
 
 <div class="opening">
   <p class="day">{greeting(now)} It is {day}.</p>
-  <h1>{summary(brief)}</h1>
+  <h1>{opening}</h1>
 </div>
+
+{#if arrived.length}
+  <div class="arrivals">
+    {#each arrived as w (w.id)}<Arrived watch={w} ondone={removed} />{/each}
+  </div>
+{/if}
 
 
 {#if progress}
@@ -107,30 +210,79 @@
   </div>
 {/if}
 
+{#if soon.length}
+  <section class="soon" aria-labelledby="soon">
+    <h2 id="soon"><span>Due soon</span> <span class="count">{soon.length}</span></h2>
+    <ul>
+      {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
+    </ul>
+    {#if soon.length > SHOWN}<a class="all touch" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
+  </section>
+{/if}
+
+<!-- A matter that Iris proposes (R6-01, option A of the owner): one card, the newest proposal. -->
+{#if proposed}
+  <section aria-labelledby="matter">
+    <h2 id="matter"><span>{proposed.count === 1 ? "A matter to confirm" : "Matters to confirm"}</span> <span class="count">{proposed.count}</span></h2>
+    {#key proposed.view.matter.id}<MatterCard view={proposed.view} ondecided={() => (done(), reloadProposed())} delay={hold} />{/key}
+    {#if proposed.count > 1}<a class="all touch" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
+  </section>
+{/if}
+
+{#if brief.review?.actions}
+  <section aria-labelledby="review">
+    <h2 id="review"><span>Waits for your review</span> <span class="count">{brief.review.actions}</span></h2>
+    {#if proposal}
+      <p class="note">Triage proposes to {Object.entries(proposal.verbs).map(([verb, n]) => `${verb} ${n.toLocaleString("en-US")} ${n === 1 ? "message" : "messages"}`).join(", ")}.</p>
+    {/if}
+    <a class="all touch" href="#/review">Open the review</a>
+  </section>
+{/if}
+
 {#each parts as part (part.key)}
-  {#if part.count > 0}
+  {#if part.key === "strangers" && brief.gate}
+    {#if brief.gate.count > 0 || (brief.declined ?? 0) > 0 || answered}
+      <section aria-labelledby="strangers">
+        <h2 id="strangers"><span>{part.title}</span> <span class="count">{brief.gate.count}</span></h2>
+        <Gate page={brief.gate} declined={brief.declined} onanswer={reload} />
+      </section>
+    {/if}
+  {:else if part.count > 0}
     <section aria-labelledby={part.key}>
       <h2 id={part.key}><span>{part.title}</span> <span class="count">{part.count}</span></h2>
       <!-- Live login codes show above the sections, so the Signals list can be empty. -->
       {#if part.items.length}
         <ul>
-          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} />{/each}
+          {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
         </ul>
       {/if}
-      <a class="all" href={`#/brief/${part.key}`}>All {part.count}</a>
+      <a class="all touch" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
     </section>
   {/if}
 {/each}
 
-{#if proposal}
-  <section class="proposal" aria-labelledby="proposal">
-    <h2 id="proposal"><span>Triage proposal</span> <span class="count">{proposal.count}</span></h2>
-    <p>
-      Iris would make {proposal.count.toLocaleString("en-US")} changes to your mailbox:
-      {Object.entries(proposal.verbs).map(([verb, n]) => `${verb} ${n.toLocaleString("en-US")}`).join(", ")}. Nothing is applied.
-    </p>
+{#if bundles.length}
+  <section aria-labelledby="bundles">
+    <h2 id="bundles"><span>Bundled by your rules</span> <span class="count">{bundles.reduce((n, b) => n + b.count, 0)}</span></h2>
+    <ul>
+      {#each bundles as bundle (bundle.rule)}<Bundle {bundle} />{/each}
+    </ul>
   </section>
 {/if}
+
+{#if handled.count > 0}
+  <section aria-labelledby="handled">
+    <h2 id="handled"><span>Handled without you</span> <span class="count">{handled.count}</span></h2>
+    <p class="note">{[hidden ? `${hidden.toLocaleString("en-US")} hidden from this brief` : "", decided ? `${decided.toLocaleString("en-US")} ${decided === 1 ? "message" : "messages"} that your rules decided` : ""].filter(Boolean).join(", ")}.</p>
+    <a class="all touch" href="#/handled">See what and why</a>
+  </section>
+{/if}
+
+<!-- Watches (R5-07, option A of the owner): the watches that wait, and the quiet button that starts one. -->
+<section class="watching" aria-labelledby={waiting.length ? "watching" : undefined} aria-label={waiting.length ? undefined : "Watches"}>
+  {#if waiting.length}<h2 id="watching"><span>Iris watches for</span> <span class="count">{waiting.length}</span></h2>{/if}
+  <Watches watches={waiting} onadded={(w) => (w ? change((all) => [w, ...all.filter((x) => x.id !== w.id)]) : reloadWatches())} onstopped={removed} />
+</section>
 
 {#if publishers.length || records.length}
   <section class="also" aria-labelledby="also">
@@ -139,15 +291,15 @@
       <p class="label">To read when you choose</p>
       <ul class="chips">
         {#each publishers.slice(0, SHOWN) as [key, group] (key)}
-          <li><a href="#/brief/feed">{group.name}{#if feedComplete} <span>{group.items.length}</span>{/if}</a></li>
+          <li><a class="touch" href="#/brief/feed">{group.name}{#if feedComplete} <span>{group.items.length}</span>{/if}</a></li>
         {/each}
-        {#if publishers.length > SHOWN || !feedComplete}<li><a href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
+        {#if publishers.length > SHOWN || !feedComplete}<li><a class="touch" href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
       </ul>
     {/if}
     {#if records.length}
       <p class="label">Records</p>
       <ul class="chips types">
-        {#each records as [type, n] (type)}<li><a href={`#/records/${type}`}>{type} <span>{n}</span></a></li>{/each}
+        {#each records as [type, n] (type)}<li><a class="touch" href={`#/records/${type}`}>{type} <span>{n}</span></a></li>{/each}
       </ul>
     {/if}
   </section>
@@ -160,7 +312,7 @@
   {#if brief.not_understood > 0}
     <p>Iris could not read {brief.not_understood} messages. They stay in your mailbox as they are.</p>
   {/if}
-  <p>Iris only observes. It changed nothing in your mailbox.</p>
+  {#if (status?.mode ?? "observe") === "observe" && decided === 0}<p>Iris only observes. It changed nothing in your mailbox.</p>{/if}
 </footer>
 
 <style>
@@ -200,6 +352,12 @@
     height: var(--space-1);
     accent-color: var(--color-primary);
   }
+  .arrivals {
+    display: grid;
+    gap: var(--space-3);
+    margin-bottom: var(--space-12);
+    animation: arrive var(--transition-normal) both;
+  }
   .codes {
     display: grid;
     gap: var(--space-3);
@@ -237,8 +395,8 @@
   .all:hover {
     color: var(--color-text);
   }
-  .proposal p {
-    margin: 0;
+  .note {
+    margin: var(--space-2) 0 0;
     color: var(--color-text-muted);
   }
   .label {
@@ -252,7 +410,8 @@
     gap: var(--space-2);
   }
   .chips a {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     padding: var(--space-1) var(--space-3);
     border: 1px solid var(--color-border-subtle);
     border-radius: var(--radius-full);
@@ -280,6 +439,10 @@
   footer p {
     margin: 0 0 var(--space-2);
   }
+  .soon {
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
+  }
   .warning {
     color: var(--color-text);
     border-left: 4px solid var(--color-warning);
@@ -287,13 +450,15 @@
   }
   @media (max-width: 600px) {
     h1 {
-      font-size: var(--font-size-3);
+      font-size: var(--font-size-2);
+      line-height: 1.3;
     }
     .opening {
       margin: var(--space-4) 0 var(--space-8);
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .arrivals,
     .opening {
       animation: none;
     }

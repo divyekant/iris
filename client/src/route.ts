@@ -4,11 +4,14 @@ export type Form = "commitment" | "conversation" | "feed" | "signal";
 export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
-  | { view: "home" | "setup" | "brief" | "measures" }
+  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" | "matters" | "outbox" | "history" }
   | { view: "records"; type: string }
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
-  | { view: "item" | "mail"; id: string };
+  | { view: "bundle"; rule: number }
+  | { view: "gate"; declined: boolean }
+  | { view: "item" | "mail" | "job" | "matter" | "start"; id: string }
+  | { view: "write"; thread: string | null };
 
 const LISTS = { commitments: "commitment", conversations: "conversation", feed: "feed", signals: "signal" } as const;
 
@@ -21,6 +24,15 @@ export const SECTIONS: Record<SectionKey, string> = {
   feed: "To read",
 };
 
+/** The canonical job ID (docs/spec/schema/job.schema.json). Up to 18 digits keeps it inside an i64. */
+export const JOB_ID = /^j-[1-9]\d{0,17}$/;
+
+/** The ID of a mail thread (`t-N`). */
+export const THREAD_ID = /^t-[1-9]\d{0,17}$/;
+
+/** The canonical matter ID (docs/spec/schema/matter.schema.json). */
+export const MATTER_ID = /^g-[1-9]\d{0,17}$/;
+
 export function parse(hash: string): Route {
   let name = "";
   let id = "";
@@ -30,20 +42,53 @@ export function parse(hash: string): Route {
     return { view: "home" }; // A bad escape such as "%" in the hash.
   }
   if (name in LISTS) return { view: "list", form: LISTS[name as keyof typeof LISTS] };
-  if ((name === "item" || name === "mail") && id) return { view: name, id };
+  // #/item/c-4/job: the start of a job from the item (card R4-10).
+  const parts = hash.replace(/^#\/?/, "").split("/");
+  if (name === "item" && id && parts.length === 3 && parts[2] === "job") return { view: "start", id };
+  if ((name === "item" || name === "mail") && id && parts.length === 2) return { view: name, id };
+  // #/brief/gate: all senders at the stranger gate. #/brief/declined: the senders that you ignored.
+  if (name === "brief" && (id === "gate" || id === "declined")) return { view: "gate", declined: id === "declined" };
   if (name === "brief" && id in SECTIONS) return { view: "section", key: id as SectionKey };
+  // #/brief/bundle/3: the items of bundle rule 3 (spec 2 section 6.4).
+  const rule = hash.replace(/^#\/?/, "").split("/")[2] ?? "";
+  if (name === "brief" && id === "bundle" && /^[1-9]\d{0,9}$/.test(rule)) return { view: "bundle", rule: Number(rule) };
   if (name === "records") return { view: "records", type: id };
-  if (name === "setup" || name === "brief" || name === "measures") return { view: name };
+  // #/jobs, or #/jobs/j-12; #/matters, or #/matters/g-4. The canonical ID and no other part.
+  for (const [list, one, ID] of [["jobs", "job", JOB_ID], ["matters", "matter", MATTER_ID]] as const) {
+    if (name !== list) continue;
+    const parts = hash.replace(/^#\/?/, "").split("/");
+    if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: list };
+    return parts.length === 2 && ID.test(id) ? { view: one, id } : { view: "home" };
+  }
+  // #/write: a new mail. #/write/t-4: a reply in the thread t-4 (card R3-04).
+  if (name === "write") {
+    if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: "write", thread: null };
+    return parts.length === 2 && THREAD_ID.test(id) ? { view: "write", thread: id } : { view: "home" };
+  }
+  if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled" || name === "outbox" || name === "history") return { view: name };
   return { view: "home" };
 }
 
 export const href = {
   item: (id: string) => `#/item/${encodeURIComponent(id)}`,
+  start: (id: string) => `#/item/${encodeURIComponent(id)}/job`,
   mail: (id: string) => `#/mail/${encodeURIComponent(id)}`,
+  bundle: (rule: number) => `#/brief/bundle/${rule}`,
+  job: (id: string) => `#/jobs/${encodeURIComponent(id)}`,
+  matter: (id: string) => `#/matters/${encodeURIComponent(id)}`,
+  reply: (thread: string) => `#/write/${encodeURIComponent(thread)}`,
 };
 
 export const NAV = [
   ["#/brief", "Brief"],
+  ["#/matters", "Matters"],
+  ["#/ask", "Ask"],
+  ["#/review", "Review"],
+  // The first view of More on a phone: a reply starts from its thread.
+  ["#/write", "Write"],
+  ["#/outbox", "Outbox"],
+  ["#/history", "History"],
+  ["#/jobs", "Jobs"],
   ["#/commitments", "Commitments"],
   ["#/conversations", "Conversations"],
   ["#/records", "Records"],

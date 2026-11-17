@@ -36,7 +36,8 @@ each input.
 
 ```rust
 pub fn clean(raw: &[u8]) -> Clean;
-pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment> }
+pub struct Clean { pub subject: String, pub text: String, pub cut: bool, pub attachments: Vec<Attachment>, pub invitation: bool, pub links: Vec<Link>, pub links_cut: bool }
+pub struct Link { pub text: String, pub href: String }
 pub struct Attachment { pub name: String, pub mime_type: String, pub size: u64, pub text: Option<String> }
 pub fn remove_repeated_end(text: &str, earlier: &[&str]) -> String;
 pub const TEXT_LIMIT: usize = 32_000;           // characters of `text`
@@ -86,8 +87,10 @@ Each budget only goes down. No step gives budget back.
   end of the body is a soft line break and goes out), and all others as
   they are. Iris cuts the input before the decode, so a decode never uses
   more than about its cap. Iris decodes quoted-printable with the
-  `mail-parser` decoder in chunks of about 64 KiB that end after a line end
-  (an escape never crosses one), and stops after the cap. The size of a
+  `mail-parser` decoder in chunks of at most 64 KiB + 2 bytes, and stops
+  after the cap. A chunk ends after a line end, or else after the last token
+  that leaves the decoder with no state (an escape `=XY`, a pair `=X` that
+  stays as it is, or a byte that is not `=`, white space or CR). The size of a
   quoted-printable attachment is the length of the same chunked decode. The `mail-parser` base64 decoder uses memory for
   white space too, so Iris gives it only the alphabet, in chunks of 64 KiB.
   The size of a base64 attachment is the length of the same chunked decode,
@@ -114,6 +117,27 @@ Each budget only goes down. No step gives budget back.
   the cut mark. The same check applies to an attached message before its
   parse. The scan reads lines only, so a body line that looks like a MIME
   field counts too: the check can refuse more, never less.
+
+### Invitation
+
+`Clean.invitation` gives the input of the guard of the fixed rules
+(specification 1, section 7.3): a message with a calendar request goes to
+the model. Release 1 has no fixed invitation rule (issue #97).
+It is true if a `text/calendar` part of the
+top message is a request:
+
+- its `method` parameter is `REQUEST` (any case), or
+- its decoded body has a line that is `METHOD:REQUEST` (any case, with white
+  space around it and nothing else).
+
+The check walks every part of the MIME tree of the top message, in any
+order. It does not depend on the `multipart/alternative` version that gives
+the text. It reads the media type and the parameter names of the parsed
+`Content-Type` as whole tokens. It decodes the whole calendar body in chunks
+of about 64 KiB, with a line matcher that keeps at most 14 bytes, so the
+memory stays bounded for a calendar of any size. The check stays inside
+`MAX_PARTS` and `MAX_DEPTH`. It does not go into an attached message: a
+calendar in an attached message is not an invitation to the user.
 
 ### A reply
 
@@ -162,11 +186,44 @@ not used makes no cut in either case.
 - These elements go out with their content, as raw text: `script`, `style`,
   `title`, `template`, `textarea`, `xmp`, `noembed`, `noframes`, `iframe`.
   These go out with their content: `head`, `svg`, `math`.
-- Links: `[text](href)` for an `http`, `https` or `mailto` target. If the
+- Links: `[text](href)` for an `http`, `https` or `mailto` target. The
+  href is read as a browser reads it first (`browser_href`): no control
+  character or space at the ends, and no tab or line end inside. So
+  `https:x.example` and ` ht<tab>tps://x.example` are web targets. If the
   text is the target, only the text shows. If the text has more than one
-  line, the form is `text (<href>)`. In the target, a space, `(`, `)`, `<`
-  and `>` become percent codes (`%20`, `%28`, `%29`, `%3C`, `%3E`). Other
-  targets (for example `javascript:`) show the text only.
+  line, the form is `text (<href>)`. In the target, `(`, `)`, `<`, `>` and
+  each white space or control character become percent codes of their
+  UTF-8 bytes (`%28`, `%29`, `%3C`, `%3E`, `%20`, `%09`, `%C2%A0`), so the
+  target is one token. Other targets (for example `javascript:`) show the
+  text only.
+- `Clean.links` lists each link whose text is not empty and is not its
+  target (card R5-10, the hostile mark `link` of spec 1 section 6.7): the
+  text as a person sees it (trimmed, with its lines, with no Markdown marks
+  such as `> ` or `- ` and no invisible characters), and the href
+  as the HTML gives it (entities decoded, not percent-encoded). Each HTML
+  part that the walker reads adds its links. Each HTML version of a
+  `multipart/alternative` adds its links too, also a version that the text
+  does not use, because a mail client can show it. The walker reads these
+  versions for their links only: they add no text and no attachment.
+  A hidden link has no text, so it is not in the list. The texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
+  true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
+  its output limit or past `PART_LIMIT`; a shown HTML element past the
+  stack limit (its content goes out); a shown link whose text or href
+  holds a named character reference that the decoder does not know (a
+  browser decodes it, for example `&period;`); `MAX_PARTS`, `MAX_DEPTH` or a
+  parser limit; a message that Iris cannot parse. `clean_cut(raw, true)`
+  reads the first bytes of a longer message: `links_cut` is also true when
+  an HTML part reaches the end of `raw`. The caller reads the rest of the
+  file with `html_part_in`. It reads the message from its start, for the
+  boundaries that the `multipart` headers declare, and is true when a MIME
+  part header past the cut (after a delimiter line of a declared boundary,
+  up to the empty line) has the type `text/html`, with any case, white
+  space or folding. `text/html` in a part body does not count, also after
+  a line that starts with `--` but is not a delimiter. The scan is also
+  true when a limit can hide a boundary or a type: a `Content-Type` field
+  past 8 KiB or with a line past 1,000 bytes, or more than 64 boundaries. The caller then sets `links_cut` too,
+  because the rest can hold an HTML part that a mail client shows. The
+  links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
   `1` (a tracking pixel).
 - Headings, lists, block quotes, `pre`, `hr` and line breaks become Markdown.
@@ -385,12 +442,19 @@ client. They are not defects of this design:
   encrypted PDF gives no text.
 - The model reads clean text as data, never as instructions (specification
   1). So hidden text that stays is a quality limit, not a security hole.
+- A quoted-printable line of more than 64 KiB that has only white space,
+  CR and `=` with white space splits at 64 KiB. Its white space can then
+  differ from the decode of the whole body.
 - Addresses (`iris-people`, through `mail-parser` 1.0.1): these forms give no
-  address, so the person goes out of the profiles. A quoted local part
-  outside `<>` (`"a:b"@example.org`), a comment inside an address
-  (`john(work)@example.org`), and a domain literal with a `:` outside `<>`
-  (`user@[IPv6:2001:db8::1]`). The same forms inside `<>` work. A comment
-  after a bare address (`a@example.org (Ana)`) is the display name.
+  address, so the person goes out of the profiles. A comment inside an
+  address (`john(work)@example.org`), a domain literal with a `:` outside
+  `<>` (`user@[IPv6:2001:db8::1]`), a quoted local part outside `<>` with an
+  escaped character (`"a\"b"@example.org`), and an `@` outside a quoted
+  local part (`a@b@example.org`). The same valid forms inside `<>` work.
+  `mail-parser` reads a bare quoted local part (`"a:b"@example.org`) as a
+  name and `@example.org`. `iris-people` joins the two again when the list
+  holds that exact text, so this form works. A comment after a bare address
+  (`a@example.org (Ana)`) is the display name.
 
 ### Limits and the cut
 
@@ -409,6 +473,26 @@ client. They are not defects of this design:
 
 `Clean.cut` is true exactly when the crate adds `CUT_MARK` to the end of
 `Clean.text`.
+
+## Failure list
+
+The input is a raw RFC 5322 message from any sender. The supported input is
+a message that `mail-parser` 1.0.1 parses, inside the limits of
+[Limits and the cut](#limits-and-the-cut). The one safe result for all other
+input: no panic, bounded memory and time, and a `Clean` with less text (and
+`CUT_MARK` when text went out), never text from outside the message.
+
+| Input class | Failure mode | Result | Test |
+|---|---|---|---|
+| Bytes that are not mail | Parse fails | Empty `Clean`, no panic | `bytes_that_are_not_mail_do_not_panic` |
+| MIME fields over 16 KiB each or 1 MiB in all | Parse memory grows | Not parsed: text is `CUT_MARK`, `cut` and no invitation | `a_mime_field_past_the_value_limit_is_not_parsed`, `a_huge_content_type_stays_bounded` |
+| More than `MAX_PARTS` parts or `MAX_DEPTH` levels | Time and memory grow | Later parts are not read, with `CUT_MARK` | `alternatives_past_the_part_limit_mark_the_cut`, `deep_nesting_stops_at_the_limit` |
+| A large body part, HTML or attachment | Decode memory grows | The decode stops at its cap, with `CUT_MARK` | `memory_and_time_stay_bounded`, `long_text_is_cut_and_marked` |
+| A header block over 256 KiB, a value over 16 KiB | Header memory grows | The rest is not read | `a_header_after_the_header_limit_does_not_count`, `a_subject_past_the_value_limit_is_cut` |
+| Hostile HTML or CSS (hidden text, many elements) | Hidden text stays, or time grows | Hidden text of the closed list goes out; time stays linear | `many_elements_with_one_class_stay_fast` |
+| A hostile PDF | Panic or memory | No panic; a PDF over `PDF_LIMIT` gives no text | `a_simple_pdf_attachment_gives_text` |
+| A calendar part | False or missed invitation | Only a parsed `text/calendar` part with `method=REQUEST` or a `METHOD:REQUEST` line counts, at any size and in any order | `crates/iris-clean/tests/invitation.rs` |
+| Text that reads as an instruction | The model follows it | The text stays data; the code never runs it | Specification 1, section 7.4 |
 
 ## Options not chosen
 

@@ -1,7 +1,8 @@
 /*
  * Design tokens of Iris, from .kalos.yaml (managed by Kalos).
- * test/tokens.test.mjs checks that these values agree with .kalos.yaml and
- * that the text colors meet WCAG AA contrast (4.5) on each background.
+ * The "Iris" palette: iris violet on cool ink neutrals (card R1-27).
+ * test/tokens.test.mjs checks that these values agree with .kalos.yaml, that
+ * each palette has at most 12 colors, and the WCAG AA contrast of each color.
  * The dark palette is the default (active brand). The light palette applies
  * when the system asks for light.
  */
@@ -32,6 +33,9 @@
   --space-24: 96px;
   --space-32: 128px;
 
+  /* The smallest touch target: 44px (11 x the 4px base unit) */
+  --size-touch: 44px;
+
   /* Radii */
   --radius-none: 0;
   --radius-sm: 4px;
@@ -42,51 +46,47 @@
   /* Transitions */
   --transition-fast: 120ms ease;
   --transition-normal: 200ms ease;
-
-  /* Semantic colors (the same in both palettes) */
-  --color-success: #16A34A;
-  --color-warning: #CA8A04;
-  --color-error: #DC2626;
-  --color-info: #2563EB;
 }
 
 /* palette: dark */
 :root {
   color-scheme: dark;
-  --color-primary: #d4af37;
-  --color-secondary: #f5d060;
-  --color-background: #0a0a0a;
-  --color-background-elevated: #111111;
-  --color-background-surface: #1a1a1a;
-  --color-text: #e5e5e5;
-  --color-text-muted: #a3a3a3;
-  --color-text-faint: #848484;
-  --color-border: rgba(212,175,55,0.15);
+  --color-primary: #a394ff;
+  --color-background: #0e0f14;
+  --color-background-elevated: #15161d;
+  --color-background-surface: #1c1e27;
+  --color-text: #e7e8ee;
+  --color-text-muted: #a4a7b5;
+  --color-text-faint: #8c8fa0;
+  --color-border: #2c2e3b;
   --color-border-subtle: rgba(255,255,255,0.06);
-  --color-accent-border: rgba(212,175,55,0.15);
-  --color-overlay: rgba(0,0,0,0.6);
-  --color-unread: #d4af37;
-  /* Text on a primary (gold) background. A value of this palette, not a new color. */
-  --color-on-primary: #0a0a0a;
+  --color-success: #5fd38d;
+  --color-warning: #f2b84b;
+  --color-error: #f47c7c;
+  /* These reuse a color of the palette, so the count of colors stays the same. */
+  --color-info: #a394ff;
+  --color-unread: #a394ff;
+  --color-on-primary: #0e0f14;
 }
 
 /* palette: light */
 @media (prefers-color-scheme: light) {
   :root {
     color-scheme: light;
-    --color-primary: #b8960f;
-    --color-secondary: #d4af37;
-    --color-background: #FAF9F6;
-    --color-background-elevated: #FFFEF9;
-    --color-background-surface: #F0EDE6;
-    --color-text: #2C2418;
-    --color-text-muted: #655D50;
-    --color-text-faint: #6E6960;
-    --color-border: #E8E2D6;
+    --color-primary: #5b47d6;
+    --color-background: #f7f7fa;
+    --color-background-elevated: #ffffff;
+    --color-background-surface: #eeeef4;
+    --color-text: #1b1c24;
+    --color-text-muted: #555867;
+    --color-text-faint: #62657a;
+    --color-border: #dcdde6;
     --color-border-subtle: rgba(0,0,0,0.06);
-    --color-accent-border: rgba(184,150,15,0.18);
-    --color-overlay: rgba(0,0,0,0.3);
-    --color-unread: #b8960f;
-    --color-on-primary: #2C2418;
+    --color-success: #15703a;
+    --color-warning: #b7750c;
+    --color-error: #c0262d;
+    --color-info: #5b47d6;
+    --color-unread: #5b47d6;
+    --color-on-primary: #ffffff;
   }
 }

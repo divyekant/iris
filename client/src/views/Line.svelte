@@ -1,13 +1,72 @@
 <!--
   One item on one line. The whole line opens the item. The envelope opens the
-  source mail in one step. A gold dot marks a conversation that waits for you.
+  source mail in one step. An unread dot marks a conversation that waits for you.
+  A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09).
+  With `ondone`, an open commitment starts with a round tick box: a click marks
+  it done after the same Undo time as the item view, then calls `ondone`. The
+  view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
+  item, a conversation or a signal gets its one quiet verb (Skip, Mute or
+  Dismiss) as a text button, with the same Undo time.
 -->
 <script lang="ts">
   import type { Item } from "../api";
   import { due, initials, money, origin, other, party, timeLeft, when } from "../format";
   import { href } from "../route";
+  import { post } from "../api";
+  import { hold, HOLD, quiet, said, type Verb } from "../act";
 
-  let { item, now = new Date(), twins = [] }: { item: Item; now?: Date; twins?: string[] } = $props();
+  // `note`: one more muted line, for example the reason of a rule that hides the item.
+  // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
+  let {
+    item,
+    now = new Date(),
+    twins = [],
+    note = "",
+    ondone,
+    delay = HOLD,
+  }: { item: Item; now?: Date; twins?: string[]; note?: string; ondone?: (id: string) => void; delay?: number } = $props();
+
+  let box = $derived(
+    !!ondone && item.form === "commitment" && (item.status === "open" || item.status === "deferred"),
+  );
+  // A feed item, a conversation or a signal gets its one quiet verb (Skip, Mute, Dismiss).
+  let away = $derived(ondone && !box ? quiet(item) : null);
+  let verb: Verb = $state("close");
+  type Phase = { at: "idle" } | { at: "held" } | { at: "sending" } | { at: "done" } | { at: "failed"; why: string; known: boolean };
+  let phase: Phase = $state({ at: "idle" });
+  let pending: ReturnType<typeof hold> | undefined;
+
+  function tick(v: Verb = "close") {
+    verb = v;
+    phase = { at: "held" };
+    pending = hold(send, delay);
+  }
+
+  function undo() {
+    pending?.cancel();
+    pending = undefined;
+    phase = { at: "idle" };
+  }
+
+  async function send() {
+    pending = undefined;
+    phase = { at: "sending" };
+    try {
+      await post(`items/${encodeURIComponent(item.id)}/${verb}`, {});
+      phase = { at: "done" };
+      ondone?.(item.id);
+    } catch (error) {
+      const status = (error as { status?: number }).status ?? 0;
+      // A 4xx answer wrote nothing. With no answer, or a 5xx, Iris cannot say.
+      const known = status >= 400 && status < 500;
+      phase = { at: "failed", why: (error as Error).message, known };
+      // A 409: the item changed after the brief loaded it. The brief loads again.
+      if (status === 409) ondone?.(item.id);
+    }
+  }
+
+  // The hold outlives this line: a brief refresh can remove the row while Undo
+  // time remains. The brief sends each hold when the person leaves it.
 
   let who = $derived(other(item));
   let date = $derived(item.form === "commitment" ? due(item, now) : null);
@@ -30,13 +89,54 @@
   let waits = $derived(item.form === "conversation" && (item.your_turn || (item.new ?? 0) > 0));
 </script>
 
+{#if phase.at !== "idle"}
+  <li class="line said" class:error={phase.at === "failed"} role="status">
+    {#if phase.at === "failed"}
+      <span class="why">
+        {phase.known ? `Iris did not record it: ${phase.why}` : "Iris does not know if it recorded the change. Reload the page to see."}
+      </span>
+      {#if phase.known}<button class="undo" type="button" onclick={() => (phase = { at: "idle" })}>Close</button>{/if}
+    {:else}
+      <svg class="tick" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+        <circle cx="10" cy="10" r="9" />
+        <path d="M6 10.5l2.75 2.75L14 8" />
+      </svg>
+      <span class="struck">{item.title}</span>
+      <span class="muted">{said(verb)} It leaves your brief.</span>
+      {#if phase.at === "held"}
+        <button class="undo" type="button" onclick={undo}>Undo</button>
+        <span class="bar" style:animation-duration={`${delay}ms`} aria-hidden="true"></span>
+      {/if}
+    {/if}
+  </li>
+{:else}
 <li class="line">
-  <span class="mark" aria-hidden="true">{initials(who)}</span>
+  {#if box}
+    <button class="box" type="button" aria-label={`Done: ${item.title}`} title="Done" onclick={() => tick()}>
+      <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+        <circle cx="10" cy="10" r="9" />
+        <path d="M6 10.5l2.75 2.75L14 8" />
+      </svg>
+    </button>
+  {:else}
+    <span class="mark" aria-hidden="true">{initials(who)}</span>
+  {/if}
   <div class="body">
     <a class="title" href={href.item(item.id)}>{item.title}</a>
     <p class="detail">
       {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
+    {#if item.ready?.includes("draft")}
+      <p class="prepared">
+        <span class="ready" title="Iris wrote a reply in your voice">
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+            <path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+          </svg>
+          Draft ready
+        </span>
+      </p>
+    {/if}
+    {#if note}<p class="note">{note}</p>{/if}
     {#if twins.length}
       <p class="twins">
         Maybe the same as {#each twins as id, i (id)}{i ? ", " : ""}<a href={href.item(id)}>{id}</a>{/each}
@@ -44,6 +144,9 @@
     {/if}
   </div>
   {#if waits}<span class="dot" title={item.your_turn ? "Your turn" : `${item.new} new`}><span class="hidden">{item.your_turn ? "Your turn" : `${item.new} new`}</span></span>{/if}
+  {#if away}
+    <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
+  {/if}
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -51,6 +154,7 @@
     </svg>
   </a>
 </li>
+{/if}
 
 <style>
   .line {
@@ -112,6 +216,7 @@
     line-clamp: 2;
     overflow: hidden;
   }
+  .note,
   .twins {
     margin: var(--space-1) 0 0;
     color: var(--color-text-muted);
@@ -136,6 +241,21 @@
   }
   .due.late::after {
     background: var(--color-error);
+  }
+  /* What Iris prepared: quiet pills under the detail. They are no control, so a click opens the item. */
+  .prepared {
+    margin: var(--space-1) 0 0;
+  }
+  .ready {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-2);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-full);
+    color: var(--color-primary);
+    font-size: var(--font-size--1);
+    white-space: nowrap;
   }
   .dot {
     flex: none;
@@ -172,10 +292,183 @@
   .source:focus-visible {
     box-shadow: 0 0 0 2px var(--color-primary);
   }
+  /* A touch screen: the icon controls grow to the size of a finger tip. */
+  @media (max-width: 600px), (pointer: coarse) {
+    .source,
+    .box {
+      width: var(--size-touch);
+      height: var(--size-touch);
+    }
+    .away {
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+    }
+  }
+  /* The quiet verb: a text button that shows on hover or focus of the line. */
+  .away {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    padding: var(--space-1) var(--space-2);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text-muted);
+    font: inherit;
+    font-size: var(--font-size--1);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--transition-fast), color var(--transition-fast);
+  }
+  .line:hover .away,
+  .away:focus-visible {
+    opacity: 1;
+  }
+  .away:hover,
+  .away:focus-visible {
+    color: var(--color-text);
+    background: var(--color-background-elevated);
+  }
+  .away:focus-visible {
+    outline: 2px solid var(--color-primary);
+  }
+  @media (hover: none) {
+    .away {
+      opacity: 1;
+    }
+  }
+  /* The tick box: a ring that shows the tick on hover or focus. */
+  .box {
+    position: relative;
+    z-index: 1;
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: var(--space-8);
+    height: var(--space-8);
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-full);
+    background: transparent;
+    cursor: pointer;
+  }
+  .box circle {
+    fill: none;
+    /* A control edge needs a contrast of 3 or more (WCAG 1.4.11): the muted text color has it. */
+    stroke: var(--color-text-muted);
+    stroke-width: 1.5;
+    transition: stroke var(--transition-fast);
+  }
+  .box path {
+    fill: none;
+    stroke: transparent;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: stroke var(--transition-fast);
+  }
+  .box:hover circle,
+  .box:focus-visible circle,
+  .box:hover path,
+  .box:focus-visible path {
+    stroke: var(--color-primary);
+  }
+  .box:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .said {
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    background: var(--color-background-elevated);
+    overflow: hidden;
+  }
+  .said:hover {
+    background: var(--color-background-elevated);
+  }
+  .said.error {
+    border-left: 4px solid var(--color-error);
+  }
+  .tick {
+    flex: none;
+    margin: 0 var(--space-2);
+    animation: pop var(--transition-normal);
+  }
+  .tick circle {
+    fill: var(--color-primary);
+  }
+  .tick path {
+    fill: none;
+    stroke: var(--color-on-primary);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .struck {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text-muted);
+    text-decoration: line-through;
+  }
+  .muted {
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
+  .why {
+    flex: 1;
+    color: var(--color-text);
+  }
+  .undo {
+    margin-left: auto;
+    padding: var(--space-1) var(--space-2);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-primary);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .undo:focus-visible {
+    outline: 2px solid var(--color-primary);
+  }
+  /* The time left to undo: a primary line that shrinks. */
+  .bar {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: 100%;
+    background: var(--color-primary);
+    transform-origin: left;
+    animation-name: shrink;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+  @keyframes shrink {
+    to {
+      transform: scaleX(0);
+    }
+  }
+  @keyframes pop {
+    from {
+      transform: scale(0.6);
+      opacity: 0;
+    }
+  }
   @media (prefers-reduced-motion: reduce) {
     .line,
-    .source {
+    .source,
+    .away,
+    .box circle,
+    .box path {
       transition: none;
+    }
+    .tick {
+      animation: none;
     }
   }
 </style>
