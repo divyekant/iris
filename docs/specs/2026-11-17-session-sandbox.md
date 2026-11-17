@@ -68,7 +68,10 @@ spec, with two changes:
   (see [Linux](#linux)).
 
 `spawn` runs only after the helper read `start` (launcher spec, "The hold
-helper"). It returns when the agent can run. If `spawn` fails after a
+helper"). It returns when the agent can run, in at most 1.5 seconds, so
+that the helper writes `started <pgid>` or `failed` inside the 2-second
+start gate of the launcher. A sandbox that is slower fails the start
+(`failed`), and the launch ends with `launch_failed` (fail closed). If `spawn` fails after a
 process started, it kills that process and reaps it before it returns the
 error, so the helper writes `failed` and no process of the session stays.
 No code of the agent runs before `spawn` returns `Ok`.
@@ -95,7 +98,8 @@ and arguments of the adapter:
 
 1. Make two pipes, and start `bwrap` with their ends on file descriptors 3
    and 4. `bwrap` sets up the namespaces and waits.
-2. Read the JSON line of file descriptor 3 (at most 4 KiB, in 5 seconds).
+2. Read the JSON line of file descriptor 3 (at most 4 KiB). Steps 2 to 5
+   share one time limit of 1.5 seconds.
    It gives `child-pid`: the init, as a host process ID. The isolation
    reads no other field.
 3. Get the inode of the PID namespace of the init: open a `pidfd` of the
@@ -164,7 +168,10 @@ namespace, so a second listener and a relay connect the two:
    listener, opens a connection to `127.0.0.1:<port>` on the host, and
    copies the bytes in the two directions. It holds at most 8 connections,
    as the egress proxy does, and closes a ninth at once.
-3. The relay threads end with the helper.
+3. The relay threads end with the helper. The proxy of the session keeps
+   its port until the reap check confirms that the helper ended (launcher
+   spec, "Model egress", changed in this PR). So the relay never connects
+   to a port that another session got.
 
 The agent reaches only the listener of its own session. The listener
 exists only in the namespace of that session, and the relay connects only
@@ -205,7 +212,7 @@ The agent sees only these paths.
 |---|---|
 | The workspace of the job | Read and write |
 | The private home of the session | Read and write |
-| System programs and libraries: `/usr`, and `/bin`, `/sbin` and `/lib*` (a link to `/usr`, or the folder) | Read |
+| System programs and libraries: `/usr` without `/usr/local`, and `/bin`, `/sbin` and `/lib*` (a link to `/usr`, or the folder) | Read |
 | The system files that programs read at the start, each one if present: in `/etc`, the files `ld.so.cache`, `ld.so.conf`, `passwd`, `group`, `nsswitch.conf`, `hosts`, `localtime`, `os-release`, and the folders `ld.so.conf.d`, `ssl`, `pki`, `ca-certificates` and `alternatives` | Read |
 | The file of the adapter program (its real path) and the file of the `iris` program | Read |
 | A new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
@@ -213,12 +220,15 @@ The agent sees only these paths.
 
 Each other path is not visible. This holds the data folder, the home
 folder of the person, `/opt`, `/srv`, `/var`, `/run`, each other file of
-`/etc`, and each socket outside the workspace (for example a Docker or SSH
+`/etc`, `/usr/local`, and each socket outside the workspace (for example a Docker or SSH
 agent socket, which a network namespace does not block). The view shows
 no folder of local programs or settings that the system does not own: a
 credential that a person or a program puts there stays out. The `/etc`
 list holds public system data only (programs, certificate authorities,
-names of users and hosts). `/usr` holds the files of the system packages.
+names of users and hosts). `/usr` holds the files of the system
+packages. `/usr/local` holds local programs and settings, so the view
+mounts an empty `tmpfs` there; a program file in it is shown alone, as
+each adapter program is.
 
 - The private home: an empty `tmpfs` at the path of `HOME`. It has no
   file of the person, and it is gone when the session ends. So the agent tool of a session authenticates with its key
@@ -298,8 +308,9 @@ before the agent runs, or `ended` is false.
 | The engine restarts while a session runs | `stop` and `ended` read the record | Linux test with a new isolation value |
 | The init process ID is reused by another process | The namespace inode differs: no signal; `ended` is true | Unit test with a record of another namespace |
 | The record cannot be written | `spawn` fails; the program did not run | Linux test with a read-only sessions folder |
-| The info line does not come in 5 seconds, or is not JSON | `spawn` fails and kills `bwrap` | Unit test of the parser (property test) |
+| The info line or the listener does not come in 1.5 seconds, or the line is not JSON | `spawn` fails and kills `bwrap` | Unit test of the parser (property test) |
 | A ninth connection to the relay | Closed at once | Linux relay test |
+| A session ends, and its agent connects to the relay during the stop | The relay reaches the proxy of its own session, which keeps its port until the reap check | R4-04e supervisor test: a second session starts while the first one stops, and gets another port |
 | A data folder inside a read path (for example the `iris` program file in a folder of the data folder) | The empty mount of the data folder comes after each read path: the data folder is empty in the view | Linux sandbox test with the program file inside the data folder |
 | A credential file or a Unix socket in a folder that is not in the view (for example `/etc/<file>` not in the list, or `/run`) | Not visible: no read and no connection | Linux sandbox test: a socket and a marker file outside the view, and `/etc/hostname` |
 | `iris job run` on macOS or another system | `system()` gives the reason, and `run` is refused before a row is written | Unit test that runs on each system that is not Linux |
@@ -311,7 +322,9 @@ before the agent runs, or `ended` is false.
 - New files beside it: `isolation_linux.rs` and its tests.
 - `crates/iris-session/src/hold.rs`: the helper calls `Isolation::spawn`.
 - `crates/iris-session/src/config.rs`: `CLAUDE_CODE_OAUTH_TOKEN` in the
-  `claude-code` adapter.
+  `claude-code` adapter, also in the adapter rule of the launcher spec.
+- The launcher spec, "Model egress": the proxy of a session keeps its port
+  until the reap check passes. R4-04e builds it.
 - `starter.json`: `bubblewrap` in the system packages of the `engine` area,
   for the tests.
 - The engine (R4-04e) calls `system(data_dir)` in the engine and in the

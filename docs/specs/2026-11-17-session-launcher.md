@@ -163,8 +163,9 @@ allow_hosts = ["api.my-tool.example"]
 The environment of the agent is empty, then gets only these variables, if
 the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 `TERM`, `TMPDIR`, `SHELL`, and the `pass_env` of the adapter. The built-in
-adapters pass `ANTHROPIC_API_KEY` (`claude-code`) and `OPENAI_API_KEY` and
-`CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
+adapters pass `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` (a token
+of `claude setup-token`, for a Claude subscription) (`claude-code`), and
+`OPENAI_API_KEY` and `CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
 mailbox. A session with an egress port also gets `HTTPS_PROXY` and
 `https_proxy`, set by the engine to the port of the session (see
 [Model egress](#model-egress)); a value of the engine for these names is
@@ -544,8 +545,13 @@ no network stops them. The engine gives each session one narrow path out:
   and the resolver, not the log or the streams of the proxy. At most 16
   workers live in the Iris process at one time, over all sessions, also
   after a stop; a `CONNECT` past this bound gets `403` with `too_many`.
-- When the session ends, the engine closes the port and each open
-  connection of the session.
+- When the session ends, the proxy of the session keeps its port and its
+  rules until the reap check of the session passes. Only then does the
+  engine stop the proxy, which closes the port and each open connection.
+  The relay of the Linux sandbox (`docs/specs/2026-11-17-session-sandbox.md`)
+  connects to the port while the helper lives, and the reap check
+  confirms that the helper ended. So the port number cannot go to the
+  proxy of another session while a process of this session can reach it.
 
 The engine knows the session from the port, never from the request. An
 adapter with no allowed host gets no egress port and no `HTTPS_PROXY`.
