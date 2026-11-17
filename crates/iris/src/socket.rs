@@ -396,10 +396,6 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
     };
     let need = || changeset()?.ok_or_else(|| usage("give the changeset ID, for example cs-12"));
     match request["verb"].as_str() {
-        Some("show") => {
-            only(&["changeset"])?;
-            Ok(Done::Document(need()?))
-        }
         Some("withdraw") => {
             only(&["changeset"])?;
             let cs = need()?;
@@ -499,11 +495,21 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             status(store, me).map(Done::Value)
         }
         Some("status") => Err(usage("status is a verb of a session")),
-        // The read verbs of a session come in card R4-04f.
+        // The read verbs of a session come in card R4-04f: `search`,
+        // `list`, and `show` of a message or an item (a `show` with no
+        // `changeset`).
         Some(v @ ("search" | "list")) if session => Err(Failure::new(
             code::DENIED,
             format!("{v} is not on the session socket yet (card R4-04f)"),
         )),
+        Some("show") if session && !args.contains_key("changeset") => Err(Failure::new(
+            code::DENIED,
+            "show of a message or an item is not on the session socket yet (card R4-04f)",
+        )),
+        Some("show") => {
+            only(&["changeset"])?;
+            Ok(Done::Document(need()?))
+        }
         Some("submit") => {
             only(&["changeset", "why"])?;
             let cs = need()?;
@@ -642,14 +648,25 @@ pub fn request_with(
     wait: Duration,
     recover: &str,
 ) -> Result<Value, Failure> {
+    request_at(&dir.join(SOCKET), verb, args, wait, recover)
+}
+
+/// [`request_with`] on the socket at `path`: `iris.sock` of a data folder,
+/// or `.iris/socket` of a session (session mode).
+pub fn request_at(
+    path: &Path,
+    verb: &str,
+    args: Value,
+    wait: Duration,
+    recover: &str,
+) -> Result<Value, Failure> {
     let mut line =
         serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
     line.push(b'\n');
     if line.len() > MAX_LINE {
         return Err(usage(MAX_LINE_TEXT));
     }
-    let path = dir.join(SOCKET);
-    let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|_| {
+    let mut stream = std::os::unix::net::UnixStream::connect(path).map_err(|_| {
         Failure::new(
             code::UNREACHABLE,
             "the engine is not reachable: start it with `iris serve`",
@@ -708,6 +725,7 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                 "add" => r["changeset"].is_string() && r["n"].is_u64(),
                 "job.run" => session_id(r),
                 "job.stop" => session_id(r) && r["reaped"].is_boolean(),
+                "status" => r["job"].is_string() && r["goal"].is_string() && r["state"].is_string(),
                 _ => r["id"].is_string() && r["state"].is_string() && r["actions"].is_array(),
             };
             valid.then(|| Ok(r.clone()))

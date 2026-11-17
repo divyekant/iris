@@ -9,7 +9,7 @@
 //! connections.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -47,8 +47,8 @@ struct Gate {
 #[derive(Default)]
 struct GateState {
     closing: bool,
-    /// The requests that passed the check of the session and have no
-    /// answer yet.
+    /// The connections with a whole request line and no whole answer yet:
+    /// each request that passed the check, and each refusal.
     busy: usize,
     /// A copy of each open connection, for the close.
     streams: HashMap<u64, UnixStream>,
@@ -179,10 +179,20 @@ fn connection(
     handler: &Handler,
     is_open: &IsOpen,
 ) -> std::io::Result<()> {
-    let line = read_line(&stream)?;
+    let line = frame(
+        Timed {
+            stream: &stream,
+            end: Instant::now() + READ_WAIT,
+        },
+        MAX_LINE,
+    )?;
     if line.is_empty() {
         return Ok(());
     }
+    // From here to the end of the answer, the shutdown waits for this
+    // connection (at most the drain wait): a taken request, and also a
+    // refusal, gets its whole answer before the close.
+    let (_reply, taken) = take(gate, is_open);
     let mut out = std::io::BufWriter::new(Deadline {
         stream: &stream,
         end: Instant::now() + WRITE_WAIT,
@@ -193,13 +203,8 @@ fn connection(
             error: "the request is longer than the limit (1.6 MiB), or has no newline".into(),
         };
         out.write_all(&crate::socket::failure_line(&f))?;
-    } else if take(gate, is_open) {
-        let done = handler(&line, &mut out);
-        let mut st = gate.state();
-        st.busy -= 1;
-        gate.changed.notify_all();
-        drop(st);
-        done?;
+    } else if taken {
+        handler(&line, &mut out)?;
     } else {
         let f = Failure {
             code: code::DENIED,
@@ -212,43 +217,52 @@ fn connection(
     stream.shutdown(Shutdown::Write)
 }
 
-/// The check of the session when the engine takes a request: the socket
-/// is open and the session is open in the store. A request that passes
-/// gets its answer before the shutdown closes the connection, for at most
-/// the drain wait.
-fn take(gate: &Gate, is_open: &IsOpen) -> bool {
-    let mut st = gate.state();
-    if st.closing || !is_open() {
-        return false;
+/// One answer in progress. The drop ends it, also on an error.
+struct Reply<'a>(&'a Gate);
+
+impl Drop for Reply<'_> {
+    fn drop(&mut self) {
+        let mut st = self.0.state();
+        st.busy -= 1;
+        self.0.changed.notify_all();
     }
-    st.busy += 1;
-    true
 }
 
-/// One request line, with its newline, for at most [`READ_WAIT`] and
-/// [`MAX_LINE`] bytes. Empty if no byte came.
-fn read_line(stream: &UnixStream) -> std::io::Result<Vec<u8>> {
-    let end = Instant::now() + READ_WAIT;
+/// Starts an answer, and checks the session: the socket is open and the
+/// session is open in the store. Gives `true` if the request may run.
+fn take<'a>(gate: &'a Gate, is_open: &IsOpen) -> (Reply<'a>, bool) {
+    let mut st = gate.state();
+    st.busy += 1;
+    let open = !st.closing && is_open();
+    (Reply(gate), open)
+}
+
+/// One request line from `r`: the bytes up to and with the first newline,
+/// at most `max` bytes. With no newline in `max` bytes, or at the end or
+/// the time limit of `r`, it gives the bytes that came (empty if none).
+fn frame(r: impl Read, max: usize) -> std::io::Result<Vec<u8>> {
     let mut line = Vec::new();
-    let mut r = BufReader::new(stream.take(MAX_LINE as u64));
-    loop {
-        let Some(left) = end.checked_duration_since(Instant::now()) else {
-            return Ok(line);
-        };
-        stream.set_read_timeout(Some(left.max(Duration::from_millis(1))))?;
-        match r.read_until(b'\n', &mut line) {
-            Ok(_) => return Ok(line),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                return Ok(line)
-            }
-            Err(e) => return Err(e),
+    match BufReader::new(r.take(max as u64)).read_until(b'\n', &mut line) {
+        Ok(_) => Ok(line),
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => Ok(line),
+        Err(e) => Err(e),
+    }
+}
+
+/// A reader that fails after `end`: one deadline for all reads.
+struct Timed<'a> {
+    stream: &'a UnixStream,
+    end: Instant,
+}
+
+impl Read for Timed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(ErrorKind::TimedOut.into());
         }
+        self.stream.set_read_timeout(Some(left))?;
+        (&mut &*self.stream).read(buf)
     }
 }
 
@@ -343,6 +357,86 @@ mod tests {
         s.shutdown(Duration::from_millis(300));
         assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
         assert_eq!(answer.join().unwrap(), "");
+    }
+
+    /// A small random number source for the property test.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self, n: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % n
+        }
+    }
+
+    /// Gives `bytes` in chunks of random sizes, then the time-out.
+    struct Chunks<'a> {
+        bytes: &'a [u8],
+        rng: Rng,
+    }
+
+    impl Read for Chunks<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.bytes.is_empty() {
+                return Err(ErrorKind::TimedOut.into());
+            }
+            let n = (1 + self.rng.next(8) as usize)
+                .min(buf.len())
+                .min(self.bytes.len());
+            buf[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn frame_gives_the_first_line_in_the_limit_for_each_input() {
+        let mut rng = Rng(7);
+        for _ in 0..5000 {
+            let len = rng.next(40) as usize;
+            // Few byte values, so a newline comes often.
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| [b'\n', b'a', b'{', 0, 0xff][rng.next(5) as usize])
+                .collect();
+            let max = 1 + rng.next(30) as usize;
+            let r = Chunks {
+                bytes: &bytes,
+                rng: Rng(rng.next(1000)),
+            };
+            let got = frame(r, max).unwrap();
+            let end = bytes
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(bytes.len(), |p| p + 1)
+                .min(max);
+            assert_eq!(got, bytes[..end], "{bytes:?} max {max}");
+        }
+    }
+
+    #[test]
+    fn a_slow_peer_gets_the_whole_answer_after_the_shutdown_starts() {
+        let path = dir("slowpeer").join("socket");
+        let listener = UnixListener::bind(&path).unwrap();
+        let handler: Arc<Handler> = Arc::new(|_, out| {
+            out.write_all(&vec![b'x'; 2 << 20])?;
+            out.write_all(b"\n")
+        });
+        let s = Server::start(listener, handler, Arc::new(|| true)).unwrap();
+        let mut c = UnixStream::connect(&path).unwrap();
+        c.write_all(b"{}\n").unwrap();
+        let reader = std::thread::spawn(move || {
+            // The peer reads only after the shutdown started.
+            std::thread::sleep(Duration::from_millis(500));
+            let mut out = Vec::new();
+            let _ = c.read_to_end(&mut out);
+            out.len()
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        s.shutdown(Duration::from_secs(10));
+        assert_eq!(reader.join().unwrap(), (2 << 20) + 1);
     }
 
     #[test]

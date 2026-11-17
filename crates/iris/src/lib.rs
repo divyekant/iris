@@ -521,34 +521,18 @@ pub fn version_line() -> String {
 /// Run one command. Gives the exit code (specification 2, section 8.4) and
 /// the error text for standard error.
 pub fn run(cli: Cli) -> Result<(), socket::Failure> {
+    // Session mode: never the store or the data folder, only the session
+    // socket.
+    if let Some(path) = session_socket() {
+        return session_run(&path, &cli.command);
+    }
     // The verbs that change changesets go through the engine socket, never
     // through the store (specification 2, section 8.1).
     let data = engine::data_dir(cli.data.clone()).map_err(|e| socket::Failure {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
-    let request = match &cli.command {
-        Command::Submit { id, why, json } => Some((
-            "submit",
-            serde_json::json!({ "changeset": id, "why": why }),
-            *json,
-        )),
-        Command::Changeset {
-            drafts: true, json, ..
-        } => Some(("drafts", serde_json::json!({}), *json)),
-        Command::Changeset { id, json, .. } => Some((
-            "show",
-            serde_json::json!({ "changeset": id.as_deref().unwrap_or_default() }),
-            *json,
-        )),
-        Command::Withdraw { id, json } => {
-            Some(("withdraw", serde_json::json!({ "changeset": id }), *json))
-        }
-        Command::Revise { id, json } => {
-            Some(("revise", serde_json::json!({ "changeset": id }), *json))
-        }
-        c => add_request(c)?.map(|r| ("add", r, false)),
-    };
+    let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
         let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
@@ -581,6 +565,118 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// The request on the engine socket of a verb that changes changesets
+/// (specification 2, section 8.1): the verb, its arguments and `--json`.
+/// `None` for the other verbs.
+fn socket_request(
+    c: &Command,
+) -> Result<Option<(&'static str, serde_json::Value, bool)>, socket::Failure> {
+    Ok(match c {
+        Command::Submit { id, why, json } => Some((
+            "submit",
+            serde_json::json!({ "changeset": id, "why": why }),
+            *json,
+        )),
+        Command::Changeset {
+            drafts: true, json, ..
+        } => Some(("drafts", serde_json::json!({}), *json)),
+        Command::Changeset { id, json, .. } => Some((
+            "show",
+            serde_json::json!({ "changeset": id.as_deref().unwrap_or_default() }),
+            *json,
+        )),
+        Command::Withdraw { id, json } => {
+            Some(("withdraw", serde_json::json!({ "changeset": id }), *json))
+        }
+        Command::Revise { id, json } => {
+            Some(("revise", serde_json::json!({ "changeset": id }), *json))
+        }
+        c => add_request(c)?.map(|r| ("add", r, false)),
+    })
+}
+
+/// The session socket of the job workspace that holds the current folder:
+/// `.iris/socket` of the nearest folder (the current folder or a folder
+/// above it) that has `.iris/`. `None` in host mode.
+pub fn session_socket() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let iris = dir.join(".iris");
+        if iris.is_dir() {
+            return Some(iris.join("socket"));
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// One command in session mode
+/// (docs/specs/2026-11-17-session-launcher.md, "The command"): each verb
+/// goes to the session socket at `path`, and the command never opens the
+/// store. Code 4 if the socket does not answer.
+fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failure> {
+    let unreachable = |f: socket::Failure| match f.code {
+        socket::code::UNREACHABLE => socket::Failure {
+            code: f.code,
+            error: format!("the session socket {} does not answer", path.display()),
+        },
+        _ => f,
+    };
+    if let Command::Status { json } = c {
+        let r = socket::request_at(
+            path,
+            "status",
+            serde_json::json!({}),
+            socket::ANSWER_WAIT,
+            "iris status",
+        )
+        .map_err(unreachable)?;
+        print!("{}", session_status_text(&r, *json));
+        return Ok(());
+    }
+    let Some((verb, args, json)) = socket_request(c)? else {
+        // The read verbs (R4-04f) and the host verbs: the engine gives
+        // nothing else to a session. With no socket file, code 4 here too.
+        use std::os::unix::fs::FileTypeExt;
+        let there = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
+        if !there {
+            return Err(unreachable(socket::Failure {
+                code: socket::code::UNREACHABLE,
+                error: String::new(),
+            }));
+        }
+        return Err(socket::Failure {
+            code: socket::code::DENIED,
+            error: "this verb is not a verb of a session".into(),
+        });
+    };
+    let out = socket_verb_at(path, verb, args, json).map_err(unreachable)?;
+    print!("{}", out.text);
+    out.failure.map_or(Ok(()), Err)
+}
+
+/// What `iris status` prints in session mode.
+fn session_status_text(r: &serde_json::Value, json: bool) -> String {
+    if json {
+        return format!("{r}\n");
+    }
+    let mut t = format!(
+        "{} ({})\nGoal: {}\n",
+        r["job"].as_str().unwrap_or_default(),
+        r["state"].as_str().unwrap_or_default(),
+        r["goal"].as_str().unwrap_or_default()
+    );
+    if let Some(due) = r["due"].as_str() {
+        t.push_str(&format!("Due: {due}\n"));
+    }
+    t.push_str(&format!(
+        "Granted: {} threads, {} messages, {} items\n",
+        r["threads"], r["messages"], r["items"]
+    ));
+    t
 }
 
 /// `iris job run` and `iris job stop`: requests on the engine socket.
@@ -665,8 +761,22 @@ pub fn socket_verb(
     args: serde_json::Value,
     json: bool,
 ) -> Result<Printed, socket::Failure> {
+    socket_verb_at(&dir.join(socket::SOCKET), verb, args, json)
+}
+
+/// [`socket_verb`] on the socket at `path`.
+fn socket_verb_at(
+    path: &std::path::Path,
+    verb: &str,
+    args: serde_json::Value,
+    json: bool,
+) -> Result<Printed, socket::Failure> {
     let id = args["changeset"].as_str().unwrap_or_default().to_string();
-    let r = socket::request(dir, verb, args)?;
+    let recover = format!(
+        "iris changeset {}",
+        args["changeset"].as_str().unwrap_or("--drafts")
+    );
+    let r = socket::request_at(path, verb, args, socket::ANSWER_WAIT, &recover)?;
     let mut failure = None;
     let text = match verb {
         "add" if json => format!("{r}\n"),

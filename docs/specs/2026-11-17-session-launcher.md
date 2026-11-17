@@ -686,7 +686,8 @@ back on the same connection, also when the verb itself ends the session
 (for example `iris done` of R4-03, which moves the job to `done` and so
 ends the session in the same transaction). The engine closes the session
 socket and each of its connections only after the reply of each request
-that passed the check, or after 10 seconds. The supervisor closes the pipe
+that passed the check, or after 10 seconds. The wait covers each answer
+that started, also a refusal, until its last byte is written. The supervisor closes the pipe
 of the helper after that. A request on a connection after the end gets
 exit code 3.
 
@@ -724,7 +725,9 @@ exit code 3.
   the command is in session mode. In session mode the command never opens
   the store, also for the read verbs of host mode. It sends each verb to
   `.iris/socket`. If the socket is not there, the command fails with exit
-  code 4.
+  code 4. `--data` has no effect in session mode. Until R4-04f, the
+  command refuses each verb that is not a session verb (`status` and the
+  write verbs of R4-03) with exit code 3, and sends nothing.
 
 ## Options not chosen
 
