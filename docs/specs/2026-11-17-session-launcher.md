@@ -449,9 +449,10 @@ The session socket answers these verbs of this card:
   `job_scope_message` of an active ref of the job that is also clean mail
   now (the predicate of the workspace build: `Mail::for_reader`, not
   hostile, not gone, not a signal source). It adds nothing to the
-  workspace. `list` gives only the items of the workspace, with the fields
-  of the item file. `show <i-id>` gives an item of the workspace with the
-  same fields. `show <m-id>` gives a granted message (the same check as
+  workspace. `list` gives only the items of the workspace that the current
+  grant still holds: each source of the item must pass the same check as
+  search now, also when the item file is still in the folder. `show <i-id>`
+  gives such an item with the same fields. `show <m-id>` gives a granted message (the same check as
   search) with the fields of a message of a thread file of the workspace:
   ID, date, the clean From, To, Cc and Subject, and the clean text. Any
   other ID, or a message that is not granted, gets exit code 3 with "not
@@ -469,8 +470,16 @@ above. Until
 then each other verb gets the exit code 3 and the reason. A host verb (for
 example `brief`, `ledger`, `job run`) gets exit code 3 in each case.
 
-Before each answer, the engine checks that the session is open in the
-store. A request on the socket of an ended session gets exit code 3.
+The engine checks that the session is open in the store when it takes a
+request, before it runs the verb. A request that arrives after the end
+gets exit code 3. A request that passed the check runs, and its reply goes
+back on the same connection, also when the verb itself ends the session
+(for example `iris done` of R4-03, which moves the job to `done` and so
+ends the session in the same transaction). The engine closes the session
+socket and each of its connections only after the reply of each request
+that passed the check, or after 10 seconds. The supervisor closes the pipe
+of the helper after that. A request on a connection after the end gets
+exit code 3.
 
 ### The command
 
@@ -549,6 +558,8 @@ is refused before a row is written.
 | A done job with a live session at the engine start | The build waits for the reap check of the session | Supervisor test |
 | A `search` in a session for a word of a message outside the grant | No result | Socket test |
 | A `search` or `show` in a session of a listed message that is now hostile, gone or a signal source | No result; `show` gives "not in this job" | Socket test |
+| A `list` or `show` of an item whose source became hostile after the build | Not listed; `show` gives "not in this job" | Socket test |
+| A verb that ends its own session (`iris done`) | Its reply comes back; the next request gets exit code 3 | Socket test with a test verb that ends the session |
 | `iris job stop` while a process that left the group still runs | Exit code 1 with the reason; the supervisor keeps calling `Isolation::stop` | Supervisor test with a test isolation whose `stop` fails once |
 | The helper is killed and the agent group lives | The reap check fails on rule 2; the session stays live and a `run` is refused | Supervisor test: kill the helper, keep the group |
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
