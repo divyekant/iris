@@ -261,3 +261,28 @@ fn the_cleanup_of_the_gone_message_keeps_the_notice() {
     assert_eq!((got.message, got.arrived_at), (Some(m), Some(NOW)));
     assert_eq!(store.check_watches(NOW).unwrap(), [], "no second notice");
 }
+
+#[test]
+fn a_watch_waits_for_the_link_check() {
+    let dir = TempDir::new("link-check");
+    let (store, acc) = setup(&dir);
+    let w = store.add_watch("from:ana", NOW).unwrap();
+    let id = put(&store, acc, msg("a", NOW, &["INBOX"], "x", true));
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO link_check(message_id) VALUES (?1)",
+                [id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.check_watches(NOW).unwrap(), []);
+    store
+        .write(|tx| {
+            tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(store.check_watches(NOW).unwrap(), [(w, id)]);
+}

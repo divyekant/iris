@@ -96,8 +96,9 @@ impl Query {
     }
 
     /// The first message that matches and arrived for a watch (card R5-07):
-    /// a row ID above `after`, a date from `since`, clean text (so the hostile
-    /// check ran), no hostile mark or hostile sender, and no label `SENT` or
+    /// a row ID above `after`, a date from `since`, clean text and no
+    /// `link_check` row (so the hostile checks ran), no hostile mark or
+    /// hostile sender, and no label `SENT` or
     /// `DRAFT`. The lowest row ID is the first arrival.
     pub(crate) fn first_arrival(
         &self,
@@ -112,6 +113,7 @@ impl Query {
         sql.push_str(&format!(
             " AND m.id > ?{a} AND m.internal_date >= ?{s}
               AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
+              AND NOT EXISTS (SELECT 1 FROM link_check c WHERE c.message_id = m.id)
               AND (m.hostile IS NULL OR m.hostile IN ('', '[]'))
               AND NOT EXISTS (SELECT 1 FROM header h JOIN sender x
                     ON x.address = h.from_addr COLLATE NOCASE

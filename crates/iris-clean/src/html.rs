@@ -90,6 +90,9 @@ struct Writer {
     shown: String,
     /// True while the writer writes a Markdown mark, not text.
     mark: bool,
+    /// True when the text or the href of a shown link holds a named
+    /// character reference that `decode_entities` does not know.
+    unread: bool,
     /// Each closed link whose text is not its target: `(text, href)`, with
     /// the href as the HTML gives it.
     links: Vec<(String, String)>,
@@ -187,6 +190,9 @@ impl Writer {
         }
         // The link check reads the text as a person sees it.
         if !self.full && !shown.is_empty() && shown != plain {
+            // A browser decodes each named reference of HTML; this decoder
+            // knows a short list. A link with another one is not checked.
+            self.unread |= unknown_entity(shown) || unknown_entity(&href);
             self.links.push((shown.to_string(), href.clone()));
         }
         // Percent-encode the characters that end a link target, and each
@@ -368,7 +374,7 @@ pub(crate) fn convert(html: &str, drop_quotes: bool) -> Converted {
     }
     w.close_link();
     Converted {
-        links_cut: w.full || deep_shown,
+        links_cut: w.full || deep_shown || w.unread,
         md: w.out,
         full: w.full,
         links: w.links,
@@ -452,6 +458,8 @@ fn open_effect(tag: &Tag, w: &mut Writer) {
             // The href as a browser reads it: `https:x.com` is a web link.
             let href = crate::browser_href(tag.attr("href").unwrap_or(""));
             let lower = href.to_ascii_lowercase();
+            // An unknown reference can hide a web target (`https&colon;`).
+            w.unread |= unknown_entity(&href);
             if ["http:", "https:", "mailto:"]
                 .iter()
                 .any(|p| lower.starts_with(p))
@@ -948,6 +956,18 @@ fn find_close(b: &[u8], from: usize, name: &str) -> usize {
         at = n + 2;
     }
     b.len()
+}
+
+/// True when `s` holds `&`, a name and `;`: a named character reference
+/// that [`decode_entities`] left as it is.
+fn unknown_entity(s: &str) -> bool {
+    s.match_indices('&').any(|(i, _)| {
+        let name = &s[i + 1..];
+        let len = name.bytes().take_while(u8::is_ascii_alphanumeric).count();
+        len > 0
+            && name.as_bytes()[0].is_ascii_alphabetic()
+            && name.as_bytes().get(len) == Some(&b';')
+    })
 }
 
 /// Decode HTML character references (`&amp;`, `&#233;`, `&#xE9;`).

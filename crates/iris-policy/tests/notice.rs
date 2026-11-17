@@ -473,3 +473,23 @@ fn a_form_rule_waits_for_a_late_understanding() {
     notice::refresh(&s, NOW).unwrap();
     assert_eq!(notices(&s), [(1, 4)]);
 }
+
+#[test]
+fn a_mail_waits_for_its_link_check_then_gets_one_notice() {
+    let (_d, s) = store("link-check");
+    activate(&s, ANN);
+    let id = put(&s, &mail(), 0);
+    // A saved mail from before the mark `link` (migration 18).
+    s.write(|tx| {
+        tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [id])?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(notice::refresh(&s, NOW).unwrap().is_empty());
+    s.write(|tx| {
+        tx.execute("DELETE FROM link_check WHERE message_id = ?1", [id])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(notice::refresh(&s, NOW).unwrap().len(), 1);
+}
