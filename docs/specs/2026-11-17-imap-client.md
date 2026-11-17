@@ -37,8 +37,9 @@ does not depend on it, so it is built first.
   send (SMTP). The apply of actions to IMAP is a later card.
 - IMAP4rev2 (RFC 9051) and `UTF8=ACCEPT` (RFC 6855). The client speaks
   IMAP4rev1 and turns on neither, so the server sends folder names in
-  modified UTF-7, which is ASCII (RFC 3501 section 5.1.3). A server
-  without the capability `IMAP4rev1` is `Error::Missing`.
+  modified UTF-7, which is ASCII (RFC 3501 section 5.1.3). The parser
+  refuses a `CAPABILITY` list without `IMAP4rev1`, so such a server gives
+  `Error::Protocol`.
 - `STARTTLS` on port 143 and plain connections. The client connects with
   TLS from the first byte (port 993) only.
 - `IDLE` and `NOTIFY` (push). The engine syncs on its timer.
@@ -77,10 +78,17 @@ All reads use UIDs, never message sequence numbers.
 |---|---|---|
 | `folders` | `LIST "" "*"` | name (as the server sends it), delimiter, special use (`\Sent`, `\Trash`, `\Drafts`, `\Junk`, `\Archive`, `\All`, `\Flagged`), and if it can be selected |
 | `examine(folder)` | `EXAMINE "<folder>"`, with `(CONDSTORE)` when the server has it | `UIDVALIDITY`, `UIDNEXT`, the count, and `HIGHESTMODSEQ` or none |
-| `changes(since, each)` | `UID FETCH 1:* (UID FLAGS) (CHANGEDSINCE <since>)`, plus `VANISHED` when `QRESYNC` is on | each changed message (UID, flags, mod-sequence) and each removed UID range |
-| `list(from, to, each)` | `UID FETCH <from>:<to> (UID FLAGS)` | each message in the range |
+| `changes(since, each)` | `UID FETCH 1:* (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE <since>)`, plus `VANISHED` when `QRESYNC` is on | each changed message (an entry) and each removed UID range |
+| `list(from, to, each)` | `UID FETCH <from>:<to> (UID FLAGS INTERNALDATE RFC822.SIZE)` | each message in the range (an entry) |
 | `fetch_raw(uid, sink)` | `UID FETCH <uid> (UID BODY.PEEK[])` | the RFC 5322 bytes, streamed to the sink |
 
+- An entry has the UID, the flags, the mod-sequence (with `CONDSTORE`),
+  the `INTERNALDATE` (the arrival time at the server, as the provider
+  internal date of spec 1) and the `RFC822.SIZE`.
+- IMAP has no thread ID in RFC 3501. Part B finds the thread of a message
+  from its `Message-ID`, `In-Reply-To` and `References` headers in the raw
+  bytes, as spec 1 does for a message with no provider thread. It can use
+  `THREADID` (RFC 8474) later, where the server has it.
 - `EXAMINE` opens a folder read-only. The client never uses `SELECT`, so
   no read sets `\Seen` and no read changes the mailbox. `BODY.PEEK[]`
   does not set `\Seen` either.
@@ -133,6 +141,20 @@ The key of a mirror entry is (folder, `UIDVALIDITY`, UID). When the
    brought back under a new UID is a new entry.
 3. After a crash between the steps, the saved `UIDVALIDITY` is the new
    one with no checkpoint, so the next sync does the full list again.
+
+A folder can go away (a delete or a rename at the provider). At each
+sync, part B compares the folder list of a successful `folders` call with
+the folders that it has:
+
+1. A folder that is not in the list is gone. In one transaction, part B
+   marks each entry of the folder gone (as above) and deletes the
+   checkpoint of the folder. A renamed folder is a gone folder and a new
+   folder.
+2. If `folders` fails, part B changes nothing and the sync of the account
+   stops with the error.
+3. After a crash before the transaction, the next sync does the same
+   compare again. The transaction is all or nothing, so a repeat gives the
+   same result.
 
 The same message in two folders is two entries. Part B decides how the
 mirror shows one message in two folders (see Open questions).
@@ -246,7 +268,8 @@ None. Nothing calls the crate until part B.
 ## Plan
 
 1. R6-03 part A: this spec.
-2. R6-03 part A: `crates/iris-fakeimap`, the test server.
-3. R6-03 part A: `crates/iris-imap`, the client and its tests.
-4. R6-03 part B (after R6-10): the provider trait implementation, the
+2. R6-03 part A: `crates/iris-imap`, the client, and
+   `crates/iris-fakeimap`, the test server, in one PR. The test server is
+   test code, as `iris-fakegmail` is.
+3. R6-03 part B (after R6-10): the provider trait implementation, the
    sealed password, the sync and the wiring.
