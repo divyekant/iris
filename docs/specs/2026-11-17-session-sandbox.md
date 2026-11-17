@@ -1,4 +1,4 @@
-# Spec: the sandbox of a session on Linux and macOS
+# Spec: the sandbox of a session on Linux
 
 - Date: 2026-11-17
 - Card: R4-05 (sandbox for sessions on macOS and Linux: no network and no
@@ -20,9 +20,10 @@ stops these actions when the agent follows such a message.
 
 ## Goal
 
-1. On Linux and on macOS, `system(data_dir)` gives an isolation that passes
-   its check on a supported system, and a reason for the person on a system
-   that is not supported.
+1. On Linux, `system(data_dir)` gives an isolation that passes its check
+   on a supported system, and a reason for the person on a system that is
+   not supported. On macOS and each other system it gives the reason (see
+   [macOS](#macos)).
 2. A process of a session cannot open a network connection, other than to
    the egress port of its own session.
 3. A process of a session cannot read or write the data folder, other than
@@ -32,14 +33,14 @@ stops these actions when the agent follows such a message.
 4. A process of a session cannot write a file outside its workspace and its
    private home. So it cannot change a settings file that a program outside
    the sandbox runs later (for example the hooks of an agent tool).
-5. No process of a session outlives its helper (the lifetime rule), with
-   the one macOS limit that "Lifetime on macOS" gives.
+5. No process of a session outlives its helper (the lifetime rule).
 6. `stop` and `ended` find the processes of a session after a restart of
    the engine.
 
 ## Not in scope
 
-- A sandbox for Windows or another system. `system()` gives the reason.
+- A sandbox for macOS, Windows or another system. `system()` gives the
+  reason. A new card designs the macOS sandbox (see [macOS](#macos)).
 - Limits of CPU, memory or disk for a session.
 - A filter of the files that the agent sends to its own model host. The
   person chose that host (launcher spec, "Model egress").
@@ -173,100 +174,48 @@ listener: its namespace has no listening socket and no route.
 
 ### macOS
 
-The macOS isolation uses `/usr/bin/sandbox-exec` with a profile in the
-sandbox profile language (SBPL) that `command()` writes as one argument
-(`-p`). macOS marks `sandbox-exec` as deprecated, but it is part of each
-release, and Codex and Claude Code use it for their own sandboxes. The
-profile starts from the base policy of Codex (Apache-2.0, the license of
-Iris), with the source named in a comment:
+This card gives no isolation on macOS. `system()` gives the reason:
+"agent sessions need Linux: macOS has no sandbox that can stop each
+process of a session for sure (R4-05)". So `iris job run` is refused on
+the Mac, and no agent runs there with a weaker sandbox.
 
-- `(deny default)`.
-- `process-fork`, `process-exec`, and `signal` and `process-info` only to
-  processes of the same sandbox.
-- The `sysctl-read`, `mach-lookup` and other system rules of the Codex base
-  policy, and the Codex network rules for TLS certificate checks
-  (`com.apple.SecurityServer`, `com.apple.trustd.agent`,
-  `com.apple.ocspd`). No other Mach service.
-- `network-outbound` only to `(remote ip "localhost:<port>")` and to the
-  session socket `<workspace>/.iris/socket`. No `network-bind` and no
-  `network-inbound`.
-- The file view of [Files](#files).
+The reason: `sandbox-exec` can limit the files and the network of a
+process, but macOS gives no public mechanism that finds each process of
+one sandbox and stops it with no race:
 
-`command()` runs the adapter through `/usr/bin/env` inside the sandbox, so
-that `HOME` and `TMPDIR` point to the private home of the session:
-`sandbox-exec -p <profile> /usr/bin/env HOME=<home> TMPDIR=<home>/tmp
-<program> <args>`.
+- No PID namespace and no parent death signal, so the lifetime rule has
+  no kernel support.
+- A list of the processes (`proc_listallpids`) and a check of each one
+  (`sandbox_check`) is not atomic. A process that forks and exits again
+  and again can stay out of each list. Then `ended` is true while a child
+  runs, the engine reaps the session, and the child can read the mail that
+  the next session of the same job gets in the same workspace path.
+- `kqueue` with `NOTE_TRACK` (follow each fork) is not supported on
+  macOS. Endpoint Security needs an entitlement and root.
 
-#### Lifetime on macOS
-
-macOS has no PID namespace and no parent death signal. The isolation finds
-the processes of a session with `sandbox_check` of `libsystem_sandbox`.
-Each profile allows the metadata read of one marker path
-`/private/var/empty/.iris-<folder hash>-se-<id>` and denies the marker
-`/private/var/empty/.iris-deny`. Neither path exists, and the user cannot
-make a file in `/private/var/empty`. A process is in the sandbox of the
-session only if:
-
-- it has the user ID of the engine;
-- it is in a sandbox (`sandbox_check` with no filter);
-- its sandbox allows the session marker and denies the deny marker.
-
-A foreign sandbox that denies by default denies the session marker. A
-foreign sandbox that allows file reads allows the deny marker. So only a
-profile of this isolation, for this data folder and this session, passes
-the three tests. A process cannot leave its sandbox, also after `setsid`
-or an exit of its parent.
-
-- `stop(session)` lists the processes (`proc_listallpids`), sends
-  `SIGKILL` to each process of the session, and lists again until no
-  process of the session remains, for at most 5 seconds. Before each
-  signal it reads the start time of the process (`proc_pidinfo`), checks
-  the three tests again, and reads the start time again; it sends the
-  signal only if the two start times agree. macOS has no `pidfd`, so a
-  short window stays between the last check and `kill`, in which the
-  process can exit and the system can give its ID to a new process.
-  Known limit, with an issue. The process ID of macOS goes up to 99999
-  before it wraps, which makes a reuse in this window unlikely.
-- `ended(session)` is true if one list finds no process of the session.
-- `name(session)` is the session marker path.
-
-`spawn()` on macOS also starts a watchdog: before it starts the agent, the
-helper forks one child that stays outside the sandbox. The helper is
-single-threaded at that moment (it starts its threads after `spawn`). The
-watchdog holds the read end of a pipe, and the helper holds the write end.
-When the pipe ends (the helper ended for any reason), the watchdog runs
-`stop(session)` and exits. The profile denies a signal from the sandbox to
-a process outside it, so the agent cannot kill the watchdog.
-
-Known limit: if the helper and the watchdog both end with `SIGKILL` (for
-example a person kills them both, or the system ends them for memory), a
-process of the session can run until the next engine start. The engine
-start calls `stop` for each live session (launcher spec, "Engine start
-and stop"). Such a process has no egress proxy, so it has no network, and
-it can write only its workspace and its private home. This limit gets an
-issue.
+The macOS card looks for a sound design, for example a small Linux virtual
+machine (macOS 26 has the Containerization framework) that runs this Linux
+sandbox. This decision and the card get an issue.
 
 ### Files
 
-Both systems use one view: the agent sees only these paths.
+The agent sees only these paths.
 
 | Path | Access |
 |---|---|
 | The workspace of the job | Read and write |
 | The private home of the session | Read and write |
-| System programs and libraries: Linux `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt` and `/nix/store` if present; macOS `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/private/etc`, `/opt/homebrew` and the system paths of the Codex profile | Read |
+| System programs and libraries: `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt` and `/nix/store`, each one if present | Read |
 | The file of the adapter program (its real path) and the file of the `iris` program | Read |
-| Linux: a new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
+| A new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
 
-Each other path is not visible (Linux) or denied (macOS). This holds the
+Each other path is not visible. This holds the
 data folder, the home folder of the person and each socket outside the
 workspace (for example a Docker or SSH agent socket, which a network
-namespace does not block on Linux).
+namespace does not block).
 
-- The private home: Linux mounts an empty `tmpfs` at the path of `HOME`.
-  macOS uses the folder `<data dir>/sessions/se-<id>.home` (mode `0700`),
-  which the isolation makes in `command()`. The private home has no file of
-  the person. So the agent tool of a session authenticates with its key
+- The private home: an empty `tmpfs` at the path of `HOME`. It has no
+  file of the person, and it is gone when the session ends. So the agent tool of a session authenticates with its key
   variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or a `pass_env` of
   `agents.toml`). This card adds `CLAUDE_CODE_OAUTH_TOKEN` to the variables
   of the `claude-code` adapter, so a person with a Claude subscription can
@@ -279,22 +228,19 @@ namespace does not block on Linux).
   an issue: a later card can add a list of read paths to `agents.toml`,
   which the person sets.
 - The data folder is always empty in the view: the isolation mounts an
-  empty folder (Linux) or denies the path (macOS) after each read path,
+  empty `tmpfs` there after each read path,
   and only then gives the workspace. So a system folder that holds the
   data folder (for example a data folder in `/opt`) does not show it.
-- On Linux the workspace is mounted after the private home, so the view
+- The workspace is mounted after the private home, so the view
   also holds when the data folder is inside `HOME`.
 
 ### Check
 
-- Linux: `bwrap` is found, and one probe run of `bwrap` with the options
-  of `command()` and the program `true` exits with 0 in 5 seconds. The
-  kernel gives a `pidfd` (`pidfd_open` exists). A system that refuses user
-  namespaces (for example an AppArmor rule) fails the probe; the reason
-  names the `bwrap` error.
-- macOS: `/usr/bin/sandbox-exec` exists, a probe run with the profile of a
-  probe session runs `/usr/bin/true`, and a probe `sleep` in that profile
-  is found by the process list, then stopped.
+`bwrap` is found, and one probe run of `bwrap` with the options of
+`command()` and the program `true` exits with 0 in 5 seconds. The kernel
+gives a `pidfd` (`pidfd_open` exists, Linux 5.3). A system that refuses
+user namespaces (for example an AppArmor rule) fails the probe; the reason
+names the `bwrap` error.
 
 ## Options not chosen
 
@@ -317,8 +263,11 @@ namespace does not block on Linux).
 - A file view that shows the whole disk read-only, minus a deny list
   (Anthropic `sandbox-runtime`): a deny list misses each secret and each
   socket that it does not name.
-- On macOS, the process group or the parent process ID to find the
-  processes of a session: `setsid` and an exit of the parent remove both.
+- On macOS, `sandbox-exec` with a process list (`proc_listallpids` and
+  `sandbox_check`), and a watchdog process: the list is not atomic, so a
+  process that forks and exits again and again can stay out of it (see
+  [macOS](#macos)). The process group and the parent process ID do not
+  help either: `setsid` and an exit of the parent remove both.
 
 ## Failure list
 
@@ -346,15 +295,13 @@ before the agent runs, or `ended` is false.
 | The info line does not come in 5 seconds, or is not JSON | `spawn` fails and kills `bwrap` | Unit test of the parser (property test) |
 | A ninth connection to the relay | Closed at once | Linux relay test |
 | A read path that holds the data folder | `check` fails | Unit test |
-| The agent kills the watchdog (macOS) | Refused by the profile | Mac test (pending, issue) |
-| The helper and the watchdog both end with `SIGKILL` (macOS) | Known limit: the process runs with no network until the next engine start | Issue |
+| `iris job run` on macOS or another system | `system()` gives the reason, and `run` is refused before a row is written | Unit test that runs on each system that is not Linux |
 
 ## Impact
 
 - `crates/iris-session/src/isolation.rs`: `system(data_dir)`, the trait
   method `spawn`, and the selection of the system.
-- New files beside it: `isolation_linux.rs`, `isolation_macos.rs`, the
-  profile `seatbelt.sbpl` and their tests.
+- New files beside it: `isolation_linux.rs` and its tests.
 - `crates/iris-session/src/hold.rs`: the helper calls `Isolation::spawn`.
 - `crates/iris-session/src/config.rs`: `CLAUDE_CODE_OAUTH_TOKEN` in the
   `claude-code` adapter.
@@ -366,8 +313,7 @@ before the agent runs, or `ended` is false.
 Memory: the Linux relay uses one accept thread, and two threads with one
 16 KiB buffer each for each open connection, at most 8 connections: about
 300 KiB at most in the helper. The private home on Linux is a `tmpfs`, so
-the files of the agent in it count as memory until the session ends. The
-macOS watchdog is one more small process for each session.
+the files of the agent in it count as memory until the session ends.
 
 ## Assumptions
 
@@ -393,15 +339,8 @@ macOS watchdog is one more small process for each session.
 - `bwrap` of Ubuntu 24.04 can make a user namespace under the AppArmor rule
   of that release. Evidence: pending. If not, `check` fails with the reason
   and no agent runs (fail closed).
-- `sandbox_check` gives the result of the profile of another process of the
-  same user, for a path that does not exist. Evidence: pending, the Mac
-  check (issue). If not, the macOS `check` fails (the probe `sleep` is not
-  found) and no agent runs.
-- `(remote ip "localhost:<port>")` permits the port on `127.0.0.1` and
-  `::1` only. Evidence: the Codex network policy uses the same filter;
-  pending the Mac check.
 - `claude -p` runs with an empty home and `ANTHROPIC_API_KEY` or
-  `CLAUDE_CODE_OAUTH_TOKEN`. Evidence: pending, the Mac check of the
+  `CLAUDE_CODE_OAUTH_TOKEN`. Evidence: pending, the check of the
   launcher spec (issue #404). If not, the session ends with the error of
   the tool, and no mail leaves.
 
@@ -429,7 +368,7 @@ signals to processes of the session.
 4. `ended` is false while a process of the session runs, and true after
    `stop`. Red on any other answer.
 5. With no `bwrap`, `check` fails and names `bubblewrap`.
-6. On macOS, the same tests pass on the Mac of the owner (pending, issue).
+6. On macOS, `system()` gives the reason. Red if it gives an isolation.
 
 ## Verify
 
@@ -438,8 +377,6 @@ cargo test -p iris-session --lib isolation
 scripts/local-ci/run.sh
 ```
 
-On the Mac: `cargo test -p iris-session --lib isolation` runs the macOS
-tests.
 
 ## Rollout
 
@@ -448,31 +385,30 @@ A Linux server needs the package `bubblewrap`; `docs/DEPLOYMENT.md` says so.
 
 ## Risks
 
-- A sandbox escape in `bwrap` or in the macOS sandbox. Both are maintained
-  by their owners. Rollback: make `system()` return the error again; no
+- A sandbox escape in `bwrap` or in the kernel. Both are maintained by
+  their owners. Rollback: make `system()` return the error again; no
   agent runs.
-- The macOS profile can block a call that an agent tool needs. The tool
-  then fails, and no data leaves. The Mac check finds such a call.
+- The view can miss a file that an agent tool needs. The tool then fails,
+  and no data leaves. The check of issue #404 finds such a file.
 
 ## Plan
 
 1. R4-05 spec: this file.
 2. R4-05 Linux: the interface change, the Linux isolation, the relay and
    the tests.
-3. R4-05 macOS: the profile, the process list, the watchdog, and a Mac
-   check by the owner.
+3. A new card: the design of a macOS sandbox (issue).
 
 ## Spec checks
 
 - [x] Each assumption holds with a second caller, worker or tab: each
-  session has its own record, namespace, marker and listener.
+  session has its own record, namespace and listener.
 - [x] Each assumption holds when an outcome is unknown: a crash between
   the record and the start leaves a record of an init that dies with
   `bwrap`; `ended` reads the process, not the record alone.
 - [x] Each dropped mechanism was dropped for a reason (Options not chosen).
 - [x] No step is check-then-act: the signal goes through a `pidfd` after
   the namespace check, so a reused process ID is never signaled.
-- [x] Each property has a test or a pending Mac check.
+- [x] Each property has a test.
 - [x] The spec addresses the hardest problem: the lifetime rule and the one
   network path.
 - [x] Each acceptance criterion can go red.
