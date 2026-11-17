@@ -117,6 +117,11 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     if expire(tx, action)? {
         return Ok(Outcome::Expired);
     }
+    // In the transaction of the item writes: a revoke that commits first
+    // stops the action (docs/specs/2026-11-17-job-verbs.md).
+    if let Some(why) = crate::deny_outside_grant(tx, action)? {
+        return Ok(Outcome::Denied(why));
+    }
     if decided_by != "person" && iris_policy::active(tx)?.policy.mode == iris_policy::Mode::Observe
     {
         return Ok(Outcome::Waiting);

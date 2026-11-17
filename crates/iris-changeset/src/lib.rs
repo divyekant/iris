@@ -44,6 +44,9 @@ pub enum Error {
     NotFound,
     /// The request does not agree with the state of the changeset.
     Refused(String),
+    /// An action of a job session is outside the grant of its job
+    /// (docs/specs/2026-11-17-job-verbs.md). Nothing changed.
+    Denied(String),
 }
 
 impl fmt::Display for Error {
@@ -52,6 +55,7 @@ impl fmt::Display for Error {
             Error::Store(e) => write!(f, "{e}"),
             Error::NotFound => write!(f, "no changeset or action has this ID"),
             Error::Refused(why) => write!(f, "refused: {why}"),
+            Error::Denied(why) => write!(f, "denied: {why}"),
         }
     }
 }
@@ -252,6 +256,10 @@ pub fn create(store: &Store, author: &Author, now_ms: i64) -> Result<i64> {
 /// [`create`] in a write transaction of the caller, with the same checks.
 /// Use [`transaction`] to run more than one step in one transaction.
 pub fn create_in(c: &Connection, author: &Author, now_ms: i64) -> Result<i64> {
+    if let Some(job) = &author.job {
+        job_author(c, author, job)?;
+        no_other_draft(c, job)?;
+    }
     c.execute(
         "INSERT INTO changeset(author_kind, author_name, author_session, author_job, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -387,6 +395,9 @@ pub fn revise(store: &Store, changeset: i64, author: &Author) -> Result<i64> {
 /// Use [`transaction`] to run more than one step in one transaction.
 pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64> {
     check_author(c, changeset, author)?;
+    if let Some(job) = &author.job {
+        no_other_draft(c, job)?;
+    }
     let (state, submitted): (String, Option<i64>) = c.query_row(
         "SELECT state, submitted_at FROM changeset WHERE id = ?1",
         [changeset],
@@ -409,7 +420,8 @@ pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64>
     )?)
 }
 
-/// The same `kind`, `name` and `session` (section 5.5).
+/// The same `kind`, `name` and `session`, or the same `kind` and `job`
+/// for a job author (section 5.5).
 /// Withdraw a changeset (section 5.5). `author` is the author of the
 /// changeset (`iris withdraw`), or `None` for the person in the web client.
 /// Each open action and each draft action becomes `cancelled` in the same
@@ -463,19 +475,78 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
     )?)
 }
 
+/// Refuse each change by a job author that is not an agent session of a
+/// job that is canonical, exists and is not `done` (issue #247): only an
+/// agent session has a job, and a done job changes nothing.
+fn job_author(c: &Connection, author: &Author, job: &str) -> Result<()> {
+    if author.kind != AuthorKind::Agent || author.session.is_none() {
+        return Err(refused("only an agent session has a job".into()));
+    }
+    let open: bool = match iris_job::parse_job_id(job) {
+        Some(id) => c
+            .query_row("SELECT state <> 'done' FROM job WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or(false),
+        None => false,
+    };
+    if !open {
+        return Err(refused(format!("{job} is not a job that is open")));
+    }
+    Ok(())
+}
+
+/// The draft of a job: its changeset whose newest revision is not
+/// submitted, and that is not withdrawn. A job has at most one
+/// (docs/specs/2026-11-17-job-verbs.md, section 2).
+pub fn job_draft(c: &Connection, job: &str) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT id FROM changeset
+             WHERE author_job = ?1 AND submitted_at IS NULL AND state <> 'withdrawn'
+             ORDER BY id DESC LIMIT 1",
+        [job],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// Refuse a second draft of a job.
+fn no_other_draft(c: &Connection, job: &str) -> Result<()> {
+    match job_draft(c, job)? {
+        Some(cs) => Err(refused(format!(
+            "{job} has the draft {}: submit or withdraw it first",
+            format_changeset_id(cs)
+        ))),
+        None => Ok(()),
+    }
+}
+
 fn check_author(c: &Connection, changeset: i64, author: &Author) -> Result<()> {
     let same: Option<bool> = c
         .query_row(
-            "SELECT author_kind = ?2 AND author_name IS ?3 AND author_session IS ?4
+            // A changeset of a job belongs to the job: a later session of
+            // the job continues it (docs/specs/2026-11-17-job-verbs.md).
+            "SELECT author_kind = ?2 AND author_job IS ?5
+                    AND (?5 IS NOT NULL OR (author_name IS ?3 AND author_session IS ?4))
              FROM changeset WHERE id = ?1",
-            params![changeset, author.kind.as_str(), author.name, author.session],
+            params![
+                changeset,
+                author.kind.as_str(),
+                author.name,
+                author.session,
+                author.job
+            ],
             |r| r.get(0),
         )
         .optional()?;
     match same {
         None => Err(Error::NotFound),
         Some(false) => Err(refused("only the author can do this".into())),
-        Some(true) => Ok(()),
+        Some(true) => match &author.job {
+            Some(job) => job_author(c, author, job),
+            None => Ok(()),
+        },
     }
 }
 
@@ -526,15 +597,28 @@ pub fn submit_in(
     // until the end of the submit; stream the reasons if an author can
     // send a very large number of actions.
     let mut denials = Vec::new();
+    // A job session: the grant of the job now. Each action must be in it,
+    // else the whole submit fails and the caller rolls back (job verbs
+    // spec). The check reads the rows of the targets, before any other
+    // check can clear them, so no other denial hides a target outside the
+    // grant.
+    let job = changeset_job(c, changeset)?;
+    let grant = job.map(|j| grant_of(c, j)).transpose()?;
     let mut last = 0;
     while let Some((id, n, verb, targets, args)) = next_action(c, changeset, revision, last)? {
         last = n;
         let verb = Verb::parse(&verb).expect("the CHECK of the table");
         // Only the targets give the rows: drop rows of another writer.
         clear(c, id)?;
+        let resolved = resolve(c, id, verb, &targets)?;
+        if let (Some(job), Some(grant)) = (job, &grant) {
+            if let Some(why) = outside_grant(c, id, job, grant, Phase::Submit)? {
+                return Err(Error::Denied(why));
+            }
+        }
         let mut denial = match supported(c, verb, &args)? {
             Err(why) => Some(why),
-            Ok(()) => resolve(c, id, verb, &targets)?,
+            Ok(()) => resolved,
         };
         if denial.is_none() && verb == Verb::Correct {
             denial = check_correct(c, id, &args, now_ms)?;
@@ -612,6 +696,154 @@ pub fn submit_in(
         )?;
     }
     Ok(())
+}
+
+/// The job of the author of a changeset, or `None` for an author with no
+/// job. A job text that is not canonical is job 0, which has no grant.
+fn changeset_job(c: &Connection, changeset: i64) -> Result<Option<i64>> {
+    let job: Option<Option<String>> = c
+        .query_row(
+            "SELECT author_job FROM changeset WHERE id = ?1",
+            [changeset],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(job
+        .flatten()
+        .map(|j| iris_job::parse_job_id(&j).unwrap_or(0)))
+}
+
+/// The grant of `job`, or an empty grant for a job that does not exist.
+fn grant_of(c: &Connection, job: i64) -> Result<iris_workspace::Grant> {
+    match iris_workspace::grant_in(c, job) {
+        Ok(g) => Ok(g),
+        Err(iris_job::Error::NotFound) => Ok(iris_workspace::Grant::default()),
+        Err(iris_job::Error::Store(e)) => Err(Error::Store(e)),
+        Err(e) => Err(Error::Store(iris_store::Error::Query(e.to_string()))),
+    }
+}
+
+/// Why an action of a job session is outside the grant of its job now, or
+/// `None` when the action is in the grant, or its author has no job. The
+/// apply checks each action with this function before each change
+/// (docs/specs/2026-11-17-job-verbs.md, section 4).
+pub fn grant_denial(c: &Connection, action: i64) -> Result<Option<String>> {
+    let changeset: Option<i64> = c
+        .query_row(
+            "SELECT changeset_id FROM changeset_action WHERE id = ?1",
+            [action],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(changeset) = changeset else {
+        return Err(Error::NotFound);
+    };
+    let Some(job) = changeset_job(c, changeset)? else {
+        return Ok(None);
+    };
+    let grant = grant_of(c, job)?;
+    outside_grant(c, action, job, &grant, Phase::Apply)
+}
+
+/// When the grant check runs: the targets are only declared at submit,
+/// and resolved to rows after it.
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Submit,
+    Apply,
+}
+
+/// The checks of one action against the grant of its job: no draft or
+/// send, each resolved message granted, each item an item of the workspace.
+/// Invariant: an action of a session changes only granted rows, and a
+/// target that gives no row never passes. At submit, each declared target
+/// must also be in the grant, so a target that gives no row (each message
+/// gone, no such row, an ID that does not parse) fails. After submit, the
+/// rows are fixed: the check reads them, not the targets, because sync can
+/// move a granted message to another thread. An action with no row fails.
+fn outside_grant(
+    c: &Connection,
+    action: i64,
+    job: i64,
+    grant: &iris_workspace::Grant,
+    phase: Phase,
+) -> Result<Option<String>> {
+    let j = iris_job::format_job_id(job);
+    let (verb, targets): (String, String) = c.query_row(
+        "SELECT verb, targets FROM changeset_action WHERE id = ?1",
+        [action],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if WRITE_VERBS.contains(&verb.as_str()) {
+        return Ok(Some(format!(
+            "a session of {j} cannot {verb}: a job has no grant of an account or a draft"
+        )));
+    }
+    let outside = || Ok(Some(format!("the targets are outside the grant of {j}")));
+    if phase == Phase::Submit {
+        // Fail closed: a target list that does not parse is outside the grant.
+        let Ok(groups) = serde_json::from_str::<Map<String, Value>>(&targets) else {
+            return outside();
+        };
+        for ids in groups.values() {
+            let Value::Array(ids) = ids else {
+                return outside();
+            };
+            for id in ids {
+                let Some((kind, row)) = id.as_str().and_then(parse_id) else {
+                    return outside();
+                };
+                let granted = match kind {
+                    Kind::Thread => grant.has_thread(row),
+                    Kind::Message => grant.messages.contains(&row),
+                    Kind::Commitment
+                    | Kind::Conversation
+                    | Kind::Record
+                    | Kind::Feed
+                    | Kind::Signal => grant.items.contains(&row),
+                    _ => false,
+                };
+                if !granted {
+                    let id = format_id(kind, row);
+                    return Ok(Some(format!("{id} is outside the grant of {j}")));
+                }
+            }
+        }
+    } else {
+        let rows: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM action_message WHERE action_id = ?1)
+                 OR EXISTS (SELECT 1 FROM action_item WHERE action_id = ?1)",
+            [action],
+            |r| r.get(0),
+        )?;
+        if !rows {
+            return outside();
+        }
+    }
+    let mut q = c.prepare_cached(
+        "SELECT message_id FROM action_message WHERE action_id = ?1 ORDER BY message_id",
+    )?;
+    for m in q.query_map([action], |r| r.get::<_, i64>(0))? {
+        let m = m?;
+        if !grant.messages.contains(&m) {
+            let id = format_id(Kind::Message, m);
+            return Ok(Some(format!("{id} is outside the grant of {j}")));
+        }
+    }
+    let mut q = c.prepare_cached(
+        "SELECT a.item_id, i.doc ->> '$.id' FROM action_item a
+         LEFT JOIN item i ON i.id = a.item_id WHERE a.action_id = ?1 ORDER BY a.item_id",
+    )?;
+    for row in q.query_map([action], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+    })? {
+        let (item, id) = row?;
+        if !grant.items.contains(&item) {
+            let id = id.unwrap_or_else(|| format!("item {item}"));
+            return Ok(Some(format!("{id} is not an item of the workspace of {j}")));
+        }
+    }
+    Ok(None)
 }
 
 type ActionRow = (i64, i64, String, String, String);

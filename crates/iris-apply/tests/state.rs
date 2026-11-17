@@ -450,3 +450,77 @@ fn the_tick_reads_the_actions_in_pages() {
         json!(249)
     );
 }
+
+/// A close of a job session applies inside the grant. After a revoke, the
+/// apply denies it in the transaction of the item writes, and the item does
+/// not change (docs/specs/2026-11-17-job-verbs.md).
+#[test]
+fn a_session_close_applies_only_inside_the_grant() {
+    for revoked in [false, true] {
+        let b = setup(&format!("grant-{revoked}"), "open", None);
+        b.store
+            .write(|tx| {
+                tx.execute_batch(
+                    "UPDATE message SET understood_at = 1;
+                     INSERT OR IGNORE INTO header(message_id, from_addr)
+                       VALUES (1, 'dana@example.com');
+                     UPDATE header SET from_addr = 'dana@example.com';",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let job = iris_job::create(&b.store, "Close it.", None, now()).unwrap();
+        iris_job::add_scope(
+            &b.store,
+            job,
+            iris_job::Ref::Thread(1),
+            iris_job::By::Person,
+            now(),
+        )
+        .unwrap();
+        let me = Author {
+            kind: AuthorKind::Agent,
+            name: Some("claude-code".into()),
+            session: Some("se-1".into()),
+            job: Some(iris_job::format_job_id(job)),
+        };
+        let s = &b.store;
+        let mut args = Map::new();
+        args.insert("reason".into(), "Done.".into());
+        let cs = iris_changeset::create(s, &me, now()).unwrap();
+        iris_changeset::add_action(s, cs, &me, Verb::Close, &["c-1"], &args, None).unwrap();
+        iris_changeset::submit(s, cs, &me, "Signed.", now()).unwrap();
+        let id = b
+            .one("SELECT max(id) FROM changeset_action")
+            .as_i64()
+            .unwrap();
+        let hash = b.one(&format!(
+            "SELECT hash FROM changeset_action WHERE id = {id}"
+        ));
+        let action = ActionId {
+            changeset: cs,
+            revision: 1,
+            n: 1,
+        };
+        iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
+        if revoked {
+            iris_job::revoke_scope(
+                s,
+                job,
+                iris_job::Ref::Thread(1),
+                iris_job::By::Person,
+                now(),
+            )
+            .unwrap();
+        }
+        match (revoked, apply_state(s, id).unwrap()) {
+            (false, Outcome::Applied(_)) => assert_eq!(b.doc()["status"], json!("done")),
+            (true, Outcome::Denied(why)) => {
+                assert!(why.contains("outside the grant"), "{why}");
+                assert_eq!(b.doc()["status"], json!("open"));
+                assert_eq!(b.state(id), "denied");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}

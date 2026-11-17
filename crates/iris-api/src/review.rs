@@ -216,7 +216,7 @@ fn conflict(e: iris_changeset::Error, missing: &str) -> Error {
     match e {
         Cs::Store(e) => Error::Store(e),
         Cs::NotFound => Error::Conflict(missing.into()),
-        Cs::Refused(why) => Error::Conflict(why),
+        Cs::Refused(why) | Cs::Denied(why) => Error::Conflict(why),
     }
 }
 

@@ -676,7 +676,19 @@ impl<'a, 'b> Run<'a, 'b> {
                 .iter()
                 .filter_map(|(id, p)| p.clone().map(|p| (*id, p)))
                 .collect();
-            self.store.write(|tx| {
+            // The cutoff: a revoke that commits before this transaction
+            // stops the call and each later call of the action.
+            let action = self.store.read(|c| {
+                Ok(c.query_row(
+                    "SELECT action_id FROM ledger WHERE id = ?1",
+                    [ledger],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })?;
+            let outside = self.store.write(|tx| {
+                if let Some(why) = outside_grant(tx, action)? {
+                    return Ok(Some(why));
+                }
                 tx.execute(
                     "UPDATE ledger SET call = ?2 WHERE id = ?1",
                     params![ledger, k],
@@ -685,8 +697,12 @@ impl<'a, 'b> Run<'a, 'b> {
                 for (id, _) in messages.iter().filter(|(_, p)| p.is_none()) {
                     set_listed(tx, ledger, *id, "gone")?;
                 }
-                Ok(())
+                Ok(None)
             })?;
+            if let Some(why) = outside {
+                // The calls that ran stay done; the rest never run.
+                return self.end(ledger, Some(why));
+            }
             if live.is_empty() {
                 continue;
             }
@@ -1027,7 +1043,47 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
     if iris_policy::active(tx)?.policy.mode == Mode::Observe {
         return Ok(Some(Outcome::Waiting));
     }
+    if let Some(why) = deny_outside_grant(tx, action)? {
+        return Ok(Some(Outcome::Denied(why)));
+    }
     Ok(None)
+}
+
+/// Why an action of a job session is outside the grant of its job now
+/// (docs/specs/2026-11-17-job-verbs.md, section 4), or `None`.
+pub(crate) fn outside_grant(tx: &Connection, action: i64) -> iris_store::Result<Option<String>> {
+    iris_changeset::grant_denial(tx, action).map_err(|e| match e {
+        iris_changeset::Error::Store(e) => e,
+        other => iris_store::Error::Query(other.to_string()),
+    })
+}
+
+/// Deny an approved action that is outside the grant of its job, in the
+/// transaction of the caller, before any provider call of the action. An
+/// action with a ledger row in `writing` is not denied here: the check
+/// before each of its calls stops it.
+pub(crate) fn deny_outside_grant(
+    tx: &Connection,
+    action: i64,
+) -> iris_store::Result<Option<String>> {
+    let writing: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')",
+        [action],
+        |r| r.get(0),
+    )?;
+    if writing {
+        return Ok(None);
+    }
+    let Some(why) = outside_grant(tx, action)? else {
+        return Ok(None);
+    };
+    tx.execute(
+        "UPDATE changeset_action SET state = 'denied', decided_by = 'engine', rule = NULL,
+           policy = NULL, reason = ?2, decided_at = ?3
+         WHERE id = ?1 AND state = 'approved'",
+        params![action, why, now()],
+    )?;
+    Ok(Some(why))
 }
 
 /// Expire an approved action 14 days after its submit (section 5.5), if it
