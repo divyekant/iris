@@ -453,7 +453,14 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy takes only `CONNECT <host>:443`. The host must be in the
   allowed hosts of the adapter: `api.anthropic.com` for `claude-code`,
   `api.openai.com` for `codex`, and `allow_hosts` for an adapter of
-  `agents.toml`. The engine resolves the host itself. Each other request,
+  `agents.toml`. The engine resolves the host itself, and checks each
+  address that it connects to: it refuses a loopback, private, link-local,
+  unique local, multicast, unspecified, documentation or other reserved
+  address (IPv4 and IPv6, also an IPv4 address mapped in IPv6). The proxy
+  connects only to the checked address, never to the name again, so a
+  second resolution cannot change it. If no address passes, the request
+  gets `403` with the reason `address_not_public`. A local model host is
+  not supported in a session (known limit, with an issue). Each other request,
   host or port gets `403` and closes.
 - The proxy relays the bytes and does not read them. TLS runs from the
   agent to the model host, so the engine sees no key and no text.
@@ -462,7 +469,7 @@ no network stops them. The engine gives each session one narrow path out:
   `CONNECT`, the line has the host (a value of the allowed list, as the
   list writes it), the bytes in each direction, and the result. For a
   refused request, the line has only a fixed reason (`not_connect`,
-  `host_not_allowed`, `port_not_allowed`, `too_long`) and no text of the
+  `host_not_allowed`, `port_not_allowed`, `address_not_public`, `too_long`) and no text of the
   request. Only the proxy writes this file,
   so it needs no shared append path with the helper. The file has a limit
   of 1 MiB. At the limit the proxy writes one line that says the rest is
@@ -623,6 +630,7 @@ is refused before a row is written.
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
+| An allowed host that resolves to a loopback, private or other reserved address | `403` with `address_not_public`; no connection | Proxy property test over the reserved ranges, with a test resolver |
 | A `pass_env` with a proxy name, in any case | Refused with the line | Parser test |
 | An adapter with no allowed host while the engine has `HTTPS_PROXY` | The agent gets no proxy variable | Launch test |
 
