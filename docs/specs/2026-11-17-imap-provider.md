@@ -99,7 +99,7 @@ thread.
 | `SPAM` | `SPAM` | system | a folder with `\Junk` |
 | `TRASH` | `TRASH` | system | a folder with `\Trash` |
 | `SENT_COPY` | `SENT_COPY` | system | a folder with `\Sent` |
-| A folder label | `folder:<name>` | user | each other folder, also `\Sent`, `\Drafts` and `\Archive` |
+| A folder label | `folder:<name>` | system | each other folder, also `\Sent`, `\Drafts` and `\Archive` |
 | `UNSENT` | `UNSENT` | system | a folder with `\Drafts`, or the `\Draft` flag |
 | A keyword label | `kw:<keyword>` | user | a keyword flag (no `\` at the start) |
 
@@ -131,9 +131,13 @@ in place gives `UNSENT` to a message that the understanding read before.
 Then its items stay, as the items of a gone message stay (spec 1): the
 label stops new understanding only. This is a limit issue too.
 
-Each folder label has the kind `user`, the special-use folders too. So a
-message in the `\Archive` folder has no system label, as the provider
-spec (section 4) says, and the mirror shows it as archived.
+Each folder label has the kind `system`, a folder that the person made
+too: the provider refuses each folder change (section 7), and the
+provider spec (section 4) gives `system` to each folder that a provider
+cannot change as a user label. So a `label` action cannot target a
+folder. A message in the `\Archive` folder has its folder label and none
+of the seven fixed labels: the mirror shows it as archived, as a Gmail
+message with no `INBOX`.
 
 
 `labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `UNSENT`,
@@ -171,8 +175,11 @@ The removals of a known folder come after its last window, at most
 
 - `QRESYNC`: `UID FETCH 1:4294967295 (UID) (CHANGEDSINCE <modseq>
   VANISHED)`. The provider reads only the `VANISHED` ranges.
-- `CONDSTORE` only: `UID SEARCH UID <UIDNEXT of from>:<UIDNEXT now - 1>`
-  gives the new UIDs that are here now (see the table).
+- `CONDSTORE` only: if the `UIDNEXT` of now is above the `UIDNEXT` of
+  `from`, `UID SEARCH UID <UIDNEXT of from>:<UIDNEXT now - 1>` gives the
+  new UIDs that are here now (see the table), and the provider keeps only
+  the UIDs inside that range. Else the set of new UIDs is empty and no
+  search is sent: a reversed range such as `101:100` would name UID 100.
 
 The page token holds the next window (its highest sequence number), the
 cursor line of the folder of the page (from the `EXAMINE` before its first
@@ -223,6 +230,7 @@ mirror does not have.
   folder, from the top down: newest first in each folder, `INBOX` first. The
   provider spec (`messages`) allows this order for a folder provider.
   With a folder label, `INBOX`, `SPAM` or `TRASH`, only that folder. With
+  `SENT_COPY`, only the `\Sent` folders, all of their messages. With
   `UNREAD`, `STARRED`, `UNSENT` or a keyword label, each folder, and each
   window is `UID SEARCH <low>:<high> <key>` (`UNSEEN`, `FLAGGED`, `DRAFT`,
   `KEYWORD <k>`) on the sequence numbers of the window, then a `UID FETCH`
