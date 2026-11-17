@@ -176,8 +176,8 @@ waits for the lock, then sees the result of the first.
       in the coalition of the record, send `SIGSTOP`, then read its
       coalition again. If the process is not in the coalition now (its
       process ID went to another process between the reads), send
-      `SIGCONT` to it. Before each `SIGSTOP`, append the process ID and
-      its unique ID (`PROC_PIDUNIQIDENTIFIERINFO`) to the journal
+      `SIGCONT` to it. Before each `SIGSTOP`, append the process ID to the
+      journal
       `<data dir>/sessions/se-<id>.stops` (with `fsync`). Repeat the scan until one scan finds each live
       member stopped (`pbi_status` is `SSTOP`), the count of these
       members equals `tasks_started - tasks_exited`, and `tasks_started`
@@ -198,10 +198,16 @@ waits for the lock, then sees the result of the first.
 
    | State of the entry | Result |
    |---|---|
-   | No process has the process ID, or it has another unique ID | Resolved: the process is gone |
+   | No process has the process ID | Resolved: no process can be stopped by the entry |
    | The process is in the coalition of the session | Resolved: it is a process of the session |
    | Another coalition, and its status is not `SSTOP` | Resolved: it runs |
    | Another coalition, stopped | Send `SIGCONT`, then read the status again. Not `SSTOP`: resolved. Else, or if the signal or a read fails: not resolved |
+
+   The recovery reads the process that has the process ID now, not the
+   process of the journal time. The process ID can go to another process
+   between the journal write and the `SIGSTOP`, and then that other
+   process is the one that Iris can have stopped. So each stopped process
+   with a journaled process ID that is not in the session gets `SIGCONT`.
 
    `stop` rewrites the journal with the entries that are not resolved
    (temporary file, `fsync`, `rename`). It returns `Ok` only if `ended`

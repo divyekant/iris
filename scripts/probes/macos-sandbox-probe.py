@@ -596,6 +596,9 @@ def main():
                         | ({"/opt/homebrew"} if os.path.isdir("/opt/homebrew") else set()))
     write_profile(lifetime_profile, tmp_root, sb_dir, 9, read_extra)
     try:
+        report["baseline_plain_child_sigkill"] = test_baseline(marker, None)
+        report["launchd_bootout"] = [test_launchd(marker, None, "bootout", 0)]
+        report["launchd_sigkill"] = [test_launchd(marker, None, "sigkill", 1)]
         report["containment"] = test_containment(marker)
         report["kill_loop"] = [test_kill_loop(marker, None, 200 + i) for i in range(3)]
         signal.signal(signal.SIGURG, lambda *_: URG.append(1))
