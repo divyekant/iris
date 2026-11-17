@@ -408,7 +408,7 @@ pub struct HandledPage {
 
 /// The row ID of an `after` value of [`handled`]: only the canonical text
 /// of a positive row ID, as `next` gives it, so one ID has one cursor.
-fn parse_after(t: &str) -> Option<i64> {
+pub(crate) fn parse_after(t: &str) -> Option<i64> {
     t.parse::<i64>()
         .ok()
         .filter(|n| *n > 0 && n.to_string() == t)

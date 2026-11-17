@@ -1,6 +1,7 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
 import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Measures } from "../src/measures";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -187,6 +188,7 @@ export const policy: Policy = {
   proposals: [
     {
       id: 1,
+      kind: "approvals",
       approvals: 14,
       created_at: 1794787200,
       rule: rule({ id: 10, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
@@ -196,6 +198,14 @@ export const policy: Policy = {
       approvals: 11,
       created_at: 1794790800,
       rule: rule({ id: 10, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
+    },
+    {
+      // A hide rule from the skips of the person (R5-02).
+      id: 3,
+      kind: "choices",
+      approvals: 12,
+      created_at: 1794794400,
+      rule: rule({ id: 10, name: "Hide feed items from digest@news.example", effect: "hide", when: { sender: "digest@news.example", form: "feed" }, by: "proposal", added: "2026-11-16", line: 0 }),
     },
   ],
   error: null,
@@ -535,6 +545,7 @@ export function answer(path: string): unknown {
   if (name === "jobs" && id) return jobDetails[id];
   if (name === "jobs") return jobPage(q.get("state"));
   if (name === "notices") return notices;
+  if (name === "measures") return measures;
   return undefined;
 }
 
@@ -633,3 +644,16 @@ export function outboxPost(path: string): [number, unknown] | undefined {
   outboxCancelled.add(draft);
   return [200, { cancelled: draft }];
 }
+
+/** GET /api/measures in the fixture state: two weeks of use, with two days off. */
+export const measures: Measures = {
+  days: [
+    ["2026-11-16", 2], ["2026-11-15", 0], ["2026-11-14", 1], ["2026-11-13", 2], ["2026-11-11", 1], ["2026-11-10", 3],
+    ["2026-11-09", 0], ["2026-11-08", 2], ["2026-11-07", 1], ["2026-11-05", 3], ["2026-11-04", 2], ["2026-11-03", 4],
+  ].map(([day, opens]) => ({ day: day as string, opens: opens as number })),
+  first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:05:40Z", seconds: 340 },
+  mirror: [{ account: "owner@example.com", checked: "2026-11-16T07:12:00Z", differences: 0, complete: true }],
+  memory: { rss_kib: 31_744, messages: 18_402 },
+  approvals: { decided: 50, approved: 47 },
+  undo: { applied: 48, undone: 1 },
+};

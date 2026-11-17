@@ -89,7 +89,7 @@ fn an_old_store_gets_the_new_verbs() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 24);
+        assert_eq!(iris_store::schema_version(tx)?, 30);
         let n: i64 = tx.query_row(
             "SELECT count(*) FROM changeset_action WHERE verb = 'archive'",
             [],
@@ -98,6 +98,12 @@ fn an_old_store_gets_the_new_verbs() {
         assert_eq!(n, 1);
         add_action(tx, "draft")?;
         add_action(tx, "send")?;
+        // Migration 26 (issue #226): the verb of the undo of a state entry.
+        add_action(tx, "restore")?;
+        // Migration 29 (R5-02) widens the same CHECK again.
+        for verb in ["skip", "mute", "dismiss"] {
+            add_action(tx, verb)?;
+        }
         assert!(add_action(tx, "nudge").is_err());
         let ok: String = tx.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         assert_eq!(ok, "ok");
@@ -109,6 +115,7 @@ fn an_old_store_gets_the_new_verbs() {
     drop(s);
     let c = Connection::open(&db).unwrap();
     add_action(&c, "send").unwrap();
+    add_action(&c, "dismiss").unwrap();
     assert!(add_action(&c, "nudge").is_err());
 }
 

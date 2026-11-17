@@ -9,6 +9,7 @@ use iris_store::{NewMessage, Store};
 use iris_understand::correct;
 use iris_understand::store::{understand, Error};
 use iris_understand::{Model, INSTRUCTION};
+use rusqlite::params;
 use serde_json::{json, Value};
 
 const NOW: i64 = 1_767_225_600_000; // 2026-01-01
@@ -414,6 +415,99 @@ fn a_new_run_keeps_a_corrected_item_and_marks_the_new_one() {
         b.col::<Option<i64>>("SELECT duplicate_of FROM item WHERE id = ?1", third),
         Some(second)
     );
+}
+
+/// A feed item that the person skipped and a signal that the person
+/// dismissed stay out of the brief after a new run: the possible duplicate
+/// takes the status of the pinned item (R5-02).
+#[test]
+fn a_new_run_keeps_a_skip_and_a_dismiss() {
+    let feed = r#"{"items": [{"form": "feed", "status": "new", "title": "Notes",
+      "quote": "Can you send me the signed lease by Friday?", "confidence": 0.5}], "phishing": false}"#;
+    let signal = r#"{"items": [{"form": "signal", "title": "Code", "quote": "Can you send me the signed lease by Friday?",
+      "kind": "code", "code": "1234", "expires": "2027-01-01T00:00:00Z"}], "phishing": false}"#;
+    for (name, answer, chosen) in [("skip", feed, "skipped"), ("dismiss", signal, "dismissed")] {
+        let b = store(&format!("rerun-{name}"));
+        let m = b.add("1", ASK, &["INBOX"]);
+        let item = understand(&b.store, m, &Fake::with(&[answer]), NOW)
+            .unwrap()
+            .items[0];
+        // The choice of the person: a status correction pins the item.
+        b.store
+            .write(|tx| {
+                tx.execute(
+                    "UPDATE item SET status = ?2, doc = json_set(doc, '$.status', ?2) WHERE id = ?1",
+                    params![item, chosen],
+                )?;
+                tx.execute(
+                    "INSERT INTO correction(item_id, field, value, by, at)
+                     VALUES (?1, 'status', json_quote(?2), 'person', 0)",
+                    params![item, chosen],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        // A second item of the same form with another quote is not the
+        // same item: it stays visible.
+        let two = answer.replace(
+            "}], \"phishing\"",
+            &format!(
+                "}}, {}], \"phishing\"",
+                answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
+                    .replace("Can you send me the signed lease by Friday?", "The lease")
+            ),
+        );
+        let out = understand(&b.store, m, &Fake::with(&[&two]), NOW).unwrap();
+        assert_eq!(out.items.len(), 2, "{two}");
+        let other = out.items[1];
+        assert_ne!(
+            b.col::<String>("SELECT status FROM item WHERE id = ?1", other),
+            chosen,
+            "{name}: another quote"
+        );
+        // Two new items with the content of the chosen item: the match is
+        // not one to one, so both stay visible.
+        let same = answer.replace(
+            "}], \"phishing\"",
+            &format!(
+                "}}, {}], \"phishing\"",
+                &answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
+            ),
+        );
+        let out = understand(&b.store, m, &Fake::with(&[&same]), NOW).unwrap();
+        assert_eq!(out.items.len(), 2, "{same}");
+        for i in &out.items {
+            assert_ne!(
+                b.col::<String>("SELECT status FROM item WHERE id = ?1", *i),
+                chosen,
+                "{name}: the same content twice"
+            );
+        }
+        // One new item with the quote of the chosen item, but another title
+        // (or another code): not the same item, so it stays visible.
+        let other = answer.replace("\"title\": \"", "\"title\": \"Other ");
+        let out = understand(&b.store, m, &Fake::with(&[&other]), NOW).unwrap();
+        assert_ne!(
+            b.col::<String>("SELECT status FROM item WHERE id = ?1", out.items[0]),
+            chosen,
+            "{name}: another title"
+        );
+        let out = understand(&b.store, m, &Fake::with(&[answer]), NOW).unwrap();
+        let new = out.items[0];
+        assert_ne!(new, item);
+        assert_eq!(
+            b.col::<String>("SELECT status FROM item WHERE id = ?1", new),
+            chosen,
+            "{name}"
+        );
+        assert_eq!(
+            b.col::<String>(
+                "SELECT json_extract(doc, '$.status') FROM item WHERE id = ?1",
+                new
+            ),
+            chosen
+        );
+    }
 }
 
 /// An item that an open changeset action names is pinned too (`item_pin`,

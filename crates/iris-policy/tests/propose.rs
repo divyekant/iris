@@ -123,7 +123,7 @@ fn a_pattern_gives_a_proposal_and_only_an_accept_writes_the_file() {
     decided(&store, "archive", &[m], "approved");
     let ps = refresh(&store);
     let p = find(&ps, "deals@shop.example").expect("a sender proposal");
-    assert_eq!(p.verb, Verb::Archive);
+    assert_eq!(p.verb, Some(Verb::Archive));
     assert_eq!(p.approvals, MIN_APPROVALS);
     let kind = ps
         .iter()
@@ -214,9 +214,9 @@ fn hostile_mail_and_mixed_senders_give_no_proposal() {
         "{ps:?}"
     );
     // A hostile mark matches only `hostile`, so no sender rule matches it.
-    assert!(ps.iter().all(|p| p.verb != Verb::Archive), "{ps:?}");
+    assert!(ps.iter().all(|p| p.verb != Some(Verb::Archive)), "{ps:?}");
     // No one sender or kind is in each trash action.
-    assert!(ps.iter().all(|p| p.verb != Verb::Trash), "{ps:?}");
+    assert!(ps.iter().all(|p| p.verb != Some(Verb::Trash)), "{ps:?}");
 }
 
 struct Rng(u64);
@@ -275,14 +275,17 @@ fn each_proposal_agrees_with_the_decisions() {
                 rules: Vec::new(),
             };
             let mut yes = 0;
+            let Some(pv) = p.verb else {
+                panic!("seed {seed}: no choice gives a hide proposal: {p:?}");
+            };
             policy.rules.push(p.rule(1, "2027-01-15"));
             for (verb, msgs, state) in &all {
-                if Verb::from_name(verb) != Some(p.verb) {
+                if Verb::from_name(verb) != Some(pv) {
                     continue;
                 }
                 let fs: Vec<Facts> = msgs.iter().map(|&m| facts(m)).collect();
                 let action = Action {
-                    verb: p.verb,
+                    verb: pv,
                     author: Author::Agent,
                     job: None,
                     bulk: false,

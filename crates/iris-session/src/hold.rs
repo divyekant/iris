@@ -77,6 +77,37 @@ pub fn hold(
     )
 }
 
+/// The exit code of [`hold_main`] for arguments that it cannot read.
+pub const BAD_ARGS: i32 = 64;
+
+/// Runs `iris session-hold <session> <program> [<argument>...]` on the
+/// standard streams of the process: the pipe from the engine on standard
+/// input, the session log on standard output and the second pipe on
+/// standard error. The launch gives the program and the arguments that
+/// [`Isolation::command`] made.
+pub fn hold_main(isolation: &dyn Isolation, args: &[std::ffi::OsString]) -> i32 {
+    let session = args
+        .first()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|s| *s > 0);
+    let (Some(session), Some(program)) = (session, args.get(1)) else {
+        return BAD_ARGS;
+    };
+    let command = Command {
+        program: program.into(),
+        args: args[2..].to_vec(),
+    };
+    hold(
+        isolation,
+        session,
+        &command,
+        io::stdin(),
+        io::stderr(),
+        io::stdout(),
+    )
+}
+
 /// The waits of [`hold_with`], and a fault for tests.
 #[derive(Clone, Copy)]
 pub(crate) struct Tuning {
@@ -122,7 +153,7 @@ pub(crate) fn hold_with(
     }
     // 2. Start the agent in a new process group of its own. The helper is
     // not in that group, so a signal to the group never reaches the helper.
-    let (child, output) = match spawn(command) {
+    let (child, output) = match spawn(isolation, session, command) {
         Ok(x) => x,
         Err(_) => {
             log.line("the agent did not start");
@@ -231,17 +262,23 @@ fn read_line(input: &mut impl Read) -> Option<String> {
     }
 }
 
-/// Starts the agent with its standard input on `/dev/null`, and its standard
-/// output and standard error on one pipe to the helper.
-fn spawn(command: &Command) -> io::Result<(Child, io::PipeReader)> {
+/// Starts the agent through the isolation, with its standard input on
+/// `/dev/null`, and its standard output and standard error on one pipe to
+/// the helper.
+fn spawn(
+    isolation: &dyn Isolation,
+    session: i64,
+    command: &Command,
+) -> io::Result<(Child, io::PipeReader)> {
     let (reader, writer) = io::pipe()?;
-    let child = std::process::Command::new(&command.program)
-        .args(&command.args)
+    let mut cmd = std::process::Command::new(&command.program);
+    cmd.args(&command.args)
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(writer.try_clone()?)
-        .stderr(writer)
-        .spawn()?;
+        .stderr(writer);
+    let child = isolation.spawn(session, &mut cmd)?;
+    drop(cmd);
     // The Command and its copies of the write end are gone: the reader sees
     // the end of the pipe when the agent and its children close it.
     Ok((child, reader))

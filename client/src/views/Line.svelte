@@ -283,6 +283,14 @@
   .source:focus-visible {
     box-shadow: 0 0 0 2px var(--color-primary);
   }
+  /* A touch screen: the icon controls grow to the size of a finger tip. */
+  @media (max-width: 600px), (pointer: coarse) {
+    .source,
+    .box {
+      width: var(--size-touch);
+      height: var(--size-touch);
+    }
+  }
   /* The tick box: a ring that shows the tick on hover or focus. */
   .box {
     position: relative;

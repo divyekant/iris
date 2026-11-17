@@ -451,6 +451,7 @@ pub fn understand(store: &Store, message: i64, model: &dyn Model, now_ms: i64) -
                 &mut invalid,
             )?);
         }
+        keep_choices(tx, message)?;
         tx.execute(
             "UPDATE message SET understood_at = ?2, retry_at = NULL WHERE id = ?1",
             params![message, now_ms],
@@ -944,13 +945,44 @@ fn put_item(
     Ok(id)
 }
 
+/// A feed item that the person skipped, or a signal that the person
+/// dismissed, stays out of the brief after a new run
+/// (docs/specs/2026-11-17-preference-rules.md). The new item takes its
+/// status only on a one-to-one match: exactly one pinned item and exactly
+/// one new item of the message with the same form and the same content
+/// (the document without the fields that each run or the person changes),
+/// and the pinned item has the chosen status. Each other new item stays
+/// visible, also one that differs in one field, such as a code. Call after the run writes its items: each item of the message
+/// that is not pinned is new.
+fn keep_choices(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "WITH mine AS (
+           SELECT i.id, i.form, i.status,
+                  json_remove(i.doc, '$.id', '$.status', '$.created', '$.updated',
+                              '$.derived', '$.model', '$.attention') AS body,
+                  EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id) AS pinned
+           FROM item_source s JOIN item i ON i.id = s.item_id
+           WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form IN ('feed', 'signal')
+         ),
+         pair AS (
+           SELECT max(CASE WHEN pinned THEN status END) AS status,
+                  max(CASE WHEN NOT pinned THEN id END) AS new
+           FROM mine WHERE body IS NOT NULL
+           GROUP BY form, body
+           HAVING sum(pinned) = 1 AND sum(NOT pinned) = 1
+         )
+         UPDATE item SET status = pair.status,
+                         doc = json_set(item.doc, '$.status', pair.status)
+         FROM pair
+         WHERE item.id = pair.new AND pair.status IN ('skipped', 'dismissed')",
+        [message],
+    )?;
+    Ok(())
+}
+
 /// The row ID of the sender row of `addr`. A new row has no kind:
 /// iris-senders decides it.
-pub(crate) fn sender_row(
-    tx: &Transaction,
-    addr: &str,
-    name: Option<&str>,
-) -> rusqlite::Result<i64> {
+pub fn sender_row(tx: &Transaction, addr: &str, name: Option<&str>) -> rusqlite::Result<i64> {
     let addr = addr.to_ascii_lowercase();
     tx.execute(
         "INSERT INTO sender(address, name) VALUES (?1, ?2) ON CONFLICT(address) DO NOTHING",

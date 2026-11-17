@@ -13,6 +13,7 @@ getrandom = "=0.4.3"
 futures-util = { version = "0.3", default-features = false }
 iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
+iris-compose = { version = "0.0.0", path = "../iris-compose" }
 iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-matters = { version = "0.0.0", path = "../iris-matters" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
@@ -27,7 +28,6 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [dev-dependencies]
-iris-compose = { version = "0.0.0", path = "../iris-compose" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-observe = { version = "0.0.0", path = "../iris-observe" }

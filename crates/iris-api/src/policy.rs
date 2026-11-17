@@ -99,6 +99,8 @@ fn proposals(store: &Store) -> Result<Vec<Value>> {
         .map(|p| {
             json!({
                 "id": p.id,
+                // `approvals` (R5-01) or `choices` (a hide rule, R5-02).
+                "kind": if p.verb.is_some() { "approvals" } else { "choices" },
                 "approvals": p.approvals,
                 "created_at": p.created_at,
                 "rule": rule(&p.rule(next, &today)),

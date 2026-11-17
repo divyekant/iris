@@ -270,7 +270,7 @@
       }
     },
     {
-      "$comment": "Only the undo of a trash makes untrash, in a changeset with the author person (section 7.4). Submit denies untrash from each other author.",
+      "$comment": "Only an undo makes untrash (of a trash) and restore (of a state entry), in a changeset with the author person (section 7.4). Submit denies untrash and restore from each other author.",
       "if": {
         "properties": {
           "author": {
@@ -293,7 +293,10 @@
                   {
                     "properties": {
                       "verb": {
-                        "const": "untrash"
+                        "enum": [
+                          "untrash",
+                          "restore"
+                        ]
                       }
                     }
                   },
@@ -458,7 +461,7 @@
       }
     },
     "verb": {
-      "$comment": "The verbs of release 2 (section 4), and draft and send of release 3 (docs/specs/2026-11-16-send.md). Only the undo of a trash makes untrash (section 7.4).",
+      "$comment": "The verbs of release 2 (section 4), and draft and send of release 3 (docs/specs/2026-11-16-send.md). Only the undo of a trash makes untrash, and only the undo of a state entry makes restore (section 7.4). skip, mute and dismiss are of release 5 (docs/specs/2026-11-17-preference-rules.md).",
       "enum": [
         "archive",
         "inbox",
@@ -473,7 +476,11 @@
         "decline",
         "correct",
         "draft",
-        "send"
+        "send",
+        "restore",
+        "skip",
+        "mute",
+        "dismiss"
       ]
     },
     "flag": {
@@ -728,7 +735,8 @@
                   "read",
                   "unread",
                   "trash",
-                  "untrash"
+                  "untrash",
+                  "restore"
                 ]
               }
             }
@@ -781,7 +789,10 @@
               "verb": {
                 "enum": [
                   "close",
-                  "decline"
+                  "decline",
+                  "skip",
+                  "mute",
+                  "dismiss"
                 ]
               }
             }
@@ -797,7 +808,8 @@
                 "properties": {
                   "reason": {
                     "type": "string",
-                    "pattern": "\\S"
+                    "pattern": "\\S",
+                    "maxLength": 500
                   }
                 }
               }
@@ -858,7 +870,7 @@
           }
         },
         {
-          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments. correct changes any item (section 4). draft takes one account or one thread; send takes one draft (release 3).",
+          "$comment": "A mailbox verb changes threads or messages, and resolves to one or more messages. close, defer and decline change commitments; skip, mute and dismiss change a feed item, a conversation and a signal. correct changes any item (section 4). draft takes one account or one thread; send takes one draft (release 3). restore takes its ledger entry, and resolves to no message: it changes the items of a state entry (section 7.4).",
           "if": {
             "properties": {
               "verb": {
@@ -866,7 +878,10 @@
                   "close",
                   "defer",
                   "decline",
-                  "correct"
+                  "correct",
+                  "skip",
+                  "mute",
+                  "dismiss"
                 ]
               }
             }
@@ -886,7 +901,8 @@
                 "verb": {
                   "enum": [
                     "draft",
-                    "send"
+                    "send",
+                    "restore"
                   ]
                 }
               }
@@ -948,11 +964,86 @@
           }
         },
         {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "skip"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "string",
+                      "pattern": "^f-[1-9][0-9]*$"
+                    },
+                    "maxItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "mute"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "string",
+                      "pattern": "^v-[1-9][0-9]*$"
+                    },
+                    "maxItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "dismiss"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "properties": {
+                  "items": {
+                    "items": {
+                      "type": "string",
+                      "pattern": "^s-[1-9][0-9]*$"
+                    },
+                    "maxItems": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
           "$comment": "The choice of the person is the approval of an undo (section 7.4).",
           "if": {
             "properties": {
               "verb": {
-                "const": "untrash"
+                "enum": [
+                          "untrash",
+                          "restore"
+                        ]
               }
             }
           },

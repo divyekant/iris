@@ -35,11 +35,6 @@ cannot tell which sender the person wants to see.
 - Opens as a signal. The opens of R5-12 have no item and no sender. A
   later card adds them when the store records the item of each open
   (issue #433).
-- An undo of a mute, a skip or a dismiss after it applied. The undo of a
-  state verb is card #226 (after the R2-03 undo). Until then, each of
-  the three verbs has a hold (section 1), as `close` has: PRODUCT.md asks
-  for "an undo or a hold". The pass reads `undone` already, so the undo
-  becomes a refusal when it exists.
 - A proposal with a `sender_kind` condition. A `hide` rule for each
   service hides too much mail. The proposal names one address.
 - A `hide` rule for commitments or records. An obligation or a receipt
@@ -59,7 +54,11 @@ cannot tell which sender the person wants to see.
 | `dismiss` | Signal | `active` | `dismissed` |
 
 - Each verb is a state verb (spec 2, section 4): one item target, the
-  optional argument `reason` (500 characters or fewer), no provider call.
+  argument `reason`, and no provider call. As for `close`, a changeset
+  action must have `reason` (500 characters or fewer, not blank), and submit denies an
+  action without it. The request body of the API can leave it out: the
+  API then writes a default reason ("Skipped.", "Muted." or "Dismissed.")
+  in the action.
 - The web client calls `POST /api/items/<id>/<verb>`, as for `close`. The
   engine makes a changeset of the author `person` with one action, and
   applies it in the same request through `iris_apply::apply_state`.
@@ -67,8 +66,11 @@ cannot tell which sender the person wants to see.
   and the API answers 400 with the reason, as for `close` on a feed item.
 - An item of another status: the ledger entry fails, and the API answers
   409 with the reason.
-- The ledger entry has `pre` and `post` of the field `status`, so the
-  undo of #226 can restore it.
+- The ledger entry has `pre` and `post` of the field `status`. Its undo
+  is `restore`, as for `close` (issue #226, migration 26): migration 29
+  lets the undo link and the view `ledger_can_undo` take the three verbs.
+  An undone choice is `undone`, so the proposal pass counts it as a
+  refusal.
 - The hold: the web client sends a verb only after the Undo time of
   `close` (`HOLD` in `client/src/act.ts`). In that time, the person can
   click Undo, and the client sends nothing. The client PR (R5-02d) shows
@@ -77,10 +79,26 @@ cannot tell which sender the person wants to see.
 - The engine keeps a `muted` conversation muted when a new message
   arrives (`iris-talk`, already built). A `skipped` feed item and a
   `dismissed` signal keep their status. Only `gone` replaces each one.
-- Store migration 23: the three verbs join the verb CHECK of
+- Store migration 29: the three verbs join the verb CHECK of
   `changeset_action`, with the method of migration 18.
-- The open model schema of the changeset (`docs/spec/schema/`) adds the
-  three verbs.
+- The open model schemas of the changeset and of the policy
+  (`docs/spec/schema/`) add the three verbs. They are verbs of the policy
+  (`iris_policy::Verb`): a rule can name them, and the hard limits of
+  spec 2, section 6.5 apply to them, as to `close`.
+- Each of the three verbs takes exactly one item. Submit denies an action
+  with two or more targets.
+- The choice holds after a new run of understanding. The ledger pins the
+  item (spec 1, section 7.5). After a run writes its items, a new item takes
+  the status of a `skipped` feed item or a `dismissed` signal only on a
+  one-to-one match: exactly one pinned item and exactly one new item of the
+  message with the same form and the same content (the document without
+  `id`, `status`, `created`, `updated`, `derived`, `model` and
+  `attention`). Each other new item stays visible, also one that differs
+  only in a code or a title, and also when two new items match: the worst
+  result is a
+  duplicate in front of the person, never a hidden item that the person
+  did not choose. A conversation keeps
+  `muted` at each new message (spec 1, section 6.8).
 
 ### 2. The proposals
 
@@ -96,7 +114,8 @@ in the same read transaction:
 - The candidate is one `hide` rule:
   `when = { sender = "<address>", form = "<form>" }`. The address is the
   `sender` of the origin message. An action whose origin message has no
-  address, a hostile mark or a `hostile` sender gives no candidate.
+  address, a hostile mark or a `hostile` sender gives no candidate. Its
+  choice and its refusal do not count.
 - An origin message from the person (sender kind `you`: the label `SENT`
   or `DRAFT`, spec 1 section 6.7) gives no candidate, and its choice and
   its refusal do not count. A conversation that the person started has
@@ -124,7 +143,7 @@ the rule cannot disagree.
 
 ### 3. The table
 
-Migration 23 also makes `rule_proposal` hold a `hide` proposal:
+Migration 30 (the proposal PR) makes `rule_proposal` hold a `hide` proposal:
 
 - The column `verb` accepts `hide`. For a `hide` row, the verb is the
   effect of the rule.
@@ -191,16 +210,16 @@ and an item of another status (409). None of these changes an item.
 | A choice after the last pass | An accept with a stale count | `current` counts again in the accept transaction (R5-01) | Unit test of `current` with a new refusal |
 | A refusal whose item, origin message, header or sender is gone | The refusal is lost | It stops each `hide` proposal of its form | Unit test |
 | Two passes with the same decisions | A second open row for the same rule | `form` is never NULL, so the unique key holds and the upsert updates the row | Unit test |
-| Migration 23 after a deleted proposal | A new proposal gets the ID of a deleted one, and a stale accept names another rule | The migration keeps the `seq` of `sqlite_sequence` | Migration test |
+| Migration 30 after a deleted proposal | A new proposal gets the ID of a deleted one, and a stale accept names another rule | The migration keeps the `seq` of `sqlite_sequence` | Migration test |
 | A choice on hostile mail | A rule learned from an attack | No candidate, no count | Unit test |
 | A mute of conversations that the person started | A rule that hides each conversation that the person starts | An origin from the person gives no candidate | Unit test |
-| A click on a verb by mistake | An item leaves the brief, with no undo until #226 | The client hold: Undo in the Undo time sends nothing | Client test (R5-02d) |
+| A click on a verb by mistake | An item leaves the brief | The client hold: Undo in the Undo time sends nothing. After the apply, the undo of the entry (`restore`) sets the status back | Client test (R5-02d), apply test |
 | A sender address that a rule cannot hold | A proposal that the file refuses | `check_sender` refuses it; no candidate | Unit test |
 | An old program reads the new table | It reads a `hide` row as a verb | `open` skips a row that it cannot read (R5-01) | Existing behavior |
 
 ## Impact
 
-- `crates/iris-store`: migration 23.
+- `crates/iris-store`: migrations 29 (the verbs) and 30 (the proposals).
 - `crates/iris-changeset`: the three verbs in `Verb` and `STATE_VERBS`.
 - `crates/iris-apply`: `state.rs`, the status moves of section 1.
 - `crates/iris-api`: the verb route and `VerbBody` rules; the `kind` of
@@ -260,7 +279,7 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-Migration 23 runs on the first start of the new program. No flag.
+Migrations 29 and 30 run on the first start of the new program. No flag.
 
 ## Risks
 
@@ -287,7 +306,7 @@ Migration 23 runs on the first start of the new program. No flag.
   items that the rule hides (property test over random choices).
 - API tests for each verb: the status move, 409 for another form or
   status, 404 for an unknown verb.
-- A migration test: a store at migration 22 with proposals keeps each
+- A migration test: a store at migration 29 with proposals keeps each
   row and ID. With IDs 1 and 2 kept and ID 3 deleted before the
   migration, the next proposal gets ID 4.
 - A repeated pass test: two passes with the same decisions leave one

@@ -5,8 +5,10 @@ and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
 [Policy](#policy)), the review of the person: decisions and withdraws
 (see [Review](#review)), the state verbs of the person (see
-[State verbs](#state-verbs)), and the cancel of a send in the outbox (see
-[Outbox](#outbox)).
+[State verbs](#state-verbs)), the cancel of a send in the outbox (see
+[Outbox](#outbox)), the days of use of the measures page (see
+[Measures](#measures)), and the press of Send in the write view (see
+[Write](#write)).
 
 ## Use
 
@@ -30,7 +32,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | Endpoint | Gives |
 |---|---|
 | `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
-| `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
+| `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). The first brief with content writes the time of the first brief (see [Measures](#measures)). |
 | `/api/brief/{section}?limit=&after=` | One page of a list section of the brief (`you_owe`, `owed_to_you`, `conversations`, `feed`, `signals` or `strangers`), of the bundle of rule N (`bundle-N`, newest first), or of the items that a `hide` rule leaves out (`hidden`, newest first; each item has the rule and the reason in `attention`): `{"count", "items", "next"}`, in the same order and with the same filter as the brief. The page has `duplicates` only when an item of the page has a duplicate, as in the brief. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. With no `after`, the page starts at the first item. `next` is a text value that holds the section name and the sort keys of the last item of the page. Do not make or change it. The API does not sign it, so a made cursor gives the items after its keys. The next page starts after these keys in the order of the section. An item that leaves the section, or that changes its sort key behind these keys, moves no other item. An item whose sort key moves across these keys between two pages can show twice or not show. For a new view, read the section again from the start. An empty `after`, or an `after` that is not a cursor of the same section, is a 400. An unknown section is a 404. `bundle-N` is a 404 when the active policy has no `bundle` rule N and no item of the brief is in its bundle. |
 | `/api/handled?limit=&after=` | `{"count", "actions": [...], "next"}`: each action that a rule decided without the person, in its state now (`approved`, `held`, `applied`, `failed`, `undone` or `denied`; not `in_review`, which the review lists), the newest first. A `failed` action can have changed some of its messages. `count` is the count of all such actions. Each action is `{"changeset", "revision", "n", "verb", "args", "messages", "state", "rule", "policy", "why", "reason", "at"}`. `messages` is the count of its messages. `why` is the reason of the author, and `reason` is the reason of the decision. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. An `after` that is not such a value is a 400. |
 | `/api/gate?limit=&after=` | The senders that wait at the stranger gate. See [Stranger gate](#stranger-gate). |
@@ -151,12 +153,84 @@ The person decides the actions of one changeset in one request
 | Endpoint | Does |
 |---|---|
 | `POST /api/changesets/{id}/decide` | Body `{"actions": [{"revision", "n", "approve", "hash"}]}`: 1 to 500 decisions, each action once. `approve` `true` approves the action and needs the `hash` that the review showed. `false` denies it, with the reason "The person denied it in the review.". The answer is the changeset document after the decision. |
-| `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset, in any state but `withdrawn` (section 5.5: "each changeset"): each open action and each draft action becomes `cancelled`, and applied and decided actions stay. A second withdraw is a 409. The answer is the changeset document after the withdraw. |
+| `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset, in any state but `withdrawn` (section 5.5: "each changeset"): each open action and each draft action becomes `cancelled`, and applied and decided actions stay. A second withdraw is a 409. The withdraw of a write also withdraws the changeset of its send, so the mail does not leave; if the send left or is leaving now, the withdraw is a 409 and changes nothing. The answer is the changeset document after the withdraw. |
 
 The changeset must be open for each decision. Each action of a decision must wait for a person (`proposed` or `in_review`). The
 decisions write in one transaction. If one is refused (a hash that changed,
 an action that has a decision, a new revision that is a draft, or an action
 that is not in the changeset), nothing is written and the answer is a 409.
+
+## Ledger
+
+Each change that Iris made, and its undo (card R2-07, specification 2,
+section 7).
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/ledger?limit=&after=` | `{"entries": [...], "next"}`: each ledger entry, the newest first. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. An `after` that is not such a value is a 400. |
+| `POST /api/ledger/{id}/undo` | No body. The person undoes the entry `id` (`l-12`): the engine makes an approved changeset of the person with the inverse action (section 7.4), and applies it at its next step. The answer is the entry after the start, with `undo_open` true. An entry with no undo now (an open undo, the state `writing` or `undone`, the undo `none`, or no changed message that is not gone) is a 409 with the reason, and nothing is written. An ID that no entry has, or that is not in the form `l-<n>`, is a 404. |
+
+Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
+"changed", "items", "title", "changeset", "author", "decided_by", "rule",
+"policy", "reason", "why", "can_undo", "undo_open", "undone_by", "undo_of"}`:
+
+- `args` holds only the short arguments that the words of a verb need: `label`, `until`, `date` and `field`. Each other argument (for example the body of a draft) stays out.
+- Each text has at most 2,000 characters, so a page stays small.
+- `state` is `writing`, `applied`, `failed` or `undone`. `error` is the reason of a failure.
+- `messages` counts the messages of the entry. `changed` counts the messages that Gmail confirmed. A `failed` entry can have changed some messages.
+- `items` counts the items of a state verb (`close`, `decline`, `defer`, `correct`). `title` is the title of the first item.
+- `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
+- `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
+- `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+
+## Measures
+
+The measures of the manifesto, "How we measure Iris" (card R5-12). The
+engine computes them from the store. Nothing leaves the machine.
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
+
+- `days`: the newest 28 days of use, the newest first, each
+  `{"day", "opens"}`. `opens` counts the different source mails that the
+  person opened on that day. A day with no entry is a day with no use.
+- `first_brief`: `{"connect", "brief", "seconds"}`, or `null` before the
+  first brief with content. `connect` is the time of the first account (the
+  connect step). `brief` is the time of the first brief with content: an
+  item of a section, a record or a bundle. The engine checks the brief every
+  10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and
+  at each `/api/brief`. The store
+  writes each time once (migration 27). A store from before migration
+  27 that has an account has no record of the two times: each field is
+  `null`, and the measure stays not known.
+- `mirror`: the newest mirror check (`iris mirror verify`) of each account,
+  each `{"account", "checked", "differences", "complete"}`. An account with
+  no check has `checked` and `differences` `null`, and `complete` `false`.
+  `differences` is `null` if the log has no count. `complete` is `false`
+  when an error stopped the check.
+- `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
+  the engine from `ps`, or `null`.
+- `approvals`: `{"decided", "approved"}`, the decisions of the person on the
+  actions of an agent or of triage. The state verbs of the person are not in
+  the count.
+- `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
+  not an undo. `undone` counts the actions of them that an undo reversed.
+
+Each request of the web client while the person is active (an input of the
+person in the last 5 minutes) has the header `x-iris-day: YYYY-MM-DD`, the
+local date of the person. A poll of a tab that nobody uses has no header.
+The API counts the measures from it:
+
+- The first request of a day counts a use of that day, before the request
+  runs. So a read of the measures already has the day.
+- `GET /api/messages/{id}` (the mail view) with success counts an open of
+  that mail on that day. A mail counts once for each day, so a repeated
+  request changes nothing.
+
+The day must be the date of the engine in UTC, or the day before or after
+it. A request with no header, or with another day, counts nothing and runs
+as usual.
 
 ## State verbs
 
@@ -189,6 +263,18 @@ sections 5 and 6). The API reads the switch. It cannot change it: only
 |---|---|
 | `GET /api/outbox?limit=&after=` | Gives `{"sending": {"on", "since"}, "count", "sends", "next"}`. `count` is the number of all sends that wait. `sends` is one page in the order of the action ID: `limit` 1 to 200 (default 200). `next` is the `after` of the next page, or `null` on the last page. Each send has `draft` (`d-N`), `state` (`approved` or `held`), `approved`, `leaves` (`null` while sending is off), `flags`, and `to`, `cc` and `subject` from the stored raw bytes of the draft. A draft that Iris cannot read has `"readable": false` and no recipients. One answer is one snapshot of the store. |
 | `POST /api/outbox/{d-N}/cancel` | No body. Cancels the open send of the draft: the send becomes `denied` by `person` with the reason "Cancelled in the outbox.". The answer is `{"cancelled": "d-N"}`. If the release claimed the send, the answer is a 409 "The send started. It cannot be cancelled.", and nothing changes. A draft with no send that waits, or an ID that is not a draft, is a 404. |
+
+## Write
+
+The write view of the web client (spec `docs/specs/2026-11-17-write.md`).
+One press of Send writes a new mail or a reply. The engine makes the draft,
+then the send. The send leaves after the hold, and only while sending is on.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/write` | The body is `account` (`a-N`, a new mail) or `thread` (`t-N`) with `parent` (`m-N`, a reply), and `to`, `cc`, `subject` (a new mail only), `body`, `key` (16 to 64 letters, digits or hyphens) and `flags` (the warnings that the person saw). In one transaction: the changeset of the author `person`, the `draft` action, its submit, the approval and the send mark. A new write is a 201 `{"write": "cs-N"}`. A second try with the same key and the same mail is a 200 with the same `cs-N`, and writes nothing. A 409 `{"error", "flags"}` writes nothing: the warnings are not the warnings that the person saw (`flags` holds the new warnings), a new mail came into the thread, or the key belongs to another mail. A body that is not valid (a target that is not an ID of its kind too), or a mail that the submit denies, is a 400. |
+| `GET /api/write/{cs-N}` | The state of the write: `saving`, `waiting` (`draft`, `sending`, `leaves_at`), `review` (`reason`), `sent` or `stopped` (`reason`, `draft`). A write that got no send in 24 hours after the press is `stopped`: the engine makes no send for it. One answer is one snapshot of the store. A changeset that is not a write is a 404. |
+| `GET /api/threads/{t-N}/reply` | The start values of a reply: `account`, `parent` (`id`, `from`, `date`, and `text` cut to 600 characters), `to`, `cc` and `subject`. The parent is the newest mail of the thread that is not spam, trash or a draft. If the person wrote it (it has the label `SENT`), the reply goes to its recipients. Otherwise it goes to its sender, also when its `From` is the address of the person. A thread with no mail to reply to is a 409. A thread that does not exist is a 404. |
 
 ## Stranger gate
 

@@ -1,4 +1,4 @@
-//! The local API of Iris (tracker item R1-17): read-only JSON from the store
+//! The local API of Iris (tracker item R1-17): JSON from the store
 //! for the web client and the read verbs. `crates/iris-api/README.md` gives
 //! the endpoints.
 //!
@@ -29,7 +29,9 @@ mod drafts;
 mod export;
 pub mod gate;
 mod jobs;
+mod ledger;
 mod matters;
+pub mod measures;
 mod notice;
 mod outbox;
 pub mod policy;
@@ -37,11 +39,13 @@ mod read;
 mod review;
 mod verbs;
 mod watch;
+mod write;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
+pub use ledger::{ledger, undo_entry, LedgerEntry, LedgerPage};
 pub use matters::{confirm_matter, decline_matter, matter, matters};
 pub use notice::*;
 pub use outbox::{cancel_send, outbox, Cancelled, MAX_SENDS};
@@ -135,6 +139,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/brief", get(get_brief))
         .route("/api/brief/{section}", get(get_brief_section))
         .route("/api/handled", get(get_handled))
+        .route("/api/ledger", get(get_ledger))
+        .route("/api/ledger/{id}/undo", post(post_undo))
         .route("/api/gate", get(get_gate))
         .route("/api/gate/declined", get(get_declined))
         .route("/api/senders/{id}/{answer}", post(post_answer))
@@ -152,6 +158,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
+        .route("/api/measures", get(get_measures))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
         .route("/api/policy/discard", post(post_discard))
@@ -168,6 +175,9 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/watches/{id}/remove", post(post_watch_remove))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
+        .route("/api/write", post(post_write))
+        .route("/api/write/{id}", get(get_write))
+        .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/matters", get(get_matters))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
@@ -175,10 +185,15 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
-        .with_state(store)
+        .with_state(store.clone())
         .merge(ask)
         // The code exchange has no handler: the guard answers it.
         .route(SIGN_IN, any(|| async { not_found() }))
+        // Inside the guard: only a request with the sign-in counts.
+        .layer(middleware::from_fn_with_state(
+            measures::Counter::new(store),
+            measures::count,
+        ))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
@@ -195,7 +210,11 @@ async fn get_records(State(s): State<Arc<Store>>) -> Result<Response> {
 }
 
 async fn get_brief(State(s): State<Arc<Store>>) -> Result<Response> {
-    Ok(Json(brief(&s, now_ms())?).into_response())
+    let now = now_ms();
+    let b = brief(&s, now)?;
+    // The first brief with content ends the measure "time to the first brief".
+    measures::mark_brief(&s, &b, now)?;
+    Ok(Json(b).into_response())
 }
 
 async fn get_handled(
@@ -205,6 +224,23 @@ async fn get_handled(
     let q = query(q)?;
     let page = handled(&s, q.limit.unwrap_or(50), q.after.as_deref())?;
     Ok(Json(page).into_response())
+}
+
+async fn get_ledger(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(Json(ledger(&s, q.limit.unwrap_or(50), q.after.as_deref())?).into_response())
+}
+
+/// The person undoes a ledger entry (specification 2, section 7.4).
+async fn post_undo(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(undo_entry(&s, &id, now_ms())?.map_or_else(not_found, |e| Json(e).into_response()))
 }
 
 async fn get_changesets(State(s): State<Arc<Store>>) -> Response {
@@ -434,14 +470,17 @@ async fn get_item(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result
     Ok(item(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
-/// A state verb of the person on one item: `close`, `decline` or `defer`
-/// (specification 2, section 4). The answer is the item after the change.
+/// A state verb of the person on one item: `close`, `decline`, `defer`,
+/// `skip`, `mute` or `dismiss` (specification 2, section 4). The answer is the item after the change.
 async fn post_verb(
     State(s): State<Arc<Store>>,
     Path((id, verb)): Path<(String, String)>,
     b: std::result::Result<Json<VerbBody>, JsonRejection>,
 ) -> Result<Response> {
-    if !matches!(verb.as_str(), "close" | "decline" | "defer") {
+    if !matches!(
+        verb.as_str(),
+        "close" | "decline" | "defer" | "skip" | "mute" | "dismiss"
+    ) {
         return Ok(not_found());
     }
     let b = body(b)?;
@@ -537,6 +576,14 @@ async fn get_raw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
         ),
     ];
     Ok((headers, Body::from_stream(parts)).into_response())
+}
+
+async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
+    let rss = tokio::task::spawn_blocking(measures::rss_kib)
+        .await
+        .ok()
+        .flatten();
+    Ok(Json(measures::measures(&s, rss)?).into_response())
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
@@ -781,6 +828,49 @@ async fn post_outbox_cancel(
             "The send started. It cannot be cancelled.",
         ),
         Cancelled::NotOpen => not_found(),
+    })
+}
+
+/// The press of Send in the write view (docs/specs/2026-11-17-write.md,
+/// section 2): 201 for a new write, 200 for an earlier try of the same
+/// press, 409 with `flags` for warnings that the person did not see.
+async fn post_write(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<write::WriteBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(match write::write(&s, &b, now_ms())? {
+        write::Pressed::New(cs) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "write": cs })),
+        )
+            .into_response(),
+        write::Pressed::Again(cs) => Json(serde_json::json!({ "write": cs })).into_response(),
+        write::Pressed::Conflict(text, flags) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": text, "flags": flags })),
+        )
+            .into_response(),
+    })
+}
+
+/// The state of a write (`cs-N`), section 4. 404 for a changeset that is
+/// not a write.
+async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = iris_changeset::parse_changeset_id(&id) else {
+        return Ok(not_found());
+    };
+    Ok(match write::state(&s, row, now_ms())? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The start values of a reply in a thread (`t-N`), section 5.
+async fn get_reply(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(match write::reply(&s, &id)? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
     })
 }
 
