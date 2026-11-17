@@ -144,12 +144,14 @@ The granted messages of a job:
   `job_scope_message` in the same write transaction, so the grant does not
   depend on a date or a row ID: a message that sync adds later with an
   older date, or that a later fetch moves into the thread from another
-  thread, is not in that list. Any other message of the thread is granted
-  only if
-  it is a reply in the granted chain: its `In-Reply-To` names the
-  `Message-ID` of a granted message of the same thread. So a reply to the
-  job mail comes in, and an unrelated message that Gmail puts in the
-  thread stays out until the person grants it.
+  thread, is not in that list. No other message of the thread is granted
+  by the thread ref, also not a reply: the reply headers come from the
+  sender, so they cannot grant mail. A new message comes into the
+  workspace only when the person or the engine for the person adds it,
+  as a new thread ref (a new list) or as an item of it. The wake of a
+  waiting job (R5-04) shows the person a new message of a scope thread, so
+  the person can add it. Until R5-04, a reply stays out of the workspace
+  (known limit, with a GitHub issue).
 - An item of the scope that is not `gone` grants each clean source message
   (`item_source`) of the item, and no other message of its thread. Gmail can put two subjects
   in one thread (spec 1), so an item does not grant its whole thread.
@@ -488,7 +490,7 @@ Markdown and JSON with `serde_json`.
 | A revoke by an agent | Refused | Unit test, and raw SQL |
 | A revoke during a build | `Built::revoked` differs from `revoked_count`, so the launcher builds again before the session (R4-04) | Unit test: the count grows on each revoke and the build gives the count it read |
 | An add of a ref whose row does not exist | Refused | Unit test |
-| A message that the store adds to a scope thread after the add, also with an older date, or that a fetch moves into the thread from another thread | Granted only if its `In-Reply-To` names a granted message of the thread | Unit test: a reply comes in, an unrelated message stays out, an old-dated backfill stays out, a moved message stays out |
+| A message that the store adds to a scope thread after the add, also with an older date, or that a fetch moves into the thread from another thread | Not granted until the person adds it, also a reply | Unit test: a reply, an old-dated backfill and a moved message stay out; a new add of the thread grants them |
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
