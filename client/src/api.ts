@@ -37,6 +37,8 @@ export type Item = {
   new?: number;
   your_turn?: boolean;
   summary?: string;
+  /** What Iris prepared for the item (card R3-09): "draft" is a reply draft that is not stale. Only in the brief lists. */
+  ready?: "draft"[];
   type?: string;
   issuer?: Party;
   fields?: Record<string, unknown>;

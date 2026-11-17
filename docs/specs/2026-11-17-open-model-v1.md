@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Card: R6-07
-- Status: Draft
+- Status: Agreed
 
 ## Problem
 
@@ -73,8 +73,9 @@ reader change and gives no gain that a later minor version cannot give.
 
 The policy file keeps `version = 0` valid because the policy file of the
 owner exists on disk. Iris writes the file only for a change from the web
-client, and it keeps each other line (spec 2, section 6.3). A version 0
-file that became invalid would put Iris in observe mode (fail closed). The
+client, and it keeps each other line (spec 2, section 6.3). If a version 0
+file became invalid, the person could not confirm a change of the file
+again, and the active policy would stay at its last confirmed text. The
 first-start file and the samples write `version = 1`.
 
 ### 2. Rules of change inside version 1
@@ -105,8 +106,10 @@ These rules go into a new published text,
    field. Its `version` is an integer that names only the major version.
    The minor rules do not apply to it. Each change of
    `policy.schema.json` after 1.0 is a new policy `version` (`2`). Iris
-   refuses a policy file with a `version` that it does not know, and goes
-   to observe mode (spec 2, section 6.1: an invalid file fails closed).
+   treats a file with a `version` that it does not know as an invalid
+   file: it never becomes the active policy, and the policy that the person
+   confirmed last stays in force (spec 2, section 6.3). With no confirmed
+   policy, Iris uses the first-start policy (observe mode).
 
 ### 3. Rules for a producer
 
@@ -182,7 +185,7 @@ requirements.txt`.
 
 | Command | Does |
 |---|---|
-| `python3 run.py self-test` | Validates each `.json`, `.jsonl` and `.toml` file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
+| `python3 run.py self-test` | Checks the schemas only (no "newer than the kit" rule, so a sample of a newer minor version can prove the `model` pattern). Validates each `.json`, `.jsonl` and `.toml` file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
 | `python3 run.py check <folder>` | Validates each `.json`, `.jsonl` and `.toml` file at the top level of the folder against the schemas of the kit. A document with a minor version higher than the kit fails ("newer than the kit"), because the kit cannot check it. A `.jsonl` file holds one document on each line. Prints one line for each file or line that fails. |
 | `python3 run.py --version` | Prints the kit version from `docs/spec/VERSION`. |
 
@@ -293,8 +296,8 @@ as a producer meets the stricter rule.
 | PR | Content | Depends on |
 |---|---|---|
 | 1 | This spec | none |
-| 2 | The freeze: section 1, section 6 items 1 to 4 (without `conformance.rs`), the spec text changes | PR 1 approved by dk |
-| 3 | The kit: specification 4, `docs/spec/VERSION`, `conformance/`, `conformance.rs`, the `spec-kit` area | PR 2 |
+| 2 | The freeze: section 1, section 6 items 1 to 4 (without `conformance.rs`), the spec text changes, and specification 4 with sections 2, 3 and 4 of this design (the version rules that the freeze needs) | PR 1 approved by dk |
+| 3 | The kit: the kit section of specification 4 (section 6 there, after the reader failure list), `docs/spec/VERSION`, `conformance/` with `test_run.py` (the Python tests of the runner and the producer), `conformance.rs`, the `spec-kit` area | PR 2 |
 
 PR 2 changes the schemas and the code together, because the tests of each
 writer validate its output against the schemas.
@@ -342,21 +345,24 @@ with a schema name of the kit.
 
 | Input | Result | Test |
 |---|---|---|
-| A file that is not valid UTF-8, JSON or TOML | That file fails with the parse error. Exit 1. | `conformance.rs` runs `check` on a bad file |
+| A file that is not valid UTF-8, JSON or TOML | That file fails with the parse error. Exit 1. | `test_run.py` runs `check` on each bad file |
 | A JSON object with a key two times | That file fails ("duplicate key"). | same |
 | `NaN`, `Infinity` or `-Infinity` | That file fails. | same |
+| JSON with arrays and objects nested deeper than 256 levels (also if it passes the schemas) | That document fails ("nesting deeper than 256 levels") before the parse, so no Python version runs out of stack. Exit 1. Issue #555. | `test_run.py`, a property test of the depth scan |
 | A name with no schema of the kit | That file fails ("no schema"). It is not skipped. | same |
 | An `items` file with a line that has no `form`, or an unknown `form` | That line fails. | same |
 | An empty `.jsonl` line | That line fails. | same |
 | A folder with no `.json`, `.jsonl` or `.toml` file | Exit 1 ("no documents"). | same |
 | A subfolder | Not read. | same |
 | A TOML date or time | Its RFC 3339 text. The self-test proves that the Python and the Rust converters give the same verdict on each sample. | `self-test` on `policy-*.toml` |
-| A schema with a `$ref` to an `$id` that is not in the kit | Exit 2 at load. No network call. | `conformance.rs` |
+| A schema with a `$ref` to an `$id` that is not in the kit | Exit 2 at load. No network call. | `test_run.py` |
 | A date that has the right shape and is not on the calendar | That file fails (section 5.4). | the two format fixtures |
 | No `rfc3339-validator` in the Python environment | Exit 2 ("the date-time check is not active"). | `self-test` |
 | A validator with a different `email` check | Same verdict on each fixture (section 5.4). | `conformance.rs` |
-| `produce.py` with an output path that exists | Exit 1. Nothing is written. | `conformance.rs` |
+| `produce.py` with an output path that exists | Exit 1. Nothing is written. | `test_run.py` |
 | A very large file | The runner reads it into memory. The runner is a test tool, not a part of the product. | none (issue) |
+| A file or a folder that cannot be read (`OSError`) | Exit 2 with the error. It is not a verdict on a document. | `test_run.py` |
+| A `.jsonl` file with a bad line among good lines | Each bad line fails with its own reason. The other lines are still checked. | `test_run.py`, a property test |
 | Any other error | Exit 2 with the error. | none |
 
 Crash recovery: the store migration of section 6 runs in the migration
@@ -372,9 +378,10 @@ each session, so the next session gets `iris/1.0` files.
 - Data format: the `model` value and the `$id` of each schema. Each other
   field stays.
 - Store: one migration of `item.doc`. It changes only `$.model`, so the
-  attention of each item stays. The trigger `attention_due_item` queues
-  an item only when its form, `type`, `kind` or `attention` changes
-  (`crates/iris-store/src/schema_8.sql`), so it queues nothing, and
+  attention of each item stays. The trigger `attention_due_item`
+  (`crates/iris-store/src/schema_8.sql`) also queues an item that has no
+  `attention` yet, at each change of `doc`. So the migration saves the
+  queue before the update and removes each row that the update added.
   `attention_keep` does not apply because `attention` stays.
 - Memory: no change in the `iris` program. The runner and the producer are
   not a part of it.
@@ -460,7 +467,7 @@ The `spec-kit` test runs the producer into a new temporary folder.
 4. After the migration, each stored item has `"model": "iris/1.0"`. Red if the
    migration test finds one.
 5. A policy file with `version = 0` and one with `version = 1` both load.
-   Red if the policy test with a version 0 file puts Iris in observe mode.
+   Red if the parser refuses a version 0 file.
 6. `run.py self-test` exits 0 in the `spec-kit` area. Red if a fixture
    gives a different verdict in Python than in Rust.
 7. `produce.py` writes one `feed` and one `signal` document for the

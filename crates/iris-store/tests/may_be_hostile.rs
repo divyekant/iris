@@ -55,8 +55,8 @@ const ALLOWED: [(&str, usize, &str); 9] = [
     ("iris/src/verbs.rs", 2, "shows the marks of a message"),
     (
         "iris-voice/src/tests.rs",
-        2,
-        "the tests of the draft gate write hostile marks",
+        3,
+        "the tests of the draft gate and of the ready rule write hostile marks",
     ),
 ];
 

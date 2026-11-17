@@ -19,7 +19,7 @@ use crate::validate;
 /// The common fields of section 6.1 of specification 1. A correction cannot
 /// change them (specification 2, section 4). `status` changes through the
 /// state verbs.
-const COMMON: [&str; 12] = [
+const COMMON: [&str; 13] = [
     "model",
     "id",
     "form",
@@ -31,6 +31,7 @@ const COMMON: [&str; 12] = [
     "derived",
     "confidence",
     "matter",
+    "ready",
     "attention",
 ];
 

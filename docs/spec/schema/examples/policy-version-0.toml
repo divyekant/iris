@@ -1,0 +1,49 @@
+# Iris policy. Version 0 has the same meaning as version 1.
+version = 0
+
+# observe: Iris applies nothing. apply: rules decide, and the rest goes to review.
+mode = "apply"
+
+# Each rule has an ID that Iris never uses again.
+
+[[rule]]
+id = 1
+name = "Archive newsletters after 3 days"
+effect = "allow"
+verbs = ["archive", "read"]
+when = { form = "feed", sender_kind = "service", older_than_days = 3 }
+by = "person"
+added = 2026-11-10
+
+[[rule]]
+id = 2
+name = "Hide Acme Deals"
+effect = "hide"
+when = { sender = "deals@acme.example" }
+by = "proposal"
+added = 2026-11-12
+
+[[rule]]
+id = 3
+name = "Bundle the feed"
+effect = "bundle"
+when = { form = "feed" }
+by = "person"
+added = 2026-11-10
+
+[[rule]]
+id = 4
+name = "Never touch mail from the bank without review"
+effect = "review"
+verbs = ["archive", "inbox", "label", "unlabel", "read", "unread", "trash"]
+when = { sender = "@bank.example" }
+by = "person"
+added = 2026-11-10
+
+[[rule]]
+id = 5
+name = "Tell me at once about mail from the clinic"
+effect = "notify"
+when = { sender = "@clinic.example" }
+by = "person"
+added = 2026-11-16

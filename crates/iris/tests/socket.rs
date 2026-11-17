@@ -916,15 +916,18 @@ fn session_mode_uses_only_the_session_socket() {
             .output()
             .unwrap()
     };
-    // Host mode (no `.iris/` above the folder): `list` is a usage error.
-    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
-        .current_dir(&root)
-        .arg("--data")
-        .arg(&data)
-        .arg("list")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    // Host mode (no `.iris/` above the folder): `list` and `wait` are usage
+    // errors.
+    for args in [&["list"][..], &["wait", "--until", "2030-01-02"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+            .current_dir(&root)
+            .arg("--data")
+            .arg(&data)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
     // No socket: code 4, for a socket verb and for a store verb.
     let draft = ["draft", "t-1", "missing.json"];
     for args in [
@@ -940,13 +943,13 @@ fn session_mode_uses_only_the_session_socket() {
     let listener = std::os::unix::net::UnixListener::bind(work.join(".iris/socket")).unwrap();
     let server = std::thread::spawn(move || {
         let mut verbs = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             let (s, _) = listener.accept().unwrap();
             let mut line = String::new();
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
             let v: serde_json::Value = serde_json::from_str(&line).unwrap();
             let verb = v["verb"].as_str().unwrap().to_string();
-            let item = json!({"model": "iris/0", "id": "c-1", "form": "commitment",
+            let item = json!({"model": "iris/1.0", "id": "c-1", "form": "commitment",
                 "sources": ["m-1"]});
             let result = match verb.as_str() {
                 "search" => json!({"messages": [{"id": "m-1", "thread": "t-1",
@@ -954,6 +957,8 @@ fn session_mode_uses_only_the_session_socket() {
                     "from_name": "Dana", "subject": "Contract"}]}),
                 "list" => json!({"items": [item]}),
                 "show" => json!({"item": item}),
+                "wait" => json!({"job": "j-4", "state": "waiting",
+                    "until": "2030-01-02T00:00:00Z", "reply": "t-5"}),
                 _ => json!({"job": "j-4", "session": "se-9", "goal": "Get it.",
                     "state": "working", "threads": 1, "messages": 2, "items": 0}),
             };
@@ -995,6 +1000,21 @@ fn session_mode_uses_only_the_session_socket() {
         String::from_utf8_lossy(&out.stdout).contains("c-1"),
         "{out:?}"
     );
+    // `wait` sends each option to the socket (R5-04).
+    let out = iris(&[
+        "wait",
+        "--until",
+        "2030-01-02",
+        "--reply",
+        "t-5",
+        "--why",
+        "Dana reads it.",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("j-4 waits until 2030-01-02T00:00:00Z"),
+        "{out:?}"
+    );
     assert_eq!(
         server.join().unwrap(),
         [
@@ -1003,6 +1023,7 @@ fn session_mode_uses_only_the_session_socket() {
             r#"search {"limit":5,"text":"contract"}"#,
             r#"show {"id":"c-1"}"#,
             r#"list {"form":"commitment"}"#,
+            r#"wait {"reply":"t-5","until":"2030-01-02","why":"Dana reads it."}"#,
         ]
     );
     assert!(!data.exists(), "the command made the data folder");

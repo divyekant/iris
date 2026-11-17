@@ -171,9 +171,9 @@ fn policy(r: &mut Rng) -> String {
     let mut t = String::new();
     let top = r.pick(&["ok", "ok", "ok", "ok", "ok", "version", "mode", "extra"]);
     t += if top == "version" {
-        "version = 1\n"
+        "version = 2\n"
     } else {
-        "version = 0\n"
+        r.pick(&["version = 0\n", "version = 1\n"])
     };
     t += if top == "mode" {
         "mode = \"auto\"\n"

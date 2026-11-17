@@ -34,6 +34,17 @@ pub fn json_files(dir: &Path) -> Vec<PathBuf> {
 /// the folder is in the registry under its `$id`, and the validator is offline,
 /// so a `$ref` never goes to the network.
 pub fn validator(name: &str) -> Validator {
+    build(name, true)
+}
+
+/// The validator of the conformance kit (spec 4, section 5.4): the same as
+/// [`validator`], but the `email` format accepts each text, because
+/// validators do not agree on `email`. `date` and `date-time` stay checked.
+pub fn kit_validator(name: &str) -> Validator {
+    build(name, false)
+}
+
+fn build(name: &str, email: bool) -> Validator {
     let dir = schema_dir();
     let mut builder = Registry::new();
     for path in json_files(&dir) {
@@ -46,11 +57,15 @@ pub fn validator(name: &str) -> Validator {
     }
     let registry = builder.prepare().expect("the schemas resolve");
     let schema = read_json(&dir.join(format!("{name}.schema.json")));
-    jsonschema::options()
+    let mut options = jsonschema::options()
         .with_draft(Draft::Draft202012)
         .should_validate_formats(true)
         .offline()
-        .with_registry(&registry)
+        .with_registry(&registry);
+    if !email {
+        options = options.with_format("email", |_| true);
+    }
+    options
         .build(&schema)
         .unwrap_or_else(|e| panic!("{name}.schema.json is not a valid schema: {e}"))
 }

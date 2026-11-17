@@ -40,7 +40,7 @@ pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
-pub use search::Query;
+pub use search::{day_ms, Query};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
@@ -76,6 +76,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_28.sql"),
     include_str!("schema_29.sql"),
     include_str!("schema_30.sql"),
+    include_str!("schema_31.sql"),
+    include_str!("schema_32.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,
@@ -146,6 +148,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// section 7.2). The store cuts a longer text before FTS5 indexes it, because
 /// FTS5 holds the terms of a document in memory while it indexes the
 /// document. Same value as `iris_clean::TEXT_LIMIT`.
+/// The `model` value of each open model document that Iris writes
+/// (spec 4, rule 2.1).
+pub const MODEL: &str = "iris/1.0";
+
+/// The `$id` of the common definitions of the open model.
+pub const COMMON_SCHEMA_ID: &str = "urn:iris:model:1:common";
+
 pub const TEXT_LIMIT: usize = 32_000;
 /// The most characters of the subject and of the sender in `body`.
 pub const FIELD_LIMIT: usize = 1_000;

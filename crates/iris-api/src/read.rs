@@ -826,15 +826,21 @@ fn read_section(
         .join(", ");
     let seek = after.map_or_else(|| "1".to_string(), |_| seek_sql(&keys));
     let mut st = c.prepare(&format!(
-        "SELECT id, form, status, doc, {list}, {MATTER} FROM item WHERE ({shown}) AND ({seek})
-         ORDER BY {order} LIMIT {limit}"
+        "SELECT id, form, status, doc, {list}, {MATTER}, {} FROM item
+         WHERE ({shown}) AND ({seek})
+         ORDER BY {order} LIMIT {limit}",
+        ready_draft()
     ))?;
     let (items, page_keys): (Vec<_>, Vec<_>) = st
         .query_map(rusqlite::params_from_iter(after.unwrap_or_default()), |r| {
             let row_keys = (4..4 + keys.len())
                 .map(|i| r.get::<_, SqlValue>(i))
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok((doc_of(r)?, row_keys))
+            let mut doc = doc_of(r)?;
+            if r.get::<_, bool>("ready_draft")? {
+                doc["ready"] = Value::from(vec!["draft"]);
+            }
+            Ok((doc, row_keys))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
@@ -1154,9 +1160,23 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
       JOIN matter m ON m.id = mi.matter_id
      WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter";
 
+/// The column `ready_draft` of an item row: true when the thread of the
+/// mail that made the item has a reply draft that the person can use now
+/// (card R3-09, [`iris_voice::ready_sql`]).
+fn ready_draft() -> String {
+    format!(
+        "{} AS ready_draft",
+        iris_voice::ready_sql(
+            "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
+             WHERE os.item_id = item.id AND os.role = 'origin'"
+        )
+    )
+}
+
 /// The document of an item row (id, form, status, doc, and the column
 /// [`MATTER`] by name). The row is the true copy of the ID, the status and
-/// the matter, so they replace the values of the document. Each output of
+/// the matter, so they replace the values of the document. A stored `ready`
+/// is removed: only [`read_section`] sets it, from the store. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     doc_at(r, 0)
@@ -1175,6 +1195,8 @@ pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
             map.insert("id".into(), id.into());
         }
         map.insert("status".into(), Value::String(r.get(at + 2)?));
+        // The engine computes `ready` on each brief read: a stored value is never shown.
+        map.remove("ready");
         let matter: Option<i64> = r.get("matter")?;
         map.insert(
             "matter".into(),

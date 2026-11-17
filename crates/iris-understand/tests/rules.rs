@@ -38,7 +38,7 @@ fn finished(d: &Draft) -> serde_json::Value {
     let By::Rule(rule) = d.by else {
         panic!("not a rule")
     };
-    v["model"] = json!("iris/0");
+    v["model"] = json!("iris/1.0");
     v["id"] = json!(format!("{}-1", &d.form()[..1]));
     v["sources"] = json!([{"message": "m-1", "thread": "t-1", "role": "origin", "quote": d.quote}]);
     v["created"] = json!("2026-01-01T00:00:00Z");

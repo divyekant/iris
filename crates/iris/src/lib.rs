@@ -95,6 +95,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// In a job workspace: end the session, and wait for a reply on a thread
+    /// of the job or for a date. Iris starts a new session of the job when
+    /// the reply comes or the date passes. A verb of a session only.
+    Wait {
+        /// The end of the wait: the start of the day YYYY-MM-DD, UTC.
+        #[arg(long)]
+        until: String,
+        /// The thread (`t-8841`) whose reply ends the wait first.
+        #[arg(long)]
+        reply: Option<String>,
+        /// The reason of the wait, for the person.
+        #[arg(long)]
+        why: Option<String>,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -565,10 +579,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } = &cli.command {
+    if let Command::List { .. } | Command::Wait { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
-            error: "list is a verb of a session: run it in a job workspace".into(),
+            error: "this is a verb of a session: run it in a job workspace".into(),
         });
     }
     if let Some((verb, args, json)) = request {
@@ -672,6 +686,19 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         return Err(denied(
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
         ));
+    }
+    if let Command::Wait { until, reply, why } = c {
+        // The wait ends this session: after a lost answer, `iris status`
+        // in a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "until": until, "reply": reply, "why": why });
+        let r = socket::request_at(path, "wait", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} waits until {}",
+            verbs::field(r["job"].as_str().unwrap_or("-")),
+            verbs::field(r["until"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
     }
     // The read verbs of a session (R4-04f): only the grant of the job.
     let read = match c {
@@ -1122,7 +1149,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } => Err("list is a verb of a session".into()),
+        Command::List { .. } | Command::Wait { .. } => Err("this is a verb of a session".into()),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },

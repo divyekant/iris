@@ -1,6 +1,7 @@
 <!--
   One item on one line. The whole line opens the item. The envelope opens the
   source mail in one step. An unread dot marks a conversation that waits for you.
+  A "Draft ready" pill marks an item with a reply that Iris prepared (card R3-09).
   With `ondone`, an open commitment starts with a round tick box: a click marks
   it done after the same Undo time as the item view, then calls `ondone`. The
   view that passes `ondone` calls `flushHolds` when the person leaves it. A feed
@@ -125,6 +126,16 @@
     <p class="detail">
       {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
+    {#if item.ready?.includes("draft")}
+      <p class="prepared">
+        <span class="ready" title="Iris wrote a reply in your voice">
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+            <path d="M10.5 2.5l3 3-7.5 7.5H3v-3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+          </svg>
+          Draft ready
+        </span>
+      </p>
+    {/if}
     {#if note}<p class="note">{note}</p>{/if}
     {#if twins.length}
       <p class="twins">
@@ -230,6 +241,21 @@
   }
   .due.late::after {
     background: var(--color-error);
+  }
+  /* What Iris prepared: quiet pills under the detail. They are no control, so a click opens the item. */
+  .prepared {
+    margin: var(--space-1) 0 0;
+  }
+  .ready {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-2);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-full);
+    color: var(--color-primary);
+    font-size: var(--font-size--1);
+    white-space: nowrap;
   }
   .dot {
     flex: none;

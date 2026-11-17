@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:matter",
-  "title": "Iris open model 0 (draft): matter",
-  "description": "Draft. A title and the items that belong together: a trip, a contract, a hire. Iris proposes a matter and the person confirms it. See docs/specs/2026-11-16-matters.md.",
+  "$id": "urn:iris:model:1:matter",
+  "title": "Iris open model 1: matter",
+  "description": "A title and the items that belong together: a trip, a contract, a hire. Iris proposes a matter and the person confirms it. See docs/specs/2026-11-16-matters.md.",
   "type": "object",
   "additionalProperties": false,
   "required": ["model", "id", "title", "status", "items", "counts", "created", "updated", "derived"],
   "properties": {
-    "model": { "const": "iris/0" },
+    "model": { "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$" },
     "id": { "type": "string", "pattern": "^g-[1-9][0-9]*$" },
     "title": { "type": "string", "minLength": 1, "maxLength": 80 },
     "status": { "enum": ["proposed", "confirmed", "declined"] },
@@ -28,11 +28,11 @@
         "record": { "type": "integer", "minimum": 0 }
       }
     },
-    "created": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
-    "updated": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
-    "decided": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+    "created": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+    "updated": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+    "decided": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
     "derived": {
-      "allOf": [{ "$ref": "urn:iris:model:0:common#/$defs/derived" }],
+      "allOf": [{ "$ref": "urn:iris:model:1:common#/$defs/derived" }],
       "properties": { "by": { "const": "model" } }
     }
   },

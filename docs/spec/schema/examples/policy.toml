@@ -1,5 +1,5 @@
-# Iris policy. Version 0 (draft).
-version = 0
+# Iris policy. Version 1.
+version = 1
 
 # observe: Iris applies nothing. apply: rules decide, and the rest goes to review.
 mode = "apply"

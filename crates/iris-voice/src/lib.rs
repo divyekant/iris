@@ -163,13 +163,50 @@ const HOSTILE: &str = concat!(
                  WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile'))"
 );
 
-/// The messages of thread `?1` that count.
-const IN_THREAD: &str = "FROM message m
+/// The messages of the thread `thread` (an SQL expression) that count.
+macro_rules! in_thread {
+    ($thread:literal) => {
+        concat!(
+            "FROM message m
          LEFT JOIN header h ON h.message_id = m.id
          LEFT JOIN body b ON b.message_id = m.id
-         WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+         WHERE m.thread_id = ",
+            $thread,
+            " AND m.gone_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')";
+                           WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT')"
+        )
+    };
+}
+
+/// The messages of thread `?1` that count.
+const IN_THREAD: &str = in_thread!("?1");
+
+/// A message that a reply can answer: not in spam and not in the trash, as
+/// `iris_changeset::reply_parent`. The counts of [`snapshot`] keep these
+/// messages, so hostile mail in the trash still stops a draft.
+const ANSWERABLE: &str =
+    "AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))";
+
+/// The newest message first: the order of [`snapshot`].
+const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
+
+/// SQL that is true when one of the threads `threads` (an SQL query that
+/// gives thread IDs) has a draft that the person can use now (card R3-09).
+/// The checks of [`write`] still pass: the draft answers the newest message
+/// that counts, and no message that counts is hostile or waits for
+/// understanding. A newer message, a gone newest message or a new hostile
+/// mark makes the draft stale, and the draft is not ready.
+pub fn ready_sql(threads: &str) -> String {
+    let in_thread = in_thread!("d.thread_id");
+    format!(
+        "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
+           AND d.based_on = (SELECT m.id {in_thread} {ANSWERABLE} {NEWEST} LIMIT 1)
+           AND NOT EXISTS (SELECT 1 {in_thread}
+                           AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL)))"
+    )
+}
 
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
     let (count, not_ready, hostile) = c
@@ -186,9 +223,8 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
-           AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                           WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
-         ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC
+         {ANSWERABLE}
+         {NEWEST}
          LIMIT ?2"
     ))?;
     // One character more than the cut keeps, so `cut` still marks a cut.

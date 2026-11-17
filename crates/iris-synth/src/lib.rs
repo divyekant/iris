@@ -10,6 +10,7 @@
 
 pub mod base64;
 mod date;
+pub mod hostile;
 mod rng;
 mod text;
 

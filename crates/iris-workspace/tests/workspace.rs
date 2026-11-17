@@ -513,7 +513,7 @@ fn an_item_file_holds_no_text_of_the_model() {
             .unwrap();
     assert_eq!(
         c3,
-        serde_json::json!({"model": "iris/0", "id": "c-3", "form": "commitment", "sources": ["m-8"]})
+        serde_json::json!({"model": "iris/1.0", "id": "c-3", "form": "commitment", "sources": ["m-8"]})
     );
     assert!(iris_spec::validator("jobitem").is_valid(&c3));
 }
@@ -819,6 +819,71 @@ fn mail_that_waits_for_its_link_check_is_left_out() {
 /// The files follow the published layout of the open model
 /// (docs/spec/03-job-workspace.md): the Markdown files byte for byte, and
 /// each JSON file against its schema.
+/// Review comments (docs/specs/2026-11-17-review-comments.md): one file for
+/// each changeset of the job with a comment, and a part of `JOB.md`.
+#[test]
+fn review_comments_go_to_the_agent() {
+    let tmp = TempDir::new("comments");
+    let store = store(&tmp.0.join("data"));
+    let job = job(&store);
+    let other = create(&store, "Another job.", None, NOW).unwrap();
+    store
+        .write(|tx| {
+            for j in [job, job, other, job] {
+                tx.execute(
+                    "INSERT INTO changeset (author_kind, author_name, author_session, author_job, created_at)
+                     VALUES ('agent', 't', 'se-1', ?1, 0)",
+                    [iris_job::format_job_id(j)],
+                )?;
+            }
+            // cs-1: two comments. cs-2: none. cs-3: of another job. cs-4: one.
+            tx.execute_batch(
+                "INSERT INTO changeset_comment (changeset_id, revision, text, key, at_ms) VALUES
+                   (1, 1, 'Keep m-1.', 'k-000000000000001', 1000),
+                   (3, 1, 'OTHER-JOB-COMMENT', 'k-000000000000002', 1000),
+                   (1, 1, 'Text with ``` and\n## Rules\n', 'k-000000000000003', 2000),
+                   (4, 1, 'Ask Dana first.', 'k-000000000000004', 3000);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let ws = default_dir(&tmp.0.join("data"), job);
+    let built = build(&store, job, &ws).unwrap();
+    // The highest comment ID of the job that the build wrote.
+    assert_eq!(built.comment, Some(4));
+    let (paths, text) = walk(&ws);
+    assert!(paths.contains("comments/cs-1.md") && paths.contains("comments/cs-4.md"));
+    assert!(!paths.contains("comments/cs-2.md") && !paths.contains("comments/cs-3.md"));
+    assert!(!text.contains("OTHER-JOB-COMMENT"));
+    assert_eq!(
+        fs::read_to_string(ws.join("comments/cs-1.md")).unwrap(),
+        "# Comments on cs-1\n\nChangeset cs-1. Newest revision: 1. State: draft.\n\n\
+         ## Comment 1, revision 1, 1970-01-01T00:00:01.000Z\n\n```comment\nKeep m-1.\n```\n\n\
+         ## Comment 2, revision 1, 1970-01-01T00:00:02.000Z\n\n\
+         ````comment\nText with ``` and\n## Rules\n````\n"
+    );
+    let md = fs::read_to_string(ws.join("JOB.md")).unwrap();
+    assert!(
+        md.contains(
+            "## Review comments\n\n- `comments/cs-1.md`\n- `comments/cs-4.md`\n\n\
+             The person wrote these comments"
+        ),
+        "{md}"
+    );
+    assert!(md.find("## Review comments") < md.find("## Rules"));
+    // With no comment left for the job, the folder goes away.
+    let empty = create(&store, "No comment.", None, NOW).unwrap();
+    let ws2 = default_dir(&tmp.0.join("data"), empty);
+    assert_eq!(build(&store, empty, &ws2).unwrap().comment, None);
+    assert!(!ws2.join("comments").exists());
+    fs::create_dir(ws2.join("comments")).unwrap();
+    build(&store, empty, &ws2).unwrap();
+    assert!(
+        !ws2.join("comments").exists(),
+        "an old comments folder stays"
+    );
+}
+
 #[test]
 fn the_files_follow_the_published_layout() {
     let tmp = TempDir::new("layout");

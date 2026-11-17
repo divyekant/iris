@@ -242,6 +242,50 @@ pub fn wait_in(c: &Connection, job: i64, w: Wait, why: Option<&str>, now_ms: i64
     add_event(c, job, State::Waiting, By::Agent, m, now_ms)
 }
 
+/// `iris wait` of the session `session` of `job` (docs/specs/2026-11-17-wait.md):
+/// one transaction checks that the session is open and, for a reply wait,
+/// that the thread is an active thread ref of the scope, then writes the
+/// wait. The move ends the session with `job_state`, so the start path of
+/// the wake finds it. A session that a revoke or a stop ended, or a thread
+/// outside the scope, is refused, and nothing changes.
+pub fn session_wait(
+    store: &Store,
+    session: i64,
+    job: i64,
+    w: Wait,
+    why: Option<&str>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        let open: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM job_session
+               WHERE id = ?1 AND job_id = ?2 AND ended_at IS NULL)",
+            params![session, job],
+            |r| r.get(0),
+        )?;
+        if !open {
+            return Err(Error::Refused(format!(
+                "{} is not open",
+                format_session_id(session)
+            )));
+        }
+        if let Some(t) = w.thread {
+            let scoped: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM job_scope
+                   WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL)",
+                params![job, t],
+                |r| r.get(0),
+            )?;
+            if !scoped {
+                return Err(Error::Refused(format!(
+                    "t-{t} is not a thread of the scope of the job"
+                )));
+            }
+        }
+        wait_in(c, job, w, why, now_ms)
+    })
+}
+
 /// The agent asks the person one question.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
     transaction(store, |c| ask_in(c, job, question, why, now_ms))
@@ -273,6 +317,27 @@ pub fn wake_in(c: &Connection, job: i64, by: By, why: Option<&str>, now_ms: i64)
         ..Move::default()
     };
     add_event(c, job, State::Working, by, m, now_ms)
+}
+
+/// The jobs that wait for a new session after a wake by the engine: the
+/// job is `working`, its newest event is a wake by the engine, and the last
+/// session of the job ended with `job_state` (the move to `waiting`). A
+/// session that starts after the wake becomes the last session, so the job
+/// leaves the list. The order is the order of the rows, not of the clock.
+/// Gives each job, its last session and the agent of that session.
+pub fn woken(store: &Store) -> Result<Vec<(i64, i64, String)>> {
+    Ok(store.read(|c| {
+        let mut st = c.prepare_cached(
+            "SELECT j.id, s.id, s.agent FROM job j
+             JOIN job_session s
+               ON s.id = (SELECT max(id) FROM job_session WHERE job_id = j.id)
+             WHERE j.state = 'working' AND s.end_reason = 'job_state'
+               AND (SELECT by FROM job_event WHERE job_id = j.id
+                    ORDER BY id DESC LIMIT 1) = 'engine'",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    })?)
 }
 
 /// The person answers the question.
@@ -501,7 +566,7 @@ pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<(
 /// The fields of the job document without `events`: the summary of a job.
 pub fn job_json(j: &Job) -> Value {
     let mut m = Map::new();
-    m.insert("model".into(), "iris/0".into());
+    m.insert("model".into(), iris_store::MODEL.into());
     m.insert("id".into(), format_job_id(j.id).into());
     m.insert("goal".into(), j.goal.as_str().into());
     if let Some(due) = j.due_ms {

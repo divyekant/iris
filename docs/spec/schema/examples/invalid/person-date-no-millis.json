@@ -1,10 +1,15 @@
 {
+  "model": "iris/1.0",
   "id": "p-1",
   "address": "dana@example.com",
-  "names": ["Dana"],
+  "names": [
+    "Dana"
+  ],
   "first": "1970-01-01T00:00:01Z",
   "last": "1970-01-01T00:00:09.000+00:00",
   "from_them": 1,
   "from_you": 0,
-  "threads": ["t-1"]
+  "threads": [
+    "t-1"
+  ]
 }

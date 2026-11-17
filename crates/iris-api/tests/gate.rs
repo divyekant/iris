@@ -101,7 +101,7 @@ impl Gate {
     /// An item of message `source`. Gives the item ID.
     fn item(&self, form: &str, status: &str, source: i64, doc: Value) -> String {
         let mut full = json!({
-            "model": "iris/0", "form": form, "status": status, "title": format!("{form} {source}"),
+            "model": "iris/1.0", "form": form, "status": status, "title": format!("{form} {source}"),
             "sources": [{"message": format!("m-{source}"), "thread": "t-1", "role": "origin", "quote": "q"}],
             "created": "2026-11-01T00:00:00Z", "updated": "2026-11-01T00:00:00Z",
             "derived": {"by": "rule", "rule": "test"}
