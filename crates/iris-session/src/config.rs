@@ -274,8 +274,8 @@ fn check_env_name(v: &str) -> Result<(), String> {
 
 /// A host is a DNS name in lower case: labels of 1 to 63 characters of a-z,
 /// 0-9 and `-` (not at the start or the end of a label), at most 253
-/// characters. A name whose last label is all digits is refused, because a
-/// resolver can read it as an IPv4 address.
+/// characters. A name whose last label is a number (decimal, or 0x and
+/// hexadecimal) is refused, because a resolver reads it as an IPv4 address.
 fn check_host(h: &str) -> Result<(), String> {
     let label_ok = |l: &str| {
         (1..=63).contains(&l.len())
@@ -284,10 +284,14 @@ fn check_host(h: &str) -> Result<(), String> {
             && !l.starts_with('-')
             && !l.ends_with('-')
     };
-    let numeric_end = h
-        .rsplit('.')
-        .next()
-        .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()));
+    // The rule of the URL Standard ("ends in a number"): a last label of
+    // digits, or 0x and hexadecimal digits, makes the name an IPv4 form,
+    // which the system resolver reads as an address (also 0x08080808).
+    let numeric_end = h.rsplit('.').next().is_some_and(|l| {
+        l.bytes().all(|b| b.is_ascii_digit())
+            || l.strip_prefix("0x")
+                .is_some_and(|x| x.bytes().all(|b| b.is_ascii_hexdigit()))
+    });
     if h.len() > 253 || !h.split('.').all(label_ok) || numeric_end {
         return Err(format!(
             "allow_hosts {h:?} is not a DNS name in lower case (no port, no wildcard, no IP address)"

@@ -192,12 +192,22 @@ fn an_allowed_host_passes_only_as_a_dns_name() {
 /// The rule of the URL Standard for a label that makes a host an IPv4 form.
 fn ends_in_a_number(l: &str) -> bool {
     l.bytes().all(|b| b.is_ascii_digit())
-        || l.strip_prefix("0x").is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+        || l.strip_prefix("0x")
+            .is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[test]
 fn each_numeric_ip_form_is_refused() {
-    for host in ["8.8.8.8", "134744072", "0x08080808", "0x8.0x8.0x8.0x8", "010.0.0.1", "a.0x", "a.0xff", "a.1"] {
+    for host in [
+        "8.8.8.8",
+        "134744072",
+        "0x08080808",
+        "0x8.0x8.0x8.0x8",
+        "010.0.0.1",
+        "a.0x",
+        "a.0xff",
+        "a.1",
+    ] {
         let text = format!("[agent.x]\ncommand = [\"a\"]\nallow_hosts = [\"{host}\"]\n");
         assert!(parse_agents(&text).is_err(), "{host}");
     }
