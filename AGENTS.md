@@ -304,6 +304,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-workspace/` | The workspace of a job: a folder with only the mail and the state of the scope of the job, as clean files. | `engine` |
 | `crates/iris-session/` | The session of a job: `agents.toml` and the adapter and environment of each agent tool, the `Isolation` interface and its Linux sandbox (`bwrap`: no network other than the egress port, no data folder, no process that outlives the helper), and the egress proxy of an agent (a `CONNECT` tunnel to the allowed model hosts, at public addresses only). The hold helper starts the agent after the engine says `start`, and stops and reaps its process group. The launch registers a session, builds its workspace, binds its socket, starts the held helper and runs the start gate. The reap check confirms that each process of an ended session stopped. `crates/iris/src/sessions.rs` runs the sessions in the engine: the supervisor, `iris job run`, `iris job stop` and `iris job session`. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
+| `apps/mac/` | The Mac app (Tauri): a window with the web client of the local engine, a menu bar icon and the system notices. Its own Cargo workspace and lock file. It builds on macOS only. CI tests `src/engine.rs` on Linux. | `mac` |
 
 ### Base decisions
 
