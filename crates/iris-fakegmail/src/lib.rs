@@ -134,6 +134,9 @@ struct Store {
     write_failures: VecDeque<(u16, bool)>,
     /// A failure for the next request whose log line contains the text.
     path_failure: Option<(String, u16)>,
+    /// A step that runs before the answer of the next request whose log
+    /// line contains the text: a change by another process during a call.
+    before_matching: Option<(String, Box<dyn FnOnce() + Send>)>,
     /// The most items on one list page, below `maxResults`.
     page_limit: usize,
     /// A draft edit that the next `drafts.get` of the draft starts, after
@@ -205,6 +208,7 @@ impl Store {
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
             path_failure: None,
+            before_matching: None,
             page_limit: usize::MAX,
             edit_after_get: None,
             log: Vec::new(),
@@ -503,6 +507,12 @@ impl FakeGmail {
         self.store.lock().unwrap().path_failure = Some((text.to_string(), status));
     }
 
+    /// Run `step` before the answer of the next request whose log line
+    /// contains `text`. The fake holds no lock while the step runs.
+    pub fn before_next_matching(&self, text: &str, step: impl FnOnce() + Send + 'static) {
+        self.store.lock().unwrap().before_matching = Some((text.to_string(), Box::new(step)));
+    }
+
     /// The next write requests (POST) get these HTTP status codes, one
     /// each, in place of an answer. Status 0 lets one write pass. With
     /// `applied`, the fake makes the change first, so the result at the
@@ -591,6 +601,17 @@ fn router(store: Shared) -> Router {
 
 /// Log each request, and answer with an injected failure if one is queued.
 async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Response {
+    let step = {
+        let mut s = s.lock().unwrap();
+        let line = format!("{} {}", req.method(), req.uri());
+        match &s.before_matching {
+            Some((t, _)) if line.contains(t.as_str()) => s.before_matching.take().map(|(_, f)| f),
+            _ => None,
+        }
+    };
+    if let Some(step) = step {
+        step();
+    }
     let failure = {
         let mut s = s.lock().unwrap();
         let line = match req.uri().query() {

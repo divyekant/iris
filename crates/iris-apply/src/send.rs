@@ -239,8 +239,22 @@ fn claim(
         // The switch is read here, in the transaction of the claim; the
         // apply lock that the caller holds keeps `iris sending off` out
         // until the call ends.
-        if draft.is_some() && switch_on(tx)?.is_none() {
-            return Ok(Some(Err(Outcome::SendingOff)));
+        // The hold too: a stop and a resume (or sending off and on) during
+        // the read of the draft move `on_at`, and the send waits a full hold
+        // again (docs/specs/2026-11-17-stop.md, section 3).
+        if draft.is_some() {
+            let Some(on_at) = switch_on(tx)? else {
+                return Ok(Some(Err(Outcome::SendingOff)));
+            };
+            let decided_at: i64 = tx.query_row(
+                "SELECT coalesce(decided_at, 0) FROM changeset_action WHERE id = ?1",
+                [action],
+                |r| r.get(0),
+            )?;
+            let until = decided_at.max(on_at) + HOLD_MS;
+            if now() < until {
+                return Ok(Some(Err(Outcome::Hold(until))));
+            }
         }
         let state = if draft.is_some() { "held" } else { "approved" };
         let free: bool = tx.query_row(

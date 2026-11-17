@@ -83,6 +83,73 @@ pub fn spawn(
     tx
 }
 
+/// The longest time since the last `app.notices` call of the Mac app, in
+/// which the app shows the notices and the engine does not
+/// (`docs/specs/2026-11-17-mac-app.md`). The app asks each 10 seconds.
+pub const APP_WAIT_MS: i64 = 30_000;
+
+/// The state of the Mac app in the engine (in memory only).
+struct App {
+    /// The time of the last `app.notices` call, in milliseconds since 1970.
+    /// 0 when no app asked.
+    asked_ms: i64,
+    /// The largest notice row ID that the app does not show: the `last` of
+    /// the call that started the app. `i64::MAX` when no app asked.
+    from: i64,
+}
+
+/// One lock for the call of the app and the choice of the engine: each
+/// notice has one owner, the app or the engine.
+static APP: std::sync::Mutex<App> = std::sync::Mutex::new(App {
+    asked_ms: 0,
+    from: i64::MAX,
+});
+
+fn app() -> std::sync::MutexGuard<'static, App> {
+    APP.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Run one `app.notices` call at `now_ms` under the lock of [`show`].
+/// `read` gets `true` when the app owns the notices: its last call came
+/// [`APP_WAIT_MS`] or less before. With `false` (the first call, or a call
+/// after a gap), the call starts the app again. `read` then gives the `last`
+/// of the answer as `Some`: the app shows only the notices after it, and the
+/// engine shows all others. A notice that the engine shows before the lock
+/// is in the store before `read`, so its row ID is at or below that `last`.
+pub fn app_call<T, E>(
+    now_ms: i64,
+    read: impl FnOnce(bool) -> Result<(T, Option<i64>), E>,
+) -> Result<T, E> {
+    let mut a = app();
+    let (answer, from) = read(app_live(a.asked_ms, now_ms))?;
+    if let Some(f) = from {
+        a.from = f;
+    }
+    a.asked_ms = a.asked_ms.max(now_ms);
+    Ok(answer)
+}
+
+/// True when an app asked at `asked_ms`, [`APP_WAIT_MS`] or less before
+/// `now_ms`.
+fn app_live(asked_ms: i64, now_ms: i64) -> bool {
+    asked_ms > 0 && now_ms - asked_ms <= APP_WAIT_MS
+}
+
+/// True when the app shows notice `id`, so the engine does not: the app is
+/// live (its call at `asked_ms`) and `id` is after the start `from` of the
+/// app.
+pub fn app_shows(id: i64, from: i64, asked_ms: i64, now_ms: i64) -> bool {
+    app_live(asked_ms, now_ms) && id > from
+}
+
+/// [`app_shows`] with the state that the engine recorded, under the lock of
+/// [`app_call`].
+pub fn app_shows_now(id: i64, now_ms: i64) -> bool {
+    let a = app();
+    app_shows(id, a.from, a.asked_ms, now_ms)
+}
+
 /// True after the first failure, so that a server with no desktop writes
 /// one log line, not one for each notice.
 static FAILED: AtomicBool = AtomicBool::new(false);
@@ -90,6 +157,9 @@ static FAILED: AtomicBool = AtomicBool::new(false);
 /// Shows one system notice for `n`. A failure writes one log line the first
 /// time. The notice stays in the web client either way.
 pub fn show(n: &iris_policy::notice::Notice) {
+    if app_shows_now(n.id, crate::engine::now_ms()) {
+        return;
+    }
     let title = format!("Iris: {}", n.rule_name);
     let text = format!("{}: {}", n.title, n.text);
     let result = match command(std::env::consts::OS, &title, &text) {
@@ -155,6 +225,57 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn the_app_shows_the_notices_for_30_seconds_after_its_call() {
+        let t = 1_800_000_000_000;
+        let shows = |asked| app_shows(5, 4, asked, t);
+        assert!(!shows(0));
+        assert!(shows(t - 10_000));
+        assert!(shows(t - APP_WAIT_MS));
+        assert!(!shows(t - APP_WAIT_MS - 1));
+        assert!(!shows(t - 31_000));
+        // A notice at or before the start of the app: the engine shows it.
+        assert!(!app_shows(4, 4, t, t));
+        assert!(!app_shows(3, 4, t, t));
+        assert!(!app_shows(1, i64::MAX, t, t));
+    }
+
+    #[test]
+    fn each_notice_of_the_first_call_has_one_owner() {
+        // The only test of the state of the app in this binary.
+        let now = 1_800_000_000_000;
+        // Notice 5 comes while the first call reads the store, after the
+        // read: the engine choice waits for the call, then leaves notice 5
+        // to the app.
+        let engine = app_call(now, |live| {
+            assert!(!live, "no app asked before");
+            let engine = std::thread::spawn(move || app_shows_now(5, now));
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!engine.is_finished(), "the choice waits for the call");
+            Ok::<_, ()>((engine, Some(4)))
+        })
+        .unwrap();
+        assert!(engine.join().unwrap(), "the app shows notice 5");
+        // Notice 4 was in the store before the read: the app does not show
+        // it (its `last` is 4), so the engine does.
+        assert!(!app_shows_now(4, now));
+        // A later call of the live app keeps its start.
+        let next = now + 10_000;
+        assert!(app_call(next, |live| Ok::<_, ()>((live, None))).unwrap());
+        assert!(app_shows_now(5, next));
+        // After a gap the engine shows the notices, and the next call
+        // starts the app again after its new `last`.
+        let gap = next + APP_WAIT_MS + 1;
+        assert!(!app_shows_now(6, gap));
+        assert!(!app_call(gap, |live| Ok::<_, ()>((live, Some(6)))).unwrap());
+        assert!(!app_shows_now(6, gap));
+        assert!(app_shows_now(7, gap));
+        // A failed read records nothing.
+        let late = gap + APP_WAIT_MS + 1;
+        assert!(app_call(late, |_| Err::<((), Option<i64>), _>(())).is_err());
+        assert!(!app_shows_now(7, late));
     }
 
     #[test]

@@ -69,6 +69,7 @@ fn open(name: &str) -> Box_ {
                 ("INBOX", "INBOX", "system"),
                 ("DRAFT", "DRAFT", "system"),
                 ("SPAM", "SPAM", "system"),
+                ("TRASH", "TRASH", "system"),
             ],
         )
         .unwrap();
@@ -963,6 +964,10 @@ fn a_draft_is_ready_exactly_while_the_checks_of_write_pass_on_its_message() {
             .unwrap();
     };
     add("gmail-draft", 500, "DRAFT", None);
+    assert!(ready(&b.store, t) && checks_pass_on(&b.store, t));
+    // A newer message in the trash is not one that a reply answers.
+    add("trashed", 550, "TRASH", Some("Old news"));
+    understood(&b.store);
     assert!(ready(&b.store, t) && checks_pass_on(&b.store, t));
     add("newer", 600, "INBOX", Some("And Saturday?"));
     assert!(!ready(&b.store, t) && !checks_pass_on(&b.store, t));

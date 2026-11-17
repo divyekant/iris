@@ -278,6 +278,7 @@ then the send. The send leaves after the hold, and only while sending is on.
 | `GET /api/write/{cs-N}` | The state of the write: `saving`, `waiting` (`draft`, `sending`, `leaves_at`), `review` (`reason`), `sent` or `stopped` (`reason`, `draft`). A write that got no send in 24 hours after the press is `stopped`: the engine makes no send for it. One answer is one snapshot of the store. A changeset that is not a write is a 404. |
 | `GET /api/threads/{t-N}/draft` | The draft of the thread that the person can use now: `thread`, `based_on` (the newest mail when Iris wrote it), `nudge` (true for a reminder that Iris prepared because a person is late on an ask, card R3-07), `to` (for a nudge, the address of the person that owes, else null) and `body`. A draft is stale after a newer mail or a hostile mark. A nudge is also stale when its commitment is done, hidden, changed or not late. A stale draft is a 404. A thread with no draft is a 404. Nothing is sent. |
 | `GET /api/threads/{t-N}/reply` | The start values of a reply: `account`, `parent` (`id`, `from`, `date`, and `text` cut to 600 characters), `to`, `cc`, `subject`, `topic` (the subject of the parent), `conversation` and `earlier`. `conversation` is the newest 20 mails of the thread that a reply can answer, oldest first, with the parent last: `id`, `from`, `date`, `to`, `you` (the mail has the label `SENT`), `hostile` (a hostile mark, a link check that waits, or a hostile sender), `text` (cut to 4,000 characters) and `cut`. `earlier` is the count of the older mails. The parent is the newest mail of the thread that is not spam, trash or a draft. If the person wrote it (it has the label `SENT`), the reply goes to its recipients. Otherwise it goes to its sender, also when its `From` is the address of the person. A thread with no mail to reply to is a 409. A thread that does not exist is a 404. |
+| `POST /api/threads/{t-N}/draft` | A draft of the reply in the voice of the person (R3-04 intent path, `iris_voice::draft`). Body `{"intent": "...", "parent": "m-N"}`; the intent can be empty, and `parent` is the mail that the form shows (409 before the call if the reply parent is another mail now). One model call through the budget of understanding. The draft is saved in `reply_draft` and comes back as `body`, with `based_on`, `samples`, `unknown_cost` and `overrun`. It writes nothing to Gmail. 404 for a thread that does not exist; 400 for an intent over 2,000 characters; 409 for a thread with hostile mail, with mail that understanding did not read, or that changed during the call; 503 with no model, no budget, or while an understanding run holds the lock; 502 if the model fails. |
 
 ## Stranger gate
 
@@ -329,7 +330,7 @@ An error is `{"error": "<reason>"}`:
 |---|---|
 | 400 | The search text, an ID, a filter or a request body is not valid. |
 | 401 | The request has no `Authorization: Bearer` token of the sign-in, or a wrong one. |
-| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid or was used. |
+| 403 | The `Host` is not the bound address, the `Origin` is another origin, or the sign-in code is not valid, was used or ended. |
 | 405 | The code exchange was not a `POST`. |
 | 404 | No object has the ID, or the path is not an endpoint. |
 | 409 | A gate answer is for a sender that is not at the gate now: its kind is not `stranger`, or a rule took its items out. A policy change cannot apply: the policy or the file changed after the person saw it, the file is not valid, or the rule does not exist. Read the policy again. A review decision cannot apply: read the changeset again. |
@@ -339,12 +340,15 @@ An error is `{"error": "<reason>"}`:
 
 The API follows specification 2, section 8.6. At each start, `Auth::new(addr)`
 makes a random web secret of 32 bytes and a one-time code. `iris serve`
-prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
+prints the sign-in address `http://<addr>/#code=<code>`. `Auth::sign_in()`
+makes one more code, for 2 minutes (`CODE_LIFE`). At most 8 codes wait
+(`CODES_MAX`): a new code ends the oldest code of `sign_in`. `iris open`
+gets such a code through the engine socket.
 
 1. The client page reads the code from the fragment of the address. The
    browser does not send a fragment to a server.
 2. The client sends `POST /api/session` with `{"code": "<code>"}`. The answer
-   is `{"token": "<secret>"}`, one time only. A wrong or used code gives 403.
+   is `{"token": "<secret>"}`, one time only. A wrong, used or ended code gives 403.
 3. The client keeps the token in the storage of its origin (for example
    `sessionStorage`), and sends `Authorization: Bearer <token>` with each
    request. A request without it gives 401.
@@ -352,7 +356,7 @@ prints (and opens) the sign-in address `http://<addr>/#code=<code>`.
 The API does not use a cookie. A browser sends a cookie to each port of a host,
 so a server of another OS user on another loopback port could get it. Storage
 belongs to one origin, with its port. A download of `/raw` needs the header
-too: fetch it, then save the blob. For a new code, start `iris serve` again.
+too: fetch it, then save the blob. For a new code, run `iris open`.
 
 ## Bound address only
 

@@ -902,7 +902,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
                  DROP TRIGGER link_check_attention_end;
                  DROP TABLE link_check;
-                 -- Migrations 21 to 28 run again after 20. The triggers
+                 -- Migrations 21 to 32 run again after 20. The triggers
                  -- of 22 replace themselves.
                  DROP TRIGGER job_session_revoke; DROP TRIGGER job_session_job_state;
                  DROP TRIGGER action_flagged_write;
@@ -915,6 +915,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
                  DROP TABLE write_send; DROP TABLE comment_delivery;
                  DROP TABLE changeset_comment; DROP TABLE nudge_try;
+                 DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())

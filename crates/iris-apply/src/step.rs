@@ -41,8 +41,9 @@ impl Step {
 /// so far ([`step_clock`]).
 ///
 /// 1. The recovery of each ledger row of the account in `writing`. It runs
-///    in each turn, also while the switch is off, so a send whose response
-///    was lost does not stay `held` (issue #400).
+///    in each turn, also while the switch is off or Iris is stopped, so a
+///    send whose response was lost does not stay `held` (issue #400).
+///    While stopped, the step ends here.
 /// 2. Each `approved` action of the account with a Gmail verb, oldest
 ///    first, with [`apply`]. The apply keeps all its checks.
 ///    2a. The send of each draft of the write view
@@ -82,6 +83,11 @@ pub fn step_clock(
     let mut out = Step::default();
     if writing_rows(store, account)? {
         recover(store, gmail, token, account)?;
+    }
+    // While stopped, only the recovery runs. The claims check the stop
+    // again, so a stop after this read still holds.
+    if store.read(iris_store::stopped)?.is_some() {
+        return Ok(out);
     }
     for action in approved(store, account)? {
         let r = apply(store, gmail, token, account, action);

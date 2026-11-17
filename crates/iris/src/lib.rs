@@ -137,6 +137,15 @@ pub enum Command {
         #[arg(value_enum)]
         state: Option<Switch>,
     },
+    /// Stop all agent work: end each session of a job, and apply and send
+    /// nothing until `iris resume`. `--show` only shows the state.
+    Stop {
+        #[arg(long)]
+        show: bool,
+    },
+    /// End the stop. Actions apply again, and each held send waits a full
+    /// hold before it leaves.
+    Resume,
     /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
     Cancel { id: String },
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
@@ -224,6 +233,13 @@ pub enum Command {
     /// input and output, for an MCP client. The same verbs, author and
     /// policy as the command.
     Mcp,
+    /// Open the web client of the running engine in the browser, with a new
+    /// one-time sign-in address. Needs the engine.
+    Open {
+        /// Print the address and open nothing.
+        #[arg(long)]
+        print: bool,
+    },
     /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
     #[command(arg_required_else_help = true)]
     Changeset {
@@ -556,6 +572,9 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
+    if let Command::Open { print } = &cli.command {
+        return open_web(&data?, *print);
+    }
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
@@ -915,6 +934,123 @@ pub fn socket_verb(
     socket_verb_at(&dir.join(socket::SOCKET), verb, args, json)
 }
 
+/// `iris open`: a new sign-in address from the engine (the socket verb
+/// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), printed or opened in the
+/// browser. The code never goes into the arguments of a process: another
+/// OS user can read them. The browser gets the path of a new page of [`open_page`].
+fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
+    let r = socket::request_with(
+        dir,
+        "sign-in",
+        serde_json::json!({}),
+        socket::ANSWER_WAIT,
+        "iris open",
+    )?;
+    let url = r["url"].as_str().unwrap_or_default();
+    let error = |e: String| socket::Failure {
+        code: socket::code::ERROR,
+        error: e,
+    };
+    if print {
+        println!("{url}");
+        return Ok(());
+    }
+    let page = open_page(dir, url).map_err(|e| error(format!("open: {e}")))?;
+    let opened = opener(std::env::consts::OS, &page)
+        .is_some_and(|mut c| c.status().is_ok_and(|s| s.success()));
+    if !opened {
+        return Err(error(format!(
+            "open: no browser opened. Open {} or run iris open --print",
+            page.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The redirect pages of `iris open` in the data folder:
+/// `open-<pid>-<ns>.html`, one page for each call.
+pub const OPEN_PAGE: (&str, &str) = ("open-", ".html");
+
+/// Write a new redirect page to `url` with mode `0600`. Each call gets its
+/// own file, so two calls never give the browser the same page. The file is
+/// new (`create_new`), so the command never writes through a file or a link
+/// that is there. Pages older than the life of a code are removed. Gives the
+/// path of the page.
+pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // The engine gives `http://<ip>:<port>/#code=<hex>`. Only these bytes,
+    // so the page needs no HTML escape.
+    let plain = url
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b":/.#=[]".contains(&b));
+    if !plain || !url.starts_with("http://") {
+        return Err(std::io::Error::other(
+            "the engine gave an address that is not valid",
+        ));
+    }
+    remove_old_pages(dir);
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let (start, end) = OPEN_PAGE;
+    let path = dir.join(format!("{start}{}-{ns}{end}", std::process::id()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    f.write_all(
+        format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Iris</title>\
+             <meta http-equiv=\"refresh\" content=\"0;url={url}\">\n"
+        )
+        .as_bytes(),
+    )?;
+    f.sync_all()?;
+    Ok(path)
+}
+
+/// Remove the redirect pages whose code ended: older than
+/// [`iris_api::CODE_LIFE`].
+fn remove_old_pages(dir: &std::path::Path) {
+    let (start, end) = OPEN_PAGE;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > iris_api::CODE_LIFE);
+        if name.starts_with(start) && name.ends_with(end) && old {
+            // A link is removed, not followed.
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// The command that opens `page` in the browser on the system `os`. Its
+/// only argument is the path.
+pub fn opener(os: &str, page: &std::path::Path) -> Option<std::process::Command> {
+    let program = match os {
+        "macos" => "/usr/bin/open",
+        "linux" => "xdg-open",
+        _ => return None,
+    };
+    let mut c = std::process::Command::new(program);
+    c.arg(page)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Some(c)
+}
+
 /// [`socket_verb`] on the socket at `path`.
 fn socket_verb_at(
     path: &std::path::Path,
@@ -1240,6 +1376,34 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             );
             Ok(())
         }
+        Command::Stop { show } => {
+            let store = open()?;
+            if *show {
+                let now = iris_apply::stop_state(&store).map_err(|e| e.to_string())?;
+                println!("{}", stop_state(now.as_ref()));
+                return Ok(());
+            }
+            let s = iris_apply::stop(&store).map_err(|e| e.to_string())?;
+            let text = stop_text(&s);
+            if s.live > 0 || s.busy {
+                return Err(text);
+            }
+            println!("{text}");
+            Ok(())
+        }
+        Command::Resume => {
+            let store = open()?;
+            let resumed = iris_apply::resume(&store).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                if resumed {
+                    "Iris runs again. Each held send waits a full hold before it leaves."
+                } else {
+                    "Iris was not stopped. Nothing changed."
+                }
+            );
+            Ok(())
+        }
         Command::Cancel { id } => {
             let store = open()?;
             println!("{}", cancel_send(&store, id, engine::now_ms())?);
@@ -1261,7 +1425,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Label(_)
         | Command::Unlabel(_)
         | Command::Compose { .. }
-        | Command::Send { .. } => unreachable!("run() sends these verbs to the socket"),
+        | Command::Send { .. }
+        | Command::Open { .. } => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,
@@ -1618,6 +1783,8 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
             std::future::pending::<()>().await
         };
         // The one-time code of the API sign-in (specification 2, section 8.6).
+        // `iris open` asks the socket for more codes.
+        let _ = socket::AUTH.set(auth.clone());
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }
@@ -1700,6 +1867,57 @@ mod tests {
     }
 }
 
+/// The state of `iris stop --show`: only a complete stop says that no
+/// mail leaves, as in [`stop_text`].
+fn stop_state(now: Option<&iris_apply::Stopped>) -> String {
+    match now {
+        None => "Iris runs. `iris stop` stops all agent work.".into(),
+        Some(s) if s.live == 0 && !s.busy => format!(
+            "Stopped since {}. No action applies and no mail leaves until `iris resume`.",
+            iris_api::rfc3339(s.since)
+        ),
+        Some(s) => {
+            let text = stop_text(s);
+            format!(
+                "The stop switch is set since {}.\n{}",
+                iris_api::rfc3339(s.since),
+                text.split_once('\n')
+                    .map_or(text.as_str(), |(_, rest)| rest)
+            )
+        }
+    }
+}
+
+/// The answer of `iris stop`. The stop is complete only with no live
+/// session and no Gmail call in progress (docs/specs/2026-11-17-stop.md).
+/// Only a complete stop says that no mail leaves.
+fn stop_text(s: &iris_apply::Stopped) -> String {
+    if s.live == 0 && !s.busy {
+        return format!(
+            "Stopped. {} session(s) ended. No action applies and no mail leaves until `iris resume`.",
+            s.sessions
+        );
+    }
+    let mut text = format!(
+        "The stop is not complete. {} session(s) ended, and no new action or send starts.",
+        s.sessions
+    );
+    if s.busy {
+        text.push_str(
+            "\nA Gmail call was in progress, and it can still finish: one change or one send. \
+             The ledger shows its result.",
+        );
+    }
+    if s.live > 0 {
+        text.push_str(&format!(
+            "\n{} session(s) still stop. `iris job session <j-id>` shows each.",
+            s.live
+        ));
+    }
+    text.push_str("\nRun `iris stop` again.");
+    text
+}
+
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
@@ -1762,6 +1980,32 @@ mod outbox_tests {
     }
 
     /// Only the typed word "yes" at a terminal turns sending on.
+    #[test]
+    fn stop_text_says_when_the_stop_is_not_complete() {
+        let mut s = iris_apply::Stopped {
+            since: 0,
+            sessions: 2,
+            live: 0,
+            busy: false,
+        };
+        assert!(stop_text(&s).contains("no mail leaves"));
+        s.live = 1;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("1 session(s) still stop"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+        s.live = 0;
+        s.busy = true;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("can still finish"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+    }
+
     #[test]
     fn only_yes_turns_sending_on() {
         assert_eq!(sending_on_confirm(true, &mut "yes\n".as_bytes()), Ok(()));

@@ -34,6 +34,9 @@ pub const ANSWER_WAIT: Duration = Duration::from_secs(30);
 /// The most drafts that `drafts` lists.
 pub const MAX_DRAFTS: i64 = 200;
 
+/// The sign-in of the web API, for the verb `sign-in`. `serve` sets it.
+pub static AUTH: std::sync::OnceLock<Arc<iris_api::Auth>> = std::sync::OnceLock::new();
+
 /// The exit codes of specification 2, section 8.4.
 pub mod code {
     pub const ERROR: u8 = 1;
@@ -402,6 +405,40 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             iris_changeset::withdraw(store, cs, Some(me)).map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
         }
+        Some(v @ ("sign-in" | "app.notices")) if session => Err(Failure::new(
+            code::DENIED,
+            format!("{v} is a host verb: a session cannot run it"),
+        )),
+        Some("sign-in") => {
+            only(&[])?;
+            let auth = AUTH.get().ok_or_else(|| {
+                Failure::new(code::ERROR, "the web server of the engine is not ready")
+            })?;
+            let url = auth
+                .sign_in()
+                .map_err(|e| Failure::new(code::ERROR, format!("sign-in: {e}")))?;
+            Ok(Done::Value(json!({ "url": url })))
+        }
+        Some("app.notices") => {
+            only(&["after"])?;
+            let after = match args.get("after") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .and_then(|n| i64::try_from(n).ok())
+                        .ok_or_else(|| usage("after must be a whole number, 0 or more"))?,
+                ),
+            };
+            crate::notify::app_call(crate::engine::now_ms(), |live| {
+                // A first call, or a call after a gap in which the engine
+                // showed the notices: the app starts again after `last`.
+                let after = after.filter(|_| live);
+                let r = app_notices(store, after)?;
+                let from = after.is_none().then(|| r["last"].as_i64().unwrap_or(0));
+                Ok((r, from))
+            })
+            .map(Done::Value)
+        }
         Some("drafts") if session => Err(Failure::new(
             code::DENIED,
             "drafts is a host verb: a session cannot run it",
@@ -590,6 +627,40 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some(other) => Err(usage(format!("unknown verb {other}"))),
         None => Err(usage("the request has no verb")),
     }
+}
+
+/// The start of this engine process, in milliseconds since 1970: a new
+/// value tells the Mac app that the engine started again, with a new web
+/// secret, so the app signs its window in again.
+static ENGINE_START: std::sync::LazyLock<i64> = std::sync::LazyLock::new(crate::engine::now_ms);
+
+/// The most notices of one `app.notices` answer. The app asks again at
+/// once while an answer is full.
+pub const APP_NOTICES_MAX: i64 = 20;
+
+/// `app.notices`: the notices that are not done and are newer than `after`,
+/// oldest first, at most [`APP_NOTICES_MAX`]. `last` is the largest row ID of
+/// the answer, or `after`. With no `after`, no notices: `last` is the largest
+/// row ID of all notices, so a new app shows no old notice. `open` counts
+/// the notices that are not done.
+fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
+    let error = |e: iris_api::Error| Failure::new(code::ERROR, e.to_string());
+    let page = match after {
+        None => iris_api::notices_after(store, i64::MAX, 0),
+        Some(a) => iris_api::notices_after(store, a, APP_NOTICES_MAX),
+    }
+    .map_err(error)?;
+    let last = match after {
+        None => page.max,
+        Some(a) => page.notices.iter().map(|(r, _)| *r).max().unwrap_or(a),
+    };
+    let notices: Vec<&iris_api::Notice> = page.notices.iter().map(|(_, n)| n).collect();
+    Ok(json!({
+        "notices": notices,
+        "last": last,
+        "open": page.open,
+        "engine": *ENGINE_START,
+    }))
 }
 
 /// `status` of a session: the job, and the counts of its grant now.
@@ -855,6 +926,13 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
         true => {
             let r = &answer["result"];
             let valid = match verb {
+                "sign-in" => r["url"].is_string(),
+                "app.notices" => {
+                    r["notices"].is_array()
+                        && r["last"].is_u64()
+                        && r["open"].is_u64()
+                        && r["engine"].is_u64()
+                }
                 "drafts" => r["changesets"]
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),

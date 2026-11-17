@@ -97,8 +97,10 @@ on macOS, `~/.local/share/iris` on Linux. `--data <path>` or the variable
 `IRIS_DATA` changes the folder. The refresh token and the client file are
 encrypted with the `key` file of the data folder.
 
-`iris serve` prints the sign-in address of the local API, with a one-time
-code. The web client uses this address when its sign-in (PR #27, tracker item R1-18) merges. A
+To open the web client, run `iris open`. It asks the running engine for a
+new sign-in address with a one-time code, and opens it in the browser. The
+address works one time, for 2 minutes. `iris open --print` prints the address
+and opens nothing. `iris serve` also prints one sign-in address at start. A
 program can exchange the code for a token with `POST /api/session`
 (`crates/iris-api/README.md`).
 
