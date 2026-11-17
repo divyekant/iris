@@ -240,7 +240,7 @@ The engine adds flags. An author cannot remove a flag.
 | Flag | When |
 |---|---|
 | `new_recipient` | A `draft` or a `send` goes to an address that the owner never sent mail to. |
-| `outside_thread` | A `send` goes to an address that is not in the thread, after the session read external mail (release 4). |
+| `outside_thread` | A `draft` or a `send` goes to an address that is not in the thread, and its author read mail that you did not send (`docs/specs/2026-11-17-hostile-input-limits.md`). |
 | `money` | The text of a draft names an amount of money (`docs/specs/2026-11-17-send-checks.md`). |
 | `date` | The text of a draft names a date (`docs/specs/2026-11-17-send-checks.md`). |
 | `attachment` | The text refers to an attachment, and none is attached, or an attachment is attached. |
@@ -603,7 +603,7 @@ in the file.
 | Limit | Result |
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
-| A `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. |
+| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 23). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
