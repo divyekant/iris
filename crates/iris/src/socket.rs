@@ -644,6 +644,14 @@ pub fn request_with(
     parse_answer(verb, &answer).ok_or_else(unknown)?
 }
 
+/// True if the result has a valid session ID (`se-<id>`).
+fn session_id(r: &Value) -> bool {
+    r["session"]
+        .as_str()
+        .and_then(iris_job::parse_session_id)
+        .is_some()
+}
+
 /// Read one answer line of the engine for `verb`. `None` when the line is
 /// not a valid answer: the result is then not known. A success must carry
 /// the result shape of the verb; a failure must carry a code of 1 to 5.
@@ -657,8 +665,8 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
                 "add" => r["changeset"].is_string() && r["n"].is_u64(),
-                "job.run" => r["session"].is_string(),
-                "job.stop" => r["session"].is_string() && r["reaped"].is_boolean(),
+                "job.run" => session_id(r),
+                "job.stop" => session_id(r) && r["reaped"].is_boolean(),
                 _ => r["id"].is_string() && r["state"].is_string() && r["actions"].is_array(),
             };
             valid.then(|| Ok(r.clone()))

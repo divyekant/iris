@@ -16,7 +16,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, ChildStderr, ChildStdin};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use iris_job::{format_session_id, EndReason, Session};
@@ -52,6 +52,10 @@ pub struct Sessions {
     helper: Arc<HelperCommand>,
     state: Mutex<State>,
     after: Mutex<Option<Arc<AfterStep>>>,
+    /// The done jobs whose workspace the build thread builds again. A
+    /// build can wait for the workspace lock without a limit, so no
+    /// supervisor turn and no stop waits for it.
+    builds: mpsc::Sender<i64>,
 }
 
 #[derive(Default)]
@@ -107,12 +111,25 @@ impl Sessions {
                     .map_err(|e| e.to_string())?;
             }
         }
+        let (builds, queue) = mpsc::channel::<i64>();
+        {
+            let store = store.clone();
+            std::thread::Builder::new()
+                .name("workspace-builds".into())
+                .spawn(move || {
+                    for job in queue {
+                        build_done(&store, job);
+                    }
+                })
+                .map_err(|e| format!("the build thread did not start: {e}"))?;
+        }
         let s = Arc::new(Sessions {
             store,
             isolation,
             helper,
             state: Mutex::new(State::default()),
             after: Mutex::new(None),
+            builds,
         });
         let live: HashSet<i64> = iris_job::live_sessions(&s.store)
             .map_err(|e| e.to_string())?
@@ -121,7 +138,7 @@ impl Sessions {
             .collect();
         for job in iris_job::list(&s.store, iris_job::State::Done).map_err(|e| e.to_string())? {
             if !live.contains(&job.id) {
-                s.build_done(job.id);
+                let _ = s.builds.send(job.id);
             }
         }
         s.remove_old_logs();
@@ -131,23 +148,6 @@ impl Sessions {
     /// Calls `f` after each step of each launch. For tests.
     pub fn set_after(&self, f: Arc<AfterStep>) {
         *self.after.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
-    }
-
-    /// Builds the workspace of `job` again if the job is done and its
-    /// workspace folder exists: the mail files go, and the files of the
-    /// agent stay. Call it only while the job has no live session.
-    fn build_done(&self, job: i64) {
-        let dir = iris_workspace::default_dir(self.data_dir(), job);
-        let done = iris_job::get(&self.store, job).is_ok_and(|j| j.state == iris_job::State::Done);
-        if !done || std::fs::symlink_metadata(&dir).is_err() {
-            return;
-        }
-        if let Err(e) = iris_workspace::build(&self.store, job, &dir) {
-            say!(
-                "iris: {}: the workspace of the done job was not built again: {e}",
-                iris_job::format_job_id(job)
-            );
-        }
     }
 
     /// Removes the files of `sessions/` older than [`LOG_DAYS`].
@@ -405,9 +405,8 @@ impl Sessions {
         }
     }
 
-    /// One supervisor turn over each live session. The builds of done jobs
-    /// come after the release of the state, so a slow build does not hold
-    /// a stop or a run.
+    /// One supervisor turn over each live session. It sends each reaped
+    /// session of a done job to the build thread.
     pub fn turn(&self, now: i64) {
         let Ok(live) = iris_job::live_sessions(&self.store) else {
             return;
@@ -444,7 +443,7 @@ impl Sessions {
             }
         }
         for job in done {
-            self.build_done(job);
+            let _ = self.builds.send(job);
         }
     }
 
@@ -543,6 +542,24 @@ impl Sessions {
             self.turn(now_ms());
             std::thread::sleep(TURN);
         }
+    }
+}
+
+/// Builds the workspace of `job` again if the job is done and its
+/// workspace folder exists: the mail files go, and the files of the agent
+/// stay. The caller sends only a job with no live session; a done job
+/// gets no new session.
+fn build_done(store: &Store, job: i64) {
+    let dir = iris_workspace::default_dir(store.dir(), job);
+    let done = iris_job::get(store, job).is_ok_and(|j| j.state == iris_job::State::Done);
+    if !done || std::fs::symlink_metadata(&dir).is_err() {
+        return;
+    }
+    if let Err(e) = iris_workspace::build(store, job, &dir) {
+        say!(
+            "iris: {}: the workspace of the done job was not built again: {e}",
+            iris_job::format_job_id(job)
+        );
     }
 }
 
