@@ -257,6 +257,7 @@ pub fn create_in(c: &Connection, author: &Author, now_ms: i64) -> Result<i64> {
             return Err(refused("only an agent session has a job".into()));
         }
         job_open(c, job)?;
+        no_other_draft(c, job)?;
     }
     c.execute(
         "INSERT INTO changeset(author_kind, author_name, author_session, author_job, created_at)
@@ -393,6 +394,9 @@ pub fn revise(store: &Store, changeset: i64, author: &Author) -> Result<i64> {
 /// Use [`transaction`] to run more than one step in one transaction.
 pub fn revise_in(c: &Connection, changeset: i64, author: &Author) -> Result<i64> {
     check_author(c, changeset, author)?;
+    if let Some(job) = &author.job {
+        no_other_draft(c, job)?;
+    }
     let (state, submitted): (String, Option<i64>) = c.query_row(
         "SELECT state, submitted_at FROM changeset WHERE id = ?1",
         [changeset],
@@ -486,6 +490,31 @@ fn job_open(c: &Connection, job: &str) -> Result<()> {
         return Err(refused(format!("{job} is not a job that is open")));
     }
     Ok(())
+}
+
+/// The draft of a job: its changeset whose newest revision is not
+/// submitted, and that is not withdrawn. A job has at most one
+/// (docs/specs/2026-11-17-job-verbs.md, section 2).
+pub fn job_draft(c: &Connection, job: &str) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT id FROM changeset
+             WHERE author_job = ?1 AND submitted_at IS NULL AND state <> 'withdrawn'
+             ORDER BY id DESC LIMIT 1",
+        [job],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// Refuse a second draft of a job.
+fn no_other_draft(c: &Connection, job: &str) -> Result<()> {
+    match job_draft(c, job)? {
+        Some(cs) => Err(refused(format!(
+            "{job} has the draft {}: submit or withdraw it first",
+            format_changeset_id(cs)
+        ))),
+        None => Ok(()),
+    }
 }
 
 fn check_author(c: &Connection, changeset: i64, author: &Author) -> Result<()> {

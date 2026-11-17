@@ -180,8 +180,20 @@ fn a_later_session_revises_the_changeset_of_its_job() {
         json!({ "changeset": cs, "why": "Tidy." }),
     )
     .unwrap();
-    // The person comments. A later session of the job makes revision 2.
+    // The person comments. A later session of the job makes revision 2,
+    // but only when the job has no other draft.
     let later = session(job, "se-2");
+    let other = add(&store, &later, "archive", &["t-1"], json!({})).unwrap();
+    let e = call(&store, &later, "revise", json!({ "changeset": cs })).unwrap_err();
+    assert_eq!(e.0, code::USAGE, "{e:?}");
+    assert!(e.1.contains("draft"), "{e:?}");
+    call(
+        &store,
+        &later,
+        "withdraw",
+        json!({ "changeset": other["changeset"] }),
+    )
+    .unwrap();
     let doc = call(&store, &later, "revise", json!({ "changeset": cs })).unwrap();
     assert_eq!(doc["revision"], json!(2), "{doc}");
     let r = call(
@@ -192,6 +204,8 @@ fn a_later_session_revises_the_changeset_of_its_job() {
     )
     .unwrap();
     assert_eq!(r["changeset"], cs);
+    // A new draft waits until the revision is submitted.
+    assert!(iris_changeset::create(&store, &later, NOW).is_err());
     let doc = call(
         &store,
         &later,
@@ -447,4 +461,38 @@ fn only_an_agent_session_of_an_open_canonical_job_has_a_job() {
         assert!(iris_changeset::create(&store, &a, NOW).is_err(), "{a:?}");
     }
     assert!(iris_changeset::create(&store, &session(job, "se-1"), NOW).is_ok());
+}
+
+#[test]
+fn the_policy_decides_a_session_submit_as_agent() {
+    let (store, job) = fixture("policy");
+    // A rule for `local` allows each archive: it must not match an agent.
+    let policy = "version = 0\nmode = \"apply\"\n\n[[rule]]\nid = 1\nname = \"Local archive\"\neffect = \"allow\"\nverbs = [\"archive\"]\nwhen = { author = \"local\" }\nby = \"person\"\nadded = 2026-11-10\n";
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h', 0)",
+                [policy],
+            )?;
+            tx.execute("INSERT INTO policy_rule_id(id) VALUES (1)", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let local = socket::local();
+    let me = session(job, "se-1");
+    let mut by = Vec::new();
+    for who in [&local, &me] {
+        let r = add(&store, who, "archive", &["t-1"], json!({})).unwrap();
+        let doc = call(
+            &store,
+            who,
+            "submit",
+            json!({ "changeset": r["changeset"], "why": "x" }),
+        )
+        .unwrap();
+        by.push(doc["actions"][0]["decision"]["by"].clone());
+    }
+    // The rule decides for `local` only: the session action goes to a person.
+    assert_eq!(by[0], json!("rule"), "{by:?}");
+    assert_ne!(by[1], json!("rule"), "{by:?}");
 }

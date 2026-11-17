@@ -489,21 +489,12 @@ fn of_job(store: &Store, cs: i64, me: &Author) -> Result<bool, Failure> {
         .map_err(|e| Failure::new(code::ERROR, format!("store: {e}")))
 }
 
-/// The newest draft changeset of the job of the session `me`, or `None` in
-/// host mode. The job has one draft changeset.
+/// The draft of the job of the session `me`, or `None` in host mode.
 fn session_draft(c: &rusqlite::Connection, me: &Author) -> iris_changeset::Result<Option<i64>> {
-    if me.job.is_none() {
-        return Ok(None);
+    match &me.job {
+        Some(job) => iris_changeset::job_draft(c, job),
+        None => Ok(None),
     }
-    use rusqlite::OptionalExtension;
-    Ok(c.query_row(
-        "SELECT id FROM changeset
-         WHERE author_kind = ?1 AND author_job = ?2 AND state = 'draft'
-         ORDER BY id DESC LIMIT 1",
-        rusqlite::params![me.kind.as_str(), me.job],
-        |r| r.get(0),
-    )
-    .optional()?)
 }
 
 /// The author of the policy (spec 2, section 6.2) for the author of a
