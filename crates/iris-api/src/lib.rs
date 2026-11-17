@@ -751,8 +751,17 @@ async fn post_notice_done(
     Ok(Json(serde_json::json!({ "done": id })).into_response())
 }
 
-async fn get_outbox(State(s): State<Arc<Store>>) -> Result<Response> {
-    Ok(Json(outbox(&s)?).into_response())
+async fn get_outbox(
+    State(s): State<Arc<Store>>,
+    q: std::result::Result<Query<PageQuery>, QueryRejection>,
+) -> Result<Response> {
+    let q = query(q)?;
+    Ok(Json(outbox(
+        &s,
+        q.limit.unwrap_or(MAX_SENDS),
+        q.after.as_deref(),
+    )?)
+    .into_response())
 }
 
 /// Cancel the send of a draft (`d-N`) in the outbox. 409 if the release

@@ -166,10 +166,13 @@ sign-in, as after a sync.
 
 ### 6. The outbox view
 
-`GET /api/outbox` gives the state of the switch (`on`, `since`) and each
-`approved` and `held` send, oldest decision first, with no more than 200
-sends. Each send has its draft ID, its state, the time of the approval,
-the time that it can leave (`null` while the switch is off), its flags,
+`GET /api/outbox?limit=&after=` gives the state of the switch (`on`,
+`since`), the count of all `approved` and `held` sends, and one page of
+them in the order of their action ID (`limit` 1 to 200, default 200).
+`next` is the `after` of the next page, or `null` on the last page. So
+each send that can leave is reachable, and the client reads each page.
+Each send has its draft ID, its state, the time of the approval, the time
+that it can leave (`null` while the switch is off), its flags,
 and the recipients and subject from the stored raw bytes of the draft. The
 API reads the switch, but it has no call that changes it.
 

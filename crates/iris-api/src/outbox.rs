@@ -11,42 +11,65 @@ use crate::read::rfc3339;
 use crate::review::changeset_error;
 use crate::Result;
 
-/// The most sends in one answer. The outbox holds only sends that a
-/// person approved and that wait for their hold or the switch, so the
-/// count stays small.
-pub const MAX_SENDS: i64 = 200;
+/// The most sends in one page. A next page gives the rest: each send that
+/// waits is reachable (`next` and `count`), so no send leaves unseen.
+pub const MAX_SENDS: u32 = 200;
 
-/// `GET /api/outbox`: `{"sending": {"on": bool, "since": time|null},
-/// "sends": [...]}`. Each send has the draft ID, the state (`approved` or
-/// `held`), the time of the approval, the time that it can leave (`null`
-/// while the switch is off), the flags, and the recipients and subject of
-/// its draft. The recipients and the subject come from the stored raw
-/// bytes of the draft, the bytes that Gmail gets. A send whose bytes Iris
-/// cannot read has `"readable": false`.
-pub fn outbox(store: &Store) -> Result<Value> {
+/// `GET /api/outbox?limit=&after=`: `{"sending": {"on": bool, "since":
+/// time|null}, "count": n, "sends": [...], "next": cursor|null}`. `count`
+/// is the number of all sends that wait. The sends come in the order of
+/// their action ID, `limit` (1 to 200, default 200) at a time; `next` is
+/// the `after` of the next page. Each send has the draft ID, the state
+/// (`approved` or `held`), the time of the approval, the time that it can
+/// leave (`null` while the switch is off), the flags, and the recipients
+/// and subject of its draft. The recipients and the subject come from the
+/// stored raw bytes of the draft, the bytes that Gmail gets. A send whose
+/// bytes Iris cannot read has `"readable": false`.
+pub fn outbox(store: &Store, limit: u32, after: Option<&str>) -> Result<Value> {
+    if !(1..=MAX_SENDS).contains(&limit) {
+        return Err(crate::Error::Query(format!(
+            "limit must be 1 to {MAX_SENDS}"
+        )));
+    }
+    let after: i64 = match after {
+        None | Some("") => 0,
+        Some(t) => t.parse().ok().filter(|n: &i64| *n >= 0).ok_or_else(|| {
+            crate::Error::Query(format!("after {t} is not the next value of a page"))
+        })?,
+    };
     Ok(store.read(|c| {
         let on: Option<i64> =
             c.query_row("SELECT on_at FROM send_switch WHERE id = 1", [], |r| {
                 r.get(0)
             })?;
-        let mut st = c.prepare(
-            "SELECT a.id, ad.draft_id, a.state, a.decided_at, a.flags
-             FROM changeset_action a JOIN action_draft ad ON ad.action_id = a.id
-             WHERE a.verb = 'send' AND a.state IN ('approved', 'held')
-             ORDER BY a.decided_at, a.id LIMIT ?1",
-        )?;
+        const OPEN: &str = "FROM changeset_action a JOIN action_draft ad ON ad.action_id = a.id
+             WHERE a.verb = 'send' AND a.state IN ('approved', 'held')";
+        let count: i64 = c.query_row(&format!("SELECT count(*) {OPEN}"), [], |r| r.get(0))?;
+        let mut st = c.prepare(&format!(
+            "SELECT a.id, ad.draft_id, a.state, a.decided_at, a.flags {OPEN}
+               AND a.id > ?1 ORDER BY a.id LIMIT ?2"
+        ))?;
         let rows: Vec<(i64, i64, String, i64, Option<String>)> = st
-            .query_map(params![MAX_SENDS], |r| {
+            .query_map(params![after, i64::from(limit) + 1], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
             })?
             .collect::<rusqlite::Result<_>>()?;
+        let more = rows.len() > limit as usize;
+        let rows = &rows[..rows.len().min(limit as usize)];
+        let next = if more {
+            rows.last().map(|r| r.0.to_string())
+        } else {
+            None
+        };
         let mut sends = Vec::with_capacity(rows.len());
-        for (action, draft, state, decided_at, flags) in rows {
+        for (action, draft, state, decided_at, flags) in rows.iter().cloned() {
             sends.push(send(c, action, draft, &state, decided_at, flags, on)?);
         }
         Ok(json!({
             "sending": {"on": on.is_some(), "since": on.map(rfc3339)},
+            "count": count,
             "sends": sends,
+            "next": next,
         }))
     })?)
 }
