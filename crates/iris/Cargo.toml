@@ -23,8 +23,10 @@ iris-auth = { version = "0.0.0", path = "../iris-auth" }
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
 iris-mcp = { version = "0.0.0", path = "../iris-mcp" }
 iris-matters = { version = "0.0.0", path = "../iris-matters" }
+iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
+iris-session = { version = "0.0.0", path = "../iris-session" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
@@ -40,7 +42,6 @@ serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "macros", "signal", "io-util", "time", "sync"] }
 
 [dev-dependencies]
-iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

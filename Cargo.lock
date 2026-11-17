@@ -869,6 +869,7 @@ dependencies = [
  "iris-model",
  "iris-policy",
  "iris-service",
+ "iris-session",
  "iris-spec",
  "iris-store",
  "iris-sync",
