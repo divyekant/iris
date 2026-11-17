@@ -60,6 +60,8 @@ const ETC: &[&str] = &[
     "/etc/ca-certificates/extracted",
     "/etc/alternatives",
 ];
+/// The private home of a session when the engine has no usable `HOME`.
+const PRIVATE_HOME: &str = "/home/iris";
 /// The system folders that are a link to `/usr` on most systems.
 const SYSTEM_LINKS: &[&str] = &["/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"];
 
@@ -141,18 +143,24 @@ impl Bwrap {
             "--tmpfs".as_ref(),
             "/tmp".as_ref(),
         ]);
-        // The private home at its real path (bwrap does not resolve a
-        // link in a mount point), and HOME names that path.
-        let home = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
-        if let Some(home) = home.filter(|h| h.is_absolute() && *h != Path::new("/")) {
-            push(&[
-                "--tmpfs".as_ref(),
-                home.as_os_str(),
-                "--setenv".as_ref(),
-                "HOME".as_ref(),
-                home.as_os_str(),
-            ]);
-        }
+        // Each path that the agent gets for a place to write is in the
+        // view: the private home at its real path (bwrap does not resolve a
+        // link in a mount point), or PRIVATE_HOME if HOME is absent or not
+        // usable, and the private /tmp.
+        let home = home
+            .map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()))
+            .filter(|h| h.is_absolute() && h.parent().is_some())
+            .unwrap_or_else(|| PathBuf::from(PRIVATE_HOME));
+        push(&[
+            "--tmpfs".as_ref(),
+            home.as_os_str(),
+            "--setenv".as_ref(),
+            "HOME".as_ref(),
+            home.as_os_str(),
+            "--setenv".as_ref(),
+            "TMPDIR".as_ref(),
+            "/tmp".as_ref(),
+        ]);
         for r in reads {
             push(&["--ro-bind".as_ref(), r.as_os_str(), r.as_os_str()]);
         }

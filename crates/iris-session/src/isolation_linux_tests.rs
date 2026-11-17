@@ -746,3 +746,33 @@ fn a_linked_home_is_usable() {
     let _ = fs::remove_file(&link);
     let _ = fs::remove_dir_all(&real);
 }
+
+/// With no HOME, and with a TMPDIR outside the view, the agent still gets
+/// a private home and a private temporary folder that it can write.
+#[test]
+fn the_agent_can_always_write_its_home_and_tmpdir() {
+    let d = Data::new();
+    let iso = d.iso();
+    for home in [None, Some(Path::new("/")), Some(Path::new("relative"))] {
+        let mut args = iso.view(home, &[], &d.ws);
+        args.extend([
+            "--".into(),
+            "/bin/sh".into(),
+            "-c".into(),
+            "echo h > \"$HOME/f\" && echo t > \"$TMPDIR/f\" && echo \"$HOME $TMPDIR\"".into(),
+        ]);
+        let out = std::process::Command::new(&iso.bwrap)
+            .args(&args)
+            .env_remove("HOME")
+            .env("TMPDIR", "/var/tmp")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{home:?}: {text} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(text, "/home/iris /tmp\n", "{home:?}");
+    }
+}
