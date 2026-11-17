@@ -314,21 +314,8 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         new_dir(&stage.join(folder))?;
     }
     for i in items {
-        let form: String = c.query_row("SELECT form FROM item WHERE id = ?1", [i], |r| r.get(0))?;
-        let (_, folder, kind) = FORMS
-            .iter()
-            .find(|(f, _, _)| *f == form)
-            .expect("the grant holds only the forms of FORMS");
-        let id = format_id(*kind, i);
-        // Store rows only, no text of the model: understanding gives the
-        // model inputs from outside the grant, and the store does not record
-        // which input a value came from.
-        let sources: Vec<String> = sources(c, i)?
-            .into_iter()
-            .map(|m| format_id(Kind::Message, m))
-            .collect();
-        // No status: a later message, which the job can lack, can set it.
-        let doc = json!({ "model": "iris/0", "id": id, "form": form, "sources": sources });
+        let (doc, folder) = item_doc(c, i)?;
+        let id = &doc["id"].as_str().expect("an item ID");
         let file = new_file(&stage.join(folder).join(format!("{id}.json")))?;
         serde_json::to_writer_pretty(file, &doc).map_err(io::Error::other)?;
         built.items += 1;
@@ -364,6 +351,112 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
     md.push_str(RULES);
     new_file(&stage.join("JOB.md"))?.write_all(md.as_bytes())?;
     Ok(built)
+}
+
+/// The document of the item file of a workspace for the granted item `i`,
+/// and its folder. Store rows only, no text of the model: understanding
+/// gives the model inputs from outside the grant, and the store does not
+/// record which input a value came from. No status: a later message, which
+/// the job can lack, can set it.
+fn item_doc(c: &Connection, i: i64) -> Result<(serde_json::Value, &'static str)> {
+    let form: String = c.query_row("SELECT form FROM item WHERE id = ?1", [i], |r| r.get(0))?;
+    let (_, folder, kind) = FORMS
+        .iter()
+        .find(|(f, _, _)| *f == form)
+        .expect("the grant holds only the forms of FORMS");
+    let sources: Vec<String> = sources(c, i)?
+        .into_iter()
+        .map(|m| format_id(Kind::Message, m))
+        .collect();
+    let doc =
+        json!({ "model": "iris/0", "id": format_id(*kind, i), "form": form, "sources": sources });
+    Ok((doc, folder))
+}
+
+/// The read verbs of a job session (docs/specs/2026-11-17-session-launcher.md,
+/// "The session socket"). Each one reads only what `grant` holds now, with
+/// the fields of the workspace files, so a session sees nothing that its
+/// workspace could not hold.
+impl Grant {
+    /// The thread of the granted message `m`.
+    fn thread_of(&self, m: i64) -> Option<i64> {
+        self.threads
+            .iter()
+            .find(|(_, (_, mails))| mails.iter().any(|(_, id)| *id == m))
+            .map(|(t, _)| *t)
+    }
+
+    /// `iris show m-<id>` in a session: the granted message with the fields
+    /// of a thread file, and the workspace items that it is a source of.
+    /// `None` for a message outside the grant.
+    pub fn message(&self, c: &Connection, m: i64) -> Result<Option<serde_json::Value>> {
+        if !self.messages.contains(&m) {
+            return Ok(None);
+        }
+        let Some(mail) = iris_talk::message(c, m)? else {
+            return Ok(None);
+        };
+        let mut items = Vec::new();
+        for &i in &self.items {
+            if sources(c, i)?.contains(&m) {
+                items.push(item_doc(c, i)?.0["id"].clone());
+            }
+        }
+        Ok(Some(json!({
+            "id": format_id(Kind::Message, m),
+            "thread": self.thread_of(m).map(|t| format_id(Kind::Thread, t)),
+            "date": rfc3339(mail.at),
+            "from": line(&mail.from),
+            "from_name": mail.from_name.as_deref().map(line),
+            "to": mail.to.iter().map(|a| line(a)).collect::<Vec<_>>(),
+            "cc": mail.cc.iter().map(|a| line(a)).collect::<Vec<_>>(),
+            "subject": line(&mail.subject),
+            "text": mail.text.trim_end(),
+            "items": items,
+        })))
+    }
+
+    /// `iris show <item ID>` in a session: the item file of a workspace item.
+    /// `None` for an item outside the grant.
+    pub fn item(&self, c: &Connection, i: i64) -> Result<Option<serde_json::Value>> {
+        if !self.items.contains(&i) {
+            return Ok(None);
+        }
+        Ok(Some(item_doc(c, i)?.0))
+    }
+
+    /// `iris list` in a session: the item file of each workspace item.
+    pub fn list(&self, c: &Connection) -> Result<Vec<serde_json::Value>> {
+        self.items.iter().map(|&i| Ok(item_doc(c, i)?.0)).collect()
+    }
+
+    /// `iris search` in a session: the granted messages that match, newest
+    /// first, at most `limit`. Each one has its ID, thread, date, sender
+    /// and subject. A search adds nothing to the workspace.
+    pub fn search(
+        &self,
+        c: &Connection,
+        q: &iris_store::Query,
+        limit: u32,
+    ) -> Result<Vec<serde_json::Value>> {
+        let ids = q
+            .run_granted(c, limit, &self.messages, &self.items)
+            .map_err(Error::Store)?;
+        let mut out = Vec::new();
+        for m in ids {
+            if let Some(mail) = iris_talk::message(c, m)? {
+                out.push(json!({
+                    "id": format_id(Kind::Message, m),
+                    "thread": self.thread_of(m).map(|t| format_id(Kind::Thread, t)),
+                    "date": rfc3339(mail.at),
+                    "from": line(&mail.from),
+                    "from_name": mail.from_name.as_deref().map(line),
+                    "subject": line(&mail.subject),
+                }));
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// True if the message `id` can go into a workspace, by the rule of the

@@ -660,8 +660,14 @@ The session socket answers these verbs of this card:
   other ID, or a message that is not granted, gets exit code 3 with "not
   in this job", the same answer for an ID that does not exist.
   The engine reads the grant at each call, so a revoke takes effect at
-  once. These verbs come in their own card (R4-04f, see the plan). Until it merges,
-  the socket refuses them with exit code 3 and the reason.
+  once. Card R4-04f added these verbs. The engine answers `search` with
+  `{"messages": [...]}` (ID, thread, date, From and Subject of each
+  match, newest first, `limit` 1 to 200, default 50), `list` with
+  `{"items": [...]}`, and `show` with `{"message": {...}}` or
+  `{"item": {...}}`. An item has the fields of its workspace file. The ID
+  of an item must have the kind of its form: `c-3` of the record 3 gets
+  "not in this job". In host mode the engine socket has no `search` or
+  `list` (code 2): the host command reads the store.
 
 R4-03 adds the engine side of the other
 session verbs: one entry point that takes the request and the author of the
@@ -725,11 +731,13 @@ exit code 3.
   the command is in session mode. In session mode the command never opens
   the store, also for the read verbs of host mode. It sends each verb to
   `.iris/socket`. If the socket is not there, the command fails with exit
-  code 4. `--data` has no effect in session mode. Until R4-04f, the
-  command refuses each verb that is not a session verb (`status` and the
-  write verbs `add`, `submit`, `show`, `withdraw` and `revise` of R4-03)
-  with exit code 3, and sends nothing. So `iris changeset --drafts` gets
-  code 3.
+  code 4. `--data` has no effect in session mode. The command refuses
+  each verb that is not a session verb with exit code 3, and sends
+  nothing. The session verbs are `status`, the read verbs `search`,
+  `show` and `list` (R4-04f), and the write verbs `add`, `submit`, `show`
+  of a changeset, `withdraw` and `revise` (R4-03). So
+  `iris changeset --drafts` gets code 3. `iris list [<form>]` is a verb of a
+  session only: in host mode it gets exit code 2.
 
 ## Options not chosen
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iris_changeset::{format_changeset_id, parse_changeset_id, Author, AuthorKind, Verb};
-use iris_store::{FileLock, Store};
+use iris_store::{FileLock, Kind, Store};
 use serde_json::{json, Value};
 
 /// The socket file in the data folder.
@@ -402,7 +402,10 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             iris_changeset::withdraw(store, cs, Some(me)).map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
         }
-        Some("drafts") if session => Err(usage("a session has no drafts verb")),
+        Some("drafts") if session => Err(Failure::new(
+            code::DENIED,
+            "drafts is a host verb: a session cannot run it",
+        )),
         Some("drafts") => {
             only(&[])?;
             drafts(store).map(Done::Value)
@@ -495,17 +498,63 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             status(store, me).map(Done::Value)
         }
         Some("status") => Err(usage("status is a verb of a session")),
-        // The read verbs of a session come in card R4-04f: `search`,
-        // `list`, and `show` of a message or an item (a `show` with no
-        // `changeset`).
-        Some(v @ ("search" | "list")) if session => Err(Failure::new(
-            code::DENIED,
-            format!("{v} is not on the session socket yet (card R4-04f)"),
-        )),
-        Some("show") if session && !args.contains_key("changeset") => Err(Failure::new(
-            code::DENIED,
-            "show of a message or an item is not on the session socket yet (card R4-04f)",
-        )),
+        // The read verbs of a session (card R4-04f): only what the grant
+        // holds now. The host command reads the store, not the socket.
+        Some("search") if session => {
+            only(&["text", "limit"])?;
+            let q = text(args, "text")?.ok_or_else(|| usage("give the search text"))?;
+            let q = iris_store::Query::parse(q)
+                .and_then(|q| q.check_granted().map(|()| q))
+                .map_err(|e| usage(e.to_string()))?;
+            let limit = match args.get("limit") {
+                None | Some(Value::Null) => 50,
+                Some(v) => v
+                    .as_u64()
+                    .filter(|n| (1..=200).contains(n))
+                    .ok_or_else(|| usage("limit must be a number from 1 to 200"))?
+                    as u32,
+            };
+            let found = grant_read(store, me, |c, g| g.search(c, &q, limit))?;
+            Ok(Done::Value(json!({ "messages": found })))
+        }
+        Some("list") if session => {
+            only(&["form"])?;
+            // A form of specification 1. A workspace holds only commitments
+            // and records, so each other form gives an empty list.
+            const FORMS: [&str; 5] = ["commitment", "conversation", "record", "feed", "signal"];
+            let form = text(args, "form")?;
+            if let Some(f) = form.filter(|f| !FORMS.contains(f)) {
+                return Err(usage(format!(
+                    "{f} is not a form: give one of {}",
+                    FORMS.join(", ")
+                )));
+            }
+            let mut items = grant_read(store, me, |c, g| g.list(c))?;
+            items.retain(|i| form.is_none_or(|f| i["form"] == f));
+            Ok(Done::Value(json!({ "items": items })))
+        }
+        Some("show") if session && !args.contains_key("changeset") => {
+            only(&["id"])?;
+            let id = text(args, "id")?.ok_or_else(|| usage("give the ID, for example m-12"))?;
+            // An ID outside the grant, of no row, or of a kind that has no
+            // file in a workspace: one answer, so a session learns nothing
+            // of the mail outside its grant.
+            let outside = || Failure::new(code::DENIED, format!("{id} is not in this job"));
+            let found = match iris_store::parse_id(id) {
+                Some((Kind::Message, m)) => {
+                    grant_read(store, me, |c, g| g.message(c, m))?.map(|m| json!({ "message": m }))
+                }
+                // The kind of the ID must be the form of the item: `c-3`
+                // of the record 3 is no ID of it.
+                Some((kind @ (Kind::Commitment | Kind::Record), i)) => {
+                    grant_read(store, me, |c, g| g.item(c, i))?
+                        .filter(|d| d["id"] == iris_store::format_id(kind, i))
+                        .map(|i| json!({ "item": i }))
+                }
+                _ => None,
+            };
+            found.map(Done::Value).ok_or_else(outside)
+        }
         Some("show") => {
             only(&["changeset"])?;
             Ok(Done::Document(need()?))
@@ -540,28 +589,49 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
 
 /// `status` of a session: the job, and the counts of its grant now.
 fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
-    let job = me
-        .job
-        .as_deref()
-        .and_then(iris_job::parse_job_id)
-        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
-    let read = store.read(|c| {
-        let j = iris_job::get_in(c, job).map_err(|e| iris_store::Error::Query(e.to_string()))?;
-        let g = iris_workspace::grant_in(c, job)
-            .map_err(|e| iris_store::Error::Query(e.to_string()))?;
-        Ok((j, g))
-    });
-    let (j, g) = read.map_err(|e| Failure::new(code::ERROR, e.to_string()))?;
+    let job = me.job.as_deref().and_then(iris_job::parse_job_id);
+    // The job and the counts of its grant from one snapshot.
+    let (j, threads, messages, items) = grant_read(store, me, |c, g| {
+        let j = iris_job::get_in(c, job.unwrap_or_default())?;
+        Ok((j, g.threads(), g.messages.len(), g.items.len()))
+    })?;
     Ok(json!({
         "job": iris_job::format_job_id(j.id),
         "session": me.session,
         "goal": j.goal,
         "state": j.state.as_str(),
         "due": j.due_ms.map(iris_api::rfc3339),
-        "threads": g.threads(),
-        "messages": g.messages.len(),
-        "items": g.items.len(),
+        "threads": threads,
+        "messages": messages,
+        "items": items,
     }))
+}
+
+/// Run `f` on the grant of the job of the session `me` now, in one read of
+/// the store.
+fn grant_read<T>(
+    store: &Store,
+    me: &Author,
+    f: impl FnOnce(&rusqlite::Connection, &iris_workspace::Grant) -> iris_workspace::Result<T>,
+) -> Result<T, Failure> {
+    let job = me
+        .job
+        .as_deref()
+        .and_then(iris_job::parse_job_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let query = |e: iris_workspace::Error| iris_store::Error::Query(e.to_string());
+    store
+        .read(|c| {
+            // One read transaction: the grant and the read see one snapshot
+            // of the store, so a write between them (a message that becomes
+            // hostile, a revoke) cannot show what the grant left out.
+            let tx = c.unchecked_transaction()?;
+            let g = iris_workspace::grant_in(&tx, job).map_err(query)?;
+            let out = f(&tx, &g).map_err(query)?;
+            tx.finish()?;
+            Ok(out)
+        })
+        .map_err(|e| Failure::new(code::ERROR, e.to_string()))
 }
 
 fn failure(e: iris_changeset::Error, cs: i64) -> Failure {
@@ -711,6 +781,18 @@ fn session_id(r: &Value) -> bool {
         .is_some()
 }
 
+/// True if `v` is an array whose each entry is an object that `ok` accepts.
+fn all_of(v: &Value, ok: impl Fn(&Value) -> bool) -> bool {
+    v.as_array()
+        .is_some_and(|a| a.iter().all(|e| e.is_object() && ok(e)))
+}
+
+/// True if `v` has the fields of the item file of a workspace that the
+/// command prints.
+fn item(v: &Value) -> bool {
+    v["id"].is_string() && v["form"].is_string()
+}
+
 /// Read one answer line of the engine for `verb`. `None` when the line is
 /// not a valid answer: the result is then not known. A success must carry
 /// the result shape of the verb; a failure must carry a code of 1 to 5.
@@ -739,6 +821,12 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                             .all(|k| r[k].is_u64())
                         && (r["due"].is_null() || r["due"].is_string())
                 }
+                "search" => all_of(&r["messages"], |m| m["id"].is_string()),
+                "list" => all_of(&r["items"], item),
+                "show" if r["message"].is_object() => {
+                    r["message"]["id"].is_string() && r["message"]["text"].is_string()
+                }
+                "show" if r["item"].is_object() => item(&r["item"]),
                 _ => r["id"].is_string() && r["state"].is_string() && r["actions"].is_array(),
             };
             valid.then(|| Ok(r.clone()))

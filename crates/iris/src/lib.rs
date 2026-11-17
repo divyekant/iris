@@ -86,6 +86,15 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// In a job workspace: list the items of the job, of one form if given.
+    /// A verb of a session only.
+    List {
+        /// commitment, conversation, record, feed or signal.
+        form: Option<String>,
+        /// Print one JSON line for each item.
+        #[arg(long)]
+        json: bool,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -556,6 +565,12 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
+    if let Command::List { .. } = &cli.command {
+        return Err(socket::Failure {
+            code: socket::code::USAGE,
+            error: "list is a verb of a session: run it in a job workspace".into(),
+        });
+    }
     if let Some((verb, args, json)) = request {
         let out = socket_verb(&data?, verb, args, json)?;
         print!("{}", out.text);
@@ -658,8 +673,26 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
         ));
     }
+    // The read verbs of a session (R4-04f): only the grant of the job.
+    let read = match c {
+        Command::Search { text, limit, json } => Some((
+            "search",
+            serde_json::json!({ "text": text, "limit": limit }),
+            *json,
+        )),
+        Command::Show { id, json } => Some(("show", serde_json::json!({ "id": id }), *json)),
+        Command::List { form, json } => Some(("list", serde_json::json!({ "form": form }), *json)),
+        _ => None,
+    };
+    if let Some((verb, args, json)) = read {
+        // A read changes nothing: after a lost answer, run it again.
+        let r = socket::request_at(path, verb, args, socket::ANSWER_WAIT, "the same command")
+            .map_err(unreachable)?;
+        print!("{}", session_read_text(&r, json));
+        return Ok(());
+    }
     // Only the write verbs of a session (R4-03): `drafts`, for example, is
-    // a host verb of the socket. The read verbs come in R4-04f.
+    // a host verb of the socket.
     const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
@@ -668,6 +701,84 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
     let out = socket_verb_at(path, verb, args, json).map_err(unreachable)?;
     print!("{}", out.text);
     out.failure.map_or(Ok(()), Err)
+}
+
+/// What `iris search`, `iris show` and `iris list` print in session mode.
+/// Mail text is data: each field goes through [`verbs::field`] and the text
+/// of a message through [`verbs::clean`].
+fn session_read_text(r: &serde_json::Value, json: bool) -> String {
+    use std::fmt::Write;
+    let s = |v: &serde_json::Value| verbs::field(v.as_str().unwrap_or("-"));
+    let mut t = String::new();
+    // A list is JSON Lines (specification 2, section 8.3).
+    let list = r["messages"].as_array().or(r["items"].as_array());
+    match (list, json) {
+        (Some(l), true) => l.iter().for_each(|v| {
+            let _ = writeln!(t, "{v}");
+        }),
+        (Some(l), false) => {
+            for v in l {
+                let line = match v["form"].as_str() {
+                    Some(form) => format!("{}  {form}", s(&v["id"])),
+                    None => format!(
+                        "{}  {}  {}  {}",
+                        s(&v["id"]),
+                        v["date"].as_str().and_then(|d| d.get(..10)).unwrap_or("-"),
+                        s(&v["from"]),
+                        s(&v["subject"])
+                    ),
+                };
+                let _ = writeln!(t, "{line}");
+            }
+            if l.is_empty() {
+                t.push_str(if r["items"].is_array() {
+                    "No items.\n"
+                } else {
+                    "No messages.\n"
+                });
+            }
+        }
+        // One JSON document of the object. An item is always JSON, as in
+        // host mode.
+        (None, _) if json || r["item"].is_object() => {
+            let v = if r["item"].is_object() {
+                &r["item"]
+            } else {
+                &r["message"]
+            };
+            let _ = writeln!(t, "{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        }
+        (None, _) => {
+            let m = &r["message"];
+            let names = |v: &serde_json::Value| {
+                let a: Vec<String> = v.as_array().into_iter().flatten().map(s).collect();
+                if a.is_empty() {
+                    "-".into()
+                } else {
+                    a.join(", ")
+                }
+            };
+            let _ = writeln!(t, "ID:      {} (thread {})", s(&m["id"]), s(&m["thread"]));
+            let _ = writeln!(t, "Date:    {}", s(&m["date"]));
+            let from = match m["from_name"].as_str() {
+                Some(n) => verbs::field(&format!("{n} <{}>", m["from"].as_str().unwrap_or("-"))),
+                None => s(&m["from"]),
+            };
+            let _ = writeln!(t, "From:    {from}");
+            let _ = writeln!(t, "To:      {}", names(&m["to"]));
+            if m["cc"].as_array().is_some_and(|a| !a.is_empty()) {
+                let _ = writeln!(t, "Cc:      {}", names(&m["cc"]));
+            }
+            let _ = writeln!(t, "Subject: {}", s(&m["subject"]));
+            if m["items"].as_array().is_some_and(|a| !a.is_empty()) {
+                let _ = writeln!(t, "Items:   {}", names(&m["items"]));
+            }
+            t.push('\n');
+            t.push_str(&verbs::clean(m["text"].as_str().unwrap_or_default()));
+            t.push('\n');
+        }
+    }
+    t
 }
 
 /// What `iris status` prints in session mode.
@@ -1010,6 +1121,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             print(verbs::search(&open()?, text, *limit, *json))
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
+        // `run` refuses it in host mode, before the store.
+        Command::List { .. } => Err("list is a verb of a session".into()),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },

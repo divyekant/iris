@@ -776,3 +776,13 @@ fn the_agent_can_always_write_its_home_and_tmpdir() {
         assert_eq!(text, "/home/iris /tmp\n", "{home:?}");
     }
 }
+
+/// A read of `/proc/<pid>` of a process that ends during the read fails
+/// with `ESRCH` (seen as `No such process` in a stop), not only with
+/// `NotFound`. Both mean that the process ended.
+#[test]
+fn an_error_of_an_ended_process_means_ended() {
+    assert!(exited(&io::Error::from_raw_os_error(libc::ESRCH)));
+    assert!(exited(&io::Error::from(io::ErrorKind::NotFound)));
+    assert!(!exited(&io::Error::from_raw_os_error(libc::EACCES)));
+}
