@@ -23,6 +23,7 @@ serde_json = "1"
 unicase = "=2.8.1"
 
 [dev-dependencies]
+iris-job = { version = "0.0.0", path = "../iris-job" }
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }

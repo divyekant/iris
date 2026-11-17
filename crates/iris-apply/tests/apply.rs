@@ -22,6 +22,8 @@ struct Box {
     store: Store,
     account: i64,
     dir: PathBuf,
+    /// The job of the author of each next changeset (a job session).
+    job: std::sync::Mutex<Option<i64>>,
 }
 
 impl Drop for Box {
@@ -64,6 +66,7 @@ fn setup(name: &str, n: usize, policy: Option<&str>) -> Box {
         store,
         account,
         dir,
+        job: Default::default(),
     }
 }
 
@@ -112,9 +115,11 @@ impl Box {
         let targets = format!("{{\"messages\":[{}]}}", ids.join(","));
         self.store
             .write(|tx| {
+                let job = self.job.lock().unwrap().map(iris_job::format_job_id);
                 tx.execute(
-                    "INSERT INTO changeset(author_kind, created_at) VALUES ('agent', 0)",
-                    [],
+                    "INSERT INTO changeset(author_kind, author_session, author_job, created_at)
+                     VALUES ('agent', CASE WHEN ?1 IS NULL THEN NULL ELSE 'se-1' END, ?1, 0)",
+                    [job],
                 )?;
                 let cs = tx.last_insert_rowid();
                 tx.execute(
@@ -1237,4 +1242,138 @@ fn a_failed_label_create_checks_the_mode_again() {
     assert_eq!(b.state(a).0, "approved");
     assert_eq!(b.calls("/labels"), 1);
     assert_eq!(b.calls("batchModify"), 0);
+}
+
+/// A job whose scope holds the thread of each message in `ms`. Each next
+/// changeset is of a session of the job. The mirror messages count as
+/// understood, with a From address, so the grant can hold them.
+fn session_job(b: &Box, ms: &[i64]) -> i64 {
+    b.store
+        .write(|tx| {
+            tx.execute_batch(
+                "UPDATE message SET understood_at = 1;
+                 INSERT OR IGNORE INTO header(message_id, from_addr)
+                   SELECT id, 'dana@example.com' FROM message;
+                 UPDATE header SET from_addr = 'dana@example.com' WHERE from_addr IS NULL;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let job = iris_job::create(&b.store, "Tidy the inbox.", None, now()).unwrap();
+    let threads: std::collections::BTreeSet<i64> = ms
+        .iter()
+        .map(|m| {
+            b.store
+                .read(|c| {
+                    Ok(
+                        c.query_row("SELECT thread_id FROM message WHERE id = ?1", [m], |r| {
+                            r.get(0)
+                        })?,
+                    )
+                })
+                .unwrap()
+        })
+        .collect();
+    for t in &threads {
+        iris_job::add_scope(
+            &b.store,
+            job,
+            iris_job::Ref::Thread(*t),
+            iris_job::By::Person,
+            now(),
+        )
+        .unwrap();
+    }
+    *b.job.lock().unwrap() = Some(job);
+    job
+}
+
+fn revoke_all(b: &Box, job: i64) {
+    for r in iris_job::scope(&b.store, job).unwrap() {
+        iris_job::revoke_scope(&b.store, job, r, iris_job::By::Person, now()).unwrap();
+    }
+}
+
+/// A session action in the grant applies. After a revoke, the next apply
+/// denies it before any provider call (docs/specs/2026-11-17-job-verbs.md).
+#[test]
+fn a_session_action_applies_only_inside_the_grant() {
+    let b = setup("grant", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    session_job(&b, &ms[..1]);
+    let a = b.approved("archive", &ms[..1], PERSON);
+    applied(b.apply(a));
+
+    let job = session_job(&b, &ms[1..]);
+    let a = b.approved("archive", &ms[1..], PERSON);
+    revoke_all(&b, job);
+    let before = b.calls("batchModify");
+    match b.apply(a) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("outside the grant"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.state(a), ("denied".into(), "engine".into()));
+    assert_eq!(b.calls("batchModify"), before);
+    assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
+}
+
+/// The check of a label runs before `labels.create`.
+#[test]
+fn a_session_label_outside_the_grant_makes_no_label() {
+    let b = setup("grant-label", 30, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    let job = session_job(&b, &ms);
+    let a = b.labelled("label", "Brand new", &ms);
+    revoke_all(&b, job);
+    assert!(matches!(b.apply(a), Ok(Outcome::Denied(_))));
+    assert_eq!(b.calls("labels"), 0);
+    assert_eq!(label_id(&b, "Brand new"), None);
+}
+
+/// A revoke between two calls of one action: the call that ran stays done,
+/// the later call never runs, and the entry is failed.
+#[test]
+fn a_revoke_between_two_calls_stops_the_later_calls() {
+    let b = setup("grant-calls", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 2);
+    let job = session_job(&b, &ms);
+    let a = b.approved("archive", &ms, PERSON);
+    // Call 1 ran and Gmail confirmed it; the engine stopped before call 2.
+    b.fake.modify_labels(&b.provider_id(ms[0]), &[], &["INBOX"]);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":2}', 'writing', 'inverse', 1)",
+                params![a, b.account],
+            )?;
+            let l = tx.last_insert_rowid();
+            for (i, m) in ms.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+                     VALUES (?1, ?2, ?3, '[\"INBOX\"]', '[]')",
+                    params![l, m, i as i64 + 1],
+                )?;
+            }
+            tx.execute("UPDATE ledger SET call = 1 WHERE id = ?1", [l])?;
+            tx.execute(
+                "UPDATE ledger_message SET done = 1 WHERE ledger_id = ?1 AND call = 1",
+                [l],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    revoke_all(&b, job);
+    match b.apply(a) {
+        Ok(Outcome::Failed { error, .. }) => {
+            assert!(error.contains("outside the grant"), "{error}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.calls("batchModify"), 0);
+    let (state, call, rows) = b.ledger(a);
+    assert_eq!((state.as_str(), call), ("failed", 1));
+    let done: Vec<bool> = rows.iter().map(|r| r.3).collect();
+    assert_eq!(done, vec![true, false]);
+    assert!(b.gmail_labels(ms[1]).contains(&"INBOX".to_string()));
 }
