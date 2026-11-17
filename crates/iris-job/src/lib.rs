@@ -678,3 +678,257 @@ pub fn scope_in(c: &Connection, job: i64) -> Result<Vec<Ref>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(refs)
 }
+
+names!(
+    /// Why a session ended (migration 21).
+    EndReason {
+        Exit = "exit",
+        Stop = "stop",
+        Revoke = "revoke",
+        JobState = "job_state",
+        TimeLimit = "time_limit",
+        Engine = "engine",
+        LaunchFailed = "launch_failed",
+        HelperFailed = "helper_failed",
+    }
+);
+
+/// One session of an agent on a job (docs/specs/2026-11-17-session-launcher.md).
+/// Open while `ended_ms` is `None`, live while `reaped_ms` is `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Session {
+    pub id: i64,
+    pub job_id: i64,
+    pub agent: String,
+    pub registered_ms: i64,
+    pub helper_pid: Option<i64>,
+    pub agent_pgid: Option<i64>,
+    pub started_ms: Option<i64>,
+    pub ended_ms: Option<i64>,
+    pub end: Option<EndReason>,
+    pub exit_code: Option<i64>,
+    pub reaped_ms: Option<i64>,
+}
+
+/// `se-` and the row ID.
+pub fn format_session_id(row: i64) -> String {
+    format!("se-{row}")
+}
+
+/// Parse `se-42`. Only the text that [`format_session_id`] gives for a
+/// positive row parses.
+pub fn parse_session_id(text: &str) -> Option<i64> {
+    let n = text.strip_prefix("se-")?;
+    if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse().ok()
+}
+
+const SESSION_COLUMNS: &str = "id, job_id, agent, registered_at, helper_pid, agent_pgid, \
+     started_at, ended_at, end_reason, exit_code, reaped_at";
+
+fn session_of(r: &Row) -> rusqlite::Result<Session> {
+    Ok(Session {
+        id: r.get(0)?,
+        job_id: r.get(1)?,
+        agent: r.get(2)?,
+        registered_ms: r.get(3)?,
+        helper_pid: r.get(4)?,
+        agent_pgid: r.get(5)?,
+        started_ms: r.get(6)?,
+        ended_ms: r.get(7)?,
+        end: named_opt(r, 8, EndReason::parse)?,
+        exit_code: r.get(9)?,
+        reaped_ms: r.get(10)?,
+    })
+}
+
+/// Register a session of `agent` on `job`. The trigger refuses a job that
+/// is not `working` and a job with a live session. Gives the row ID.
+pub fn register(store: &Store, job: i64, agent: &str, now_ms: i64) -> Result<i64> {
+    transaction(store, |c| register_in(c, job, agent, now_ms))
+}
+
+pub fn register_in(c: &Connection, job: i64, agent: &str, now_ms: i64) -> Result<i64> {
+    get_in(c, job)?;
+    c.execute(
+        "INSERT INTO job_session (job_id, agent, registered_at) VALUES (?1, ?2, ?3)",
+        params![job, agent, now_ms],
+    )?;
+    Ok(c.last_insert_rowid())
+}
+
+/// Run one move of `session`. Gives `false` if the `WHERE` of the move
+/// found no row in the state that the move needs.
+fn session_move(
+    c: &Connection,
+    session: i64,
+    set: &str,
+    when: &str,
+    values: &[&dyn rusqlite::ToSql],
+) -> Result<bool> {
+    session_in(c, session)?;
+    let n = c.execute(
+        &format!("UPDATE job_session SET {set} WHERE id = ?1 AND {when}"),
+        &[&[&session as &dyn rusqlite::ToSql], values].concat()[..],
+    )?;
+    Ok(n == 1)
+}
+
+fn must(done: bool, why: &str) -> Result<()> {
+    if done {
+        Ok(())
+    } else {
+        Err(Error::Refused(why.into()))
+    }
+}
+
+/// The helper move: the process ID of the hold helper, once.
+pub fn set_helper(store: &Store, session: i64, pid: i64) -> Result<()> {
+    transaction(store, |c| set_helper_in(c, session, pid))
+}
+
+pub fn set_helper_in(c: &Connection, session: i64, pid: i64) -> Result<()> {
+    let done = session_move(
+        c,
+        session,
+        "helper_pid = ?2",
+        "helper_pid IS NULL AND reaped_at IS NULL",
+        &[&pid],
+    )?;
+    must(
+        done,
+        "the helper of a session is set once, while it is live",
+    )
+}
+
+/// The spawn move: the process group ID of the agent, once, after the helper.
+pub fn set_agent(store: &Store, session: i64, pgid: i64) -> Result<()> {
+    transaction(store, |c| set_agent_in(c, session, pgid))
+}
+
+pub fn set_agent_in(c: &Connection, session: i64, pgid: i64) -> Result<()> {
+    let done = session_move(
+        c,
+        session,
+        "agent_pgid = ?2",
+        "agent_pgid IS NULL AND helper_pid IS NOT NULL AND reaped_at IS NULL",
+        &[&pgid],
+    )?;
+    must(
+        done,
+        "the agent group of a session is set once, after the helper, while it is live",
+    )
+}
+
+/// The start move. Gives `false` if the session ended (a revoke, a job move
+/// or a stop came first), and then changes nothing.
+pub fn start(store: &Store, session: i64, now_ms: i64) -> Result<bool> {
+    transaction(store, |c| start_in(c, session, now_ms))
+}
+
+pub fn start_in(c: &Connection, session: i64, now_ms: i64) -> Result<bool> {
+    if session_in(c, session)?.started_ms.is_some() {
+        return Err(Error::Refused("a session starts once".into()));
+    }
+    session_move(
+        c,
+        session,
+        "started_at = ?2",
+        "started_at IS NULL AND ended_at IS NULL",
+        &[&now_ms],
+    )
+}
+
+/// The end move. `exit_code` only with [`EndReason::Exit`]. Gives `false`
+/// if the session ended already: the first end stays.
+pub fn end(
+    store: &Store,
+    session: i64,
+    why: EndReason,
+    exit_code: Option<i64>,
+    now_ms: i64,
+) -> Result<bool> {
+    transaction(store, |c| end_in(c, session, why, exit_code, now_ms))
+}
+
+pub fn end_in(
+    c: &Connection,
+    session: i64,
+    why: EndReason,
+    exit_code: Option<i64>,
+    now_ms: i64,
+) -> Result<bool> {
+    session_move(
+        c,
+        session,
+        "ended_at = ?2, end_reason = ?3, exit_code = ?4",
+        "ended_at IS NULL",
+        &[&now_ms, &why.as_str(), &exit_code],
+    )
+}
+
+/// The reap move, once, after the end. Only the reap check of the engine
+/// calls it.
+pub fn reap(store: &Store, session: i64, now_ms: i64) -> Result<()> {
+    transaction(store, |c| reap_in(c, session, now_ms))
+}
+
+pub fn reap_in(c: &Connection, session: i64, now_ms: i64) -> Result<()> {
+    let done = session_move(
+        c,
+        session,
+        "reaped_at = ?2",
+        "reaped_at IS NULL AND ended_at IS NOT NULL",
+        &[&now_ms],
+    )?;
+    must(done, "a session is reaped once, after its end")
+}
+
+/// One session by row ID.
+pub fn session(store: &Store, id: i64) -> Result<Session> {
+    read(store, |c| session_in(c, id))
+}
+
+pub fn session_in(c: &Connection, id: i64) -> Result<Session> {
+    c.query_row(
+        &format!("SELECT {SESSION_COLUMNS} FROM job_session WHERE id = ?1"),
+        [id],
+        session_of,
+    )
+    .optional()?
+    .ok_or(Error::NotFound)
+}
+
+/// The open session of `job`, if one exists.
+pub fn open_session(store: &Store, job: i64) -> Result<Option<Session>> {
+    read(store, |c| open_session_in(c, job))
+}
+
+pub fn open_session_in(c: &Connection, job: i64) -> Result<Option<Session>> {
+    get_in(c, job)?;
+    Ok(c.query_row(
+        &format!(
+            "SELECT {SESSION_COLUMNS} FROM job_session WHERE job_id = ?1 AND ended_at IS NULL"
+        ),
+        [job],
+        session_of,
+    )
+    .optional()?)
+}
+
+/// Each live session (not reaped), in the order of the register.
+pub fn live_sessions(store: &Store) -> Result<Vec<Session>> {
+    read(store, live_sessions_in)
+}
+
+pub fn live_sessions_in(c: &Connection) -> Result<Vec<Session>> {
+    let mut q = c.prepare(&format!(
+        "SELECT {SESSION_COLUMNS} FROM job_session WHERE reaped_at IS NULL ORDER BY id"
+    ))?;
+    let all = q
+        .query_map([], session_of)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(all)
+}

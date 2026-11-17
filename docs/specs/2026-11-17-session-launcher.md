@@ -60,7 +60,7 @@ command. Each tool has its own command line.
 
 ### Sessions in the store
 
-Migration 20 adds the table `job_session`:
+Migration 21 (20 went to R5-10) adds the table `job_session`:
 
 | Column | Type | Rule |
 |---|---|---|
@@ -72,8 +72,8 @@ Migration 20 adds the table `job_session`:
 | `ended_at` | INTEGER | NULL while the session is open. |
 | `end_reason` | TEXT | NULL while open. Else one of `exit`, `stop`, `revoke`, `job_state`, `time_limit`, `engine`, `launch_failed`, `helper_failed`. |
 | `exit_code` | INTEGER | The exit code of the agent for `exit`, else NULL. |
-| `helper_pid` | INTEGER | NULL until step 5 of the launch. The process ID of the hold helper. |
-| `agent_pgid` | INTEGER | NULL until the helper starts the agent. The process group ID of the agent. |
+| `helper_pid` | INTEGER | NULL until step 5 of the launch. The process ID of the hold helper, 2 or more (0 and 1 are never a session process). |
+| `agent_pgid` | INTEGER | NULL until the helper starts the agent. The process group ID of the agent, 2 or more. |
 | `reaped_at` | INTEGER | NULL until the engine confirmed that each process of the session stopped. |
 
 A session has two ends. `ended_at` is the end of the grant: from that moment
@@ -670,7 +670,7 @@ is refused before a row is written.
 
 ## Impact
 
-- `crates/iris-store/src/schema_20.sql`: the table and the triggers.
+- `crates/iris-store/src/schema_21.sql`: the table and the triggers.
 - `crates/iris-job`: the session functions.
 - New crate `crates/iris-session`: adapters, `agents.toml`, the hold helper,
   the launch, the reap check and the egress proxy. A direct dependency on `libc` (exact version of the lock).
@@ -791,7 +791,7 @@ cargo test -p iris
 
 ## Rollout
 
-Migration 20 adds one table. The verbs are new. Nothing changes for a person
+Migration 21 adds one table. The verbs are new. Nothing changes for a person
 who does not run `iris job run`.
 
 ## Risks
@@ -812,7 +812,7 @@ and `dependsOn` on the board.
 | Card | PR | Depends on |
 |---|---|---|
 | R4-04 | This spec. | R4-02 |
-| R4-04b | Migration 20 and the session functions in `iris-job`. | R4-04 |
+| R4-04b | Migration 21 and the session functions in `iris-job`. | R4-04 |
 | R4-04c | The crate `iris-session`: adapters, `agents.toml`, the hold helper and the launch. | R4-04b |
 | R4-04d | The egress proxy in `iris-session`. | R4-04 |
 | R4-04e | The engine: supervisor, reap check, requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04c, R4-04d |
