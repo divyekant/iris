@@ -254,6 +254,27 @@ def test_launchd(marker, profile, how, n):
     return res
 
 
+def kill_member(pid, cid):
+    """SIGSTOP, then SIGKILL only if the process is still in the coalition.
+    A process ID that went to another process gets SIGCONT."""
+    try:
+        os.kill(pid, signal.SIGSTOP)
+        c = coalition(pid)
+        os.kill(pid, signal.SIGKILL if c and c[0] == cid else signal.SIGCONT)
+    except OSError:
+        pass
+
+
+def kill_marked(pid, marker):
+    """SIGSTOP, then SIGKILL only if the command line still holds the marker."""
+    try:
+        os.kill(pid, signal.SIGSTOP)
+        cmd = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+        os.kill(pid, signal.SIGKILL if marker in cmd else signal.SIGCONT)
+    except OSError:
+        pass
+
+
 def kill_loop(cid, limit=5.0):
     """Stop then kill each member of the coalition until a scan and the
     counters say it is empty. Gives the pass count and the result."""
@@ -261,12 +282,8 @@ def kill_loop(cid, limit=5.0):
     while time.time() - t0 < limit:
         passes += 1
         members = pids_in_coalition(cid)
-        for sig in (signal.SIGSTOP, signal.SIGKILL):
-            for pid in members:
-                try:
-                    os.kill(pid, sig)
-                except OSError:
-                    pass
+        for pid in members:
+            kill_member(pid, cid)
         c = coalition_counts(cid)
         if not members and (not isinstance(c, tuple) or c[0] == c[1]):
             break  # ESRCH: the coalition is gone, so it is empty
@@ -291,12 +308,8 @@ def test_kill_loop(marker, profile, n):
     time.sleep(0.5)
     res["after_bootout"] = escapers_alive(outdir)
     res["single_scan_kill"] = None
-    members = pids_in_coalition(cid)
-    for pid in members:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    for pid in pids_in_coalition(cid):
+        kill_member(pid, cid)
     time.sleep(1.5)
     res["after_single_scan_kill"] = escapers_alive(outdir)
     res["counts_after_single_scan_kill"] = coalition_counts(cid)
@@ -389,7 +402,7 @@ def test_init_killer(marker, profile, n):
     if URG or res["urg"] is None:
         # kill(-1) reached a process outside the sandbox: never send SIGKILL.
         for pid in pids_in_coalition(cid):
-            os.kill(pid, signal.SIGKILL)
+            kill_member(pid, cid)
         res["bootout"] = bootout(label)
         res["aborted"] = "kill(-1) is not limited to the sandbox"
         return res
@@ -596,10 +609,7 @@ def main():
         left = marker_pids(marker)
         report["cleanup_marker_pids_found"] = len(left)
         for pid in left:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+            kill_marked(pid, marker)
     text = json.dumps(report, indent=1, default=str)
     out = os.path.join(tempfile.gettempdir(), "iris-probe-report.json")
     with open(out, "w") as f:
