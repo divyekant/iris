@@ -899,7 +899,12 @@ fn session_mode_uses_only_the_session_socket() {
     };
     // No socket: code 4, for a socket verb and for a store verb.
     let draft = ["draft", "t-1", "missing.json"];
-    for args in [&["status"][..], &["withdraw", "cs-1"], &["search", "x"], &draft] {
+    for args in [
+        &["status"][..],
+        &["withdraw", "cs-1"],
+        &["search", "x"],
+        &draft,
+    ] {
         let out = iris(args);
         assert_eq!(out.status.code(), Some(4), "{args:?}: {out:?}");
     }

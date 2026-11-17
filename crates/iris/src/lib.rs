@@ -625,6 +625,21 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         },
         _ => f,
     };
+    let denied = |error: &str| socket::Failure {
+        code: socket::code::DENIED,
+        error: error.into(),
+    };
+    // The order of the checks: the socket file, then the class of the
+    // verb, and only then the work of the verb (a draft file is read
+    // only for a verb that a session can send).
+    use std::os::unix::fs::FileTypeExt;
+    let there = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
+    if !there {
+        return Err(unreachable(socket::Failure {
+            code: socket::code::UNREACHABLE,
+            error: String::new(),
+        }));
+    }
     if let Command::Status { json } = c {
         let r = socket::request_at(
             path,
@@ -637,25 +652,18 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         print!("{}", session_status_text(&r, *json));
         return Ok(());
     }
+    // A job has no grant of an account or a draft (docs/specs/2026-11-17-job-verbs.md).
+    if matches!(c, Command::Compose { .. } | Command::Send { .. }) {
+        return Err(denied(
+            "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
+        ));
+    }
     // Only the write verbs of a session (R4-03): `drafts`, for example, is
-    // a host verb of the socket.
+    // a host verb of the socket. The read verbs come in R4-04f.
     const SESSION_VERBS: [&str; 5] = ["add", "submit", "show", "withdraw", "revise"];
     let request = socket_request(c)?.filter(|(verb, ..)| SESSION_VERBS.contains(verb));
     let Some((verb, args, json)) = request else {
-        // The read verbs (R4-04f) and the host verbs: the engine gives
-        // nothing else to a session. With no socket file, code 4 here too.
-        use std::os::unix::fs::FileTypeExt;
-        let there = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket());
-        if !there {
-            return Err(unreachable(socket::Failure {
-                code: socket::code::UNREACHABLE,
-                error: String::new(),
-            }));
-        }
-        return Err(socket::Failure {
-            code: socket::code::DENIED,
-            error: "this verb is not a verb of a session".into(),
-        });
+        return Err(denied("this verb is not a verb of a session"));
     };
     let out = socket_verb_at(path, verb, args, json).map_err(unreachable)?;
     print!("{}", out.text);
