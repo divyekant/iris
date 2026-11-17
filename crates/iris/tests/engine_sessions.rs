@@ -530,6 +530,38 @@ fn a_failed_launch_that_is_reaped_stops_its_proxy() {
     }
 }
 
+fn a_stop_before_the_register_stops_the_launch() {
+    let f = fixture("stopfirst", "sleep 30");
+    let s = sessions(&f);
+    // The test holds the store write lock: the register of the run waits.
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let store = f.store.clone();
+        std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    locked_tx.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(1500));
+                    Ok(())
+                })
+                .unwrap();
+        })
+    };
+    locked_rx.recv().unwrap();
+    let runner = {
+        let (s, job) = (s.clone(), f.job);
+        std::thread::spawn(move || s.run(job, "script"))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let (last, left) = s.stop(f.job).unwrap();
+    holder.join().unwrap();
+    let id = runner.join().unwrap().unwrap();
+    assert_eq!((last, left), (id, Ok(())));
+    let row = session(&f.store, id).unwrap();
+    assert_eq!(row.end, Some(EndReason::Stop));
+    assert!(row.reaped_ms.is_some(), "{row:?}");
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -608,6 +640,10 @@ fn main() {
         (
             "a_failed_launch_that_is_reaped_stops_its_proxy",
             a_failed_launch_that_is_reaped_stops_its_proxy,
+        ),
+        (
+            "a_stop_before_the_register_stops_the_launch",
+            a_stop_before_the_register_stops_the_launch,
         ),
     ];
     let mut failed = 0;
