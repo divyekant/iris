@@ -6,6 +6,7 @@
 //! closes the pipe, waits for the helper if one started, removes the socket
 //! and runs the reap check. So no live session stays without a process.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -14,6 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, ChildStderr, ChildStdin, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -66,6 +68,13 @@ pub struct Launcher<'a> {
     /// the helper, so each session gets its own proxy. An error ends the
     /// session with `launch_failed`.
     pub egress: &'a Egress<'a>,
+    /// The jobs whose stop came during their launch. The gate locks it
+    /// in its write transaction, after the store write lock, and holds it
+    /// to the commit. So a stop mark comes before the read of the gate (no
+    /// start, also when the end write of the stop failed) or after the
+    /// commit of the start (a stop of a running session). No code may
+    /// wait for the store while it holds this lock.
+    pub stop_marks: &'a Mutex<HashSet<i64>>,
     /// The environment of the engine. Only the names of the agent
     /// environment are read.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
@@ -152,6 +161,8 @@ enum Attempt {
 
 enum Gate {
     Ended(EndReason),
+    /// A stop of the job came, but the store may have no end.
+    Stopped,
     Failed(String),
 }
 
@@ -265,7 +276,7 @@ impl Launcher<'_> {
         }
         (self.after)(Step::HelperStarted, session);
         // 6. The gate.
-        self.gate(session, helper, socket, socket_path)
+        self.gate(job, session, helper, socket, socket_path)
     }
 
     /// Step 6: the check of the end, the start and the spawn, in one write
@@ -273,6 +284,7 @@ impl Launcher<'_> {
     /// commits before the check or after the commit of the gate.
     fn gate(
         &self,
+        job: i64,
         session: i64,
         mut helper: Helper,
         socket: UnixListener,
@@ -280,6 +292,8 @@ impl Launcher<'_> {
     ) -> Attempt {
         let mut result: Option<Result<i32, Gate>> = None;
         let now = (self.now)();
+        // Held from the read of the mark to the end of the transaction.
+        let mut marks: Option<MutexGuard<'_, HashSet<i64>>> = None;
         let written = self.store.write(|tx| {
             // An Err rolls the transaction back. The launch acts on
             // `result`, not on this placeholder.
@@ -301,6 +315,11 @@ impl Launcher<'_> {
             };
             if let Some(end) = s.end {
                 result = Some(Err(Gate::Ended(end)));
+                return Err(rollback());
+            }
+            let m = marks.insert(self.stop_marks.lock().unwrap_or_else(|e| e.into_inner()));
+            if m.contains(&job) {
+                result = Some(Err(Gate::Stopped));
                 return Err(rollback());
             }
             match iris_job::start_in(tx, session, now) {
@@ -340,6 +359,7 @@ impl Launcher<'_> {
             result = Some(Ok(pgid));
             Ok(())
         });
+        drop(marks);
         match (written, result) {
             (Ok(()), Some(Ok(pgid))) => Attempt::Running(Running {
                 session,
@@ -359,6 +379,17 @@ impl Launcher<'_> {
                         "the session ended before the start ({}){tail}",
                         end.as_str()
                     ),
+                )
+            }
+            (_, Some(Err(Gate::Stopped))) => {
+                drop(socket);
+                let why = "a stop came before the start".to_string();
+                self.end_now(
+                    session,
+                    EndReason::Stop,
+                    why,
+                    Some(helper),
+                    Some(&socket_path),
                 )
             }
             (_, Some(Err(Gate::Failed(why)))) => {
@@ -459,24 +490,31 @@ impl Launcher<'_> {
         helper: Option<Helper>,
         socket: Option<&Path>,
     ) -> Attempt {
+        self.end_now(session, EndReason::LaunchFailed, why, helper, socket)
+    }
+
+    /// Ends the session with `reason` (the first end stays), then cleans
+    /// up.
+    fn end_now(
+        &self,
+        session: i64,
+        reason: EndReason,
+        why: String,
+        helper: Option<Helper>,
+        socket: Option<&Path>,
+    ) -> Attempt {
         let mut written = Err(iris_job::Error::NotFound);
         for i in 0..END_TRIES {
             if i > 0 {
                 thread::sleep(Duration::from_millis(100));
             }
-            written = iris_job::end(
-                self.store,
-                session,
-                EndReason::LaunchFailed,
-                None,
-                (self.now)(),
-            );
+            written = iris_job::end(self.store, session, reason, None, (self.now)());
             if written.is_ok() {
                 break;
             }
         }
         let end = match written {
-            Ok(true) => EndReason::LaunchFailed,
+            Ok(true) => reason,
             // An earlier end (a stop, a revoke) stays.
             Ok(false) => iris_job::session(self.store, session)
                 .ok()

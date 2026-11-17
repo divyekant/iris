@@ -52,6 +52,13 @@ pub struct Sessions {
     isolation: Result<Arc<dyn Isolation>, String>,
     helper: Arc<HelperCommand>,
     state: Mutex<State>,
+    /// The jobs whose stop came during a launch. The gate of the launch
+    /// holds this lock from its read of the mark to its commit (see
+    /// `Launcher::stop_marks`), so it has its own lock: a turn holds the
+    /// state lock while it waits for the store. Lock order: the state lock
+    /// or the store, then this lock. Never wait for the store while this
+    /// lock is held. A stop waits here for at most one gate.
+    stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
     /// The done jobs whose workspace the build thread builds again. A
     /// build can wait for the workspace lock without a limit, so no
@@ -68,9 +75,6 @@ struct State {
     /// The jobs with a launch thread. Rule 0 of the reap check: the
     /// supervisor does not touch a session of such a job.
     launching: HashSet<i64>,
-    /// The jobs whose stop came during a launch: a revoke retry of the
-    /// launch ends its new session with `stop`.
-    stopping: HashSet<i64>,
     /// The sessions whose helper this engine started, by session ID.
     running: HashMap<i64, Live>,
     /// The reason of the last failed reap check of each session.
@@ -143,6 +147,7 @@ impl Sessions {
             isolation,
             helper,
             state: Mutex::new(State::default()),
+            stop_marks: Mutex::default(),
             after: Mutex::new(None),
             builds,
             releases,
@@ -197,6 +202,15 @@ impl Sessions {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn marks(&self) -> MutexGuard<'_, HashSet<i64>> {
+        self.stop_marks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `true` if a stop of `job` came during its launch.
+    fn stopped(&self, job: i64) -> bool {
+        self.marks().contains(&job)
     }
 
     fn data_dir(&self) -> &Path {
@@ -256,7 +270,7 @@ impl Sessions {
     /// of the job came during the launch, end the new session with `stop`.
     /// The launch sees the end and starts no agent.
     fn registered(&self, job: i64, session: i64) {
-        if self.state().stopping.contains(&job) {
+        if self.stopped(job) {
             let _ = iris_job::end(&self.store, session, EndReason::Stop, None, now_ms());
         }
     }
@@ -265,7 +279,7 @@ impl Sessions {
     fn launch_over(&self, job: i64) {
         let mut st = self.state();
         st.launching.remove(&job);
-        st.stopping.remove(&job);
+        self.marks().remove(&job);
     }
 
     /// Sends `proxy` to the stop thread.
@@ -302,6 +316,7 @@ impl Sessions {
             isolation,
             helper: &*self.helper,
             egress,
+            stop_marks: &self.stop_marks,
             env: &|name| std::env::var_os(name),
             now: &now_ms,
             after,
@@ -343,7 +358,7 @@ impl Sessions {
         // session is in the map.
         let mut st = self.state();
         st.launching.remove(&job);
-        st.stopping.remove(&job);
+        self.marks().remove(&job);
         match outcome {
             Outcome::Running(r) => {
                 let proxy = proxies.remove(&r.session);
@@ -407,15 +422,16 @@ impl Sessions {
 
     /// `job.stop`: ends the open session of `job` with `stop`, then waits
     /// up to [`STOP_WAIT`] for the reap. A stop during a launch also ends
-    /// each session that a revoke retry of the launch registers. Gives the
+    /// each session that a revoke retry of the launch registers, and its
+    /// stop mark keeps the gate from a start if an end write fails. Gives the
     /// last session of the job, and `Ok` if the launch is over and that
     /// session was reaped, else the reason that it is not.
     #[allow(clippy::type_complexity)]
     pub fn stop(self: &Arc<Self>, job: i64) -> Result<(i64, Result<(), String>), String> {
         {
-            let mut st = self.state();
+            let st = self.state();
             if st.launching.contains(&job) {
-                st.stopping.insert(job);
+                self.marks().insert(job);
             }
         }
         let end = Instant::now() + STOP_WAIT;
