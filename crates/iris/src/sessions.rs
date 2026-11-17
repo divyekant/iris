@@ -53,10 +53,11 @@ pub struct Sessions {
     helper: Arc<HelperCommand>,
     state: Mutex<State>,
     /// The jobs whose stop came during a launch. The gate of the launch
-    /// reads it in its store write transaction, so it has its own lock:
-    /// a turn holds the state lock while it waits for the store. Lock
-    /// order: the state lock, then this lock. Never wait for the store
-    /// while this lock is held.
+    /// holds this lock from its read of the mark to its commit (see
+    /// `Launcher::stop_marks`), so it has its own lock: a turn holds the
+    /// state lock while it waits for the store. Lock order: the state lock
+    /// or the store, then this lock. Never wait for the store while this
+    /// lock is held. A stop waits here for at most one gate.
     stop_marks: Mutex<HashSet<i64>>,
     after: Mutex<Option<Arc<AfterStep>>>,
     /// The done jobs whose workspace the build thread builds again. A
@@ -233,7 +234,6 @@ impl Sessions {
             return Err(refuse(Some(id)));
         }
         let hook = self.hook();
-        let stopped = |job| self.stopped(job);
         let after = |step: Step, s: i64| {
             if step == Step::Registered {
                 self.registered(job, s);
@@ -243,7 +243,7 @@ impl Sessions {
             }
         };
         let begun = self
-            .launcher(&*isolation, &|_, _| Ok(None), &stopped, &after)
+            .launcher(&*isolation, &|_, _| Ok(None), &after)
             .begin(job, agent);
         let begun = match begun {
             Ok(b) => b,
@@ -308,7 +308,6 @@ impl Sessions {
         &'a self,
         isolation: &'a dyn Isolation,
         egress: &'a Egress<'a>,
-        stopped: &'a dyn Fn(i64) -> bool,
         after: &'a dyn Fn(Step, i64),
     ) -> Launcher<'a> {
         Launcher {
@@ -317,7 +316,7 @@ impl Sessions {
             isolation,
             helper: &*self.helper,
             egress,
-            stopped,
+            stop_marks: &self.stop_marks,
             env: &|name| std::env::var_os(name),
             now: &now_ms,
             after,
@@ -350,10 +349,7 @@ impl Sessions {
             proxies.borrow_mut().insert(session, p);
             Ok(Some(port))
         };
-        let stopped = |job| self.stopped(job);
-        let outcome = self
-            .launcher(isolation, &egress, &stopped, &after)
-            .finish(begun);
+        let outcome = self.launcher(isolation, &egress, &after).finish(begun);
         let mut proxies = proxies.into_inner();
         // The session of a launch that ended with no agent, if its cleanup
         // reaped it: each reap asks for the build of a done job.

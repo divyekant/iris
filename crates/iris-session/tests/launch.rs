@@ -130,7 +130,7 @@ fn launch(
         isolation: &Plain,
         helper,
         egress: &|_, _| Ok(None),
-        stopped: &|_| false,
+        stop_marks: &Mutex::default(),
         env: &env,
         now: &now,
         after,
@@ -359,14 +359,13 @@ fn a_stop_mark_during_the_gate_waits_for_its_commit() {
                 *early.lock().unwrap() = Some(!started);
             });
         };
-        let stopped = |job: i64| marks.lock().unwrap().contains(&job);
         let l = Launcher {
             store: &f.store,
             data_dir: &f.data,
             isolation: &Plain,
             helper: &slow,
             egress: &|_, _| Ok(None),
-            stopped: &stopped,
+            stop_marks: &marks,
             env: &env,
             now: &now,
             after: &after,
@@ -437,7 +436,7 @@ fn a_missing_program_fails_before_a_session_row() {
         isolation: &Plain,
         helper: &real_helper,
         egress: &|_, _| Ok(None),
-        stopped: &|_| false,
+        stop_marks: &Mutex::default(),
         env: &env,
         now: &now,
         after: &|_, _| {},

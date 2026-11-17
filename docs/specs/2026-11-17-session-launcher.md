@@ -307,11 +307,16 @@ environment and its clock:
      `started_at`.
 
    The engine also keeps a stop mark for each job whose stop came during
-   the launch. The gate reads the mark in the same transaction. If the
-   mark is set, the gate rolls back and ends the session with `stop`, also
-   when the end write of the stop failed. So no agent starts after a stop
-   (issue #517). The mark has its own lock, and no code waits for the
-   store while it holds that lock.
+   the launch. The gate locks the marks after the store write lock, reads
+   the mark of its job, and holds the lock to the commit. So a stop mark
+   comes before the read (no start) or after the commit (the stop ends a
+   running session). It never comes between the two (issue #517). If the
+   mark is set, the gate rolls back and ends the session with `stop`.
+   This holds also when the end write of the stop failed. If no end write
+   of the gate works either, the session stays open with no start, and
+   the supervisor ends it with `launch_failed` when the store takes the
+   end. The marks have their own lock, and no code waits for the store
+   while it holds that lock. A stop waits for at most one gate.
 
    If the session did not end, then in the same transaction:
    1. Set `started_at` (`iris_job::start_in`).
@@ -792,7 +797,9 @@ is refused before a row is written.
 | The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
 | A revoke or a stop during the build, then at once a second `run` | The first session stays live until its launch thread returns after its cleanup; the second `run` is refused at the register until then | Launch test: a build hook that waits, a stop, then a second `run` that fails until the first thread returned |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `iris job session` shows the end with no start | Launch test with a stop hook |
-| `iris job stop` during a launch, and its end write fails | The gate reads the stop mark: no agent starts, and the launch ends the session with `stop` | Engine test: a trigger refuses the end write of the stop |
+| `iris job stop` during a launch, and its end write fails once | The gate reads the stop mark: no agent starts, and the launch ends the session with `stop` | Engine test: a trigger refuses the end write of the stop |
+| `iris job stop` during a launch, and no end write works until the launch is over | No agent starts. The session stays open; the supervisor ends it with `launch_failed` when the store takes the end | Engine test: the trigger stays until the helper stopped |
+| A stop mark while the gate waits for `started` | The mark waits for the commit of the gate; then the stop ends a running session | Launch test: a mark 300 ms into a 1 s late helper |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |

@@ -6,6 +6,7 @@
 //! closes the pipe, waits for the helper if one started, removes the socket
 //! and runs the reap check. So no live session stays without a process.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -14,6 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, ChildStderr, ChildStdin, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -66,11 +68,13 @@ pub struct Launcher<'a> {
     /// the helper, so each session gets its own proxy. An error ends the
     /// session with `launch_failed`.
     pub egress: &'a Egress<'a>,
-    /// Gives `true` if a stop of the job came during the launch. The gate
-    /// reads it in its write transaction, so no agent starts after a stop,
-    /// also when the end write of the stop failed. The function must not
-    /// wait for the store.
-    pub stopped: &'a dyn Fn(i64) -> bool,
+    /// The jobs whose stop came during their launch. The gate locks it
+    /// in its write transaction, after the store write lock, and holds it
+    /// to the commit. So a stop mark comes before the read of the gate (no
+    /// start, also when the end write of the stop failed) or after the
+    /// commit of the start (a stop of a running session). No code may
+    /// wait for the store while it holds this lock.
+    pub stop_marks: &'a Mutex<HashSet<i64>>,
     /// The environment of the engine. Only the names of the agent
     /// environment are read.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
@@ -288,6 +292,8 @@ impl Launcher<'_> {
     ) -> Attempt {
         let mut result: Option<Result<i32, Gate>> = None;
         let now = (self.now)();
+        // Held from the read of the mark to the end of the transaction.
+        let mut marks: Option<MutexGuard<'_, HashSet<i64>>> = None;
         let written = self.store.write(|tx| {
             // An Err rolls the transaction back. The launch acts on
             // `result`, not on this placeholder.
@@ -311,7 +317,8 @@ impl Launcher<'_> {
                 result = Some(Err(Gate::Ended(end)));
                 return Err(rollback());
             }
-            if (self.stopped)(job) {
+            let m = marks.insert(self.stop_marks.lock().unwrap_or_else(|e| e.into_inner()));
+            if m.contains(&job) {
                 result = Some(Err(Gate::Stopped));
                 return Err(rollback());
             }
@@ -352,6 +359,7 @@ impl Launcher<'_> {
             result = Some(Ok(pgid));
             Ok(())
         });
+        drop(marks);
         match (written, result) {
             (Ok(()), Some(Ok(pgid))) => Attempt::Running(Running {
                 session,
