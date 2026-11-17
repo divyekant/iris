@@ -628,10 +628,9 @@ fn no_random_text_is_a_journal_but_the_valid_form() {
                 .map(|_| format!("{}\n", next(1 << 31)))
                 .collect()
         };
-        let lines: Option<Vec<i32>> = if t.is_empty() {
-            Some(Vec::new())
-        } else {
-            t.strip_suffix('\n').and_then(|b| {
+        let lines: Option<Vec<i32>> = match t.rfind('\n') {
+            None => Some(Vec::new()),
+            Some(i) => Some(&t[..i]).and_then(|b| {
                 b.split('\n')
                     .map(|l| {
                         (!l.is_empty() && l.bytes().all(|c| c.is_ascii_digit()))
@@ -639,7 +638,7 @@ fn no_random_text_is_a_journal_but_the_valid_form() {
                             .flatten()
                     })
                     .collect()
-            })
+            }),
         };
         assert_eq!(parse_journal(&t), lines, "{t:?}");
         if let Some(p) = &lines {
@@ -669,4 +668,72 @@ fn a_journal_of_an_earlier_boot_is_removed_and_resumes_nothing() {
     assert!(w.procs[&pid].stopped);
     drop(w);
     assert!(!s.file(1, "stops").exists());
+}
+
+#[test]
+fn a_cut_last_journal_line_is_left_out_and_the_rest_resolves() {
+    let (_d, s, f) = setup("cut");
+    s.write_record(1, &rec(50)).unwrap();
+    // A crash left one whole entry of a stopped process of coalition 60,
+    // then a cut write with no end of line.
+    let pid = f.add(60, false);
+    f.w().procs.get_mut(&pid).unwrap().stopped = true;
+    fs::write(s.file(1, "stops"), format!("{pid}\n12")).unwrap();
+    assert_eq!(s.read_journal(1).unwrap(), [pid]);
+    s.stop(1).unwrap();
+    assert!(!f.w().procs[&pid].stopped);
+    assert!(s.read_journal(1).unwrap().is_empty());
+}
+
+#[test]
+fn the_command_runs_the_program_in_the_profile_with_the_private_folders() {
+    let (d, s, _f) = setup("command");
+    let work = d.0.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let program = d.0.join("tool");
+    fs::write(&program, "").unwrap();
+    let c = s.command(
+        1,
+        &work,
+        Some(4100),
+        &program,
+        &["--task".to_string(), "a b".to_string()],
+    );
+    assert_eq!(c.program, PathBuf::from(SANDBOX_EXEC));
+    let a: Vec<String> = c
+        .args
+        .iter()
+        .map(|x| x.to_string_lossy().into_owned())
+        .collect();
+    let env = a.iter().position(|x| x == "/usr/bin/env").unwrap();
+    // The options of sandbox-exec: the parameters, then the profile.
+    let p = a.iter().position(|x| x == "-p").unwrap();
+    assert_eq!(p + 2, env);
+    assert!(a[p + 1].starts_with("(version 1)\n(deny default)"));
+    assert!(a[p + 1].contains("localhost:4100"));
+    assert!(a[..p]
+        .chunks(2)
+        .all(|o| o[0] == "-D" && o[1].starts_with('P')));
+    let real = |x: &Path| fs::canonicalize(x).unwrap().to_string_lossy().into_owned();
+    let work_param = a[..p]
+        .iter()
+        .any(|o| o.ends_with(&format!("={}", real(&work))));
+    assert!(work_param, "{a:?}");
+    // env: the private home and /tmp, the folder of iris first in PATH,
+    // then the program and its arguments.
+    let home = s.home(1).to_string_lossy().into_owned();
+    let tmp = s.tmp(1).to_string_lossy().into_owned();
+    assert_eq!(a[env + 1], format!("HOME={home}"));
+    assert_eq!(a[env + 2], format!("TMPDIR={tmp}"));
+    let exe = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let dir = exe.parent().unwrap().to_string_lossy().into_owned();
+    assert!(
+        a[env + 3].starts_with(&format!("PATH={dir}")),
+        "{}",
+        a[env + 3]
+    );
+    assert_eq!(
+        a[env + 4..],
+        [real(&program), "--task".into(), "a b".into()]
+    );
 }

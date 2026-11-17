@@ -545,12 +545,15 @@ fn sandbox_args(paths: &Paths, egress_port: Option<u16>) -> Vec<OsString> {
 }
 
 /// The stop journal: one process ID (greater than 0) on each line, each
-/// line with its end. `None` for each other text.
+/// line with its end. A last line with no end is a write that a crash cut:
+/// it was not synced, so no `SIGSTOP` followed it, and it is left out.
+/// `None` for each other text.
 fn parse_journal(text: &str) -> Option<Vec<i32>> {
-    if text.is_empty() {
-        return Some(Vec::new());
-    }
-    text.strip_suffix('\n')?
+    let whole = match text.rfind('\n') {
+        Some(i) => &text[..i],
+        None => return Some(Vec::new()),
+    };
+    whole
         .split('\n')
         .map(|l| {
             let ok = !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit());
