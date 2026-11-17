@@ -898,7 +898,8 @@ fn session_mode_uses_only_the_session_socket() {
             .unwrap()
     };
     // No socket: code 4, for a socket verb and for a store verb.
-    for args in [&["status"][..], &["withdraw", "cs-1"], &["search", "x"]] {
+    let draft = ["draft", "t-1", "missing.json"];
+    for args in [&["status"][..], &["withdraw", "cs-1"], &["search", "x"], &draft] {
         let out = iris(args);
         assert_eq!(out.status.code(), Some(4), "{args:?}: {out:?}");
     }
@@ -923,7 +924,7 @@ fn session_mode_uses_only_the_session_socket() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("j-4 (working)"));
     // A store verb and a host verb of the socket: code 3, and nothing
     // reaches the socket.
-    for args in [&["search", "x"][..], &["changeset", "--drafts"]] {
+    for args in [&["search", "x"][..], &["changeset", "--drafts"], &draft] {
         let out = iris(args);
         assert_eq!(out.status.code(), Some(3), "{args:?}: {out:?}");
     }
