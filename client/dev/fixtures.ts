@@ -214,6 +214,10 @@ const HEADS: Record<string, [string, string, string, string]> = {
   "m-55210": ["t-8841", "Priya Raman", "priya@northwind.example", "Q4 numbers for the board"],
   "m-53500": ["t-8600", "Example Air", "trips@air.example", "Your flight to Tokyo: QX7K2P"],
   "m-55211": ["t-8841", "You", "you@example.com", "Re: Q4 numbers for the board"],
+  "m-55212": ["t-8841", "Priya Raman", "priya@northwind.example", "Re: Q4 numbers for the board"],
+  "m-55380": ["t-9001", "Sam Lee", "sam@example.org", "Dinner on Thursday?"],
+  "m-55390": ["t-9001", "You", "you@example.com", "Re: Dinner on Thursday?"],
+  "m-55400": ["t-9001", "Sam Lee", "sam@example.org", "Re: Dinner on Thursday?"],
   "m-60001": ["t-9002", "Dana Brooks", "dana@leadgen.example", "Quick question about your Q1 plans"],
   "m-61500": ["t-9100", "Morning Brew", "crew@morningbrew.example", "Monday: the market opens higher"],
 };
@@ -466,6 +470,7 @@ export function answer(path: string): unknown {
     return section && "items" in section ? { items: section.items, next: null, duplicates: section.duplicates } : undefined;
   }
   if (name === "brief") return briefNow();
+  if (name === "items" && id && url.pathname.endsWith("/job")) return startPreview(id);
   if (name === "items" && id) return [...items, ...hidden, ...strangers].find((i) => i.id === id);
   if (name === "items") {
     return { items: items.filter((i) => (!q.get("form") || i.form === q.get("form")) && (!q.get("type") || i.type === q.get("type"))), next: null };
@@ -528,4 +533,19 @@ export function answerSender(id: string, answer: string): GateAnswer | undefined
   state.set(id, answer === "accept" ? "accepted" : answer === "decline" ? "declined" : "waiting");
   const accepted = answer === "accept";
   return { id, address: sender.address, name: sender.name, kind: accepted ? "person" : "stranger", decided_by: accepted ? "person" : "engine", declined: answer === "decline" };
+}
+
+// "Handle this" (card R4-10): the mail that a start grants. Message m-55212 is not readable yet.
+const START: Record<string, [string, boolean][]> = {
+  "c-311": [["m-55210", true], ["m-55211", true], ["m-55212", false]],
+  "v-88": [["m-55380", true], ["m-55390", true], ["m-55400", true]],
+};
+function startPreview(id: string) {
+  const list = START[id];
+  // The engine order: the thread, then the date.
+  return list && { messages: list.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) };
+}
+/** POST /api/jobs: the fixture job j-12 stands for the new job. */
+export function startJob(): [number, unknown] {
+  return [201, jobs["j-12"]];
 }

@@ -8,6 +8,8 @@
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
   import Act from "./Act.svelte";
+  import Start from "./Start.svelte";
+  import { canStart } from "../start";
   import Code from "./Code.svelte";
 
   let { item: given, now: start = new Date() }: { item: Item; now?: Date } = $props();
@@ -64,6 +66,9 @@
     r.push(["State", item.status]);
     return r;
   });
+  // "Handle this" (R4-10): the start form opens in place.
+  let starting = $state(false);
+  let startable = $derived(canStart(item));
   let made = $derived(
     item.derived.by === "rule" ? `a fixed rule (${item.derived.rule})` : item.derived.by === "model" ? `the model ${item.derived.model}` : "you",
   );
@@ -73,7 +78,13 @@
   <p class="form">{FORMS[item.form]}{item.form === "record" && item.type ? `: ${item.type}` : ""}</p>
   <h1>{item.title}</h1>
 
-  <Act {item} onchange={(next) => (item = next)} />
+  {#snippet handle()}
+    {#if startable && !starting}<button class="handle" type="button" onclick={() => (starting = true)}>Handle this</button>{/if}
+  {/snippet}
+
+  <Act {item} onchange={(next) => (item = next)} more={handle} />
+  {#if item.form !== "commitment" && startable && !starting}<div class="alone">{@render handle()}</div>{/if}
+  {#if starting}<Start {item} oncancel={() => (starting = false)} />{/if}
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>
@@ -128,6 +139,32 @@
     letter-spacing: -0.01em;
     line-height: 1.25;
     margin: 0 0 var(--space-6);
+  }
+  .handle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: calc(var(--space-8) + var(--space-2));
+    padding: 0 var(--space-4);
+    margin-left: auto;
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--color-primary);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+  .handle:hover {
+    background: var(--color-background-elevated);
+  }
+  .alone {
+    display: flex;
+    margin: 0 0 var(--space-8);
+  }
+  .alone .handle {
+    margin-left: 0;
   }
   .code {
     margin-bottom: var(--space-6);
