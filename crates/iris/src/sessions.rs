@@ -70,10 +70,6 @@ struct State {
     /// The jobs whose stop came during a launch: a revoke retry of the
     /// launch ends its new session with `stop`.
     stopping: HashSet<i64>,
-    /// The egress proxies of launches that ended with no running session.
-    /// Each proxy, here and in [`Live`], runs until the reap of its
-    /// session: a process of the agent can still use the port until then.
-    parked: HashMap<i64, Proxy>,
     /// The sessions whose helper this engine started, by session ID.
     running: HashMap<i64, Live>,
     /// The reason of the last failed reap check of each session.
@@ -164,7 +160,7 @@ impl Sessions {
     /// The count of egress proxies that run. For tests.
     pub fn open_proxies(&self) -> usize {
         let st = self.state();
-        st.parked.len() + st.running.values().filter(|l| l.proxy.is_some()).count()
+        st.running.values().filter(|l| l.proxy.is_some()).count()
     }
 
     /// Calls `f` after each step of each launch. For tests.
@@ -386,7 +382,8 @@ impl Sessions {
             Some((Outcome::Ended { session, why, .. } | Outcome::Open { session, why }, proxy)) => {
                 say!("iris: {}: {why}", format_session_id(session));
                 if let Some(p) = proxy {
-                    st.parked.insert(session, p);
+                    // The session ended: its proxy stops now.
+                    self.release(p);
                 }
                 // Each reap asks for the build of a done job: the turns for
                 // their reaps, and this launch for a reap in its cleanup.
@@ -508,19 +505,6 @@ impl Sessions {
                 st.busy.insert(id);
             }
         }
-        // A parked proxy stops when its session is reaped, by any path: a
-        // reap thread, or the cleanup of the launch itself.
-        let reaped: Vec<i64> = st
-            .parked
-            .keys()
-            .copied()
-            .filter(|id| iris_job::session(&self.store, *id).is_ok_and(|r| r.reaped_ms.is_some()))
-            .collect();
-        for id in reaped {
-            if let Some(p) = st.parked.remove(&id) {
-                self.release(p);
-            }
-        }
     }
 
     /// One running session of this engine, under the state lock. Gives
@@ -547,7 +531,7 @@ impl Sessions {
                 };
                 let _ = iris_job::end(&self.store, s.id, why, code, now);
             }
-            shutdown(l);
+            self.shutdown(l);
             return Some(true);
         }
         if s.ended_ms.is_none() {
@@ -561,13 +545,26 @@ impl Sessions {
         // The session ended in the store (a stop, a revoke, a job move, a
         // time limit): the helper stops the group when the pipe closes. The
         // reap thread stops the isolation; a later turn reaps the helper.
-        shutdown(l);
+        self.shutdown(l);
         Some(false)
     }
 
+    /// The fast part of the shutdown order, under the state lock: the grant
+    /// ended in the store; close the socket and the pipe (the helper stops
+    /// the group), and send the egress proxy to the stop thread, which
+    /// closes its port and its connections. The reap thread stops the
+    /// isolation.
+    fn shutdown(&self, l: &mut Live) {
+        l.socket = None;
+        l.pipe = None;
+        if let Some(p) = l.proxy.take() {
+            self.release(p);
+        }
+    }
+
     /// The reap thread of one ended session: the isolation stop, then the
-    /// reap check. On a reap, it removes the session from the state, sends
-    /// its proxy to the stop thread and its job to the build thread.
+    /// reap check. On a reap, it removes the session from the state and
+    /// sends its job to the build thread.
     fn reap_one(&self, session: i64, job: i64, helper_reaped: bool) {
         if let Ok(iso) = &self.isolation {
             let _ = iso.stop(session);
@@ -648,16 +645,6 @@ fn is_session_log(name: &str) -> bool {
         .strip_suffix(".egress.log")
         .or_else(|| name.strip_suffix(".log"));
     id.and_then(iris_job::parse_session_id).is_some()
-}
-
-/// The fast part of the shutdown order, under the state lock: the grant
-/// ended in the store; close the socket and the pipe (the helper stops the
-/// group). The reap thread stops the isolation. The egress proxy stops
-/// only at the reap, so its port is not free for a new session while a
-/// process of this agent can still use it.
-fn shutdown(l: &mut Live) {
-    l.socket = None;
-    l.pipe = None;
 }
 
 /// Moves a log file to a new name, and never over a file of that name.
