@@ -333,6 +333,11 @@ each running session:
   cases, run the reap check, which keeps the session live while a process
   of the agent group runs. Then remove the socket file. If the job is
   `done`, build its workspace again after the reap.
+- An open session with no launch thread of this engine and no helper
+  (`helper_pid` NULL, or the helper ended): end it with `launch_failed`, then
+  run the reap check. This covers a launch that failed and could not write
+  the end (for example, a full disk): the launch tries the end write 3
+  times, then reports the session as open, never as ended.
 - A session that ended but did not pass the reap check: run the reap check
   again. The session stays live until the check passes.
 - The session ended in the store (a revoke, a job move, a stop, or a verb

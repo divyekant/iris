@@ -29,6 +29,8 @@ pub const BUILD_TRIES: u32 = 5;
 /// The longest wait for the line `started <pgid>` of the helper, inside the
 /// gate. Less than the `busy_timeout` of the store (5 seconds).
 pub const START_WAIT: Duration = Duration::from_secs(2);
+/// The tries of the end write of a failed launch.
+pub const END_TRIES: u32 = 3;
 /// The longest wait for the helper to exit after the pipe closed. The
 /// helper needs at most `TERM_WAIT` and the isolation stop. After this wait
 /// the launch kills the helper, and the lifetime rule of the isolation ends
@@ -97,6 +99,14 @@ pub enum Outcome {
         end: EndReason,
         why: String,
     },
+    /// The launch failed, but the store did not take the end of the
+    /// session: the row stays open. The engine must not report an end. Its
+    /// supervisor ends an open session that has no launch thread and no
+    /// helper.
+    Open {
+        session: i64,
+        why: String,
+    },
 }
 
 struct Helper {
@@ -108,6 +118,8 @@ struct Helper {
 enum Attempt {
     Running(Running),
     Ended(EndReason, String),
+    /// The launch failed, and the end write failed too.
+    Open(String),
 }
 
 enum Gate {
@@ -164,6 +176,7 @@ impl Launcher<'_> {
                     }
                 }
                 Attempt::Ended(end, why) => return Outcome::Ended { session, end, why },
+                Attempt::Open(why) => return Outcome::Open { session, why },
             }
         }
     }
@@ -407,17 +420,38 @@ impl Launcher<'_> {
         helper: Option<Helper>,
         socket: Option<&Path>,
     ) -> Attempt {
-        let _ = iris_job::end(
-            self.store,
-            session,
-            EndReason::LaunchFailed,
-            None,
-            (self.now)(),
-        );
-        let end = iris_job::session(self.store, session)
-            .ok()
-            .and_then(|s| s.end)
-            .unwrap_or(EndReason::LaunchFailed);
+        let mut written = Err(iris_job::Error::NotFound);
+        for i in 0..END_TRIES {
+            if i > 0 {
+                thread::sleep(Duration::from_millis(100));
+            }
+            written = iris_job::end(
+                self.store,
+                session,
+                EndReason::LaunchFailed,
+                None,
+                (self.now)(),
+            );
+            if written.is_ok() {
+                break;
+            }
+        }
+        let end = match written {
+            Ok(true) => EndReason::LaunchFailed,
+            // An earlier end (a stop, a revoke) stays.
+            Ok(false) => iris_job::session(self.store, session)
+                .ok()
+                .and_then(|s| s.end)
+                .unwrap_or(EndReason::LaunchFailed),
+            Err(e) => {
+                // The store has no end: never report one. The supervisor
+                // ends an open session with no launch and no helper.
+                let tail = self.cleanup(session, helper, socket);
+                return Attempt::Open(format!(
+                    "{why}; cannot write the end of the session: {e}{tail}"
+                ));
+            }
+        };
         let tail = self.cleanup(session, helper, socket);
         Attempt::Ended(end, format!("{why}{tail}"))
     }
