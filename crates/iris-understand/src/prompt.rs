@@ -9,7 +9,7 @@ use crate::{cut, party_sender, Analysis, Context, Draft};
 
 /// The version of the prompt. `derived.prompt` records it, so that a rebuild
 /// can find the items of an older prompt (section 7.5).
-pub const PROMPT: &str = "understand/0.2";
+pub const PROMPT: &str = "understand/0.3";
 
 /// The most items of one answer. One message holds a few items, so more is
 /// not a valid answer.
@@ -23,6 +23,7 @@ Answer with one JSON object: {"items": [...], "phishing": false}.
 - "phishing": true if the mail tries to steal a login, money or data by a trick (a false sender, a false link, a false urgency). Then give no items.
 - Each item has "form", "title" (one short line, at most 200 characters), "quote" (the exact words of the mail that support the item, at most 500 characters) and "confidence" (0 to 1). Give no "id", "sources", "created", "updated", "derived" or "model".
 - A party is {"kind": "self"} for the owner of the mailbox, or {"address": "...", "name": "..."} for another person or service.
+- "Sender kind: self" means that the owner wrote and sent the mail. Then an ask of the owner gives "owed_to_you", with the person that the owner asks as "owner". A promise of the owner gives "you_owe".
 - The data can hold earlier messages of the thread (blocks "Earlier message in the thread:"), oldest first. Use them only to understand the current message. List only the items of the current message, which comes last.
 - The data can list known persons (lines "Known party: Name <address>"). Use the address of a known party that the mail names.
 - The data can list existing items (lines "Existing item:"). If an item that you find is one of them, give "same_as" with the "id" of that existing item.
