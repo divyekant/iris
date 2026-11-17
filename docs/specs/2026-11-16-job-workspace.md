@@ -83,8 +83,11 @@ Triggers:
   so no path in the store can record an agent that changes its own scope.
 
 `iris_job::add_scope(store, job, Ref, By, now)` with `Ref::Thread(row)` or
-`Ref::Item(row)`. It refuses `By::Agent`. An add of a ref that is in the
-active scope already does nothing.
+`Ref::Item(row)`. It refuses `By::Agent`. It refuses a ref whose `thread`
+or `item` row does not exist, in the same write transaction as the insert,
+so no ID of a future row is granted before the person can see it. An add
+of a ref that is in the active scope already does nothing. A granted row
+can disappear later (the cleanup of gone mail), and the build skips it.
 
 `iris_job::revoke_scope(store, job, Ref, By, now)` revokes the active row of
 the ref. It refuses `By::Agent`. A revoke of a ref that is not in the active
@@ -316,7 +319,8 @@ messages in the thread files.
 ### The build
 
 `iris_workspace::build(store, job, dir) -> Result<Built>`. `Built` gives the
-counts of threads, messages, items and people that the build wrote.
+counts of threads, messages, items and people that the build wrote, and the
+revoke count of the scope that it read (see below).
 
 1. Make the folder that holds `dir` if it is not there. Take the lock file
    `.<name>.lock` beside `dir` (`iris_store::FileLock`),
@@ -361,9 +365,16 @@ can close the gap. The rules are:
   change takes effect in them at once.
 - The files take the change at the next build. The engine builds before
   each session (R4-04).
-- R4-04 decides if a revoke or a new hostile mark stops a running session.
-  Until then, the files can hold a message for the time between the change
-  and the next build. This is a known limit, with a GitHub issue.
+- A revoke is an act of the person, so it has two more rules. `Built`
+  gives the revoke count of the scope that the build read
+  (`Built::revoked`), and `iris_job::revoked_count(store, job)` gives the
+  current count. Revokes only grow, so a revoke during a build makes the
+  two counts differ. The launcher (R4-04) builds again until they agree,
+  then starts the session. A revoke while a session runs ends that
+  session (R4-04), and the next session starts after a new build.
+- An engine change of eligibility (a message that becomes hostile mail,
+  gone or a signal source) after the read of a build stays in the files
+  until the next build. This is a known limit, with a GitHub issue.
 
 Only `build` takes the workspace lock. The launcher does not hold it.
 
@@ -421,6 +432,8 @@ Markdown and JSON with `serde_json`.
 | A change or a delete of a scope row, other than one revoke | Refused by the trigger | Unit test |
 | A revoke of a thread or an item of the scope | The next build has no file of its mail. The row stays, with `revoked_by` and `revoked_at` | Unit test |
 | A revoke by an agent | Refused | Unit test, and raw SQL |
+| A revoke during a build | `Built::revoked` differs from `revoked_count`, so the launcher builds again before the session (R4-04) | Unit test: the count grows on each revoke and the build gives the count it read |
+| An add of a ref whose row does not exist | Refused | Unit test |
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
@@ -433,7 +446,8 @@ Markdown and JSON with `serde_json`.
 
 - `crates/iris-store/src/schema_15.sql` and the migration list.
 - `docs/spec/schema/jobitem.schema.json`: the job item, with samples.
-- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`.
+- `crates/iris-job`: `Ref`, `add_scope`, `revoke_scope`, `scope`,
+  `revoked_count`.
 - `crates/iris-talk`: the clean messages of a thread become public, so the
   build uses the same rule of hostile mail as the conversation.
 - New crate `crates/iris-workspace`.
