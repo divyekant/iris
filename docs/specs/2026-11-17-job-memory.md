@@ -99,12 +99,27 @@ reads the file only while no process of the job can write it.
    paths, the build calls `save_notes`. The result does not stop the build,
    but an `Err` does.
 2. **At each reap** (`Sessions::reap_one`, `crates/iris/src/sessions.rs`).
-   After the reap check passed, no process of the session runs. The reap
-   thread marks the job as `launching` in the state of the engine, so
-   `Sessions::run` and `Sessions::wake` start no session of the job. Then it
-   calls `save_notes` without the state lock, and then it ends the mark
-   (`launch_over`). If a launch of the job runs at that time, the reap thread
-   does not save: the build of that launch saves.
+   After the reap check passed, no process of the reaped session runs. The
+   reap check writes `reaped_at` before the reap thread takes the state
+   lock, so a new session of the job can start in that gap. So, under the
+   state lock, the reap thread checks two things and sets one mark, in one
+   step:
+
+   1. No launch of the job has the `launching` mark.
+   2. The job has no live session (`reaped_at` is NULL) other than the
+      reaped one. The reaped one is not live, so the check is: no live
+      session of the job.
+
+   If both are true, it marks the job as `launching`. `Sessions::run` sets
+   the same mark under the same lock, and refuses a job with the mark, so
+   no new session starts until the mark ends. `Sessions::wake` skips a job
+   with the mark. Then the reap thread calls `save_notes` without the state
+   lock, and ends the mark (`launch_over`).
+
+   If a check fails, a newer session or its launch can write `notes.md`.
+   The reap thread does not save. The build of that launch saved the notes
+   before its agent started, and the reap of that session saves them at its
+   end.
 
    A `TooLarge` or `NotAFile` result, or an error, writes one line in the
    engine log with the job ID. The reap does not fail.
@@ -169,7 +184,8 @@ stays as it is, and the session starts.
 | No `notes.md`, and no copy. | The build writes `# Notes`. | Existing test. |
 | The workspace folder is gone, and the job wakes. | The launch build makes the folder and restores the notes. | Engine test with the fake clock. |
 | The agent changes the file after the reap and before the build. | Not possible: no process of the job runs between a reap and the next launch. | The reap check (R4-04). |
-| A launch of the job runs at the reap save. | The reap thread does not save. The build of the launch saves. | Unit test of the guard. |
+| A launch of the job runs, or a newer session of the job is live, at the reap. | The reap thread does not save. The build of that launch and the reap of that session save. | Review: the check and the mark are one step under the state lock, which `run` also takes for its mark. |
+| A launch starts while the reap thread saves. | `run` refuses it (the job has the mark); `wake` tries again at its next call. | Review, as above. |
 | A crash during the save. | The transaction gives the old copy or the new copy. | SQLite. |
 | A store error at the build save. | The build stops with an error. No session starts. | Unit test with a read-only store, if the build can make one; else review. |
 
@@ -193,8 +209,10 @@ stays as it is, and the session starts.
   `iris_session::launch` (the launch builds before the helper starts).
 - After the reap check, no process of the session runs:
   `iris_session::reap::reap_check` (rules 1 to 3).
-- `Sessions::run` refuses a job in `launching`, and `Sessions::wake` skips
-  it: `crates/iris/src/sessions.rs`.
+- `Sessions::run` sets the `launching` mark under the state lock and refuses
+  a job that has it; `Sessions::wake` skips it: `crates/iris/src/sessions.rs`.
+- The reap check writes `reaped_at` before the reap thread takes the state
+  lock: `Sessions::reap_one`.
 - `O_NOFOLLOW` and `O_NONBLOCK` exist on macOS and Linux: POSIX.1-2008.
 
 ## External writes
@@ -251,7 +269,8 @@ See the failure list and the acceptance criteria.
 
 - [x] Each assumption holds with a second caller: two builds of one workspace
   take the build lock; a reap save and a launch of one job exclude each other
-  by the `launching` mark.
+  by the `launching` mark, and the reap save also skips when a newer session
+  of the job is live.
 - [x] Each assumption holds when an outcome is unknown: a crash during a save
   keeps the old or the new copy; the next reap or build saves again.
 - [x] Each dropped mechanism was dropped for a reason (Options not chosen).
