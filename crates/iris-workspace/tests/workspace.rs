@@ -683,3 +683,77 @@ fn a_granted_message_that_moves_stays_granted() {
     // Only the moved message of thread 2: not the other mail of thread 2.
     assert!(!text.contains("OTHER-THREAD-TEXT"));
 }
+
+/// The conversation rule: a message that is not yours and has no valid From
+/// address is not in the workspace.
+#[test]
+fn a_message_with_no_from_address_is_left_out() {
+    let tmp = TempDir::new("no-from");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (40, 1, 1, 'm40', 40000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (40, 40000, 'not an address', 'me@example.com', 'NO-FROM-SUBJECT');
+                 INSERT INTO body (message_id, subject, sender, text)
+                   VALUES (40, 'NO-FROM-SUBJECT', '', 'NO-FROM-TEXT');",
+            )?)
+        })
+        .unwrap();
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    add_scope(&store, job, Ref::Thread(1), By::Person, NOW).unwrap();
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let text = walk(&ws).1;
+    assert!(text.contains("DANA-TEXT"));
+    assert!(!text.contains("NO-FROM-TEXT") && !text.contains("NO-FROM-SUBJECT"));
+}
+
+/// You are the account address and each From of your sent mail: an alias
+/// gets no people file, also when the sender axis calls it a person.
+#[test]
+fn an_alias_of_yours_is_not_a_person() {
+    let tmp = TempDir::new("alias");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "INSERT INTO sender (address, name, kind) VALUES ('me.work@example.com', 'Me', 'person');
+                 INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (41, 1, 1, 'm41', 41000, 1), (42, 1, 2, 'm42', 42000, 1);
+                 INSERT INTO message_label (message_id, label_id) VALUES (41, 1), (42, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, cc_addrs, subject) VALUES
+                   (41, 41000, 'me.work@example.com', 'dana@example.com', 'me.work@example.com', 'Contract'),
+                   (42, 42000, 'me.work@example.com', 'sam@example.com', NULL, 'Dinner');
+                 INSERT INTO body (message_id, subject, sender, text) VALUES
+                   (41, 'Contract', 'me.work@example.com', 'ALIAS-TEXT'),
+                   (42, 'Dinner', 'me.work@example.com', 'ALIAS-OTHER');",
+            )?)
+        })
+        .unwrap();
+    // Only thread 1 is granted. Message 9 (yours, from the account address)
+    // names the alias in Cc; message 41 is from the alias.
+    store
+        .write(|tx| {
+            Ok(tx.execute_batch(
+                "UPDATE header SET cc_addrs = 'me.work@example.com' WHERE message_id = 9;",
+            )?)
+        })
+        .unwrap();
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    add_scope(&store, job, Ref::Thread(1), By::Person, NOW).unwrap();
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let (paths, text) = walk(&ws);
+    assert!(text.contains("ALIAS-TEXT"));
+    assert!(!text.contains("me.work@example.com\""), "an alias in a people file");
+    let people: Vec<&String> = paths.iter().filter(|p| p.starts_with("people/")).collect();
+    for p in &people {
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(ws.join(p)).unwrap()).unwrap();
+        assert!(!v.to_string().contains("me.work"), "{p}: {v}");
+    }
+    assert!(!people.is_empty());
+}
