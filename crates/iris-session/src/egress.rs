@@ -243,11 +243,19 @@ struct Shared {
 }
 
 /// A setup step that can fail.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(not(test), allow(dead_code))]
 enum Fault {
+    /// The clone of the client socket at the accept.
     Clone,
+    /// The thread of the connection.
     Spawn,
+    /// The thread of the resolver worker.
+    ResolverSpawn,
+    /// A clone of the upstream or client socket for the tunnel.
+    UpstreamClone,
+    /// The thread of the up direction of the tunnel.
+    RelaySpawn,
 }
 
 /// True if a test made the setup step `f` fail.
@@ -532,6 +540,8 @@ enum Phase {
     Failed,
     /// [`MAX_RESOLVERS`] resolver workers are still live.
     Busy,
+    /// No thread for the resolver worker.
+    NoResources,
     /// A stop came first.
     Cancel,
 }
@@ -587,6 +597,7 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
         Phase::Up(u) => u,
         Phase::NotPublic => return refuse(client, Reason::AddressNotPublic),
         Phase::Busy => return refuse(client, Reason::TooMany),
+        Phase::NoResources => return refuse(client, Reason::NoResources),
         Phase::Failed => {
             return Finish {
                 end: tunnel(host, 0, 0, "connect_failed"),
@@ -600,6 +611,21 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
             }
         }
     };
+    // Take each socket clone of the tunnel before the 200: a failure then
+    // refuses the CONNECT, and no tunnel runs outside the reach of a stop.
+    let clones = (|| {
+        if faulted(shared, Fault::UpstreamClone) {
+            return None;
+        }
+        Some((
+            upstream.try_clone().ok()?,
+            upstream.try_clone().ok()?,
+            client.try_clone().ok()?,
+        ))
+    })();
+    let Some((registered, upstream_up, client_up)) = clones else {
+        return refuse(client, Reason::NoResources);
+    };
     {
         let mut c = lock(&shared.conns);
         if shared.stopping.load(Ordering::SeqCst) {
@@ -609,8 +635,9 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
             };
         }
         // A stop closes this stream with the client stream.
-        if let (Ok(clone), Some(list)) = (upstream.try_clone(), c.streams.get_mut(&id)) {
-            list.push(clone);
+        match c.streams.get_mut(&id) {
+            Some(list) => list.push(registered),
+            None => return refuse(client, Reason::NoResources),
         }
     }
     // The tunnel opens only for a TLS ClientHello whose server name is the
@@ -634,7 +661,12 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
         Err(end) => return Finish { end, answer: None },
     };
     let _ = client.set_read_timeout(None);
-    let (up, down) = relay(client, upstream, &first);
+    let Some((up, down)) = relay(shared, client, upstream, client_up, upstream_up, &first) else {
+        return Finish {
+            end: End::Refused(Reason::NoResources),
+            answer: None,
+        };
+    };
     let result = if shared.stopping.load(Ordering::SeqCst) {
         "stopped"
     } else {
@@ -675,19 +707,25 @@ fn connect(shared: &Shared, host: usize, id: u64) -> Phase {
     let name = shared.allowed[host].clone();
     let public_only = shared.public_only;
     let deadline = Instant::now() + CONNECT_TIME;
-    let spawned = thread::Builder::new()
-        .name("iris-egress-resolve".into())
-        .spawn(move || {
-            let _place = place;
-            let _ = tx.send(resolve_and_connect(
-                &*resolver,
-                &name,
-                public_only,
-                deadline,
-            ));
-        });
+    let work = move || {
+        let _place = place;
+        let _ = tx.send(resolve_and_connect(
+            &*resolver,
+            &name,
+            public_only,
+            deadline,
+        ));
+    };
+    let spawned = if faulted(shared, Fault::ResolverSpawn) {
+        drop(work);
+        Err(io::Error::other("fault"))
+    } else {
+        thread::Builder::new()
+            .name("iris-egress-resolve".into())
+            .spawn(work)
+    };
     if spawned.is_err() {
-        return Phase::Failed;
+        return Phase::NoResources;
     }
     rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap_or(Phase::Failed)
@@ -796,21 +834,42 @@ fn check_hello(buf: &[u8], name: &str) -> Result<bool, Reason> {
 
 /// Relays both directions until both end. Gives the bytes sent up (client to
 /// host) and down. `rest` holds the bytes that came after the head.
-fn relay(client: TcpStream, mut upstream: TcpStream, rest: &[u8]) -> (u64, u64) {
-    if upstream.write_all(rest).is_err() {
+/// `client_up` and `upstream_up` are clones for the up direction. `None`
+/// means that the up thread did not start: both sockets are then closed
+/// before a byte reaches the host.
+fn relay(
+    shared: &Shared,
+    client: TcpStream,
+    upstream: TcpStream,
+    client_up: TcpStream,
+    mut upstream_up: TcpStream,
+    rest: &[u8],
+) -> Option<(u64, u64)> {
+    let close = || {
         let _ = client.shutdown(Shutdown::Both);
         let _ = upstream.shutdown(Shutdown::Both);
-        return (0, 0);
-    }
-    let (Ok(c2), Ok(u2)) = (client.try_clone(), upstream.try_clone()) else {
-        let _ = client.shutdown(Shutdown::Both);
-        let _ = upstream.shutdown(Shutdown::Both);
-        return (0, 0);
     };
-    let up = thread::spawn(move || copy(c2, u2));
+    let up = if faulted(shared, Fault::RelaySpawn) {
+        Err(io::Error::other("fault"))
+    } else {
+        let rest = rest.to_vec();
+        thread::Builder::new()
+            .name("iris-egress-up".into())
+            .spawn(move || {
+                if upstream_up.write_all(&rest).is_err() {
+                    let _ = upstream_up.shutdown(Shutdown::Both);
+                    let _ = client_up.shutdown(Shutdown::Both);
+                    return 0;
+                }
+                rest.len() as u64 + copy(client_up, upstream_up)
+            })
+    };
+    let Ok(up) = up else {
+        close();
+        return None;
+    };
     let down = copy(upstream, client);
-    let up = up.join().unwrap_or(0);
-    (rest.len() as u64 + up, down)
+    Some((up.join().unwrap_or(0), down))
 }
 
 /// Copies `from` to `to` until the end. On an end of file it closes the write
