@@ -160,6 +160,13 @@ pub struct Grant {
     threads: Threads,
 }
 
+impl Grant {
+    /// If the grant holds one or more messages of `thread`.
+    pub fn has_thread(&self, thread: i64) -> bool {
+        self.threads.contains_key(&thread)
+    }
+}
+
 /// The grant of `job`, in the read or write transaction of the caller. A
 /// done job grants nothing. Memory holds the ID sets and one message body.
 pub fn grant_in(c: &Connection, job: i64) -> Result<Grant> {

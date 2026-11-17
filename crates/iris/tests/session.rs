@@ -271,6 +271,44 @@ fn a_target_outside_the_grant_fails_the_whole_submit() {
     }
 }
 
+/// A target that gives no row (each message gone, or no such row) is still
+/// outside the grant: the check reads the targets that the action names.
+#[test]
+fn a_target_with_no_row_outside_the_grant_fails() {
+    for (name, verb, target) in [
+        ("gone-thread", "archive", "t-2"),
+        ("gone-message", "read", "m-7"),
+        ("no-thread", "archive", "t-99"),
+        ("no-message", "read", "m-99"),
+        ("no-item", "close", "c-99"),
+    ] {
+        let (store, job) = fixture(&format!("norow-{name}"));
+        store
+            .write(|tx| {
+                tx.execute_batch("UPDATE message SET gone_at = 1 WHERE id = 7;")?;
+                Ok(())
+            })
+            .unwrap();
+        let me = session(job, "se-1");
+        let r = add(&store, &me, "archive", &["t-1"], json!({})).unwrap();
+        add(&store, &me, verb, &[target], json!({ "reason": "x" })).unwrap();
+        let e = call(
+            &store,
+            &me,
+            "submit",
+            json!({ "changeset": r["changeset"], "why": "x" }),
+        )
+        .unwrap_err();
+        assert_eq!(e.0, code::DENIED, "{name}: {e:?}");
+        assert!(e.1.contains(target), "{name}: {e:?}");
+        assert_eq!(
+            count(&store, "SELECT count(*) FROM action_message"),
+            0,
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn a_thread_with_one_message_outside_the_grant_fails() {
     let (store, job) = fixture("partial");
