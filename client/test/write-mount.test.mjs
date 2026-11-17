@@ -200,3 +200,28 @@ test("a reply shows the mail that it answers and names the parent", async () => 
     net.restore();
   }
 });
+
+test("Stop in saving withdraws the write; a 409 says that the mail cannot stop", async () => {
+  let refuse = false;
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "write") return [201, { write: "cs-3" }];
+    if (method === "POST" && path === "changesets/cs-3/withdraw") return refuse ? [409, { error: "No." }] : [200, {}];
+    if (path === "write/cs-3") return [200, { state: "saving" }];
+    return [404, { error: "Not found." }];
+  });
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    const stop = () => [...app.target.querySelectorAll("button")].find((b) => b.textContent.includes("Stop this mail"));
+    await until(() => stop());
+    refuse = true;
+    stop().click();
+    await until(() => text(app.target).includes("Iris cannot stop it"));
+    assert.match(text(app.target), /The mail left or is leaving now\. Iris cannot stop it\./);
+    assert.ok(net.posts().some((p) => p.path === "changesets/cs-3/withdraw"));
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

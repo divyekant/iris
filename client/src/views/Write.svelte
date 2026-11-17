@@ -202,11 +202,14 @@
   async function stop() {
     busy = true;
     note = "";
+    const waiting = ws.state === "waiting";
     try {
       if (ws.state === "waiting") await post(`outbox/${encodeURIComponent(ws.draft)}/cancel`, {});
       else await post(`changesets/${encodeURIComponent(write)}/withdraw`, {});
     } catch (e) {
-      note = (e as { status?: number }).status === 409 ? "The send started. It cannot be cancelled." : own(e);
+      // 409: the engine sends the mail now, or sent it, so a stop cannot hold.
+      if ((e as { status?: number }).status !== 409) note = own(e);
+      else note = waiting ? "The send started. It cannot be cancelled." : "The mail left or is leaving now. Iris cannot stop it.";
     }
     await read();
     busy = false;
