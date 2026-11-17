@@ -85,6 +85,11 @@ cannot tell which sender the person wants to see.
   spec 2, section 6.5 apply to them, as to `close`.
 - Each of the three verbs takes exactly one item. Submit denies an action
   with two or more targets.
+- The choice holds after a new run of understanding. The ledger pins the
+  item (spec 1, section 7.5). A possible duplicate of a `skipped` feed item
+  or a `dismissed` signal (same form, same origin message) starts with the
+  same status, so it does not come back to the brief. A conversation keeps
+  `muted` at each new message (spec 1, section 6.8).
 
 ### 2. The proposals
 

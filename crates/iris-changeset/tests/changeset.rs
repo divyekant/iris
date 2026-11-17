@@ -551,6 +551,22 @@ fn random_target_rows() {
                VALUES (1, 1, 'r1', 'iris.1@example.com', '{}', 'h', x'00',
                        last_insert_rowid(), 0, 0);",
         )?;
+        // A feed item f-3, a conversation v-4 and a signal s-5 for skip,
+        // mute and dismiss.
+        for (row, id, form, file, status) in [
+            (3, "f-3", "feed", "feed.json", "new"),
+            (4, "v-4", "conversation", "conversation.json", "active"),
+            (5, "s-5", "signal", "signal-code.json", "active"),
+        ] {
+            let mut doc =
+                iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+            doc["id"] = json!(id);
+            tx.execute(
+                "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                rusqlite::params![row, form, status, doc.to_string()],
+            )?;
+        }
         Ok(())
     })
     .unwrap();
@@ -566,12 +582,13 @@ fn random_target_rows() {
     ];
     let ids = [
         "t-1", "t-2", "t-3", "t-9", "m-1", "m-3", "m-5", "c-1", "r-2", "p-1", "x", "m-0", "1",
-        "a-1", "a-2", "d-1", "d-9",
+        "a-1", "a-2", "d-1", "d-9", "f-3", "v-4", "s-5", "f-9",
     ];
     let verbs = [
-        "archive", "close", "decline", "defer", "correct", "draft", "send",
+        "archive", "close", "decline", "defer", "correct", "draft", "send", "skip", "mute",
+        "dismiss",
     ];
-    let (mut proposed, mut state, mut write) = (0, 0, 0);
+    let (mut proposed, mut state, mut write, mut one) = (0, 0, 0, 0);
     for round in 0..400 {
         let cs = create(&s, &agent(), NOW).unwrap();
         s.write(|tx| {
@@ -605,6 +622,9 @@ fn random_target_rows() {
                             [next(2) as usize]
                             .clone(),
                         json!({"drafts": ["d-1"]}),
+                        json!({"items": ["f-3"]}),
+                        json!({"items": ["v-4"]}),
+                        json!({"items": ["s-5"]}),
                     ];
                     targets = fits[v].as_object().unwrap().clone();
                 }
@@ -629,7 +649,18 @@ fn random_target_rows() {
                     "{\"to\":\"p@x.org\",\"body\":1}",
                 ];
                 // Half the rows get the valid shape of the verb, the rest any shape.
-                let fit = [5, 0, 0, 1, 3 + next(2) as usize, 13 + next(2) as usize, 5][v];
+                let fit = [
+                    5,
+                    0,
+                    0,
+                    1,
+                    3 + next(2) as usize,
+                    13 + next(2) as usize,
+                    5,
+                    0,
+                    0,
+                    0,
+                ][v];
                 let args = args[if next(2) == 0 {
                     fit
                 } else {
@@ -688,6 +719,19 @@ fn random_target_rows() {
                     assert_eq!(a["args"], json!({}), "round {round}: {a}");
                     proposed += 1;
                 }
+                "proposed"
+                    if ["skip", "mute", "dismiss"].contains(&a["verb"].as_str().unwrap()) =>
+                {
+                    // One item of the one form of the verb.
+                    let item = match a["verb"].as_str().unwrap() {
+                        "skip" => "f-3",
+                        "mute" => "v-4",
+                        _ => "s-5",
+                    };
+                    assert_eq!(a["targets"], json!({"items": [item]}), "round {round}: {a}");
+                    assert_eq!(a["args"]["reason"], "Done.", "round {round}: {a}");
+                    one += 1;
+                }
                 "proposed" => {
                     // The fixture has the commitment c-1 and the record r-2.
                     let kinds: &[&str] = match a["verb"].as_str().unwrap() {
@@ -709,6 +753,7 @@ fn random_target_rows() {
     assert!(proposed > 0, "the test reaches the proposed path");
     assert!(state > 0, "the test reaches a proposed state action");
     assert!(write > 0, "the test reaches a proposed draft or send");
+    assert!(one > 0, "the test reaches a proposed skip, mute or dismiss");
 }
 
 /// Submit gives the messages from the targets only: a row of another

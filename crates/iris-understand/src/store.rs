@@ -918,23 +918,36 @@ fn put_item(
     }
     // A possible duplicate of a pinned item (`item_pin`): same form, same
     // origin message.
-    let pinned: Option<i64> = tx
+    let pinned: Option<(i64, String)> = tx
         .query_row(
-            "SELECT i.id FROM item_source s JOIN item i ON i.id = s.item_id
+            "SELECT i.id, i.status FROM item_source s JOIN item i ON i.id = s.item_id
              WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form = ?2
                AND EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id)
              ORDER BY i.id LIMIT 1",
             params![ids.message, form],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
+    // A feed item or a signal that the person skipped or dismissed stays out
+    // of the brief: its possible duplicate takes the same status
+    // (docs/specs/2026-11-17-preference-rules.md). Each value is a valid
+    // status of its form.
+    let mut doc = doc;
+    if let Some((_, status)) = &pinned {
+        if matches!(
+            (form.as_str(), status.as_str()),
+            ("feed", "skipped") | ("signal", "dismissed")
+        ) {
+            doc["status"] = Value::from(status.as_str());
+        }
+    }
     tx.execute(
         "UPDATE item SET status = ?2, doc = ?3, duplicate_of = ?4 WHERE id = ?1",
         params![
             id,
             doc["status"].as_str().unwrap_or(""),
             doc.to_string(),
-            pinned
+            pinned.map(|p| p.0)
         ],
     )?;
     tx.execute(
