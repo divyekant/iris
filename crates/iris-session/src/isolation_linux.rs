@@ -76,15 +76,23 @@ impl Bwrap {
         let bwrap = find_bwrap(std::env::var_os("PATH").as_deref()).ok_or_else(|| {
             "bubblewrap (bwrap) is not installed: install the package bubblewrap".to_string()
         })?;
-        Ok(Self::with(bwrap, data_dir))
+        Self::with(bwrap, data_dir)
     }
 
-    pub(crate) fn with(bwrap: PathBuf, data_dir: &Path) -> Self {
-        Self {
+    /// The data folder is resolved first: `bwrap` mounts at the path as it
+    /// is given, so a link would leave the real folder in the view.
+    pub(crate) fn with(bwrap: PathBuf, data_dir: &Path) -> Result<Self, String> {
+        let data_dir = fs::canonicalize(data_dir).map_err(|e| {
+            format!(
+                "the data folder {} cannot be resolved: {e}",
+                data_dir.display()
+            )
+        })?;
+        Ok(Self {
             bwrap,
-            data_dir: data_dir.to_path_buf(),
             sessions: data_dir.join("sessions"),
-        }
+            data_dir,
+        })
     }
 
     fn record_path(&self, session: i64) -> PathBuf {
@@ -363,8 +371,13 @@ impl Isolation for Bwrap {
         if let Some(exe) = &iris {
             reads.push(exe.clone());
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let mut a = self.view(home.as_deref(), &reads, workspace);
+        // Each mount point of the view is a real path: bwrap does not
+        // resolve a link in a destination.
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| fs::canonicalize(&h).unwrap_or(h));
+        let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        let mut a = self.view(home.as_deref(), &reads, &workspace);
         if let Some(dir) = iris.as_deref().and_then(Path::parent) {
             let mut path = dir.as_os_str().to_os_string();
             if let Some(p) = std::env::var_os("PATH") {

@@ -99,7 +99,7 @@ fn wait_for(mut f: impl FnMut() -> bool, secs: u64) -> bool {
 fn check_passes_here_and_fails_with_no_bwrap() {
     let d = Data::new();
     d.iso().check().unwrap();
-    let none = Bwrap::with(PathBuf::from("/nonexistent/bwrap"), &d.dir);
+    let none = Bwrap::with(PathBuf::from("/nonexistent/bwrap"), &d.dir).unwrap();
     let e = none.check().unwrap_err();
     assert!(e.contains("bwrap"), "{e}");
     assert_eq!(find_bwrap(Some(OsStr::new("relative:"))), find_bwrap(None));
@@ -657,4 +657,54 @@ fn a_relay_reaches_no_proxy_of_another_session() {
     let text = fs::read_to_string(&log).unwrap();
     let _ = fs::remove_file(&log);
     assert!(text.contains("refused reason=not_session"), "{text}");
+}
+
+/// A data folder that is a link: each mount of the view uses the real
+/// path, so the real folder is the one that the empty mount hides. A data
+/// folder that cannot be resolved gives no isolation.
+#[test]
+fn a_linked_data_folder_is_hidden_at_its_real_path() {
+    let d = Data::new();
+    let link = d.dir.with_extension("link");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&d.dir, &link).unwrap();
+    let real = fs::canonicalize(&d.dir).unwrap();
+    let iso = Bwrap::new(&link).unwrap();
+    assert_eq!(iso.data_dir, real);
+    let ws_link = link.join("workspaces/j-1");
+    let c = iso.command(9, &ws_link, None, Path::new("/bin/true"), &[]);
+    let args: Vec<&OsStr> = c.args.iter().map(|a| a.as_os_str()).collect();
+    let after = |flag: &str| -> Vec<&OsStr> {
+        args.windows(2)
+            .filter(|w| w[0] == OsStr::new(flag))
+            .map(|w| w[1])
+            .collect()
+    };
+    assert!(after("--tmpfs").contains(&real.as_os_str()), "{args:?}");
+    assert!(!args.contains(&link.as_os_str()), "{args:?}");
+    assert!(!args.contains(&ws_link.as_os_str()), "{args:?}");
+    assert!(after("--chdir").contains(&real.join("workspaces/j-1").as_os_str()));
+    // The sandbox through the link also hides the key.
+    let out = {
+        let args: Vec<String> = vec![
+            "-c".into(),
+            format!(
+                "cat {}/key {}/key 2>/dev/null; echo end",
+                link.display(),
+                real.display()
+            ),
+        ];
+        let c = iso.command(9, &ws_link, None, Path::new("/bin/sh"), &args);
+        let mut cmd = std::process::Command::new(&c.program);
+        cmd.args(&c.args)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = iso.spawn_with(9, &mut cmd, None).unwrap();
+        String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
+    };
+    assert!(out.contains("end") && !out.contains("KEY-MARKER"), "{out}");
+    fs::remove_file(&link).unwrap();
+    assert!(Bwrap::new(&link).is_err());
 }
