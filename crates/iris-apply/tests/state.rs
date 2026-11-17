@@ -1098,3 +1098,29 @@ fn the_undo_of_a_correction_to_the_owner_address_sets_the_party_back() {
     assert_eq!(party, want);
     assert!(b.doc()["counterparty"]["sender"].is_string());
 }
+
+/// While stopped, a state verb of an agent waits, and a state verb of the
+/// person applies: it changes only the items of the store
+/// (docs/specs/2026-11-17-stop.md).
+#[test]
+fn while_stopped_only_the_person_changes_an_item() {
+    let b = setup("stop", "open", None);
+    let (agent, action) = b.submitted(AuthorKind::Agent, Verb::Close, json!({ "reason": "Done." }));
+    let hash = b.one(&format!(
+        "SELECT hash FROM changeset_action WHERE id = {agent}"
+    ));
+    iris_changeset::approve(&b.store, action, hash.as_str().unwrap(), now()).unwrap();
+    iris_apply::stop(&b.store).unwrap();
+    assert_eq!(apply_state(&b.store, agent).unwrap(), Outcome::Stopped);
+    assert_eq!(b.state(agent), "approved");
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("open"));
+    let mine = b.approved(Verb::Defer, json!({ "date": "2026-12-01" }));
+    assert!(matches!(
+        apply_state(&b.store, mine),
+        Ok(Outcome::Applied(_))
+    ));
+    assert_eq!(
+        b.one("SELECT status FROM item WHERE id = 1"),
+        json!("deferred")
+    );
+}

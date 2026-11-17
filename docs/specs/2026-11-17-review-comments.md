@@ -260,7 +260,7 @@ None. The comment is a local write.
 
 ## Open questions
 
-- The exact name of the R5-04 entry point `Sessions::resume` (stage 2).
+- None. R5-04 merged `Sessions::resume` and `Sessions::wake` (PR #561).
 
 ## Acceptance criteria
 

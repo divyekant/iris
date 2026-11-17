@@ -1036,7 +1036,7 @@ pub fn notes(store: &Store, job: i64) -> Result<Option<Vec<u8>>> {
 
 /// Replace the copy of the notes of `job` with `text`, as it is. A text of
 /// more than [`NOTES_MAX`] bytes is refused, and the old copy stays. Gives
-/// false for a done job: it has no copy (migration 33).
+/// false for a done job: it has no copy (migration 34).
 pub fn save_notes(store: &Store, job: i64, text: &[u8], now_ms: i64) -> Result<bool> {
     transaction(store, |c| save_notes_in(c, job, text, now_ms))
 }

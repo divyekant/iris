@@ -1,27 +1,32 @@
--- Migration 33: the memory of a job between sessions
--- (docs/specs/2026-11-17-job-memory.md, card R5-06). One copy of
--- `notes.md` of each job, as the bytes of the file. The backup copies
--- `iris.db`, so it holds the copy; it does not copy the workspaces.
+-- Migration 33: the stop switch (docs/specs/2026-11-17-stop.md, card R4-11).
+-- One row. `stopped_at` is NULL while Iris runs. `iris stop` and
+-- `POST /api/stop` set it; `iris resume` and `POST /api/resume` clear it.
 
-CREATE TABLE job_notes (
-  job_id   INTEGER PRIMARY KEY REFERENCES job(id),
-  text     BLOB NOT NULL CHECK (typeof(text) = 'blob' AND length(text) <= 65536),
-  saved_ms INTEGER NOT NULL
+CREATE TABLE stop_switch (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  stopped_at INTEGER CHECK (stopped_at IS NULL OR (typeof(stopped_at) = 'integer' AND stopped_at >= 0)),
+  changed_at INTEGER NOT NULL CHECK (typeof(changed_at) = 'integer' AND changed_at >= 0)
 );
+INSERT INTO stop_switch(id, stopped_at, changed_at) VALUES (1, NULL, 0);
 
--- The copy ends with the job, in the transaction of the move to done.
--- Each path to done (the finish of the agent, the finish and the cancel of
--- the person) inserts a job_event with the state done.
-CREATE TRIGGER job_notes_end AFTER INSERT ON job_event
-WHEN NEW.state = 'done'
+-- The backstop of the stop: no session registers while stopped. Stop ends
+-- each open session in the transaction that sets the switch, so no session
+-- is open while the switch is set.
+CREATE TRIGGER job_session_stop BEFORE INSERT ON job_session
+WHEN (SELECT stopped_at FROM stop_switch WHERE id = 1) IS NOT NULL
 BEGIN
-  DELETE FROM job_notes WHERE job_id = NEW.job_id;
+  SELECT RAISE(ABORT, 'iris: Iris is stopped: run iris resume first');
 END;
 
--- A done job gets no copy. SQLite runs this trigger on each upsert, also on
--- one that takes the UPDATE path, and the move to done cannot go back.
-CREATE TRIGGER job_notes_done BEFORE INSERT ON job_notes
-WHEN (SELECT state FROM job WHERE id = NEW.job_id) = 'done'
+-- The backstop of the stop: no new ledger entry while stopped, so no apply
+-- and no release claims an action. Only a state verb (no account) of a
+-- changeset of the person can apply: it changes only the items of the store.
+CREATE TRIGGER ledger_stop BEFORE INSERT ON ledger
+WHEN (SELECT stopped_at FROM stop_switch WHERE id = 1) IS NOT NULL
+  AND (NEW.account_id IS NOT NULL
+       OR coalesce((SELECT c.author_kind FROM changeset_action a
+                    JOIN changeset c ON c.id = a.changeset_id
+                    WHERE a.id = NEW.action_id), '') <> 'person')
 BEGIN
-  SELECT RAISE(IGNORE);
+  SELECT RAISE(ABORT, 'iris: Iris is stopped: no action applies until iris resume');
 END;

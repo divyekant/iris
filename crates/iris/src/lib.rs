@@ -136,6 +136,15 @@ pub enum Command {
         #[arg(value_enum)]
         state: Option<Switch>,
     },
+    /// Stop all agent work: end each session of a job, and apply and send
+    /// nothing until `iris resume`. `--show` only shows the state.
+    Stop {
+        #[arg(long)]
+        show: bool,
+    },
+    /// End the stop. Actions apply again, and each held send waits a full
+    /// hold before it leaves.
+    Resume,
     /// Cancel the send of a draft (`d-4`) while it waits in the outbox.
     Cancel { id: String },
     /// Close a commitment (`c-7`) in a draft changeset. Needs the engine.
@@ -1366,6 +1375,34 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
             );
             Ok(())
         }
+        Command::Stop { show } => {
+            let store = open()?;
+            if *show {
+                let now = iris_apply::stop_state(&store).map_err(|e| e.to_string())?;
+                println!("{}", stop_state(now.as_ref()));
+                return Ok(());
+            }
+            let s = iris_apply::stop(&store).map_err(|e| e.to_string())?;
+            let text = stop_text(&s);
+            if s.live > 0 || s.busy {
+                return Err(text);
+            }
+            println!("{text}");
+            Ok(())
+        }
+        Command::Resume => {
+            let store = open()?;
+            let resumed = iris_apply::resume(&store).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                if resumed {
+                    "Iris runs again. Each held send waits a full hold before it leaves."
+                } else {
+                    "Iris was not stopped. Nothing changed."
+                }
+            );
+            Ok(())
+        }
         Command::Cancel { id } => {
             let store = open()?;
             println!("{}", cancel_send(&store, id, engine::now_ms())?);
@@ -1829,6 +1866,57 @@ mod tests {
     }
 }
 
+/// The state of `iris stop --show`: only a complete stop says that no
+/// mail leaves, as in [`stop_text`].
+fn stop_state(now: Option<&iris_apply::Stopped>) -> String {
+    match now {
+        None => "Iris runs. `iris stop` stops all agent work.".into(),
+        Some(s) if s.live == 0 && !s.busy => format!(
+            "Stopped since {}. No action applies and no mail leaves until `iris resume`.",
+            iris_api::rfc3339(s.since)
+        ),
+        Some(s) => {
+            let text = stop_text(s);
+            format!(
+                "The stop switch is set since {}.\n{}",
+                iris_api::rfc3339(s.since),
+                text.split_once('\n')
+                    .map_or(text.as_str(), |(_, rest)| rest)
+            )
+        }
+    }
+}
+
+/// The answer of `iris stop`. The stop is complete only with no live
+/// session and no Gmail call in progress (docs/specs/2026-11-17-stop.md).
+/// Only a complete stop says that no mail leaves.
+fn stop_text(s: &iris_apply::Stopped) -> String {
+    if s.live == 0 && !s.busy {
+        return format!(
+            "Stopped. {} session(s) ended. No action applies and no mail leaves until `iris resume`.",
+            s.sessions
+        );
+    }
+    let mut text = format!(
+        "The stop is not complete. {} session(s) ended, and no new action or send starts.",
+        s.sessions
+    );
+    if s.busy {
+        text.push_str(
+            "\nA Gmail call was in progress, and it can still finish: one change or one send. \
+             The ledger shows its result.",
+        );
+    }
+    if s.live > 0 {
+        text.push_str(&format!(
+            "\n{} session(s) still stop. `iris job session <j-id>` shows each.",
+            s.live
+        ));
+    }
+    text.push_str("\nRun `iris stop` again.");
+    text
+}
+
 /// The confirmation of `iris sending on`: a terminal and a typed "yes". So
 /// a script with no terminal does not turn sending on by mistake.
 /// `terminal` is true when standard input is a terminal: a script or an
@@ -1891,6 +1979,32 @@ mod outbox_tests {
     }
 
     /// Only the typed word "yes" at a terminal turns sending on.
+    #[test]
+    fn stop_text_says_when_the_stop_is_not_complete() {
+        let mut s = iris_apply::Stopped {
+            since: 0,
+            sessions: 2,
+            live: 0,
+            busy: false,
+        };
+        assert!(stop_text(&s).contains("no mail leaves"));
+        s.live = 1;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("1 session(s) still stop"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+        s.live = 0;
+        s.busy = true;
+        let t = stop_text(&s);
+        assert!(
+            t.contains("not complete") && t.contains("can still finish"),
+            "{t}"
+        );
+        assert!(!t.contains("no mail leaves"), "{t}");
+    }
+
     #[test]
     fn only_yes_turns_sending_on() {
         assert_eq!(sending_on_confirm(true, &mut "yes\n".as_bytes()), Ok(()));

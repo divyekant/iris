@@ -66,6 +66,10 @@ pub struct Sessions {
     /// engine tried to start: one try for each wake and engine. After a failed start, the
     /// person runs `iris job run`.
     tried: Mutex<HashSet<(i64, i64)>>,
+    /// Each (job, highest pending comment ID) that a review comment tried to
+    /// start (R4-08): one try for each new comment and engine, also when the
+    /// start fails before a session registers.
+    comment_tried: Mutex<HashSet<(i64, i64)>>,
     /// The done jobs whose workspace the build thread builds again. A
     /// build can wait for the workspace lock without a limit, so no
     /// supervisor turn and no stop waits for it.
@@ -158,6 +162,7 @@ impl Sessions {
             stop_marks: Mutex::default(),
             after: Mutex::new(None),
             tried: Mutex::default(),
+            comment_tried: Mutex::default(),
             builds,
             releases,
         });
@@ -698,6 +703,7 @@ impl Sessions {
         if let Err(e) = iris_workspace::wake_due(&self.store, now) {
             say!("iris: the wake of the waiting jobs failed: {e}");
         }
+        self.comment_wake(now);
         let Ok(woken) = iris_job::woken(&self.store) else {
             return;
         };
@@ -718,6 +724,57 @@ impl Sessions {
                     "iris: {}: the session after the wake did not start: {e}",
                     iris_job::format_job_id(job)
                 );
+            }
+        }
+    }
+
+    /// The review comments of R4-08 (docs/specs/2026-11-17-review-comments.md,
+    /// section 5, stage 2): a `waiting` job with a pending comment gets a
+    /// wake of the engine, and a `working` job with a pending comment and no
+    /// live session gets a new session. The comment stays pending until the
+    /// gate of a session writes its delivery, so a session that is live now
+    /// or a launch that runs now gets nothing more here. Each new comment
+    /// gets one try: a start that fails, also before its register, waits for
+    /// the next comment or for `iris job run`.
+    fn comment_wake(self: &Arc<Self>, now: i64) {
+        let mut jobs = None;
+        if let Err(e) = self.store.read(|c| {
+            jobs = Some(iris_changeset::commented_jobs_in(c));
+            Ok(())
+        }) {
+            say!("iris: the read of the review comments failed: {e}");
+            return;
+        }
+        let jobs = match jobs.expect("the read ran") {
+            Ok(j) => j,
+            Err(e) => {
+                say!("iris: the read of the review comments failed: {e}");
+                return;
+            }
+        };
+        for (job, state, comment) in jobs {
+            if self.live_of(job).is_some() || self.state().launching.contains(&job) {
+                continue;
+            }
+            let first = self
+                .comment_tried
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((job, comment));
+            if !first {
+                continue;
+            }
+            let id = iris_job::format_job_id(job);
+            if state == "waiting" {
+                if let Err(e) =
+                    iris_job::wake(&self.store, job, iris_job::By::Engine, Some("comment"), now)
+                {
+                    say!("iris: {id}: the wake for a review comment failed: {e}");
+                }
+                continue;
+            }
+            if let Err(e) = self.resume(job) {
+                say!("iris: {id}: the session for a review comment did not start: {e}");
             }
         }
     }
