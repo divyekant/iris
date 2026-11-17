@@ -107,9 +107,10 @@ No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
 that the owner wrote the mail (the sender axis, the hostile checks, the
 known people). Anyone can move or copy a received message into the Sent
 or the Drafts folder, and any client can set the `\Draft` flag. So a
-message in the `\Sent` or the `\Drafts` folder gets the system label
-`folder:<name>` only. The send card gives `SENT` to the copies that Iris
-itself sent.
+message in the `\Sent` or the `\Drafts` folder never gets `SENT` or
+`DRAFT`. It gets its folder label `folder:<name>` and the folder-state
+label of the next paragraph (`SENT_COPY` or `UNSENT`). The send card
+gives `SENT` to the copies that Iris itself sent.
 
 A draft and a sent copy must still stay out of the understanding of
 received mail (spec 1 section 6.7). So a message in the `\Drafts` folder
@@ -241,7 +242,12 @@ mirror does not have.
   `SENT_COPY`, only the `\Sent` folders, all of their messages. With
   `UNREAD`, `STARRED`, `UNSENT` or a keyword label, each folder, and each
   window is `UID SEARCH <low>:<high> <key>` (`UNSEEN`, `FLAGGED`, `DRAFT`,
-  `KEYWORD <k>`) on the sequence numbers of the window, then a `UID FETCH`
+  `KEYWORD <k>`) on the sequence numbers of the window. A bare set in a
+  search is a set of sequence numbers, also in `UID SEARCH` (RFC 3501
+  section 6.4.4, the `<sequence set>` key; only the key `UID <set>` names
+  UIDs, and `UID` changes only the numbers of the answer to UIDs). The
+  test `search_windows_use_sequence_numbers` covers a folder whose UIDs
+  do not start at 1. then a `UID FETCH`
   of the found UIDs. So one answer holds at most 2,000 UIDs, under the
   1 MiB response limit of the client. For `UNSENT`, each message of a
   `\Drafts` folder counts with no search.
