@@ -17,8 +17,10 @@ choose it for the account.
 1. `iris_imap::Imap` implements `Provider`.
 2. `iris_sync::sync` and `iris_sync::verify` run on a test IMAP mailbox
    with zero differences, with `QRESYNC` and with `CONDSTORE` only.
-3. The apply can mark a message read, unread, starred or not starred, and
-   add or remove a keyword label.
+3. The apply can mark a message read or unread, and add or remove a
+   keyword label. The changeset has no star verb, so `STARRED` is read
+   only in this card. The provider still maps `STARRED` to `\Flagged` in
+   `modify` (section 7), for a later star verb.
 4. The engine keeps an IMAP account (host, port, user, sealed password)
    and syncs it with this provider.
 
