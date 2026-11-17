@@ -57,8 +57,8 @@ stops these actions when the agent follows such a message.
 spec, with two changes:
 
 - `system(data_dir: &Path)` takes the data folder. The isolation keeps one
-  record for each session in `<data dir>/sessions/`, and it refuses a view
-  that holds the data folder. The engine and the helper make the isolation
+  record for each session in `<data dir>/sessions/`, and it hides the data
+  folder in each view (see [Files](#files)). The engine and the helper make the isolation
   with the same data folder.
 - A new method `spawn(&self, session, command: &mut process::Command) ->
   io::Result<Child>` starts the command that `command()` gave. The hold
@@ -205,14 +205,20 @@ The agent sees only these paths.
 |---|---|
 | The workspace of the job | Read and write |
 | The private home of the session | Read and write |
-| System programs and libraries: `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt` and `/nix/store`, each one if present | Read |
+| System programs and libraries: `/usr`, and `/bin`, `/sbin` and `/lib*` (a link to `/usr`, or the folder) | Read |
+| The system files that programs read at the start, each one if present: in `/etc`, the files `ld.so.cache`, `ld.so.conf`, `passwd`, `group`, `nsswitch.conf`, `hosts`, `localtime`, `os-release`, and the folders `ld.so.conf.d`, `ssl`, `pki`, `ca-certificates` and `alternatives` | Read |
 | The file of the adapter program (its real path) and the file of the `iris` program | Read |
 | A new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
+| The root of the view (a `tmpfs` of `bwrap`) and each other folder that the view makes | Read only (`--remount-ro /`) |
 
-Each other path is not visible. This holds the
-data folder, the home folder of the person and each socket outside the
-workspace (for example a Docker or SSH agent socket, which a network
-namespace does not block).
+Each other path is not visible. This holds the data folder, the home
+folder of the person, `/opt`, `/srv`, `/var`, `/run`, each other file of
+`/etc`, and each socket outside the workspace (for example a Docker or SSH
+agent socket, which a network namespace does not block). The view shows
+no folder of local programs or settings that the system does not own: a
+credential that a person or a program puts there stays out. The `/etc`
+list holds public system data only (programs, certificate authorities,
+names of users and hosts). `/usr` holds the files of the system packages.
 
 - The private home: an empty `tmpfs` at the path of `HOME`. It has no
   file of the person, and it is gone when the session ends. So the agent tool of a session authenticates with its key
@@ -228,9 +234,9 @@ namespace does not block).
   an issue: a later card can add a list of read paths to `agents.toml`,
   which the person sets.
 - The data folder is always empty in the view: the isolation mounts an
-  empty `tmpfs` there after each read path,
-  and only then gives the workspace. So a system folder that holds the
-  data folder (for example a data folder in `/opt`) does not show it.
+  empty `tmpfs` there after each read path, and only then gives the
+  workspace. So a data folder inside a read path (for example
+  `/usr/local/iris`) is supported, and the view does not show it.
 - The workspace is mounted after the private home, so the view
   also holds when the data folder is inside `HOME`.
 
@@ -294,7 +300,8 @@ before the agent runs, or `ended` is false.
 | The record cannot be written | `spawn` fails; the program did not run | Linux test with a read-only sessions folder |
 | The info line does not come in 5 seconds, or is not JSON | `spawn` fails and kills `bwrap` | Unit test of the parser (property test) |
 | A ninth connection to the relay | Closed at once | Linux relay test |
-| A read path that holds the data folder | `check` fails | Unit test |
+| A data folder inside a read path (for example the `iris` program file in a folder of the data folder) | The empty mount of the data folder comes after each read path: the data folder is empty in the view | Linux sandbox test with the program file inside the data folder |
+| A credential file or a Unix socket in a folder that is not in the view (for example `/etc/<file>` not in the list, or `/run`) | Not visible: no read and no connection | Linux sandbox test: a socket and a marker file outside the view, and `/etc/hostname` |
 | `iris job run` on macOS or another system | `system()` gives the reason, and `run` is refused before a row is written | Unit test that runs on each system that is not Linux |
 
 ## Impact
