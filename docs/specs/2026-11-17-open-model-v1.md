@@ -375,9 +375,10 @@ each session, so the next session gets `iris/1.0` files.
 - Data format: the `model` value and the `$id` of each schema. Each other
   field stays.
 - Store: one migration of `item.doc`. It changes only `$.model`, so the
-  attention of each item stays. The trigger `attention_due_item` queues
-  an item only when its form, `type`, `kind` or `attention` changes
-  (`crates/iris-store/src/schema_8.sql`), so it queues nothing, and
+  attention of each item stays. The trigger `attention_due_item`
+  (`crates/iris-store/src/schema_8.sql`) also queues an item that has no
+  `attention` yet, at each change of `doc`. So the migration saves the
+  queue before the update and removes each row that the update added.
   `attention_keep` does not apply because `attention` stays.
 - Memory: no change in the `iris` program. The runner and the producer are
   not a part of it.

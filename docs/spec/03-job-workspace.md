@@ -1,6 +1,6 @@
 # Specification 3: the job workspace layout
 
-- Open model version: 0 (draft)
+- Open model version: 1.0
 - Release: 4
 - Input: `docs/specs/2026-11-16-job-workspace.md` (the design and the
   reasons)
