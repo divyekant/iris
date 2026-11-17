@@ -255,6 +255,7 @@ fn proxy(name: &str, to: SocketAddr, public_only: bool, log_limit: u64) -> Box_ 
         Box::new(Fixed(to)),
         public_only,
         None,
+        None,
         log_limit,
         Arc::new(AtomicUsize::new(0)),
     )
@@ -409,6 +410,7 @@ fn a_stop_does_not_wait_for_a_stalled_resolver() {
         Box::new(Stalled),
         false,
         None,
+        None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
@@ -497,6 +499,7 @@ fn stalled_resolver_workers_stay_bounded_over_proxies() {
             file,
             Box::new(Counted(calls.clone())),
             false,
+            None,
             None,
             LOG_LIMIT,
             workers.clone(),
@@ -779,6 +782,7 @@ fn the_proxy_takes_only_its_session_address() {
         Box::new(Fixed(echo())),
         false,
         session_peer(7),
+        None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
@@ -800,6 +804,71 @@ fn the_proxy_takes_only_its_session_address() {
         2,
         "{text}"
     );
+}
+
+/// macOS: a process of another session (no token, a wrong token or the
+/// token of another session) gets 407 before any upstream connection.
+#[test]
+fn the_proxy_takes_only_the_token_of_its_session() {
+    use base64::Engine;
+    let log = std::env::temp_dir().join(format!("iris-egress-token-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let mine = new_token().unwrap();
+    let other = new_token().unwrap();
+    assert_eq!(mine.len(), 64);
+    assert_ne!(mine, other);
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Fixed(echo())),
+        false,
+        Some(Ipv4Addr::LOCALHOST),
+        Some(mine.clone()),
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    assert_eq!(proxy.endpoint().token.as_deref(), Some(mine.as_str()));
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    let with = |cred: &str| {
+        format!(
+            "CONNECT api.example.test:443 HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            b64(cred)
+        )
+    };
+    let mut cut = mine.clone();
+    cut.pop();
+    let refused = [
+        "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n".to_string(),
+        with(&format!("iris:{other}")),
+        with(&format!("iris:{cut}")),
+        with(&format!("root:{mine}")),
+        with(&format!("iris:{mine}x")),
+        format!(
+            "CONNECT api.example.test:443 HTTP/1.1\r\nProxy-Authorization: Bearer {mine}\r\n\r\n"
+        ),
+    ];
+    for head in &refused {
+        let (_s, line) = send(&proxy, head);
+        assert!(line.starts_with("HTTP/1.1 407"), "{head}: {line}");
+    }
+    let (s, line) = send(&proxy, &with(&format!("iris:{mine}")));
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    drop(s);
+    proxy.stop().unwrap();
+    let text = log_text(&guard);
+    assert_eq!(
+        text.matches("refused reason=not_session").count(),
+        refused.len(),
+        "{text}"
+    );
+    assert!(!text.contains(&mine) && !text.contains(&other), "{text}");
 }
 
 /// The grant ends: the tunnel ends at once, a new client gets no tunnel,
@@ -876,6 +945,7 @@ fn close_ends_a_stalled_resolve_at_once() {
         Box::new(Stalled),
         false,
         None,
+        None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )
@@ -918,6 +988,7 @@ fn close_comes_before_the_address_check() {
         Box::new(Fixed(echo())),
         false,
         session_peer(7),
+        None,
         LOG_LIMIT,
         Arc::new(AtomicUsize::new(0)),
     )

@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Read;
+use std::net::Ipv4Addr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 use iris_changeset::{Author, AuthorKind};
 use iris_job::{format_session_id, EndReason, Session};
 use iris_session::config::Adapter;
-use iris_session::egress::{session_peer, Proxy, SystemResolver};
+use iris_session::egress::{new_token, session_peer, Endpoint, Proxy, SystemResolver};
 use iris_session::isolation::Isolation;
 use iris_session::launch::{Egress, Launcher, Outcome, Step};
 use iris_session::reap::reap_check;
@@ -355,14 +356,14 @@ impl Sessions {
         // of a revoke retry. Each has the log and the peer address of its
         // session.
         let proxies: RefCell<HashMap<i64, Proxy>> = RefCell::default();
-        let egress = |session: i64, adapter: &Adapter| -> Result<Option<u16>, String> {
+        let egress = |session: i64, adapter: &Adapter| -> Result<Option<Endpoint>, String> {
             if adapter.allow_hosts.is_empty() {
                 return Ok(None);
             }
             let p = self.egress(session, adapter.allow_hosts.clone())?;
-            let port = p.port();
+            let end = p.endpoint();
             proxies.borrow_mut().insert(session, p);
-            Ok(Some(port))
+            Ok(Some(end))
         };
         let outcome = self.launcher(isolation, &egress, &after).finish(begun);
         let mut proxies = proxies.into_inner();
@@ -426,8 +427,16 @@ impl Sessions {
             .mode(0o600)
             .open(self.egress_log(session))
             .map_err(|e| e.to_string())?;
-        let peer = session_peer(session).ok_or("the session ID has no peer address")?;
-        Proxy::start(allowed, log, Box::new(SystemResolver), peer).map_err(|e| e.to_string())
+        // macOS has no session address: the peer is 127.0.0.1, and the token
+        // of the session tells its processes from all others.
+        let (peer, token) = if cfg!(target_os = "macos") {
+            let token = new_token().map_err(|e| format!("no token: {e}"))?;
+            (Ipv4Addr::LOCALHOST, Some(token))
+        } else {
+            let peer = session_peer(session).ok_or("the session ID has no peer address")?;
+            (peer, None)
+        };
+        Proxy::start(allowed, log, Box::new(SystemResolver), peer, token).map_err(|e| e.to_string())
     }
 
     fn egress_log(&self, session: i64) -> PathBuf {

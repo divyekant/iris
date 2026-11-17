@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use toml::Spanned;
 
+use crate::egress::Endpoint;
+
 /// The fixed prompt of each agent. It holds no mail text and no goal text.
 pub const PROMPT: &str = "Read JOB.md in this folder and do the job that it gives. \
 Use only the files of this folder and the iris command.";
@@ -403,10 +405,11 @@ fn find_program(program: &str, path: Option<&OsStr>) -> Option<PathBuf> {
 /// The environment of the agent: empty, then only the base list and the
 /// variables of the adapter, with the values of the engine (`get`). The
 /// proxy variables come only from the egress port of the session, and only
-/// for an adapter with allowed hosts. No variable of Iris goes to the agent.
+/// for an adapter with allowed hosts. With a token (macOS), the proxy URL
+/// holds `iris:<token>`. No variable of Iris goes to the agent.
 pub fn agent_env(
     adapter: &Adapter,
-    egress_port: Option<u16>,
+    egress: Option<&Endpoint>,
     get: impl Fn(&str) -> Option<OsString>,
 ) -> Vec<(String, OsString)> {
     let mut env: Vec<(String, OsString)> = Vec::new();
@@ -425,8 +428,13 @@ pub fn agent_env(
             env.push((name.to_string(), v));
         }
     }
-    if let (Some(port), false) = (egress_port, adapter.allow_hosts.is_empty()) {
-        let url = OsString::from(format!("http://127.0.0.1:{port}"));
+    if let (Some(e), false) = (egress, adapter.allow_hosts.is_empty()) {
+        let user = e
+            .token
+            .as_ref()
+            .map(|t| format!("iris:{t}@"))
+            .unwrap_or_default();
+        let url = OsString::from(format!("http://{user}127.0.0.1:{}", e.port));
         env.push(("HTTPS_PROXY".into(), url.clone()));
         env.push(("https_proxy".into(), url));
     }
