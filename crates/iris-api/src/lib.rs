@@ -172,6 +172,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/policy/grant", post(post_grant))
         .route("/api/jobs", get(get_jobs).post(post_job))
         .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/answer", post(post_job_answer))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/notices", get(get_notices))
@@ -185,6 +186,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/write", post(post_write))
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
+        .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
@@ -824,6 +826,26 @@ async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
+#[derive(Deserialize)]
+struct JobAnswerBody {
+    answer: String,
+}
+
+/// The answer of the person to the question of a job (card R5-05). The
+/// answer is the job document.
+async fn post_job_answer(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobAnswerBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    answer_job(&s, row, &b.answer, now_ms())?;
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
 /// `id` is the ID of an open proposal (spec 2, section 6.6).
 #[derive(Deserialize)]
 struct ProposalBody {
@@ -984,6 +1006,31 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
     };
     Ok(match write::state(&s, row, now_ms())? {
         Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The draft of a thread (`t-N`) that the person can use now: a reply in
+/// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
+/// the person that owes (`to`). 404 when there is none, or when it is
+/// stale ([`iris_voice::ready_sql`]): a newer mail, or for a nudge, a
+/// change of its commitment or its person. Nothing is sent.
+async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some((iris_store::Kind::Thread, thread)) = iris_store::parse_id(&id) else {
+        return Ok(not_found());
+    };
+    let draft = s
+        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .map_err(Error::from)?;
+    Ok(match draft {
+        Some((based_on, _, body, to)) => Json(serde_json::json!({
+            "thread": id,
+            "based_on": iris_store::format_id(iris_store::Kind::Message, based_on),
+            "nudge": to.is_some(),
+            "to": to,
+            "body": body,
+        }))
+        .into_response(),
         None => not_found(),
     })
 }

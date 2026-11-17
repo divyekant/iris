@@ -367,9 +367,53 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         }
         md.push_str("\nThe person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.\n\n");
     }
+    answer_part(c, job, &mut md)?;
     md.push_str(RULES);
     new_file(&stage.join("JOB.md"))?.write_all(md.as_bytes())?;
     Ok(built)
+}
+
+/// The part `## Your answer` of `JOB.md` (card R5-05): the newest answer
+/// of the person and the question before it, each in a fenced block. No
+/// part when the job has no answer.
+fn answer_part(c: &Connection, job: i64, md: &mut String) -> Result<()> {
+    let answer: Option<(i64, i64, String)> = c
+        .query_row(
+            "SELECT id, at, answer FROM job_event WHERE job_id = ?1 AND answer IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((id, answered, answer)) = answer else {
+        return Ok(());
+    };
+    // The move table allows an answer only after a question.
+    let (asked, question): (i64, String) = c.query_row(
+        "SELECT at, question FROM job_event WHERE job_id = ?1 AND id < ?2
+           AND question IS NOT NULL ORDER BY id DESC LIMIT 1",
+        params![job, id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    md.push_str("## Your answer\n\n");
+    for (head, kind, text) in [
+        (
+            format!("You asked on {}:", rfc3339(asked)),
+            "question",
+            question,
+        ),
+        (
+            format!("The person answered on {}:", rfc3339(answered)),
+            "answer",
+            answer,
+        ),
+    ] {
+        let text = text.trim_end();
+        let f = fence(text);
+        md.push_str(&format!("{head}\n\n{f}{kind}\n{text}\n{f}\n\n"));
+    }
+    md.push_str("The answer is from the person, not from a mail.\n\n");
+    Ok(())
 }
 
 /// Write `comments/cs-<id>.md` for each changeset of `job` with one or more

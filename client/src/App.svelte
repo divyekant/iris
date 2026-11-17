@@ -27,6 +27,7 @@
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
   import Notices from "./views/Notices.svelte";
+  import Stop, { refresh as refreshStop } from "./views/Stop.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
@@ -37,11 +38,18 @@
       // A sign-in address opened in this tab: the access state shows a failure.
       if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
+      refreshStop();
       if (moreOpen) document.getElementById("more")?.hidePopover();
       scrollTo(0, 0);
     };
     addEventListener("hashchange", update);
-    return () => removeEventListener("hashchange", update);
+    // A stop from the terminal shows when the tab comes back.
+    addEventListener("focus", refreshStop);
+    refreshStop();
+    return () => {
+      removeEventListener("hashchange", update);
+      removeEventListener("focus", refreshStop);
+    };
   });
 
   // Read the status one time at start, so a view opened from a link also shows an account that needs sign-in.
@@ -78,6 +86,7 @@
       <a href={link} aria-current={active === link ? "page" : undefined}>{label}</a>
     {/each}
   </nav>
+  <Stop place="button" />
 </header>
 
 <nav class="tabs" aria-label="Main views">
@@ -106,6 +115,7 @@
 {/snippet}
 
 <main>
+  <Stop place="band" />
   {#if access.problem}<p class="problem" role="alert">{access.problem}</p>{/if}
   <SignInNotice />
   <Notices />
