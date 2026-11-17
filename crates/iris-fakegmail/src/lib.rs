@@ -9,7 +9,8 @@
 //! only as `rfc822msgid:<id>`), `users.messages.get` (`raw`, `metadata`,
 //! `minimal`), `users.messages.send`, `users.drafts.create`,
 //! `.get` (`raw`), `.list` (`q` as above) and `.send`,
-//! `users.messages.batchModify`, `users.messages.trash`, `users.labels.create` and
+//! `users.messages.batchModify`, `users.messages.trash`,
+//! `users.messages.untrash`, `users.labels.create` and
 //! `users.history.list` (paging, `historyTypes`). The JSON has the shape
 //! of the real API. The fake returns 400 for `format=full` and for an absent
 //! format, because the real default is `full` and the fake does not build it.
@@ -572,6 +573,10 @@ fn router(store: Shared) -> Router {
             post(batch_modify),
         )
         .route("/gmail/v1/users/{user}/messages/{id}/trash", post(trash))
+        .route(
+            "/gmail/v1/users/{user}/messages/{id}/untrash",
+            post(untrash),
+        )
         .route("/gmail/v1/users/{user}/messages/{id}", get(message))
         .route("/gmail/v1/users/{user}/history", get(history))
         .route(
@@ -1056,6 +1061,25 @@ async fn trash(
         return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
     };
     change_labels(&mut s, i, &["TRASH".into()], &["INBOX".into()]);
+    Json(s.with_labels(i)).into_response()
+}
+
+/// shortcut: the fake untrash removes `TRASH` and adds `INBOX`, the
+/// inverse of the fake trash; check the real label effect at Gmail before a
+/// test depends on `INBOX` after it (issue #172).
+async fn untrash(
+    State(s): State<Shared>,
+    Path((user, id)): Path<(String, String)>,
+    h: HeaderMap,
+) -> Response {
+    if let Err(e) = check(&h, &user) {
+        return e;
+    }
+    let mut s = s.lock().unwrap();
+    let Some(i) = s.index(&id) else {
+        return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
+    };
+    change_labels(&mut s, i, &["INBOX".into()], &["TRASH".into()]);
     Json(s.with_labels(i)).into_response()
 }
 

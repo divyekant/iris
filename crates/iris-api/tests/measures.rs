@@ -382,13 +382,13 @@ async fn first_brief_runs_to_the_first_brief_with_content() {
     assert_eq!(m["first_brief"]["seconds"], (brief - connect) / 1000);
 }
 
-/// Make the store a store of migration 22 again.
+/// Make the store a store of migration 23 again.
 fn downgrade(s: &Store) {
     s.write(|tx| {
         tx.execute_batch(
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
-             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 22;",
+             DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time; PRAGMA user_version = 23;",
         )?;
         Ok(())
     })
@@ -396,11 +396,11 @@ fn downgrade(s: &Store) {
 }
 
 /// Invariant: a stored brief time is always a brief with content that the
-/// engine saw. A store from before migration 23 with an account has no
+/// engine saw. A store from before migration 24 with an account has no
 /// such record, so both times are not known, and a later brief or account
 /// does not write a time that is not the first.
 #[test]
-fn migration_23_does_not_guess_the_times_of_an_older_store() {
+fn migration_24_does_not_guess_the_times_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!("iris-api-measures-old-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     {
@@ -453,10 +453,10 @@ fn migration_23_does_not_guess_the_times_of_an_older_store() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A store from before migration 23 gets the decisions of the person that
+/// A store from before migration 24 gets the decisions of the person that
 /// the actions still show.
 #[test]
-fn migration_23_takes_the_decisions_of_an_older_store() {
+fn migration_24_takes_the_decisions_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!(
         "iris-api-measures-old-decide-{}",
         std::process::id()
@@ -629,13 +629,37 @@ async fn approvals_and_undo_count_the_decisions_of_the_person() {
         json!({"decided": 3, "approved": 2})
     );
 
-    // No undo exists yet (R2-03): make the failed entry the undo of the
-    // applied one, past the triggers.
+    // Invariant: an action of an undo (each step, in table ledger_undo) is
+    // not an applied change of the measure. A close of a second item gives
+    // entry 3. Make entry 2 step 1 of the undo of entry 1, and entry 3 its
+    // step 2 (as the archive after an untrash), past the triggers: a state
+    // verb has no Gmail undo.
+    doc["id"] = json!("c-2");
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+             VALUES ('commitment', ?1, 'open', ?2, 0, 0)",
+            params![a, doc.to_string()],
+        )?;
+        tx.execute(
+            "INSERT INTO item_source(item_id, message_id, role) VALUES (2, 1, 'origin')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        post(&s, "/api/items/c-2/close", "{}").await.0,
+        StatusCode::OK
+    );
     s.write(|tx| {
         tx.execute_batch(
             "DROP TRIGGER ledger_change; DROP TRIGGER ledger_state;
+             DROP TRIGGER ledger_undo_insert; DROP TRIGGER ledger_undone_by;
              UPDATE ledger SET state = 'applied' WHERE id = 2;
-             UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 1;",
+             UPDATE ledger SET state = 'undone', undone_by = 2 WHERE id = 1;
+             INSERT INTO ledger_undo(action_id, ledger_id, step)
+             SELECT action_id, 1, CASE id WHEN 2 THEN 1 ELSE 2 END FROM ledger WHERE id IN (2, 3);",
         )?;
         Ok(())
     })

@@ -50,7 +50,7 @@ Each one has a test or a measure.
 | M1 | The mirror matches Gmail with zero differences. | `iris mirror verify` reports 0 differences each day for 7 days on a real mailbox (exit criterion of release 1). |
 | M2 | Release 1 sends no write request to Gmail. | The OAuth scope is `gmail.readonly`. A test of the provider client fails if a code path calls a write endpoint. |
 | M3 | The engine stays inside the memory budget. | 50 MB resident memory with 100,000 messages (`crates/iris/tests/budget.rs`). |
-| M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. On the machine of the person, the measures page shows the time from the first account to the first brief with content (migration 23, table `measure_time`). The engine checks the brief every 10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and at each `/api/brief`. |
+| M4 | The first brief appears in 10 minutes or less. | Time from the connect step to the first brief, with the synthetic mailbox and the fake Gmail server. On the machine of the person, the measures page shows the time from the first account to the first brief with content (migration 24, table `measure_time`). The engine checks the brief every 10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and at each `/api/brief`. |
 | M5 | Mail text is data. | No text from a message can start an action. The understanding step has no tools and returns only schema-valid JSON. |
 | M6 | Each item points to its source mail. | Each item has one or more sources. The schemas require the `sources` field. |
 | M7 | The forms can be built again from the mirror. | With a fixed fake model, `iris rebuild` makes the same items from the same mirror, apart from IDs and times. Each pinned item keeps its ID and its corrections. |
@@ -778,12 +778,13 @@ mail" is a message with a hostile mark, or a message from a `hostile` sender.
 | Commitment | `deferred` to `done`, `declined`, or `deferred` with a new date | A person, through a changeset (release 2): `close`, `decline` and `defer` (specification 2, section 4). |
 | Commitment | `deferred` to `open` | The engine, on the `deferred_until` date (UTC). The engine checks once each minute. |
 | Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
-| Conversation | `muted` | Reserved. A later release adds the verb. |
+| Conversation | `active` or `quiet` to `muted` | A person, through a changeset (release 5): `mute` (`docs/specs/2026-11-17-preference-rules.md`). A new message keeps it `muted`. |
 | Record | `kept` to `corrected` | A correction (release 2). |
 | Feed | `new` to `read` | The engine, when the message loses the label `UNREAD`. |
-| Feed | `skipped` | Reserved. A later release adds the verb. |
+| Feed | `new` or `read` to `skipped` | A person, through a changeset (release 5): `skip`. |
 | Signal | `active` to `expired` | The engine, at `expires`. |
-| Signal | `used`, `dismissed` | Reserved. A later release adds the verb. |
+| Signal | `active` to `dismissed` | A person, through a changeset (release 5): `dismiss`. |
+| Signal | `used` | Reserved. A later release adds the verb. |
 
 ## 7. Understanding: from mail to forms
 
@@ -952,6 +953,10 @@ The conversation rule runs for each message that is not hostile mail:
   sent mail with the first `To`, `Cc` or `Bcc` recipient that is not an
   owner address (sent mail keeps `Bcc`). With no such party, the
   commitment is not valid. The other side is never the owner.
+- The instruction says that the sender kind `self` marks mail that the
+  owner sent. An ask in such mail is `owed_to_you`: the person that the
+  owner asks is the `owner` of the commitment. A promise in such mail is
+  `you_owe`.
 - The owner addresses are the address of the mailbox and, in sent mail,
   the `From` address (also an alias). A party with an owner address is the
   owner.

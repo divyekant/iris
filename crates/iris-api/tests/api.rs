@@ -50,6 +50,11 @@ fn split_addr(v: &str) -> (Option<String>, Option<String>) {
 /// A store with the first `COUNT` synthetic messages, in the label INBOX
 /// (and SENT for the mail of the owner). Gives the store and the mailbox.
 fn filled(dir: &TempDir) -> (Arc<Store>, Mailbox) {
+    filled_n(dir, COUNT)
+}
+
+/// [`filled`] with the first `count` synthetic messages.
+fn filled_n(dir: &TempDir, count: usize) -> (Arc<Store>, Mailbox) {
     let store = Store::open(&dir.0).unwrap();
     let acc = store.add_account("gmail", "owner@example.com").unwrap();
     store
@@ -58,9 +63,9 @@ fn filled(dir: &TempDir) -> (Arc<Store>, Mailbox) {
             &[("INBOX", "INBOX", "system"), ("SENT", "SENT", "system")],
         )
         .unwrap();
-    let mailbox = Mailbox::new(11, COUNT);
+    let mailbox = Mailbox::new(11, count);
     let mut batch = Vec::new();
-    for i in 0..COUNT {
+    for i in 0..count {
         let raw = mailbox.raw(i);
         let truth = mailbox.truth(i);
         let text = String::from_utf8_lossy(&raw).replace("\r\n ", " ");
@@ -1460,4 +1465,86 @@ async fn a_bundle_has_the_name_of_its_rule_and_a_bad_bundle_name_is_a_404() {
     let (_, b) = get(&store, "/api/brief").await;
     assert_eq!(b["feed"]["count"], 2);
     assert!(b["bundles"].as_array().unwrap().is_empty());
+}
+
+/// Gives the answer that the test puts in `next`, once.
+struct Oracle(std::cell::RefCell<Option<String>>);
+
+impl iris_understand::Model for Oracle {
+    fn name(&self) -> &str {
+        "oracle"
+    }
+
+    fn ask(&self, _: &str, _: &str) -> Result<iris_model::Reply, iris_model::Error> {
+        let text = self.0.borrow_mut().take();
+        Ok(iris_model::Reply {
+            text: text.unwrap_or_else(|| r#"{"items": [], "phishing": false}"#.into()),
+            usage: iris_model::Usage::default(),
+            stop: iris_model::Stop::End,
+        })
+    }
+}
+
+/// R3-06: an ask in your own sent mail shows under "Owed to you", with the
+/// person you asked and the date. The whole path runs: understanding of the
+/// sent message (with a model that gives the true answer), the sender axis,
+/// and the brief. The recipient never wrote to you.
+#[tokio::test]
+async fn an_ask_that_you_send_is_owed_to_you_with_the_person_and_the_date() {
+    let dir = temp("owed-sent");
+    // Asks of the owner are rare in the synthetic mailbox.
+    let (store, mb) = filled_n(&dir, 1500);
+    let mut want = Vec::new();
+    for i in 0..mb.len() {
+        let t = mb.truth(i);
+        let f: std::collections::BTreeMap<_, _> = mb.fields(i).into_iter().collect();
+        if t.sender != Sender::Owner
+            || f.get("direction").map(String::as_str) != Some("owed_to_you")
+        {
+            continue;
+        }
+        let raw = String::from_utf8_lossy(&mb.raw(i)).replace("\r\n ", " ");
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        let to = split_addr(&field(head, "To").unwrap()).1.unwrap();
+        // The subject can be MIME encoded: quote the ask in the body.
+        let quote = body.lines().find(|l| l.starts_with("Can you")).unwrap();
+        let item = json!({"form": "commitment", "title": "Send it", "quote": quote,
+                          "direction": "owed_to_you", "kind": "task",
+                          "due": {"date": f["due.date"]}});
+        let model = Oracle(std::cell::RefCell::new(Some(
+            json!({"items": [item], "phishing": false}).to_string(),
+        )));
+        let row: i64 = store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT id FROM message WHERE provider_id = ?1",
+                    [format!("g{i}")],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let out = iris_understand::store::understand(&store, row, &model, NOW).unwrap();
+        assert_eq!(out.items.len(), 1, "message {i}: {out:?}");
+        want.push((to, f["due.date"].clone()));
+    }
+    assert!(!want.is_empty(), "the mailbox has no sent ask");
+    let (code, brief) = get(&store, "/api/brief").await;
+    assert_eq!(code, StatusCode::OK);
+    let owed = &brief["owed_to_you"];
+    assert_eq!(owed["count"], want.len(), "{owed}");
+    let mut got: Vec<(String, String)> = owed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            assert_eq!(d["counterparty"]["kind"], "self", "{d}");
+            (
+                d["owner"]["address"].as_str().unwrap().to_string(),
+                d["due"]["date"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
 }

@@ -171,8 +171,8 @@ engine computes them from the store. Nothing leaves the machine.
   item of a section, a record or a bundle. The engine checks the brief every
   10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and
   at each `/api/brief`. The store
-  writes each time once (migration 23). A store from before migration
-  23 that has an account has no record of the two times: each field is
+  writes each time once (migration 24). A store from before migration
+  24 that has an account has no record of the two times: each field is
   `null`, and the measure stays not known.
 - `mirror`: the newest mirror check (`iris mirror verify`) of each account,
   each `{"account", "checked", "differences", "complete"}`. An account with

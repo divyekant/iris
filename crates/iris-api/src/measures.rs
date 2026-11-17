@@ -143,12 +143,12 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
                 })
             },
         )?;
-        // An undo is an action with its own ledger row: count only the
-        // rows that are not the undo of another row.
+        // An undo is an action with its own ledger row, one for each step
+        // (migration 23): count only the rows that are not a step of an undo.
         let undo = c.query_row(
             "SELECT count(*), coalesce(sum(state = 'undone'), 0) FROM ledger
              WHERE state IN ('applied', 'undone')
-               AND id NOT IN (SELECT undone_by FROM ledger WHERE undone_by IS NOT NULL)",
+               AND action_id NOT IN (SELECT action_id FROM ledger_undo)",
             [],
             |r| {
                 Ok(Undo {
