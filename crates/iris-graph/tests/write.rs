@@ -210,3 +210,55 @@ fn definite_and_unknown_errors() {
     assert!(!Error::Unauthorized.write_result_unknown());
     assert!(!Error::Decode("x".into()).write_result_unknown());
 }
+
+/// An accepted answer, with `changes` on top of a plain inbox message.
+fn answer(id: &str, changes: serde_json::Value) -> String {
+    let mut m = serde_json::json!({
+        "id": id, "conversationId": "c", "parentFolderId": "F-inbox",
+        "categories": [], "isRead": true, "flag": {"flagStatus": "notFlagged"},
+        "isDraft": false, "@odata.etag": "W/\"9\"",
+    });
+    for (k, v) in changes.as_object().unwrap() {
+        if v.is_null() {
+            m.as_object_mut().unwrap().remove(k);
+        } else {
+            m[k] = v.clone();
+        }
+    }
+    m.to_string()
+}
+
+#[test]
+fn each_write_answer_must_show_exactly_the_asked_state() {
+    use serde_json::json;
+    let (fake, graph) = setup();
+    let id = inbox_message(&fake);
+    let list = vec!["Red".to_string(), "Blue".to_string()];
+    // The same categories in another order: success.
+    fake.answer_next(&[&answer(&id, json!({"categories": ["Blue", "Red"]}))]);
+    graph.set_categories(TOKEN, &id, &list, "W/\"1\"").unwrap();
+    // One category less: unknown.
+    fake.answer_next(&[&answer(&id, json!({"categories": ["Red"]}))]);
+    let err = graph
+        .set_categories(TOKEN, &id, &list, "W/\"1\"")
+        .unwrap_err();
+    assert!(err.write_result_unknown(), "{err}");
+    // An unflag answered with `complete`: unknown.
+    fake.answer_next(&[&answer(&id, json!({"flag": {"flagStatus": "complete"}}))]);
+    let err = graph.set_flag(TOKEN, &id, false).unwrap_err();
+    assert!(err.write_result_unknown(), "{err}");
+    fake.answer_next(&[&answer(&id, json!({}))]);
+    graph.set_flag(TOKEN, &id, false).unwrap();
+    // A draft with no etag, or with an empty ID: unknown.
+    for changes in [
+        json!({"isDraft": true, "@odata.etag": null}),
+        json!({"isDraft": true, "@odata.etag": ""}),
+        json!({"isDraft": true, "id": ""}),
+    ] {
+        fake.answer_next(&[&answer(&id, changes.clone())]);
+        let err = graph.create_draft(TOKEN, MIME).unwrap_err();
+        assert!(err.write_result_unknown(), "{changes} {err}");
+    }
+    fake.answer_next(&[&answer(&id, json!({"isDraft": true}))]);
+    graph.create_draft(TOKEN, MIME).unwrap();
+}

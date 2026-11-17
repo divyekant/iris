@@ -435,7 +435,7 @@ impl Graph {
         let status = if flagged { "flagged" } else { "notFlagged" };
         let body = serde_json::json!({ "flag": { "flagStatus": status } });
         let m = self.patch(token, id, body, None)?;
-        sure(m.flagged() == flagged, m)
+        sure(m.flag.flag_status == status, m)
     }
 
     /// `PATCH categories` with the full list and `If-Match: etag`. A write:
@@ -450,7 +450,9 @@ impl Graph {
     ) -> Result<Message> {
         let body = serde_json::json!({ "categories": categories });
         let m = self.patch(token, id, body, Some(etag))?;
-        sure(m.categories == categories, m)
+        // Graph keeps no order of the categories: compare as sets (spec, A6).
+        let set = |l: &[String]| l.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        sure(set(&m.categories) == set(categories), m)
     }
 
     /// `POST /me/messages/{id}/move` to the folder with the ID `folder`. A
@@ -475,7 +477,9 @@ impl Graph {
         let url = self.url("/me/messages");
         let m: Message =
             accepted(&self.write(token, Verb::Post, &url, base64(mime), "text/plain", None)?)?;
-        sure(m.is_draft, m)
+        // The release needs the ID and the etag of the draft (section 5, step 1).
+        let tagged = m.etag.as_deref().is_some_and(|e| !e.is_empty());
+        sure(m.is_draft && !m.id.is_empty() && tagged, m)
     }
 
     /// `POST /me/sendMail` with the MIME text: Graph sends these bytes. A
