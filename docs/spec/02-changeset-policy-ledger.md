@@ -70,6 +70,9 @@ not have the label `SPAM` or `TRASH`.
 | `defer` | commitment | date | none (Iris state) | set the old value (below) | 2 |
 | `decline` | commitment | reason | none (Iris state) | set the old value (below) | 2 |
 | `correct` | any item | field, value | none (Iris state) | set the old value (below) | 2 |
+| `skip` | feed item | reason | none (Iris state) | set the old value (below) | 5 |
+| `mute` | conversation | reason | none (Iris state) | set the old value (below) | 5 |
+| `dismiss` | signal | reason | none (Iris state) | set the old value (below) | 5 |
 | `draft` | one thread (a reply) or one account (`a-N`, a new mail) | recipients, subject, text | `drafts.create` (section 7.5) | none: Iris never deletes a draft. The change of a draft and its undo come in a later card | 3 |
 | `send` | one draft (`d-N`) | none | `drafts.send`, after the hold (section 7.5) | none: final after the hold | 3 |
 | `nudge` | commitment `owed_to_you` | none | makes a `draft` action, then a `send` action | as `draft` and `send` | 3 |
@@ -86,7 +89,8 @@ the name or the ID of a system label, with no regard to case. A system label (`I
 others) changes only through its own verb, so that no `label` action can go
 past a rule or a hard limit that names that verb.
 
-A verb that changes Iris state (`close`, `defer`, `decline`, `correct`) goes
+A verb that changes Iris state (`close`, `defer`, `decline`, `correct`,
+`skip`, `mute`, `dismiss`) goes
 through a changeset too. This gives each change one path, one review and one
 ledger. The state verbs set these values:
 
@@ -95,6 +99,9 @@ ledger. The state verbs set these values:
 | `close` | `status` `done` |
 | `decline` | `status` `declined` |
 | `defer` | `status` `deferred` and `deferred_until` |
+| `skip` | `status` `skipped`, from `new` or `read` |
+| `mute` | `status` `muted`, from `active` or `quiet` |
+| `dismiss` | `status` `dismissed`, from `active` |
 | `correct` | The field of the item. `correct` changes only items. A person changes the kind of a sender only in the web client (specification 1, section 6.7). |
 
 When an action of a state verb applies, the engine writes in one SQLite
@@ -649,6 +656,25 @@ changes:
   409. A dismiss changes
   no file. Iris never proposes an accepted or a dismissed rule again.
 - An open row that no longer has the pattern goes away.
+
+The pass also proposes a `hide` rule from the choices of the person
+(card R5-02, `docs/specs/2026-11-17-preference-rules.md`):
+
+- It reads the newest 2,000 actions of the author `person` with the verb
+  `skip`, `mute` or `dismiss`, `applied` (a choice) or `undone` (a
+  refusal).
+- A candidate is a `hide` rule with two conditions: the `sender` of the
+  origin message of the item, and the `form` of the item. Hostile mail
+  and an origin message from the person (sender kind `you`) give no
+  candidate. A choice counts only when the rule, added to the
+  active policy, changes the attention of its item from shown to hidden.
+- The engine proposes the rule when 10 or more choices count and no
+  refusal counts. A refusal that the engine cannot read again stops each
+  `hide` proposal of its form.
+- An undone choice whose item, origin message, header or sender cannot
+  be read again stops each `hide` proposal of its form.
+- The row has `verb = 'hide'` and the `form` (store migration 23). An
+  `allow` row has the form `''`.
 
 Failure list of the proposals:
 

@@ -778,12 +778,13 @@ mail" is a message with a hostile mark, or a message from a `hostile` sender.
 | Commitment | `deferred` to `done`, `declined`, or `deferred` with a new date | A person, through a changeset (release 2): `close`, `decline` and `defer` (specification 2, section 4). |
 | Commitment | `deferred` to `open` | The engine, on the `deferred_until` date (UTC). The engine checks once each minute. |
 | Conversation | `active` to `quiet`, and back | The engine: 14 days with no message, and the next message. |
-| Conversation | `muted` | Reserved. A later release adds the verb. |
+| Conversation | `active` or `quiet` to `muted` | A person, through a changeset (release 5): `mute` (`docs/specs/2026-11-17-preference-rules.md`). A new message keeps it `muted`. |
 | Record | `kept` to `corrected` | A correction (release 2). |
 | Feed | `new` to `read` | The engine, when the message loses the label `UNREAD`. |
-| Feed | `skipped` | Reserved. A later release adds the verb. |
+| Feed | `new` or `read` to `skipped` | A person, through a changeset (release 5): `skip`. |
 | Signal | `active` to `expired` | The engine, at `expires`. |
-| Signal | `used`, `dismissed` | Reserved. A later release adds the verb. |
+| Signal | `active` to `dismissed` | A person, through a changeset (release 5): `dismiss`. |
+| Signal | `used` | Reserved. A later release adds the verb. |
 
 ## 7. Understanding: from mail to forms
 
