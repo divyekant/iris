@@ -209,7 +209,10 @@ async fn a_second_start_finds_the_open_job() {
     // Only an item of the same kind finds the job: no conversation 1 exists.
     for item in ["v-1", "c-3"] {
         let (code, v) = d
-            .post("/api/jobs", json!({"item": item, "goal": "Go.", "messages": []}))
+            .post(
+                "/api/jobs",
+                json!({"item": item, "goal": "Go.", "messages": []}),
+            )
             .await;
         assert_ne!(v.get("job"), Some(&json!("j-1")), "{item}: {v}");
         assert_ne!(code, StatusCode::CREATED, "{item}: {v}");

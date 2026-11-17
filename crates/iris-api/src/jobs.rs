@@ -213,6 +213,8 @@ impl<W: Write> Write for Prefixed<'_, W> {
 
 /// The longest goal, in characters (`docs/spec/schema/job.schema.json`).
 const GOAL_MAX: usize = 2000;
+/// The last millisecond of the year 9999: the highest time of the job table.
+const TIME_MAX: i64 = 253_402_300_799_999;
 
 /// The result of [`start_job`].
 #[derive(Debug)]
@@ -279,14 +281,18 @@ fn check_item(c: &Connection, form: &str, row: i64) -> rusqlite::Result<Check> {
 
 /// Each message that a start from item `row` grants: the source messages
 /// and each message of their threads, as the scope adds list them. In the
-/// order of the thread, then the date.
+/// order of the thread, then the date that the summary shows (the header
+/// date, else the date of the provider).
 fn grant_list(c: &Connection, row: i64) -> rusqlite::Result<Vec<i64>> {
     let mut q = c.prepare_cached(
         "SELECT m.id FROM message m
          WHERE m.id IN (SELECT message_id FROM item_source WHERE item_id = ?1)
             OR m.thread_id IN (SELECT x.thread_id FROM item_source s
                                JOIN message x ON x.id = s.message_id WHERE s.item_id = ?1)
-         ORDER BY m.thread_id, coalesce(m.internal_date, 0), m.id",
+         ORDER BY m.thread_id,
+                  coalesce((SELECT h.date FROM header h WHERE h.message_id = m.id),
+                           m.internal_date, 0),
+                  m.id",
     )?;
     let ids = q.query_map([row], |r| r.get(0))?.collect();
     ids
@@ -334,16 +340,22 @@ pub fn start_job(
 ) -> Result<Started> {
     let (form, row) = start_item(item)?;
     let goal = goal.trim();
-    if goal.is_empty() || goal.chars().count() > GOAL_MAX {
+    // The checks of the job table, so that each value it refuses is a 400.
+    if goal.is_empty() || goal.chars().count() > GOAL_MAX || goal.contains('\0') {
         return Err(Error::Query(format!(
-            "the goal must have 1 to {GOAL_MAX} characters"
+            "the goal must have 1 to {GOAL_MAX} characters, and no NUL"
         )));
     }
     let due_ms = match due {
         None => None,
         Some(d) => Some(
             iris_understand::time::parse_rfc3339(d)
-                .ok_or_else(|| Error::Query(format!("due is not an RFC 3339 time: {d:?}")))?,
+                .filter(|ms| (0..=TIME_MAX).contains(ms))
+                .ok_or_else(|| {
+                    Error::Query(format!(
+                        "due is not an RFC 3339 time from 1970 to 9999: {d:?}"
+                    ))
+                })?,
         ),
     };
     let mut seen = BTreeSet::new();
@@ -363,9 +375,11 @@ pub fn start_job(
         let open: Option<i64> = c
             .query_row(
                 "SELECT j.id FROM job_scope s JOIN job j ON j.id = s.job_id
-                 WHERE s.item_id = ?1 AND s.revoked_at IS NULL AND j.state != 'done'
+                 JOIN item i ON i.id = s.item_id
+                 WHERE s.item_id = ?1 AND i.form = ?2
+                   AND s.revoked_at IS NULL AND j.state != 'done'
                  ORDER BY j.id LIMIT 1",
-                [row],
+                rusqlite::params![row, form],
                 |r| r.get(0),
             )
             .optional()?;
@@ -392,7 +406,12 @@ pub fn start_job(
         for t in threads {
             iris_job::add_scope_in(c, job, Ref::Thread(t), By::Person, now_ms)?;
         }
-        let doc = iris_job::job_json(&iris_job::get_in(c, job)?);
+        // The full document, with the create event (the same as GET).
+        let mut doc = Vec::new();
+        iris_job::write_document_in(c, job, &mut doc)?;
+        let doc = serde_json::from_slice(&doc).map_err(|e| {
+            iris_job::Error::Store(iris_store::Error::Query(format!("job document: {e}")))
+        })?;
         Ok(Out::Done(Started::Created(doc)))
     })
     .map_err(|e| match e {
