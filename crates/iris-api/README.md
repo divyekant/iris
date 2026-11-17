@@ -159,8 +159,6 @@ engine computes them from the store. Nothing leaves the machine.
 | Endpoint | Does |
 |---|---|
 | `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
-| `POST /api/measures/use` | Body `{"day": "YYYY-MM-DD"}`. Counts one use of the web client on that day. The answer is `{}`. |
-| `POST /api/measures/open` | Body `{"day": "YYYY-MM-DD", "message": "m-…"}`. Counts one use, and the open of that source mail on that day. A mail counts once for each day, so a repeated request changes nothing. |
 
 - `days`: the newest 28 days of use, the newest first, each
   `{"day", "opens"}`. `opens` counts the different source mails that the
@@ -187,10 +185,18 @@ engine computes them from the store. Nothing leaves the machine.
 - `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
   not an undo. `undone` counts the actions of them that an undo reversed.
 
-`day` is the local date of the person. It must be the date of the engine in
-UTC, or the day before or after it. Another day, an open with no
-`message`, a use with a `message`, or a body that is not valid, is a 400,
-and nothing is written. Another event is a 404.
+Each request of the web client has the header `x-iris-day: YYYY-MM-DD`, the
+local date of the person. The API counts the measures from it:
+
+- The first request of a day counts a use of that day, before the request
+  runs. So a read of the measures already has the day.
+- `GET /api/messages/{id}` (the mail view) with success counts an open of
+  that mail on that day. A mail counts once for each day, so a repeated
+  request changes nothing.
+
+The day must be the date of the engine in UTC, or the day before or after
+it. A request with no header, or with another day, counts nothing and runs
+as usual.
 
 ## State verbs
 

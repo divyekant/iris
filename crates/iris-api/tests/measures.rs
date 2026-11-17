@@ -1,5 +1,5 @@
 //! Tests of the measures endpoints (card R5-12): `GET /api/measures`, and
-//! `POST /api/measures/use` and `/open`.
+//! the counts from the day header of each request.
 
 use std::sync::Arc;
 
@@ -96,25 +96,56 @@ async fn an_empty_store_has_empty_measures() {
     assert!(m["memory"]["rss_kib"].as_i64().unwrap() > 1000, "{m}");
 }
 
-/// A use makes the day; each open of another mail adds one to it. The
-/// answer gives the newest 28 days, the newest first.
+/// GET with the day header of the web client.
+async fn visit(store: &Arc<Store>, uri: &str, day: Option<&str>) -> StatusCode {
+    let mut req = Request::get(uri);
+    if let Some(day) = day {
+        req = req.header(iris_api::measures::DAY, day);
+    }
+    call(store, req.body(Body::empty()).unwrap()).await.0
+}
+
+/// Two messages of one account, `m-1` and `m-2`.
+fn two_messages(s: &Store) {
+    let a = s.add_account("gmail", "a@example.com").unwrap();
+    let m = |id: &str| NewMessage {
+        provider_id: id.into(),
+        thread_provider_id: id.into(),
+        ..Default::default()
+    };
+    s.put_messages(a, &[m("g1"), m("g2")]).unwrap();
+}
+
+/// Each request of the web client is a use of its day, and each mail view
+/// is an open of that mail. The answer gives the newest 28 days, the
+/// newest first.
 #[tokio::test]
 async fn use_and_open_count_on_the_day_of_the_person() {
     let s = store("count");
+    two_messages(&s);
     let day = today();
-    let body = json!({ "day": day }).to_string();
-    let open = |m: &str| json!({ "day": day, "message": m }).to_string();
+    // The use counts before the request runs: the first read of the
+    // measures of a day already has that day.
+    let req = Request::get("/api/measures")
+        .header(iris_api::measures::DAY, &day)
+        .body(Body::empty())
+        .unwrap();
+    let (code, m) = call(&s, req).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(m["days"], json!([{"day": day, "opens": 0}]));
+    for uri in [
+        "/api/messages/m-1",
+        "/api/messages/m-2",
+        "/api/messages/m-1",
+    ] {
+        assert_eq!(visit(&s, uri, Some(&day)).await, StatusCode::OK);
+    }
+    // The raw source and a message that is not there are not an open.
+    visit(&s, "/api/messages/m-1/raw", Some(&day)).await;
     assert_eq!(
-        post(&s, "/api/measures/use", &body).await,
-        (StatusCode::OK, json!({}))
+        visit(&s, "/api/messages/m-9", Some(&day)).await,
+        StatusCode::NOT_FOUND
     );
-    assert_eq!(days(&s), vec![(day.clone(), 0)]);
-    assert_eq!(
-        post(&s, "/api/measures/open", &open("m-1")).await,
-        (StatusCode::OK, json!({}))
-    );
-    post(&s, "/api/measures/open", &open("m-2")).await;
-    post(&s, "/api/measures/use", &body).await;
     assert_eq!(days(&s), vec![(day.clone(), 2)]);
 
     s.write(|tx| {
@@ -224,52 +255,26 @@ fn only_a_date_near_today_counts() {
     );
 }
 
+/// A request with no day header, or with a day that is not near today,
+/// counts nothing and runs as usual.
 #[tokio::test]
-async fn a_bad_request_writes_nothing() {
+async fn a_request_with_no_good_day_counts_nothing() {
     let s = store("bad");
-    let day = today();
-    for (uri, body, code) in [
-        (
-            "/api/measures/view",
-            json!({"day": day}).to_string(),
-            StatusCode::NOT_FOUND,
-        ),
-        ("/api/measures/open", "{}".into(), StatusCode::BAD_REQUEST),
-        (
-            "/api/measures/open",
-            json!({"day": day, "n": 2}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "/api/measures/open",
-            json!({"day": 20261116}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "/api/measures/open",
-            json!({"day": "2001-01-01", "message": "m-1"}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "/api/measures/open",
-            json!({"day": day}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "/api/measures/open",
-            json!({"day": day, "message": "i-1"}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            "/api/measures/use",
-            json!({"day": day, "message": "m-1"}).to_string(),
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let (got, _) = post(&s, uri, &body).await;
-        assert_eq!(got, code, "{uri} {body}");
+    two_messages(&s);
+    for day in [None, Some("2001-01-01"), Some("2026-02-30"), Some("now")] {
+        assert_eq!(
+            visit(&s, "/api/messages/m-1", day).await,
+            StatusCode::OK,
+            "{day:?}"
+        );
     }
     assert_eq!(days(&s), vec![]);
+    // A good day after a bad one still counts.
+    assert_eq!(
+        visit(&s, "/api/status", Some(&today())).await,
+        StatusCode::OK
+    );
+    assert_eq!(days(&s), vec![(today(), 0)]);
 }
 
 fn times(s: &Store) -> Vec<(String, i64)> {

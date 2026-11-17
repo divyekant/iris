@@ -526,73 +526,22 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.equal(rows({ ...mixed, mirror: [{ ...mixed.mirror[0], differences: 2 }, none] }, now)[2].tone, "missed");
 });
 
-test("a use counts once a day, and an open counts each time, on the local day", async () => {
-  const { count } = await load("/src/measures.ts");
+test("each request of the web client sends the local day, so the engine counts the use and each mail view", async () => {
+  const { get } = await load("/src/api.ts");
+  const { localDay } = await load("/src/measures.ts");
   const saved = globalThis.fetch;
   const sent = [];
-  let fail = false;
   globalThis.fetch = async (url, init) => {
-    sent.push([url, init?.body]);
-    return new Response(fail ? '{"error":"x"}' : "{}", { status: fail ? 500 : 200 });
+    sent.push([url, init?.headers?.["x-iris-day"]]);
+    return new Response("{}", { status: 200 });
   };
   try {
-    const day = new Date(2026, 10, 16, 23, 30);
-    fail = true;
-    await count("use", day);
-    fail = false;
-    await count("use", day);
-    await count("use", day);
-    await count({ open: "m-1" }, day);
-    await count({ open: "m-2" }, day);
-    // A use in flight: a second use of the day waits for the same request.
-    let release;
-    globalThis.fetch = (url, init) => {
-      sent.push([url, init?.body]);
-      return new Promise((r) => (release = () => r(new Response("{}", { status: 200 }))));
-    };
-    const next = new Date(2026, 10, 17, 0, 10);
-    const first = count("use", next);
-    assert.equal(count("use", next), first);
-    while (!release) await new Promise((r) => setTimeout(r, 1));
-    release();
-    await first;
+    await get("status");
+    await get("messages/m-1");
     assert.deepEqual(sent, [
-      ["/api/measures/use", '{"day":"2026-11-16"}'],
-      ["/api/measures/use", '{"day":"2026-11-16"}'],
-      ["/api/measures/open", '{"day":"2026-11-16","message":"m-1"}'],
-      ["/api/measures/open", '{"day":"2026-11-16","message":"m-2"}'],
-      ["/api/measures/use", '{"day":"2026-11-17"}'],
+      ["/api/status", localDay()],
+      ["/api/messages/m-1", localDay()],
     ]);
-  } finally {
-    globalThis.fetch = saved;
-  }
-});
-
-test("a failed open goes again with the same mail, and a refused one does not", async () => {
-  const { count, written } = await load("/src/measures.ts");
-  const saved = globalThis.fetch;
-  const sent = [];
-  let status = 500;
-  globalThis.fetch = async (url, init) => {
-    sent.push([url, init?.body]);
-    return new Response(status === 200 ? "{}" : '{"error":"x"}', { status });
-  };
-  try {
-    const day = new Date(2026, 10, 18, 9, 0);
-    await count({ open: "m-1" }, day);
-    status = 200;
-    await count({ open: "m-2" }, day);
-    await written();
-    // The first open, its second try with the same mail (the engine counts a mail once
-    // for each day, so a lost answer does not count twice), and the second open.
-    const opens = sent.filter(([u]) => u === "/api/measures/open").map(([, b]) => JSON.parse(b).message);
-    assert.deepEqual(opens.sort(), ["m-1", "m-1", "m-2"]);
-    status = 400;
-    sent.length = 0;
-    await count({ open: "m-3" }, day);
-    status = 200;
-    await written();
-    assert.equal(sent.length, 1);
   } finally {
     globalThis.fetch = saved;
   }

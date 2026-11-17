@@ -154,7 +154,6 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
         .route("/api/measures", get(get_measures))
-        .route("/api/measures/{event}", post(post_measure))
         .route("/api/policy", get(get_policy))
         .route("/api/policy/confirm", post(post_confirm))
         .route("/api/policy/discard", post(post_discard))
@@ -178,10 +177,15 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
-        .with_state(store)
+        .with_state(store.clone())
         .merge(ask)
         // The code exchange has no handler: the guard answers it.
         .route(SIGN_IN, any(|| async { not_found() }))
+        // Inside the guard: only a request with the sign-in counts.
+        .layer(middleware::from_fn_with_state(
+            measures::Counter::new(store),
+            measures::count,
+        ))
         .layer(middleware::from_fn_with_state(auth, auth::guard))
 }
 
@@ -552,37 +556,6 @@ async fn get_measures(State(s): State<Arc<Store>>) -> Result<Response> {
         .ok()
         .flatten();
     Ok(Json(measures::measures(&s, rss)?).into_response())
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DayBody {
-    day: String,
-    /// The `m-` ID of the source mail. An open needs it, a use has none.
-    message: Option<String>,
-}
-
-/// One use of the web client (`use`, body `{"day"}`) or one source mail
-/// opened (`open`, body `{"day", "message"}`) on the local day of the
-/// person. A repeated request changes nothing. The answer is `{}`.
-async fn post_measure(
-    State(s): State<Arc<Store>>,
-    Path(event): Path<String>,
-    b: std::result::Result<Json<DayBody>, JsonRejection>,
-) -> Result<Response> {
-    let open = match event.as_str() {
-        "use" => false,
-        "open" => true,
-        _ => return Ok(not_found()),
-    };
-    let b = body(b)?;
-    if open != b.message.is_some() {
-        return Err(Error::Query(
-            "an open names its message, and a use names none".into(),
-        ));
-    }
-    measures::count_use(&s, &b.day, b.message.as_deref(), now_ms())?;
-    Ok(Json(serde_json::json!({})).into_response())
 }
 
 async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {

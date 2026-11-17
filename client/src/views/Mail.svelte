@@ -1,18 +1,13 @@
 <!--
   One source mail, as clean text. Mail text is data: Svelte escapes it, and the
-  client never renders the HTML of a mail. Each open counts the mail in the opens of the day, once for each day (R5-12).
+  client never renders the HTML of a mail. The engine counts each view of a mail as an open (R5-12).
 -->
 <script lang="ts">
   import { download, own, type Address, type Message } from "../api";
   import { initials, when } from "../format";
-  import { count } from "../measures";
   import { href } from "../route";
 
   let { message }: { message: Message } = $props();
-
-  $effect(() => {
-    void count({ open: message.id });
-  });
 
   let failed = $state("");
   const original = () => download(message.id).then(() => (failed = ""), (e: unknown) => (failed = own(e)));

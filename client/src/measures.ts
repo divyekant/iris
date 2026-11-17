@@ -1,6 +1,7 @@
 // The measures of the manifesto, "How we measure Iris" (card R5-12). The engine
 // computes them on this machine (GET /api/measures). Nothing leaves the machine.
-import { post } from "./api";
+// Each request of the web client sends the local day (header x-iris-day, in api.ts):
+// the engine counts the day as a day of use, and a mail view as an open.
 
 export type Measures = {
   days: { day: string; opens: number }[];
@@ -28,56 +29,6 @@ const TARGET_MESSAGES = 100_000;
 export function localDay(now = new Date()): string {
   const p = (n: number) => String(n).padStart(2, "0");
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
-}
-
-let use: { day: string; done: Promise<void> } | null = null;
-const pending = new Set<Promise<void>>();
-// The opens that got no answer of success. A 400 is a definite refusal (for example a
-// day that is too old now), so it is not kept. The engine counts each mail once for each
-// day, so a second try of an open that the engine wrote but whose answer got lost
-// changes nothing.
-type Open = { day: string; message: string };
-const failed: Open[] = [];
-
-function send(body: { day: string; message?: string }): Promise<void> {
-  const open = body.message !== undefined;
-  const done: Promise<void> = post(`measures/${open ? "open" : "use"}`, body).then(
-    () => {},
-    (e: { status?: number }) => {
-      if (open && e?.status !== 400) failed.push(body as Open);
-      if (use?.done === done) use = null;
-    },
-  );
-  pending.add(done);
-  void done.then(() => pending.delete(done));
-  return done;
-}
-
-/** Send each open again that got no answer of success. */
-function resend() {
-  for (const open of failed.splice(0)) void send(open);
-}
-
-/**
- * Count one use of the web client on the local day, or the open of one source mail
- * (`{ open: <m- ID> }`). A use counts once for each day in this page: a second call of
- * the same day gives the promise of the first. A failed count does not stop the page.
- * The next use tries again, and each failed open goes again with the next count.
- */
-export function count(event: "use" | { open: string }, now = new Date()): Promise<void> {
-  const day = localDay(now);
-  resend();
-  if (event !== "use") return send({ day, message: event.open });
-  if (use?.day === day) return use.done;
-  const done = send({ day });
-  use = { day, done };
-  return done;
-}
-
-/** Send the failed opens again, then wait until each count of this page has its answer, so a read of the measures includes them. */
-export async function written(): Promise<void> {
-  resend();
-  while (pending.size > 0) await Promise.all([...pending]);
 }
 
 /** The last SPAN local days, the oldest first. A day with no use has `opens: null`. */

@@ -2,11 +2,21 @@
 //! engine computes each measure from the store on this machine. Nothing
 //! leaves the machine.
 
+use std::sync::{Arc, Mutex};
+
+use axum::extract::{Request, State};
+use axum::http::Method;
+use axum::middleware::Next;
+use axum::response::Response;
 use iris_store::Store;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::{rfc3339, Error, Result};
+
+/// The header of each request of the web client: the local date of the
+/// person, `YYYY-MM-DD`.
+pub const DAY: &str = "x-iris-day";
 
 /// The number of the newest days of use that [`measures`] gives.
 pub const DAYS: u32 = 28;
@@ -280,6 +290,55 @@ pub fn count_use(store: &Store, day: &str, open: Option<&str>, now_ms: i64) -> R
         Ok(())
     })?;
     Ok(())
+}
+
+/// The state of [`count`]: the store, and the last day that a use was
+/// counted, so that only the first request of a day writes.
+#[derive(Clone)]
+pub struct Counter {
+    store: Arc<Store>,
+    day: Arc<Mutex<String>>,
+}
+
+impl Counter {
+    pub fn new(store: Arc<Store>) -> Self {
+        Self {
+            store,
+            day: Arc::default(),
+        }
+    }
+}
+
+/// Count the measures of each request of the web client that has the
+/// header [`DAY`]: a use of that day before the request runs (so a read of
+/// the measures includes it), and an open when `GET /api/messages/{id}`
+/// (the mail view) answers with success. A day that [`count_use`] refuses
+/// counts nothing, and the request runs as usual: the measures never stop
+/// the web client.
+pub async fn count(State(c): State<Counter>, req: Request, next: Next) -> Response {
+    let day = req
+        .headers()
+        .get(DAY)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let open = (req.method() == Method::GET)
+        .then(|| req.uri().path().strip_prefix("/api/messages/"))
+        .flatten()
+        .filter(|id| !id.contains('/'))
+        .map(str::to_owned);
+    if let Some(day) = &day {
+        let mut last = c.day.lock().unwrap_or_else(|e| e.into_inner());
+        if *last != *day && count_use(&c.store, day, None, crate::now_ms()).is_ok() {
+            *last = day.clone();
+        }
+    }
+    let res = next.run(req).await;
+    if let (Some(day), Some(id)) = (day, open) {
+        if res.status().is_success() {
+            let _ = count_use(&c.store, &day, Some(&id), crate::now_ms());
+        }
+    }
+    res
 }
 
 /// The resident memory of this process in KiB, from `ps`, as the budget

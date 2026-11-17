@@ -23,11 +23,6 @@ export default defineConfig(({ mode }) => {
             res.end(source);
             return;
           }
-          if (/^\/measures\/(use|open)$/.test(url) && req.method === "POST") {
-            res.setHeader("content-type", "application/json");
-            res.end("{}");
-            return;
-          }
           if (url === "/ask" && req.method === "POST") {
             let text = "";
             req.on("data", (part: Buffer) => (text += part));

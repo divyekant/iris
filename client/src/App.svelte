@@ -2,7 +2,7 @@
   import { access } from "./access.svelte.ts";
   import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
-  import { count, written, type Measures as MeasuresData } from "./measures";
+  import type { Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
   import Brief from "./views/Brief.svelte";
@@ -36,7 +36,6 @@
       if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
       scrollTo(0, 0);
-      void count("use");
     };
     addEventListener("hashchange", update);
     return () => removeEventListener("hashchange", update);
@@ -45,8 +44,6 @@
   // Read the status one time at start, so a view opened from a link also shows an account that needs sign-in.
   // svelte-ignore state_referenced_locally
   if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
-  // A day on which the person opens Iris is a day of use (the measures page). A tab that stays open counts again at the next view of a new day.
-  if (typeof location !== "undefined") void count("use");
 
   const JOB_STATES = ["needs_you", "working", "waiting", "done"] as const;
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
@@ -131,8 +128,7 @@
     {:else if route.view === "ask"}
       <Ask />
     {:else if route.view === "measures"}
-      <!-- Each count of this page first (the use of today, an open in flight), so the page includes them. -->
-      {#await count("use").then(written).then(() => get<MeasuresData>("measures")) then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
+      {#await get<MeasuresData>("measures") then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "review"}
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
