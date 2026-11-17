@@ -107,7 +107,7 @@ export type Status = {
 export type Rule = {
   id: number;
   name: string;
-  effect: "allow" | "review" | "deny" | "hide" | "bundle";
+  effect: "allow" | "review" | "deny" | "hide" | "bundle" | "notify";
   verbs: string[];
   when: Record<string, string | number>;
   by: "person" | "proposal";
