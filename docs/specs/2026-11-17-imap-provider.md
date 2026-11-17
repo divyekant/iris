@@ -63,7 +63,17 @@ Errors map as follows:
 The provider reads the folder list (`LIST "" "*"`) at each `profile`,
 `labels`, `messages` and `changes` call. It skips folders that cannot be
 selected, and folders with `\All` or `\Flagged`: these are views of mail in
-other folders, and their copies would count each message two times.
+other folders, and their copies would count each message two times. Mail
+that is only in a `\All` folder (Gmail over IMAP) does not sync: limit
+issue #633.
+
+The order of the folders is `INBOX` first, then the other folders by the
+bytes of the name. A page token holds the name of its folder, not an
+index, so a change of the LIST order between two calls does not skip a
+folder. The next page is the first folder after that name in the order of
+now. A folder that a page sequence skips because it was made during the
+sequence is not in the cursor of `profile` or of the last `changes`, so
+the next `changes` gives `Added` for each of its messages.
 
 ### 3. Message ID and thread ID
 
@@ -86,22 +96,23 @@ thread.
 | `INBOX` | `INBOX` | system | the folder `INBOX` |
 | `UNREAD` | `UNREAD` | system | no `\Seen` flag |
 | `STARRED` | `STARRED` | system | the `\Flagged` flag |
-| `DRAFT` | `DRAFT` | system | a folder with `\Drafts`, or the `\Draft` flag |
 | `SPAM` | `SPAM` | system | a folder with `\Junk` |
 | `TRASH` | `TRASH` | system | a folder with `\Trash` |
-| A folder label | `folder:<name>` | system for a special-use folder, else user | each other folder, also `\Sent` and `\Archive` |
+| A folder label | `folder:<name>` | system for a special-use folder, else user | each other folder, also `\Sent`, `\Drafts` and `\Archive` |
 | A keyword label | `kw:<keyword>` | user | a keyword flag (no `\` at the start) |
 
-No IMAP message gets `SENT`. `SENT` is proof that the owner wrote the
-mail (the sender axis, the hostile checks, the known people). Anyone can
-move a received message into the Sent folder. So a message in the `\Sent`
-folder gets the system label `folder:<name>` only. The send card gives
-`SENT` to the copies that Iris itself sent.
+No IMAP message gets `SENT` or `DRAFT`. Each of the two labels is proof
+that the owner wrote the mail (the sender axis, the hostile checks, the
+known people). Anyone can move or copy a received message into the Sent
+or the Drafts folder, and any client can set the `\Draft` flag. So a
+message in the `\Sent` or the `\Drafts` folder gets the system label
+`folder:<name>` only, and the `\Draft` flag gives no label. The send card
+gives `SENT` to the copies that Iris itself sent.
 
 A message in the `\Archive` folder has the label `folder:<name>` and no
 `INBOX`: the mirror shows it as archived.
 
-`labels` gives the seven fixed labels that apply, each folder label, and a
+`labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `SPAM` and `TRASH` that apply, each folder label, and a
 keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
 each folder. It gives no counts.
 
@@ -112,15 +123,16 @@ The cursor is text with one line for each folder:
 it from an `EXAMINE` of each folder.
 
 `changes(from, page)` gives one folder for each page. The page token is the
-index of the folder in the list. For each folder of the list now:
+name of the folder (section 2) and the cursor lines of the folders before
+it. For each folder of the list now:
 
 | Case | Result |
 |---|---|
 | The folder is not in `from` | `Added` for each message of the folder |
 | A new `UIDVALIDITY` | `HistoryExpired` |
-| `HIGHESTMODSEQ` is the same and the count is the same | nothing |
+| `HIGHESTMODSEQ`, `UIDNEXT` and the count are the same | nothing |
 | `QRESYNC` | `changes(since)`: `Added` (the full label set) for each changed message, `Deleted` for each `VANISHED` UID |
-| `CONDSTORE` only | `changes(since)` as above. Removed mail: removed = count in `from` - (count now - the count of UIDs at or above the `UIDNEXT` of `from`). If removed is above 0, `HistoryExpired` |
+| `CONDSTORE` only | `changes(since)` as above. Removed mail: removed = count in `from` - (count now - the count of UIDs at or above the `UIDNEXT` of `from`). If removed is above 0, `HistoryExpired`. A UID from the `UIDNEXT` of `from` up to the `UIDNEXT` of now that is not in the folder now came and went after `from` (the first sync can list it): `Deleted` |
 
 A folder in `from` that is not in the list now gives `HistoryExpired`. The
 last page carries the cursor of now, made from the `EXAMINE` results of
@@ -137,31 +149,40 @@ mirror does not have.
 
 ### 6. Reads
 
-- `profile`: the user as the address, counts 0 (the trait allows 0), the
-  cursor of now.
-- `messages(label, page)`: the page token is `<folder index>:<UID>`.
-  Each page is up to 500 messages of one folder, from the highest UID down
-  (newest first, as Gmail). With a folder label, `INBOX`, `DRAFT`, `SPAM`
-  or `TRASH`, only that folder. With `UNREAD`, `STARRED` or a keyword
+- `profile`: the address of the account, as the person gave it to
+  `iris account add-imap` (section 8), not the IMAP user name. The sync
+  and the apply compare it with the address of the account row. Counts 0
+  (the trait allows 0), and the cursor of now.
+- `messages(label, page)`: the page token is `<UID>` and the folder name
+  (section 2). Each page is up to 500 messages of one folder, from the
+  highest UID down: newest first in each folder, `INBOX` first. The
+  provider spec (`messages`) allows this order for a folder provider.
+  With a folder label, `INBOX`, `SPAM` or `TRASH`, only that folder. With `UNREAD`, `STARRED` or a keyword
   label, `UID SEARCH` (`UNSEEN`, `FLAGGED`, `KEYWORD <k>`) in each folder.
-- `minimal`, `metadata` and `raw`: `EXAMINE` of the folder of the ID, then
+- `minimal` and `raw`: `EXAMINE` of the folder of the ID, then
   a `UID FETCH`. A new `UIDVALIDITY`, or no message with the UID, is
   `NotFound`. `raw` gives the `INTERNALDATE` in milliseconds and the
   thread of section 3.
-- `messages_with_id`: `UID SEARCH HEADER Message-ID <id>` in each folder.
+- `metadata` and `messages_with_id`: `Api` 400 `notSupported`. Only the
+  drafts and the send use them (provider spec, section 6), and they are
+  not in scope.
 
 ### 7. Writes
 
 | Call | Result |
 |---|---|
-| `modify` with only `UNREAD`, `STARRED` and `kw:` labels | `SELECT` of the folder of each ID, then `UID STORE <uid> +FLAGS.SILENT` or `-FLAGS.SILENT` |
+| `modify` with only `UNREAD`, `STARRED` and `kw:` labels | `SELECT` of the folder of each ID, a check of its `UIDVALIDITY`, then `UID STORE <uid> +FLAGS.SILENT` or `-FLAGS.SILENT` |
 | `modify` with any other label | `Api` 400 `notSupported`, before any write |
-| `create_label(name)` | `kw:<name>` with no server call, if the name is a valid atom; else `Api` 400 `badName` |
+| `create_label(name)` | `Api` 400 `notSupported` until the flag writes. With the flag writes: `kw:<name>` if the name is a valid atom, else `Api` 400 `badName` |
 | `trash`, `untrash` | `Api` 400 `notSupported` |
 | drafts and send | `Api` 400 `notSupported` |
 
 A `modify` checks all IDs and labels before the first write. It writes
-each folder in turn. An error after the first `STORE` was sent is
+each folder in turn. After the `SELECT` of a folder, it compares the
+`UIDVALIDITY` of the folder with the one in each ID of that folder. A
+different value before any `STORE` was sent is `NotFound`, and nothing is
+written. A different value after a `STORE` of an earlier folder is
+`Transport` (unknown), and nothing more is written. An error after the first `STORE` was sent is
 `Transport` (unknown), as the provider spec (section 6) says for a
 `modify` in parts. A `NO` to the first `STORE` with nothing sent before is
 `Api` 400.
@@ -202,6 +223,8 @@ two times after an unknown result (spec 2 section 7.2).
 | Input | Result | Test |
 |---|---|---|
 | A message ID that does not parse | `NotFound` | `bad_id` |
+| A message that came and went after the cursor | `Deleted` | `came_and_went_after_the_cursor` |
+| A new `UIDVALIDITY` between the read and the `STORE` | `NotFound`, nothing sent | `modify_uidvalidity` |
 | A cursor that does not parse | `HistoryExpired` | `bad_cursor` |
 | A new `UIDVALIDITY` of a folder | `HistoryExpired` | `uidvalidity_change` |
 | A folder deleted at the server | `HistoryExpired` | `folder_gone` |
@@ -256,7 +279,8 @@ two times after an unknown result (spec 2 section 7.2).
    removals. It goes red if `changes` loses an event.
 2. A `modify` of `UNREAD` changes `\Seen` at the test server. A `modify`
    of `INBOX` sends nothing.
-3. A `\Sent` folder message has no `SENT` label.
+3. A `\Sent` folder message has no `SENT` label, and a `\Drafts` folder
+   message or a `\Draft` message has no `DRAFT` label.
 4. A message of an IMAP account with `Authentication-Results:
    mx.google.com; dkim=pass` has no trusted authentication result.
 
