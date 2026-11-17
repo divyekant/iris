@@ -1,0 +1,124 @@
+<!--
+  The accounts (card R6-02): each mailbox that Iris copies, with its state in
+  one sentence, and how to add one more. The brief shows the mail of all
+  accounts in one list.
+-->
+<script lang="ts">
+  import { get, type Account, type Status } from "../api";
+  import { poll as every } from "../clock";
+  import { accountNames, when } from "../format";
+
+  let { status: initial, poll = 60000 }: { status: Status; poll?: number } = $props();
+  // svelte-ignore state_referenced_locally
+  let status = $state(initial);
+  $effect(() => (poll ? every(() => get<Status>("status"), (s) => (status = s), poll) : undefined));
+
+  let names = $derived(accountNames(status.accounts));
+
+  // The state of one account, in one sentence, and its tone.
+  function stateOf(a: Account): { text: string; tone: "ok" | "busy" | "stopped" } {
+    if (a.state === "needs_sign_in") return { text: "The copy stopped: Google refused the sign-in. Sign in again to continue.", tone: "stopped" };
+    // `sync` is set while a first copy or a full copy again runs (iris-sync, account.sync_kind).
+    if (!a.mirror_ready_at) return { text: "Iris copies this mailbox now. The brief shows the mail that it copied so far.", tone: "busy" };
+    if (a.sync) return { text: "Iris copies this mailbox again now, to find each change.", tone: "busy" };
+    const last = a.last_sync;
+    // A sync writes "error: ...", a verify writes "N differences, M skipped, then error: ..." (iris-sync).
+    if (last?.result?.includes("error:")) return { text: "The last sync failed. Iris tries again each minute.", tone: "stopped" };
+    return { text: last?.ended ? `Up to date. Last sync ${when(last.ended)}.` : "Up to date.", tone: "ok" };
+  }
+</script>
+
+<h1>Accounts</h1>
+<p class="sub">Iris copies each mailbox to this machine. Your brief shows the mail of all accounts in one list.</p>
+
+<ul class="accounts">
+  {#each status.accounts as a (a.id)}
+    {@const s = stateOf(a)}
+    <li>
+      <span class="tone {s.tone}" aria-hidden="true"></span>
+      <div>
+        <p class="address">
+          {a.address}{#if names[`a-${a.id}`]}<span class="name">Shown as “{names[`a-${a.id}`]}” in the brief</span>{/if}
+        </p>
+        <p class="state">{s.text}</p>
+        {#if a.state === "needs_sign_in"}
+          <p class="state">On the machine that runs Iris, run <code>iris account add client.json</code> with the client file of this account.</p>
+        {/if}
+      </div>
+    </li>
+  {:else}
+    <li class="none">No account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</li>
+  {/each}
+</ul>
+
+<section class="add" aria-labelledby="add">
+  <h2 id="add">Add an account</h2>
+  <p>
+    On the machine that runs Iris, run <code>iris account add client.json</code> and sign in with the other mailbox. You can use the same client
+    file. The new account starts to copy at once, and its mail joins your brief.
+  </p>
+</section>
+
+<style>
+  h1 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--font-size-3);
+  }
+  .sub {
+    margin: 0 0 var(--space-6);
+    color: var(--color-text-muted);
+  }
+  .accounts {
+    list-style: none;
+    margin: 0 0 var(--space-8);
+    padding: 0;
+    border-top: 1px solid var(--color-border);
+  }
+  .accounts li {
+    display: flex;
+    gap: var(--space-3);
+    align-items: baseline;
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .tone {
+    flex: none;
+    width: var(--space-2);
+    height: var(--space-2);
+    border-radius: var(--radius-full);
+    transform: translateY(-2px);
+  }
+  .tone.ok {
+    background: var(--color-success);
+  }
+  .tone.busy {
+    background: var(--color-primary);
+  }
+  .tone.stopped {
+    background: var(--color-error);
+  }
+  .address {
+    margin: 0;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+  .name {
+    margin-left: var(--space-2);
+    color: var(--color-text-muted);
+    font-weight: 400;
+    font-size: var(--font-size--1);
+  }
+  .state {
+    margin: var(--space-1) 0 0;
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+  }
+  .add h2 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--font-size-1);
+  }
+  .add p {
+    margin: 0;
+    color: var(--color-text-muted);
+  }
+</style>

@@ -218,6 +218,24 @@ export function across(status: Status | null): string {
   return status && status.accounts.length > 1 ? " from all accounts" : "";
 }
 
+/**
+ * A short name for each account, by its `a-` ID, so a line can say which mailbox
+ * an item came from (card R6-02). The first part that tells the accounts apart:
+ * the name of the domain ("gmail"), the part before "@", or the whole address.
+ * With one account, no line needs a name: the map is empty.
+ */
+export function accountNames(accounts: Pick<Account, "id" | "address">[]): Record<string, string> {
+  if (accounts.length < 2) return {};
+  const parts = [
+    (a: string) => a.split("@")[1]?.split(".")[0] ?? a,
+    (a: string) => a.split("@")[0],
+    (a: string) => a,
+  ];
+  const lower = accounts.map((a) => a.address.toLowerCase());
+  const pick = parts.find((p) => new Set(lower.map(p)).size === lower.length) ?? parts[2];
+  return Object.fromEntries(accounts.map((a, i) => [`a-${a.id}`, pick(lower[i])]));
+}
+
 /** The home view: the setup flow until there is something to show, then the brief. */
 export function home(status: Status, view: "home" | "brief" = "home"): "setup" | "brief" {
   if (status.accounts.length === 0) return "setup";

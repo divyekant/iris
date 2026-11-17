@@ -8,4 +8,6 @@ export const access = $state({
   locked: [] as string[],
   /** True when the last status answer had no account: the views then link to setup. */
   none: false,
+  /** The short name of each account by its `a-` ID, from the last status answer. Empty with one account. */
+  accounts: {} as Record<string, string>,
 });

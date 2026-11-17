@@ -16,6 +16,7 @@
   import { href } from "../route";
   import { get, post, type ThreadDraft } from "../api";
   import { hold, HOLD, quiet, said, type Verb } from "../act";
+  import { access } from "../access.svelte.ts";
 
   // `note`: one more muted line, for example the reason of a rule that hides the item.
   // `ondone`: shows the tick box on an open commitment. `delay`: the time for Undo, shorter in tests.
@@ -109,6 +110,8 @@
         return party(who);
     }
   });
+  // With two or more accounts, the line names the mailbox of the item (card R6-02).
+  let account = $derived(item.account ? access.accounts[item.account] : undefined);
   let waits = $derived(item.form === "conversation" && (item.your_turn || (item.new ?? 0) > 0));
 </script>
 
@@ -170,6 +173,7 @@
   {#if away}
     <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
   {/if}
+  {#if account}<span class="pill" title={`From your account ${account}`}>{account}</span>{/if}
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -249,6 +253,15 @@
     position: relative;
     z-index: 1;
     color: var(--color-text-muted);
+  }
+  /* The account of the item (card R6-02, option B): a quiet pill beside the mail icon. */
+  .pill {
+    flex: none;
+    padding: 0 var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
   }
   .due::after {
     content: "";

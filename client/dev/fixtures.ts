@@ -13,7 +13,11 @@ import signal from "../../docs/spec/schema/examples/signal-code.json" with { typ
 import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
 import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
 
-export const items = [youOwe, owedToYou, payment, conversation, receipt, booking, feed, signal] as unknown as Item[];
+// Two accounts (card R6-02): the work mailbox has the conversation and the commitment owed to you.
+const work = new Set(["commitment-owed-to-you", "conversation"]);
+export const items = Object.entries({ "commitment-you-owe": youOwe, "commitment-owed-to-you": owedToYou, payment, conversation, receipt, booking, feed, signal }).map(
+  ([name, item]) => ({ ...item, model: "iris/1.1", account: work.has(name) ? "a-2" : "a-1" }),
+) as unknown as Item[];
 
 const of = (list: Item[]) => ({ count: list.length, items: list });
 const byForm = (form: string) => items.filter((i) => i.form === form);
@@ -28,7 +32,16 @@ export const status: Status = {
       state: null,
       mirror_ready_at: "2026-11-16T08:00:00Z",
       sync: null,
-      last_sync: { kind: "incremental", started: "2026-11-16T09:00:00Z", ended: "2026-11-16T09:00:02Z", result: "ok" },
+      last_sync: { kind: "incremental", started: "2026-11-16T09:00:00Z", ended: "2026-11-16T09:00:02Z", result: "ok: history 9120, fetched 3, gone 0, failed 0" },
+    },
+    {
+      id: 2,
+      address: "you@northwind.example",
+      provider: "gmail",
+      state: null,
+      mirror_ready_at: "2026-11-16T08:30:00Z",
+      sync: null,
+      last_sync: { kind: "incremental", started: "2026-11-16T09:00:00Z", ended: "2026-11-16T09:00:01Z", result: "ok: history 4410, fetched 1, gone 0, failed 0" },
     },
   ],
   messages: { total: 84212, fetched: 84212, understood: 84212, gone: 0 },

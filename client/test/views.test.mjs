@@ -231,7 +231,7 @@ test("a conversation item opens the reply form of its thread, unless the convers
 });
 
 test("the setup flow says mirror ready and that nothing changed", async () => {
-  const status = { ...fx.status, messages: { total: 84212, fetched: 84212, understood: 100, gone: 0 } };
+  const status = { ...fx.status, accounts: [fx.status.accounts[0]], messages: { total: 84212, fetched: 84212, understood: 100, gone: 0 } };
   const html = await render("/src/views/Setup.svelte", { status, poll: 0 });
   assert.match(text(html), /Mirror ready\. 84,212 messages\. Nothing in your mailbox changed\./);
   assert.match(text(html), /100 of 84,212 messages/);
