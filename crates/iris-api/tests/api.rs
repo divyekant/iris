@@ -1548,3 +1548,72 @@ async fn an_ask_that_you_send_is_owed_to_you_with_the_person_and_the_date() {
     want.sort();
     assert_eq!(got, want);
 }
+
+/// The draft marks of the items of `section` of a brief: the item ID and
+/// its `ready` field.
+fn ready_marks(section: &Value) -> Vec<(String, Value)> {
+    section["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["id"].as_str().unwrap().to_string(), d["ready"].clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
+    let dir = temp("ready-draft");
+    let (store, _) = filled_n(&dir, 30);
+    let person = sender(&store, "dana@contoso.example", Some("person"));
+    let owe = json!({"direction": "you_owe", "kind": "task", "owner": {"kind": "self"},
+                     "counterparty": party(&person)});
+    // Two items from messages of two threads. Understanding and the link
+    // check finished each message.
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let (first, other): (i64, i64) = store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT min(m.id), (SELECT min(o.id) FROM message o WHERE o.thread_id <> m.thread_id)
+                 FROM message m WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = 1)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let with = add_item(&store, "commitment", "open", first, 10, owe.clone());
+    let without = add_item(&store, "commitment", "open", other, 20, owe);
+    // The draft of the thread of `with` answers its newest message.
+    exec(
+        &store,
+        "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+         SELECT m.thread_id, m.id, 'Yes.', 'fake', 'draft/0.1', 0, 1 FROM message m
+         WHERE m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
+         ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC LIMIT 1",
+        [first],
+    );
+    let ready = json!(["draft"]);
+    let want = vec![
+        (format!("c-{with}"), ready.clone()),
+        (format!("c-{without}"), Value::Null),
+    ];
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(ready_marks(&brief["you_owe"]), want);
+    let (_, page) = get(&store, "/api/brief/you_owe").await;
+    assert_eq!(ready_marks(&page), want);
+
+    // Hostile mail in the thread: the draft is not ready.
+    exec(
+        &store,
+        "UPDATE message SET hostile = '[\"spoof\"]' WHERE id = ?1",
+        [first],
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    assert_eq!(
+        ready_marks(&brief["you_owe"]),
+        vec![
+            (format!("c-{with}"), Value::Null),
+            (format!("c-{without}"), Value::Null),
+        ]
+    );
+}

@@ -63,7 +63,8 @@ export const ignored: GatePage = {
 };
 
 export const brief: Brief = {
-  you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe")),
+  // Iris prepared a reply for the first item (card R3-09).
+  you_owe: of(byForm("commitment").filter((i) => i.direction === "you_owe").map((i, n) => (n ? i : { ...i, ready: ["draft"] }))),
   owed_to_you: of(byForm("commitment").filter((i) => i.direction === "owed_to_you")),
   conversations: of(byForm("conversation")),
   records: { receipt: 1, booking: 1 },

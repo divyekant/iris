@@ -863,3 +863,109 @@ fn a_sample_marked_spam_during_the_call_saves_nothing() {
     ));
     assert_eq!(saved(store, t), None);
 }
+
+/// What [`ready_sql`] says of thread `t`.
+fn ready(store: &Store, t: i64) -> bool {
+    store
+        .read(|c| {
+            Ok(
+                c.query_row(&format!("SELECT {}", ready_sql("SELECT ?1")), [t], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap()
+}
+
+/// What the checks of [`write`] say of thread `t`: they pass, and the
+/// newest message is the one that the draft answers.
+fn checks_pass_on(store: &Store, t: i64) -> bool {
+    store
+        .read(|c| {
+            let based_on: Option<i64> = c
+                .query_row(
+                    "SELECT based_on FROM reply_draft WHERE thread_id = ?1",
+                    [t],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let snap = snapshot(c, t)?;
+            Ok(based_on.is_some() && check(&snap).ok().map(|m| m.id) == based_on)
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_draft_is_ready_exactly_while_the_checks_of_write_pass_on_its_message() {
+    // Each change of the thread after the draft, as SQL on thread ?1.
+    let changes: &[(&str, &str)] = &[
+        ("nothing", "UPDATE thread SET id = id WHERE id = ?1"),
+        (
+            "hostile mark",
+            "UPDATE message SET hostile = '[\"spoof\"]' WHERE thread_id = ?1",
+        ),
+        (
+            "spam label",
+            "INSERT INTO message_label(message_id, label_id)
+             SELECT m.id, l.id FROM message m, label l
+             WHERE m.thread_id = ?1 AND l.provider_id = 'SPAM'",
+        ),
+        (
+            "hostile sender",
+            "INSERT INTO sender(address, kind) SELECT 'ana@example.org', 'hostile' WHERE ?1 > 0",
+        ),
+        (
+            "newest gone",
+            "UPDATE message SET gone_at = 1 WHERE thread_id = ?1",
+        ),
+        (
+            "not understood",
+            "UPDATE message SET understood_at = NULL WHERE thread_id = ?1",
+        ),
+        (
+            "draft removed",
+            "DELETE FROM reply_draft WHERE thread_id = ?1",
+        ),
+    ];
+    for (name, sql) in changes {
+        let (b, t) = mailbox(&format!("ready-{}", name.replace(' ', "-")));
+        assert!(!ready(&b.store, t), "{name}: no draft yet");
+        write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
+        assert!(ready(&b.store, t), "{name}: a new draft");
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [t])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(ready(&b.store, t), checks_pass_on(&b.store, t), "{name}");
+        assert_eq!(ready(&b.store, t), *name == "nothing", "{name}");
+    }
+
+    // New mail in the thread: a Gmail draft does not count, a newer message
+    // does, before and after understanding.
+    let (b, t) = mailbox("ready-new-mail");
+    write(&b.store, t, None, &Fake::new(r#"{"body": "ok"}"#), 1).unwrap();
+    let add = |id: &str, date: i64, label: &str, text: Option<&str>| {
+        b.store
+            .put_messages(
+                1,
+                &[msg(
+                    id,
+                    "t1",
+                    date,
+                    label,
+                    "ana@example.org",
+                    "me@example.com",
+                    text,
+                )],
+            )
+            .unwrap();
+    };
+    add("gmail-draft", 500, "DRAFT", None);
+    assert!(ready(&b.store, t) && checks_pass_on(&b.store, t));
+    add("newer", 600, "INBOX", Some("And Saturday?"));
+    assert!(!ready(&b.store, t) && !checks_pass_on(&b.store, t));
+    understood(&b.store);
+    assert!(!ready(&b.store, t) && !checks_pass_on(&b.store, t));
+}

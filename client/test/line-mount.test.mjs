@@ -191,3 +191,25 @@ test("a refusal shows the reason, a 409 loads the brief again, and no answer say
     }
   }
 });
+
+test("a line shows Draft ready only when the engine says a draft is ready", async () => {
+  const cases = [
+    [{ ...commitment(), ready: ["draft"] }, true],
+    [{ ...fx.items.find((i) => i.form === "conversation"), ready: ["draft"] }, true],
+    [{ ...commitment(), ready: [] }, false],
+    [commitment(), false],
+  ];
+  for (const [item, shown] of cases) {
+    const view = await mount("/src/views/Line.svelte", { item });
+    try {
+      const pill = view.target.querySelector(".ready");
+      assert.equal(!!pill, shown, `${item.form} ready=${JSON.stringify(item.ready)}`);
+      if (shown) {
+        assert.equal(text(pill).trim(), "Draft ready");
+        assert.equal(pill.querySelector("a, button"), null, "the pill is no control: the line opens the item");
+      }
+    } finally {
+      view.destroy();
+    }
+  }
+});
