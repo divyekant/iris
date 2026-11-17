@@ -31,10 +31,12 @@ CREATE UNIQUE INDEX job_scope_thread ON job_scope(job_id, thread_id)
 CREATE UNIQUE INDEX job_scope_item ON job_scope(job_id, item_id)
   WHERE item_id IS NOT NULL AND revoked_at IS NULL;
 
--- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, so no
--- insert replaces a scope row.
+-- A BEFORE trigger runs before INSERT OR REPLACE deletes a row, and a
+-- REPLACE runs no delete trigger. So the trigger refuses the ID of each
+-- row and each active duplicate: no insert replaces a scope row.
 CREATE TRIGGER job_scope_insert BEFORE INSERT ON job_scope
-WHEN NOT EXISTS (SELECT 1 FROM job WHERE id = new.job_id AND state <> 'done')
+WHEN EXISTS (SELECT 1 FROM job_scope WHERE id = new.id)
+  OR NOT EXISTS (SELECT 1 FROM job WHERE id = new.job_id AND state <> 'done')
   OR new.revoked_at IS NOT NULL OR new.revoked_by IS NOT NULL
   OR NOT (EXISTS (SELECT 1 FROM thread WHERE id = new.thread_id)
           OR EXISTS (SELECT 1 FROM item WHERE id = new.item_id))
