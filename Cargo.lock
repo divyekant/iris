@@ -1132,6 +1132,7 @@ dependencies = [
  "rusqlite",
  "rustls",
  "serde",
+ "socket2",
  "toml",
 ]
 
