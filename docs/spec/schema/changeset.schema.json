@@ -1011,7 +1011,7 @@
           }
         },
         {
-          "$comment": "A checked draft of new mail (each state but denied) has a subject; a checked reply has none, because the subject of the parent decides it (send spec, section 1). A denied action keeps the args as the author wrote them.",
+          "$comment": "A checked draft of new mail has a subject; a checked reply has none, because the subject of the parent decides it (send spec, section 1).",
           "if": {
             "properties": {
               "verb": {
@@ -1021,25 +1021,11 @@
                 "required": [
                   "accounts"
                 ]
-              },
-              "decision": {
-                "required": [
-                  "state"
-                ],
-                "properties": {
-                  "state": {
-                    "type": "string",
-                    "not": {
-                      "const": "denied"
-                    }
-                  }
-                }
               }
             },
             "required": [
               "verb",
-              "targets",
-              "decision"
+              "targets"
             ]
           },
           "then": {
@@ -1063,25 +1049,11 @@
                 "required": [
                   "threads"
                 ]
-              },
-              "decision": {
-                "required": [
-                  "state"
-                ],
-                "properties": {
-                  "state": {
-                    "type": "string",
-                    "not": {
-                      "const": "denied"
-                    }
-                  }
-                }
               }
             },
             "required": [
               "verb",
-              "targets",
-              "decision"
+              "targets"
             ]
           },
           "then": {

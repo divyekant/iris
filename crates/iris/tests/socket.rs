@@ -581,3 +581,16 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
 }
+
+/// Until the apply and the release of a write verb exist, the command
+/// refuses `draft` and `send`, so no approved action has no apply path.
+#[test]
+fn the_write_verbs_wait_for_their_apply() {
+    let (store, d) = engine("write");
+    mailbox(&store);
+    for verb in ["draft", "send"] {
+        let r = json!({ "verb": verb, "targets": ["a-1"], "args": {} });
+        let e = socket::request(&d, "add", r).unwrap_err();
+        assert!(e.to_string().contains("not available yet"), "{verb}: {e}");
+    }
+}
