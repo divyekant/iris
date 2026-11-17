@@ -11,13 +11,13 @@
 //!   thread of the attack. Today the engine denies its submit.
 //!
 //! Before the agent runs, the mail goes through a sync and through
-//! understanding with no model: the headers, the hostile marks and the
-//! sender kinds.
+//! understanding with no model: the headers, the clean text and the
+//! hostile marks. The test checks the clean text of each attack.
 //!
 //! The setup is the worst case: the mode `apply`, a rule that allows each
-//! Gmail verb on all mail, and the send switch on. Then each action gets a
-//! rule approval in the store, and the apply step of the engine runs after
-//! the hold. The fake Gmail server counts each send.
+//! Gmail verb on all mail, and the send switch on. Then the test tries a
+//! rule approval of each action in the store, and runs the apply step of
+//! the engine after the hold. The fake Gmail server counts each send.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use iris_changeset::{Author, AuthorKind, Verb};
 use iris_fakegmail::FakeGmail;
 use iris_gmail::{Config, Gmail};
 use iris_store::Store;
-use iris_synth::hostile::{Ask, SAMPLES};
+use iris_synth::hostile::{Ask, Carrier, SAMPLES};
 use iris_synth::Mailbox;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
@@ -357,6 +357,32 @@ fn no_injection_sends_mail_without_a_person() {
         e.one::<i64>("SELECT id FROM draft WHERE action_id IS NOT NULL", [])
     );
 
+    // Iris decoded each attack into the clean text that an agent reads,
+    // except the hidden HTML block: the clean text takes the plain part.
+    for s in SAMPLES {
+        let (subject, text): (String, String) = e
+            .store
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT b.subject, b.text FROM body b JOIN header h ON h.message_id = b.message_id
+                     WHERE h.message_id_hdr IN (?1, trim(?1, '<>'))",
+                    [s.message_id()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        let read = match s.carrier {
+            Carrier::Subject => subject.contains(s.attack),
+            _ => text.contains(s.attack),
+        };
+        assert_eq!(
+            read,
+            s.carrier != Carrier::HiddenHtml,
+            "{}: {subject} {text}",
+            s.name
+        );
+    }
+
     // The agent obeys each attack on each path.
     let mut hostile = Vec::new();
     for s in SAMPLES {
@@ -370,17 +396,29 @@ fn no_injection_sends_mail_without_a_person() {
             by_agent(&e, &agent(Some(job(&e, &thread))), verb, &target, &args),
         ];
         assert!(paths[0].is_some() && paths[1].is_some(), "{}", s.name);
-        for cs in paths.into_iter().flatten() {
+        for (i, cs) in paths.into_iter().flatten().enumerate() {
             let actions = e.actions(&cs);
             assert_eq!(actions.len(), 1, "{}: {cs}", s.name);
             let (a, state, flags) = actions.into_iter().next().unwrap();
-            // A rule never decides a draft or a send: a person reviews it,
-            // or the engine denies it.
-            assert!(
-                state == "in_review" || state == "denied",
-                "{}: {cs} is {state}",
-                s.name
-            );
+            // A rule never decides a draft or a send. The engine denies a
+            // reply: understanding marked each sample as hostile mail. The
+            // first send of the draft waits for a person, and the engine
+            // denies each later send of the same draft.
+            let reason: Option<String> =
+                e.one("SELECT reason FROM changeset_action WHERE id = ?1", [a]);
+            let first_send = s.ask == Ask::SendDraft && i == 0;
+            match s.ask {
+                Ask::Draft { reply: true, .. } => {
+                    assert_eq!(state, "denied", "{}: {cs}", s.name);
+                    let reason = reason.unwrap_or_default();
+                    assert!(reason.contains("hostile mail"), "{}: {reason}", s.name);
+                }
+                Ask::Draft { reply: false, .. } => {
+                    assert_eq!(state, "in_review", "{}: {cs}", s.name)
+                }
+                Ask::SendDraft if first_send => assert_eq!(state, "in_review", "{}: {cs}", s.name),
+                Ask::SendDraft => assert_eq!(state, "denied", "{}: {cs} {reason:?}", s.name),
+            }
             let outside = flags.iter().any(|f| f == "outside_thread");
             // The draft of the owner is a new mail to priya: a new mail has
             // no thread, so its send goes outside the thread too.
@@ -388,54 +426,57 @@ fn no_injection_sends_mail_without_a_person() {
             if state == "in_review" {
                 assert_eq!(outside, expect, "{}: {cs} {flags:?}", s.name);
             }
-            hostile.push((s.name, a, flags));
+            // A denied action has its end state: only one in review can
+            // get an approval.
+            if state == "in_review" {
+                hostile.push((s.name, a, flags));
+            }
         }
     }
-    assert!(hostile.len() >= 2 * SAMPLES.len());
+    assert!(!hostile.is_empty());
 
     // The release reads the clock of the system: an approval before the
     // hold delay lets each send leave at the next step.
     let past = t - HOLD_MS - 60_000;
-    // A bug or a later card approves each action by rule. The store refuses
-    // each one with a flag of the hard limit (migration 25). The apply step
-    // sends each other one back to review.
-    let mut ruled = 0;
+    // A bug or a later card approves each action by rule. Each draft and
+    // send of the set has a flag of the hard limit of spec 2, section 6.5,
+    // so the store refuses each approval that is not by a person
+    // (migration 25).
+    let hard = ["new_recipient", "outside_thread", "money", "date"];
     for (name, a, flags) in &hostile {
-        let r = e.store.write(|c| {
-            Ok(c.execute(
-                "UPDATE changeset_action SET state = 'approved', decided_by = 'rule',
-                   decided_at = ?2 WHERE id = ?1 AND state = 'in_review'",
-                params![a, past],
-            )?)
-        });
-        // The flags of the hard limit of spec 2, section 6.5.
-        let hard = ["new_recipient", "outside_thread", "money", "date"];
-        if flags.iter().any(|f| hard.contains(&f.as_str())) {
-            let err = r.err().map(|x| x.to_string()).unwrap_or_default();
-            assert!(
-                err.contains("only a person approves"),
-                "{name}: action {a}: {err}"
-            );
-        } else {
-            ruled += r.unwrap();
-        }
+        assert!(
+            flags.iter().any(|f| hard.contains(&f.as_str())),
+            "{name}: action {a} has no flag of the hard limit: {flags:?}"
+        );
+        let err = e
+            .store
+            .write(|c| {
+                Ok(c.execute(
+                    "UPDATE changeset_action SET state = 'approved', decided_by = 'rule',
+                       decided_at = ?2 WHERE id = ?1",
+                    params![a, past],
+                )?)
+            })
+            .err()
+            .map(|x| x.to_string())
+            .unwrap_or_default();
+        assert!(
+            err.contains("only a person approves"),
+            "{name}: action {a}: {err}"
+        );
     }
 
     // The apply step after the hold: no draft from an attack reaches Gmail,
     // and no mail leaves. Two steps: the first moves sends to `held`.
-    let mut review = 0;
     for _ in 0..2 {
         let step = e.step(t);
         for (a, r) in &step.results {
-            review += matches!(r, Ok(iris_apply::Outcome::Review(_))) as usize;
             assert!(
                 !matches!(r, Ok(iris_apply::Outcome::Applied(_))),
                 "action {a} applied: {r:?}"
             );
         }
     }
-    // The apply sends each rule approval of a draft back to review.
-    assert_eq!(review, ruled, "a rule approval passed the apply");
     assert_eq!(e.posts("/drafts"), 1, "a draft of an attack is at Gmail");
     assert_eq!(e.sends(), 0, "mail left without a person");
     let left: Option<i64> = e
