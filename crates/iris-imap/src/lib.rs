@@ -394,6 +394,7 @@ impl<S: Read + Write> Session<S> {
         let tag = format!("a{}", self.tag);
         self.send(format!("{tag} AUTHENTICATE {mech}\r\n").as_bytes())?;
         let mut sent = false;
+        let mut ended = false;
         loop {
             let buf = self.read_response(None)?;
             if bad_outcome(&buf) {
@@ -410,7 +411,13 @@ impl<S: Read + Write> Session<S> {
                     sent = true;
                 }
                 // An error challenge (XOAUTH2): an empty line ends it, then the server says NO.
-                Response::Continue(_) => self.send(b"\r\n")?,
+                Response::Continue(_) if !ended => {
+                    self.send(b"\r\n")?;
+                    ended = true;
+                }
+                Response::Continue(_) => {
+                    return Err(Error::Protocol("sign-in challenge after the end".into()))
+                }
                 Response::Done {
                     tag: t,
                     status,

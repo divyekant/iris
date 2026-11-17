@@ -268,6 +268,12 @@ fn other_uid() {
 }
 
 #[test]
+fn endless_challenge() {
+    let s = Script(Cursor::new(b"* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\na1 OK done\r\n+ \r\n+ x\r\n+ x\r\n+ x\r\n".to_vec()));
+    assert!(matches!(Session::start(s, PASS), Err(Error::Protocol(_))));
+}
+
+#[test]
 fn rev2_only() {
     let s = Script(Cursor::new(
         b"* OK ready\r\n* CAPABILITY IMAP4rev2 AUTH=PLAIN\r\na1 OK done\r\n".to_vec(),
