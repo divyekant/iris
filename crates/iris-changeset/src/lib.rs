@@ -457,7 +457,9 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
 
 /// Expire each open action 14 days or more after its submit (section 5.5):
 /// `proposed`, `in_review` and `approved`, by `expiry`. An action whose
-/// provider calls started (a ledger row in `writing`) continues to its end. `held`
+/// provider calls started (a ledger row in `writing`) continues to its end.
+/// An undo (migration 23) does not expire: the person approved it, and step
+/// 2 of a `trash` undo must apply after a long stop (section 7.4). `held`
 /// (release 3) does not expire. Gives the count of expired actions. The
 /// engine runs it on each tick.
 pub fn expire(store: &Store, now_ms: i64) -> Result<usize> {
@@ -472,6 +474,7 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
          WHERE state IN ('proposed', 'in_review', 'approved', 'held')
            AND NOT EXISTS (SELECT 1 FROM ledger l
                            WHERE l.action_id = changeset_action.id AND l.state = 'writing')
+           AND NOT EXISTS (SELECT 1 FROM ledger_undo u WHERE u.action_id = changeset_action.id)
            AND submitted_at <= ?1 - ?2",
         params![now_ms, EXPIRY_MS],
     )?)
@@ -618,7 +621,7 @@ pub fn submit_in(
                 return Err(Error::Denied(why));
             }
         }
-        let mut denial = match supported(c, verb, &args)? {
+        let mut denial = match supported(c, id, verb, &args)? {
             Err(why) => Some(why),
             Ok(()) => resolved,
         };
@@ -662,10 +665,17 @@ pub fn submit_in(
         // `first_contact` finds no thread for it. A send whose thread has
         // only gone messages has no message row but keeps its draft thread.
         let mailbox = !STATE_VERBS.contains(&verb.as_str());
+        // The flag `bulk` does not apply to an undo (section 7.4).
+        let undo: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
+            [id],
+            |r| r.get(0),
+        )?;
         let mut flags = Vec::new();
         if mailbox
             && count > 0
             && !WRITE_VERBS.contains(&verb.as_str())
+            && !undo
             && (count > BULK || total > BULK)
         {
             flags.push("bulk");
@@ -910,9 +920,14 @@ const SYSTEM_LABELS: [&str; 9] = [
     "CHAT",
 ];
 
-/// The argument checks of each verb (section 4). Gives the reason of the
-/// denial for an action that is not valid.
-fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Result<(), String>> {
+/// The argument checks of each verb (section 4), for the action row
+/// `action`. Gives the reason of the denial for an action that is not valid.
+fn supported(
+    c: &Connection,
+    action: i64,
+    verb: Verb,
+    args: &str,
+) -> Result<std::result::Result<(), String>> {
     // add_action writes an object. Another writer of the table may not.
     let Ok(args) = serde_json::from_str::<Map<String, Value>>(args) else {
         return Ok(Err("the arguments are not a JSON object".into()));
@@ -941,8 +956,22 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
             (Some(Value::String(f)), Some(_), 2) if !f.is_empty() => Ok(()),
             _ => Err("correct needs {\"field\": \"...\", \"value\": ...}".into()),
         },
-        // The undo of a trash (R2-03, section 7.4) makes its own changeset.
-        Verb::Untrash => Err("only the undo of a trash makes untrash".into()),
+        // Only the undo of a trash makes untrash (section 7.4): its action
+        // is step 1 of the undo of a `trash` entry (migration 23).
+        Verb::Untrash => {
+            let undo: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id
+                                JOIN changeset_action o ON o.id = l.action_id
+                                WHERE u.action_id = ?1 AND u.step = 1 AND o.verb = 'trash')",
+                [action],
+                |r| r.get(0),
+            )?;
+            match (undo, args.is_empty()) {
+                (true, true) => Ok(()),
+                (true, false) => Err("untrash takes no arguments".into()),
+                (false, _) => Err("only the undo of a trash makes untrash".into()),
+            }
+        }
         // The content checks need the target: see check_draft.
         Verb::Draft => Ok(()),
         Verb::Send => {
@@ -1024,6 +1053,19 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return bad();
     };
     let state = STATE_VERBS.contains(&verb.as_str());
+    // The undo of a ledger entry (section 7.4) names the entry. Its
+    // messages come from the ledger in SQL, never as a list in memory.
+    if group == "ledger" && !state {
+        return resolve_undo(c, action, ids);
+    }
+    let linked: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)",
+        [action],
+        |r| r.get(0),
+    )?;
+    if linked {
+        return Ok(Some("an undo targets its ledger entry".into()));
+    }
     let write = WRITE_VERBS.contains(&verb.as_str());
     match (verb, group.as_str()) {
         (Verb::Draft, "accounts" | "threads") | (Verb::Send, "drafts") => {}
@@ -1164,6 +1206,43 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         return Ok(Some("the targets are in two or more accounts".into()));
     }
     Ok(None)
+}
+
+/// The messages of an undo: the messages with `done` of the ledger entry
+/// that the action undoes, that are not gone (migration 23). Step 2 of the
+/// undo of a `trash` takes only those with no `INBOX` in `pre`.
+fn resolve_undo(c: &Connection, action: i64, ids: &[Value]) -> Result<Option<String>> {
+    let ledger = match ids {
+        [Value::String(id)] => id
+            .strip_prefix("l-")
+            .and_then(|n| n.parse::<i64>().ok())
+            .filter(|n| *n > 0 && format!("l-{n}") == *id),
+        _ => None,
+    };
+    let Some(ledger) = ledger else {
+        return Ok(Some("the targets are not valid".into()));
+    };
+    let linked: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1 AND ledger_id = ?2)",
+        params![action, ledger],
+        |r| r.get(0),
+    )?;
+    if !linked {
+        return Ok(Some(
+            "only an undo of the entry targets a ledger entry".into(),
+        ));
+    }
+    let n = c.execute(
+        "INSERT INTO action_message(action_id, message_id)
+         SELECT ?1, lm.message_id FROM ledger_undo u
+         JOIN ledger_message lm ON lm.ledger_id = u.ledger_id
+         JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
+         WHERE u.action_id = ?1 AND lm.done = 1
+           AND (u.step = 1
+                OR NOT EXISTS (SELECT 1 FROM json_each(lm.pre) WHERE value = 'INBOX'))",
+        [action],
+    )?;
+    Ok((n == 0).then(|| "the targets have no message to change".into()))
 }
 
 /// The checks of a write verb (`docs/specs/2026-11-16-send.md`, sections 4

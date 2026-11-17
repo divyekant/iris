@@ -1,11 +1,12 @@
 //! The apply of one approved changeset action to Gmail, with its ledger
-//! entry (specification 2, sections 7.1 to 7.3), for the verbs `archive`,
-//! `inbox`, `read`, `unread`, `trash`, `label` and `unlabel`.
+//! entry (specification 2, sections 7.1 to 7.4), for the verbs `archive`,
+//! `inbox`, `read`, `unread`, `trash`, `label` and `unlabel`, and
+//! `untrash` of an undo. [`undo`] makes the undo of a ledger entry.
 //!
 //! The steps of [`apply`]:
 //!
 //! 1. Expire an action 14 days after its submit. Wait while the active
-//!    policy has the mode `observe`. Send an action that a rule approved
+//!    policy has the mode `observe` (not for an undo). Send an action that a rule approved
 //!    to review (issue #168). Deny an action whose hash does not agree with
 //!    its rows. Before these checks, run the recovery of each ledger row
 //!    of the account in `writing`. For `label` and `unlabel`, find the
@@ -16,7 +17,8 @@
 //! 3. In one transaction, claim the action: the ledger row in `writing`,
 //!    with one row for each other message, its `pre`, `post` and call.
 //! 4. For each call: save its number, call Gmail (one `batchModify` call
-//!    for each 1,000 messages, or one `trash` call for each message), save
+//!    for each 1,000 messages, or one `trash` or `untrash` call for each
+//!    message), save
 //!    `done` for its messages and write the change to the mirror.
 //! 5. Set the state `applied`, or `failed`. The trigger `ledger_state`
 //!    moves the action to the same state.
@@ -40,6 +42,9 @@ use iris_store::Store;
 use rusqlite::{params, Connection, OptionalExtension};
 use unicase::UniCase;
 
+mod undo;
+pub use undo::undo;
+
 #[derive(Debug)]
 pub enum Error {
     Store(iris_store::Error),
@@ -61,6 +66,8 @@ pub enum Error {
     /// The verb has no Gmail apply: a state verb applies with
     /// [`apply_state`], and a `send` with [`release`].
     Verb(String),
+    /// The ledger entry has no undo now, with the reason ([`undo`]).
+    Undo(String),
     /// A sent copy had other content than the approved content (ledger
     /// error [`SENT_OTHER`]). Each release stops until the owner checks
     /// assumption 6 of the send spec. The action stays as it was.
@@ -76,6 +83,7 @@ impl std::fmt::Display for Error {
             Error::Busy => write!(f, "another apply runs now"),
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
+            Error::Undo(why) => write!(f, "no undo: {why}"),
             Error::SendStopped => write!(f, "{SENT_OTHER}: each send stops until the owner checks"),
         }
     }
@@ -124,7 +132,8 @@ pub enum Outcome {
     /// The state is `in_review` by `engine`, with this reason: a rule
     /// approved the action.
     Review(String),
-    /// The mode is `observe`. The action stays `approved` and waits.
+    /// The mode is `observe`, or the action is step 2 of an undo and step 1
+    /// did not end. The action stays `approved` and waits.
     Waiting,
     /// 14 days passed after the submit: the state is `expired`.
     Expired,
@@ -140,6 +149,9 @@ pub enum Outcome {
     Pending,
 }
 
+/// The name of the `batchModify` call in `ops`.
+const BATCH: &str = "batchModify";
+
 /// An open action expires 14 days after its submit (section 5.5).
 const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 
@@ -147,38 +159,53 @@ const EXPIRY_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 struct Change {
     add: Vec<String>,
     remove: Vec<String>,
-    /// `messages.trash` for each message, not `batchModify`.
-    trash: bool,
+    /// The provider call: `batchModify` for each 1,000 messages, or
+    /// `trash` or `untrash` for each message.
+    call: &'static str,
 }
 
 impl Change {
     /// The change of a verb with no label argument.
     fn of(verb: &str) -> Option<Change> {
-        let (add, remove, trash): (&[&str], &[&str], bool) = match verb {
-            "archive" => (&[], &["INBOX"], false),
-            "inbox" => (&["INBOX"], &[], false),
-            "read" => (&[], &["UNREAD"], false),
-            "unread" => (&["UNREAD"], &[], false),
-            "trash" => (&["TRASH"], &[], true),
+        let (add, remove, call): (&[&str], &[&str], &str) = match verb {
+            "archive" => (&[], &["INBOX"], BATCH),
+            "inbox" => (&["INBOX"], &[], BATCH),
+            "read" => (&[], &["UNREAD"], BATCH),
+            "unread" => (&["UNREAD"], &[], BATCH),
+            "trash" => (&["TRASH"], &[], "trash"),
+            // Only an undo makes it (section 7.4).
+            "untrash" => (&[], &["TRASH"], "untrash"),
             _ => return None,
         };
         let own = |v: &[&str]| v.iter().map(|l| l.to_string()).collect();
         Some(Change {
             add: own(add),
             remove: own(remove),
-            trash,
+            call: Change::call_of(call)?,
         })
+    }
+
+    /// The static name of a provider call.
+    fn call_of(call: &str) -> Option<&'static str> {
+        [BATCH, "trash", "untrash"].into_iter().find(|c| *c == call)
+    }
+
+    /// One provider call for each message.
+    fn single(&self) -> bool {
+        self.call != BATCH
     }
 
     /// The change that a ledger row recorded in `ops` (see [`Change::ops`]).
     /// The recovery uses it: the label IDs of `label` and `unlabel` are
     /// known only at the claim.
     fn of_ledger(c: &Connection, ledger: i64) -> rusqlite::Result<Change> {
-        let trash: bool = c.query_row(
-            "SELECT json_extract(ops, '$.call') = 'trash' FROM ledger WHERE id = ?1",
+        let call: String = c.query_row(
+            "SELECT json_extract(ops, '$.call') FROM ledger WHERE id = ?1",
             [ledger],
             |r| r.get(0),
         )?;
+        // The claim wrote one of the names of `call_of`.
+        let call = Change::call_of(&call).ok_or(rusqlite::Error::InvalidQuery)?;
         let list = |key: &str| -> rusqlite::Result<Vec<String>> {
             let mut st = c.prepare(&format!(
                 "SELECT value FROM ledger, json_each(ledger.ops, '$.{key}')
@@ -190,7 +217,7 @@ impl Change {
         Ok(Change {
             add: list("add")?,
             remove: list("remove")?,
-            trash,
+            call,
         })
     }
 
@@ -203,7 +230,11 @@ impl Change {
             .add
             .iter()
             .chain(&self.remove)
-            .chain(if self.trash { &inbox[..] } else { &[] })
+            .chain(if self.call == "trash" {
+                &inbox[..]
+            } else {
+                &[]
+            })
             .filter(|w| labels.contains(w))
             .collect();
         labels_json(watched)
@@ -213,7 +244,7 @@ impl Change {
     /// and the number of calls.
     fn ops(&self, calls: i64) -> String {
         serde_json::json!({
-            "call": if self.trash { "trash" } else { "batchModify" },
+            "call": self.call,
             "add": self.add,
             "remove": self.remove,
             "calls": calls,
@@ -353,12 +384,12 @@ pub fn apply(
         ("label" | "unlabel", Some(_)) => Change {
             add: Vec::new(),
             remove: Vec::new(),
-            trash: false,
+            call: BATCH,
         },
         _ if write_verb => Change {
             add: Vec::new(),
             remove: Vec::new(),
-            trash: false,
+            call: BATCH,
         },
         _ => Change::of(&verb).ok_or(Error::Verb(verb.clone()))?,
     };
@@ -398,9 +429,41 @@ pub fn apply(
     if verb == "draft" {
         return send::draft(&mut run, action);
     }
+    // The undo of `label` or `unlabel` changes the label of the entry, by
+    // its ID: a rename at Gmail after the entry does not change it.
+    let undo_label: Option<String> = match &label {
+        Some(_) => store.read(|c| {
+            Ok(c.query_row(
+                "SELECT coalesce(json_extract(l.ops, '$.add[0]'), json_extract(l.ops, '$.remove[0]'))
+                 FROM ledger_undo u JOIN ledger l ON l.id = u.ledger_id WHERE u.action_id = ?1",
+                [action],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+        })?,
+        None => None,
+    };
+    if let Some(id) = undo_label {
+        // A label that the person deleted at Gmail stays deleted: the undo
+        // is denied, with no write call.
+        let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
+        let Some(l) = labels.iter().find(|l| l.id == id) else {
+            let reason = "The label of the entry is not at Gmail now.";
+            decide(store, action, "denied", reason)?;
+            return Ok(Outcome::Denied(reason.into()));
+        };
+        // The mirror gets the name of now, also after a rename at Gmail.
+        store.put_labels(account, &[(&l.id, &l.name, "user")])?;
+        match verb.as_str() {
+            "label" => change.add.push(id),
+            _ => change.remove.push(id),
+        }
+    }
     // Step 1: the user label of `label` and `unlabel`. A label that Gmail
     // does not have is made now, with no ledger entry: it stays after an
     // undo (section 7.2).
+    let label = label.filter(|_| change.add.is_empty() && change.remove.is_empty());
     if let Some(name) = &label {
         let labels = run.call(|g, t| g.labels(t)).map_err(Error::Gmail)?;
         let id = match find_label(&labels, name) {
@@ -442,26 +505,51 @@ pub fn apply(
     })?;
     let mut after = 0;
     loop {
-        // A gone message has no provider ID here.
-        let page: Vec<(i64, Option<String>)> = store.read(|c| {
+        // A gone message has no provider ID here. An undo of the entry `o`
+        // changes a message only if `o` changed it, and no later entry
+        // changed it, except the actions of the undos of `o`. Step 2 of the
+        // undo of a `trash` changes only a message that an `untrash` of an
+        // undo of `o` changed (section 7.4).
+        let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
             let mut st = c.prepare_cached(
-                "SELECT am.message_id, m.provider_id FROM action_message am
+                "SELECT am.message_id, m.provider_id,
+                   u.ledger_id IS NULL
+                   OR (EXISTS (SELECT 1 FROM ledger_message lm
+                               WHERE lm.ledger_id = u.ledger_id
+                                 AND lm.message_id = am.message_id AND lm.done = 1)
+                       AND NOT EXISTS (
+                         SELECT 1 FROM ledger_message lm JOIN ledger l ON l.id = lm.ledger_id
+                         WHERE lm.message_id = am.message_id AND l.id > u.ledger_id
+                           AND (lm.done = 1 OR lm.listed = 'unknown')
+                           AND l.action_id NOT IN (SELECT action_id FROM ledger_undo
+                                                   WHERE ledger_id = u.ledger_id))
+                       AND (u.step = 1 OR EXISTS (
+                         SELECT 1 FROM ledger_undo f JOIN ledger l ON l.action_id = f.action_id
+                         JOIN ledger_message lm ON lm.ledger_id = l.id
+                         WHERE f.ledger_id = u.ledger_id AND f.step = 1
+                           AND lm.message_id = am.message_id AND lm.done = 1)))
+                 FROM action_message am
+                 LEFT JOIN ledger_undo u ON u.action_id = am.action_id
                  LEFT JOIN message m ON m.id = am.message_id AND m.gone_at IS NULL
                  WHERE am.action_id = ?1 AND am.message_id > ?2
                  ORDER BY am.message_id LIMIT ?3",
             )?;
             let rows = st.query_map(params![action, after, BATCH_LIMIT as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })?;
-        let Some(&(last, _)) = page.last() else {
+        let Some(&(last, ..)) = page.last() else {
             break;
         };
         after = last;
         let mut seen: Vec<(i64, Vec<String>)> = Vec::new();
         let mut todo: Vec<(i64, String)> = Vec::new();
-        for (id, provider_id) in page {
+        for (id, provider_id, eligible) in page {
+            if !eligible {
+                run.counts.unchanged += 1;
+                continue;
+            }
             let Some(provider_id) = provider_id else {
                 run.counts.gone.push(id);
                 continue;
@@ -623,7 +711,7 @@ impl<'a, 'b> Run<'a, 'b> {
                 return Ok(Ok(None));
             }
             let n: i64 = tx.query_row("SELECT count(*) FROM temp.apply_todo", [], |r| r.get(0))?;
-            let calls = if change.trash {
+            let calls = if change.single() {
                 n
             } else {
                 (n + BATCH_LIMIT as i64 - 1) / BATCH_LIMIT as i64
@@ -641,7 +729,7 @@ impl<'a, 'b> Run<'a, 'b> {
                  SELECT ?1, message_id, CASE WHEN ?2 THEN n ELSE (n - 1) / ?3 + 1 END, pre, ?4
                  FROM (SELECT message_id, pre, row_number() OVER (ORDER BY message_id) AS n
                        FROM temp.apply_todo)",
-                params![ledger, change.trash, BATCH_LIMIT as i64, labels_json(&change.add)],
+                params![ledger, change.single(), BATCH_LIMIT as i64, labels_json(&change.add)],
             )?;
             tx.execute("DELETE FROM temp.apply_todo", [])?;
             Ok(Ok(Some(ledger)))
@@ -711,10 +799,17 @@ impl<'a, 'b> Run<'a, 'b> {
             if live.is_empty() {
                 continue;
             }
-            let result = if change.trash {
+            let result = if change.single() {
                 let (id, p) = &live[0];
-                self.call(|g, t| g.trash(t, p))
-                    .map(|m| vec![(*id, m.label_ids)])
+                let untrash = change.call == "untrash";
+                self.call(|g, t| {
+                    if untrash {
+                        g.untrash(t, p)
+                    } else {
+                        g.trash(t, p)
+                    }
+                })
+                .map(|m| vec![(*id, m.label_ids)])
             } else {
                 let ids: Vec<&str> = live.iter().map(|(_, p)| p.as_str()).collect();
                 let add: Vec<&str> = change.add.iter().map(String::as_str).collect();
@@ -731,7 +826,7 @@ impl<'a, 'b> Run<'a, 'b> {
                             params![ledger, k],
                         )?)
                     })?;
-                    if change.trash {
+                    if change.single() {
                         mirror(self.store, self.account, &labels);
                     } else {
                         let ids: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
@@ -776,11 +871,45 @@ impl<'a, 'b> Run<'a, 'b> {
         });
         let state = if error.is_some() { "failed" } else { "applied" };
         self.store.write(|tx| {
-            Ok(tx.execute(
+            tx.execute(
                 "UPDATE ledger SET state = ?2, error = ?3, history_id = ?4
                  WHERE id = ?1 AND state = 'writing'",
                 params![ledger, state, error, history],
-            )?)
+            )?;
+            // An undo whose actions are each `applied` makes its entry
+            // `undone`, with the entry of step 1 (section 7.4). After a failed
+            // action of the undo, the entry keeps its state, and the person
+            // can undo it again: the next undo skips each message that is
+            // back.
+            if state == "applied" {
+                tx.execute(
+                    "UPDATE ledger SET state = 'undone', undone_by = (
+                       SELECT l1.id FROM ledger n
+                       JOIN changeset_action a ON a.id = n.action_id
+                       JOIN changeset_action a1 ON a1.changeset_id = a.changeset_id
+                       JOIN ledger_undo u1 ON u1.action_id = a1.id AND u1.step = 1
+                       JOIN ledger l1 ON l1.action_id = a1.id
+                       WHERE n.id = ?1)
+                     WHERE id = (SELECT u.ledger_id FROM ledger_undo u
+                                 JOIN ledger n ON n.action_id = u.action_id WHERE n.id = ?1)
+                       AND state IN ('applied', 'failed')
+                       AND NOT EXISTS (
+                         SELECT 1 FROM ledger n JOIN changeset_action a ON a.id = n.action_id
+                         JOIN changeset_action x ON x.changeset_id = a.changeset_id
+                         WHERE n.id = ?1 AND x.state IS NOT 'applied')
+                       -- No step 1 entry: no undo to record, and the end of
+                       -- this entry must not fail.
+                       AND EXISTS (
+                         SELECT 1 FROM ledger n
+                         JOIN changeset_action a ON a.id = n.action_id
+                         JOIN changeset_action a1 ON a1.changeset_id = a.changeset_id
+                         JOIN ledger_undo u1 ON u1.action_id = a1.id AND u1.step = 1
+                         JOIN ledger l1 ON l1.action_id = a1.id
+                         WHERE n.id = ?1)",
+                    [ledger],
+                )?;
+            }
+            Ok(())
         })?;
         let counts = self.counts(ledger)?;
         Ok(match error {
@@ -1045,7 +1174,16 @@ fn gate(tx: &Connection, action: i64) -> iris_store::Result<Option<Outcome>> {
     if expire(tx, action)? {
         return Ok(Some(Outcome::Expired));
     }
-    if iris_policy::active(tx)?.policy.mode == Mode::Observe {
+    // The mode `observe` does not hold an undo (section 7.4). Step 2 of the
+    // undo of a `trash` waits for the end of step 1.
+    let (undo, first_open): (bool, bool) = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1),
+                EXISTS (SELECT 1 FROM undo_pair p JOIN changeset_action a ON a.id = p.first
+                        WHERE p.second = ?1 AND a.state IN ('proposed', 'in_review', 'approved'))",
+        [action],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if first_open || (!undo && iris_policy::active(tx)?.policy.mode == Mode::Observe) {
         return Ok(Some(Outcome::Waiting));
     }
     if let Some(why) = deny_outside_grant(tx, action)? {
@@ -1100,6 +1238,7 @@ fn expire(tx: &Connection, action: i64) -> iris_store::Result<bool> {
            decided_at = CAST(unixepoch('subsec') * 1000 AS INTEGER)
          WHERE id = ?1 AND state IN ('approved', 'held')
            AND NOT EXISTS (SELECT 1 FROM ledger WHERE action_id = ?1 AND state = 'writing')
+           AND NOT EXISTS (SELECT 1 FROM ledger_undo WHERE action_id = ?1)
            AND CAST(unixepoch('subsec') * 1000 AS INTEGER) - submitted_at >= ?2",
         params![action, EXPIRY_MS],
     )?;

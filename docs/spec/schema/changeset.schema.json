@@ -1118,7 +1118,7 @@
       ]
     },
     "targets": {
-      "$comment": "IDs of one kind: threads, messages, items, drafts or accounts. A sender is not a target (section 5.6). drafts and accounts are the targets of the write verbs (release 3).",
+      "$comment": "IDs of one kind: threads, messages, items, drafts, accounts or ledger entries. A sender is not a target (section 5.6). drafts and accounts are the targets of the write verbs (release 3). Only an undo targets a ledger entry (section 7.4).",
       "type": "object",
       "additionalProperties": false,
       "minProperties": 1,
@@ -1162,6 +1162,16 @@
           "maxItems": 1,
           "items": {
             "$ref": "#/$defs/accountId"
+          }
+        },
+        "ledger": {
+          "$comment": "The ledger entry that the undo reverses. Submit resolves its messages with done.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^l-[1-9][0-9]*$"
           }
         }
       }
