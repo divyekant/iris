@@ -1009,6 +1009,90 @@
               }
             }
           }
+        },
+        {
+          "$comment": "A checked draft of new mail (each state but denied) has a subject; a checked reply has none, because the subject of the parent decides it (send spec, section 1). A denied action keeps the args as the author wrote them.",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              },
+              "targets": {
+                "required": [
+                  "accounts"
+                ]
+              },
+              "decision": {
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "not": {
+                      "const": "denied"
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "verb",
+              "targets",
+              "decision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "See the rule above: a checked reply has no subject.",
+          "if": {
+            "properties": {
+              "verb": {
+                "const": "draft"
+              },
+              "targets": {
+                "required": [
+                  "threads"
+                ]
+              },
+              "decision": {
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "not": {
+                      "const": "denied"
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "verb",
+              "targets",
+              "decision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "properties": {
+                  "subject": false
+                }
+              }
+            }
+          }
         }
       ]
     },

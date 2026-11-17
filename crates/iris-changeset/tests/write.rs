@@ -205,6 +205,16 @@ fn only_a_person_writes_into_a_hostile_thread() {
             "proposed"
         );
     }
+    // Each message of the thread is gone: the send still reads the thread
+    // of its draft, and the gone hostile message counts.
+    s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE thread_id = 1", [])?))
+        .unwrap();
+    let got = one(&s, AuthorKind::Agent, Verb::Send, &["d-1"], json!({}));
+    assert_eq!(state(&got), "denied");
+    assert!(got["decision"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("hostile"));
 }
 
 /// One draft has at most one send that can go out.

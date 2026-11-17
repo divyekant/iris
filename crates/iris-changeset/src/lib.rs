@@ -951,8 +951,9 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
 
 /// Spec 2, section 6.5: an author other than the person writes no mail
 /// into a thread with hostile mail. True if the action is such a write:
-/// each message of the threads of its resolved messages counts, not only
-/// the resolved ones. The apply checks it again.
+/// each message of the threads of its resolved messages and of its draft
+/// counts, also a gone message, not only the resolved ones. The apply
+/// checks it again.
 pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
     Ok(c.query_row(
         "SELECT cs.author_kind <> 'person' AND EXISTS (
@@ -960,7 +961,10 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
            LEFT JOIN header h ON h.message_id = m.id
            LEFT JOIN sender p ON p.address = h.from_addr
            WHERE m.thread_id IN (SELECT t.thread_id FROM action_message am
-                                 JOIN message t ON t.id = am.message_id WHERE am.action_id = a.id)
+                                 JOIN message t ON t.id = am.message_id WHERE am.action_id = a.id
+                                 UNION
+                                 SELECT d.thread_id FROM action_draft ad
+                                 JOIN draft d ON d.id = ad.draft_id WHERE ad.action_id = a.id)
              AND (m.hostile IS NOT NULL OR p.kind = 'hostile'))
          FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
         [action],
