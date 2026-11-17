@@ -20,6 +20,12 @@
       "type": "string",
       "format": "date-time"
     },
+    "utcDateTime": {
+      "$comment": "A date-time in UTC with three digits of milliseconds and Z, as the engine writes it. See docs/spec/03-job-workspace.md, section 2.",
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
     "date": {
       "type": "string",
       "format": "date"

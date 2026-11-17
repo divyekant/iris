@@ -14,8 +14,8 @@
       "uniqueItems": true,
       "items": { "type": "string" }
     },
-    "first": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
-    "last": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
+    "first": { "$ref": "urn:iris:model:0:common#/$defs/utcDateTime" },
+    "last": { "$ref": "urn:iris:model:0:common#/$defs/utcDateTime" },
     "from_them": { "type": "integer", "minimum": 0 },
     "from_you": { "type": "integer", "minimum": 0 },
     "threads": {

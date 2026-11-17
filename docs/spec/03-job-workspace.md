@@ -28,7 +28,7 @@ and a schema do not agree, the schema is correct and this text has a defect.
 | Your message | A message with the Gmail label `SENT`. |
 | Your address | The address of each account, and the `From` address of each of your messages. |
 | ID | The ID of a row, with its prefix: `j-` job, `t-` thread, `m-` message, `c-` commitment, `r-` record, `p-` sender. See specification 1, section 5.7. |
-| Date | An RFC 3339 date-time in UTC, with three digits of milliseconds and `Z`. Example: `2026-11-14T09:00:00.000Z`. |
+| Date | An RFC 3339 date-time in UTC, with three digits of milliseconds and `Z`. Example: `2026-11-14T09:00:00.000Z`. The thread files, the people files and `JOB.md` use only this form. `schema/common.schema.json` defines it as `utcDateTime`. |
 | One line | A value in which each control character (Unicode category `Cc`, also CR and LF) is changed into one space. |
 
 ## 3. The folder
@@ -170,6 +170,7 @@ from the messages in the thread files where the address is a party:
 
 The job document of the job (`schema/job.schema.json`). It holds the state
 and the events of the job. A job in the state `done` gets this file too.
+Its dates follow `schema/job.schema.json`.
 
 ## 9. `JOB.md`
 
@@ -225,6 +226,20 @@ rules:
 - Read the job, the scope and the mail in one read transaction, so that all
   files agree.
 - Let one build of a workspace run at a time.
+- Start a session of the job only after a build that ended with no error.
+
+### 11.1 Failure list
+
+| Case | Safe result |
+|---|---|
+| A path in the workspace is a symbolic link or a file that the agent made, in place of an owned path. | The build removes the link or the file as it is, and writes a new path. No file outside the workspace changes. |
+| The workspace path itself is a symbolic link or a file. | The build stops with an error. It writes nothing in the workspace or through the link. |
+| `.iris/` holds an entry that an earlier session left. | The build removes `.iris/` and makes it new and empty. |
+| A second build of the same workspace starts while one runs. | The second build waits for the lock beside the workspace. Two builds never use the same stage. |
+| A build stopped before the moves (a crash, an error). | The old owned paths stay. The stage beside the workspace stays. The next build removes the stage first. |
+| A build stopped during the moves. | An owned path can be absent. No session starts, because the build did not end with no error. The next build writes each owned path again. |
+| The scope changes during the build. | The files hold the scope of the read transaction. The next build takes the change. See the design spec, "The build", for the revoke rules of a session start. |
+| Any other error. | The build stops with an error. No session starts. The agent paths `drafts/` and `notes.md` do not change. |
 
 ## 12. A sample
 
