@@ -605,6 +605,9 @@ exit code 3.
 
 ### The command
 
+- `iris session-hold` is not a verb of the command line: the program
+  checks this first argument before it reads the command line, and the
+  verb list (and the MCP tools) does not show it.
 - `iris job run <j-id> --agent <name>` and `iris job stop <j-id>` are host
   verbs. They send a request on `iris.sock`, so only the engine starts and
   stops sessions.
@@ -618,8 +621,9 @@ exit code 3.
   start, a `launch_failed`, a stop before the start) is in the row, and
   `iris job session` shows it.
 - `iris job session <j-id>` (host verb) shows the last session of the job:
-  its ID, the agent, and its state (`starting`, `running`, `ending`,
-  `ended` with the end reason, or `reaped`). It reads the row of the store,
+  its ID, the agent, and its state: `starting` (open, no start),
+  `running` (open, started), `ending (<reason>)` (ended, not reaped yet)
+  or `ended (<reason>)` (ended and reaped). It reads the row of the store,
   so it works after a time-out or a lost connection of `iris job run`.
 - If the answer of `job.run` is lost (a time-out, a broken connection),
   `iris job run` prints that the result is unknown and tells the person to
@@ -879,8 +883,9 @@ and `dependsOn` on the board.
 | R4-04g | The hold helper in `iris-session`. | R4-04c |
 | R4-04h | The launch and the reap check (`iris_session::reap::reap_check`) in `iris-session`, and the fix of #432. | R4-04g |
 | R4-04d | The egress proxy in `iris-session`. | R4-04 |
-| R4-04e | The engine: supervisor (it calls the reap check of R4-04h), requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
-| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
+| R4-04e | The engine sessions: the supervisor (it calls the reap check of R4-04h), the end of the open sessions at the engine start, the egress port of each session, `iris job run`, `iris job stop` and `iris job session`, and the hidden `iris session-hold`. | R4-04h, R4-04d |
+| R4-04i | The session socket (`status`, and the verbs of R4-03 as the author of the session) and session mode of the command. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04e |
+| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04i |
 
 R4-05 (the isolation of each system) depends on R4-04c, R4-04d and R4-04g. The
 cards that need a running session (R4-08, R4-11, R5-04) depend on R4-04e.

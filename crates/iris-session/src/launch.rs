@@ -75,6 +75,19 @@ pub struct Begun {
     adapter: Adapter,
 }
 
+impl Begun {
+    /// The job of the session.
+    pub fn job(&self) -> i64 {
+        self.job
+    }
+
+    /// The allowed hosts of the adapter. If there is none, the session
+    /// gets no egress port.
+    pub fn allow_hosts(&self) -> &[String] {
+        &self.adapter.allow_hosts
+    }
+}
+
 /// A session after the gate: the agent runs.
 pub struct Running {
     pub session: i64,

@@ -45,3 +45,9 @@ tokio = { version = "1", default-features = false, features = ["rt", "net", "mac
 iris-spec = { version = "0.0.0", path = "../iris-spec" }
 iris-fakegmail = { version = "0.0.0", path = "../iris-fakegmail" }
 iris-synth = { version = "0.0.0", path = "../iris-synth" }
+
+# The engine session tests run their own main: the test program is also the
+# hold helper of each session that it starts.
+[[test]]
+name = "engine_sessions"
+harness = false

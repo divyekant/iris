@@ -323,6 +323,19 @@ pub fn answer_as(
     }
 }
 
+/// The `job` argument: a job ID such as `j-3`.
+fn job_arg(args: &serde_json::Map<String, Value>) -> Result<i64, Failure> {
+    let t = text(args, "job")?.ok_or_else(|| usage("give the job, for example j-3"))?;
+    iris_job::parse_job_id(t).ok_or_else(|| usage(format!("{t} is not a job ID")))
+}
+
+/// The sessions of this engine.
+fn sessions() -> Result<&'static Arc<crate::sessions::Sessions>, Failure> {
+    crate::sessions::SESSIONS
+        .get()
+        .ok_or_else(|| Failure::new(code::ERROR, "this engine runs no sessions"))
+}
+
 fn usage(why: impl Into<String>) -> Failure {
     Failure::new(code::USAGE, why)
 }
@@ -447,6 +460,35 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             let cs = need()?;
             iris_changeset::revise(store, cs, me).map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
+        }
+        // The host verbs of sessions (docs/specs/2026-11-17-session-launcher.md,
+        // "The command"). Only the person runs them: a session cannot start
+        // or stop a session.
+        Some(v @ ("job.run" | "job.stop")) if session => Err(Failure::new(
+            code::DENIED,
+            format!("{v} is a host verb: a session cannot run it"),
+        )),
+        Some("job.run") => {
+            only(&["job", "agent"])?;
+            let job = job_arg(args)?;
+            let agent = text(args, "agent")?.ok_or_else(|| usage("give the agent"))?;
+            let session = sessions()?
+                .run(job, agent)
+                .map_err(|e| Failure::new(code::DENIED, e))?;
+            Ok(Done::Value(
+                json!({ "session": iris_job::format_session_id(session) }),
+            ))
+        }
+        Some("job.stop") => {
+            only(&["job"])?;
+            let job = job_arg(args)?;
+            let (session, reaped) = sessions()?
+                .stop(job)
+                .map_err(|e| Failure::new(code::DENIED, e))?;
+            Ok(Done::Value(json!({
+                "session": iris_job::format_session_id(session),
+                "reaped": reaped,
+            })))
         }
         Some("submit") => {
             only(&["changeset", "why"])?;
