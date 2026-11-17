@@ -551,3 +551,73 @@ fn the_pages_hold_each_job_of_the_states_once() {
     }
     assert!(page(&store, &[], 5, None).unwrap().is_empty());
 }
+
+#[test]
+fn only_the_person_or_the_engine_changes_a_scope() {
+    use iris_job::{add_scope, revoke_scope, scope, Ref};
+    let dir = TempDir::new("scope");
+    let store = Store::open(&dir.0).unwrap();
+    let job = create(&store, "Get the contract.", None, NOW).unwrap();
+    // No ID of a future row.
+    refused(add_scope(&store, job, Ref::Thread(5), By::Person, NOW));
+    refused(add_scope(&store, job, Ref::Item(9), By::Person, NOW));
+    assert!(sql(
+        &store,
+        r#"INSERT INTO account (id, provider, address) VALUES (1, 'gmail', 'me@example.com');
+           INSERT INTO thread (id, account_id, provider_id) VALUES (5, 1, 'a'), (6, 1, 'b');
+           INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+             VALUES (9, 'commitment', 1, 'open', '{}', 1, 1);"#
+    ));
+    refused(add_scope(&store, job, Ref::Thread(5), By::Agent, NOW));
+    add_scope(&store, job, Ref::Thread(5), By::Person, NOW).unwrap();
+    add_scope(&store, job, Ref::Item(9), By::Engine, NOW).unwrap();
+    // The same ref again changes nothing.
+    add_scope(&store, job, Ref::Thread(5), By::Engine, NOW + 1).unwrap();
+    assert_eq!(scope(&store, job).unwrap(), [Ref::Thread(5), Ref::Item(9)]);
+    assert!(matches!(scope(&store, 99), Err(Error::NotFound)));
+    assert!(matches!(
+        add_scope(&store, 99, Ref::Thread(5), By::Person, NOW),
+        Err(Error::NotFound)
+    ));
+    for text in [
+        "INSERT INTO job_scope (job_id, thread_id, by, at) VALUES (1, 6, 'agent', 1)",
+        "INSERT INTO job_scope (job_id, thread_id, item_id, by, at) VALUES (1, 6, 7, 'person', 1)",
+        "INSERT INTO job_scope (job_id, by, at) VALUES (1, 'person', 1)",
+        "INSERT INTO job_scope (job_id, thread_id, by, at) VALUES (1, 0, 'person', 1)",
+        "INSERT INTO job_scope (job_id, thread_id, by, at) VALUES (1, 5, 'person', 1)",
+        "INSERT OR REPLACE INTO job_scope (job_id, thread_id, by, at) VALUES (1, 5, 'engine', 2)",
+        "INSERT INTO job_scope (job_id, thread_id, by, at) VALUES (2, 6, 'person', 1)",
+        "INSERT INTO job_scope (job_id, thread_id, by, at, revoked_by, revoked_at) VALUES (1, 6, 'person', 1, 'person', 1)",
+        "UPDATE job_scope SET by = 'engine'",
+        "UPDATE job_scope SET revoked_by = 'agent', revoked_at = 2",
+        "UPDATE job_scope SET revoked_by = 'person'",
+        "UPDATE job_scope SET revoked_by = 'person', revoked_at = 2, thread_id = 7 WHERE thread_id = 5",
+        "DELETE FROM job_scope",
+    ] {
+        assert!(!sql(&store, text), "{text}");
+    }
+
+    // A revoke: only by the person or the engine, once. The row stays, and
+    // the ref can be added again.
+    refused(revoke_scope(&store, job, Ref::Thread(5), By::Agent, NOW));
+    assert_eq!(iris_job::revoked_count(&store, job).unwrap(), 0);
+    revoke_scope(&store, job, Ref::Thread(5), By::Person, NOW + 1).unwrap();
+    assert_eq!(scope(&store, job).unwrap(), [Ref::Item(9)]);
+    assert_eq!(iris_job::revoked_count(&store, job).unwrap(), 1);
+    revoke_scope(&store, job, Ref::Thread(5), By::Engine, NOW + 2).unwrap();
+    assert!(!sql(
+        &store,
+        "UPDATE job_scope SET revoked_by = 'engine', revoked_at = 9 WHERE thread_id = 5"
+    ));
+    add_scope(&store, job, Ref::Thread(5), By::Person, NOW + 3).unwrap();
+    assert_eq!(scope(&store, job).unwrap(), [Ref::Item(9), Ref::Thread(5)]);
+    let rows: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM job_scope", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(rows, 3);
+
+    finish(&store, job, By::Person, End::Cancel, None, NOW + 4).unwrap();
+    refused(add_scope(&store, job, Ref::Thread(6), By::Person, NOW + 5));
+    revoke_scope(&store, job, Ref::Item(9), By::Person, NOW + 6).unwrap();
+    assert_eq!(scope(&store, job).unwrap(), [Ref::Thread(5)]);
+}

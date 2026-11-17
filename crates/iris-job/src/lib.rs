@@ -373,7 +373,7 @@ fn event_of(r: &Row) -> rusqlite::Result<Event> {
 }
 
 pub fn get(store: &Store, job: i64) -> Result<Job> {
-    read(store, |c| job_in(c, job))
+    read(store, |c| get_in(c, job))
 }
 
 /// The jobs in `state`, newest first.
@@ -432,7 +432,8 @@ fn read<T>(store: &Store, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T>
     out.expect("f ran")
 }
 
-fn job_in(c: &Connection, job: i64) -> Result<Job> {
+/// The job in a read or write transaction of the caller.
+pub fn get_in(c: &Connection, job: i64) -> Result<Job> {
     c.query_row(
         &format!("SELECT {JOB_COLUMNS} FROM job WHERE id = ?1"),
         [job],
@@ -445,7 +446,7 @@ fn job_in(c: &Connection, job: i64) -> Result<Job> {
 /// The events of `job`, in order.
 pub fn events(store: &Store, job: i64) -> Result<Vec<Event>> {
     read(store, |c| {
-        job_in(c, job)?;
+        get_in(c, job)?;
         let mut out = Vec::new();
         each_event(c, job, |e| {
             out.push(e);
@@ -523,7 +524,7 @@ pub fn job_json(j: &Job) -> Value {
 
 /// [`write_document`] on `c`, for one read with other queries.
 pub fn write_document_in(c: &Connection, job: i64, out: &mut impl Write) -> Result<()> {
-    let j = job_in(c, job)?;
+    let j = get_in(c, job)?;
     // Read each event once before the first byte (issue #303): a row that
     // does not parse gives an error and no partial document. The same read
     // transaction gives the same rows to the second pass.
@@ -543,4 +544,137 @@ pub fn write_document_in(c: &Connection, job: i64, out: &mut impl Write) -> Resu
     })?;
     out.write_all(b"]}")?;
     Ok(())
+}
+
+/// One thread or one item of the scope of a job, by row ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Ref {
+    Thread(i64),
+    Item(i64),
+}
+
+/// Add `what` to the scope of `job` (migration 19). Only the person or the
+/// engine adds to a scope: an agent cannot widen the scope of its own job.
+/// A thread ref grants the messages that the thread has at the add. An item
+/// ref grants the sources of the item at the add. An add of a ref that is
+/// in the scope already adds the messages that it has now to its list.
+pub fn add_scope(store: &Store, job: i64, what: Ref, by: By, now_ms: i64) -> Result<()> {
+    transaction(store, |c| add_scope_in(c, job, what, by, now_ms))
+}
+
+pub fn add_scope_in(c: &Connection, job: i64, what: Ref, by: By, now_ms: i64) -> Result<()> {
+    if by == By::Agent {
+        return Err(Error::Refused(
+            "an agent cannot change the scope of a job".into(),
+        ));
+    }
+    if get_in(c, job)?.state == State::Done {
+        return Err(Error::Refused("the job is done".into()));
+    }
+    let (thread, item) = match what {
+        Ref::Thread(t) => (Some(t), None),
+        Ref::Item(i) => (None, Some(i)),
+    };
+    // No ID of a future row: the person grants only a row that exists.
+    let exists: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)
+             OR EXISTS (SELECT 1 FROM item WHERE id = ?2)",
+        params![thread, item],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err(Error::Refused(
+            "the thread or the item does not exist".into(),
+        ));
+    }
+    let have: Option<i64> = c
+        .query_row(
+            "SELECT id FROM job_scope WHERE job_id = ?1 AND revoked_at IS NULL
+             AND (thread_id = ?2 OR item_id = ?3)",
+            params![job, thread, item],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let scope_id = match have {
+        Some(id) => id,
+        None => {
+            c.execute(
+                "INSERT INTO job_scope (job_id, thread_id, item_id, by, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![job, thread, item, by.as_str(), now_ms],
+            )?;
+            c.last_insert_rowid()
+        }
+    };
+    // The list of the ref now: the messages of the thread, or the sources
+    // of the item. A message that sync or understanding adds later comes in
+    // only with the next add by the person.
+    c.execute(
+        "INSERT OR IGNORE INTO job_scope_message (scope_id, message_id)
+         SELECT ?1, id FROM message WHERE thread_id = ?2
+         UNION SELECT ?1, message_id FROM item_source WHERE item_id = ?3",
+        params![scope_id, thread, item],
+    )?;
+    Ok(())
+}
+
+/// Revoke `what` from the active scope of `job`. The row stays, with the
+/// revoke, and the next build drops its mail. Only the person or the engine
+/// revokes. A ref that is not in the active scope changes nothing.
+pub fn revoke_scope(store: &Store, job: i64, what: Ref, by: By, now_ms: i64) -> Result<()> {
+    transaction(store, |c| revoke_scope_in(c, job, what, by, now_ms))
+}
+
+pub fn revoke_scope_in(c: &Connection, job: i64, what: Ref, by: By, now_ms: i64) -> Result<()> {
+    if by == By::Agent {
+        return Err(Error::Refused(
+            "an agent cannot change the scope of a job".into(),
+        ));
+    }
+    get_in(c, job)?;
+    let (thread, item) = match what {
+        Ref::Thread(t) => (Some(t), None),
+        Ref::Item(i) => (None, Some(i)),
+    };
+    c.execute(
+        "UPDATE job_scope SET revoked_by = ?4, revoked_at = ?5
+         WHERE job_id = ?1 AND revoked_at IS NULL AND (thread_id = ?2 OR item_id = ?3)",
+        params![job, thread, item, by.as_str(), now_ms],
+    )?;
+    Ok(())
+}
+
+/// The count of the revoked scope rows of `job`. Revokes only grow, so a
+/// revoke during a build makes this count differ from `Built::revoked`.
+pub fn revoked_count(store: &Store, job: i64) -> Result<i64> {
+    read(store, |c| revoked_count_in(c, job))
+}
+
+pub fn revoked_count_in(c: &Connection, job: i64) -> Result<i64> {
+    get_in(c, job)?;
+    Ok(c.query_row(
+        "SELECT count(revoked_at) FROM job_scope WHERE job_id = ?1",
+        [job],
+        |r| r.get(0),
+    )?)
+}
+
+/// The active scope of `job`, in the order of the adds.
+pub fn scope(store: &Store, job: i64) -> Result<Vec<Ref>> {
+    read(store, |c| scope_in(c, job))
+}
+
+pub fn scope_in(c: &Connection, job: i64) -> Result<Vec<Ref>> {
+    get_in(c, job)?;
+    let mut q =
+        c.prepare("SELECT thread_id, item_id FROM job_scope WHERE job_id = ?1 AND revoked_at IS NULL ORDER BY rowid")?;
+    let refs = q
+        .query_map([job], |r| {
+            let thread: Option<i64> = r.get(0)?;
+            Ok(match thread {
+                Some(t) => Ref::Thread(t),
+                None => Ref::Item(r.get(1)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(refs)
 }
