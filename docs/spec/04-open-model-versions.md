@@ -97,3 +97,30 @@ action from it.
 | A minor version higher than `K` | Show only (section 4). Take no action from it. |
 | A policy file with a `version` other than 0 or 1, or with an error | Follow rule 2.7. |
 | Any other error while the reader reads the document | Refuse the document. Take no action from it. |
+
+## 6. The conformance kit
+
+The kit checks the documents of a producer with no Iris code. Its version
+is in [`VERSION`](VERSION) (`1.0`), and it names the newest minor version
+that it knows.
+
+| Path | Content |
+|---|---|
+| [`schema/*.schema.json`](schema/) | The schemas |
+| [`schema/examples/`](schema/examples/) | The valid fixtures: each file must pass |
+| [`schema/examples/invalid/`](schema/examples/invalid/) | The invalid fixtures: each file must fail |
+| [`conformance/run.py`](conformance/run.py) | The runner |
+| [`conformance/requirements.txt`](conformance/requirements.txt) | The libraries of the runner, with exact versions and hashes |
+| [`conformance/producer/`](conformance/producer/) | A sample producer in Python, with the standard library only |
+
+The name of a file selects its schema: the text before the first `-` or
+`.`, for example `commitment-payment.json`. A `.toml` file is a policy
+file. In a file with the name `items` (`items.jsonl` of `iris export`),
+the `form` of each document selects the schema.
+
+The kit checks the formats `date` and `date-time`, and does not check
+`email`, because validators do not agree on `email`. Each invalid fixture
+fails also when a validator accepts each `email` text.
+
+A producer conforms when `run.py check` on a folder with its documents
+exits 0. [`conformance/README.md`](conformance/README.md) gives the steps.
