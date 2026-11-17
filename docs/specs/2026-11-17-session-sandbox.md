@@ -495,7 +495,7 @@ scripts/local-ci/run.sh
 ## Rollout
 
 None. `iris job run` starts to work when R4-04e and this card are merged.
-A Linux server needs the package `bubblewrap`; `docs/DEPLOYMENT.md` says so.
+A Linux server needs the package `bubblewrap`. The Linux code PR of R4-05 adds this step to `docs/DEPLOYMENT.md`, with the command of each package manager.
 
 ## Risks
 
