@@ -1162,13 +1162,15 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
 
 /// The column `ready_draft` of an item row: true when the thread of the
 /// mail that made the item has a reply draft that the person can use now
-/// (card R3-09, [`iris_voice::ready_sql`]).
+/// (card R3-09, [`iris_voice::ready_item_sql`]). A nudge (card R3-07)
+/// marks only its own commitment.
 fn ready_draft() -> String {
     format!(
         "{} AS ready_draft",
-        iris_voice::ready_sql(
+        iris_voice::ready_item_sql(
             "SELECT om.thread_id FROM item_source os JOIN message om ON om.id = os.message_id
-             WHERE os.item_id = item.id AND os.role = 'origin'"
+             WHERE os.item_id = item.id AND os.role = 'origin'",
+            "item.id"
         )
     )
 }

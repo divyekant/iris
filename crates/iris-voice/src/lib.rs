@@ -201,14 +201,28 @@ const NEWEST: &str = "ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC";
 /// R3-07, a draft with `ask`) is ready only while its `ask` is the
 /// [`nudge_key_sql`] of its thread: the same commitment, to the same person.
 pub fn ready_sql(threads: &str) -> String {
+    ready_of(threads, None)
+}
+
+/// As [`ready_sql`], for the line of item row `item` (an SQL value): a
+/// nudge marks only the commitment of its key, not the other items of its
+/// thread. A draft of the owner marks each item of its thread.
+pub fn ready_item_sql(threads: &str, item: &str) -> String {
+    ready_of(threads, Some(item))
+}
+
+fn ready_of(threads: &str, item: Option<&str>) -> String {
     let in_thread = in_thread!("d.thread_id");
     let key = nudge_key_sql("d.thread_id", None);
+    let mine = item.map_or(String::new(), |i| {
+        format!("AND (d.ask IS NULL OR json_extract(d.ask, '$.item') = {i})")
+    });
     format!(
         "EXISTS (SELECT 1 FROM reply_draft d WHERE d.thread_id IN ({threads})
            AND d.based_on = (SELECT m.id {in_thread} {ANSWERABLE} {NEWEST} LIMIT 1)
            AND NOT EXISTS (SELECT 1 {in_thread}
                            AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
-           AND (d.ask IS NULL OR d.ask = {key}))"
+           AND (d.ask IS NULL OR d.ask = {key}) {mine})"
     )
 }
 
@@ -401,23 +415,37 @@ impl Late {
 }
 
 /// The draft of `thread` that the person can use now ([`ready_sql`]), or
-/// `None`: `(based_on, intent, body, to)`. `to` is the address of the
-/// person that owes, for a nudge only.
-#[allow(clippy::type_complexity)]
-pub fn ready(
-    c: &Connection,
-    thread: i64,
-) -> rusqlite::Result<Option<(i64, Option<String>, String, Option<String>)>> {
+/// `None`.
+pub fn ready(c: &Connection, thread: i64) -> rusqlite::Result<Option<Ready>> {
     c.query_row(
         &format!(
-            "SELECT based_on, intent, body, json_extract(ask, '$.to') FROM reply_draft
-              WHERE thread_id = ?1 AND {}",
+            "SELECT based_on, intent, body, json_extract(ask, '$.to'), json_extract(ask, '$.item')
+               FROM reply_draft WHERE thread_id = ?1 AND {}",
             ready_sql("SELECT ?1")
         ),
         [thread],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| {
+            Ok(Ready {
+                based_on: r.get(0)?,
+                intent: r.get(1)?,
+                body: r.get(2)?,
+                to: r.get(3)?,
+                item: r.get(4)?,
+            })
+        },
     )
     .optional()
+}
+
+/// The ready draft of a thread ([`ready`]). `to` and `item` (the row of the
+/// commitment) are set for a nudge only.
+#[derive(Debug)]
+pub struct Ready {
+    pub based_on: i64,
+    pub intent: Option<String>,
+    pub body: String,
+    pub to: Option<String>,
+    pub item: Option<i64>,
 }
 
 /// Writes a nudge of a late thread ([`write`] with [`NUDGE_INTENT`], to
