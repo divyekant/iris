@@ -32,28 +32,34 @@
   // The number of the newest request. Only the answer of the newest request
   // changes the state, so an older answer never replaces a newer one.
   let newest = 0;
-  // The action of the error on the screen: the error goes only when a read
-  // shows that this action took effect.
+  // The Stop or Resume that got no good answer. Until a read shows that it
+  // took effect, the state stays not known: the action can still commit
+  // after the read. A new action, or a read that shows it, clears it.
   let failedAction: "" | "stop" | "resume" = "";
 
   function show(n: number, a: Answer): boolean {
     if (n !== newest) return false;
-    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy, known: true });
+    const confirmed = !failedAction || a.stopped === (failedAction === "stop");
+    if (confirmed) failedAction = "";
+    Object.assign(stopState, { stopped: a.stopped, since: a.since, live: a.stopped ? (a.live ?? 0) : 0, busy: a.stopped && !!a.busy, known: confirmed });
+    if (confirmed) stopState.error = "";
     return true;
   }
 
   export async function reread() {
     const n = ++newest;
     try {
-      if (show(n, await read<Answer>("stop")) && failedAction && stopState.stopped === (failedAction === "stop")) {
-        failedAction = "";
-        stopState.error = "";
-      }
+      show(n, await read<Answer>("stop"));
     } catch {
       // With no answer, the state is not known: the band makes no claim.
       // The access state shows the failure of the engine above each view.
       if (n === newest) stopState.known = false;
     }
+  }
+
+  /** The action to try again while the state is not known. */
+  export function pending(): "" | "stop" | "resume" {
+    return failedAction;
   }
 
   /** Read the state again: at start, at each new view and when the tab comes back. */
@@ -109,6 +115,9 @@
     <section class="band" role="status" aria-label="Stop state not known">
       <p class="words">Iris does not know if agent work is stopped now.</p>
       <div class="actions">
+        {#if shared.error && pending()}
+          <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => act(pending() || "stop")}>{pending() === "stop" ? "Stop again" : "Resume again"}</button>
+        {/if}
         <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => reread()}>Check again</button>
       </div>
     </section>

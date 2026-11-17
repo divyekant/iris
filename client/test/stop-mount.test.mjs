@@ -215,10 +215,38 @@ test("a rejected Stop keeps its error when the read shows that Iris still runs",
   try {
     await act("stop");
     band.flushSync();
-    assert.equal(stopState.known, true);
-    assert.equal(stopState.stopped, false);
+    // The Stop can still commit after the read: the state is not known.
+    assert.equal(stopState.known, false);
     assert.notEqual(stopState.error, "");
     assert.ok(band.target.querySelector("[role=alert]"));
+  } finally {
+    band.destroy();
+  }
+});
+
+test("a Resume with no answer, then a read of the old stop, stays not known until a read shows Iris runs", async () => {
+  const { act, refresh, stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
+  let committed = false;
+  globalThis.fetch = async (url, init) => {
+    if ((init?.method ?? "GET") === "POST") throw new TypeError("Failed to fetch");
+    // The read comes before the Resume commits.
+    const out = committed ? { stopped: false, since: null, live: 0, busy: false } : { stopped: true, since, live: 0, busy: false };
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  try {
+    await act("resume");
+    band.flushSync();
+    assert.equal(stopState.known, false);
+    assert.doesNotMatch(text(band.target), /no mail leaves/);
+    assert.ok([...band.target.querySelectorAll("button")].some((b) => text(b).includes("Resume again")));
+    committed = true;
+    await refresh();
+    band.flushSync();
+    assert.equal(stopState.known, true);
+    assert.equal(stopState.stopped, false);
+    assert.equal(stopState.error, "");
   } finally {
     band.destroy();
   }
