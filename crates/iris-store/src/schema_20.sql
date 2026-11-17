@@ -51,3 +51,18 @@ BEGIN
   INSERT INTO link_check(message_id) SELECT m.id FROM message m
     WHERE m.id = OLD.message_id AND m.content_sha256 IS NOT NULL AND m.gone_at IS NULL;
 END;
+
+-- The attention of an item reads `may_be_hostile`, so a message whose link
+-- check starts or ends needs a new evaluation (migration 8).
+CREATE TRIGGER link_check_attention_add AFTER INSERT ON link_check
+BEGIN
+  INSERT INTO attention_due(message_id) SELECT NEW.message_id
+    WHERE NOT EXISTS (SELECT 1 FROM attention_due d WHERE d.message_id = NEW.message_id);
+END;
+
+CREATE TRIGGER link_check_attention_end AFTER DELETE ON link_check
+BEGIN
+  INSERT INTO attention_due(message_id) SELECT OLD.message_id
+    WHERE EXISTS (SELECT 1 FROM message m WHERE m.id = OLD.message_id)
+      AND NOT EXISTS (SELECT 1 FROM attention_due d WHERE d.message_id = OLD.message_id);
+END;

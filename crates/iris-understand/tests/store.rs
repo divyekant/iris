@@ -118,7 +118,8 @@ impl Box_ {
     fn add_in(&self, id: &str, thread: &str, date: i64, raw: &str, labels: &[&str]) -> i64 {
         let raw = raw.replace('\n', "\r\n");
         let sha = self.store.put_content(raw.as_bytes()).unwrap();
-        self.store
+        let id = self
+            .store
             .put_messages(
                 self.account,
                 &[NewMessage {
@@ -130,7 +131,10 @@ impl Box_ {
                     ..NewMessage::default()
                 }],
             )
-            .unwrap()[0]
+            .unwrap()[0];
+        // Step 1 of each batch run: the link check of new content.
+        iris_understand::store::recheck_links(&self.store, NOW, None).unwrap();
+        id
     }
 
     fn kind(&self, addr: &str, name: &str, kind: &str) {

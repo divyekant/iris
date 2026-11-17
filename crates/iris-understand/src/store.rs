@@ -632,13 +632,15 @@ fn inputs(
 /// the thread yet.
 macro_rules! earlier_ok {
     () => {
-        "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
-         AND m.internal_date < ?3
-         AND coalesce(m.hostile, '[]') = '[]'
-         AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+        concat!(
+            "m.thread_id = ?1 AND m.id <> ?2 AND m.gone_at IS NULL
+         AND m.internal_date < ?3 AND NOT ",
+            iris_store::may_be_hostile!(),
+            " AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                          WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'DRAFT'))
          AND NOT EXISTS (SELECT 1 FROM header hh JOIN sender s ON s.address = hh.from_addr
                          WHERE hh.message_id = m.id AND s.kind = 'hostile')"
+        )
     };
 }
 

@@ -899,7 +899,8 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
             )?;
             tx.execute_batch(
                 "DROP TRIGGER link_check_insert; DROP TRIGGER link_check_update;
-                 DROP TRIGGER link_check_label;
+                 DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
+                 DROP TRIGGER link_check_attention_end;
                  DROP TABLE link_check; PRAGMA user_version = 19;",
             )?;
             Ok(())

@@ -985,11 +985,12 @@ pub fn hostile(c: &Connection, action: i64) -> Result<bool> {
            LEFT JOIN header h ON h.message_id = m.id
            LEFT JOIN sender p ON p.address = h.from_addr
            WHERE m.thread_id IN ({ACTION_THREADS})
-             AND ((m.hostile IS NOT NULL AND m.hostile NOT IN ('', '[]')) OR p.kind = 'hostile'
+             AND ({may_be_hostile} OR p.kind = 'hostile'
                   -- A gone message after the cleanup has no header, so its
                   -- sender is not known: it counts as hostile evidence.
                   OR (m.gone_at IS NOT NULL AND h.message_id IS NULL)))
-         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1"
+         FROM changeset_action a JOIN changeset cs ON cs.id = a.changeset_id WHERE a.id = ?1",
+            may_be_hostile = iris_store::may_be_hostile!(),
         ),
         [action],
         |r| r.get(0),

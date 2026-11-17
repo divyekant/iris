@@ -113,14 +113,14 @@ impl Query {
         sql.push_str(&format!(
             " AND m.id > ?{a} AND m.internal_date >= ?{s}
               AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
-              AND NOT EXISTS (SELECT 1 FROM link_check c WHERE c.message_id = m.id)
-              AND (m.hostile IS NULL OR m.hostile IN ('', '[]'))
+              AND NOT {may_be_hostile}
               AND NOT EXISTS (SELECT 1 FROM header h JOIN sender x
                     ON x.address = h.from_addr COLLATE NOCASE
                   WHERE h.message_id = m.id AND x.kind = 'hostile')
               AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                   WHERE ml.message_id = m.id AND l.provider_id IN ('SENT', 'DRAFT'))
-             ORDER BY m.id LIMIT 1"
+             ORDER BY m.id LIMIT 1",
+            may_be_hostile = crate::may_be_hostile!(),
         ));
         let mut st = conn.prepare(&sql)?;
         let mut rows = st.query_map(rusqlite::params_from_iter(args), |r| r.get(0))?;

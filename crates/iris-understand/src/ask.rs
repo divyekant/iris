@@ -59,12 +59,14 @@ Answer with one JSON object: {"claims": [{"text": "...", "sources": [1]}], "quot
 
 /// The rules of a message that Ask reads, in SQL over `message m` and
 /// `header h`.
-const ELIGIBLE: &str = "m.gone_at IS NULL
-    AND (m.hostile IS NULL OR m.hostile IN ('', '[]'))
-    AND NOT EXISTS (SELECT 1 FROM sender s
+const ELIGIBLE: &str = concat!(
+    "m.gone_at IS NULL AND NOT ",
+    iris_store::may_be_hostile!(),
+    " AND NOT EXISTS (SELECT 1 FROM sender s
                     WHERE s.address = h.from_addr COLLATE NOCASE AND s.kind = 'hostile')
     AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                    WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))";
+                    WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))"
+);
 
 /// Words that a search for them does not narrow (English only).
 const STOP: &[&str] = &[

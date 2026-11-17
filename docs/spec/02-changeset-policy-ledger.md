@@ -593,11 +593,11 @@ in the file.
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
 | A `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
-| An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
+| An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
 | Mode is `observe`. | Nothing applies, except an undo by the person (section 7.4) and a state verb that the person approved (section 4). |
 | A permanent delete. | No verb exists. |
-| Hostile mail: a message with a hostile mark, or from a `hostile` sender. | No notice, even if a `notify` rule matches. |
+| Hostile mail: a message with a hostile mark, a message that waits for its link check, or a message from a `hostile` sender. | No notice, even if a `notify` rule matches. |
 
 The hard limits treat `local` and `triage` as agents.
 
