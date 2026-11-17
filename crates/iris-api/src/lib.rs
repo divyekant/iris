@@ -25,6 +25,7 @@ use serde::Deserialize;
 
 mod ask;
 mod auth;
+mod drafts;
 mod export;
 pub mod gate;
 mod jobs;
@@ -142,6 +143,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
         .route("/api/changesets/{id}", get(get_changeset))
+        .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
         .route("/api/messages", get(get_messages))
@@ -214,6 +216,15 @@ async fn get_changeset(State(s): State<Arc<Store>>, Path(id): Path<String>) -> R
         })
         .await,
     )
+}
+
+/// The draft of each `draft` and `send` action that waits, with the parts
+/// that gave its flags (card R4-07).
+async fn get_drafts(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(Json(drafts::drafts(&s, row)?).into_response())
 }
 
 #[derive(Deserialize)]
