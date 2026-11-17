@@ -1046,6 +1046,7 @@ dependencies = [
 name = "iris-mcp"
 version = "0.0.0"
 dependencies = [
+ "jsonschema",
  "rmcp",
  "serde_json",
  "tokio",
