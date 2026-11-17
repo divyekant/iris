@@ -304,6 +304,49 @@ fn sign_in_errors_hide_the_secret() {
     }
 }
 
+/// A removal of the highest UID, with no later add, shows in VANISHED.
+#[test]
+fn vanished_highest_uid() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.add("INBOX", b"a".to_vec(), &[]);
+    let top = fake.add("INBOX", b"b".to_vec(), &[]);
+    let mut s = open(&fake, PASS).unwrap();
+    let since = s.examine("INBOX").unwrap().highest_modseq.unwrap();
+    fake.remove("INBOX", top);
+    s.examine("INBOX").unwrap();
+    let mut got = Vec::new();
+    s.changes(since, |c| got.push(c)).unwrap();
+    assert_eq!(got, [Change::Vanished(top..=top)]);
+}
+
+/// A server that echoes the secret after the sign-in (to CAPABILITY, to
+/// ENABLE, or as a bad response): no error shows it.
+#[test]
+fn errors_after_sign_in_hide_the_secret() {
+    let secret = "s3cret-Value";
+    let head =
+        "* OK ready\r\n* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\na1 OK done\r\n+ \r\na2 OK in\r\n";
+    for rest in [
+        format!("a3 NO {secret}\r\n"),
+        format!("* {secret} (\r\n"),
+        format!("* CAPABILITY IMAP4rev1 QRESYNC\r\na3 OK done\r\na4 BAD {secret}\r\n"),
+        format!("* CAPABILITY IMAP4rev1 QRESYNC\r\na3 OK done\r\n* OK [{secret}\r\n"),
+    ] {
+        let auth = Auth::Password {
+            user: USER,
+            password: secret,
+        };
+        let err = Session::start(
+            Script(Cursor::new(format!("{head}{rest}").into_bytes())),
+            auth,
+        )
+        .err()
+        .expect("error");
+        let shown = format!("{err} {err:?}");
+        assert!(!shown.contains(secret), "{shown}");
+    }
+}
+
 #[test]
 fn other_uid() {
     let rest = b"* 1 FETCH (UID 9 BODY[] {3}\r\nabc)\r\na4 OK done\r\n";

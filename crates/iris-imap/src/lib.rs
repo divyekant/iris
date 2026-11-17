@@ -28,8 +28,6 @@ use imap_proto::{
 /// The largest response that the client reads into memory. The `BODY[]`
 /// literal of [`Session::fetch_raw`] does not count: the client streams it.
 pub const RESPONSE_LIMIT: usize = 1024 * 1024;
-/// The most bytes of server text in an error.
-const TEXT_LIMIT: usize = 200;
 
 #[derive(Debug)]
 pub enum Error {
@@ -37,14 +35,16 @@ pub enum Error {
     Io(io::Error),
     /// The TLS setup failed (for example, a bad host name).
     Tls(String),
-    /// A response did not parse, or did not agree with the command.
-    Protocol(String),
+    /// A response did not parse, or did not agree with the command. No error
+    /// holds server text: a server can echo the password or the token.
+    Protocol(&'static str),
     /// A response or a line is above [`RESPONSE_LIMIT`].
     TooLarge,
     /// The server refused the sign-in. The person must sign in again. It
     /// holds no server text, because a server can echo the secret.
     SignIn,
-    /// The server answered `NO` or `BAD` to a command.
+    /// The server answered `NO` or `BAD` to a command. It holds the first
+    /// word of the command only.
     Refused(String),
     /// The server closed the connection (`BYE`).
     Closed,
@@ -217,15 +217,6 @@ fn quote(s: &str) -> Result<String> {
     ))
 }
 
-/// Server text for an error: cut, and only printable ASCII.
-fn text(t: Option<&str>) -> String {
-    t.unwrap_or("")
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .take(TEXT_LIMIT)
-        .collect()
-}
-
 /// Remove the escapes of a quoted string.
 fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -296,7 +287,7 @@ impl<S: Read + Write> Session<S> {
         };
         let greeting = s.read_response(None)?;
         if bad_outcome(&greeting) {
-            return Err(Error::Protocol("greeting".into()));
+            return Err(Error::Protocol("greeting"));
         }
         match Response::parse(&greeting) {
             Ok((
@@ -312,14 +303,13 @@ impl<S: Read + Write> Session<S> {
                     ..
                 },
             )) => return Err(Error::Closed),
-            _ => return Err(Error::Protocol("greeting".into())),
+            _ => return Err(Error::Protocol("greeting")),
         }
         s.capability()?;
         // A server can echo the secret in any answer to the sign-in, so
         // each error of this step drops the server text.
         s.sign_in(auth).map_err(|e| match e {
             Error::Refused(_) | Error::SignIn => Error::SignIn,
-            Error::Protocol(_) => Error::Protocol("sign-in".into()),
             e => e,
         })?;
         // The capabilities can change after the sign-in.
@@ -404,9 +394,9 @@ impl<S: Read + Write> Session<S> {
         loop {
             let buf = self.read_response(None)?;
             if bad_outcome(&buf) {
-                return Err(Error::Protocol("byte above 127 after ]".into()));
+                return Err(Error::Protocol("byte above 127 after ]"));
             }
-            let (_, r) = Response::parse(&buf).map_err(|_| Error::Protocol("sign-in".into()))?;
+            let (_, r) = Response::parse(&buf).map_err(|_| Error::Protocol("sign-in"))?;
             match r {
                 Response::Continue(_) if !sent => {
                     let mut line = base64::engine::general_purpose::STANDARD
@@ -422,7 +412,7 @@ impl<S: Read + Write> Session<S> {
                     ended = true;
                 }
                 Response::Continue(_) => {
-                    return Err(Error::Protocol("sign-in challenge after the end".into()))
+                    return Err(Error::Protocol("sign-in challenge after the end"))
                 }
                 Response::Done {
                     tag: t,
@@ -505,7 +495,7 @@ impl<S: Read + Write> Session<S> {
             }
             Ok(())
         })?;
-        e.uidvalidity = validity.ok_or_else(|| Error::Protocol("no UIDVALIDITY".into()))?;
+        e.uidvalidity = validity.ok_or(Error::Protocol("no UIDVALIDITY"))?;
         if !self.condstore() {
             e.highest_modseq = None;
         }
@@ -519,8 +509,11 @@ impl<S: Read + Write> Session<S> {
             return Err(Error::Missing("CONDSTORE"));
         }
         let vanished = if self.qresync { " VANISHED" } else { "" };
+        // Not `1:*`: `*` is the largest UID now, so a removed UID above it
+        // would get no VANISHED. 4294967295 is the largest UID (RFC 3501).
         let cmd = format!(
-            "UID FETCH 1:* (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE {since}{vanished})"
+            "UID FETCH 1:{} (UID FLAGS INTERNALDATE RFC822.SIZE) (CHANGEDSINCE {since}{vanished})",
+            u32::MAX
         );
         self.run(&cmd, None, |r, _| {
             match r {
@@ -571,7 +564,7 @@ impl<S: Read + Write> Session<S> {
                     .iter()
                     .any(|a| matches!(a, AttributeValue::Uid(u) if *u == uid));
                 if has_body && !this {
-                    return Err(Error::Protocol("BODY[] of another message".into()));
+                    return Err(Error::Protocol("BODY[] of another message"));
                 }
                 if has_body {
                     found = Some(());
@@ -611,25 +604,28 @@ impl<S: Read + Write> Session<S> {
         loop {
             let buf = self.read_response(body.as_deref_mut())?;
             if bad_outcome(&buf) {
-                return Err(Error::Protocol("byte above 127 after ]".into()));
+                return Err(Error::Protocol("byte above 127 after ]"));
             }
             let r = match Response::parse(&buf) {
                 Ok((b"", r)) => r,
-                _ => return Err(Error::Protocol(text(Some(&String::from_utf8_lossy(&buf))))),
+                _ => return Err(Error::Protocol("a response does not parse")),
             };
             match r {
                 Response::Done {
                     tag: t,
                     status,
-                    outcome,
+                    outcome: _,
                 } if t.0 == tag => {
                     return match status {
                         Status::Ok => Ok(()),
-                        _ => Err(Error::Refused(text(outcome.information.as_deref()))),
+                        // Only the command word: a LOGIN command holds the password.
+                        _ => Err(Error::Refused(
+                            cmd.split(' ').next().unwrap_or("").to_owned(),
+                        )),
                     };
                 }
                 Response::Done { .. } | Response::Continue(_) => {
-                    return Err(Error::Protocol("unexpected answer".into()))
+                    return Err(Error::Protocol("unexpected answer"))
                 }
                 Response::Data {
                     status: Status::Bye,
