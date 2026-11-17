@@ -629,19 +629,17 @@ pub const APP_NOTICES_MAX: i64 = 20;
 /// the notices that are not done.
 fn app_notices(store: &Store, after: Option<i64>) -> Result<Value, Failure> {
     let error = |e: iris_api::Error| Failure::new(code::ERROR, e.to_string());
-    let (page, open, max) = match after {
-        None => {
-            let (_, open, max) = iris_api::notices_after(store, i64::MAX, 0).map_err(error)?;
-            (Vec::new(), open, max)
-        }
-        Some(a) => iris_api::notices_after(store, a, APP_NOTICES_MAX).map_err(error)?,
-    };
+    let page = match after {
+        None => iris_api::notices_after(store, i64::MAX, 0),
+        Some(a) => iris_api::notices_after(store, a, APP_NOTICES_MAX),
+    }
+    .map_err(error)?;
     let last = match after {
-        None => max,
-        Some(a) => page.iter().map(|(r, _)| *r).max().unwrap_or(a),
+        None => page.max,
+        Some(a) => page.notices.iter().map(|(r, _)| *r).max().unwrap_or(a),
     };
-    let notices: Vec<&iris_api::Notice> = page.iter().map(|(_, n)| n).collect();
-    Ok(json!({ "notices": notices, "last": last, "open": open }))
+    let notices: Vec<&iris_api::Notice> = page.notices.iter().map(|(_, n)| n).collect();
+    Ok(json!({ "notices": notices, "last": last, "open": page.open }))
 }
 
 /// `status` of a session: the job, and the counts of its grant now.

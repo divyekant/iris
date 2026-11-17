@@ -26,20 +26,30 @@ pub fn notices(store: &Store) -> Result<Vec<Notice>> {
     Ok(store.read(|c| shape(c, iris_policy::notice::list(c)?))?)
 }
 
+/// One page of [`notices_after`].
+pub struct NoticePage {
+    /// Each notice with its row ID, oldest first.
+    pub notices: Vec<(i64, Notice)>,
+    /// The count of notices that are not done.
+    pub open: i64,
+    /// The largest row ID of all notices, or 0.
+    pub max: i64,
+}
+
 /// One page of the notices for the Mac app (`docs/specs/2026-11-17-mac-app.md`):
 /// the notices that are not done with a row ID larger than `after`, oldest
 /// first, at most `limit`. Also the count of notices that are not done, and
 /// the largest row ID of all notices. One snapshot.
-pub fn notices_after(
-    store: &Store,
-    after: i64,
-    limit: i64,
-) -> Result<(Vec<(i64, Notice)>, i64, i64)> {
+pub fn notices_after(store: &Store, after: i64, limit: i64) -> Result<NoticePage> {
     Ok(store.read(|c| {
         let page = iris_policy::notice::after(c, after, limit)?;
         let rows: Vec<i64> = page.iter().map(|n| n.id).collect();
         let (open, max) = iris_policy::notice::counts(c)?;
-        Ok((rows.into_iter().zip(shape(c, page)?).collect(), open, max))
+        Ok(NoticePage {
+            notices: rows.into_iter().zip(shape(c, page)?).collect(),
+            open,
+            max,
+        })
     })?)
 }
 

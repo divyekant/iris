@@ -898,8 +898,9 @@ pub fn socket_verb(
 }
 
 /// `iris open`: a new sign-in address from the engine (the socket verb
-/// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), opened in the browser or
-/// printed.
+/// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), printed or opened in the
+/// browser. The code never goes into the arguments of a process: another
+/// OS user can read them. The browser gets the path of [`OPEN_PAGE`].
 fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
     let r = socket::request_with(
         dir,
@@ -909,26 +910,78 @@ fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
         "iris open",
     )?;
     let url = r["url"].as_str().unwrap_or_default();
-    let opener = match std::env::consts::OS {
-        "macos" => Some("/usr/bin/open"),
-        "linux" => Some("xdg-open"),
-        _ => None,
+    let error = |e: String| socket::Failure {
+        code: socket::code::ERROR,
+        error: e,
     };
-    let opened = !print
-        && opener.is_some_and(|o| {
-            std::process::Command::new(o)
-                .arg(url)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        });
-    if !opened {
-        // The address is for this person only: it works one time, for 2 minutes.
+    if print {
         println!("{url}");
+        return Ok(());
+    }
+    let page = open_page(dir, url).map_err(|e| error(format!("open: {e}")))?;
+    let opened = opener(std::env::consts::OS, &page)
+        .is_some_and(|mut c| c.status().is_ok_and(|s| s.success()));
+    if !opened {
+        return Err(error(format!(
+            "open: no browser opened. Open {} or run iris open --print",
+            page.display()
+        )));
     }
     Ok(())
+}
+
+/// The redirect page of `iris open` in the data folder.
+pub const OPEN_PAGE: &str = "open.html";
+
+/// Write the redirect page to `url` with mode `0600`: a new file, then a
+/// rename, so the command never writes through a file or a link that is
+/// there. Gives the path of the page.
+pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // The engine gives `http://<ip>:<port>/#code=<hex>`: nothing to escape.
+    let plain = url
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b":/.#=[]".contains(&b));
+    if !plain || !url.starts_with("http://") {
+        return Err(std::io::Error::other(
+            "the engine gave an address that is not valid",
+        ));
+    }
+    let path = dir.join(OPEN_PAGE);
+    let new = dir.join(format!(".{OPEN_PAGE}.{}", std::process::id()));
+    let _ = std::fs::remove_file(&new);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&new)?;
+    f.write_all(
+        format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Iris</title>\
+             <meta http-equiv=\"refresh\" content=\"0;url={url}\">\n"
+        )
+        .as_bytes(),
+    )?;
+    f.sync_all()?;
+    std::fs::rename(&new, &path)?;
+    Ok(path)
+}
+
+/// The command that opens `page` in the browser on the system `os`. Its
+/// only argument is the path.
+pub fn opener(os: &str, page: &std::path::Path) -> Option<std::process::Command> {
+    let program = match os {
+        "macos" => "/usr/bin/open",
+        "linux" => "xdg-open",
+        _ => return None,
+    };
+    let mut c = std::process::Command::new(program);
+    c.arg(page)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Some(c)
 }
 
 /// [`socket_verb`] on the socket at `path`.

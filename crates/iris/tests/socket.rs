@@ -1144,3 +1144,36 @@ fn app_notices_give_only_the_new_notices_oldest_first() {
         assert_eq!(r["code"], json!(code::USAGE), "{bad}: {r}");
     }
 }
+
+#[test]
+fn iris_open_keeps_the_code_out_of_process_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("open-page");
+    std::fs::create_dir_all(&d).unwrap();
+    let url = "http://127.0.0.1:4800/#code=0123abcd";
+    // A link at the path is replaced, never written through.
+    let target = d.join("target");
+    std::fs::write(&target, b"mine").unwrap();
+    std::os::unix::fs::symlink(&target, d.join(iris::OPEN_PAGE)).unwrap();
+    let page = iris::open_page(&d, url).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"mine");
+    let m = std::fs::symlink_metadata(&page).unwrap();
+    assert!(m.file_type().is_file());
+    assert_eq!(m.permissions().mode() & 0o777, 0o600);
+    let html = std::fs::read_to_string(&page).unwrap();
+    assert!(html.contains(&format!("content=\"0;url={url}\"")), "{html}");
+    for os in ["macos", "linux"] {
+        let c = iris::opener(os, &page).unwrap();
+        let args: Vec<_> = c.get_args().collect();
+        assert_eq!(args, [page.as_os_str()], "{os}");
+        assert!(!c.get_program().to_string_lossy().contains("code"));
+    }
+    assert!(iris::opener("windows", &page).is_none());
+    for bad in [
+        "http://127.0.0.1:4800/#code=\"><script>",
+        "file:///etc/passwd",
+        "javascript:x",
+    ] {
+        assert!(iris::open_page(&d, bad).is_err(), "{bad}");
+    }
+}
