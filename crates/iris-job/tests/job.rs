@@ -73,7 +73,7 @@ fn a_job_keeps_its_state_after_a_restart() {
         )
         .unwrap();
         ask(&store, job, "Can I accept section 4?", None, NOW + 1).unwrap();
-        answer(&store, job, "Yes.", NOW + 2).unwrap();
+        answer(&store, job, "Yes.", None, NOW + 2).unwrap();
         wait(&store, job, w, Some("Dana has the contract now."), NOW + 3).unwrap();
         (job, get(&store, job).unwrap(), events(&store, job).unwrap())
     };
@@ -211,7 +211,7 @@ fn the_api_moves_and_refusals() {
     };
     refused(wait(&store, job, w(NOW), None, NOW));
     // The person does not wait or ask, and the agent does not answer.
-    refused(answer(&store, job, "Yes.", NOW));
+    refused(answer(&store, job, "Yes.", None, NOW));
     wait(&store, job, w(NOW + DAY), None, NOW + 1).unwrap();
     // The agent does not wake or end a waiting job.
     refused(wake(&store, job, By::Agent, None, NOW + 2));
@@ -278,8 +278,8 @@ fn the_text_limits() {
     refused(create(&store, "G", Some(-1), NOW));
     refused(create(&store, "G", None, 253_402_300_800_000));
     ask(&store, job, "Which?", None, NOW).unwrap();
-    refused(answer(&store, job, &"a".repeat(10_001), NOW));
-    answer(&store, job, &"a".repeat(10_000), NOW).unwrap();
+    refused(answer(&store, job, &"a".repeat(10_001), None, NOW));
+    answer(&store, job, &"a".repeat(10_000), None, NOW).unwrap();
     agree(&store, job);
 }
 
@@ -397,7 +397,7 @@ fn the_document_of_each_state_passes_the_schema() {
     wake(&store, job, By::Engine, Some("reply"), NOW + 2).unwrap();
     ask(&store, job, "Accept section 4?", None, NOW + 3).unwrap();
     check(job, "needs_you");
-    answer(&store, job, "Yes.", NOW + 4).unwrap();
+    answer(&store, job, "Yes.", None, NOW + 4).unwrap();
     finish(
         &store,
         job,

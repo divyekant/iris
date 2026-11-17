@@ -77,7 +77,9 @@ pub fn answer_job(
 ) -> Result<()> {
     iris_job::check_text(text, 10_000).map_err(Error::Query)?;
     iris_job::answer(store, row, text, asked, now_ms).map_err(|e| match e {
-        iris_job::Error::Refused(_) => Error::Conflict("The job does not ask this question now.".into()),
+        iris_job::Error::Refused(_) => {
+            Error::Conflict("The job does not ask this question now.".into())
+        }
         e => job_error(e),
     })
 }
