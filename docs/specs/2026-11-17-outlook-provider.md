@@ -17,7 +17,7 @@ history ID for the mailbox.
 
 1. A crate `crates/iris-graph` holds a thin Graph mail client for the
    mirror: folders, delta queries, the raw MIME of a message, and the write
-   calls (read state, flag, categories, move, draft, send and the delete of a sent draft).
+   calls (read state, flag, categories, move, draft and send).
 2. A crate `crates/iris-fakegraph` holds a fake Graph server on top of the
    synthetic mailbox. CI tests the client against the fake. No test calls
    Microsoft.
@@ -159,7 +159,6 @@ account. R6-10 decides where this compare lives.
 | `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
 | `sent_by_message_id(id)` | `GET /me/mailFolders/sentitems/messages?$filter=internetMessageId eq '<id>'` (a read) | 200, at most one message |
 | `draft_etag(id)` | `GET /me/messages/{id}?$select=id` | 200, the `@odata.etag` |
-| `delete_draft(id, etag)` | `DELETE /me/messages/{id}` with `If-Match: <etag>` | 204, or 412 |
 
 `set_categories` replaces the full list (A6). The caller reads the message
 with its `@odata.etag` first, and sends the full new list with
@@ -174,15 +173,25 @@ draft (the same bytes that the approval hash covers, as for Gmail in spec
 `2026-11-16-send.md`).
 
 Graph builds the MIME text of a draft again at each read (A4), so a hash
-of the server bytes cannot show a change. The etag shows it. The release
-of a send does these steps:
+of the server bytes cannot show a change, and an etag alone is not proof
+(A14). The release checks both. The release of a send does these steps:
 
 1. `create_draft` keeps the `@odata.etag` of the new draft with the draft
    row.
-2. Before the send, `draft_etag` reads the server draft. If the draft is
-   gone (404), or its etag is not the kept etag, the person or another
-   client changed it: the release denies the send ("The draft changed
-   after the approval."), as spec 2 section 7.5 and the send spec require.
+2. Before the send, `draft_etag` reads the server draft, and `raw` reads
+   its MIME text. The release runs the read back of the send spec
+   section 1 on that text (the fields of the content hash). It goes on
+   only if the draft exists, the etag is the kept etag, and the content
+   hash is the hash of the `draft` row. Else the person or another client
+   changed it: the release denies the send ("The draft changed after the
+   approval."), as spec 2 section 7.5 and the send spec require, and
+   refreshes the `draft` row as the send spec section 4.1 says: the row
+   gets the content, the hash, the new etag and the exact bytes of the
+   read back, or `foreign_at` when the text does not read back (for
+   example, Graph changed its form). A new `send` action then binds to
+   the content that the person wrote, or submit denies it. If Graph
+   always gives a form that does not read back, each Outlook send is
+   denied: the safe result, and the release gate shows it.
 3. The claim of spec `2026-11-16-send.md` section 5, step 3 (the ledger
    row in `writing` and the `ledger_send` row), then `send_mime` with the
    stored bytes. The answer 202 has no message ID, so the row stays in
@@ -197,24 +206,13 @@ of a send does these steps:
    each later recovery turn searches again. Recovery never calls
    `send_mime` again. After 24 hours with no copy, the row fails with
    the unknown result kept, as for Gmail (issue #280).
-5. The transaction that sets the ledger row `applied` also sets the
-   draft row `cleanup = pending`, with the checked etag. Then
-   `delete_draft` deletes the server draft with `If-Match` and that
-   etag, so that the person does not send it a second time from Outlook.
-   A draft that changed after step 2 gives 412, and Iris leaves it in
-   place. A failed delete leaves a draft and changes no sent mail.
-6. The cleanup ends in one transaction that clears `cleanup`: after 204
-   or 404 (the draft is gone), or after 412 (the draft changed; a notice
-   says "The draft stays in Outlook. Delete it there."). A crash or an
-   unknown result keeps `cleanup = pending`. Each recovery turn runs the
-   pending cleanups again, before each apply and each release. The
-   cleanup is not a changeset action: it changes no sent mail, and a
-   repeat of the conditional delete can only remove the draft in the
-   checked state, which is the target. After 3 turns with no definite
-   answer, Iris clears `cleanup` and shows the same notice.
 
-If Graph ignores `If-Match` on `DELETE` (A14), Iris does not delete the
-draft: it stays in Drafts, and the outbox tells the person.
+Iris does not delete the server draft after the send, because spec 2
+says that Iris never deletes a draft, and a delete is a mailbox write
+with no approval. The draft stays in Outlook Drafts. The outbox shows
+"Sent. The draft stays in Outlook: delete it there." A known limit with
+its own issue: the person can send the same draft a second time from
+Outlook. A later card can make the delete an approved part of the send.
 
 ### 6. Map to the mirror
 
@@ -368,11 +366,13 @@ Each assumption has the evidence of a Microsoft Learn page, read on
 - A12. Consent to an unverified multitenant app can be blocked in a work
   tenant with risk-based step-up consent. Evidence:
   <https://learn.microsoft.com/en-us/entra/identity-platform/publisher-verification-overview>.
-- A14. A `PATCH` or a `DELETE` of a message with `If-Match` and an old
-  `@odata.etag` gives HTTP 412, and a change of a draft changes its etag. Evidence: `pending` (OData v4 rule; the message-update
+- A14. A `PATCH` of a message with `If-Match` and an old `@odata.etag`
+  gives HTTP 412, and a change of a draft changes its etag. Evidence: `pending` (OData v4 rule; the message-update
   page does not state it). The release gate tests it on the real mailbox.
   If Graph ignores `If-Match`, Iris turns off category writes for Outlook
   accounts (label and unlabel give a definite refusal), and the rest works.
+  A draft edit that keeps its etag is still caught: the release also
+  compares the content hash of the read back (section 5, step 2).
 - A15. A list of a folder with `$filter=internetMessageId eq '<id>'`
   finds the sent copy, and the `$value` of the copy keeps the fields of
   the content hash. Evidence: `pending`; the release gate tests it. If the
@@ -404,7 +404,6 @@ section 7.3). The caller reconciles with reads only.
 | `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
 | `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
 | `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery searches `sentitems` for the `Message-ID` and runs the completion (spec 2 section 7.5) | never |
-| `delete_draft` | 204 | `Error::Api`; 404 means the draft is gone, which is the target; 412 means the draft changed, and Iris leaves it | the caller reads the draft: 404 means deleted, else the draft stays | never after an unknown result |
 
 ## Open questions
 
