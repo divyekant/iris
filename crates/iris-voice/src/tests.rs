@@ -1020,7 +1020,7 @@ fn late_threads(store: &Store, now: i64) -> Vec<i64> {
         .read(|c| Ok(late(c, now)?))
         .unwrap()
         .into_iter()
-        .map(|(t, _)| t)
+        .map(|l| l.thread)
         .collect()
 }
 
@@ -1103,15 +1103,33 @@ fn a_thread_is_late_only_while_each_rule_holds() {
         ),
         (
             "the ask went to another person",
-            "UPDATE header SET to_addrs = 'bo@example.org, ana@example.org'
+            "UPDATE header SET to_addrs = 'bo@example.org', cc_addrs = 'me@example.com'
               WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
             at,
             false,
         ),
         (
-            "the ask went to Ana first",
-            "UPDATE header SET to_addrs = 'ANA@example.org, bo@example.org'
+            "Ana is the second recipient",
+            "UPDATE header SET to_addrs = 'bo@example.org', cc_addrs = ' ANA@example.org'
               WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
+            at,
+            true,
+        ),
+        (
+            "due today",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-03')) WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "due yesterday",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-02')) WHERE ?1 > 0",
+            at,
+            true,
+        ),
+        (
+            "due at the second before",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('at', '1970-01-03T00:00:00+00:00')) WHERE ?1 > 0",
             at,
             true,
         ),
@@ -1148,13 +1166,32 @@ fn a_thread_is_late_only_while_each_rule_holds() {
     assert_eq!(late_threads(&b.store, 3000 + LATE_AFTER_MS), [t]);
 }
 
+/// The one late thread at `now`.
+fn one_late(store: &Store, now: i64) -> Late {
+    let mut l = store.read(|c| Ok(late(c, now)?)).unwrap();
+    assert_eq!(l.len(), 1, "{l:?}");
+    l.remove(0)
+}
+
 #[test]
 fn a_nudge_is_saved_only_while_the_thread_is_late() {
     let now = 1000 + LATE_AFTER_MS;
     // A nudge draft makes the thread not late until the thread changes.
     let (b, t) = asked("nudge-saved");
     let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
-    nudge(&b.store, t, &fake, now).unwrap();
+    // Ana is the second recipient: the nudge goes to her.
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE header SET to_addrs = 'bo@example.org, ana@example.org'
+                  WHERE message_id IN (SELECT id FROM message WHERE thread_id = ?1)",
+                [t],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let l = one_late(&b.store, now);
+    nudge(&b.store, &l, &fake, now).unwrap();
     assert!(late_threads(&b.store, now).is_empty());
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     assert_eq!(data["intent"], NUDGE_INTENT);
@@ -1162,10 +1199,11 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     assert_eq!(saved(&b.store, t).unwrap().1.as_deref(), Some(NUDGE_INTENT));
 
     // A thread that is not late gets no call.
-    let (b, t) = asked("nudge-not-late");
+    let (b, _) = asked("nudge-not-late");
     let fake = Fake::new(r#"{"body": "x"}"#);
+    let l = one_late(&b.store, now);
     assert!(matches!(
-        nudge(&b.store, t, &fake, now - 1),
+        nudge(&b.store, &l, &fake, now - 1),
         Err(Error::Changed)
     ));
     assert!(fake.calls.borrow().is_empty());
@@ -1189,7 +1227,8 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
                 })
                 .unwrap();
         }));
-        assert!(matches!(nudge(store, t, &fake, now), Err(Error::Changed)), "{name}");
+        let l = one_late(store, now);
+        assert!(matches!(nudge(store, &l, &fake, now), Err(Error::Changed)), "{name}");
         assert_eq!(fake.calls.borrow().len(), 1, "{name}");
         let body = saved(store, t).map(|s| s.0);
         assert_ne!(body.as_deref(), Some("x"), "{name}");

@@ -178,6 +178,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/write", post(post_write))
         .route("/api/write/{id}", get(get_write))
         .route("/api/threads/{id}/reply", get(get_reply))
+        .route("/api/threads/{id}/draft", get(get_draft))
         .route("/api/matters", get(get_matters))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
@@ -862,6 +863,28 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
     };
     Ok(match write::state(&s, row, now_ms())? {
         Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The draft of a thread (`t-N`) that the person can use now: a reply in
+/// the voice of the owner (R3-05) or a nudge (R3-07). 404 when there is
+/// none, or when it is stale. The draft is text only: nothing is sent.
+async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some((iris_store::Kind::Thread, thread)) = iris_store::parse_id(&id) else {
+        return Ok(not_found());
+    };
+    let draft = s
+        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .map_err(Error::from)?;
+    Ok(match draft {
+        Some((based_on, intent, body)) => Json(serde_json::json!({
+            "thread": id,
+            "based_on": iris_store::format_id(iris_store::Kind::Message, based_on),
+            "nudge": intent.as_deref() == Some(iris_voice::NUDGE_INTENT),
+            "body": body,
+        }))
+        .into_response(),
         None => not_found(),
     })
 }

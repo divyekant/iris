@@ -16,11 +16,11 @@ use crate::reply::Connect;
 /// The most nudge calls in one turn of the understanding thread.
 pub const MAX_PER_TURN: usize = 3;
 
-/// The threads and newest messages that a nudge call was made for. A
-/// thread gets one call for each newest message, also if the call failed,
+/// The late threads ([`iris_voice::Late`]) that a nudge call was made for.
+/// A thread gets one call for each newest message and person, also if the call failed,
 /// so an invalid answer does not cost a call each turn.
 /// shortcut: the set is in memory, so a restart of the engine gives each late thread one more call; store it if restarts are frequent.
-pub type Tried = HashSet<(i64, i64)>;
+pub type Tried = HashSet<iris_voice::Late>;
 
 /// One nudge step: a call for each late thread ([`iris_voice::late`]) that
 /// `tried` does not have, at most [`MAX_PER_TURN`]. No call when another
@@ -55,17 +55,17 @@ pub fn step(
     }
     let model = connect(&row)?;
     let mut saved = 0;
-    for (thread, newest) in late.into_iter().take(MAX_PER_TURN) {
-        match call(store, &row, model.as_ref(), thread, now_ms)? {
-            Outcome::Refused => break,
-            Outcome::Saved => saved += 1,
-            Outcome::Failed => {}
-            Outcome::ModelFailed => {
-                tried.insert((thread, newest));
-                break;
-            }
+    for l in late.into_iter().take(MAX_PER_TURN) {
+        let outcome = call(store, &row, model.as_ref(), &l, now_ms)?;
+        if matches!(outcome, Outcome::Refused) {
+            break;
         }
-        tried.insert((thread, newest));
+        tried.insert(l);
+        match outcome {
+            Outcome::Saved => saved += 1,
+            Outcome::ModelFailed => break,
+            _ => {}
+        }
     }
     Ok(saved)
 }
@@ -87,7 +87,7 @@ fn call(
     store: &Store,
     row: &ModelRow,
     model: &dyn Model,
-    thread: i64,
+    late: &iris_voice::Late,
     now_ms: i64,
 ) -> Result<Outcome, String> {
     let run = store
@@ -107,7 +107,7 @@ fn call(
         })
         .map_err(|e| e.to_string())?;
     let budgeted = Budgeted::new(model, store, run, Some(row));
-    let result = iris_voice::nudge(store, thread, &budgeted, now_ms);
+    let result = iris_voice::nudge(store, late, &budgeted, now_ms);
     let s = budgeted.state();
     let stop = if s.refused || s.overrun {
         "budget"

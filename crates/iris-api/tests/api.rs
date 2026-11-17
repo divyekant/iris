@@ -1592,6 +1592,30 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
          ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC LIMIT 1",
         [first],
     );
+    // The text of the draft: GET /api/threads/{t}/draft.
+    let thread = format!(
+        "t-{}",
+        store
+            .read(|c| Ok(c.query_row(
+                "SELECT thread_id FROM message WHERE id = ?1",
+                [first],
+                |r| r.get::<_, i64>(0)
+            )?))
+            .unwrap()
+    );
+    let (status, draft) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    assert_eq!(draft["body"], "Yes.");
+    assert_eq!(draft["nudge"], false);
+    exec(
+        &store,
+        "UPDATE reply_draft SET intent = ?1",
+        [iris_voice::NUDGE_INTENT],
+    );
+    let (_, draft) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(draft["nudge"], true);
+    let (status, _) = get(&store, "/api/threads/m-1/draft").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let ready = json!(["draft"]);
     let want = vec![
         (format!("c-{with}"), ready.clone()),
@@ -1637,4 +1661,6 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
             (format!("c-{without}"), Value::Null),
         ]
     );
+    let (status, _) = get(&store, &format!("/api/threads/{thread}/draft")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a stale draft");
 }

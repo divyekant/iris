@@ -205,21 +205,24 @@ The answer is late. Ask when they can do it. Do not repeat the whole ask.";
 pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 
 /// The threads that need a nudge at the time `now_ms`, each with its
-/// newest message that counts, oldest first. A thread needs a nudge when:
+/// newest message that counts and the address of the person that owes,
+/// oldest first. One entry for each thread. A thread needs a nudge when:
 /// - it is the thread of the origin message of an open commitment that is
 ///   owed to you by a `person`, and that the brief shows (no `hide` or
-///   `bundle` rule), with no due date or a due date before `now_ms`;
+///   `bundle` rule), with no due date or a due date that passed: a `due.at`
+///   at its instant, a `due.date` at the end of that day in UTC;
 /// - its newest message that counts is from the owner (`SENT`) and is at
 ///   least [`LATE_AFTER_MS`] old, so the person did not answer, and a
 ///   nudge that the owner sent starts the wait again;
-/// - the reply to that message goes to the person that owes ([`recipient`]
-///   is the address of the sender row of the commitment owner);
+/// - that message went to the person that owes: the address of the sender
+///   row of the commitment owner is in its `To` or `Cc`, and is not an
+///   address of the owner. The nudge goes to that address;
 /// - [`write`] can make a draft: no message that counts is hostile or waits
 ///   for understanding;
 /// - it has no draft of the owner (a draft with another intent than
 ///   [`NUDGE_INTENT`], stale or not), so a nudge never replaces it, and no
 ///   nudge that the person can use now ([`ready_sql`]).
-pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
+pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
     let newest = in_thread!("t.id");
     let all = in_thread!("n.thread");
     let ready = ready_sql("SELECT n.thread");
@@ -235,9 +238,11 @@ pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
               AND json_extract(item.doc, '$.direction') = 'owed_to_you'
               AND coalesce(json_extract(item.doc, '$.attention.state'), 'shown') = 'shown'
               AND s.kind = 'person'
-              AND coalesce(unixepoch(coalesce(json_extract(item.doc, '$.due.at'),
-                                              json_extract(item.doc, '$.due.date')), 'subsec') * 1000,
-                           0) < ?1),
+              -- A due time passes at its instant. A due date with no time
+              -- passes at the end of that day in UTC.
+              AND coalesce(unixepoch(json_extract(item.doc, '$.due.at'), 'subsec'),
+                           unixepoch(json_extract(item.doc, '$.due.date'), '+1 day'),
+                           0) * 1000 <= ?1),
          n(thread, me, owner, newest) AS
            (SELECT t.id, t.me, t.owner, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t)
          SELECT n.thread, n.newest, n.me, n.owner FROM n JOIN message nm ON nm.id = n.newest
@@ -259,28 +264,70 @@ pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
             r.get::<_, String>(3)?,
         ))
     })?;
-    let mut out: Vec<(i64, i64)> = Vec::new();
+    let mut out: Vec<Late> = Vec::new();
     for row in rows {
         let (thread, newest, me, owner) = row?;
-        if out.last().is_some_and(|l| l.0 == thread) {
+        if out.last().is_some_and(|l| l.thread == thread) {
             continue;
         }
-        // The same recipient rule as `write`, on the same snapshot.
-        let to = recipient(&snapshot(c, thread)?.newest, &me);
-        if to.is_some_and(|to| to.eq_ignore_ascii_case(owner.trim())) {
-            out.push((thread, newest));
+        let to = owner.trim().to_lowercase();
+        let snap = snapshot(c, thread)?;
+        let Some(last) = snap.newest.last().filter(|m| m.id == newest) else {
+            continue;
+        };
+        let owners = [Some(me.as_str()), last.from_addr.as_deref()];
+        let lists = [last.to_addrs.as_deref(), last.cc_addrs.as_deref()];
+        if addresses(&lists, &owners).any(|a| a == to) {
+            out.push(Late { thread, newest, to });
         }
     }
     Ok(out)
 }
 
-/// Writes a nudge of `thread` ([`write`] with [`NUDGE_INTENT`]). The thread
-/// must be [`late`] before the call and again in the write of the draft, so
-/// a commitment that is done, hidden or answered during the call gets no
-/// nudge.
-pub fn nudge(store: &Store, thread: i64, model: &dyn Model, now_ms: i64) -> Result<Saved> {
-    let still = |c: &Connection| Ok(late(c, now_ms)?.iter().any(|(t, _)| *t == thread));
-    write_when(store, thread, Some(NUDGE_INTENT), model, now_ms, &still)
+/// A thread that needs a nudge ([`late`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Late {
+    pub thread: i64,
+    /// The newest message that counts: the last mail of the owner.
+    pub newest: i64,
+    /// The address of the person that owes, in lower case.
+    pub to: String,
+}
+
+/// The draft of `thread` that the person can use now ([`ready_sql`]), or
+/// `None`: `(based_on, intent, body)`.
+pub fn ready(
+    c: &Connection,
+    thread: i64,
+) -> rusqlite::Result<Option<(i64, Option<String>, String)>> {
+    c.query_row(
+        &format!(
+            "SELECT based_on, intent, body FROM reply_draft
+              WHERE thread_id = ?1 AND {}",
+            ready_sql("SELECT ?1")
+        ),
+        [thread],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+}
+
+/// Writes a nudge of a late thread ([`write`] with [`NUDGE_INTENT`], to
+/// the person that owes). The same entry must be in [`late`] before the
+/// call and again in the write of the draft, so a commitment that is done,
+/// hidden or answered during the call gets no nudge.
+pub fn nudge(store: &Store, late: &Late, model: &dyn Model, now_ms: i64) -> Result<Saved> {
+    let still = |c: &Connection| Ok(self::late(c, now_ms)?.contains(late));
+    let to = Some(late.to.as_str());
+    write_when(
+        store,
+        late.thread,
+        Some(NUDGE_INTENT),
+        to,
+        model,
+        now_ms,
+        &still,
+    )
 }
 
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
@@ -360,12 +407,21 @@ fn recipient(msgs: &[Msg], me: &str) -> Option<String> {
 /// The first address of the comma lists that is not empty and not one of
 /// `owners`, in lower case.
 fn first_other(lists: &[Option<&str>], owners: &[Option<&str>]) -> Option<String> {
+    addresses(lists, owners).next()
+}
+
+/// The addresses of the comma lists that are not empty and not one of
+/// `owners`, in lower case, in order.
+fn addresses<'a>(
+    lists: &'a [Option<&'a str>],
+    owners: &'a [Option<&'a str>],
+) -> impl Iterator<Item = String> + 'a {
     lists
         .iter()
         .flatten()
         .flat_map(|l| l.split(','))
         .map(|a| a.trim().to_lowercase())
-        .find(|a| {
+        .filter(|a| {
             !a.is_empty()
                 && !owners
                     .iter()
@@ -530,15 +586,17 @@ pub fn write(
     model: &dyn Model,
     now_ms: i64,
 ) -> Result<Saved> {
-    write_when(store, thread, intent, model, now_ms, &|_| Ok(true))
+    write_when(store, thread, intent, None, model, now_ms, &|_| Ok(true))
 }
 
 /// [`write`], with one more condition `still` that must be true before the
-/// call and in the write of the draft. Else [`Error::Changed`].
+/// call and in the write of the draft (else [`Error::Changed`]), and `to`
+/// in place of the [`recipient`] rule when it is given.
 fn write_when(
     store: &Store,
     thread: i64,
     intent: Option<&str>,
+    to: Option<&str>,
     model: &dyn Model,
     now_ms: i64,
     still: &dyn Fn(&Connection) -> rusqlite::Result<bool>,
@@ -561,13 +619,17 @@ fn write_when(
                 return Ok(None);
             };
             let snap = snapshot(c, thread)?;
-            let to = recipient(&snap.newest, &me);
+            let to = to
+                .map(str::to_string)
+                .or_else(|| recipient(&snap.newest, &me));
             let samples = samples(c, account, thread, to.as_deref())?;
             Ok(Some((account, me, snap, samples)))
         })?
         .ok_or(Error::NoThread(thread))?;
     let based_on = check(&snap)?.id;
-    let to = recipient(&snap.newest, &me);
+    let to = to
+        .map(str::to_string)
+        .or_else(|| recipient(&snap.newest, &me));
     let data = data(&me, to.as_deref(), intent, &samples, &snap.newest);
     // The last check before the call, after the slow read of the samples.
     // shortcut: a sync that marks a message hostile after this check and
