@@ -205,9 +205,11 @@ Exit codes:
 #### 5.3 The sample producer
 
 `producer/produce.py <out-folder>` uses only the Python standard library.
-It makes `<out-folder>` as a new folder, and stops with exit 1 if the path
-exists. It writes each file in the new folder with an exclusive create
-(`open(path, "x")`), so it never replaces a file.
+It stops with exit 1 if `<out-folder>` or `<out-folder>.partial` exists.
+It makes `<out-folder>.partial` as a new folder and writes each file in it
+with an exclusive create (`open(path, "x")`), so it never replaces a file.
+After the last file, it renames `<out-folder>.partial` to `<out-folder>`.
+So `<out-folder>` exists only after a complete run.
 It reads each `.eml` file in `producer/mail/` with the `email` package, and
 writes one document for each message:
 
@@ -413,10 +415,15 @@ None outside the computer. The migration writes the store (section
 | Case | Result |
 |---|---|
 | Success | `<out-folder>` is new and holds one file for each document. Exit 0. |
-| `<out-folder>` exists (a file, a folder or a link) | Nothing is written. Exit 1 with the path. |
-| A write fails (no space, no permission) | The producer stops with exit 1. The new folder can hold some files. |
-| A crash or a stop during the writes | The new folder can hold some files, and the last file can be short. |
-| Retry after a failure or a crash | The producer refuses the existing folder. The person removes it, or names a new folder. A partial folder never passes as a complete run, because `run.py check` validates each file, and the `spec-kit` test checks the count of documents. |
+| `<out-folder>` or `<out-folder>.partial` exists (a file, a folder or a link) | Nothing is written. Exit 1 with the path. |
+| A write or the rename fails (no space, no permission) | The producer stops with exit 1. `<out-folder>.partial` can hold some files. `<out-folder>` does not exist. |
+| A crash or a stop before the rename | `<out-folder>.partial` can hold some files, and the last file can be short. `<out-folder>` does not exist. |
+| Retry after a failure or a crash | The producer refuses the existing `<out-folder>.partial`. The person removes it, or names a new folder. |
+
+`run.py check` validates the documents in a folder. It does not certify
+that a run of a producer was complete. The rename gives that result for
+the sample producer, and the `spec-kit` test also checks the count of
+documents.
 
 The `spec-kit` test runs the producer into a new temporary folder.
 
