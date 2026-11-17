@@ -173,7 +173,7 @@ documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/1.0",
+  "model": "iris/1.1",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },

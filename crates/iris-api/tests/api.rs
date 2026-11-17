@@ -1744,3 +1744,60 @@ async fn an_item_shows_a_ready_draft_of_its_thread_until_the_draft_is_stale() {
     let (status, _) = get(&store, &format!("/api/threads/{thread}/draft")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "a stale draft");
 }
+
+/// R6-02: the brief shows the items of each account, each with the `a-` ID
+/// of its account, and the item passes the schema of model 1.1.
+#[tokio::test]
+async fn the_brief_shows_the_items_of_each_account() {
+    let dir = temp("two-accounts");
+    let (store, _) = filled_n(&dir, 30);
+    let second = store.add_account("gmail", "second@example.com").unwrap();
+    let person = sender(&store, "dana@contoso.example", Some("person"));
+    let owe = json!({"direction": "you_owe", "kind": "task", "owner": {"kind": "self"},
+                     "counterparty": party(&person)});
+    exec(&store, "UPDATE message SET understood_at = 1 WHERE ?1", [1]);
+    exec(&store, "DELETE FROM link_check WHERE ?1", [1]);
+    let first = add_item(&store, "commitment", "open", 1, 10, owe.clone());
+    let other = add_item(&store, "commitment", "open", 2, 20, owe);
+    exec(
+        &store,
+        "UPDATE item SET account_id = ?1 WHERE id = ?2",
+        [second, other],
+    );
+    let (_, brief) = get(&store, "/api/brief").await;
+    let items = brief["you_owe"]["items"].as_array().unwrap();
+    let mut shown: Vec<(String, String)> = items
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().into(),
+                i["account"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    shown.sort();
+    assert_eq!(
+        shown,
+        vec![
+            (format!("c-{first}"), "a-1".to_string()),
+            (format!("c-{other}"), format!("a-{second}")),
+        ]
+    );
+    let schema = iris_spec::validator("commitment");
+    for item in items {
+        assert_eq!(item["model"], iris_store::MODEL);
+        assert!(schema.is_valid(item), "{item}");
+    }
+    let mut wrong = items[0].clone();
+    wrong["account"] = json!("a-0");
+    assert!(!schema.is_valid(&wrong), "{wrong}");
+    // The status lists both accounts, so the client can name each one.
+    let (_, status) = get(&store, "/api/status").await;
+    let addresses: Vec<&str> = status["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["address"].as_str().unwrap())
+        .collect();
+    assert_eq!(addresses, ["owner@example.com", "second@example.com"]);
+}

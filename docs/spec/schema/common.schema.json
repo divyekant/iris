@@ -294,6 +294,11 @@
             }
           ]
         },
+        "account": {
+          "description": "Since iris/1.1. The a- ID of the account (the mailbox) of the item. See docs/specs/2026-11-17-accounts.md.",
+          "type": "string",
+          "pattern": "^a-[1-9][0-9]*$"
+        },
         "ready": {
           "description": "What Iris prepared for the item, on the items of the brief only (card R3-09). draft: the thread of the origin message has a reply draft that is not stale.",
           "type": "array",
