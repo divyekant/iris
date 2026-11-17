@@ -36,6 +36,8 @@ pub struct Caps {
     pub qresync: bool,
     /// `AUTH=PLAIN`. Without it, the client must use `LOGIN`.
     pub plain: bool,
+    /// `UIDNEXT` in each `EXAMINE` answer.
+    pub uidnext: bool,
 }
 
 impl Caps {
@@ -44,6 +46,7 @@ impl Caps {
         condstore: true,
         qresync: true,
         plain: true,
+        uidnext: true,
     };
 }
 
@@ -482,7 +485,9 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                         ));
                         reply.push_str(&format!("* {} EXISTS\r\n", f.messages.len()));
                         reply.push_str(&format!("* OK [UIDVALIDITY {}] ok\r\n", f.uidvalidity));
-                        reply.push_str(&format!("* OK [UIDNEXT {}] ok\r\n", f.uidnext));
+                        if s.caps.uidnext {
+                            reply.push_str(&format!("* OK [UIDNEXT {}] ok\r\n", f.uidnext));
+                        }
                         if s.caps.condstore {
                             reply.push_str(&format!("* OK [HIGHESTMODSEQ {high}] ok\r\n"));
                         } else {

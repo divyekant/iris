@@ -215,6 +215,28 @@ fn no_condstore() {
 }
 
 #[test]
+fn no_uidnext() {
+    let condstore_only = Caps {
+        qresync: false,
+        uidnext: false,
+        ..Caps::ALL
+    };
+    let (fake, _) = filled(condstore_only, 2);
+    let r = provider(&fake).profile(PASSWORD);
+    assert!(
+        matches!(&r, Err(Error::Api { status: 400, reason, .. }) if reason == "noUidnext"),
+        "{r:?}"
+    );
+    // With QRESYNC, VANISHED covers removals and UIDNEXT does not matter.
+    let qresync = Caps {
+        uidnext: false,
+        ..Caps::ALL
+    };
+    let (fake, _) = filled(qresync, 2);
+    assert!(provider(&fake).profile(PASSWORD).is_ok());
+}
+
+#[test]
 fn wrong_password() {
     let (fake, _) = filled(Caps::ALL, 1);
     let mail = provider(&fake);

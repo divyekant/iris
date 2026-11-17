@@ -136,7 +136,7 @@ fn no_condstore_mode() {
     let fake = FakeImap::start(Caps {
         condstore: false,
         qresync: false,
-        plain: true,
+        ..Caps::ALL
     });
     let mut s = open(&fake, PASS).unwrap();
     assert!(!s.condstore());
@@ -490,7 +490,7 @@ fn mirror_agrees_in_each_mode() {
         Caps {
             condstore: false,
             qresync: false,
-            plain: true,
+            ..Caps::ALL
         },
     ]
     .into_iter()
