@@ -1,0 +1,20 @@
+[package]
+name = "iris-imap"
+description = "A synchronous IMAP client for the Iris mirror: TLS sign-in, folders, CONDSTORE and QRESYNC changes, and a streamed raw fetch."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+# The response parser of async-imap. The framing and the commands are own code (spec "Options not chosen").
+imap-proto = "0.17"
+# The TLS parts that ureq brings already: rustls with ring, and the Mozilla roots.
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+iris-fakeimap = { version = "0.0.0", path = "../iris-fakeimap" }
+iris-synth = { version = "0.0.0", path = "../iris-synth" }
