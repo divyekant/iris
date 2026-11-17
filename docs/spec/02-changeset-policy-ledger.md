@@ -912,8 +912,20 @@ release 1: they change nothing, so they cannot skip the policy. In session
 mode (release 4), each read verb goes through the session socket, and the
 engine applies the current grant of the job of the session
 (`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
-directly: the direct path is for host mode only. One engine runs on a data
-folder: `iris serve` holds the lock `engine.lock` in the data folder while it
+directly: the direct path is for host mode only.
+
+Release 3 exception (`docs/specs/2026-11-17-held-outbox.md`, sections 3
+and 5): `iris sending on|off`, `iris sending` and `iris cancel <d-N>` open
+the data folder directly, in host mode only, and do not need a running
+engine. They change no mailbox, so they cannot skip the policy:
+
+| Verb | Local writes | Rules |
+|---|---|---|
+| `sending on` | The send switch, after a typed `yes` at a terminal | Held-outbox spec, section 3 |
+| `sending off` | The send switch, after it holds `apply.lock` (at most 20 seconds) | Held-outbox spec, section 3 |
+| `cancel <d-N>` | The open send of the draft becomes `denied` by `person` | Held-outbox spec, section 5 |
+
+One engine runs on a data folder: `iris serve` holds the lock `engine.lock` in the data folder while it
 runs.
 
 | Mode | When | Socket | Who |

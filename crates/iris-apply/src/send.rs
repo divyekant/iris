@@ -674,7 +674,7 @@ fn changed_at_gmail(
     Ok(Outcome::Denied(why.into()))
 }
 
-fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
+pub(crate) fn changeset_error(e: iris_changeset::Error) -> iris_store::Error {
     match e {
         iris_changeset::Error::Store(e) => e,
         other => iris_store::Error::Query(other.to_string()),
@@ -720,14 +720,15 @@ pub fn set_sending(store: &Store, on: bool) -> Result<()> {
             }
         }
     };
-    // The clock is read here, after the lock and the confirmation of the
-    // caller, so a hold always counts from the moment the switch changed.
-    let now_ms = super::now();
+    // SQLite reads the clock in the statement, after it holds the write
+    // lock: a hold always counts from the moment the switch changed, also
+    // after a wait for another writer.
     store.write(|tx| {
         tx.execute(
-            "UPDATE send_switch SET on_at = CASE WHEN ?1 THEN coalesce(on_at, ?2) END,
-               changed_at = ?2 WHERE id = 1",
-            params![on, now_ms],
+            "UPDATE send_switch SET
+               on_at = CASE WHEN ?1 THEN coalesce(on_at, CAST(unixepoch('subsec') * 1000 AS INTEGER)) END,
+               changed_at = CAST(unixepoch('subsec') * 1000 AS INTEGER) WHERE id = 1",
+            params![on],
         )?;
         Ok(())
     })?;

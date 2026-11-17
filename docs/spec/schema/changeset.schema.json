@@ -177,7 +177,8 @@
                       "enum": [
                         "proposed",
                         "in_review",
-                        "approved"
+                        "approved",
+                        "held"
                       ]
                     }
                   }
@@ -216,7 +217,8 @@
                         "enum": [
                           "proposed",
                           "in_review",
-                          "approved"
+                          "approved",
+                          "held"
                         ]
                       }
                     }
@@ -312,6 +314,7 @@
                               "proposed",
                               "in_review",
                               "approved",
+                              "held",
                               "applied",
                               "failed",
                               "undone",
@@ -591,6 +594,7 @@
                   "proposed",
                   "in_review",
                   "approved",
+                  "held",
                   "applied",
                   "failed",
                   "undone",
@@ -655,6 +659,7 @@
                     "enum": [
                       "in_review",
                       "approved",
+                      "held",
                       "applied",
                       "failed",
                       "undone",
@@ -670,6 +675,35 @@
             "properties": {
               "hash": {
                 "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "Only a send is held (docs/specs/2026-11-17-held-outbox.md, migration 22).",
+          "if": {
+            "type": "object",
+            "required": [
+              "decision"
+            ],
+            "properties": {
+              "decision": {
+                "type": "object",
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "const": "held"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verb": {
+                "const": "send"
               }
             }
           }
@@ -1144,6 +1178,7 @@
             "proposed",
             "in_review",
             "approved",
+            "held",
             "applied",
             "failed",
             "denied",
@@ -1152,7 +1187,7 @@
             "replaced",
             "undone"
           ],
-          "$comment": "held is for a send in the held outbox (release 3). No verb of this version can be held."
+          "$comment": "held is for a send in the held outbox (release 3): an approved send that waits for its hold and the send switch."
         },
         "by": {
           "enum": [
@@ -1237,6 +1272,7 @@
               "state": {
                 "enum": [
                   "approved",
+                  "held",
                   "applied",
                   "failed"
                 ]

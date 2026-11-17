@@ -754,3 +754,185 @@ fn a_tick_finds_the_mail_of_a_watch() {
     e.tick().unwrap();
     assert_eq!(store.watch(w).unwrap().unwrap().message, Some(m));
 }
+
+/// An approved archive of the first inbox message, in the mode `apply`.
+/// Gives the action ID and the Gmail ID of the message.
+fn approved_archive(s: &Setup) -> (i64, String) {
+    let (message, provider): (i64, String) = s
+        .store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at)
+                 VALUES ('version = 0\nmode = \"apply\"\n', 'h', 0)",
+                [],
+            )?;
+            Ok(tx.query_row(
+                "SELECT m.id, m.provider_id FROM message m JOIN message_label ml
+                   ON ml.message_id = m.id JOIN label l ON l.id = ml.label_id
+                 WHERE l.provider_id = 'INBOX' ORDER BY m.id LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let person = iris_changeset::Author {
+        kind: iris_changeset::AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let now = engine::now_ms();
+    let cs = iris_changeset::create(&s.store, &person, now).unwrap();
+    iris_changeset::add_action(
+        &s.store,
+        cs,
+        &person,
+        iris_changeset::Verb::Archive,
+        &[&format!("m-{message}")],
+        &serde_json::Map::new(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(&s.store, cs, &person, "Done.", now).unwrap();
+    let (id, hash): (i64, String) = s
+        .store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT id, hash FROM changeset_action WHERE changeset_id = ?1",
+                [cs],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    let action = iris_changeset::ActionId {
+        changeset: cs,
+        revision: 1,
+        n: 1,
+    };
+    iris_changeset::approve(&s.store, action, &hash, now).unwrap();
+    (id, provider)
+}
+
+fn action_state(store: &Store, action: i64) -> String {
+    store
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT state FROM changeset_action WHERE id = ?1",
+                [action],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+}
+
+/// The apply step after a sync (held-outbox spec, section 4): an approved
+/// archive goes to Gmail. A 401 during the step gets a new token one time.
+#[test]
+fn the_apply_step_applies_an_approved_archive() {
+    let s = setup("apply-step", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, provider) = approved_archive(&s);
+    let calls = s.tokens.calls.lock().unwrap().len();
+    s.fake.fail_next(&[401]);
+    let turn = w.apply_step().unwrap();
+    assert_eq!((turn.next, turn.reports.len()), (None, 0), "{turn:?}");
+    assert_eq!(s.tokens.calls.lock().unwrap().len(), calls + 1);
+    assert_eq!(action_state(&s.store, action), "applied");
+    let meta = gmail(s.fake.base_url()).minimal("t", &provider).unwrap();
+    assert!(!meta.label_ids.contains(&"INBOX".to_string()), "{meta:?}");
+    assert_state(&s.store, s.account, STATE_OK);
+}
+
+/// A 401 during the step, then an error of the token endpoint: the
+/// account stays, and the next turn applies the action (specification 1,
+/// section 4.7).
+#[test]
+fn a_token_endpoint_error_during_the_apply_step_keeps_the_account() {
+    let s = setup("apply-token-down", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.fake.fail_next(&[401]);
+    s.tokens
+        .answers
+        .lock()
+        .unwrap()
+        .push_back((500, r#"{"error":"internal_failure"}"#.into()));
+    let r = w.apply_step();
+    assert!(
+        r.is_err() && !matches!(r, Err(engine::Error::NeedsSignIn)),
+        "{r:?}"
+    );
+    assert_state(&s.store, s.account, STATE_OK);
+    assert_eq!(action_state(&s.store, action), "approved");
+    assert_eq!(w.apply_step().unwrap().next, None);
+    assert_eq!(action_state(&s.store, action), "applied");
+}
+
+/// Gmail refuses two tokens during the recovery of a row in `writing`:
+/// the account needs a new sign-in, as after a sync.
+#[test]
+fn a_refused_token_during_the_recovery_needs_sign_in() {
+    let s = setup("apply-recover-refused", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+                 VALUES (?1, ?2, '{\"call\":\"batchModify\",\"add\":[],\"remove\":[\"INBOX\"],\"calls\":1}',
+                         'writing', 'inverse', 1)",
+                rusqlite::params![action, s.account],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    s.fake.fail_next(&[401, 401]);
+    let r = w.apply_step();
+    assert!(matches!(r, Err(engine::Error::NeedsSignIn)), "{r:?}");
+    assert_state(&s.store, s.account, STATE_NEEDS_SIGN_IN);
+}
+
+/// Two refused tokens of a sync mark the account. The apply step after
+/// it makes no Gmail call, also when Gmail takes the next token.
+#[test]
+fn no_apply_step_after_a_sync_needs_sign_in() {
+    let s = setup("apply-after-refusal", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.fake.fail_next(&[401, 401]);
+    assert!(matches!(w.sync(), Err(engine::Error::NeedsSignIn)));
+    let r = w.apply_step();
+    assert!(matches!(r, Err(engine::Error::NeedsSignIn)), "{r:?}");
+    assert_eq!(action_state(&s.store, action), "approved");
+}
+
+/// Gmail refuses the write of an action (HTTP 400): the action fails, and
+/// the turn reports it with the error of Gmail.
+#[test]
+fn the_apply_step_reports_a_failed_action() {
+    let s = setup("apply-failed", 5);
+    let mut w = s.worker(s.account);
+    w.sync().unwrap();
+    let (action, _) = approved_archive(&s);
+    s.fake.fail_next_write(&[400], false);
+    let turn = w.apply_step().unwrap();
+    assert_eq!(action_state(&s.store, action), "failed");
+    assert_eq!(turn.reports.len(), 1, "{turn:?}");
+    assert!(
+        turn.reports[0].starts_with(&format!("action {action} failed: ")),
+        "{turn:?}"
+    );
+}
+
+#[test]
+fn a_sync_thread_wakes_at_the_end_of_a_hold() {
+    let min = Duration::from_secs(1);
+    assert_eq!(engine::wait(None, 0), engine::SYNC_EVERY);
+    assert_eq!(engine::wait(Some(10_000), 0), Duration::from_secs(10));
+    assert_eq!(engine::wait(Some(0), 5_000), min);
+    assert_eq!(engine::wait(Some(i64::MAX), 0), engine::SYNC_EVERY);
+}
