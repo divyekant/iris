@@ -372,10 +372,10 @@ fn labels_of_special_folders_and_flags() {
     );
     let copies = mail.messages(PASSWORD, Some(SENT_COPY), None).unwrap();
     assert_eq!(copies.messages.len(), 1);
-    // Each folder label is a user label, so no folder is a system label.
+    // Each folder label is system: a label action cannot target a folder.
     for l in mail.labels(PASSWORD).unwrap() {
         if l.id.starts_with("folder:") {
-            assert_eq!(l.kind, "user", "{l:?}");
+            assert_eq!(l.kind, "system", "{l:?}");
         }
     }
     // Nor DRAFT: a folder or a flag is not proof that the owner wrote it.

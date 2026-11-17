@@ -152,9 +152,9 @@ fn folder_label(f: &Folder) -> (String, String, &'static str) {
     match f.special {
         Some(Special::Junk) => fixed("SPAM"),
         Some(Special::Trash) => fixed("TRASH"),
-        // `\Sent`, `\Drafts` and `\Archive` too: no IMAP message gets SENT
-        // or DRAFT, and an archived message has no system label (spec section 4).
-        _ => (format!("folder:{}", f.name), f.name.clone(), "user"),
+        // `\Sent` and `\Drafts` too: no IMAP message gets SENT or DRAFT. Each
+        // folder is system: the provider cannot change a folder (spec section 4).
+        _ => (format!("folder:{}", f.name), f.name.clone(), "system"),
     }
 }
 
