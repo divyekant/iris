@@ -27,6 +27,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use unicase::UniCase;
 
+mod flags;
+pub use flags::{action_content, draft_flags, has_attachment, has_date, has_money, words};
+
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
 pub const BULK: i64 = 500;
@@ -580,6 +583,12 @@ pub fn submit_in(
         }
         if mailbox && first_contact(c, id)? {
             flags.push("first_contact");
+        }
+        // The draft flags (spec 2, section 5.3) come from the content.
+        if WRITE_VERBS.contains(&verb.as_str()) {
+            if let Some((account, content)) = action_content(c, id)? {
+                flags.extend(draft_flags(c, &account, &content)?);
+            }
         }
         c.execute(
             "UPDATE changeset_action SET hash = ?2, flags = ?3 WHERE id = ?1",

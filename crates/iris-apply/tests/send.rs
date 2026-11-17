@@ -670,3 +670,44 @@ fn a_crash_after_the_send_claim_never_sends() {
     assert_eq!(ledger(&store, s).0, "writing");
     assert_eq!(b.sends(), sends);
 }
+
+/// A flag that appears after the approval denies the send, and no
+/// `drafts.send` goes out (docs/specs/2026-11-17-send-checks.md, section 4).
+#[test]
+fn a_warning_after_the_approval_denies_the_send() {
+    let b = setup("grown");
+    let text =
+        "the quarterly numbers look strong and the board meeting agreed on the new plan for hiring";
+    let a = b.approved(
+        Verb::Draft,
+        "a-1",
+        json!({"to": ["priya@example.com"], "subject": "Plan", "body": text}),
+        0,
+    );
+    assert!(matches!(b.apply(a), Ok(Outcome::Applied(_))));
+    let (d, _) = b.draft(a);
+    let s = b.approved(Verb::Send, &d, json!({}), AGED);
+    // Now a received message holds the same words: untrusted_content.
+    let ids = b
+        .store
+        .put_messages(
+            b.account,
+            &[iris_store::NewMessage {
+                provider_id: "echo".into(),
+                thread_provider_id: "echo".into(),
+                body: Some(iris_store::Body {
+                    subject: "Re".into(),
+                    sender: "x@example.org".into(),
+                    text: text.into(),
+                }),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    match b.release(s) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("warnings"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
+}

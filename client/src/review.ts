@@ -122,8 +122,8 @@ export const FLAGS: Record<string, string> = {
   first_contact: "The thread is with a sender you do not know",
   new_recipient: "Goes to an address you never wrote to",
   outside_thread: "Goes to an address that is not in the thread",
-  money: "Promises an amount of money",
-  date: "Promises a date",
+  money: "Names an amount of money",
+  date: "Names a date",
   attachment: "Mentions an attachment",
   untrusted_content: "Holds text from another message",
 };
