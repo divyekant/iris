@@ -191,3 +191,38 @@ test("a refusal shows the reason, a 409 loads the brief again, and no answer say
     }
   }
 });
+
+// R5-02: a feed item, a conversation and a signal get their one quiet verb.
+test("Skip, Mute and Dismiss wait, then send their verb and call ondone", async () => {
+  for (const [id, label, verb, said] of [
+    ["f-5001", "Skip", "skip", "Skipped."],
+    ["v-88", "Mute", "mute", "Muted."],
+    ["s-901", "Dismiss", "dismiss", "Dismissed."],
+  ]) {
+    const item = fx.items.find((i) => i.id === id);
+    const asked = serve(() => [200, item]);
+    let done = null;
+    const view = await mount("/src/views/Line.svelte", { item, delay: 30, ondone: (x) => (done = x) });
+    try {
+      assert.ok(!box(view), "no tick box");
+      assert.equal(view.target.querySelector("button.away").getAttribute("aria-label"), `${label}: ${item.title}`);
+      button(view, label).click();
+      await until(() => button(view, "Undo"));
+      assert.equal(asked.length, 0, "no request during the hold");
+      assert.match(text(view.target), new RegExp(`${said} It leaves your brief\\.`));
+      await until(() => done);
+      assert.deepEqual(asked, [[`items/${id}/${verb}`, {}]]);
+    } finally {
+      view.destroy();
+    }
+  }
+  // With no ondone, or on a commitment, no quiet verb shows.
+  for (const props of [{ item: fx.items.find((i) => i.id === "v-88") }, { item: commitment(), ondone: () => {} }]) {
+    const view = await mount("/src/views/Line.svelte", props);
+    try {
+      assert.ok(!view.target.querySelector("button.away"));
+    } finally {
+      view.destroy();
+    }
+  }
+});
