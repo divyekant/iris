@@ -39,12 +39,14 @@
     return true;
   }
 
-  async function reread(keepError: boolean) {
+  export async function reread(keepError: boolean) {
     const n = ++newest;
     try {
       if (show(n, await read<Answer>("stop")) && !keepError) stopState.error = "";
     } catch {
-      // The access state shows a failure of the engine above each view.
+      // With no answer, the state is not known: the band makes no claim.
+      // The access state shows the failure of the engine above each view.
+      if (n === newest) stopState.known = false;
     }
   }
 
@@ -80,7 +82,7 @@
   }
 </script>
 
-{#if place === "button" && !shared.stopped}
+{#if place === "button" && (!shared.stopped || !shared.known)}
   <button
     class="stop-all"
     type="button"
@@ -95,13 +97,18 @@
 
 {#if place === "band"}
   {#if shared.error}<p class="band failed" role="alert">{shared.error}</p>{/if}
-  {#if shared.stopped}
+  {#if !shared.known}
+    <section class="band" role="status" aria-label="Stop state not known">
+      <p class="words">Iris does not know if agent work is stopped now.</p>
+      <div class="actions">
+        <button class="again" type="button" disabled={shared.busyAction !== ""} onclick={() => reread(false)}>Check again</button>
+      </div>
+    </section>
+  {:else if shared.stopped}
     <section class="band" role="status" aria-label="Iris is stopped">
       <div class="words">
         <p><strong>Iris is stopped</strong>{#if shared.since}{" "}<span class="since">since {since(shared.since)}</span>{/if}.</p>
-        {#if !shared.known}
-          <p class="muted">Iris does not know the state now.</p>
-        {:else if shared.live === 0 && !shared.busy}
+        {#if shared.live === 0 && !shared.busy}
           <p class="muted">No agent runs, no action applies and no mail leaves.</p>
         {:else}
           <p class="muted">The stop is not complete yet.</p>

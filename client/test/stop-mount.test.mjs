@@ -124,7 +124,8 @@ test("a Resume with no answer makes no claim, and a read of the engine gives the
     await until(() => stopState.known === false && stopState.busyAction === "");
     band.flushSync();
     assert.doesNotMatch(text(band.target), /no mail leaves/);
-    assert.match(text(band.target), /does not know the state/);
+    assert.match(text(band.target), /does not know if agent work is stopped/);
+    assert.doesNotMatch(text(band.target), /Iris is stopped/);
     // The next read of the engine gives the state, and clears the old error.
     getWorks = true;
     const { refresh } = await load("/src/views/Stop.svelte");
@@ -146,4 +147,44 @@ test("a Resume when Iris already runs does not say that a new hold started", asy
   await act("resume");
   assert.equal(stopState.stopped, false);
   assert.equal(stopState.note, "");
+});
+
+test("a failed read after a complete stop takes back the claim, and the Stop button comes back", async () => {
+  const { refresh, stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: true, note: "", error: "" });
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const button = await mount("/src/views/Stop.svelte", { place: "button" });
+  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  try {
+    assert.match(text(band.target), /no mail leaves/);
+    // For example, `iris resume` ran at the terminal, and the engine does not answer now.
+    await refresh();
+    band.flushSync();
+    assert.doesNotMatch(text(band.target), /no mail leaves|Iris is stopped/);
+    assert.match(text(band.target), /does not know if agent work is stopped/);
+    assert.ok(button.target.querySelector("button.stop-all"));
+  } finally {
+    button.destroy();
+    band.destroy();
+  }
+});
+
+test("a Stop with no answer makes no claim", async () => {
+  const { act, stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: false, since: null, live: 0, busy: false, known: true, note: "", error: "" });
+  globalThis.fetch = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const band = await mount("/src/views/Stop.svelte", { place: "band" });
+  try {
+    await act("stop");
+    band.flushSync();
+    assert.equal(stopState.known, false);
+    assert.doesNotMatch(text(band.target), /no mail leaves|Iris is stopped/);
+    assert.match(text(band.target), /does not know if agent work is stopped/);
+  } finally {
+    band.destroy();
+  }
 });
