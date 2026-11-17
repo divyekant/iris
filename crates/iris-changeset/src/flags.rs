@@ -334,8 +334,8 @@ pub const DRAFT_FLAGS: [&str; 5] = [
     "untrusted_content",
 ];
 
-/// The part of a draft that a mark is in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The part of a draft that a mark is in, in the order of the draft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Field {
     /// The address with this index in `to`.
     To(usize),
@@ -434,7 +434,31 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
             marks.push(mark("untrusted_content", field, range, Some(source)));
         }
     }
-    Ok(marks)
+    Ok(merge(marks))
+}
+
+/// One mark for each piece of text: the marks of one flag in one field
+/// that overlap or touch become one mark ("$1,200 USD" is one amount),
+/// with the first source. The marks come in the order of [`DRAFT_FLAGS`],
+/// then of the field, then of the text.
+fn merge(mut marks: Vec<Mark>) -> Vec<Mark> {
+    let rank = |f: &str| DRAFT_FLAGS.iter().position(|x| *x == f);
+    marks.sort_by_key(|m| (rank(m.flag), m.field, m.range.start, m.range.end));
+    let mut out: Vec<Mark> = Vec::with_capacity(marks.len());
+    for m in marks {
+        match out.last_mut() {
+            Some(last)
+                if last.flag == m.flag
+                    && last.field == m.field
+                    && m.range.start <= last.range.end =>
+            {
+                last.range.end = last.range.end.max(m.range.end);
+                last.source = last.source.or(m.source);
+            }
+            _ => out.push(m),
+        }
+    }
+    out
 }
 
 /// Each run of [`RUN`] words of the text, at a start of 0, 8, 16 and so

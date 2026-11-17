@@ -496,7 +496,9 @@ fn each_mark_of_the_test_set_is_on_its_words() {
 /// or the word.
 #[test]
 fn a_mark_covers_the_whole_amount_and_date() {
-    let cases: [(&str, &str); 12] = [
+    let dir = TempDir::new("whole");
+    let s = store(&dir);
+    let cases: [(&str, &str); 13] = [
         ("pay 100 $ now", "100 $"),
         ("pay $ 1,250.50.", "$ 1,250.50"),
         ("pay €12", "€12"),
@@ -505,18 +507,22 @@ fn a_mark_covers_the_whole_amount_and_date() {
         ("pay USD 1,200.", "USD 1,200"),
         ("pay 1,200.50 USD", "1,200.50 USD"),
         ("pay 2,500usd", "2,500usd"),
+        ("pay $1,200 USD now", "$1,200 USD"),
         ("by 2026-11-17", "2026-11-17"),
         ("by 11/17/2026", "11/17/2026"),
         ("by end of the day", "end of the day"),
         ("by next week", "next week"),
     ];
     for (text, want) in cases {
-        let r = iris_changeset::money_spans(text)
-            .into_iter()
-            .chain(iris_changeset::date_spans(text))
-            .next()
-            .unwrap_or_else(|| panic!("{text:?}"));
-        assert_eq!(&text[r], want);
+        let c = Content {
+            to: vec!["priya@example.com".into()],
+            cc: Vec::new(),
+            subject: "Hi".into(),
+            body: text.into(),
+        };
+        let marks = s.read(|x| Ok(draft_marks(x, OWNER, &c).unwrap())).unwrap();
+        let got: Vec<&str> = marks.iter().map(|m| &text[m.range.clone()]).collect();
+        assert_eq!(got, [want], "{text:?}");
     }
 }
 
@@ -589,6 +595,16 @@ fn marks_agree_with_the_flags_for_random_text() {
             })
             .unwrap();
         assert_eq!(names(&marks), flags, "{c:?}");
+        // One mark for each piece of text: no two marks of one flag in one field overlap or touch.
+        for (i, a) in marks.iter().enumerate() {
+            for b in &marks[i + 1..] {
+                let apart = a.range.end < b.range.start || b.range.end < a.range.start;
+                assert!(
+                    a.flag != b.flag || a.field != b.field || apart,
+                    "{a:?} {b:?}"
+                );
+            }
+        }
         for m in &marks {
             assert!(!m.range.is_empty(), "{m:?}");
             let text = marked(&c, m);
