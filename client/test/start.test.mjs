@@ -57,3 +57,10 @@ test("byThread keeps the order of the list and groups each run of one thread", (
   assert.equal(s.reads(list), "3 messages in 2 threads");
   assert.equal(s.reads([list[0]]), "1 message in 1 thread");
 });
+
+test("subjectOf names an empty or blank subject (no subject), as the workspace does (#413)", () => {
+  for (const blank of [null, undefined, "", "   ", "\t\n"]) assert.equal(s.subjectOf({ subject: blank }), "(no subject)", JSON.stringify(blank));
+  assert.equal(s.subjectOf({ subject: "  Q4 numbers " }), "Q4 numbers");
+  const groups = s.byThread([{ id: "m-1", thread: "t-1", subject: "  ", readable: true }]);
+  assert.equal(groups[0].subject, "(no subject)");
+});

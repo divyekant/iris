@@ -36,13 +36,18 @@ export function dueValue(item: Item, field: string): string | null {
   return endOfDay(field);
 }
 
+/** The subject of a message as the person reads it: "(no subject)" for none, empty or blank, as in the workspace. */
+export function subjectOf(m: { subject?: string | null }): string {
+  return m.subject?.trim() || "(no subject)";
+}
+
 /** The messages of a start, grouped by thread, in the order of the list. */
 export function byThread(messages: StartMessage[]): { thread: string; subject: string; messages: StartMessage[] }[] {
   const out: { thread: string; subject: string; messages: StartMessage[] }[] = [];
   for (const m of messages) {
     const last = out[out.length - 1];
     if (last && last.thread === m.thread) last.messages.push(m);
-    else out.push({ thread: m.thread, subject: m.subject ?? "(no subject)", messages: [m] });
+    else out.push({ thread: m.thread, subject: subjectOf(m), messages: [m] });
   }
   return out;
 }
