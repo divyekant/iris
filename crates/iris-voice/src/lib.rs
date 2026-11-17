@@ -222,29 +222,38 @@ pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
 /// SQL of the key of the nudge of the thread `thread` (an SQL expression),
 /// or NULL: JSON text of the commitment that the nudge reminds of (`item`,
 /// `to`, `title`, `due`, `quote`). It is the open commitment with the
-/// lowest row ID that:
-/// - came from a message of the thread (its `origin`), is owed to you by a
-///   `person`, and the brief shows it (no `hide` or `bundle` rule);
-/// - names a person whose address is in `To` or `Cc` of the newest message
-///   of the thread that counts, and is not an address of the owner (the
-///   account, or the `From` of that message). The nudge goes to it;
-/// - with `now` (an SQL expression of milliseconds), has no due date or a
-///   due date that passed: a `due.at` at its instant, a `due.date` at the
-///   end of that day in UTC. With no `now`, the due date does not count:
-///   a due date that passed stays passed.
+/// lowest row ID that came from a message of the thread (its `origin`),
+/// is owed to you by a `person`, and that the brief shows (no `hide` or
+/// `bundle` rule), in one of two cases of the newest message of the
+/// thread that counts:
+/// - an ask that the person did not answer: the newest message is from the
+///   owner (`SENT`), and the address of the person is in its `To` or `Cc`
+///   and is not an address of the owner (the account, or its `From`);
+/// - a promise that the person did not keep: the newest message is from
+///   the person (its `From`), not `SENT`, and the commitment has a due
+///   date.
+///
+/// With `now` (an SQL expression of milliseconds), the time rules apply
+/// too: the due date passed (a `due.at` at its instant, a `due.date` at the
+/// end of that day in UTC), and an ask is at least [`LATE_AFTER_MS`] old,
+/// so a nudge that the owner sent starts the wait again. With no `now`,
+/// they do not count: what passed stays passed.
 ///
 /// One thread has one nudge, so a second commitment waits for the first.
 /// A change of the commitment, its person or the newest message changes
-/// the key, so a saved nudge with the old key is stale.
+/// the key or makes it NULL, so a saved nudge with the old key is stale.
 pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
     let in_thread = in_thread!("om.thread_id");
-    let due = now.map_or(String::new(), |now| {
-        format!(
-            "AND coalesce(unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec'),
-                          unixepoch(json_extract(ki.doc, '$.due.date'), '+1 day'),
-                          0) * 1000 <= {now}"
+    let due_at = "coalesce(unixepoch(json_extract(ki.doc, '$.due.at'), 'subsec'),
+                           unixepoch(json_extract(ki.doc, '$.due.date'), '+1 day'))";
+    let (due, wait) = now.map_or((String::new(), String::new()), |now| {
+        (
+            format!("AND coalesce({due_at}, 0) * 1000 <= {now}"),
+            format!("AND coalesce(km.internal_date, 0) <= {now} - {LATE_AFTER_MS}"),
         )
     });
+    let sent = "EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                         WHERE ml.message_id = km.id AND l.provider_id = 'SENT')";
     format!(
         "(SELECT json_object('item', ki.id, 'to', lower(trim(ks.address)),
                   'title', substr(json_extract(ki.doc, '$.title'), 1, 300),
@@ -258,18 +267,23 @@ pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
             JOIN account ka ON ka.id = om.account_id
             JOIN sender ks ON ks.id =
                  CAST(substr(json_extract(ki.doc, '$.owner.sender'), 3) AS INTEGER)
-            JOIN header kh ON kh.message_id = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
+            JOIN message km ON km.id = (SELECT m.id {in_thread} {NEWEST} LIMIT 1)
+            JOIN header kh ON kh.message_id = km.id
            WHERE om.thread_id = {thread}
              AND ki.form = 'commitment' AND ki.status = 'open'
              AND json_extract(ki.doc, '$.direction') = 'owed_to_you'
              AND coalesce(json_extract(ki.doc, '$.attention.state'), 'shown') = 'shown'
              AND ks.kind = 'person'
-             AND instr(',' || lower(replace(coalesce(kh.to_addrs, '') || ',' ||
-                                            coalesce(kh.cc_addrs, ''), ' ', '')) || ',',
-                       ',' || lower(trim(ks.address)) || ',') > 0
-             AND lower(trim(ks.address)) NOT IN (lower(trim(ka.address)),
-                                                 lower(trim(coalesce(kh.from_addr, ''))))
+             AND lower(trim(ks.address)) <> lower(trim(ka.address))
              {due}
+             AND ((
+                   {sent} {wait}
+                   AND instr(',' || lower(replace(coalesce(kh.to_addrs, '') || ',' ||
+                                                  coalesce(kh.cc_addrs, ''), ' ', '')) || ',',
+                             ',' || lower(trim(ks.address)) || ',') > 0
+                   AND lower(trim(ks.address)) <> lower(trim(coalesce(kh.from_addr, ''))))
+               OR (NOT {sent} AND {due_at} IS NOT NULL
+                   AND lower(trim(coalesce(kh.from_addr, ''))) = lower(trim(ks.address))))
            ORDER BY ki.id LIMIT 1)"
     )
 }
@@ -277,9 +291,6 @@ pub fn nudge_key_sql(thread: &str, now: Option<&str>) -> String {
 /// The threads that need a nudge at the time `now_ms`, oldest newest
 /// message first. A thread needs a nudge when:
 /// - it has a [`nudge_key_sql`] at `now_ms`;
-/// - its newest message that counts is from the owner (`SENT`) and is at
-///   least [`LATE_AFTER_MS`] old, so the person did not answer, and a
-///   nudge that the owner sent starts the wait again;
 /// - [`write`] can make a draft: no message that counts is hostile or waits
 ///   for understanding;
 /// - it has no draft of the owner (a draft with no `ask`), stale or not,
@@ -299,11 +310,8 @@ pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
               AND json_extract(item.doc, '$.direction') = 'owed_to_you'),
          n(thread, newest) AS (SELECT t.thread, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t),
          k(thread, newest, key) AS (SELECT n.thread, n.newest, {key} FROM n)
-         SELECT k.thread, k.newest, k.key FROM k JOIN message nm ON nm.id = k.newest
+         SELECT k.thread, k.newest, k.key FROM k
           WHERE k.key IS NOT NULL
-            AND coalesce(nm.internal_date, 0) <= ?1 - ?2
-            AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                         WHERE ml.message_id = nm.id AND l.provider_id = 'SENT')
             AND NOT EXISTS (SELECT 1 {all}
                              AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
             AND NOT EXISTS (SELECT 1 FROM reply_draft d
@@ -311,7 +319,7 @@ pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<Late>> {
             AND NOT {ready}
           ORDER BY k.newest"
     ))?;
-    let rows = st.query_map(params![now_ms, LATE_AFTER_MS], |r| {
+    let rows = st.query_map(params![now_ms], |r| {
         Ok(Late {
             thread: r.get(0)?,
             newest: r.get(1)?,

@@ -1377,3 +1377,69 @@ fn a_nudge_is_stale_when_its_person_changes_and_a_second_commitment_waits() {
     assert_eq!(ready_to(&b.store, t), None);
     assert_eq!(one_late(&b.store, now).to(), "bo@example.org");
 }
+
+#[test]
+fn a_promise_of_the_person_is_late_after_its_due_date() {
+    let (b, _) = mailbox("nudge-promise");
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "promise",
+                "t-promise",
+                1000,
+                "INBOX",
+                "ana@example.org",
+                "me@example.com",
+                Some("I will send the slides by Friday."),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    let t = thread_of(&b.store, "t-promise");
+    let set = |sql: &str| {
+        b.store
+            .write(|tx| {
+                tx.execute_batch(sql)?;
+                Ok(())
+            })
+            .unwrap()
+    };
+    set(
+        "INSERT INTO sender(address, kind) VALUES ('ana@example.org', 'person');
+         INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+         VALUES ('commitment', 1, 'open', json_object('direction', 'owed_to_you',
+                 'title', 'Send the slides',
+                 'owner', json_object('kind', 'sender', 'sender', 's-1')), 1, 1);
+         INSERT INTO item_source(item_id, message_id, role)
+         SELECT 1, id, 'origin' FROM message WHERE provider_id = 'promise';",
+    );
+    // No due date: a promise is not late.
+    assert!(late_threads(&b.store, 1_000_000_000).is_empty());
+    set("UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '1970-01-03'))");
+    // During the due day: not late. After it: late, to Ana.
+    assert!(late_threads(&b.store, 3 * 86_400_000 - 1).is_empty());
+    let l = one_late(&b.store, 3 * 86_400_000);
+    assert_eq!((l.thread, l.to()), (t, "ana@example.org".to_string()));
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news? D"}"#);
+    nudge(&b.store, &l, &fake, 3 * 86_400_000).unwrap();
+    assert_eq!(ready_to(&b.store, t).as_deref(), Some("ana@example.org"));
+    // Another sender wrote last in the thread: no nudge.
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "other",
+                "t-promise",
+                2000,
+                "INBOX",
+                "cy@example.org",
+                "me@example.com",
+                Some("Hi all"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    assert_eq!(ready_to(&b.store, t), None);
+    assert!(late_threads(&b.store, 3 * 86_400_000).is_empty());
+}
