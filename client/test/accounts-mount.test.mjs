@@ -7,6 +7,7 @@ import { load, mount } from "./mount.mjs";
 const fx = await load("/dev/fixtures.ts");
 const { accountNames } = await load("/src/format.ts");
 const { access } = await load("/src/access.svelte.ts");
+const { get } = await load("/src/api.ts");
 const text = (el) => el.textContent.replace(/\s+/g, " ").trim();
 const acc = (id, address) => ({ id, address });
 
@@ -59,5 +60,45 @@ test("the accounts view lists each account with its state and how to add one", a
     assert.match(text(view.target), /Add an account.*iris account add client\.json/);
   } finally {
     view.destroy();
+  }
+});
+
+test("a status answer sets the account pills of the brief, and a later one-account answer removes them", async () => {
+  const answer = (status) => (globalThis.fetch = async () => new Response(JSON.stringify(status), { status: 200, headers: { "content-type": "application/json" } }));
+  const item = fx.items.find((i) => i.account === "a-2");
+  const pill = async () => {
+    const view = await mount("/src/views/Line.svelte", { item });
+    try {
+      return view.target.querySelector(".pill")?.textContent.trim() ?? null;
+    } finally {
+      view.destroy();
+    }
+  };
+  answer(fx.status);
+  await get("status");
+  assert.equal(await pill(), "northwind");
+  answer({ ...fx.status, accounts: [fx.status.accounts[0]] });
+  await get("status");
+  assert.equal(await pill(), null);
+});
+
+test("the accounts view never says up to date while a copy runs or after a failed run", async () => {
+  const base = fx.status.accounts[0];
+  const cases = [
+    [{ ...base, sync: { kind: "resync", step: 2 } }, /copies this mailbox again/],
+    [{ ...base, last_sync: { ...base.last_sync, result: "error: Gmail: HTTP 500" } }, /last sync failed/],
+    [{ ...base, last_sync: { ...base.last_sync, kind: "verify", result: "2 differences, 0 skipped, then error: HTTP 401" } }, /last sync failed/],
+    [{ ...base, mirror_ready_at: null, sync: { kind: "first", step: 1 } }, /copies this mailbox now/],
+    [base, /Up to date/],
+  ];
+  for (const [account, want] of cases) {
+    const view = await mount("/src/views/Accounts.svelte", { status: { ...fx.status, accounts: [account] }, poll: 0 });
+    try {
+      const row = text(view.target.querySelector(".accounts li"));
+      assert.match(row, want, JSON.stringify(account));
+      if (want.source !== "Up to date") assert.doesNotMatch(row, /Up to date/);
+    } finally {
+      view.destroy();
+    }
   }
 });
