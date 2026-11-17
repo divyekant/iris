@@ -2,7 +2,8 @@
 
 - Date: 2026-11-17
 - Card: R4-05 (sandbox for sessions on macOS and Linux: no network and no
-  credentials)
+  credentials). This spec splits the card: R4-05 delivers Linux, and the
+  new card R4-05m (todo, on the board) delivers macOS.
 - Status: Draft
 
 ## Problem
@@ -40,7 +41,19 @@ stops these actions when the agent follows such a message.
 ## Not in scope
 
 - A sandbox for macOS, Windows or another system. `system()` gives the
-  reason. A new card designs the macOS sandbox (see [macOS](#macos)).
+  reason. Card R4-05m designs and builds the macOS sandbox (see
+  [macOS](#macos)).
+
+### Change of the platform scope
+
+Iris runs on macOS and on Linux (AGENTS.md, "Base decisions"). This spec
+changes that rule for one flow only: until R4-05m is done, an agent
+session (`iris job run`) runs only on Linux. On macOS each other part of
+Iris runs, and `iris job run` stops with the reason of `system()`. No
+agent runs on the Mac with a sandbox that can let a process of a session
+outlive its reap. The owner decides on the decision card of this thread
+whether the Mac gets a weaker sandbox earlier. The `doneWhen` of R4-05m
+is the Linux acceptance of this spec, on macOS.
 - Limits of CPU, memory or disk for a session.
 - A filter of the files that the agent sends to its own model host. The
   person chose that host (launcher spec, "Model egress").
@@ -360,7 +373,7 @@ before the agent runs, or `ended` is false.
 | The engine crashes, and a new engine gives the port of an old session to the proxy of a new session while the helper of the old session still runs | The relay of the old session connects from its own session address, and the new proxy refuses it (`not_session`). Also, the relay makes no new connection after the end of its engine | Linux test: a relay of session 7 to the proxy of session 8 gets 403 and the log word `not_session`. Proxy test: only the session address passes. Relay test: the parent of the relay ends, and a new listener on the same port gets no connection |
 | A host process that is not Iris listens on the freed port after an engine crash | The relay can connect to it until the helper stops the agent (the end of the pipe from the engine), and the relay stops at the end of its engine. The agent tool verifies TLS to the model host, so that process cannot read the tunnel | Known limit (issue) |
 | A file view of a host with keys in `/etc/ssl/private` | That folder is not in the view | Linux sandbox test: `/etc/ssl` in the view holds no `private` |
-| A session ends, and its agent connects to the relay during the stop | The relay reaches the proxy of its own session, which keeps its port until the reap check | R4-04e supervisor test: a second session starts while the first one stops, and gets another port |
+| A session ends, and its agent connects to the relay during the stop | The relay reaches the proxy of its own session. That proxy is closed at `ended_at`: it ends each open tunnel and answers each new connection with a close (`ended reason=stopped`), and it keeps its port until the reap check | Proxy test: after `close`, an open tunnel ends, a new connection gets `stopped`, and the port stays bound. R4-04e supervisor test: a second session starts while the first one stops, and gets another port |
 | A program file inside the data folder (the adapter program or the `iris` program) | The empty mount of the data folder comes after each program file, so it hides the program. The agent does not start, and the data folder stays empty in the view. Known limit (issue) | Linux sandbox test with the program file inside the data folder: the program does not run |
 | A credential file or a Unix socket in a folder that is not in the view (for example `/etc/<file>` not in the list, or `/run`) | Not visible: no read and no connection | Linux sandbox test: a socket and a marker file outside the view, and `/etc/hostname` |
 | `iris job run` on macOS or another system | `system()` gives the reason, and `run` is refused before a row is written | Unit test that runs on each system that is not Linux |
@@ -378,8 +391,10 @@ before the agent runs, or `ended` is false.
   address of its session.
 - `crates/iris-session/src/config.rs`: `CLAUDE_CODE_OAUTH_TOKEN` in the
   `claude-code` adapter, also in the adapter rule of the launcher spec.
-- The launcher spec, "Model egress": the proxy of a session keeps its port
-  until the reap check passes. R4-04e builds it.
+- The launcher spec, "Model egress": at `ended_at` the engine closes the
+  proxy of the session (`Proxy::close`, new in `egress.rs`: no tunnel and
+  no new connection), and the proxy keeps its port until the reap check
+  passes. R4-04e calls `close` and `stop`.
 - The launcher spec, "The hold helper": the helper runs outside the
   sandbox, and the agent (`bwrap` on Linux) is its child.
 - `docs/spec/03-job-workspace.md` and the fixed text of `JOB.md` in
