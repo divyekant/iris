@@ -395,10 +395,12 @@ fn downgrade(s: &Store) {
     .unwrap();
 }
 
-/// A store from before migration 23 gets the times from the oldest sync
-/// and the oldest item.
+/// Invariant: a stored brief time is always a brief with content that the
+/// engine saw. A store from before migration 23 with an account has no
+/// such record, so both times are not known, and a later brief or account
+/// does not write a time that is not the first.
 #[test]
-fn migration_23_takes_the_times_of_an_older_store() {
+fn migration_23_does_not_guess_the_times_of_an_older_store() {
     let dir = std::env::temp_dir().join(format!("iris-api-measures-old-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     {
@@ -420,28 +422,25 @@ fn migration_23_takes_the_times_of_an_older_store() {
         .unwrap();
     }
     let s = Store::open(&dir).unwrap();
-    assert_eq!(
-        times(&s),
-        vec![("brief".into(), NOON + 340_000), ("connect".into(), NOON)]
-    );
+    let unknown = || {
+        s.read(|c| {
+            let mut q = c.prepare("SELECT name, at IS NULL FROM measure_time ORDER BY name")?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<(String, bool)>>>()?)
+        })
+        .unwrap()
+    };
+    let none = vec![("brief".to_string(), true), ("connect".to_string(), true)];
+    assert_eq!(unknown(), none);
+    // A later check of the brief and a new account change nothing.
+    iris_api::measures::check_brief(&s, NOON + 900_000).unwrap();
+    s.add_account("gmail", "b@example.com").unwrap();
+    assert_eq!(unknown(), none);
     let m = iris_api::measures::measures(&s, None).unwrap();
-    assert_eq!(m.first_brief.unwrap().seconds, 340);
-    drop(s);
-
-    // An account with no sync yet: the connect time is the time of the
-    // migration, so the first item still gives a measure.
-    let _ = std::fs::remove_dir_all(&dir);
-    {
-        let s = Store::open(&dir).unwrap();
-        s.add_account("gmail", "a@example.com").unwrap();
-        downgrade(&s);
-    }
-    let before = now();
-    let s = Store::open(&dir).unwrap();
-    let t = times(&s);
-    assert_eq!(t.len(), 1);
-    assert_eq!(t[0].0, "connect");
-    assert!(t[0].1 >= before, "{t:?}");
+    assert_eq!(
+        serde_json::to_value(m.first_brief).unwrap(),
+        json!({"connect": null, "brief": null, "seconds": null})
+    );
     drop(s);
 
     // No account: no time.

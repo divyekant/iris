@@ -22,10 +22,11 @@ CREATE TABLE use_open (
 -- (specification 1, M4): `connect`, when the first account is added (the
 -- connect step), and `brief`, when the brief first has content
 -- (iris_api::measures::check_brief, every 10 seconds in iris serve). Each
--- time is written once. A time never changes after that.
+-- time is written once. A time never changes after that. `at` is NULL when
+-- the store is older than the measure, so the time is not known.
 CREATE TABLE measure_time (
   name TEXT PRIMARY KEY CHECK (name IN ('connect', 'brief')),
-  at INTEGER NOT NULL
+  at INTEGER
 ) WITHOUT ROWID;
 
 -- NOT EXISTS, not OR IGNORE: an UPSERT of the outer statement overrides the
@@ -43,15 +44,13 @@ BEGIN
   SELECT RAISE(ABORT, 'iris: a measure time does not change');
 END;
 
--- A store from before this migration: the best evidence is the start of
--- the oldest sync and the oldest item that is still there (an estimate:
--- the brief can show its first content later). An account with no sync
--- yet has only the time of this migration.
+-- A store from before this migration that has an account: the store has no
+-- record of the connect step or of the first brief with content, so both
+-- times are not known (NULL). The rows also stop a later account or brief
+-- from writing a time that is not the first.
 INSERT INTO measure_time(name, at)
-SELECT 'connect', coalesce(min(started_at), CAST(unixepoch('subsec') * 1000 AS INTEGER))
-FROM sync_log HAVING count(*) > 0 OR EXISTS (SELECT 1 FROM account);
-INSERT INTO measure_time(name, at)
-SELECT 'brief', min(created_at) FROM item HAVING count(*) > 0;
+SELECT name, NULL FROM (SELECT 'connect' AS name UNION ALL SELECT 'brief')
+WHERE EXISTS (SELECT 1 FROM account);
 
 -- The decision of the person on each action of another author (an agent,
 -- triage or a local tool): the measure "proposed actions that you approve

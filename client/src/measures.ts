@@ -4,7 +4,8 @@ import { post } from "./api";
 
 export type Measures = {
   days: { day: string; opens: number }[];
-  first_brief: { connect: string; brief: string; seconds: number } | null;
+  /** `null` before the first brief. Each field is `null` when the store is older than the measure. */
+  first_brief: { connect: string | null; brief: string | null; seconds: number | null } | null;
   /** Each account. An account with no check has `checked: null` and `complete: false`. */
   mirror: { account: string; checked: string | null; differences: number | null; complete: boolean }[];
   memory: { rss_kib: number | null; messages: number };
@@ -126,14 +127,16 @@ export function rows(m: Measures, now = new Date()): Row[] {
           detail: `In the last ${plural(window.length, "day", "days")}. Target: each day.`,
           tone: used === window.length ? "met" : "missed",
         },
-    brief
+    brief?.seconds != null && brief.connect
       ? {
           name: "Time to the first brief",
           value: brief.seconds < 60 ? "Under 1 min" : `${num(Math.ceil(brief.seconds / 60))} min`,
           detail: `From the connect step on ${shortDay(brief.connect)}. Target: 10 minutes or less.`,
           tone: brief.seconds <= MAX_FIRST_BRIEF ? "met" : "missed",
         }
-      : { name: "Time to the first brief", value: "Not yet", detail: "Iris measures it at the first brief. Target: 10 minutes or less.", tone: "none" },
+      : brief
+        ? { name: "Time to the first brief", value: "Not known", detail: "Your Iris data is older than this measure. Target: 10 minutes or less.", tone: "none" }
+        : { name: "Time to the first brief", value: "Not yet", detail: "Iris measures it at the first brief. Target: 10 minutes or less.", tone: "none" },
     checks.length === 0
       ? { name: "Differences from Gmail", value: "Not yet", detail: "Run iris mirror verify to compare the mirror with Gmail. Target: zero.", tone: "none" }
       : {

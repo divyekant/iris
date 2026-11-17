@@ -3,7 +3,7 @@
 //! leaves the machine.
 
 use iris_store::Store;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::{rfc3339, Error, Result};
@@ -17,7 +17,8 @@ pub struct Measures {
     /// day on which the person did not use the web client.
     pub days: Vec<Day>,
     /// From the first account to the first brief with content, or `null`
-    /// before that brief.
+    /// before that brief. Each field is `null` when the store is older than
+    /// the measure, so the times are not known.
     pub first_brief: Option<FirstBrief>,
     /// The last mirror check of each account. An account with no check
     /// has `checked: null`.
@@ -41,10 +42,10 @@ pub struct Day {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct FirstBrief {
     /// The time of the first account (the connect step).
-    pub connect: String,
-    /// The time of the first answer of GET /api/brief with content.
-    pub brief: String,
-    pub seconds: i64,
+    pub connect: Option<String>,
+    /// The time of the first brief with content.
+    pub brief: Option<String>,
+    pub seconds: Option<i64>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -95,21 +96,21 @@ pub fn measures(store: &Store, rss_kib: Option<i64>) -> Result<Measures> {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
+        // The brief row is there only after the first brief, or when the
+        // store is older than the measure (its time is NULL).
         let first_brief = c
             .query_row(
-                "SELECT (SELECT at FROM measure_time WHERE name = 'connect'),
-                        (SELECT at FROM measure_time WHERE name = 'brief')",
+                "SELECT (SELECT at FROM measure_time WHERE name = 'connect'), at
+                 FROM measure_time WHERE name = 'brief'",
                 [],
                 |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
             )
-            .map(|times| match times {
-                (Some(a), Some(b)) => Some(FirstBrief {
-                    connect: rfc3339(a),
-                    brief: rfc3339(b),
-                    seconds: (b - a).max(0) / 1000,
-                }),
-                _ => None,
-            })?;
+            .optional()?
+            .map(|(a, b)| FirstBrief {
+                connect: a.map(rfc3339),
+                brief: b.map(rfc3339),
+                seconds: a.zip(b).map(|(a, b)| (b - a).max(0) / 1000),
+            });
         let mut q = c.prepare(
             "SELECT a.address, coalesce(l.ended_at, l.started_at), l.result
              FROM account a LEFT JOIN sync_log l ON l.id =

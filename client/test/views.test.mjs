@@ -500,6 +500,9 @@ test("each measure says when it has no data, and the sentence names a missed tar
   assert.equal(lead(slow, now).text, "2 measures miss their target.");
   const fast = { ...empty, first_brief: { connect: "2026-11-03T08:00:00Z", brief: "2026-11-03T08:10:00Z", seconds: 600 }, memory: { rss_kib: 51_200, messages: 100_000 } };
   assert.deepEqual(rows(fast, now).slice(1, 4).map((x) => x.tone), ["met", "none", "met"]);
+  // A store older than the measure: the time is not known, and it has no target tone.
+  const old = rows({ ...empty, first_brief: { connect: null, brief: null, seconds: null } }, now)[1];
+  assert.deepEqual([old.value, old.tone], ["Not known", "none"]);
   // Under 50 MB with fewer than 100,000 messages does not show the target as met.
   const tone = (rss_kib, messages) => rows({ ...empty, memory: { rss_kib, messages } }, now)[3].tone;
   assert.equal(tone(30_000, 99_999), "flat");
