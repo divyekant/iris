@@ -804,9 +804,8 @@ who does not run `iris job run`.
 - Rollback: stop the engine, revert the code PRs, and restore the copy
   `iris.db.v20.<time>-<random>.bak` that the store wrote before migration
   21 (spec 1, section 5.5). A program of version 20 cannot open a store of
-  version 21, so the revert alone is not enough. Sessions made after the
-  migration are lost; no mail data is lost, because the mirror syncs
-  again.
+  version 21, so the revert alone is not enough. Each change to the store
+  after the migration is lost; the next sync gets the mail again.
 
 ## Plan
 
