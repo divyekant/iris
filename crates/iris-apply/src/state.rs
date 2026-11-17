@@ -156,7 +156,19 @@ fn apply_in(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<O
     let fields: Vec<String> = match verb.as_str() {
         // A correction can change the status too (a record becomes
         // `corrected`, a signal follows `expires`).
-        "correct" => vec![args["field"].as_str().unwrap_or("").into(), "status".into()],
+        // The entry also holds the whole top-level value of the field: a
+        // correction can change its siblings too (an address of the owner
+        // makes the party `self`), and the undo sets them back.
+        "correct" => {
+            let field = args["field"].as_str().unwrap_or("");
+            let top = field.split('.').next().unwrap_or(field);
+            let mut f = vec![field.to_string()];
+            if top != field {
+                f.push(top.to_string());
+            }
+            f.push("status".into());
+            f
+        }
         // `close` and `decline` remove `deferred_until`: the undo needs it.
         _ => vec!["status".into(), "deferred_until".into()],
     };

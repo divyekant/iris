@@ -269,11 +269,11 @@ fn correct_changes_one_field() {
     let (_, _, pre, post) = b.entry(a);
     assert_eq!(
         pre,
-        json!({ "c-1": { "due.date": "2026-11-17", "status": "open" } })
+        json!({ "c-1": { "due.date": "2026-11-17", "due": { "date": "2026-11-17", "strict": false }, "status": "open" } })
     );
     assert_eq!(
         post,
-        json!({ "c-1": { "due.date": "2026-11-20", "status": "open" } })
+        json!({ "c-1": { "due.date": "2026-11-20", "due": { "date": "2026-11-20", "strict": false }, "status": "open" } })
     );
     assert_eq!(
         b.one("SELECT by FROM correction WHERE field = 'due.date'"),
@@ -315,8 +315,13 @@ fn correct_changes_one_field() {
         let a = b.correct_example(example, form, status, id, field, value);
         assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
         let (_, _, pre, post) = b.entry(a);
-        assert_eq!(pre, json!({ id: { field: old, "status": status } }));
-        assert_eq!(post, json!({ id: { field: value, "status": new } }));
+        // The entry also holds the top-level value of the field (for the undo).
+        for (map, f, st) in [(&pre, &old, status), (&post, &value, new)] {
+            assert_eq!(map[id][field], json!(f), "{id}");
+            assert_eq!(map[id]["status"], json!(st), "{id}");
+            let top = field.split('.').next().unwrap();
+            assert!(top == field || map[id].get(top).is_some(), "{id}: {top}");
+        }
         let cs = b.one(&format!(
             "SELECT 'cs-' || changeset_id FROM changeset_action WHERE id = {a}"
         ));
@@ -978,4 +983,30 @@ fn the_undo_of_a_correction_removes_the_parent_that_it_made() {
     );
     assert_eq!(b.plain(), before);
     assert!(iris_understand::validate(&b.doc()).is_ok());
+}
+
+/// Invariant: the undo sets back each value that the correction changed.
+/// An address of the owner makes the whole party `self`; the undo gives
+/// back the sender party with its kind, name and address.
+#[test]
+fn the_undo_of_a_correction_to_the_owner_address_sets_the_party_back() {
+    let b = setup("undo-self", "open", None);
+    let before = b.doc()["counterparty"].clone();
+    let a = b.approved(
+        Verb::Correct,
+        json!({ "field": "counterparty.address", "value": "owner@example.com" }),
+    );
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    assert_eq!(b.doc()["counterparty"]["kind"], json!("self"));
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if c.changed == 1),
+        "{outcome:?}"
+    );
+    let mut party = b.doc()["counterparty"].clone();
+    let mut want = before;
+    party.as_object_mut().unwrap().remove("sender");
+    want.as_object_mut().unwrap().remove("sender");
+    assert_eq!(party, want);
+    assert!(b.doc()["counterparty"]["sender"].is_string());
 }

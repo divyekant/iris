@@ -116,7 +116,10 @@ transaction:
   section 5.5). So the item is pinned, and a rebuild keeps the change.
 - A ledger row with the state `applied`, the old values as `pre` and the new
   values as `post` (section 7.1). `pre` and `post` map each item ID to its
-  fields, for example `{"c-7": {"status": "open"}}`.
+  fields, for example `{"c-7": {"status": "open"}}`. For `correct`, the
+  fields are the corrected field, its top-level value (for example `due` for
+  `due.date`) and `status`: a correction can change the siblings of the
+  field, and the undo sets them back.
 
 The engine applies each approved action of a state verb at the next tick,
 with no provider call. These rules apply:
@@ -919,6 +922,7 @@ An undo of an undo is a new action, not a delete of the record.
 | The undo of a state entry whose item changed after the entry (a later action, also with the same values, understanding, the tick of a deferred item, or a gone item) | The undo reverses the later change | The apply of `restore` changes only an item that is not gone, that no later state entry names, and whose fields have the `post` values of the entry. It counts each other item as unchanged. It deletes only the correction rows whose IDs the entry holds, so another action of the same changeset keeps its rows. |
 | The undo of a `correct` of an array element (`fields.items.0`) | The undo changes nothing and still marks the entry `undone` | The apply sets each field with the path rule of a correction (`iris_talk::set_field`), with array indices. If a path does not fit the item, the item stays as it is and counts as unchanged. |
 | The undo of a `correct` of a field whose parent was missing (`due.date` with no `due`) | The undo leaves an empty parent, and the item is not valid | The apply removes each parent object that becomes empty, and checks the restored item against the schemas. An item that is not valid stays as it is and counts as unchanged. |
+| The undo of a `correct` that changes more than its field (an address of the owner makes the whole party `self`) | The undo sets only the field back, and the party stays `self` | The entry holds the top-level value of the field, and the undo sets the whole value back. |
 | The undo of a `correct` of a party address | The party keeps the sender ID of the corrected address | The apply of `restore` sets the sender ID of each party from its address, with the rule of a correction. Migration 24 links `restore` with no arguments only to a state entry, as step 1. |
 | An undo of an entry in `writing`, `undone`, or with the undo `none` | The undo changes messages of an apply that did not end, or reverses a change two times | `undo` refuses it (`Error::Undo`). The trigger `ledger_undo_insert` refuses the link. |
 | A second undo while an undo of the entry is open | Two undos change the same messages, or a one-action undo ends the entry while action 2 of another undo waits | `undo` refuses it until each action of the open undo ended. The trigger refuses a link while an action of another undo changeset of the entry is open, and a second link of the same step in one changeset. Action 2 of a `trash` undo applies also after a failed action 1, so the undo ends. |
