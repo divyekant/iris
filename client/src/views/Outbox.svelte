@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import { loadOutbox, newest, own, post, type Outbox, type OutboxSend } from "../api";
+  import { loadOutbox, own, post, type Outbox, type OutboxSend } from "../api";
   import { FLAGS } from "../review";
 
   // `every`: the ms between two reads of the outbox (a prop for the tests).
@@ -16,33 +16,52 @@
   // svelte-ignore state_referenced_locally
   let box = $state(first);
   let now = $state(Date.now());
-  let busy = $state("");
+  // The draft whose cancel request runs now. One cancel at a time.
+  let posting = $state("");
+  // Each draft with a cancel that answered, and the number of the last read
+  // that started before the answer. Its Cancel stays off until a read that
+  // started after the answer shows the outbox: a failed read keeps it off.
+  let pending = $state<{ draft: string; after: number }[]>([]);
   // What each cancel did, as lines above the cards. The cards show only the
   // sends that the engine gives, so a new send of the same draft shows too.
   let notes = $state<string[]>([]);
 
-  // Each read of the outbox gets a number. Only the newest read applies, so
-  // an older read cannot put back a send that a newer read left out.
-  const turn = newest();
-
-  async function refresh(fresh = turn()) {
+  // Each read of the outbox gets a number when it starts. A read applies
+  // only if no read that started later applied first, so an older answer
+  // cannot put back a send that a newer answer left out.
+  let started = 0;
+  let applied = 0;
+  async function read() {
+    const mine = ++started;
     try {
       const v = await loadOutbox();
-      if (fresh()) box = v;
+      if (mine <= applied) return;
+      applied = mine;
+      box = v;
+      pending = pending.filter((p) => p.after >= mine);
     } catch {
       // The engine can restart. The next read tries again.
     }
   }
 
-  const tick = setInterval(() => (now = Date.now()), 1000);
-  // No read starts while a cancel runs: the cancel reads the outbox when it ends.
+  // The poll: one read at a time, `every` ms after the end of the last one,
+  // so a slow read is never made stale by the next poll.
+  let alive = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const poll = async () => {
+    await read();
+    if (alive) timer = setTimeout(poll, every);
+  };
   // svelte-ignore state_referenced_locally
-  const reads = setInterval(() => busy || refresh(), every);
+  timer = setTimeout(poll, every);
+  const tick = setInterval(() => (now = Date.now()), 1000);
   onDestroy(() => {
+    alive = false;
+    clearTimeout(timer);
     clearInterval(tick);
-    clearInterval(reads);
   });
 
+  const off = (s: OutboxSend) => !!posting || pending.some((p) => p.draft === s.draft);
 
   /** The time left as "0:42" or "3:05", or null when the send can leave now. */
   function left(s: OutboxSend): string | null {
@@ -72,20 +91,19 @@
   const name = (s: OutboxSend) => (s.readable && s.subject ? `"${s.subject}"` : `The send of ${s.draft}`);
 
   async function cancel(s: OutboxSend) {
-    busy = s.draft;
-    // A read that started before the cancel does not apply after it.
-    const fresh = turn();
+    if (off(s)) return;
+    posting = s.draft;
     try {
       await post(`outbox/${encodeURIComponent(s.draft)}/cancel`, {});
       notes = [...notes, `${name(s)} is cancelled. It does not leave.`];
     } catch (e) {
       // A 409: the release claimed the send. The note stays after its card goes.
-      const started = (e as { status?: number }).status === 409;
-      notes = [...notes, started ? `${name(s)} started to send. It cannot be cancelled.` : `${name(s)}: ${own(e)}`];
+      const started409 = (e as { status?: number }).status === 409;
+      notes = [...notes, started409 ? `${name(s)} started to send. It cannot be cancelled.` : `${name(s)}: ${own(e)}`];
     }
-    // Each Cancel stays off until the view shows the outbox after this cancel.
-    await refresh(fresh);
-    busy = "";
+    pending = [...pending, { draft: s.draft, after: started }];
+    posting = "";
+    void read();
   }
 </script>
 
@@ -116,7 +134,7 @@
             <span class="left" class:paused={!box.sending.on}>{when(s)}</span>
             {#if box.sending.on}<span class="bar" aria-hidden="true"><span style:width="{gone(s) * 100}%"></span></span>{/if}
           </div>
-          <button type="button" class="pill" onclick={() => cancel(s)} disabled={!!busy}>{busy === s.draft ? "Cancelling" : "Cancel"}</button>
+          <button type="button" class="pill" onclick={() => cancel(s)} disabled={off(s)}>{posting === s.draft || pending.some((p) => p.draft === s.draft) ? "Cancelling" : "Cancel"}</button>
         </div>
       </li>
     {/each}

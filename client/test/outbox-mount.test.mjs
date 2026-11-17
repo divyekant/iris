@@ -197,6 +197,59 @@ test("a send approved while the view is open shows at the next read", async () =
   }
 });
 
+test("a slow read is the only read, and it applies when it ends", async () => {
+  const state = { sends: fx.outbox().sends.slice(0, 1) };
+  const net = gated(state);
+  const app = await mount("/src/views/Outbox.svelte", { first: { ...fx.outbox(), count: 1, sends: state.sends }, every: 10 });
+  try {
+    await until(() => net.waits.length === 1);
+    state.sends = fx.outbox().sends; // read 1 answers with one send: its body is set at its start
+    // Ten intervals pass while read 1 waits: no other poll starts.
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(net.waits.length, 1);
+    net.waits.shift()();
+    // The next read starts after read 1 ends, and its answer applies.
+    await until(() => net.waits.length === 1);
+    net.waits.shift()();
+    await until(() => app.target.querySelectorAll("li.card").length === 3);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("after a cancel, Cancel stays off until a read shows the outbox", async () => {
+  let sends = fx.outbox().sends;
+  let fail = 0;
+  const net = serve((path, method) => {
+    if (method === "POST") {
+      sends = sends.filter((x) => x.draft !== "d-14");
+      fail = 1;
+      return [200, { cancelled: "d-14" }];
+    }
+    if (fail > 0) {
+      fail--;
+      return [503, { error: "The engine restarts." }];
+    }
+    return [200, { ...fx.outbox(), count: sends.length, sends }];
+  });
+  const app = await mount("/src/views/Outbox.svelte", { first: fx.outbox(), every: 60_000 });
+  const card = () => [...app.target.querySelectorAll("li.card")].find((c) => c.textContent.includes("Signing"));
+  try {
+    card().querySelector("button").click();
+    // The read after the cancel fails: the card stays, with Cancel off.
+    await until(() => net.asked.filter((a) => a.startsWith("GET")).length === 1);
+    await new Promise((r) => setTimeout(r, 20));
+    app.flushSync();
+    assert.equal(card().querySelector("button").disabled, true);
+    card().querySelector("button").click();
+    assert.equal(net.asked.filter((a) => a.startsWith("POST")).length, 1);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
 // Last: it cancels d-16 in the fixture state of this file.
 test("the fixture server cancels a send, as the API does", () => {
   const before = fx.outbox().sends.length;
