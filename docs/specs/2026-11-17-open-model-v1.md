@@ -73,8 +73,9 @@ reader change and gives no gain that a later minor version cannot give.
 
 The policy file keeps `version = 0` valid because the policy file of the
 owner exists on disk. Iris writes the file only for a change from the web
-client, and it keeps each other line (spec 2, section 6.3). A version 0
-file that became invalid would put Iris in observe mode (fail closed). The
+client, and it keeps each other line (spec 2, section 6.3). If a version 0
+file became invalid, the person could not confirm a change of the file
+again, and the active policy would stay at its last confirmed text. The
 first-start file and the samples write `version = 1`.
 
 ### 2. Rules of change inside version 1
@@ -105,8 +106,10 @@ These rules go into a new published text,
    field. Its `version` is an integer that names only the major version.
    The minor rules do not apply to it. Each change of
    `policy.schema.json` after 1.0 is a new policy `version` (`2`). Iris
-   refuses a policy file with a `version` that it does not know, and goes
-   to observe mode (spec 2, section 6.1: an invalid file fails closed).
+   treats a file with a `version` that it does not know as an invalid
+   file: it never becomes the active policy, and the policy that the person
+   confirmed last stays in force (spec 2, section 6.3). With no confirmed
+   policy, Iris uses the first-start policy (observe mode).
 
 ### 3. Rules for a producer
 
@@ -460,7 +463,7 @@ The `spec-kit` test runs the producer into a new temporary folder.
 4. After the migration, each stored item has `"model": "iris/1.0"`. Red if the
    migration test finds one.
 5. A policy file with `version = 0` and one with `version = 1` both load.
-   Red if the policy test with a version 0 file puts Iris in observe mode.
+   Red if the parser refuses a version 0 file.
 6. `run.py self-test` exits 0 in the `spec-kit` area. Red if a fixture
    gives a different verdict in Python than in Rust.
 7. `produce.py` writes one `feed` and one `signal` document for the

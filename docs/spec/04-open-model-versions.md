@@ -38,9 +38,12 @@ reads them (a reader). Iris is a producer and a reader.
    `version = 0` and `version = 1` have the same meaning, because policy
    files of version 0 exist. The minor rules do not apply to the policy
    file. Each change of `policy.schema.json` after version 1.0 is a new
-   policy `version` (`2`). Iris refuses a policy file with a `version` that
-   it does not know, and goes to observe mode (specification 2, section
-   6.1).
+   policy `version` (`2`). Iris treats a file with a `version` that it
+   does not know as an invalid file (specification 2, section 6.3): the file
+   never becomes the active policy, the policy that the person confirmed
+   last stays in force, and the status of the file shows the error. If no
+   policy was ever confirmed, Iris uses the policy of the first start,
+   which is observe mode.
 
 ## 3. Rules for a producer
 
@@ -75,3 +78,22 @@ reads the minor version `M` of each document from `model`.
 - Refuse a document with a major version other than 1, or with a `model`
   value that does not match `^iris/1\.(0|[1-9][0-9]*)$`.
 - For the policy file, follow rule 2.7.
+
+## 5. Failure list of a reader
+
+A reader reads documents that another program wrote. The supported input
+is one UTF-8 JSON document (or one line of JSON Lines) with a `model`
+value of major version 1, or a policy file in TOML. For each other input,
+the safe result is the same: refuse the one document, say why, and take no
+action from it.
+
+| Input | Result |
+|---|---|
+| Text that is not UTF-8, or not JSON (or TOML for the policy file) | Refuse the document: "not a document". |
+| A JSON object with a key two times | Refuse the document: "duplicate key". A reader must not pick one of the two values. |
+| `NaN`, `Infinity` or `-Infinity` | Refuse the document. |
+| No `model` value, or a value that does not match `^iris/1\.(0|[1-9][0-9]*)$` (also a major version other than 1) | Refuse the document: "not a document of version 1". |
+| A minor version that is not higher than `K`, and the document fails the schemas | Refuse the document, with the first error of the schema. |
+| A minor version higher than `K` | Show only (section 4). Take no action from it. |
+| A policy file with a `version` other than 0 or 1, or with an error | Follow rule 2.7. |
+| Any other error while the reader reads the document | Refuse the document. Take no action from it. |
