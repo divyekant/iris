@@ -166,7 +166,7 @@ fn expiring_proxy(fake: &FakeGmail, tokens: &TokenServer, times: usize, wait: Du
                     if raw
                         && token <= times
                         && fired
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |f| {
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |f| {
                                 (f < token).then_some(token)
                             })
                             .is_ok()
