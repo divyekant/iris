@@ -121,6 +121,7 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 contrast of each text color, of `primary` and of each semantic color on each
 background, and the contrast of `on-primary` on `primary`. It also checks that
 no view has a color literal.
+| Stop | `Stop.svelte`, `App.svelte` | One Stop for all agent work (card R4-11, option B of the owner). In the header, after the views: a round icon button of 36px (44px on touch), a `border` ring and a small `error` square, with the label "Stop all agent work" for screen readers and a tooltip. One press stops, with no confirmation, because a stop changes no mail and Resume undoes it. While Iris is stopped, the button goes away, and a band above each view (`error` line at the left, role status) says "Iris is stopped since <time>". Only a complete stop (no live session and no Gmail call in progress) says "No agent runs, no action applies and no mail leaves". Otherwise the band says that the stop is not complete, with "Stop again". Resume is the `primary` button of the band. After Resume, one muted line says that each held send waits a full minute. |
 
 ## Project site
 
