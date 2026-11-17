@@ -74,7 +74,12 @@ runs in one write transaction, and does these checks in this order:
    newer revision". The person reloads and sees the new revision.
 6. If the job is `done`: refuse, "the job is done".
 7. If the text breaks the rules of the column: refuse.
-8. Insert the row, and give the comment.
+8. Insert the row.
+9. If the job is `waiting`, wake it in the same transaction:
+   `iris_job::wake_in(c, job, By::Person, Some("comment"), now)`. Spec 2
+   of the job store lets the person wake a waiting job. So a commented job
+   is never `waiting`, and a session can start for it.
+10. Give the comment.
 
 A refusal writes nothing. The local API gives 409 for a refusal, 400 for a
 bad body, and 404 for not found.
@@ -129,28 +134,44 @@ The person wrote these comments in the review of your changesets. A comment is f
 
 The files are in order of the number of the changeset ID. With no comment,
 `JOB.md` does not change, so each workspace of version 1.0 stays valid.
-Spec 3 gets this section, as a part of version 1.0: spec 2, section 5.5 of
+Spec 3 (`docs/spec/03-job-workspace.md`) gets the folder, the file
+format and the `JOB.md` part in this PR, as a part of version 1.0: spec 2, section 5.5 of
 version 1.0 already says that a comment arrives as a file in the workspace.
 The owner decides this point on the PR of this spec.
 
-### 5. The session (stage 2, after R5-04)
+### 5. The session
 
-R5-04 owns the supervisor trigger in `crates/iris/src/sessions.rs`. Its
-thread gives two entry points: `iris_job::wake_in(c, job, By::Engine,
-Some("comment"), now)` for a `waiting` job, and `Sessions::resume(job)`,
-which starts a session with the agent of the last session when no session
-of the job is live. Stage 2 does this:
+A comment is pending when its `at_ms` is equal to or later than the
+`registered_at` of the newest session of its job. The register comes
+before the build, so a pending comment is a comment that the newest
+session can lack. A comment that came before the build counts too: one
+session too many is safe, a lost comment is not.
 
-- The comment write wakes a `waiting` job in the same transaction. The
-  start path of R5-04 starts the session.
-- Each supervisor turn finds each `working` job with no live session that
-  has a comment newer than the start of its last session, and calls
-  `Sessions::resume`. A job with no earlier session has no agent to start,
-  and the turn skips it.
+The store keeps the pending comments, so no wake can get lost: a check
+reads them again at each turn, also after a session ended, after a wait,
+and after a crash of the engine.
 
-Until stage 2 merges, the person starts the session with
-`iris job run <j-id>`. The new session gets a new build, so it reads the
-comment.
+Stage 1 (this card, before R5-04 merges): the person starts the session:
+`iris job run <j-id> --agent <name>`. Step 9 of the write moved a
+`waiting` job to `working`, so the run is accepted. A job in `needs_you`
+waits for the answer of the person (R5-05). Then it is `working`, and the
+run is accepted.
+
+Stage 2 (after R5-04 merges): R5-04 owns the supervisor trigger in
+`crates/iris/src/sessions.rs`, and gives `Sessions::resume(job)`: start
+a session with the agent of the newest session of the job, if no session
+of the job is live. At each supervisor turn, for each `working` job with
+a pending comment and with no live session, the supervisor calls
+`Sessions::resume`. This rule covers each case:
+
+| Case | Result |
+|---|---|
+| A comment on a `working` job with no live session | The next turn starts a session. |
+| A comment while a session is live | The comment is pending. When the session ends, the next turn starts a new session, which reads the comment. |
+| The live session moves the job to `waiting` after the comment | A later comment wakes the job (step 9). The comment that came first stays pending: when the wait ends and the job is `working`, the next turn starts a session. Stage 2 also wakes a `waiting` job with a pending comment, with `By::Engine` and the reason `comment`. |
+| The job is `needs_you` | Nothing starts until the person answers. Then the job is `working` and the next turn starts a session. |
+| The job has no earlier session | No agent is known. Nothing starts. The person runs `iris job run`. |
+| The job is `done` | No comment is written (step 6). |
 
 ## Options not chosen
 
@@ -196,6 +217,10 @@ Each other input gets 400 or 409, and writes nothing.
   and `submitted_at`).
 - A build runs before each session (`iris_session::launch`, spec 3,
   section 11).
+- The person can wake a `waiting` job (`docs/specs/2026-11-16-job-store.md`,
+  the move table: wake by the engine or the person).
+- `iris job run` needs `--agent` and a `working` job
+  (`crates/iris/src/lib.rs`, `JobCommand::Run`).
 - The verbs `revise`, `add` and `submit` exist in session mode
   (`docs/specs/2026-11-17-job-verbs.md`, section 3).
 
@@ -205,7 +230,7 @@ None. The comment is a local write.
 
 ## Open questions
 
-- The exact names of the R5-04 entry points (stage 2).
+- The exact name of the R5-04 entry point `Sessions::resume` (stage 2).
 
 ## Acceptance criteria
 
@@ -216,7 +241,11 @@ None. The comment is a local write.
 3. A later session of the job revises the changeset, and its submit
    replaces the open actions of revision 1. Red if `revise` is refused.
 4. Each refusal of the failure list writes nothing.
-5. Stage 2: a comment on a waiting job starts a session with no command.
+5. A comment on a `waiting` job moves it to `working`. Red if the job
+   stays `waiting`.
+6. Stage 2: a comment on a job with no live session starts a session with
+   no command, and a comment during a session starts one more session
+   after it ends. Red if no session starts.
 
 ## Verify
 
@@ -240,7 +269,7 @@ Rollback: revert the PR. The table stays, unused.
 1. R4-08 spec: this file and spec 3.
 2. R4-08 engine: migration, write, API, workspace.
 3. R4-08 client: the comment box.
-4. R4-08 stage 2: the wake and the resume, after R5-04.
+4. R4-08 stage 2: the resume of a job with a pending comment, after R5-04.
 
 ## Spec checks
 
