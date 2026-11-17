@@ -1,6 +1,6 @@
 // "Handle this" (card R4-10, docs/specs/2026-11-17-start-job.md): the start
-// of a job from a commitment or a conversation.
-import type { Item, Summary } from "./api";
+// of a job from a commitment or a conversation, and the grants inside a job.
+import type { Item, Rule, Summary } from "./api";
 import { ymd } from "./act";
 
 /** One message that a start grants (GET /api/items/{id}/job). */
@@ -52,4 +52,22 @@ export function reads(messages: StartMessage[]): string {
   const threads = new Set(messages.map((m) => m.thread)).size;
   const n = (k: number, one: string) => `${k} ${one}${k === 1 ? "" : "s"}`;
   return `${n(messages.length, "message")} in ${n(threads, "thread")}`;
+}
+
+/** The groups of verbs that the job page offers as grants. */
+export const GRANTS = [
+  { key: "tidy", title: "Tidy the mail", note: "Archive, add or remove labels, mark as read or unread, move back to the inbox", verbs: ["archive", "label", "unlabel", "read", "unread", "inbox"] },
+  { key: "commitments", title: "Update commitments", note: "Mark as done, put off to a later day, decline", verbs: ["close", "defer", "decline"] },
+  { key: "trash", title: "Move mail to the trash", note: "You can take it back from the trash for 30 days", verbs: ["trash"] },
+] as const;
+
+/** The grants of `job` in the active policy: the allow rules with this job. */
+export function grantsOf(rules: Rule[], job: string): Rule[] {
+  return rules.filter((r) => r.job === job && r.effect === "allow");
+}
+
+/** The rule of a group: a grant of the job with the same verbs, or undefined. */
+export function ruleOf(rules: Rule[], group: { verbs: readonly string[] }): Rule | undefined {
+  const want = [...group.verbs].sort().join();
+  return rules.find((r) => [...r.verbs].sort().join() === want);
 }
