@@ -665,3 +665,53 @@ fn a_failed_setup_still_writes_one_line() {
         assert!(text.contains("reason=no_resources"), "{fault:?} {text}");
     }
 }
+
+/// The proxy connects only to port 443 at a checked address, whatever port
+/// the resolver gives. Only the test mode (no public check) keeps the port
+/// of the resolver, for the loopback test server.
+#[test]
+fn a_target_is_a_checked_address_on_port_443() {
+    let given: Vec<SocketAddr> = vec![
+        "1.1.1.1:8443".parse().unwrap(),
+        "10.0.0.1:443".parse().unwrap(),
+        "[2606:4700::1111]:80".parse().unwrap(),
+        "[::1]:443".parse().unwrap(),
+    ];
+    let want: Vec<SocketAddr> = vec![
+        "1.1.1.1:443".parse().unwrap(),
+        "[2606:4700::1111]:443".parse().unwrap(),
+    ];
+    assert_eq!(targets(given.clone(), true), want);
+    assert_eq!(targets(given.clone(), false), given);
+}
+
+/// A client that connects while the proxy stops gets one log line if the
+/// proxy accepted it, and none if the kernel reset it.
+#[test]
+fn a_connection_that_races_a_stop_writes_one_line() {
+    for round in 0..20 {
+        let b = proxy(&format!("race-{round}"), echo(), false, LOG_LIMIT);
+        let port = b.proxy.port();
+        let clients = thread::spawn(move || {
+            let mut accepted = 0;
+            for _ in 0..20 {
+                let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) else {
+                    continue;
+                };
+                s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut buf = [0u8; 8];
+                // A FIN (Ok(0)) means that the proxy accepted the socket and
+                // closed it; a reset means that it never accepted it.
+                if let Ok(0) = s.read(&mut buf) {
+                    accepted += 1;
+                }
+            }
+            accepted
+        });
+        thread::sleep(Duration::from_millis(round % 5));
+        b.proxy.stop().unwrap();
+        let accepted = clients.join().unwrap();
+        let text = log_text(&b.log);
+        assert_eq!(text.lines().count(), accepted, "{text}");
+    }
+}
