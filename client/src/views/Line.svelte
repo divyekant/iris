@@ -150,7 +150,7 @@
   <div class="body">
     <a class="title" href={href.item(item.id)}>{item.title}</a>
     <p class="detail">
-      {#if account}<span class="account" title={`From your account ${account}`}>{account}</span>{/if}{detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
+      {detail}{#if date}<span class="due {date.tone}">, {date.text}</span>{/if}
     </p>
     {#if item.ready?.includes("draft")}
       <p class="prepared">
@@ -173,6 +173,7 @@
   {#if away}
     <button class="away" type="button" aria-label={`${away.label}: ${item.title}`} onclick={() => tick(away.verb)}>{away.label}</button>
   {/if}
+  {#if account}<span class="pill" title={`From your account ${account}`}>{account}</span>{/if}
   <a class="source" href={href.mail(origin(item))} aria-label="Open the source mail" title="Open the source mail">
     <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
       <rect x="2.5" y="4.5" width="15" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.5" />
@@ -253,13 +254,14 @@
     z-index: 1;
     color: var(--color-text-muted);
   }
-  /* The account leads the detail line, so a clamp of a long detail never hides it. */
-  .account {
-    font-weight: 600;
-  }
-  .account::after {
-    content: "·";
-    margin: 0 var(--space-2);
+  /* The account of the item (card R6-02, option B): a quiet pill beside the mail icon. */
+  .pill {
+    flex: none;
+    padding: 0 var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-full);
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
   }
   .due::after {
     content: "";

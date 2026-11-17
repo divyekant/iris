@@ -36,10 +36,10 @@ test("a brief line names its account only when there are two or more", async () 
     access.accounts = accounts;
     const view = await mount("/src/views/Line.svelte", { item });
     try {
-      const name = view.target.querySelector(".account");
+      const name = view.target.querySelector(".pill");
       assert.equal(name ? text(name) : null, shown);
-      // The name leads the detail line, so a clamp of the detail never hides it.
-      if (name) assert.equal(name.parentElement.firstElementChild, name);
+      // The pill is outside the detail line, so a clamp of the detail never hides it.
+      if (name) assert.ok(!name.closest(".detail") && name.nextElementSibling?.classList.contains("source"));
     } finally {
       view.destroy();
     }
