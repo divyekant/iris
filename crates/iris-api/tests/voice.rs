@@ -221,3 +221,85 @@ async fn a_refused_draft_saves_nothing() {
     assert!(v["error"].as_str().unwrap().contains("hostile"), "{v}");
     assert!(drafts(&s).is_empty());
 }
+
+/// For random threads of mail with the labels `TRASH`, `DRAFT` and `SENT`
+/// and random dates, a draft answers the parent of the reply form: its
+/// `based_on` is the `parent` of `GET /api/threads/{t}/reply`. A thread with
+/// no parent gets no draft.
+#[tokio::test]
+async fn property_a_draft_answers_the_parent_of_the_form() {
+    let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    for case in 0..60 {
+        let s = store(&format!("prop-{case}"), Some(100_000_000));
+        let n = 1 + next(5);
+        s.write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO label(account_id, provider_id, name, kind) VALUES
+                   (1, 'TRASH', 'TRASH', 'system'), (1, 'DRAFT', 'DRAFT', 'system'),
+                   (1, 'SENT', 'SENT', 'system');",
+            )?;
+            for i in 0..n {
+                let id: i64 = {
+                    tx.execute(
+                        "INSERT INTO message(account_id, thread_id, provider_id, internal_date, understood_at)
+                           VALUES (1, 1, ?1, ?2, 1)",
+                        rusqlite::params![format!("p{case}-{i}"), 1_794_000_000_000 + next(4) as i64 * 1000],
+                    )?;
+                    tx.last_insert_rowid()
+                };
+                tx.execute(
+                    "INSERT INTO header(message_id, from_addr, to_addrs, subject)
+                       VALUES (?1, 'ana@example.org', 'owner@example.com', 'Lunch')",
+                    [id],
+                )?;
+                tx.execute(
+                    "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, 'Lunch', 'ana', 'Lunch?')",
+                    [id],
+                )?;
+                let label = ["", "TRASH", "DRAFT", "SENT"][next(4) as usize];
+                if !label.is_empty() {
+                    tx.execute(
+                        "INSERT INTO message_label(message_id, label_id)
+                           SELECT ?1, id FROM label WHERE provider_id = ?2",
+                        rusqlite::params![id, label],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+        let req = Request::get("/api/threads/t-1/reply")
+            .header("host", "127.0.0.1:4800")
+            .header("authorization", auth.bearer())
+            .body(Body::empty())
+            .unwrap();
+        let res = iris_api::router(s.clone(), auth)
+            .oneshot(req)
+            .await
+            .unwrap();
+        let start_code = res.status();
+        let start: Value =
+            serde_json::from_slice(&to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let (code, v) = post(
+            &s,
+            fake(),
+            "/api/threads/t-1/draft",
+            json!({"intent": "yes"}),
+        )
+        .await;
+        if start_code == StatusCode::OK {
+            assert_eq!(code, StatusCode::OK, "case {case}: {v}");
+            assert_eq!(v["based_on"], start["parent"]["id"], "case {case}");
+        } else {
+            assert_eq!(start_code, StatusCode::CONFLICT, "case {case}");
+            assert_ne!(code, StatusCode::OK, "case {case}: {v}");
+        }
+    }
+}

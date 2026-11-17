@@ -135,7 +135,10 @@ struct Msg {
 /// The state of a thread that a draft depends on, in memory that does not
 /// grow with the thread: counts over all messages, and the newest
 /// [`THREAD_MESSAGES`] messages, oldest first. Only messages that are not
-/// gone and not a Gmail draft count.
+/// gone and not a Gmail draft count. The newest messages leave out spam and
+/// trash too, so the newest one is the parent of the reply form and of the
+/// send (`iris_changeset::reply_parent`). The counts keep them: a hostile
+/// mail in the trash still stops the draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
     count: i64,
@@ -183,6 +186,8 @@ fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
            EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                    WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
          {IN_THREAD}
+           AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                           WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
          ORDER BY coalesce(m.internal_date, 0) DESC, m.id DESC
          LIMIT ?2"
     ))?;
