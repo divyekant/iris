@@ -3,7 +3,7 @@
 The local API of Iris (tracker item R1-17). The API gives the web client
 and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
-[Policy](#policy)), the review of the person: decisions and withdraws
+[Policy](#policy)), the review of the person: decisions, withdraws and comments
 (see [Review](#review)), the state verbs of the person (see
 [State verbs](#state-verbs)), the cancel of a send in the outbox (see
 [Outbox](#outbox)), the days of use of the measures page (see
@@ -154,6 +154,8 @@ The person decides the actions of one changeset in one request
 |---|---|
 | `POST /api/changesets/{id}/decide` | Body `{"actions": [{"revision", "n", "approve", "hash"}]}`: 1 to 500 decisions, each action once. `approve` `true` approves the action and needs the `hash` that the review showed. `false` denies it, with the reason "The person denied it in the review.". The answer is the changeset document after the decision. |
 | `POST /api/changesets/{id}/withdraw` | No body. The person withdraws the changeset, in any state but `withdrawn` (section 5.5: "each changeset"): each open action and each draft action becomes `cancelled`, and applied and decided actions stay. A second withdraw is a 409. The withdraw of a write also withdraws the changeset of its send, so the mail does not leave; if the send left or is leaving now, the withdraw is a 409 and changes nothing. The answer is the changeset document after the withdraw. |
+| `POST /api/changesets/{id}/comments` | Body `{"revision", "text", "key"}`. The person comments on the newest revision of an open changeset of a job (`docs/specs/2026-11-17-review-comments.md`). `text` has 1 to 4,000 characters, not only white space, and no NUL. `key` has 16 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`; the client makes a new key for each new comment. A retry with the same key and the same body gives the first comment and writes nothing. A comment on a `waiting` job wakes the job. The next session of the job reads the comment in `comments/cs-<id>.md`. The answer is the comment: `{"id", "changeset", "revision", "text", "at"}`. A bad body is a 400. A changeset with no job, not open, of a done job, or with a newer revision is a 409, and nothing is written. |
+| `GET /api/changesets/{id}/comments` | `{"comments": [...]}`: each comment of the changeset, oldest first, in the form of the `POST` answer. |
 
 The changeset must be open for each decision. Each action of a decision must wait for a person (`proposed` or `in_review`). The
 decisions write in one transaction. If one is refused (a hash that changed,

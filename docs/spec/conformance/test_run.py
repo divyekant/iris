@@ -156,6 +156,41 @@ class Runner(unittest.TestCase):
             finally:
                 run.SPEC, run.SCHEMAS = spec, schemas
 
+    def test_depth_matches_the_parsed_document(self):
+        """For random JSON with brackets and quotes in strings, the scan
+        before the parse gives the depth of the parsed document."""
+
+        def real(v):
+            if isinstance(v, dict):
+                return 1 + max(map(real, v.values()), default=0)
+            if isinstance(v, list):
+                return 1 + max(map(real, v), default=0)
+            return 0
+
+        def value(rng, level):
+            k = rng.randrange(5 if level < 12 else 3)
+            if k == 0:
+                return "".join(rng.choice('ab[]{}"\\') for _ in range(rng.randrange(6)))
+            if k == 1:
+                return rng.randrange(100)
+            if k == 2:
+                return None
+            if k == 3:
+                return [value(rng, level + 1) for _ in range(rng.randrange(4))]
+            return {str(i) + "]": value(rng, level + 1) for i in range(rng.randrange(4))}
+
+        rng = random.Random(7)
+        for _ in range(2000):
+            doc = value(rng, 0)
+            self.assertEqual(run.depth(json.dumps(doc)), real(doc), doc)
+
+    def test_nesting_past_the_limit_fails_with_a_reason(self):
+        ok = "[" * run.MAX_DEPTH + "]" * run.MAX_DEPTH
+        self.assertEqual(run.depth(ok), run.MAX_DEPTH)
+        code, out = check({"signal-deep.json": "[" + ok + "]"})
+        self.assertEqual(code, 1, out)
+        self.assertIn("nesting deeper than", out)
+
     def test_usage_is_exit_2(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(run.main(["nothing"]), 2)

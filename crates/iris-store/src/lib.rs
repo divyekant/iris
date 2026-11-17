@@ -40,7 +40,7 @@ pub use backup::{BackupLock, Cleaned, PolicyExpect, PolicyWrite, GONE_KEEP_MS};
 pub use content::ContentWriter;
 pub use file_lock::FileLock;
 pub use id::{format_id, parse_id, Kind};
-pub use search::Query;
+pub use search::{day_ms, Query};
 pub use watch::{Watch, SINCE_MARGIN_MS, TEXT_MAX, WAIT_MAX};
 
 /// The schema migrations, in order. Item `n` makes `PRAGMA user_version` `n + 1`.
@@ -77,6 +77,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema_29.sql"),
     include_str!("schema_30.sql"),
     include_str!("schema_31.sql"),
+    include_str!("schema_32.sql"),
 ];
 
 /// The SQLite settings of specification 1, section 5.2, for each connection,

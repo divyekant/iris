@@ -535,6 +535,11 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             status(store, me).map(Done::Value)
         }
         Some("status") => Err(usage("status is a verb of a session")),
+        Some("wait") if session => {
+            only(&["until", "reply", "why"])?;
+            wait(store, me, args).map(Done::Value)
+        }
+        Some("wait") => Err(usage("wait is a verb of a session")),
         // The read verbs of a session (card R4-04f): only what the grant
         // holds now. The host command reads the store, not the socket.
         Some("search") if session => {
@@ -675,6 +680,54 @@ fn status(store: &Store, me: &Author) -> Result<Value, Failure> {
         "threads": threads,
         "messages": messages,
         "items": items,
+    }))
+}
+
+/// `wait` of a session (docs/specs/2026-11-17-wait.md): the job moves to
+/// `waiting`, and the same transaction ends the session with `job_state`.
+/// The reap thread sends this answer before the agent gets a signal.
+fn wait(
+    store: &Store,
+    me: &Author,
+    args: &serde_json::Map<String, Value>,
+) -> Result<Value, Failure> {
+    let job = me
+        .job
+        .as_deref()
+        .and_then(iris_job::parse_job_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
+    let until = text(args, "until")?
+        .ok_or_else(|| usage("give the end of the wait: --until YYYY-MM-DD"))?;
+    let until_ms = iris_store::day_ms(until).map_err(|e| usage(e.to_string()))?;
+    let now = crate::engine::now_ms();
+    if until_ms <= now {
+        return Err(usage(format!(
+            "{until} is not in the future (the day starts at 00:00 UTC)"
+        )));
+    }
+    let thread = match text(args, "reply")? {
+        None => None,
+        Some(t) => match iris_store::parse_id(t) {
+            Some((iris_store::Kind::Thread, row)) => Some(row),
+            _ => return Err(usage(format!("{t} is not a thread ID"))),
+        },
+    };
+    let session = me
+        .session
+        .as_deref()
+        .and_then(iris_job::parse_session_id)
+        .ok_or_else(|| Failure::new(code::ERROR, "the session has no ID"))?;
+    let why = text(args, "why")?;
+    let w = iris_job::Wait { thread, until_ms };
+    iris_job::session_wait(store, session, job, w, why, now).map_err(|e| match e {
+        iris_job::Error::Refused(why) => Failure::new(code::DENIED, why),
+        e => Failure::new(code::ERROR, e.to_string()),
+    })?;
+    Ok(json!({
+        "job": iris_job::format_job_id(job),
+        "state": "waiting",
+        "until": iris_api::rfc3339(until_ms),
+        "reply": thread.map(|t| format!("t-{t}")),
     }))
 }
 
@@ -898,6 +951,11 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                             .iter()
                             .all(|k| r[k].is_u64())
                         && (r["due"].is_null() || r["due"].is_string())
+                }
+                "wait" => {
+                    r["job"].as_str().and_then(iris_job::parse_job_id).is_some()
+                        && r["state"] == "waiting"
+                        && r["until"].is_string()
                 }
                 "search" => all_of(&r["messages"], |m| m["id"].is_string()),
                 "list" => all_of(&r["items"], item),
