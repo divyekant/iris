@@ -62,6 +62,7 @@ this one takes the next free number.
 | `item_id` | INTEGER | An item of the scope, or NULL. |
 | `by` | TEXT NOT NULL | `person` or `engine`. |
 | `at` | INTEGER NOT NULL | Milliseconds. |
+| `upto` | INTEGER | For a thread ref: the highest `message.id` in the store at the add (0 if none). NULL for an item ref. |
 | `revoked_by` | TEXT | `person` or `engine` after a revoke, else NULL. |
 | `revoked_at` | INTEGER | Milliseconds of the revoke, else NULL. |
 
@@ -132,9 +133,11 @@ The granted messages of a job:
   start. The callers come with
   R4-04 and R4-09 (known limit until then, with a GitHub issue).
 
-- A thread of the scope grants each clean message of the thread that
-  arrived at or before the add of the ref (`internal_date` at or before
-  `at` of the scope row). A message that arrives later is granted only if
+- A thread of the scope grants each clean message of the thread that the
+  store held at the add of the ref: its row ID is at or below `upto` of the
+  scope row. `message.id` is `AUTOINCREMENT`, so a row that sync adds later
+  has a higher ID, also when its date is older (a delayed sync or a
+  backfill). A message that the store adds later is granted only if
   it is a reply in the granted chain: its `In-Reply-To` names the
   `Message-ID` of a granted message of the same thread. So a reply to the
   job mail comes in, and an unrelated message that Gmail puts in the
@@ -215,9 +218,13 @@ these rules:
   action, also `labels.create` (spec 2 apply step 1), and again at the
   cutoff. A revoke between the two can leave a new label in Gmail with no
   message on it. The action is refused and no message changes.
-- The cutoff of the apply check is the write transaction that moves the
-  action to the state before the provider call that changes a message
-  (spec 2). The check of the grant runs in that same transaction. A revoke is a write transaction
+- The cutoff of the apply check is the write transaction before each
+  provider call that changes a message (spec 2), also a call that recovery
+  resumes. An action with many messages can need many calls
+  (`batchModify` of 1,000 messages, or one `trash` for each message): the
+  check runs before each of them. If a revoke wins before a call, the
+  engine stops the remaining calls, and the ledger records the calls that
+  ran and the refusal of the rest. A revoke is a write transaction
   too, and SQLite runs one write transaction at a time. So a revoke that
   commits before the cutoff makes the action refused. A revoke that
   commits after the cutoff does not stop that one provider call: the
@@ -385,10 +392,15 @@ can close the gap. The rules are:
   two counts differ. The launcher (R4-04) does these steps in order:
   1. Register the session of the job in a write transaction.
   2. Build, and compare the two counts. If they differ, build again.
-  3. Start the agent of the session.
+  3. In a write transaction, mark the session as started, only if it did
+     not end. If it ended, stop here and start again at step 1.
+  4. Start the agent process of the session.
 
-  A revoke ends each registered session of the job, also one that is in
-  step 2 or 3 and has no running agent yet (R4-04). A revoke before step 1
+  A revoke ends each registered session of the job in its own write
+  transaction, also one that is in step 2, 3 or 4 and has no running agent
+  yet (R4-04). The engine stops the agent process of an ended session as
+  soon as the process exists, before the process gets the session socket,
+  so the agent of an ended session reads no file. A revoke before step 1
   is in the first build. A revoke after step 1 ends the session before or
   while its agent reads, and the next session starts with step 1 again.
 - An engine change of eligibility (a message that becomes hostile mail,
@@ -453,7 +465,7 @@ Markdown and JSON with `serde_json`.
 | A revoke by an agent | Refused | Unit test, and raw SQL |
 | A revoke during a build | `Built::revoked` differs from `revoked_count`, so the launcher builds again before the session (R4-04) | Unit test: the count grows on each revoke and the build gives the count it read |
 | An add of a ref whose row does not exist | Refused | Unit test |
-| A message that arrives in a scope thread after the add | Granted only if its `In-Reply-To` names a granted message of the thread | Unit test: a reply comes in, an unrelated message stays out |
+| A message that the store adds to a scope thread after the add, also with an older date | Granted only if its `In-Reply-To` names a granted message of the thread | Unit test: a reply comes in, an unrelated message stays out, an old-dated backfill stays out |
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
