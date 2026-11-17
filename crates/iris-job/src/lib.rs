@@ -275,6 +275,19 @@ pub fn session_wait(
     })
 }
 
+/// The check of the text of a question (`max` 2000) or an answer (`max`
+/// 10000) as the agent or the person gave it: not only white space, at most
+/// `max` characters, and no NUL. The callers store the text as given, so
+/// the check and the store see the same text.
+pub fn check_text(text: &str, max: usize) -> std::result::Result<(), String> {
+    if text.trim().is_empty() || text.chars().count() > max || text.contains('\0') {
+        return Err(format!(
+            "the text must have 1 to {max} characters, not only white space, and no NUL character"
+        ));
+    }
+    Ok(())
+}
+
 /// Refuses unless `session` is a session of `job` that did not end.
 fn open_in(c: &Connection, session: i64, job: i64) -> Result<()> {
     let open: bool = c.query_row(

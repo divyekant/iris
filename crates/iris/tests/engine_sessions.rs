@@ -1028,6 +1028,8 @@ fn an_answer_starts_a_session_with_the_answer() {
         serde_json::json!({}),
         serde_json::json!({ "question": "  " }),
         serde_json::json!({ "question": "x".repeat(2001) }),
+        // Over the limit before any trim (the review of PR #575).
+        serde_json::json!({ "question": format!(" {} ", "x".repeat(1999)) }),
     ] {
         let v = ask(&f, "ask", bad).unwrap();
         assert_eq!(v["code"], 2, "{v}");
@@ -1035,7 +1037,7 @@ fn an_answer_starts_a_session_with_the_answer() {
     let v = ask(
         &f,
         "ask",
-        serde_json::json!({ "question": "Which card do I use?" }),
+        serde_json::json!({ "question": "  Which card do I use?" }),
     )
     .unwrap();
     assert_eq!(v["ok"], true, "{v}");
@@ -1054,7 +1056,7 @@ fn an_answer_starts_a_session_with_the_answer() {
     let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
     assert!(job.contains("## Your answer\n\nYou asked on "), "{job}");
     assert!(
-        job.contains("\n```question\nWhich card do I use?\n```\n"),
+        job.contains("\n```question\n  Which card do I use?\n```\n"),
         "{job}"
     );
     // The fence is longer than each run of backticks in the answer.

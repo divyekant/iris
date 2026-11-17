@@ -678,15 +678,8 @@ fn ask(
         .as_deref()
         .and_then(iris_job::parse_job_id)
         .ok_or_else(|| Failure::new(code::ERROR, "the session has no job"))?;
-    let question = text(args, "question")?
-        .map(str::trim)
-        .filter(|q| !q.is_empty())
-        .ok_or_else(|| usage("give the question"))?;
-    if question.chars().count() > 2000 || question.contains('\0') {
-        return Err(usage(
-            "the question has more than 2000 characters or a NUL character",
-        ));
-    }
+    let question = text(args, "question")?.ok_or_else(|| usage("give the question"))?;
+    iris_job::check_text(question, 2000).map_err(usage)?;
     let session = me
         .session
         .as_deref()

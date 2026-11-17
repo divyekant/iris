@@ -751,3 +751,41 @@ fn an_add_takes_the_list_of_the_ref_now() {
         ]
     );
 }
+
+/// The text check of R5-05 decides on the text as given: each text that it
+/// accepts is the same text that the store keeps, and the store accepts it.
+#[test]
+fn the_text_check_and_the_store_agree_on_the_text_as_given() {
+    let pads = ["", " ", "  ", "\n", "\t"];
+    let bodies = [
+        "a".to_string(),
+        "    indented".into(),
+        "x".repeat(1999),
+        "a\u{0}b".into(),
+        "é".repeat(2000),
+    ];
+    let dir = std::env::temp_dir().join(format!("iris-job-text-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = iris_store::Store::open(&dir).unwrap();
+    for lead in pads {
+        for end in pads {
+            for body in &bodies {
+                let text = format!("{lead}{body}{end}");
+                let n = text.chars().count();
+                let ok = iris_job::check_text(&text, 2000).is_ok();
+                let want = !text.trim().is_empty() && n <= 2000 && !text.contains('\0');
+                assert_eq!(ok, want, "{lead:?} {n} {end:?}");
+                if ok {
+                    let job = iris_job::create(&store, "Pay.", None, 1).unwrap();
+                    iris_job::ask(&store, job, &text, None, 2).unwrap();
+                    assert_eq!(
+                        iris_job::get(&store, job).unwrap().question.as_deref(),
+                        Some(text.as_str())
+                    );
+                }
+            }
+        }
+    }
+    assert!(iris_job::check_text(" \n\t ", 10).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -399,6 +399,8 @@ async fn the_person_answers_the_question_of_a_job_once() {
         json!({ "answer": " \n " }),
         json!({ "answer": "x".repeat(10_001) }),
         json!({ "answer": "a\u{0}b" }),
+        // Over the limit before any trim (the review of PR #575).
+        json!({ "answer": format!("  {}  ", "x".repeat(9_999)) }),
     ] {
         let (code, v) = post(&s, &uri, bad.clone()).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
@@ -410,11 +412,14 @@ async fn the_person_answers_the_question_of_a_job_once() {
             .0,
         StatusCode::NOT_FOUND
     );
-    let (code, doc) = post(&s, &uri, json!({ "answer": " The blue card. " })).await;
+    // The answer is stored as the person gave it: the indent of the first
+    // line stays.
+    let given = "    card: blue\n    limit: 2400\n";
+    let (code, doc) = post(&s, &uri, json!({ "answer": given })).await;
     assert_eq!(code, StatusCode::OK, "{doc}");
     assert_eq!(doc["job"]["state"], "working");
     let last = doc["job"]["events"].as_array().unwrap().last().unwrap();
-    assert_eq!(last["answer"], "The blue card.");
+    assert_eq!(last["answer"], given);
     assert_eq!(last["by"], "person");
     // A second answer finds no question.
     let (code, _) = post(&s, &uri, json!({ "answer": "The red card." })).await;
