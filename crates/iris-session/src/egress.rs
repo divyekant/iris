@@ -364,12 +364,11 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
             .name("iris-egress-conn".into())
             .spawn(move || {
                 let f = handle(&s, stream, id);
-                {
-                    let mut c = lock(&s.conns);
-                    c.streams.remove(&id);
-                    c.cancels.remove(&id);
-                }
+                lock(&s.conns).cancels.remove(&id);
+                // The connection keeps its place in the count until its
+                // socket closes, so a stop can close it during the drain.
                 finish(&s, f);
+                lock(&s.conns).streams.remove(&id);
             });
         match spawned {
             Ok(t) => c.threads.push(t),
