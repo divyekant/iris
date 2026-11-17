@@ -740,6 +740,7 @@ dependencies = [
  "iris-triage",
  "iris-understand",
  "iris-web",
+ "iris-workspace",
  "rusqlite",
  "serde",
  "serde_json",

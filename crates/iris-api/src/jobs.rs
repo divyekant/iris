@@ -3,7 +3,9 @@
 
 use std::io::Write;
 
-use iris_job::State as JobState;
+use std::collections::BTreeSet;
+
+use iris_job::{By, Ref, State as JobState};
 use iris_store::{format_id, Kind, Store};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
@@ -206,5 +208,218 @@ impl<W: Write> Write for Prefixed<'_, W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.out.flush()
+    }
+}
+
+/// The longest goal, in characters (`docs/spec/schema/job.schema.json`).
+const GOAL_MAX: usize = 2000;
+/// The last millisecond of the year 9999: the highest time of the job table.
+const TIME_MAX: i64 = 253_402_300_799_999;
+
+/// The result of [`start_job`].
+#[derive(Debug)]
+pub enum Started {
+    /// The document of the new job.
+    Created(Value),
+    /// No commitment or conversation has this ID.
+    NotFound,
+    /// An open job has the item in its scope: its ID (`j-4`).
+    Open(String),
+}
+
+/// The form and the row of a start item: a commitment or a conversation.
+fn start_item(item: &str) -> Result<(&'static str, i64)> {
+    match iris_store::parse_id(item) {
+        Some((Kind::Commitment, row)) => Ok(("commitment", row)),
+        Some((Kind::Conversation, row)) => Ok(("conversation", row)),
+        _ => Err(Error::Query(format!(
+            "not the ID of a commitment or a conversation: {item:?}"
+        ))),
+    }
+}
+
+/// The checks of an item before a start (section 2, steps 2 and 3).
+enum Check {
+    Ok,
+    NotFound,
+    Refused(&'static str),
+}
+
+fn check_item(c: &Connection, form: &str, row: i64) -> rusqlite::Result<Check> {
+    let status: Option<String> = c
+        .query_row(
+            "SELECT status FROM item WHERE id = ?1 AND form = ?2",
+            rusqlite::params![row, form],
+            |r| r.get(0),
+        )
+        .optional()?;
+    // The statuses of the item page: a commitment that is open, a
+    // conversation that is active or quiet.
+    match (form, status.as_deref()) {
+        (_, None) => return Ok(Check::NotFound),
+        ("commitment", Some("open")) | ("conversation", Some("active" | "quiet")) => {}
+        _ => return Ok(Check::Refused("The item is not open any more.")),
+    }
+    let mut q = c.prepare_cached("SELECT message_id FROM item_source WHERE item_id = ?1")?;
+    let sources = q
+        .query_map([row], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if sources.is_empty() {
+        return Ok(Check::Refused("The item has no mail."));
+    }
+    // The rule of the workspace build: else the job starts with an item
+    // that its workspace drops.
+    for m in sources {
+        if !iris_workspace::readable(c, m)? {
+            return Ok(Check::Refused(
+                "An agent cannot read the mail of this item.",
+            ));
+        }
+    }
+    Ok(Check::Ok)
+}
+
+/// Each message that a start from item `row` grants: the source messages
+/// and each message of their threads, as the scope adds list them. In the
+/// order of the thread, then the date that the summary shows (the header
+/// date, else the date of the provider).
+fn grant_list(c: &Connection, row: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut q = c.prepare_cached(
+        "SELECT m.id FROM message m
+         WHERE m.id IN (SELECT message_id FROM item_source WHERE item_id = ?1)
+            OR m.thread_id IN (SELECT x.thread_id FROM item_source s
+                               JOIN message x ON x.id = s.message_id WHERE s.item_id = ?1)
+         ORDER BY m.thread_id,
+                  coalesce((SELECT h.date FROM header h WHERE h.message_id = m.id),
+                           m.internal_date, 0),
+                  m.id",
+    )?;
+    let ids = q.query_map([row], |r| r.get(0))?.collect();
+    ids
+}
+
+/// The mail that a start from `item` grants now (`GET /api/items/{id}/job`):
+/// `{"messages": [...]}`, the summary of each message with `readable`.
+/// Gives `None` when no commitment or conversation has the ID.
+pub fn start_preview(store: &Store, item: &str) -> Result<Option<Value>> {
+    let (form, row) = start_item(item)?;
+    store.read(|c| {
+        let tx = c.unchecked_transaction()?;
+        let out = match check_item(&tx, form, row)? {
+            Check::NotFound => Ok(None),
+            Check::Refused(why) => Err(Error::Conflict(why.into())),
+            Check::Ok => {
+                let mut messages = Vec::new();
+                for m in grant_list(&tx, row)? {
+                    let Some((summary, _)) = message_row(&tx, m)? else {
+                        continue;
+                    };
+                    let mut v = serde_json::to_value(summary).map_err(std::io::Error::other)?;
+                    v["readable"] = iris_workspace::readable(&tx, m)?.into();
+                    messages.push(v);
+                }
+                Ok(Some(json!({ "messages": messages })))
+            }
+        };
+        Ok(out)
+    })?
+}
+
+/// Start a job from one item, for the person ("Handle this",
+/// `docs/specs/2026-11-17-start-job.md`, section 2). `messages` are the
+/// IDs of the preview that the person saw. The scope is the item and the
+/// thread of each source message. All steps are one write transaction, so
+/// two starts for the same item make one job.
+pub fn start_job(
+    store: &Store,
+    item: &str,
+    goal: &str,
+    due: Option<&str>,
+    messages: &[String],
+    now_ms: i64,
+) -> Result<Started> {
+    let (form, row) = start_item(item)?;
+    let goal = goal.trim();
+    // The checks of the job table, so that each value it refuses is a 400.
+    if goal.is_empty() || goal.chars().count() > GOAL_MAX || goal.contains('\0') {
+        return Err(Error::Query(format!(
+            "the goal must have 1 to {GOAL_MAX} characters, and no NUL"
+        )));
+    }
+    let due_ms = match due {
+        None => None,
+        Some(d) => Some(
+            iris_understand::time::parse_rfc3339(d)
+                .filter(|ms| (0..=TIME_MAX).contains(ms))
+                .ok_or_else(|| {
+                    Error::Query(format!(
+                        "due is not an RFC 3339 time from 1970 to 9999: {d:?}"
+                    ))
+                })?,
+        ),
+    };
+    let mut seen = BTreeSet::new();
+    for m in messages {
+        match iris_store::parse_id(m) {
+            Some((Kind::Message, id)) => seen.insert(id),
+            _ => return Err(Error::Query(format!("not a message ID: {m:?}"))),
+        };
+    }
+    enum Out {
+        Done(Started),
+        Refused(&'static str),
+    }
+    let out = iris_job::transaction(store, |c| {
+        // First: a retry after a lost answer finds the job, also when the
+        // item closed after that start.
+        let open: Option<i64> = c
+            .query_row(
+                "SELECT j.id FROM job_scope s JOIN job j ON j.id = s.job_id
+                 JOIN item i ON i.id = s.item_id
+                 WHERE s.item_id = ?1 AND i.form = ?2
+                   AND s.revoked_at IS NULL AND j.state != 'done'
+                 ORDER BY j.id LIMIT 1",
+                rusqlite::params![row, form],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(j) = open {
+            return Ok(Out::Done(Started::Open(iris_job::format_job_id(j))));
+        }
+        match check_item(c, form, row)? {
+            Check::Ok => {}
+            Check::NotFound => return Ok(Out::Done(Started::NotFound)),
+            Check::Refused(why) => return Ok(Out::Refused(why)),
+        }
+        if grant_list(c, row)?.into_iter().collect::<BTreeSet<_>>() != seen {
+            return Ok(Out::Refused("The mail changed. Look at it again."));
+        }
+        let job = iris_job::create_in(c, goal, due_ms, now_ms)?;
+        iris_job::add_scope_in(c, job, Ref::Item(row), By::Person, now_ms)?;
+        let mut q = c.prepare_cached(
+            "SELECT DISTINCT m.thread_id FROM item_source s
+             JOIN message m ON m.id = s.message_id WHERE s.item_id = ?1 ORDER BY 1",
+        )?;
+        let threads = q
+            .query_map([row], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for t in threads {
+            iris_job::add_scope_in(c, job, Ref::Thread(t), By::Person, now_ms)?;
+        }
+        // The full document, with the create event (the same as GET).
+        let mut doc = Vec::new();
+        iris_job::write_document_in(c, job, &mut doc)?;
+        let doc = serde_json::from_slice(&doc).map_err(|e| {
+            iris_job::Error::Store(iris_store::Error::Query(format!("job document: {e}")))
+        })?;
+        Ok(Out::Done(Started::Created(doc)))
+    })
+    .map_err(|e| match e {
+        iris_job::Error::Refused(why) => Error::Conflict(why),
+        e => job_error(e),
+    })?;
+    match out {
+        Out::Done(s) => Ok(s),
+        Out::Refused(why) => Err(Error::Conflict(why.into())),
     }
 }

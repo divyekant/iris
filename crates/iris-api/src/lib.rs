@@ -137,6 +137,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/records", get(get_records))
         .route("/api/items", get(get_items))
         .route("/api/items/{id}", get(get_item))
+        .route("/api/items/{id}/job", get(get_start))
         .route("/api/items/{id}/{verb}", post(post_verb))
         .route("/api/search", get(get_search))
         .route("/api/changesets", get(get_changesets))
@@ -151,7 +152,8 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/policy/discard", post(post_discard))
         .route("/api/policy/mode", post(post_mode))
         .route("/api/policy/remove", post(post_remove))
-        .route("/api/jobs", get(get_jobs))
+        .route("/api/policy/grant", post(post_grant))
+        .route("/api/jobs", get(get_jobs).post(post_job))
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
@@ -618,6 +620,68 @@ async fn get_jobs(
     let state = q.state.as_deref().unwrap_or("open");
     let page = jobs(&s, state, q.limit.unwrap_or(50), q.after.as_deref())?;
     Ok(Json(page).into_response())
+}
+
+/// The mail that a start from the item grants now.
+async fn get_start(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(start_preview(&s, &id)?.map_or_else(not_found, |v| Json(v).into_response()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartBody {
+    item: String,
+    goal: String,
+    due: Option<String>,
+    messages: Vec<String>,
+}
+
+/// Start a job from one item ("Handle this"). The answer is 201 with the
+/// job document. If an open job has the item, 409 names that job.
+async fn post_job(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<StartBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(
+        match start_job(
+            &s,
+            &b.item,
+            &b.goal,
+            b.due.as_deref(),
+            &b.messages,
+            now_ms(),
+        )? {
+            Started::Created(doc) => (StatusCode::CREATED, Json(doc)).into_response(),
+            Started::NotFound => not_found(),
+            Started::Open(job) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "A job that is not done has this item already.",
+                    "job": job,
+                })),
+            )
+                .into_response(),
+        },
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantBody {
+    version: Option<i64>,
+    job: String,
+    verbs: Vec<String>,
+}
+
+/// A grant inside one open job: one `allow` rule with `job`.
+async fn post_grant(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<GrantBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(policy::grant(&s, &b.job, &b.verbs, b.version, now_s())?
+        .map_or_else(not_found, |v| Json(v).into_response()))
 }
 
 async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
