@@ -178,56 +178,47 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
     let mut by_thread = BTreeSet::new();
     let mut by_item: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
     for r in &refs {
-        let (thread, only) = match *r {
-            Ref::Thread(t) => {
-                let scope_id: i64 = c.query_row(
-                    "SELECT id FROM job_scope
-                     WHERE job_id = ?1 AND thread_id = ?2 AND revoked_at IS NULL",
-                    params![job, t],
-                    |r| r.get(0),
-                )?;
-                let mut clean_ids = BTreeSet::new();
-                for m in iris_talk::messages(c, t)? {
-                    if clean(c, &m)? {
-                        clean_ids.insert(m.id);
-                    }
-                }
-                (vec![t], Some(thread_grant(c, scope_id, &clean_ids)?))
-            }
+        // One path for both kinds of ref: the list of the ref
+        // (`job_scope_message`), each message in its thread now. A message
+        // that sync moves to another thread stays granted.
+        let (thread_id, item_id) = match *r {
+            Ref::Thread(t) => (Some(t), None),
             Ref::Item(i) => {
                 by_item.entry(i).or_default();
-                // A gone item grants nothing.
-                let live: bool = c
-                    .query_row(
-                        "SELECT status != 'gone' FROM item WHERE id = ?1",
-                        [i],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false);
-                // The list of the ref, not the sources now: a source that
-                // understanding adds later needs a new add by the person.
-                let s: Vec<(i64, i64)> = if live {
-                    let mut q = c.prepare_cached(
-                        "SELECT m.id, m.thread_id FROM job_scope s
-                         JOIN job_scope_message l ON l.scope_id = s.id
-                         JOIN message m ON m.id = l.message_id
-                         WHERE s.job_id = ?1 AND s.item_id = ?2 AND s.revoked_at IS NULL",
-                    )?;
-                    let rows = q.query_map(params![job, i], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                    rows.collect::<rusqlite::Result<_>>()?
-                } else {
-                    Vec::new()
-                };
-                let mut t: Vec<i64> = s.iter().map(|(_, t)| *t).collect();
-                t.sort_unstable();
-                t.dedup();
-                (
-                    t,
-                    Some(s.into_iter().map(|(m, _)| m).collect::<BTreeSet<i64>>()),
-                )
+                (None, Some(i))
             }
         };
+        // A gone item grants nothing.
+        let live: bool = match item_id {
+            Some(i) => c
+                .query_row(
+                    "SELECT status != 'gone' FROM item WHERE id = ?1",
+                    [i],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false),
+            None => true,
+        };
+        let s: Vec<(i64, i64)> = if live {
+            let mut q = c.prepare_cached(
+                "SELECT m.id, m.thread_id FROM job_scope s
+                 JOIN job_scope_message l ON l.scope_id = s.id
+                 JOIN message m ON m.id = l.message_id
+                 WHERE s.job_id = ?1 AND s.revoked_at IS NULL
+                   AND s.thread_id IS ?2 AND s.item_id IS ?3",
+            )?;
+            let rows = q.query_map(params![job, thread_id, item_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        } else {
+            Vec::new()
+        };
+        let mut thread: Vec<i64> = s.iter().map(|(_, t)| *t).collect();
+        thread.sort_unstable();
+        thread.dedup();
+        let only: BTreeSet<i64> = s.into_iter().map(|(m, _)| m).collect();
         for t in thread {
             let account: Option<i64> = c
                 .query_row("SELECT account_id FROM thread WHERE id = ?1", [t], |r| {
@@ -236,7 +227,7 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
                 .optional()?;
             let Some(account) = account else { continue };
             for m in iris_talk::messages(c, t)? {
-                if clean(c, &m)? && only.as_ref().is_none_or(|o| o.contains(&m.id)) {
+                if clean(c, &m)? && only.contains(&m.id) {
                     threads.insert(t, account);
                     granted.insert(m.id);
                     match *r {
@@ -330,26 +321,6 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
     md.push_str(RULES);
     new_file(&stage.join("JOB.md"))?.write_all(md.as_bytes())?;
     Ok(built)
-}
-
-/// The messages that a thread ref grants: its list (`job_scope_message`),
-/// each of them clean. A later message is not granted, also not a reply:
-/// the reply headers come from the sender.
-fn thread_grant(
-    c: &Connection,
-    scope_id: i64,
-    clean: &BTreeSet<i64>,
-) -> rusqlite::Result<BTreeSet<i64>> {
-    let mut q = c.prepare_cached("SELECT message_id FROM job_scope_message WHERE scope_id = ?1")?;
-    let ids = q.query_map([scope_id], |r| r.get::<_, i64>(0))?;
-    let mut out = BTreeSet::new();
-    for id in ids {
-        let id = id?;
-        if clean.contains(&id) {
-            out.insert(id);
-        }
-    }
-    Ok(out)
 }
 
 /// True if `m` can go into a workspace: clean for the conversation rule, not
