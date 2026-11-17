@@ -825,3 +825,92 @@ fn close_ends_each_tunnel_and_keeps_the_port() {
     let text = log_text(&b.log);
     assert!(text.contains("ended reason=stopped"), "{text}");
 }
+
+/// A close ends a resolve in progress at once: the client does not wait
+/// for the connect time.
+#[test]
+fn close_ends_a_stalled_resolve_at_once() {
+    let log = std::env::temp_dir().join(format!("iris-egress-cstall-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Stalled),
+        false,
+        None,
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+    s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n")
+        .unwrap();
+    // The worker is in the resolver now.
+    assert!(wait_until(
+        || proxy.shared.workers.load(Ordering::SeqCst) == 1
+    ));
+    let t = Instant::now();
+    proxy.close();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut x = [0u8; 1];
+    assert_eq!(s.read(&mut x).unwrap_or(0), 0);
+    assert!(t.elapsed() < CONNECT_TIME / 2, "{:?}", t.elapsed());
+    assert!(wait_until(
+        || log_text(&guard).contains("host=api.example.test up=0 down=0 result=stopped")
+    ));
+    proxy.stop().unwrap();
+}
+
+/// After a close, a client from another address also gets the stopped
+/// close, not a refusal.
+#[cfg(target_os = "linux")]
+#[test]
+fn close_comes_before_the_address_check() {
+    let log = std::env::temp_dir().join(format!("iris-egress-cpeer-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let guard = LogFile(log.clone());
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let proxy = Proxy::start_with(
+        allowed(),
+        file,
+        Box::new(Fixed(echo())),
+        false,
+        session_peer(7),
+        LOG_LIMIT,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .unwrap();
+    proxy.close();
+    for from in [session_peer(8).unwrap(), Ipv4Addr::LOCALHOST] {
+        let mut s = connect_from(from, proxy.port()).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        let mut x = [0u8; 1];
+        assert_eq!(s.read(&mut x).unwrap_or(0), 0, "no 403 after a close");
+    }
+    proxy.stop().unwrap();
+    let text = log_text(&guard);
+    assert_eq!(text.matches("ended reason=stopped").count(), 2, "{text}");
+    assert!(!text.contains("not_session"), "{text}");
+}
+
+fn wait_until(f: impl Fn() -> bool) -> bool {
+    let end = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < end {
+        if f() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    false
+}

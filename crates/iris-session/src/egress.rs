@@ -98,44 +98,18 @@ pub fn session_peer(session: i64) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(SESSION_BASE + session as u32))
 }
 
-/// Connects to `127.0.0.1:<port>` from the loopback address `from`. The
-/// socket is close-on-exec. Linux takes each address of `127.0.0.0/8` as a
-/// local address with no setup.
-pub fn connect_from(from: Ipv4Addr, port: u16) -> io::Result<std::net::TcpStream> {
-    use std::os::fd::FromRawFd;
-    fn sin(ip: Ipv4Addr, port: u16) -> libc::sockaddr_in {
-        // SAFETY: sockaddr_in is plain data; all zero is a valid value.
-        let mut a: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-        a.sin_family = libc::AF_INET as libc::sa_family_t;
-        a.sin_port = port.to_be();
-        a.sin_addr = libc::in_addr {
-            s_addr: u32::from(ip).to_be(),
-        };
-        a
-    }
-    let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    // SAFETY: plain system calls on a socket that this function owns.
-    unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let stream = std::net::TcpStream::from_raw_fd(fd);
-        let src = sin(from, 0);
-        if libc::bind(fd, &src as *const _ as *const libc::sockaddr, len) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let dst = sin(Ipv4Addr::LOCALHOST, port);
-        loop {
-            if libc::connect(fd, &dst as *const _ as *const libc::sockaddr, len) == 0 {
-                return Ok(stream);
-            }
-            let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::Interrupted {
-                return Err(e);
-            }
-        }
-    }
+/// Connects to `127.0.0.1:<port>` from the loopback address `from`, with
+/// `socket2` (bind before connect). `Socket::new` sets close-on-exec. Linux takes
+/// each address of `127.0.0.0/8` as a local address with no setup.
+pub fn connect_from(from: Ipv4Addr, port: u16) -> io::Result<TcpStream> {
+    use socket2::{Domain, SockAddr, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    socket.bind(&SockAddr::from(SocketAddr::from((from, 0))))?;
+    socket.connect(&SockAddr::from(SocketAddr::from((
+        Ipv4Addr::LOCALHOST,
+        port,
+    ))))?;
+    Ok(socket.into())
 }
 
 /// True if a connection to `ip` can leave the machine to the public internet.
@@ -526,15 +500,10 @@ fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
             finish(&shared, refuse(stream, Reason::NoResources));
             continue;
         }
-        if let Some(peer) = shared.peer {
-            if from.ip() != IpAddr::V4(peer) {
-                finish(&shared, refuse(stream, Reason::NotSession));
-                continue;
-            }
-        }
         let mut c = lock(&shared.conns);
         if shared.stopping.load(Ordering::SeqCst) {
-            // A client accepted after a close gets its line and a close.
+            // Each client accepted after a close, from any address, gets
+            // its line and a close.
             drop(c);
             drop(stream);
             finish(
@@ -544,6 +513,14 @@ fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
                     answer: None,
                 },
             );
+            continue;
+        }
+        if shared
+            .peer
+            .is_some_and(|peer| from.ip() != IpAddr::V4(peer))
+        {
+            drop(c);
+            finish(&shared, refuse(stream, Reason::NotSession));
             continue;
         }
         c.threads.retain(|t| !t.is_finished());
