@@ -218,6 +218,69 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
 /// The most characters of the parent text in the reply form.
 pub const PARENT_TEXT: usize = 600;
 
+/// The most mails of the conversation above the reply form (layout C): the
+/// newest ones, up to and with the parent. The start values give the count
+/// of the older mails.
+pub const CONVERSATION: usize = 20;
+
+/// The most characters of the text of one mail of the conversation. The
+/// mail view shows the full text.
+pub const MAIL_TEXT: usize = 4000;
+
+/// The first `n` characters of `t`, with `…` if the text is longer.
+fn cut(t: &str, n: usize) -> String {
+    match t.char_indices().nth(n) {
+        Some((i, _)) => format!("{}…", &t[..i]),
+        None => t.to_string(),
+    }
+}
+
+/// The mails of the thread that a reply can answer (the filter of
+/// `iris_changeset::reply_parent`), newest first.
+const ANSWERABLE: &str = "FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+   AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+     WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH', 'DRAFT'))";
+
+/// The conversation above the reply form: the newest [`CONVERSATION`]
+/// answerable mails of the thread, oldest first, and the count of the older
+/// ones. The last mail is the parent. Mail text is data: the client shows it
+/// as text.
+fn conversation(c: &Connection, thread: i64) -> rusqlite::Result<(Vec<Value>, i64)> {
+    let total: i64 = c.query_row(&format!("SELECT count(*) {ANSWERABLE}"), [thread], |r| {
+        r.get(0)
+    })?;
+    let mut st = c.prepare(&format!(
+        "SELECT m.id, EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                              WHERE ml.message_id = m.id AND l.provider_id = 'SENT')
+         {ANSWERABLE} ORDER BY m.internal_date DESC, m.id DESC LIMIT ?2"
+    ))?;
+    let rows = st
+        .query_map(rusqlite::params![thread, CONVERSATION as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (row, you) in rows.into_iter().rev() {
+        let Some(m) = message_in(c, row)? else {
+            continue;
+        };
+        let text = m.text.as_deref();
+        out.push(json!({
+            "id": m.summary.id,
+            "from": m.summary.from,
+            "date": m.summary.date,
+            "to": m.to,
+            // The label `SENT` says that the person wrote the mail (section 5).
+            "you": you,
+            "hostile": !m.hostile.is_empty() || m.sender_kind == "hostile",
+            "text": text.map(|t| cut(t, MAIL_TEXT)),
+            "cut": text.is_some_and(|t| t.chars().nth(MAIL_TEXT).is_some()),
+        }));
+    }
+    let earlier = total - out.len() as i64;
+    Ok((out, earlier.max(0)))
+}
+
 /// The start values of a reply in the thread `t-N` (section 5). `None` if
 /// the thread does not exist. [`Error::Conflict`] if it has no parent.
 pub fn reply(store: &Store, thread: &str) -> Result<Option<Value>> {
@@ -275,13 +338,8 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         vec![m.summary.from.address.clone().unwrap_or_default()]
     };
     let to: Vec<String> = to.into_iter().filter(|a| valid_address(a)).collect();
-    let text = m
-        .text
-        .as_deref()
-        .map(|t| match t.char_indices().nth(PARENT_TEXT) {
-            Some((i, _)) => format!("{}…", &t[..i]),
-            None => t.to_string(),
-        });
+    let text = m.text.as_deref().map(|t| cut(t, PARENT_TEXT));
+    let (mails, earlier) = conversation(c, thread).map_err(iris_store::Error::from)?;
     Ok(Some(json!({
         "account": format_id(Kind::Account, account),
         "parent": {
@@ -293,6 +351,9 @@ fn reply_in(c: &Connection, thread: i64) -> Result<Option<Value>> {
         "to": to,
         "cc": [],
         "subject": iris_compose::reply_subject(subject.as_deref().unwrap_or("")),
+        "topic": subject.unwrap_or_default(),
+        "conversation": mails,
+        "earlier": earlier,
     })))
 }
 

@@ -365,6 +365,103 @@ async fn a_reply_names_the_newest_mail() {
     assert_eq!(code, StatusCode::CONFLICT);
 }
 
+/// The start values hold the conversation above the reply form: the newest
+/// answerable mails, oldest first, with the parent last, and the count of
+/// the older ones. A draft or a mail in the trash is not part of it. The
+/// text of a long mail is cut.
+#[tokio::test]
+async fn a_reply_shows_the_conversation() {
+    // `write::CONVERSATION` and `write::MAIL_TEXT` of the API.
+    const CONVERSATION: usize = 20;
+    const MAIL_TEXT: usize = 4000;
+    let dir = temp("talk");
+    let s = store(&dir);
+    let n = CONVERSATION as i64 + 3;
+    let long = "x".repeat(MAIL_TEXT + 5);
+    s.write(|tx| {
+        tx.execute_batch(
+            "INSERT INTO label(account_id, provider_id, name, kind) VALUES
+               (1, 'SENT', 'SENT', 'system'), (1, 'DRAFT', 'DRAFT', 'system'),
+               (1, 'TRASH', 'TRASH', 'system');",
+        )?;
+        // Messages 3 to n: mail of the person (label SENT) with a long text.
+        for i in 3..=n {
+            tx.execute(
+                "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+                   VALUES (1, 1, ?1, ?2)",
+                rusqlite::params![format!("p{i}"), i * 1000],
+            )?;
+            tx.execute(
+                "INSERT INTO body(message_id, subject, sender, text) VALUES (?1, 'Re: Q4', 'owner', ?2)",
+                rusqlite::params![i, long],
+            )?;
+            tx.execute(
+                "INSERT INTO header(message_id, from_addr, to_addrs, subject)
+                   VALUES (?1, 'owner@example.com', 'priya@example.com', 'Re: Q4')",
+                [i],
+            )?;
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                   SELECT ?1, id FROM label WHERE provider_id = 'SENT'",
+                [i],
+            )?;
+        }
+        // A newer draft and a newer mail in the trash.
+        for (i, label) in [(n + 1, "DRAFT"), (n + 2, "TRASH")] {
+            tx.execute(
+                "INSERT INTO message(account_id, thread_id, provider_id, internal_date)
+                   VALUES (1, 1, ?1, ?2)",
+                rusqlite::params![format!("p{i}"), i * 1000],
+            )?;
+            tx.execute(
+                "INSERT INTO message_label(message_id, label_id)
+                   SELECT ?1, id FROM label WHERE provider_id = ?2",
+                rusqlite::params![i, label],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let mails = v["conversation"].as_array().unwrap();
+    assert_eq!(mails.len(), CONVERSATION);
+    assert_eq!(v["earlier"], n - CONVERSATION as i64);
+    let ids: Vec<&str> = mails.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    let want: Vec<String> = (n + 1 - CONVERSATION as i64..=n)
+        .map(|i| format!("m-{i}"))
+        .collect();
+    assert_eq!(ids, want);
+    assert_eq!(v["parent"]["id"], *ids.last().unwrap());
+    let last = mails.last().unwrap();
+    assert_eq!(last["you"], true);
+    assert_eq!(last["hostile"], false);
+    assert_eq!(last["cut"], true);
+    assert_eq!(
+        last["text"].as_str().unwrap().chars().count(),
+        MAIL_TEXT + 1
+    );
+    assert_eq!(v["topic"], "Re: Q4");
+    // A short thread: the two mails of the fixture, from priya.
+    let dir = temp("talk-short");
+    let s = store(&dir);
+    s.write(|tx| {
+        Ok(tx.execute(
+            r#"UPDATE message SET hostile = '["link_mismatch"]' WHERE id = 1"#,
+            [],
+        )?)
+    })
+    .unwrap();
+    let (_, v) = call(&s, "GET", "/api/threads/t-1/reply", None).await;
+    assert_eq!(v["earlier"], 0);
+    assert_eq!(v["conversation"][0]["hostile"], true);
+    assert_eq!(v["conversation"][1]["hostile"], false);
+    assert_eq!(v["conversation"][0]["id"], "m-1");
+    assert_eq!(v["conversation"][1]["id"], "m-2");
+    assert_eq!(v["conversation"][1]["you"], false);
+    assert_eq!(v["conversation"][1]["from"]["name"], "Priya Shah");
+}
+
 /// Add the newest mail of thread 1 (message 3), from `from` to `to`, with
 /// the label `SENT` if `sent`.
 fn newest(s: &Store, from: &str, to: &str, sent: bool) {
