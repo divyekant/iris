@@ -2154,3 +2154,33 @@ fn hundred_actions_and_hundred_undos_are_correct() {
         }
     }
 }
+
+/// A later entry blocks the undo of an older entry on the same message
+/// while the later entry stands, also after a failed undo of it (R2-13).
+/// `hundred_actions_and_hundred_undos_are_correct` covers the undone case.
+#[test]
+fn a_later_entry_blocks_the_older_undo_after_a_failed_undo() {
+    let b = setup("undo-stack", 60, Some(APPLY_POLICY));
+    let ms = b.messages(IN_INBOX, 1);
+    b.fake
+        .modify_labels(&b.provider_id(ms[0]), &[], &["UNREAD"]);
+    let old = b.approved("archive", &ms, PERSON);
+    applied(b.apply(old));
+    let later = b.approved("unread", &ms, PERSON);
+    applied(b.apply(later));
+    assert!(b.gmail_labels(ms[0]).contains(&"UNREAD".to_string()));
+
+    // The undo of the later entry fails: the later entry stands.
+    let actions = iris_apply::undo(&b.store, b.entry(later), now()).unwrap();
+    b.fake.fail_next_write(&[400], false);
+    assert!(matches!(b.apply(actions[0]), Ok(Outcome::Failed { .. })));
+    assert_ne!(b.state(later).0, "undone");
+    let skipped = iris_apply::undo(&b.store, b.entry(old), now()).unwrap();
+    match b.apply(skipped[0]).unwrap() {
+        Outcome::Applied(c) => assert_eq!((c.changed, c.unchanged), (0, 1)),
+        other => panic!("{other:?}"),
+    }
+    assert!(!b.gmail_labels(ms[0]).contains(&"INBOX".to_string()));
+
+    assert_eq!(b.mirror_labels(ms[0]), b.gmail_labels(ms[0]));
+}
