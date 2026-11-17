@@ -5,10 +5,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_job::{
-    add_scope, create, events, get, register, revoke_scope, wait, wake_due, woken, By, Ref, State,
-    Wait,
+    add_scope, create, events, get, register, revoke_scope, wait, woken, By, Ref, State, Wait,
 };
 use iris_store::Store;
+use iris_workspace::wake_due;
 
 const NOW: i64 = 1_763_283_422_000;
 const DAY: i64 = 86_400_000;
@@ -37,6 +37,7 @@ fn fixture(name: &str) -> Fixture {
          INSERT INTO thread (id, account_id, provider_id) VALUES (5, 1, 'a');
          INSERT INTO message (id, account_id, thread_id, provider_id, fetched_at, understood_at)
            VALUES (1, 1, 5, 'm1', 1, 1);
+         INSERT INTO header (message_id, from_addr) VALUES (1, 'dana@example.com');
          INSERT INTO label (id, account_id, provider_id, name, kind)
            VALUES (1, 1, 'SENT', 'SENT', 'system'), (2, 1, 'DRAFT', 'DRAFT', 'system');",
     );
@@ -62,7 +63,9 @@ fn message(f: &Fixture, id: i64, extra: &str) {
         &f.store,
         &format!(
             "INSERT INTO message (id, account_id, thread_id, provider_id, fetched_at, understood_at)
-               VALUES ({id}, 1, 5, 'm{id}', 1, 1); {extra}"
+               VALUES ({id}, 1, 5, 'm{id}', 1, 1);
+             INSERT INTO header (message_id, from_addr) VALUES ({id}, 'dana@example.com');
+             {extra}"
         ),
     );
 }
@@ -74,11 +77,10 @@ fn last_why(f: &Fixture) -> Option<String> {
 #[test]
 fn no_wake_before_the_end_with_no_reply() {
     let f = fixture("none");
-    // Mail that is not a reply: sent by you, a draft, not fetched, gone, not
-    // understood yet, marked hostile, or queued for the link check.
+    // Mail that is not a reply: sent by you, a draft, gone, not understood
+    // yet, marked hostile, or queued for the link check.
     message(&f, 2, "INSERT INTO message_label VALUES (2, 1);");
     message(&f, 3, "INSERT INTO message_label VALUES (3, 2);");
-    message(&f, 4, "UPDATE message SET fetched_at = NULL WHERE id = 4;");
     message(&f, 5, "UPDATE message SET gone_at = 1 WHERE id = 5;");
     message(
         &f,
@@ -91,6 +93,21 @@ fn no_wake_before_the_end_with_no_reply() {
         r#"UPDATE message SET hostile = '["injection"]' WHERE id = 7;"#,
     );
     message(&f, 8, "INSERT INTO link_check (message_id) VALUES (8);");
+    // The source of a signal (it can hold a security code), and mail from a
+    // hostile sender: the workspace cannot read them.
+    message(
+        &f,
+        9,
+        "INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+           VALUES (1, 'signal', 1, 'open', '{}', 1, 1);
+         INSERT INTO item_source VALUES (1, 9, 'evidence');",
+    );
+    message(
+        &f,
+        10,
+        "UPDATE header SET from_addr = 'eve@example.net' WHERE message_id = 10;
+         INSERT INTO sender (address, kind) VALUES ('eve@example.net', 'hostile');",
+    );
     assert!(wake_due(&f.store, NOW + 3 * DAY - 1).unwrap().is_empty());
     assert_eq!(get(&f.store, f.job).unwrap().state, State::Waiting);
     assert!(woken(&f.store).unwrap().is_empty());
@@ -114,22 +131,40 @@ fn the_end_of_the_wait_wakes_the_job_once() {
 }
 
 #[test]
-fn a_reply_wakes_the_job_and_joins_the_grant() {
+fn a_reply_wakes_the_job_and_only_the_reply_joins_the_grant() {
     let f = fixture("reply");
-    message(&f, 2, "");
+    // Mail that you sent and a signal on the thread come with the reply.
+    message(&f, 2, "INSERT INTO message_label VALUES (2, 1);");
+    message(
+        &f,
+        3,
+        "INSERT INTO item (id, form, account_id, status, doc, created_at, updated_at)
+           VALUES (1, 'signal', 1, 'open', '{}', 1, 1);
+         INSERT INTO item_source VALUES (1, 3, 'evidence');",
+    );
+    message(&f, 4, "");
     assert_eq!(wake_due(&f.store, NOW + 2).unwrap(), vec![f.job]);
     assert_eq!(last_why(&f).as_deref(), Some("reply"));
-    let granted: i64 = f
+    let granted: Vec<i64> = f
         .store
         .read(|c| {
-            Ok(c.query_row(
-                "SELECT count(*) FROM job_scope_message WHERE message_id IN (1, 2)",
-                [],
-                |r| r.get(0),
-            )?)
+            let mut st = c.prepare("SELECT message_id FROM job_scope_message ORDER BY 1")?;
+            let ids = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(ids)
         })
         .unwrap();
-    assert_eq!(granted, 2);
+    assert_eq!(granted, vec![1, 4]);
+    // Each message that the grant holds, the workspace can read.
+    f.store
+        .read(|c| {
+            for m in &granted {
+                assert!(iris_workspace::readable(c, *m)?, "m-{m}");
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

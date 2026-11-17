@@ -21,6 +21,9 @@ use serde_json::json;
 
 pub use iris_job::{Error, Result};
 
+mod wake;
+pub use wake::{replies_in, wake_due};
+
 /// The paths that the build writes new on each build.
 const OWNED: [&str; 6] = [
     "JOB.md",

@@ -945,6 +945,10 @@ fn a_reply_on_the_wait_thread_wakes_the_job() {
                      VALUES (?1, 1, 5, ?2, 1, 1)",
                     rusqlite::params![id, format!("m{id}")],
                 )?;
+                tx.execute(
+                    "INSERT INTO header (message_id, from_addr) VALUES (?1, 'dana@example.com')",
+                    [id],
+                )?;
                 if sent {
                     tx.execute_batch(
                         "INSERT OR IGNORE INTO label (id, account_id, provider_id, name, kind)
@@ -970,18 +974,20 @@ fn a_reply_on_the_wait_thread_wakes_the_job() {
         (iris_job::State::Working, By::Engine)
     );
     assert_eq!(woke.why.as_deref(), Some("reply"));
-    // The reply is in the grant of the next session.
-    let granted: bool = f
+    // The reply is in the grant of the next session; the mail that you sent
+    // is not.
+    let granted: Vec<i64> = f
         .store
         .read(|c| {
-            Ok(c.query_row(
-                "SELECT EXISTS (SELECT 1 FROM job_scope_message WHERE message_id = 41)",
-                [],
-                |r| r.get(0),
-            )?)
+            let mut st =
+                c.prepare("SELECT message_id FROM job_scope_message WHERE message_id IN (40, 41)")?;
+            let ids = st
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(ids)
         })
         .unwrap();
-    assert!(granted);
+    assert_eq!(granted, vec![41]);
     next_session(&s, &f, first.id);
     let _ = s.stop(f.job).unwrap();
 }

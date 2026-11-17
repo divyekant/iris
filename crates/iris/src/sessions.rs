@@ -690,7 +690,7 @@ impl Sessions {
     /// with the agent of its last session. A job with a live session (the
     /// session of the wait before its reap) gets its session at a later call.
     pub fn wake(self: &Arc<Self>, now: i64) {
-        if let Err(e) = iris_job::wake_due(&self.store, now) {
+        if let Err(e) = iris_workspace::wake_due(&self.store, now) {
             say!("iris: the wake of the waiting jobs failed: {e}");
         }
         let Ok(woken) = iris_job::woken(&self.store) else {
