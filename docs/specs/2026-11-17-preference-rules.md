@@ -114,7 +114,8 @@ in the same read transaction:
 - The candidate is one `hide` rule:
   `when = { sender = "<address>", form = "<form>" }`. The address is the
   `sender` of the origin message. An action whose origin message has no
-  address, a hostile mark or a `hostile` sender gives no candidate.
+  address, a hostile mark or a `hostile` sender gives no candidate. Its
+  choice and its refusal do not count.
 - An origin message from the person (sender kind `you`: the label `SENT`
   or `DRAFT`, spec 1 section 6.7) gives no candidate, and its choice and
   its refusal do not count. A conversation that the person started has

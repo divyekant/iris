@@ -187,6 +187,7 @@ export const policy: Policy = {
   proposals: [
     {
       id: 1,
+      kind: "approvals",
       approvals: 14,
       created_at: 1794787200,
       rule: rule({ id: 10, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
@@ -196,6 +197,14 @@ export const policy: Policy = {
       approvals: 11,
       created_at: 1794790800,
       rule: rule({ id: 10, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
+    },
+    {
+      // A hide rule from the skips of the person (R5-02).
+      id: 3,
+      kind: "choices",
+      approvals: 12,
+      created_at: 1794794400,
+      rule: rule({ id: 10, name: "Hide feed items from digest@news.example", effect: "hide", when: { sender: "digest@news.example", form: "feed" }, by: "proposal", added: "2026-11-16", line: 0 }),
     },
   ],
   error: null,
