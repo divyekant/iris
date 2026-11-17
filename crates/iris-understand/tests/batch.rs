@@ -902,10 +902,13 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TRIGGER link_check_label; DROP TRIGGER link_check_attention_add;
                  DROP TRIGGER link_check_attention_end;
                  DROP TABLE link_check;
-                 -- Migrations 21 and 22 run again after 20. The triggers
+                 -- Migrations 21 to 23 run again after 20. The triggers
                  -- of 22 replace themselves.
                  DROP TRIGGER job_session_revoke; DROP TRIGGER job_session_job_state;
                  DROP TABLE job_session; DROP TABLE send_switch;
+                 DROP VIEW ledger_can_undo; DROP VIEW undo_pair;
+                 DROP TRIGGER ledger_undo_action; DROP TRIGGER ledger_undone_by;
+                 DROP TABLE ledger_undo;
                  PRAGMA user_version = 19;",
             )?;
             Ok(())
