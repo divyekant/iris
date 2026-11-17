@@ -807,3 +807,17 @@ fn a_job_answer_of_the_engine_is_a_result() {
     );
     job_command(&d, &["stop", "j-1"]).unwrap();
 }
+
+#[test]
+fn a_stop_that_waits_too_long_gives_the_reason() {
+    let d = one_answer(
+        "slowstop",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\",\"reaped\":false,\"why\":\"the helper (process 7) still runs\"}}\n"),
+    );
+    let e = job_command(&d, &["stop", "j-1"]).unwrap_err();
+    assert!(
+        e.error.contains("the helper (process 7) still runs"),
+        "{}",
+        e.error
+    );
+}

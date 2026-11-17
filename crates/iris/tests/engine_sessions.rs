@@ -161,7 +161,7 @@ fn a_stop_ends_the_session_and_waits_for_the_reap() {
     let id = s.run(f.job, "script").unwrap();
     until(&s, &f, id, |r| r.started_ms.is_some());
     let t = Instant::now();
-    assert_eq!(s.stop(f.job).unwrap(), (id, true));
+    assert_eq!(s.stop(f.job).unwrap(), (id, Ok(())));
     assert!(t.elapsed() < Duration::from_secs(15));
     let row = session(&f.store, id).unwrap();
     assert_eq!(row.end, Some(EndReason::Stop));
@@ -226,6 +226,11 @@ fn a_killed_helper_keeps_the_session_live_until_the_group_is_empty() {
         None,
         "the agent still runs"
     );
+    // A stop waits 15 s, then gives the reason of the reap check.
+    let (stopped_id, left) = s.stop(f.job).unwrap();
+    assert_eq!(stopped_id, id);
+    let why = left.unwrap_err();
+    assert!(why.contains("group"), "{why}");
     kill(&format!("-{group}"));
     until(&s, &f, id, |r| r.reaped_ms.is_some());
 }
@@ -371,6 +376,96 @@ fn a_revoke_retry_gives_the_egress_log_to_the_new_session() {
     s.stop(f.job).unwrap();
 }
 
+fn a_slow_rebuild_does_not_hold_a_stop_of_another_job() {
+    let f = fixture("slow", "sleep 30");
+    let other = create(&f.store, "Other.", None, NOW).unwrap();
+    add_scope(&f.store, other, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let a = s.run(f.job, "script").unwrap();
+    until(&s, &f, a, |r| r.started_ms.is_some());
+    let b = s.run(other, "script").unwrap();
+    until(&s, &f, b, |r| r.started_ms.is_some());
+    // The test holds the build lock of the workspace of job A: the
+    // rebuild of the done job waits for it.
+    let lock = f.store.dir().join(format!("workspaces/.j-{}.lock", f.job));
+    let held = iris_store::FileLock::take(&lock).unwrap();
+    iris_job::finish(
+        &f.store,
+        f.job,
+        By::Person,
+        iris_job::End::Cancel,
+        None,
+        now(),
+    )
+    .unwrap();
+    let supervisor = {
+        let (s, store) = (s.clone(), f.store.clone());
+        std::thread::spawn(move || {
+            let end = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < end && session(&store, a).unwrap().reaped_ms.is_none() {
+                s.turn(now());
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    while session(&f.store, a).unwrap().reaped_ms.is_none() {
+        assert!(Instant::now() < end, "job A is not reaped");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(s.stop(other));
+        });
+    }
+    let stopped = rx.recv_timeout(Duration::from_secs(20));
+    drop(held);
+    supervisor.join().unwrap();
+    assert_eq!(stopped.expect("the stop came back").unwrap(), (b, Ok(())));
+}
+
+fn the_time_limit_of_the_run_holds_after_a_config_change() {
+    let f = fixture_with("limitread", "sleep 30", "[session]\nmax_minutes = 1\n");
+    let s = sessions(&f);
+    // The owner breaks agents.toml after the register.
+    let data = f.store.dir().to_path_buf();
+    s.set_after(Arc::new(move |step, _| {
+        if step == Step::Registered {
+            fs::write(data.join("agents.toml"), "not [ toml").unwrap();
+        }
+    }));
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    s.turn(now() + 2 * 60_000);
+    assert_eq!(
+        session(&f.store, id).unwrap().end,
+        Some(EndReason::TimeLimit)
+    );
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+}
+
+fn a_second_run_names_the_live_session() {
+    let f = fixture("twice", "sleep 30");
+    let s = sessions(&f);
+    // The first build waits 1 s: the second run comes during the launch.
+    let once = AtomicBool::new(false);
+    s.set_after(Arc::new(move |step, _| {
+        if step == Step::Built && !once.swap(true, Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }));
+    let id = s.run(f.job, "script").unwrap();
+    let name = format!("se-{id}");
+    let e = s.run(f.job, "script").unwrap_err();
+    assert!(e.contains(&name), "during the launch: {e}");
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let e = s.run(f.job, "script").unwrap_err();
+    assert!(e.contains(&name), "after the launch: {e}");
+    s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -429,6 +524,18 @@ fn main() {
         (
             "a_revoke_retry_gives_the_egress_log_to_the_new_session",
             a_revoke_retry_gives_the_egress_log_to_the_new_session,
+        ),
+        (
+            "a_slow_rebuild_does_not_hold_a_stop_of_another_job",
+            a_slow_rebuild_does_not_hold_a_stop_of_another_job,
+        ),
+        (
+            "the_time_limit_of_the_run_holds_after_a_config_change",
+            the_time_limit_of_the_run_holds_after_a_config_change,
+        ),
+        (
+            "a_second_run_names_the_live_session",
+            a_second_run_names_the_live_session,
         ),
     ];
     let mut failed = 0;
