@@ -895,9 +895,13 @@ the table are not mailbox actions, so they do not go through the policy.
 Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
 each verb that adds, submits or withdraws an action goes through the socket
-(`docs/specs/2026-11-16-engine-socket.md`). The read verbs (`status`,
-`search`, `show`, `brief` and `list`) keep the exception of release 1: they
-change nothing, so they cannot skip the policy. One engine runs on a data
+(`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
+(`status`, `search`, `show`, `brief` and `list`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. In session
+mode (release 4), each read verb goes through the session socket, and the
+engine applies the current grant of the job of the session
+(`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store
+directly: the direct path is for host mode only. One engine runs on a data
 folder: `iris serve` holds the lock `engine.lock` in the data folder while it
 runs.
 
@@ -932,7 +936,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris serve [--addr <addr>]` | Starts the engine. The default address is `127.0.0.1:4800`. The engine refuses an address that is not a loopback address, until open question 1 has a decision. | host | 0 |
 | `iris service install` | Installs and starts the background service that runs `iris serve`: a launchd agent on macOS, a systemd user unit on Linux. If a call to the service manager fails or its result is not known, the service file stays and the command returns the error. The state of the service manager is then not known: a second `install` finishes the work, and `remove` undoes it. Both are safe to repeat. | host | 1 |
 | `iris service remove` | Stops the background service and removes its file. If the stop fails, or if launchd cannot say if the agent runs, the file stays and the command returns the error. A second remove tries again. On Linux with no running systemd (`/run/systemd/system` is absent), nothing can run the unit, so it deletes the file with no `systemctl` call. If systemd runs and the stop fails (also when `systemctl` is not found), the file stays and the command returns the error. After a good stop, a failed `systemctl --user daemon-reload` is not an error, because the unit is stopped and disabled. | host | 1 |
-| `iris status` | Shows the account, the sync, the mode and the counts. | both | 1 |
+| `iris status` | Host mode: shows the account, the sync, the mode and the counts of the mailbox. Session mode: shows only the job (its ID, goal, state and due date) and the counts of the workspace. It shows no account, sync or mailbox count. | both | 1 |
 | `iris mirror sync` | Runs an incremental sync now, then one run of understanding inside the approved budget. If another run holds the run lock, it waits for that run to end. | host | 1 |
 | `iris mirror verify` | Compares the mirror with Gmail (specification 1, section 4.8). | host | 1 |
 | `iris rebuild [--since-prompt <v>]` | Runs understanding again. | host | 1 |
@@ -940,10 +944,10 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris understand --estimate`, `iris understand --approve <code> --budget <usd>`, `iris understand [--max-cost <usd>] [--max-messages <n>]` | Shows the estimate and its approval code, approves a budget for paid runs after the estimate, and runs understanding on the pending messages. | host | 1 |
 | `iris backup <path>` | Copies the data folder while the engine runs. | host | 1 |
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
-| `iris brief` | Shows the brief. | both | 1 |
-| `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it adds the threads that match to `threads/`. | both | 1 |
-| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. | both | 1 |
-| `iris list <form> [filters]` | Lists items of one form. | both | 1 |
+| `iris brief` | Shows the brief. | host | 1 |
+| `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
+| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
+| `iris list <form> [filters]` | Lists items of one form. In session mode, only the items of the workspace, with the fields of `show`. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
 | `iris changeset <cs-id>` | Shows a changeset. | both | 2 |
@@ -962,6 +966,16 @@ Each command that adds an action prints the changeset ID and the action
 number, and changes nothing outside the draft changeset. Nothing leaves the
 engine before `submit`.
 
+In session mode, each message that an action changes must be in the
+current grant of the job (`docs/specs/2026-11-16-job-workspace.md`): the
+engine checks each message that a target resolves to, at `submit` and again
+just before the apply. A message outside the grant at `submit` makes the
+submit fail with no change. A message that left the grant before the apply
+makes the action refused, with the reason. Each item target must be an item
+of the workspace now, by the same two checks. `iris draft`, `iris send` and `iris nudge` are
+refused in session mode until a card defines their grant, and `submit`
+refuses each draft or send action in a changeset of a session.
+
 ### 8.3 Output
 
 - The default output is short text for a person or an agent to read. In a
@@ -973,7 +987,9 @@ engine before `submit`.
   program reads these commands with `--json`, where the command has it.
 - `--json` prints the open model documents (specification 1, section 6, and
   section 5.1 here). One JSON document for one object, and JSON Lines for a
-  list.
+  list. Exception: in session mode, an item is a job item
+  (`jobitem.schema.json`, `docs/specs/2026-11-16-job-workspace.md`), not the
+  full item document.
 - The command writes errors to standard error. An error message says what
   failed and what to do.
 
