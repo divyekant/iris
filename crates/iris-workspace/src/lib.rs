@@ -130,7 +130,9 @@ pub fn build(store: &Store, job: i64, dir: &Path) -> Result<Built> {
 }
 
 /// The account and the `t-` ID of each thread of the scope.
-type Threads = BTreeMap<i64, i64>;
+/// Each thread with a granted message: its account, and its granted
+/// messages as (date, ID), oldest first.
+type Threads = BTreeMap<i64, (i64, BTreeSet<(i64, i64)>)>;
 
 /// Write the job, the threads and the items into `stage`, from one read
 /// transaction, so that these files agree.
@@ -215,27 +217,31 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         } else {
             Vec::new()
         };
-        let mut thread: Vec<i64> = s.iter().map(|(_, t)| *t).collect();
-        thread.sort_unstable();
-        thread.dedup();
-        let only: BTreeSet<i64> = s.into_iter().map(|(m, _)| m).collect();
-        for t in thread {
+        // One message at a time: memory stays bounded by one body, also
+        // in a large thread.
+        for (id, t) in s {
             let account: Option<i64> = c
                 .query_row("SELECT account_id FROM thread WHERE id = ?1", [t], |r| {
                     r.get(0)
                 })
                 .optional()?;
             let Some(account) = account else { continue };
-            for m in iris_talk::messages(c, t)? {
-                if clean(c, &m)? && only.contains(&m.id) {
-                    threads.insert(t, account);
-                    granted.insert(m.id);
-                    match *r {
-                        Ref::Thread(_) => by_thread.insert(m.id),
-                        Ref::Item(i) => by_item.entry(i).or_default().insert(m.id),
-                    };
-                }
+            let Some(m) = iris_talk::message(c, id)? else {
+                continue;
+            };
+            if !clean(c, &m)? {
+                continue;
             }
+            threads
+                .entry(t)
+                .or_insert_with(|| (account, BTreeSet::new()))
+                .1
+                .insert((m.at, m.id));
+            granted.insert(m.id);
+            match *r {
+                Ref::Thread(_) => by_thread.insert(m.id),
+                Ref::Item(i) => by_item.entry(i).or_default().insert(m.id),
+            };
         }
     }
     // The item refs, and the items with a source that a thread ref grants.
@@ -289,15 +295,8 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
 
     new_dir(&stage.join("threads"))?;
     let mut people = People::new();
-    for (t, account) in &threads {
-        let written = write_thread(
-            c,
-            *t,
-            *account,
-            &granted,
-            &stage.join("threads"),
-            &mut people,
-        )?;
+    for (t, (account, mails)) in &threads {
+        let written = write_thread(c, *t, *account, mails, &stage.join("threads"), &mut people)?;
         built.threads += 1;
         built.messages += written;
     }
@@ -345,19 +344,21 @@ fn write_thread(
     c: &Connection,
     thread: i64,
     account: i64,
-    granted: &BTreeSet<i64>,
+    granted: &BTreeSet<(i64, i64)>,
     folder: &Path,
     people: &mut People,
 ) -> Result<u32> {
-    let mails: Vec<iris_talk::Mail> = iris_talk::messages(c, thread)?
-        .into_iter()
-        .filter(|m| granted.contains(&m.id))
-        .collect();
-    let n = mails.len() as u32;
+    // One message at a time, so memory holds one body. The read transaction
+    // of the caller gives the same rows as the grant.
+    let mail = |id: i64| -> Result<iris_talk::Mail> {
+        iris_talk::message(c, id)?
+            .ok_or_else(|| io::Error::other("a granted message is gone").into())
+    };
+    let n = granted.len() as u32;
     let id = format_id(Kind::Thread, thread);
     let mut f = BufWriter::new(new_file(&folder.join(format!("{id}.md")))?);
-    let title = mails
-        .first()
+    let first = granted.first().map(|(_, id)| mail(*id)).transpose()?;
+    let title = first
         .map(|m| line(&m.subject))
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "(no subject)".into());
@@ -373,7 +374,8 @@ fn write_thread(
         [account],
         |r| r.get(0),
     )?;
-    for m in &mails {
+    for (_, id) in granted {
+        let m = &mail(*id)?;
         // The people of the scope come only from the messages in this file.
         // One entry for each address, so each count counts messages.
         let mut parties: BTreeMap<&String, Option<&String>> = BTreeMap::new();

@@ -376,71 +376,81 @@ pub fn set_field(doc: &mut Value, field: &str, value: Value) -> bool {
     true
 }
 
-/// Each understood message of the thread, also when it is gone, oldest
-/// first. A message is for a reader when it is `clean` and not `gone`: then
-/// it is not a draft and not hostile mail (specification 1, section 6.7).
-pub fn messages(conn: &Connection, thread: i64) -> rusqlite::Result<Vec<Mail>> {
-    mails(conn, thread, None)
+/// One understood message, also when it is gone, or `None`. A message is
+/// for a reader when it is `clean` and not `gone`: then it is not a draft
+/// and not hostile mail (specification 1, section 6.7). It reads one body,
+/// so a caller can go through a large thread with bounded memory.
+pub fn message(conn: &Connection, id: i64) -> rusqlite::Result<Option<Mail>> {
+    let mut q = conn.prepare_cached(&format!(
+        "{MAIL_SELECT} WHERE m.id = ?1 AND m.understood_at IS NOT NULL"
+    ))?;
+    q.query_row([id], |r| mail_of(conn, r)).optional()
 }
+
+/// The columns that [`mail_of`] reads.
+const MAIL_SELECT: &str =
+    "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
+            h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
+            EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                   WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
+            EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                   WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
+            m.gone_at IS NOT NULL
+     FROM message m LEFT JOIN header h ON h.message_id = m.id
+     LEFT JOIN body b ON b.message_id = m.id";
 
 /// Each message of the thread that is understood or `current`, also when it
 /// is gone, oldest first. The content cleanup can delete the header of a gone
 /// message: then only its row decides.
 fn mails(conn: &Connection, thread: i64, current: Option<i64>) -> rusqlite::Result<Vec<Mail>> {
-    let mut q = conn.prepare_cached(
-        "SELECT m.id, COALESCE(m.internal_date, h.date, 0) AS at, h.from_addr, h.from_name,
-                h.to_addrs, h.cc_addrs, COALESCE(b.subject, h.subject), b.text, m.hostile,
-                EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND l.provider_id = 'SENT'),
-                EXISTS(SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
-                       WHERE ml.message_id = m.id AND l.provider_id = 'DRAFT'),
-                m.gone_at IS NOT NULL
-         FROM message m LEFT JOIN header h ON h.message_id = m.id
-         LEFT JOIN body b ON b.message_id = m.id
-         WHERE m.thread_id = ?1
+    let mut q = conn.prepare_cached(&format!(
+        "{MAIL_SELECT} WHERE m.thread_id = ?1
            AND (m.understood_at IS NOT NULL OR m.id IS ?2)
-         ORDER BY at, m.id",
-    )?;
-    let rows = q.query_map(params![thread, current], |r| {
-        let hostile: Option<String> = r.get(8)?;
-        let sent: bool = r.get(9)?;
-        let draft: bool = r.get(10)?;
-        let gone: bool = r.get(11)?;
-        let from = r
-            .get::<_, Option<String>>(2)?
-            .and_then(|f| addresses(&f).into_iter().next())
-            // A From that is not an address gives no party.
-            .unwrap_or_default();
-        // The kind of the parsed address: sender rows hold bare addresses.
-        let kind: Option<String> = conn
-            .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
-            .query_row([&from], |r| r.get(0))
-            .optional()?
-            .flatten();
-        // Only the label SENT makes a message yours: anyone can write the
-        // mailbox address in From (spec 1 section 6.7).
-        let mine = sent;
-        let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
-        let mail = Mail {
-            id: r.get(0)?,
-            at: r.get(1)?,
-            from_name: r
-                .get::<_, Option<String>>(3)?
-                .map(|n| decode_name(&n))
-                .filter(|n| !n.trim().is_empty()),
-            to: addresses(r.get::<_, Option<String>>(4)?.as_deref().unwrap_or("")),
-            cc: addresses(r.get::<_, Option<String>>(5)?.as_deref().unwrap_or("")),
-            subject: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            text: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            service: !mine && kind.as_deref() == Some("service"),
-            mine,
-            from,
-            gone,
-            clean: !draft && !hostile,
-        };
-        Ok(mail)
-    })?;
+         ORDER BY at, m.id"
+    ))?;
+    let rows = q.query_map(params![thread, current], |r| mail_of(conn, r))?;
     rows.collect()
+}
+
+/// One row of [`MAIL_SELECT`] as a [`Mail`].
+fn mail_of(conn: &Connection, r: &rusqlite::Row) -> rusqlite::Result<Mail> {
+    let hostile: Option<String> = r.get(8)?;
+    let sent: bool = r.get(9)?;
+    let draft: bool = r.get(10)?;
+    let gone: bool = r.get(11)?;
+    let from = r
+        .get::<_, Option<String>>(2)?
+        .and_then(|f| addresses(&f).into_iter().next())
+        // A From that is not an address gives no party.
+        .unwrap_or_default();
+    // The kind of the parsed address: sender rows hold bare addresses.
+    let kind: Option<String> = conn
+        .prepare_cached("SELECT kind FROM sender WHERE address = ?1")?
+        .query_row([&from], |r| r.get(0))
+        .optional()?
+        .flatten();
+    // Only the label SENT makes a message yours: anyone can write the
+    // mailbox address in From (spec 1 section 6.7).
+    let mine = sent;
+    let hostile = marked(hostile.as_deref()) || (!mine && kind.as_deref() == Some("hostile"));
+    let mail = Mail {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        from_name: r
+            .get::<_, Option<String>>(3)?
+            .map(|n| decode_name(&n))
+            .filter(|n| !n.trim().is_empty()),
+        to: addresses(r.get::<_, Option<String>>(4)?.as_deref().unwrap_or("")),
+        cc: addresses(r.get::<_, Option<String>>(5)?.as_deref().unwrap_or("")),
+        subject: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        text: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        service: !mine && kind.as_deref() == Some("service"),
+        mine,
+        from,
+        gone,
+        clean: !draft && !hostile,
+    };
+    Ok(mail)
 }
 
 /// True if the `hostile` column holds one or more marks. A value that is not
