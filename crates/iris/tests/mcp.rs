@@ -549,9 +549,9 @@ const NOT_TOOLS: &[&str] = &[
     "job",
     // The verbs of a job session only: `iris mcp` serves the host.
     "list",
+    "wait",
     // A sign-in of the web client is for the person, never a tool of an agent.
     "open",
-    "wait",
 ];
 
 /// Each verb of the command is a tool, or it is in `NOT_TOOLS`. Each tool is
