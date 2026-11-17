@@ -195,7 +195,11 @@ fn is_engine(shell: &Shell, url: &Url) -> bool {
 /// default browser.
 fn navigate(app: &AppHandle, url: &Url) -> bool {
     if url.host_str() == Some(START) {
-        start(app.clone());
+        // Only the button of the local page, never a link of the engine page.
+        let from = app.get_webview_window(MAIN).and_then(|w| w.url().ok());
+        if engine::start_allowed(from.as_ref().map_or("", |u| u.scheme()), url.as_str()) {
+            start(app.clone());
+        }
         return false;
     }
     if url.scheme() == "tauri" || is_engine(&app.state::<Shell>(), url) {
@@ -252,6 +256,7 @@ fn notices(app: AppHandle) {
     let waiting = Arc::new(AtomicUsize::new(0));
     let mut poll = engine::Poll::default();
     loop {
+        let started = std::time::Instant::now();
         let page = engine::request(&socket, "app.notices", poll.args())
             .ok()
             .and_then(|r| poll.read(&r));
@@ -270,7 +275,7 @@ fn notices(app: AppHandle) {
                 continue;
             }
         }
-        std::thread::sleep(engine::POLL);
+        std::thread::sleep(engine::next_poll(started.elapsed()));
     }
 }
 
@@ -354,7 +359,7 @@ fn known_app(id: &str) -> bool {
 /// fixed `osascript` of the engine shows it, with no click action.
 fn notify(app: &AppHandle, n: engine::Notice, native: bool, waiting: &Arc<AtomicUsize>) {
     if !native {
-        let _ = engine::osascript(&n.title, &n.body).status();
+        let _ = engine::run(engine::osascript(&n.title, &n.body), engine::SHOW_WAIT);
         return;
     }
     let wait = waiting.fetch_add(1, Ordering::Relaxed) < WAIT_MAX;
@@ -373,7 +378,7 @@ fn notify(app: &AppHandle, n: engine::Notice, native: bool, waiting: &Arc<Atomic
             }
             Ok(_) => {}
             Err(_) => {
-                let _ = engine::osascript(&n.title, &n.body).status();
+                let _ = engine::run(engine::osascript(&n.title, &n.body), engine::SHOW_WAIT);
             }
         }
         waiting.fetch_sub(1, Ordering::Relaxed);

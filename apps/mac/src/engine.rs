@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -22,6 +22,45 @@ pub const PAGE: usize = 20;
 const WAIT: Duration = Duration::from_secs(5);
 /// The longest answer line.
 const MAX_ANSWER: u64 = 1 << 20;
+
+/// The address of the "Start Iris" button of the local page.
+pub const START_URL: &str = "https://start.iris.invalid/";
+/// The longest run of a fallback `osascript`, as in the engine.
+pub const SHOW_WAIT: Duration = Duration::from_secs(5);
+
+/// The wait from now to the next poll. The polls start each [`POLL`] from
+/// the start of the last poll, so a slow answer does not move the next one.
+pub fn next_poll(since_start: Duration) -> Duration {
+    POLL.saturating_sub(since_start)
+}
+
+/// True only for the "Start Iris" button of a local page (`tauri:` scheme).
+/// A link on the engine page, or another path, starts nothing.
+pub fn start_allowed(from_scheme: &str, to: &str) -> bool {
+    from_scheme == "tauri" && to == START_URL
+}
+
+/// Runs `c` and waits at most `wait`. Kills it after that, so a stalled
+/// command does not hold the thread.
+pub fn run(mut c: Command, wait: Duration) -> Result<(), String> {
+    let mut child = c.spawn().map_err(|e| e.to_string())?;
+    let end = Instant::now() + wait;
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("the command ended with {status}"))
+            };
+        }
+        if Instant::now() >= end {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("no answer in {} ms", wait.as_millis()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 /// The engine socket in the default data folder of macOS (issue #541).
 pub fn socket(home: &Path) -> PathBuf {
@@ -226,6 +265,56 @@ pub fn osascript(title: &str, body: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stalled_command_ends_at_the_time_limit() {
+        let mut c = Command::new("sleep");
+        c.arg("30");
+        let t = Instant::now();
+        assert!(run(c, Duration::from_millis(200)).is_err());
+        assert!(t.elapsed() < Duration::from_secs(2));
+        assert!(run(Command::new("true"), SHOW_WAIT).is_ok());
+        assert!(run(Command::new("false"), SHOW_WAIT).is_err());
+    }
+
+    #[test]
+    fn the_notice_thread_never_waits_for_osascript_without_a_limit() {
+        let mac = include_str!("mac.rs");
+        let all = mac.matches("engine::osascript(").count();
+        let limited = mac.matches("engine::run(engine::osascript(").count();
+        assert!(all > 0);
+        assert_eq!(all, limited);
+        assert!(mac.contains("engine::next_poll("));
+    }
+
+    #[test]
+    fn each_poll_starts_at_most_one_poll_time_after_the_last() {
+        // A restart of the engine is seen at the next poll start. With a
+        // socket wait of up to WAIT, the next start stays POLL after the last.
+        let mut e = Duration::ZERO;
+        while e <= Duration::from_secs(30) {
+            let gap = e + next_poll(e);
+            assert_eq!(gap, POLL.max(e));
+            e += Duration::from_millis(250);
+        }
+        assert_eq!(next_poll(WAIT), POLL - WAIT);
+    }
+
+    #[test]
+    fn only_the_button_of_the_local_page_starts_the_engine() {
+        assert!(start_allowed("tauri", START_URL));
+        for (from, to) in [
+            ("http", START_URL),
+            ("https", START_URL),
+            ("tauri", "https://start.iris.invalid/x"),
+            ("tauri", "https://start.iris.invalid/?a"),
+            ("tauri", "http://start.iris.invalid/"),
+            ("tauri", "https://start.iris.invalid.example/"),
+        ] {
+            assert!(!start_allowed(from, to), "{from} {to}");
+        }
+        assert!(include_str!("mac.rs").contains("engine::start_allowed("));
+    }
 
     #[test]
     fn only_a_loopback_sign_in_address_loads() {
