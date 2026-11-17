@@ -194,15 +194,25 @@ namespace, so a second listener and a relay connect the two:
    its port until the reap check confirms that the helper ended (launcher
    spec, "Model egress", changed in this PR). So, while the engine runs,
    the relay never connects to a port that another session got.
-4. The relay connects only while the engine that started the helper (its
-   parent process) runs. `spawn` opens a `pidfd` of the parent. Before
-   each connection to the host, the relay checks that the `pidfd` is not
-   readable. When the check sees the end of the engine, the relay closes
-   its listener and stops. An engine crash frees the port of each proxy,
-   but a port can go to another session only in a new engine, which can
-   start only after the old engine process ended. The window between the
-   check and the `connect` is a few system calls, while a new engine must
-   start, open the store and launch a session first.
+4. The relay connects to the host from the session address of the
+   session: `127.128.0.0` plus the session ID (`session_peer` in
+   `egress.rs`, changed in this PR). Linux takes each address of
+   `127.0.0.0/8` as a local address with no setup. The engine starts the
+   proxy of the session with this address (`Proxy::start` gets a `peer`
+   argument), and the proxy refuses a client from each other address with
+   the log word `not_session`. Session IDs are never used again (the
+   `AUTOINCREMENT` key of the sessions table), so two sessions never have
+   the same address. An engine crash frees the port of each proxy, and a
+   new engine can give a port to another session. The relay of an old
+   session can then reach the proxy of a new session, but that proxy
+   refuses it. This holds with no timing assumption.
+5. As a second guard, the relay also stops when the engine that started
+   the helper ends: `spawn` opens a `pidfd` of the parent, and the relay
+   checks it before each connection. Step 4, not this check, keeps the
+   sessions apart.
+6. A session ID above `SESSION_MAX` (`0x7FFFFE`) has no session address.
+   `spawn` of such a session with an egress port fails with a reason. An
+   installation reaches this limit only after about 8 million sessions.
 
 The agent reaches only the listener of its own session. The listener
 exists only in the namespace of that session, and the relay connects only
@@ -244,7 +254,7 @@ The agent sees only these paths.
 | The workspace of the job | Read and write |
 | The private home of the session | Read and write |
 | System programs and libraries: `/usr` without `/usr/local`, and `/bin`, `/sbin` and `/lib*` (a link to `/usr`, or the folder) | Read |
-| The system files that programs read at the start, each one if present: in `/etc`, the files `ld.so.cache`, `ld.so.conf`, `passwd`, `group`, `nsswitch.conf`, `hosts`, `localtime`, `os-release`, and the folders `ld.so.conf.d`, `ssl`, `pki`, `ca-certificates` and `alternatives` | Read |
+| The system files that programs read at the start, each one if present: in `/etc`, the files `ld.so.cache`, `ld.so.conf`, `passwd`, `group`, `nsswitch.conf`, `hosts`, `localtime`, `os-release`, and the folders `ld.so.conf.d` and `alternatives`; only the public certificate authority files: `ssl/certs`, `ssl/cert.pem`, `ssl/openssl.cnf`, `pki/tls/certs`, `pki/tls/cert.pem`, `pki/tls/openssl.cnf`, `pki/ca-trust/extracted` and `ca-certificates/extracted`. The folders of private keys (`ssl/private`, `pki/tls/private`) are not in the view | Read |
 | The file of the adapter program (its real path) and the file of the `iris` program | Read |
 | A new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
 | The root of the view (a `tmpfs` of `bwrap`) and each other folder that the view makes | Read only (`--remount-ro /`) |
@@ -342,7 +352,9 @@ before the agent runs, or `ended` is false.
 | The record cannot be written | `spawn` fails; the program did not run | Linux test with a read-only sessions folder |
 | The info line or the listener does not come in 1.5 seconds, or the line is not JSON | `spawn` fails and kills `bwrap` | Unit test of the parser (property test) |
 | A ninth connection to the relay | Closed at once | Linux relay test |
-| The engine crashes and a new engine starts while the helper of an old session still runs | The relay sees the end of its engine (the `pidfd` of the parent) and makes no new connection | Linux relay test: the parent of the relay ends, and a new listener on the same port gets no connection |
+| The engine crashes, and a new engine gives the port of an old session to the proxy of a new session while the helper of the old session still runs | The relay of the old session connects from its own session address, and the new proxy refuses it (`not_session`). Also, the relay makes no new connection after the end of its engine | Linux test: a relay of session 7 to the proxy of session 8 gets 403 and the log word `not_session`. Proxy test: only the session address passes. Relay test: the parent of the relay ends, and a new listener on the same port gets no connection |
+| A host process that is not Iris listens on the freed port after an engine crash | The relay can connect to it until the helper stops the agent (the end of the pipe from the engine), and the relay stops at the end of its engine. The agent tool verifies TLS to the model host, so that process cannot read the tunnel | Known limit (issue) |
+| A file view of a host with keys in `/etc/ssl/private` | That folder is not in the view | Linux sandbox test: `/etc/ssl` in the view holds no `private` |
 | A session ends, and its agent connects to the relay during the stop | The relay reaches the proxy of its own session, which keeps its port until the reap check | R4-04e supervisor test: a second session starts while the first one stops, and gets another port |
 | A data folder inside a read path (for example the `iris` program file in a folder of the data folder) | The empty mount of the data folder comes after each read path: the data folder is empty in the view | Linux sandbox test with the program file inside the data folder |
 | A credential file or a Unix socket in a folder that is not in the view (for example `/etc/<file>` not in the list, or `/run`) | Not visible: no read and no connection | Linux sandbox test: a socket and a marker file outside the view, and `/etc/hostname` |
@@ -354,6 +366,11 @@ before the agent runs, or `ended` is false.
   method `spawn`, and the selection of the system.
 - New files beside it: `isolation_linux.rs` and its tests.
 - `crates/iris-session/src/hold.rs`: the helper calls `Isolation::spawn`.
+- `crates/iris-session/src/egress.rs`: `session_peer`, `connect_from`,
+  the `peer` argument of `Proxy::start` and the refusal `not_session`. The
+  engine (R4-04e) passes `session_peer(session)` when it starts a proxy.
+- The launcher spec, "Model egress": the proxy takes only the session
+  address of its session.
 - `crates/iris-session/src/config.rs`: `CLAUDE_CODE_OAUTH_TOKEN` in the
   `claude-code` adapter, also in the adapter rule of the launcher spec.
 - The launcher spec, "Model egress": the proxy of a session keeps its port

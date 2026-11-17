@@ -494,6 +494,10 @@ no network stops them. The engine gives each session one narrow path out:
 - The engine listens on one TCP port of `127.0.0.1` for each running
   session, the egress port. The isolation permits a connection to this
   port only. It blocks each other address, also DNS.
+- The proxy takes a client only from the session address of its session
+  (`127.128.0.0` plus the session ID). The relay of the sandbox connects
+  from that address (sandbox spec, "Egress on Linux"). A client from each
+  other address gets `403` and the log word `not_session`.
 - The agent gets `HTTPS_PROXY=http://127.0.0.1:<port>` (and `https_proxy`).
 - The proxy takes only `CONNECT <host>:443`. The host must be in the
   allowed hosts of the adapter: `api.anthropic.com` for `claude-code`,
