@@ -18,6 +18,8 @@ iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-workspace = { version = "0.0.0", path = "../iris-workspace" }
 rusqlite = "=0.43.0"
 serde = { version = "1", features = ["derive"] }
+# Already in Cargo.lock. Reads the info line of bwrap.
+serde_json = "1"
 toml = { version = "=0.9.8", default-features = false, features = ["std", "parse", "serde"] }
 # Already in Cargo.lock (through hyper). Parses the CONNECT request head.
 httparse = "=1.10.1"
