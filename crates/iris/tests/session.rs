@@ -384,10 +384,7 @@ fn a_session_sees_only_the_changesets_of_its_job() {
     for verb in ["show", "withdraw"] {
         let e = call(&store, &mine, verb, json!({ "changeset": cs })).unwrap_err();
         assert_eq!(e.0, code::USAGE, "{verb}: {e:?}");
-        assert!(
-            e.1.contains("no changeset") || e.1.contains("only the author"),
-            "{e:?}"
-        );
+        assert!(e.1.contains("no changeset"), "{e:?}");
     }
     let e = call(
         &store,
@@ -493,6 +490,92 @@ fn the_policy_decides_a_session_submit_as_agent() {
         by.push(doc["actions"][0]["decision"]["by"].clone());
     }
     // The rule decides for `local` only: the session action goes to a person.
+    assert_eq!(by[0], json!("rule"), "{by:?}");
+    assert_ne!(by[1], json!("rule"), "{by:?}");
+}
+
+#[test]
+fn another_job_and_a_missing_id_give_the_same_answer() {
+    let (store, job) = fixture("same-answer");
+    let other = create(&store, "Another goal.", None, NOW).unwrap();
+    add_scope(&store, other, Ref::Thread(1), By::Person, NOW).unwrap();
+    let theirs = session(other, "se-9");
+    let r = add(&store, &theirs, "archive", &["t-1"], json!({})).unwrap();
+    let mine = session(job, "se-1");
+    for (verb, extra) in [
+        ("show", json!({})),
+        ("withdraw", json!({})),
+        ("revise", json!({})),
+        ("submit", json!({ "why": "x" })),
+        ("add", json!({ "verb": "archive", "targets": ["t-1"] })),
+    ] {
+        let answer = |cs: &str| {
+            let mut a = extra.clone();
+            a["changeset"] = json!(cs);
+            call(&store, &mine, verb, a).unwrap_err()
+        };
+        let (taken, missing) = (answer(r["changeset"].as_str().unwrap()), answer("cs-999"));
+        assert_eq!(taken.0, missing.0, "{verb}");
+        assert_eq!(
+            taken.1.replace(r["changeset"].as_str().unwrap(), "cs-999"),
+            missing.1,
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn a_job_author_with_no_session_changes_nothing() {
+    let (store, job) = fixture("no-session");
+    let me = session(job, "se-1");
+    let r = add(&store, &me, "archive", &["t-1"], json!({})).unwrap();
+    let cs = iris_changeset::parse_changeset_id(r["changeset"].as_str().unwrap()).unwrap();
+    let bare = Author {
+        session: None,
+        ..me.clone()
+    };
+    assert!(iris_changeset::submit(&store, cs, &bare, "x", NOW).is_err());
+    assert!(iris_changeset::withdraw(&store, cs, Some(&bare)).is_err());
+    assert_eq!(
+        count(
+            &store,
+            "SELECT count(*) FROM changeset WHERE state = 'draft'"
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_rule_of_a_job_matches_only_that_job() {
+    let (store, job) = fixture("job-rule");
+    let other = create(&store, "Another goal.", None, NOW).unwrap();
+    add_scope(&store, other, Ref::Thread(1), By::Person, NOW).unwrap();
+    let policy = format!(
+        "version = 0\nmode = \"apply\"\n\n[[rule]]\nid = 1\nname = \"Job archive\"\neffect = \"allow\"\nverbs = [\"archive\"]\nwhen = {{ author = \"agent\" }}\njob = \"{}\"\nby = \"person\"\nadded = 2026-11-10\n",
+        iris_job::format_job_id(job)
+    );
+    store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO policy_version(text, sha256, confirmed_at) VALUES (?1, 'h', 0)",
+                [&policy],
+            )?;
+            tx.execute("INSERT INTO policy_rule_id(id) VALUES (1)", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let mut by = Vec::new();
+    for who in [session(job, "se-1"), session(other, "se-2")] {
+        let r = add(&store, &who, "archive", &["t-1"], json!({})).unwrap();
+        let doc = call(
+            &store,
+            &who,
+            "submit",
+            json!({ "changeset": r["changeset"], "why": "x" }),
+        )
+        .unwrap();
+        by.push(doc["actions"][0]["decision"]["by"].clone());
+    }
     assert_eq!(by[0], json!("rule"), "{by:?}");
     assert_ne!(by[1], json!("rule"), "{by:?}");
 }

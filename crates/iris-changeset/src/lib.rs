@@ -251,12 +251,7 @@ pub fn create(store: &Store, author: &Author, now_ms: i64) -> Result<i64> {
 /// Use [`transaction`] to run more than one step in one transaction.
 pub fn create_in(c: &Connection, author: &Author, now_ms: i64) -> Result<i64> {
     if let Some(job) = &author.job {
-        // Only an agent session has a job (issue #247), and only a job that
-        // can still act.
-        if author.kind != AuthorKind::Agent || author.session.is_none() {
-            return Err(refused("only an agent session has a job".into()));
-        }
-        job_open(c, job)?;
+        job_author(c, author, job)?;
         no_other_draft(c, job)?;
     }
     c.execute(
@@ -474,9 +469,13 @@ pub fn expire_in(c: &Connection, now_ms: i64) -> Result<usize> {
     )?)
 }
 
-/// Refuse each change by an author whose job is not canonical, does not
-/// exist or is `done` (issue #247): a done job changes nothing.
-fn job_open(c: &Connection, job: &str) -> Result<()> {
+/// Refuse each change by a job author that is not an agent session of a
+/// job that is canonical, exists and is not `done` (issue #247): only an
+/// agent session has a job, and a done job changes nothing.
+fn job_author(c: &Connection, author: &Author, job: &str) -> Result<()> {
+    if author.kind != AuthorKind::Agent || author.session.is_none() {
+        return Err(refused("only an agent session has a job".into()));
+    }
     let open: bool = match iris_job::parse_job_id(job) {
         Some(id) => c
             .query_row("SELECT state <> 'done' FROM job WHERE id = ?1", [id], |r| {
@@ -539,7 +538,7 @@ fn check_author(c: &Connection, changeset: i64, author: &Author) -> Result<()> {
         None => Err(Error::NotFound),
         Some(false) => Err(refused("only the author can do this".into())),
         Some(true) => match &author.job {
-            Some(job) => job_open(c, job),
+            Some(job) => job_author(c, author, job),
             None => Ok(()),
         },
     }

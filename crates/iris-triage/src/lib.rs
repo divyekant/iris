@@ -198,6 +198,12 @@ pub fn decide_submitted(
     let active = iris_policy::active(c)?;
     let apply = active.policy.mode == Mode::Apply;
     let now = now_ms.div_euclid(1000);
+    // A rule with `job` matches only the actions of that job.
+    let job: Option<String> = c.query_row(
+        "SELECT author_job FROM changeset WHERE id = ?1",
+        [changeset],
+        |r| r.get(0),
+    )?;
     // One action at a time, by its number, so memory holds one action.
     let mut last = 0i64;
     while let Some((id, n, verb, flags)) = c
@@ -256,7 +262,7 @@ pub fn decide_submitted(
             &iris_policy::Action {
                 verb,
                 author,
-                job: None,
+                job: job.as_deref(),
                 bulk,
                 now,
             },

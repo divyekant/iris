@@ -362,6 +362,7 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             None => Ok(()),
         }
     };
+    let session = me.job.is_some();
     let changeset = || -> Result<Option<i64>, Failure> {
         text(args, "changeset")?
             .map(|t| {
@@ -369,18 +370,22 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             })
             .transpose()
     };
+    // A session gets the answer "no changeset" for each changeset of
+    // another job: an ID of another job looks the same as a missing one.
+    let changeset = || -> Result<Option<i64>, Failure> {
+        let cs = changeset()?;
+        match cs {
+            Some(cs) if session && !of_job(store, cs, me)? => {
+                Err(failure(iris_changeset::Error::NotFound, cs))
+            }
+            _ => Ok(cs),
+        }
+    };
     let need = || changeset()?.ok_or_else(|| usage("give the changeset ID, for example cs-12"));
-    let session = me.job.is_some();
     match request["verb"].as_str() {
         Some("show") => {
             only(&["changeset"])?;
-            let cs = need()?;
-            // A session sees only the changesets of its job, and the answer
-            // for another job is the answer for no changeset.
-            if session && !of_job(store, cs, me)? {
-                return Err(failure(iris_changeset::Error::NotFound, cs));
-            }
-            Ok(Done::Document(cs))
+            Ok(Done::Document(need()?))
         }
         Some("withdraw") => {
             only(&["changeset"])?;
