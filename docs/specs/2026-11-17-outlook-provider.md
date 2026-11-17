@@ -17,7 +17,7 @@ history ID for the mailbox.
 
 1. A crate `crates/iris-graph` holds a thin Graph mail client for the
    mirror: folders, delta queries, the raw MIME of a message, and the write
-   calls (read state, flag, categories, move, draft and send).
+   calls (read state, flag, categories, move, draft, send and the delete of a sent draft).
 2. A crate `crates/iris-fakegraph` holds a fake Graph server on top of the
    synthetic mailbox. CI tests the client against the fake. No test calls
    Microsoft.
@@ -64,11 +64,13 @@ token to another host.
 
 Waits after a refusal:
 
-- HTTP 429, and HTTP 503 of any call: wait for `Retry-After` when the
-  answer has it, else 1 second, then double up to 5 minutes, plus up to 50
-  percent at random (A5). A write that must go one time only (send) never
-  waits and tries again (see "External writes").
-- HTTP 5xx of a read: wait as above and try again.
+- HTTP 429 and HTTP 5xx of a read: wait for `Retry-After` when the answer
+  has it, else 1 second, then double up to 5 minutes, plus up to 50 percent
+  at random (A5), and try again.
+- A write makes one request only. The client never tries a write again,
+  also not after 429 or 503. A time-out, a lost answer, 429 and 5xx of a
+  write give an unknown result (`Error::write_result_unknown`), and the
+  caller reconciles it with a read (see "External writes").
 - HTTP 401: `Error::Unauthorized`. The caller gets a new access token one
   time.
 - HTTP 404: `Error::NotFound`.
@@ -138,13 +140,25 @@ account. R6-10 decides where this compare lives.
 |---|---|---|
 | `set_read(id, bool)` | `PATCH /me/messages/{id}` `{"isRead"}` | 200 |
 | `set_flag(id, bool)` | `PATCH` `{"flag":{"flagStatus":"flagged" or "notFlagged"}}` | 200 |
-| `set_categories(id, list)` | `PATCH` `{"categories":[...]}`, the full list | 200 |
+| `set_categories(id, list, etag)` | `PATCH` `{"categories":[...]}`, the full list, with `If-Match: <etag>` | 200, or 412 |
 | `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
 | `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
-| `send_draft(id)` | `POST /me/messages/{id}/send` | 202, no body |
+| `send_mime(mime)` | `POST /me/sendMail`, `text/plain`, base64 MIME | 202, no body |
+| `delete_draft(id)` | `DELETE /me/messages/{id}` | 204 |
 
-`set_categories` replaces the full list (A6). The caller reads the
-categories of the message first, and sends the full new list.
+`set_categories` replaces the full list (A6). The caller reads the message
+with its `@odata.etag` first, and sends the full new list with
+`If-Match`. If the person changed the message after the read, Graph gives
+HTTP 412 (A14): a definite rejection, and no category is lost. The caller
+can read again and make a new PATCH, because the 412 call changed nothing.
+
+The send binds the approved bytes. Iris never sends a draft by its ID,
+because the person or another client can change a draft at the server
+after the approval. `send_mime` sends the stored raw bytes of the approved
+draft (the same bytes that the approval hash covers, as for Gmail in spec
+`2026-11-16-send.md`). After a send, Iris deletes the server draft with
+`delete_draft`, so that the person does not send it a second time from
+Outlook. A failed delete leaves a draft and changes no sent mail.
 
 ### 6. Map to the mirror
 
@@ -172,8 +186,10 @@ move to `inbox`. Trash is a move to `deleteditems`.
   and `/token`, fixed in the code, as for Google.
 - Scopes: `offline_access https://graph.microsoft.com/Mail.ReadWrite
   https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read`.
-  The code exchange and each refresh check that the `scope` of the answer
-  has `Mail.ReadWrite` (A10).
+  The code exchange and each refresh that names a `scope` check that it has
+  both `Mail.ReadWrite` and `Mail.Send` (A10). If one is missing, the
+  sign-in fails with an error that names the missing permission, and the
+  account does not start.
 - PKCE with S256 and a random `state`.
 - Redirect: `http://localhost:<port>/oauth/callback`. Microsoft ignores the
   port of a `localhost` redirect (A9). The listener binds `127.0.0.1`.
@@ -223,7 +239,7 @@ and MIME text of `$value`. All other input fails closed: the call gives
 | The same message two times in one round | the last one wins | fake replays |
 | A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
 | An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
-| 429 or 503 with `Retry-After` | wait for it, then call again (not a send) | fake with `Retry-After` |
+| 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
 | A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
 
 ## Impact
@@ -283,6 +299,11 @@ Each assumption has the evidence of a Microsoft Learn page, read on
 - A12. Consent to an unverified multitenant app can be blocked in a work
   tenant with risk-based step-up consent. Evidence:
   <https://learn.microsoft.com/en-us/entra/identity-platform/publisher-verification-overview>.
+- A14. A `PATCH` of a message with `If-Match` and an old `@odata.etag`
+  gives HTTP 412. Evidence: `pending` (OData v4 rule; the message-update
+  page does not state it). The release gate tests it on the real mailbox.
+  If Graph ignores `If-Match`, Iris turns off category writes for Outlook
+  accounts (label and unlabel give a definite refusal), and the rest works.
 - A13. An app registration needs an Entra tenant; a person with only a
   personal Microsoft account makes one with a free Azure account. Evidence:
   <https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app>.
@@ -296,10 +317,17 @@ the ledger and the apply rules of spec 2 stay the same; R6-10 maps them.
 
 | Call | Success | Definite rejection (4xx, not 429) | Unknown result (time-out, lost answer, 5xx, 429 of a send) | Retry |
 |---|---|---|---|---|
-| `set_read`, `set_flag`, `set_categories` | the answer has the new state | `Error::Api`, the mirror does not change | `write_result_unknown()` true; the caller reads the message to learn the state | the same PATCH again is safe: it sets a state, it does not add |
-| `move_to` | 201 with the moved message | `Error::Api` | unknown; the caller reads the message: its `parentFolderId` shows the result | safe after the read, because the ID does not change (A3) |
-| `create_draft` | 201 with the draft ID | `Error::Api` | unknown; a draft can exist. The caller finds it by its `Message-ID` header in `drafts` before a new create | not before the search |
-| `send_draft` | 202 | `Error::Api` | unknown. The caller never sends again: the ledger keeps the claim (spec 2 section 7.5) | never, also not after 429 |
+No write is made two times after it started with an unknown result (spec 2
+section 7.3). The caller reconciles with reads only.
+
+| Call | Success | Definite rejection (4xx, not 429) | Unknown result (time-out, lost answer, 429, 5xx) | Retry |
+|---|---|---|---|---|
+| `set_read`, `set_flag` | the answer has the new state | `Error::Api`, the mirror does not change | the caller reads the message: the target state means applied, any other state means failed | never after an unknown result |
+| `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
+| `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: its `parentFolderId` shows the result | never after an unknown result |
+| `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
+| `send_mime` | 202 | `Error::Api` | the ledger keeps the claim, and the caller looks in `sentitems` for the `Message-ID` (spec 2 section 7.5) | never |
+| `delete_draft` | 204 | `Error::Api`; 404 means the draft is gone, which is the target | the caller reads the draft: 404 means deleted | never after an unknown result |
 
 ## Open questions
 
@@ -320,11 +348,15 @@ the ledger and the apply rules of spec 2 stay the same; R6-10 maps them.
    makes it red.
 5. The fake counts requests at the same time; the most is 4. A fifth makes
    it red.
-6. `send_draft` makes one request also after 429 or 503. A second request
-   makes it red.
-7. A Microsoft sign-in against a fake token endpoint gives a new refresh
-   token on refresh, and a missing `Mail.ReadWrite` scope gives an error.
-8. After R6-10: an Outlook account syncs with zero differences against the
+6. Each write makes one request also after 429 or 503. A second request
+   makes it red. `send_mime` sends the given bytes; other bytes at the fake
+   make it red.
+7. `set_categories` with an old etag gets 412 from the fake and changes
+   nothing. A changed list makes it red.
+8. A Microsoft sign-in against a fake token endpoint gives a new refresh
+   token on refresh. A missing `Mail.ReadWrite` or `Mail.Send` scope gives
+   an error.
+9. After R6-10: an Outlook account syncs with zero differences against the
    fake, also after a move, a delete and an expired link.
 
 ## Verify
