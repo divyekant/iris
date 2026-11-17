@@ -1217,9 +1217,21 @@ fn a_comment_during_a_session_starts_one_session_after_it() {
     s.wake(now());
     let next = next_session(&s, &f, first);
     assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
-    s.wake(now());
-    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    assert!(
+        !pending(&f),
+        "the gate of the new session delivered the comment"
+    );
+    // After the session ends, a new engine (no memory of its tries) starts no third session.
     let _ = s.stop(f.job).unwrap();
+    until(&s, &f, next.id, |r| r.reaped_ms.is_some());
+    let again = sessions(&f);
+    again.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+}
+
+/// True if a comment on a changeset of the job has no delivery yet.
+fn pending(f: &Fixture) -> bool {
+    iris_changeset::transaction(&f.store, |c| iris_changeset::comment_pending_in(c, f.job)).unwrap()
 }
 
 /// The live session moves the job to `waiting` after a comment: the wake
@@ -1241,10 +1253,12 @@ fn a_comment_wakes_a_job_that_waits_after_it() {
         (woke.by, woke.why.as_deref()),
         (By::Engine, Some("comment"))
     );
-    let next = next_session(&s, &f, first);
+    next_session(&s, &f, first);
     assert!(workspace(&f).join(format!("comments/{cs}.md")).exists());
-    s.wake(now());
-    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    assert!(
+        !pending(&f),
+        "the gate of the new session delivered the comment"
+    );
     let _ = s.stop(f.job).unwrap();
 }
 
