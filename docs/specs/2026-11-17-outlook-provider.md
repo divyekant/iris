@@ -191,6 +191,10 @@ with its `@odata.etag` first, and sends the full new list with
 `If-Match`. If the person changed the message after the read, Graph gives
 HTTP 412 (A14): a definite rejection, and no category is lost. The caller
 can read again and make a new PATCH, because the 412 call changed nothing.
+The new PATCH applies the `label` or `unlabel` of the action to the
+categories of the new read, and sends that new full list with the new
+etag. It never sends the list of the first try, so a category that
+another client added stays.
 
 The send binds the approved bytes. Iris never sends a draft by its ID,
 because the person or another client can change a draft at the server
@@ -220,11 +224,15 @@ of the server bytes cannot show a change, and an etag alone is not proof
    the content that the person wrote, or submit denies it. If Graph
    always gives a form that does not read back, each Outlook send is
    denied: the safe result, and the release gate shows it.
-3. The claim of spec `2026-11-16-send.md` section 5, step 3 (the ledger
+3. The warning check of spec `2026-11-17-send-checks.md`: the release
+   computes the flags of the stored bytes again, and denies the send with
+   `iris_changeset::new_flags` if any warning grew after the approval
+   (for example `new_recipient`), as for Gmail.
+4. The claim of spec `2026-11-16-send.md` section 5, step 3 (the ledger
    row in `writing` and the `ledger_send` row), then `send_mime` with the
    stored bytes. The answer 202 has no message ID, so the row stays in
    `writing`.
-4. The completion finds the sent copy: `sent_by_message_id(id)` lists
+5. The completion finds the sent copy: `sent_by_message_id(id)` lists
    the messages of the whole mailbox (`/me/messages`, each folder) with
    `$filter=internetMessageId eq '<id>'` (A15), and follows each page, so
    a rule or a client that moved the copy does not hide it. A candidate
@@ -540,7 +548,7 @@ section 7.3). The caller reconciles with reads only.
 | `set_categories` | the answer has the new list | `Error::Api`; 412 means the message changed after the read: nothing changed | as `set_read` | after 412 only: one new read and one new PATCH |
 | `move_to` | 201 with the moved message | `Error::Api` | the caller reads the message: the target folder means applied; any other folder keeps the result unknown, and Iris tells the person | never after an unknown result |
 | `create_draft` | 201 with the draft ID | `Error::Api` | a draft can exist. The caller searches `drafts` for its `Message-ID` header: found means created, not found means failed | never after an unknown result |
-| `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery runs the search of section 5, step 4 (each folder, no draft) and the completion (spec 2 section 7.5) | never |
+| `send_mime` | 202: the row stays in `writing` until the completion finds and checks the sent copy (section 5) | `Error::Api`; the row fails and the claim goes, as in the send spec | the ledger keeps the claim; recovery runs the search of section 5, step 5 (each folder, no draft) and the completion (spec 2 section 7.5) | never |
 
 ## Open questions
 
