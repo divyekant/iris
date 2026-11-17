@@ -496,3 +496,44 @@ fn apply_mode_deny_rule() {
     assert_eq!(decisions(&s, changeset)[0].0, "denied");
     assert_eq!(run(&s, a, NOW + 1).unwrap(), Outcome::Nothing);
 }
+
+/// A draft and a send are verbs that no rule decides: a submit of each
+/// goes to a person in the mode `apply`, and the decision does not panic.
+#[test]
+fn apply_mode_sends_a_draft_and_a_send_to_a_person() {
+    use iris_changeset::{add_action, create, submit, Author, AuthorKind, Verb};
+    let dir = TempDir::new("applywrite");
+    let (s, a) = store(&dir);
+    apply_policy(&s, &dir, "");
+    let who = Author {
+        kind: AuthorKind::Agent,
+        name: Some("t".into()),
+        session: None,
+        job: None,
+    };
+    let cs = create(&s, &who, NOW).unwrap();
+    let args = serde_json::json!({"to": ["p@x.org"], "subject": "Hi", "body": "Hello"});
+    let account = format!("a-{a}");
+    add_action(
+        &s,
+        cs,
+        &who,
+        Verb::Draft,
+        &[&account],
+        args.as_object().unwrap(),
+        None,
+    )
+    .unwrap();
+    submit(&s, cs, &who, "Write.", NOW).unwrap();
+    s.write(|c| {
+        iris_triage::decide_submitted(c, cs, 1, iris_policy::Author::Local, NOW)
+            .map_err(|e| iris_store::Error::Io(std::io::Error::other(e.to_string())))
+    })
+    .unwrap();
+    let d = decisions(&s, cs);
+    assert_eq!(
+        (d[0].0.as_str(), d[0].1.as_str(), d[0].2),
+        ("in_review", "policy", None)
+    );
+    assert!(d[0].3.contains("a person decides"), "{}", d[0].3);
+}
