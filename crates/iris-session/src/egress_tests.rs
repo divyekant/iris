@@ -380,10 +380,15 @@ fn a_stop_does_not_wait_for_a_stalled_resolver() {
     let log = std::env::temp_dir().join(format!("iris-egress-stall-{}.log", std::process::id()));
     let _ = std::fs::remove_file(&log);
     let guard = LogFile(log.clone());
-    let file = File::options().create_new(true).append(true).open(&log).unwrap();
+    let file = File::options()
+        .create_new(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
     let proxy = Proxy::start_with(allowed(), file, Box::new(Stalled), false, LOG_LIMIT).unwrap();
     let mut s = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
-    s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n").unwrap();
+    s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n")
+        .unwrap();
     thread::sleep(Duration::from_millis(200));
     let t = Instant::now();
     proxy.stop().unwrap();
@@ -406,8 +411,12 @@ fn each_connection_writes_one_log_line() {
             match r.next(5) {
                 0 => {}
                 1 => s.write_all(b"CONNECT api.exa").unwrap(),
-                2 => s.write_all(b"CONNECT evil.test:443 HTTP/1.1\r\n\r\n").unwrap(),
-                3 => s.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\nhi").unwrap(),
+                2 => s
+                    .write_all(b"CONNECT evil.test:443 HTTP/1.1\r\n\r\n")
+                    .unwrap(),
+                3 => s
+                    .write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\nhi")
+                    .unwrap(),
                 _ => {
                     s.write_all(b"CONNECT api.exa").unwrap();
                     held.push(s);

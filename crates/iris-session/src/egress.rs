@@ -13,7 +13,7 @@ use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -206,6 +206,8 @@ struct Conns {
     next: u64,
     streams: HashMap<u64, Vec<TcpStream>>,
     threads: Vec<JoinHandle<()>>,
+    /// The connections in the resolve and connect phase.
+    cancels: HashMap<u64, mpsc::Sender<Phase>>,
 }
 
 struct Shared {
@@ -262,6 +264,7 @@ impl Proxy {
                 next: 0,
                 streams: HashMap::new(),
                 threads: Vec::new(),
+                cancels: HashMap::new(),
             }),
             stopping: AtomicBool::new(false),
         });
@@ -300,6 +303,9 @@ impl Proxy {
             for s in c.streams.values().flatten() {
                 let _ = s.shutdown(Shutdown::Both);
             }
+            for tx in c.cancels.values() {
+                let _ = tx.send(Phase::Cancel);
+            }
             std::mem::take(&mut c.threads)
         };
         for t in threads {
@@ -336,7 +342,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         c.threads.retain(|t| !t.is_finished());
         if c.streams.len() >= MAX_CONNECTIONS {
             drop(c);
-            refuse(&shared, stream, Reason::TooMany);
+            finish(&shared, refuse(stream, Reason::TooMany));
             continue;
         }
         let Ok(clone) = stream.try_clone() else {
@@ -349,8 +355,13 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         let spawned = thread::Builder::new()
             .name("iris-egress-conn".into())
             .spawn(move || {
-                handle(&s, stream, id);
-                lock(&s.conns).streams.remove(&id);
+                let f = handle(&s, stream, id);
+                {
+                    let mut c = lock(&s.conns);
+                    c.streams.remove(&id);
+                    c.cancels.remove(&id);
+                }
+                finish(&s, f);
             });
         match spawned {
             Ok(t) => c.threads.push(t),
@@ -361,13 +372,74 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
     }
 }
 
-/// Answers `403`, writes the reason, and reads the rest of the request for a
-/// short time, so that the close does not reset the connection.
-fn refuse(shared: &Shared, mut stream: TcpStream, reason: Reason) {
-    lock(&shared.log).line(&format!("refused reason={}", reason.word()));
-    let _ = stream
-        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    drain(stream);
+/// How a connection ended. Each accepted connection gives exactly one, and
+/// [`finish`] writes it as the one log line of the connection.
+enum End {
+    Refused(Reason),
+    /// The client closed before a full head.
+    NoHead,
+    /// A stop came before a full head.
+    Stopped,
+    Tunnel {
+        host: usize,
+        up: u64,
+        down: u64,
+        result: &'static str,
+    },
+}
+
+/// The end of a connection, and the answer to send before the close.
+struct Finish {
+    end: End,
+    answer: Option<(TcpStream, &'static [u8])>,
+}
+
+const FORBIDDEN: &[u8] =
+    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const BAD_GATEWAY: &[u8] =
+    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+fn refuse(stream: TcpStream, reason: Reason) -> Finish {
+    Finish {
+        end: End::Refused(reason),
+        answer: Some((stream, FORBIDDEN)),
+    }
+}
+
+fn tunnel(host: usize, up: u64, down: u64, result: &'static str) -> End {
+    End::Tunnel {
+        host,
+        up,
+        down,
+        result,
+    }
+}
+
+/// Writes the one log line of a connection, then sends the answer and reads
+/// the rest of the request for a short time, so that the close does not
+/// reset the connection.
+fn finish(shared: &Shared, f: Finish) {
+    let line = match f.end {
+        End::Refused(r) => format!("refused reason={}", r.word()),
+        End::NoHead => "ended reason=no_head".to_string(),
+        End::Stopped => "ended reason=stopped".to_string(),
+        End::Tunnel {
+            host,
+            up,
+            down,
+            result,
+        } => {
+            format!(
+                "host={} up={up} down={down} result={result}",
+                shared.allowed[host]
+            )
+        }
+    };
+    lock(&shared.log).line(&line);
+    if let Some((mut stream, answer)) = f.answer {
+        let _ = stream.write_all(answer);
+        drain(stream);
+    }
 }
 
 fn drain(mut stream: TcpStream) {
@@ -387,24 +459,45 @@ fn drain(mut stream: TcpStream) {
     }
 }
 
+/// The result of the resolve and connect phase of a connection.
+enum Phase {
+    Up(TcpStream),
+    NotPublic,
+    Failed,
+    /// A stop came first.
+    Cancel,
+}
+
 /// Reads the head of one connection, checks it, and relays the tunnel.
-fn handle(shared: &Shared, mut client: TcpStream, id: u64) {
+fn handle(shared: &Arc<Shared>, mut client: TcpStream, id: u64) -> Finish {
     let mut head = Vec::with_capacity(512);
     let end = Instant::now() + HEAD_TIME;
+    let stopped_or = |e: End| {
+        if shared.stopping.load(Ordering::SeqCst) {
+            End::Stopped
+        } else {
+            e
+        }
+    };
     let (host, len) = loop {
         match check_head(&head, &shared.allowed) {
             Ok(Some(found)) => break found,
             Ok(None) => {}
-            Err(r) => return refuse(shared, client, r),
+            Err(r) => return refuse(client, r),
         }
         let left = end.saturating_duration_since(Instant::now());
         if left.is_zero() || client.set_read_timeout(Some(left)).is_err() {
-            return refuse(shared, client, Reason::Timeout);
+            return refuse(client, Reason::Timeout);
         }
         let mut buf = [0u8; 1024];
         let room = (HEAD_MAX - head.len()).min(buf.len());
         match client.read(&mut buf[..room]) {
-            Ok(0) => return,
+            Ok(0) => {
+                return Finish {
+                    end: stopped_or(End::NoHead),
+                    answer: None,
+                }
+            }
             Ok(n) => head.extend_from_slice(&buf[..n]),
             Err(e)
                 if matches!(
@@ -412,35 +505,39 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                return refuse(shared, client, Reason::Timeout);
+                return refuse(client, Reason::Timeout);
             }
-            Err(_) => return,
+            Err(_) => {
+                return Finish {
+                    end: stopped_or(End::NoHead),
+                    answer: None,
+                }
+            }
         }
     };
-    let name = &shared.allowed[host];
-    let addrs: Vec<SocketAddr> = match shared.resolver.resolve(name, 443) {
-        Ok(a) => a,
-        Err(_) => return fail(shared, client, name),
-    };
-    let checked: Vec<SocketAddr> = addrs
-        .into_iter()
-        .filter(|a| !shared.public_only || is_public(a.ip()))
-        .collect();
-    if checked.is_empty() {
-        return refuse(shared, client, Reason::AddressNotPublic);
-    }
-    // Connect to a checked address only, never to the name again.
-    let Some(upstream) = checked
-        .iter()
-        .find_map(|a| TcpStream::connect_timeout(a, CONNECT_TIME).ok())
-    else {
-        return fail(shared, client, name);
+    let upstream = match connect(shared, host, id) {
+        Phase::Up(u) => u,
+        Phase::NotPublic => return refuse(client, Reason::AddressNotPublic),
+        Phase::Failed => {
+            return Finish {
+                end: tunnel(host, 0, 0, "connect_failed"),
+                answer: Some((client, BAD_GATEWAY)),
+            }
+        }
+        Phase::Cancel => {
+            return Finish {
+                end: tunnel(host, 0, 0, "stopped"),
+                answer: None,
+            }
+        }
     };
     {
         let mut c = lock(&shared.conns);
         if shared.stopping.load(Ordering::SeqCst) {
-            drop(c);
-            return log_tunnel(shared, name, 0, 0, "stopped");
+            return Finish {
+                end: tunnel(host, 0, 0, "stopped"),
+                answer: None,
+            };
         }
         // A stop closes this stream with the client stream.
         if let (Ok(clone), Some(list)) = (upstream.try_clone(), c.streams.get_mut(&id)) {
@@ -454,18 +551,62 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) {
     } else {
         "closed"
     };
-    log_tunnel(shared, name, up, down, result);
+    Finish {
+        end: tunnel(host, up, down, result),
+        answer: None,
+    }
 }
 
-fn fail(shared: &Shared, mut client: TcpStream, name: &str) {
-    log_tunnel(shared, name, 0, 0, "connect_failed");
-    let _ = client
-        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    drain(client);
+/// Resolves the host and connects to a checked address, in a worker thread,
+/// so that a stalled resolver cannot hold the connection or a stop. The wait
+/// ends at [`CONNECT_TIME`] or at a stop, whichever comes first. A worker
+/// that is still in the resolver then ends later, by itself, and its
+/// connection (if any) is dropped.
+fn connect(shared: &Arc<Shared>, host: usize, id: u64) -> Phase {
+    let (tx, rx) = mpsc::channel();
+    {
+        let mut c = lock(&shared.conns);
+        if shared.stopping.load(Ordering::SeqCst) {
+            return Phase::Cancel;
+        }
+        c.cancels.insert(id, tx.clone());
+    }
+    let s = shared.clone();
+    let deadline = Instant::now() + CONNECT_TIME;
+    let spawned = thread::Builder::new()
+        .name("iris-egress-resolve".into())
+        .spawn(move || {
+            let _ = tx.send(resolve_and_connect(&s, host, deadline));
+        });
+    if spawned.is_err() {
+        return Phase::Failed;
+    }
+    rx.recv_timeout(CONNECT_TIME + Duration::from_secs(1))
+        .unwrap_or(Phase::Failed)
 }
 
-fn log_tunnel(shared: &Shared, name: &str, up: u64, down: u64, result: &str) {
-    lock(&shared.log).line(&format!("host={name} up={up} down={down} result={result}"));
+fn resolve_and_connect(shared: &Shared, host: usize, deadline: Instant) -> Phase {
+    let Ok(addrs) = shared.resolver.resolve(&shared.allowed[host], 443) else {
+        return Phase::Failed;
+    };
+    let checked: Vec<SocketAddr> = addrs
+        .into_iter()
+        .filter(|a| !shared.public_only || is_public(a.ip()))
+        .collect();
+    if checked.is_empty() {
+        return Phase::NotPublic;
+    }
+    // Connect to a checked address only, never to the name again.
+    for a in &checked {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        if let Ok(u) = TcpStream::connect_timeout(a, left) {
+            return Phase::Up(u);
+        }
+    }
+    Phase::Failed
 }
 
 /// Relays both directions until both end. Gives the bytes sent up (client to
