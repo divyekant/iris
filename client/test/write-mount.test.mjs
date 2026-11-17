@@ -328,6 +328,63 @@ test("a press with an unfinished address and a lost answer: the retry sends the 
   }
 });
 
+test("Write it for me sends the intent to the engine and puts its draft in the text", async () => {
+  let release;
+  const held = new Promise((r) => (release = r));
+  const net = serve((path, method) => {
+    if (method === "POST" && path === "threads/t-2/draft") return [200, { body: "Hi Priya,\n\nYes, on Wednesday.", based_on: "m-9", samples: 3, unknown_cost: false, overrun: false }];
+    return [404, { error: "Not found." }];
+  });
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (...a) => (a[0].toString().endsWith("/draft") ? (await held, fetch(...a)) : fetch(...a));
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    type(app.target.querySelector(".intent input"), "yes, Wednesday");
+    app.flushSync();
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Write it for me").click();
+    app.flushSync();
+    assert.equal(app.target.querySelector("fieldset").disabled, true, "the form does not change while Iris writes");
+    release();
+    await until(() => app.target.querySelector("textarea").value.startsWith("Hi Priya"));
+    const [post] = net.posts();
+    assert.equal(post.path, "threads/t-2/draft");
+    assert.deepEqual(post.body, { intent: "yes, Wednesday" });
+    assert.equal(app.target.querySelector("fieldset").disabled, false);
+    assert.equal(app.target.querySelector("button[type=submit]").disabled, false, "the person can send the draft");
+  } finally {
+    globalThis.fetch = fetch;
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a refused draft shows its reason and keeps the text", async () => {
+  const net = serve(() => [409, { error: "This thread has hostile mail. Iris writes no draft for it." }]);
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    type(app.target.querySelector("textarea"), "My own words.");
+    app.flushSync();
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Write it for me").click();
+    await until(() => app.target.querySelector(".note"));
+    assert.match(text(app.target.querySelector(".note")), /hostile mail/);
+    assert.equal(app.target.querySelector("textarea").value, "My own words.");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a new mail has no intent line: Iris drafts replies only", async () => {
+  const net = serve(() => [404, {}]);
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    assert.equal(app.target.querySelector(".intent"), null);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
 test("Stop in saving withdraws the write; a 409 says that the mail cannot stop", async () => {
   let refuse = false;
   const net = serve((path, method) => {

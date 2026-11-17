@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { act, answer, answerSender, askAnswer, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, watchPost, withdraw } from "./dev/fixtures.ts";
+import { act, answer, answerSender, askAnswer, replyDraft, decide, noticePost, undoEntry, outboxPost, policyPost, raw, startJob, watchPost, withdraw } from "./dev/fixtures.ts";
 import { engineProxy } from "./dev/proxy.ts";
 
 // `pnpm dev` sends /api to an engine on 127.0.0.1:4800 (`iris serve`).
@@ -43,6 +43,12 @@ export default defineConfig(({ mode }) => {
               // A pause, so the wait of the view shows.
               setTimeout(() => res.end(JSON.stringify(askAnswer(question))), 900);
             });
+            return;
+          }
+          // A draft in your voice (R3-04 intent path), after a pause, as the engine.
+          if (url === "/threads/t-8841/draft" && req.method === "POST") {
+            res.setHeader("content-type", "application/json");
+            setTimeout(() => res.end(JSON.stringify(replyDraft)), 900);
             return;
           }
           const undo = url.match(/^\/ledger\/([^/?]+)\/undo$/);
