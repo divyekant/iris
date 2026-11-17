@@ -255,3 +255,23 @@ test("the item view sends skip, mute or dismiss after the hold", async () => {
   assert.equal(quiet({ form: "conversation", status: "muted" }), null);
   assert.equal(quiet({ form: "record", status: "kept" }), null);
 });
+
+test("Reply of a conversation stays while Mute holds, and after Mute fails (R3-10)", async () => {
+  const conversation = fx.items.find((i) => i.id === "v-88");
+  serve(() => [500, { error: "The store is busy." }]);
+  const view = await mount("/src/views/Item.svelte", { item: conversation });
+  const reply = () => view.target.querySelector('a[href="#/write/t-9001"]');
+  try {
+    assert.ok(reply());
+    button(view, "Mute").click();
+    await until(() => button(view, "Undo"));
+    view.flushSync();
+    assert.ok(reply(), "during the hold");
+    window.dispatchEvent(new Event("pagehide"));
+    await until(() => text(view.target).includes("Iris did not record it") || text(view.target).includes("does not know"));
+    view.flushSync();
+    assert.ok(reply(), "after the failure");
+  } finally {
+    view.destroy();
+  }
+});

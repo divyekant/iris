@@ -86,11 +86,13 @@
     {#if thread}<a class="reply" href={href.reply(thread)}>Reply</a>{/if}
   {/snippet}
 
-  <Act {item} onchange={(next) => (item = next)} lead={reply} more={handle} />
-  <!-- Where Act shows no row with Mute, Skip or Dismiss, Reply and Handle this stand alone. A commitment keeps Handle this in its own row. -->
-  {#if item.form !== "commitment" && !quiet(item) && (startable || thread)}
-    <div class="alone">{@render reply()}{@render handle()}</div>
-  {/if}
+  <!-- Reply sits outside Act, so it stays in each phase of a verb: the hold, the answer and a failure. -->
+  <div class="verbs">
+    {@render reply()}
+    <Act {item} onchange={(next) => (item = next)} more={handle} />
+  </div>
+  <!-- Where Act shows no row with Mute, Skip or Dismiss, Handle this stands alone. A commitment keeps Handle this in its own row. -->
+  {#if item.form !== "commitment" && !quiet(item) && startable}<div class="alone">{@render handle()}</div>{/if}
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>
@@ -167,11 +169,20 @@
   }
   .alone {
     display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-3);
     margin: 0 0 var(--space-8);
   }
+  .verbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0 var(--space-2);
+  }
+  /* The row or the note of Act takes the rest of the line. */
+  .verbs > :global(div) {
+    flex: 1;
+  }
   .reply {
+    margin-bottom: var(--space-8);
     display: inline-flex;
     align-items: center;
     min-height: var(--size-touch);
