@@ -99,6 +99,11 @@ impl Begun {
         self.job
     }
 
+    /// The adapter name of the session, for example `claude-code`.
+    pub fn agent(&self) -> &str {
+        &self.adapter.name
+    }
+
     /// The allowed hosts of the adapter. If there is none, the session
     /// gets no egress port.
     pub fn allow_hosts(&self) -> &[String] {

@@ -186,6 +186,45 @@ fn a_stop_ends_the_session_and_waits_for_the_reap() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// One request on the session socket of `f`: the answer as JSON, or the
+/// error of the connect.
+fn ask(f: &Fixture, verb: &str, args: serde_json::Value) -> std::io::Result<serde_json::Value> {
+    use std::io::{Read, Write};
+    let mut c = std::os::unix::net::UnixStream::connect(workspace(f).join(".iris/socket"))?;
+    c.set_read_timeout(Some(Duration::from_secs(20)))?;
+    let line = serde_json::json!({"v": 1, "verb": verb, "args": args});
+    c.write_all(format!("{line}\n").as_bytes())?;
+    let mut out = Vec::new();
+    c.read_to_end(&mut out)?;
+    serde_json::from_slice(&out).map_err(std::io::Error::other)
+}
+
+fn the_session_socket_answers_status_and_refuses_other_verbs() {
+    let f = fixture("sockstatus", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    let v = ask(&f, "status", serde_json::json!({})).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["job"], format!("j-{}", f.job), "{v}");
+    assert_eq!(v["result"]["goal"], "Get the contract.", "{v}");
+    assert_eq!(v["result"]["state"], "working", "{v}");
+    for verb in ["job.run", "brief", "search", "list", "status.all"] {
+        let v = ask(&f, verb, serde_json::json!({})).unwrap();
+        assert_eq!(v["code"], 3, "{verb}: {v}");
+    }
+    // The read form of show (a message or an item) waits for R4-04f.
+    let v = ask(&f, "show", serde_json::json!({"message": "m-1"})).unwrap();
+    assert_eq!(v["code"], 3, "{v}");
+    // A request after the end in the store gets code 3, before any turn.
+    iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
+    let v = ask(&f, "status", serde_json::json!({})).unwrap();
+    assert_eq!(v["code"], 3, "{v}");
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+    // After the reap, the socket is gone.
+    assert!(ask(&f, "status", serde_json::json!({})).is_err());
+}
+
 fn a_revoke_stops_a_running_session() {
     let f = fixture("revoke", "sleep 30");
     let s = sessions(&f);
@@ -400,6 +439,9 @@ fn a_revoke_retry_gives_the_egress_log_to_the_new_session() {
         assert!(Instant::now() < end, "no second session: {last:?}");
         std::thread::sleep(Duration::from_millis(100));
     };
+    // The socket of the running session names the second session.
+    let v = ask(&f, "status", serde_json::json!({})).unwrap();
+    assert_eq!(v["result"]["session"], format!("se-{second}"), "{v}");
     let log = |id: i64| f.store.dir().join(format!("sessions/se-{id}.egress.log"));
     assert!(
         log(second).exists(),
@@ -809,6 +851,10 @@ fn main() {
         (
             "a_stop_ends_the_session_and_waits_for_the_reap",
             a_stop_ends_the_session_and_waits_for_the_reap,
+        ),
+        (
+            "the_session_socket_answers_status_and_refuses_other_verbs",
+            the_session_socket_answers_status_and_refuses_other_verbs,
         ),
         (
             "a_revoke_stops_a_running_session",
