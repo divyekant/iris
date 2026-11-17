@@ -59,7 +59,7 @@ cannot tell which sender the person wants to see.
 | `dismiss` | Signal | `active` | `dismissed` |
 
 - Each verb is a state verb (spec 2, section 4): one item target, the
-  optional argument `reason` (500 characters or fewer), no provider call.
+  optional argument `reason` (500 characters or fewer, for each path: submit refuses a longer one), no provider call.
 - The web client calls `POST /api/items/<id>/<verb>`, as for `close`. The
   engine makes a changeset of the author `person` with one action, and
   applies it in the same request through `iris_apply::apply_state`.

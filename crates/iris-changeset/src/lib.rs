@@ -933,6 +933,9 @@ fn supported(c: &Connection, verb: Verb, args: &str) -> Result<std::result::Resu
         Verb::Label | Verb::Unlabel => label_name(c, &args)?,
         Verb::Close | Verb::Decline | Verb::Skip | Verb::Mute | Verb::Dismiss => {
             match (args.get("reason"), args.len()) {
+                (Some(Value::String(r)), 1) if r.chars().count() > MAX_REASON => {
+                    Err(format!("the reason is longer than {MAX_REASON} characters"))
+                }
                 (Some(Value::String(r)), 1) if !r.trim().is_empty() => Ok(()),
                 _ => Err(format!(
                     "{} needs one reason: {{\"reason\": \"...\"}}",
@@ -997,6 +1000,11 @@ fn label_name(
         Ok(())
     })
 }
+
+/// The most characters of the reason of a state verb (spec 2, section 4).
+/// Submit refuses a longer one, so each path (the web client, the command,
+/// an agent) has the same limit.
+pub const MAX_REASON: usize = 500;
 
 /// The verbs that change Iris state, not a mailbox (section 4). Their
 /// targets are items. Each list of state verbs (the bulk count, the apply,

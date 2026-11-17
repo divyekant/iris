@@ -1720,3 +1720,50 @@ fn skip_mute_and_dismiss_take_one_item() {
         assert_eq!(hash_doc(&s, cs, 1, 2)["decision"]["state"], "proposed");
     }
 }
+
+/// Submit refuses a reason longer than `MAX_REASON` for each verb with a
+/// reason, on each path: an agent changeset here, the web client in the
+/// API tests.
+#[test]
+fn submit_refuses_a_long_reason() {
+    let dir = TempDir::new("long-reason");
+    let s = store(&dir);
+    let long = "x".repeat(iris_changeset::MAX_REASON + 1);
+    let fit = "x".repeat(iris_changeset::MAX_REASON);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    for verb in [Verb::Close, Verb::Decline] {
+        add_action(
+            &s,
+            cs,
+            &agent(),
+            verb,
+            &["c-1"],
+            &args(json!({"reason": long})),
+            None,
+        )
+        .unwrap();
+    }
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Close,
+        &["c-1"],
+        &args(json!({"reason": fit})),
+        None,
+    )
+    .unwrap();
+    submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+    for n in 1..=2 {
+        let d = hash_doc(&s, cs, 1, n);
+        assert_eq!(d["decision"]["state"], "denied", "{d}");
+        assert!(
+            d["decision"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("longer than 500"),
+            "{d}"
+        );
+    }
+    assert_eq!(hash_doc(&s, cs, 1, 3)["decision"]["state"], "proposed");
+}

@@ -803,7 +803,8 @@
                 "properties": {
                   "reason": {
                     "type": "string",
-                    "pattern": "\\S"
+                    "pattern": "\\S",
+                    "maxLength": 500
                   }
                 }
               }
@@ -972,7 +973,8 @@
                     "items": {
                       "type": "string",
                       "pattern": "^f-[1-9][0-9]*$"
-                    }
+                    },
+                    "maxItems": 1
                   }
                 }
               }
@@ -995,7 +997,8 @@
                     "items": {
                       "type": "string",
                       "pattern": "^v-[1-9][0-9]*$"
-                    }
+                    },
+                    "maxItems": 1
                   }
                 }
               }
@@ -1018,7 +1021,8 @@
                     "items": {
                       "type": "string",
                       "pattern": "^s-[1-9][0-9]*$"
-                    }
+                    },
+                    "maxItems": 1
                   }
                 }
               }

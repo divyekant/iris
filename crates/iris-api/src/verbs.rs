@@ -22,8 +22,8 @@ pub struct VerbBody {
     pub date: Option<String>,
 }
 
-/// The most characters of a reason.
-pub const MAX_REASON: usize = 500;
+/// The most characters of a reason: the limit of submit.
+pub use iris_changeset::MAX_REASON;
 
 /// Apply the verb `verb` (`close`, `decline`, `defer`, `skip`, `mute` or `dismiss`) of the person to
 /// the item `id`. Gives the item after the change, or `None` when no item
