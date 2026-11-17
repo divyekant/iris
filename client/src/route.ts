@@ -10,7 +10,7 @@ export type Route =
   | { view: "section"; key: SectionKey }
   | { view: "bundle"; rule: number }
   | { view: "gate"; declined: boolean }
-  | { view: "item" | "mail" | "job" | "matter"; id: string };
+  | { view: "item" | "mail" | "job" | "matter" | "start"; id: string };
 
 const LISTS = { commitments: "commitment", conversations: "conversation", feed: "feed", signals: "signal" } as const;
 
@@ -38,7 +38,10 @@ export function parse(hash: string): Route {
     return { view: "home" }; // A bad escape such as "%" in the hash.
   }
   if (name in LISTS) return { view: "list", form: LISTS[name as keyof typeof LISTS] };
-  if ((name === "item" || name === "mail") && id) return { view: name, id };
+  // #/item/c-4/job: the start of a job from the item (card R4-10).
+  const parts = hash.replace(/^#\/?/, "").split("/");
+  if (name === "item" && id && parts.length === 3 && parts[2] === "job") return { view: "start", id };
+  if ((name === "item" || name === "mail") && id && parts.length === 2) return { view: name, id };
   // #/brief/gate: all senders at the stranger gate. #/brief/declined: the senders that you ignored.
   if (name === "brief" && (id === "gate" || id === "declined")) return { view: "gate", declined: id === "declined" };
   if (name === "brief" && id in SECTIONS) return { view: "section", key: id as SectionKey };
@@ -59,6 +62,7 @@ export function parse(hash: string): Route {
 
 export const href = {
   item: (id: string) => `#/item/${encodeURIComponent(id)}`,
+  start: (id: string) => `#/item/${encodeURIComponent(id)}/job`,
   mail: (id: string) => `#/mail/${encodeURIComponent(id)}`,
   bundle: (rule: number) => `#/brief/bundle/${rule}`,
   job: (id: string) => `#/jobs/${encodeURIComponent(id)}`,

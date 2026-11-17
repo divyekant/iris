@@ -1,4 +1,4 @@
-// "Handle this" (R4-10) in a DOM: the button on the item page, the start form,
+// "Handle this" (R4-10) in a DOM: the link on the item page, the start page,
 // the body that it sends, and the answers of the engine.
 process.env.TZ = "America/Los_Angeles";
 import { test } from "node:test";
@@ -9,6 +9,7 @@ import { load, mount, until } from "./mount.mjs";
 globalThis.location = window.location;
 const fx = await load("/dev/fixtures.ts");
 const s = await load("/src/start.ts");
+const { parse, href } = await load("/src/route.ts");
 const commitment = (status = "open") => ({ ...fx.items.find((i) => i.id === "c-311"), status });
 const conversation = (status = "active") => ({ ...fx.items.find((i) => i.id === "v-88"), status });
 const text = (el) => el.textContent.replace(/\s+/g, " ");
@@ -35,8 +36,10 @@ const type = (view, value) => {
   view.flushSync();
 };
 
-test("Handle this shows only on an item that can start a job, and opens the form in place", async () => {
-  serve((method, path) => [200, path.endsWith("/job") ? preview("c-311") : {}]);
+const handle = (view) => view.target.querySelector("a.handle");
+
+test("Handle this shows only on an item that can start a job, and links to its start page", async () => {
+  serve(() => [200, {}]);
   for (const [item, shows] of [
     [commitment("open"), true],
     [commitment("done"), false],
@@ -46,22 +49,29 @@ test("Handle this shows only on an item that can start a job, and opens the form
     [conversation("muted"), false],
   ]) {
     const view = await mount("/src/views/Item.svelte", { item });
-    assert.equal(!!button(view, "Handle this"), shows, `${item.form} ${item.status}`);
+    assert.equal(!!handle(view), shows, `${item.form} ${item.status}`);
+    if (shows) assert.equal(handle(view).getAttribute("href"), `#/item/${item.id}/job`);
     view.destroy();
   }
-  const view = await mount("/src/views/Item.svelte", { item: commitment() });
-  button(view, "Handle this").click();
-  view.flushSync();
+  assert.deepEqual(parse("#/item/c-311/job"), { view: "start", id: "c-311" });
+  assert.deepEqual(parse("#/item/c-311"), { view: "item", id: "c-311" });
+  for (const bad of ["#/item/c-311/job/x", "#/item/c-311/jobs", "#/mail/m-1/job"]) assert.deepEqual(parse(bad), { view: "home" }, bad);
+  assert.equal(parse(href.start("c-311")).view, "start");
+});
+
+test("the start page shows the item, an empty goal and each message of the grant; Cancel goes back to the item", async () => {
+  serve(() => [200, preview("c-311")]);
+  location.hash = "";
+  const view = await mount("/src/views/StartPage.svelte", { item: commitment() });
   await until(() => view.target.querySelector(".thread"));
-  assert.equal(button(view, "Handle this"), undefined, "the button goes while the form is open");
+  assert.match(text(view.target), /Give this to an agent/);
+  assert.match(text(view.target), /Review contract section 4/);
   assert.equal(view.target.querySelector("textarea").value, "", "no text of the mail fills the goal");
   assert.match(text(view.target), /The agent reads 3 messages in 1 thread, and no other mail\./);
   assert.match(text(view.target), /Hidden from the agent for now/);
   assert.ok(button(view, "Start the job").disabled, "no start with an empty goal");
   button(view, "Cancel").click();
-  view.flushSync();
-  assert.equal(view.target.querySelector("textarea"), null);
-  assert.ok(button(view, "Handle this"));
+  assert.equal(location.hash, "#/item/c-311");
   view.destroy();
 });
 
@@ -133,17 +143,14 @@ test("an item that closed after the preview: the page shows the item as it is no
     return [200, commitment("done")];
   });
   location.hash = "";
-  const view = await mount("/src/views/Item.svelte", { item: commitment() });
-  button(view, "Handle this").click();
-  view.flushSync();
+  const view = await mount("/src/views/StartPage.svelte", { item: commitment() });
   await until(() => view.target.querySelector(".thread"));
   type(view, "Go.");
   button(view, "Start the job").click();
   await until(() => asked.some(([m, p]) => m === "GET" && p === "items/c-311"));
-  await until(() => !button(view, "Done"));
-  assert.match(text(view.target.querySelector("[role=alert]")), /The item is not open any more\./);
+  await until(() => view.target.querySelector("[role=alert]") && (view.flushSync(), button(view, "Start the job").disabled));
+  assert.match(text(view.target), /The item is not open any more\./);
   assert.ok(button(view, "Start the job").disabled, "no second start from a closed item");
-  assert.equal(button(view, "Handle this"), undefined);
   assert.equal(location.hash, "");
   view.destroy();
 });
@@ -157,9 +164,7 @@ test("after a 409, the due field takes the new due date of the item, unless the 
       return [200, { ...commitment(), due: { date: "2026-11-24", strict: false } }];
     });
     location.hash = "";
-    const view = await mount("/src/views/Item.svelte", { item: commitment() });
-    button(view, "Handle this").click();
-    view.flushSync();
+    const view = await mount("/src/views/StartPage.svelte", { item: commitment() });
     await until(() => view.target.querySelector(".thread"));
     if (edit) {
       const field = view.target.querySelector("input[type=date]");

@@ -8,7 +8,6 @@
   import { due, field, money, party, RECORD_FIELDS, when } from "../format";
   import { href } from "../route";
   import Act from "./Act.svelte";
-  import Start from "./Start.svelte";
   import { canStart } from "../start";
   import Code from "./Code.svelte";
 
@@ -66,8 +65,7 @@
     r.push(["State", item.status]);
     return r;
   });
-  // "Handle this" (R4-10): the start form opens in place.
-  let starting = $state(false);
+  // "Handle this" (R4-10): the start of a job, on its own page.
   let startable = $derived(canStart(item));
   let made = $derived(
     item.derived.by === "rule" ? `a fixed rule (${item.derived.rule})` : item.derived.by === "model" ? `the model ${item.derived.model}` : "you",
@@ -79,12 +77,11 @@
   <h1>{item.title}</h1>
 
   {#snippet handle()}
-    {#if startable && !starting}<button class="handle" type="button" onclick={() => (starting = true)}>Handle this</button>{/if}
+    {#if startable}<a class="handle" href={href.start(item.id)}>Handle this</a>{/if}
   {/snippet}
 
   <Act {item} onchange={(next) => (item = next)} more={handle} />
-  {#if item.form !== "commitment" && startable && !starting}<div class="alone">{@render handle()}</div>{/if}
-  {#if starting}<Start {item} oncancel={() => (starting = false)} onitem={(next) => (item = next)} />{/if}
+  {#if item.form !== "commitment" && startable}<div class="alone">{@render handle()}</div>{/if}
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>
@@ -153,7 +150,7 @@
     color: var(--color-primary);
     font: inherit;
     font-weight: 500;
-    cursor: pointer;
+    text-decoration: none;
     transition: background var(--transition-fast);
   }
   .handle:hover {
