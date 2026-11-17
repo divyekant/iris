@@ -110,8 +110,10 @@ Before the job process starts the agent, it writes the record
 `<data dir>/sessions/se-<id>.sandbox`, as on Linux (temporary file,
 `fsync`, `link`, `fsync` of the folder). The record holds the boot time
 (`sysctl kern.boottime`) and the resource coalition ID of the job process
-(`proc_pidinfo`, `PROC_PIDCOALITIONINFO`). A coalition ID is not used again
-in one boot. The agent runs only after the record exists.
+(`proc_pidinfo`, `PROC_PIDCOALITIONINFO`), and the egress port of the
+session (or none). A coalition ID is not used again in one boot. The agent
+runs only after the record exists. The reap removes the record only after
+`ended` is true.
 
 `ended(session)`:
 
@@ -169,9 +171,26 @@ There is no network namespace, so no relay. The agent connects to
 The proxy of the session takes clients from `127.0.0.1` on macOS: the
 engine passes `Ipv4Addr::LOCALHOST` as the peer (`sessions.rs`). macOS has
 only `127.0.0.1` on the loopback interface, so `session_peer` addresses do
-not work there. The port stays with its session until the reap (launcher
-spec), and the reap waits for `ended`, so a process of an old session
-cannot reach the proxy of a new session.
+not work there.
+
+Invariant: a process of a session reaches only the proxy of its own
+session, also after an engine crash. Two paths can give the port of a
+session that is not reaped to another proxy:
+
+- The engine runs: the proxy keeps its port until the reap (launcher
+  spec), and the reap waits for `ended`.
+- The engine crashed: the operating system freed the port, and a new
+  engine can get the same port for a new proxy. So a new trait method
+  `Isolation::holds_port(port) -> io::Result<bool>` reads the records in
+  `<data dir>/sessions/`. It is true if a record names the port and
+  `ended` of its session is false. The default method gives `false`
+  (Linux keeps the sessions apart by the peer address). The egress
+  callback of the engine starts the proxy, and if `holds_port` is true or
+  an error, it stops that proxy and starts a new one, at most 8 times.
+  Then the launch fails (`launch_failed`), fail closed.
+
+A crash between the start of the proxy and the record leaves no record,
+but then the agent did not start, so no process uses the port.
 
 ### Check
 
@@ -222,6 +241,7 @@ before the agent runs, or `ended` is false.
 | The engine crashes while a session runs | The pipe ends, the hold stops the agent; the new engine reads the record and calls `stop` and `ended` | Mac acceptance 4 |
 | The system starts again | The boot time differs: `ended` is true | Unit test with a record of another boot time |
 | The record cannot be written | `spawn` fails; the agent did not run | Unit test with a read-only sessions folder |
+| The engine crashes while an escaped process of session A lives, and a new engine gets the old port of A for the proxy of session B | `holds_port` is true for that port: the new engine drops that proxy and takes another port | Unit test: a record of a live coalition with port P makes `holds_port(P)` true; engine test with a test isolation that holds the first port |
 | A program file in a folder of the person (for example `~/.local/bin/claude`) | Only that file is readable | Mac acceptance 1 |
 
 ## Impact
@@ -232,7 +252,9 @@ before the agent runs, or `ended` is false.
   `stop`, `ended`, check) and `isolation_macos_tests.rs`.
 - `crates/iris-session/src/hold.rs` or the helper entry of the program:
   the shim and the `session-job` verb on macOS.
-- `crates/iris/src/sessions.rs`: the egress peer `127.0.0.1` on macOS.
+- `crates/iris/src/sessions.rs`: the egress peer `127.0.0.1` on macOS, and
+  the retry of the proxy start while `holds_port` is true.
+- `crates/iris-session/src/isolation.rs`: the trait method `holds_port`.
 - The launcher spec, "Isolation": the macOS form of the lifetime rule.
 - `docs/DEPLOYMENT.md`: the Mac needs a signed-in user (GUI domain).
 
