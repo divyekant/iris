@@ -1,7 +1,7 @@
 // The phone view (card R6-05): at 360, 390 and 768 px on a touch screen, the
 // brief, the review, an item and a mail show no horizontal scroll, and each
 // control is at least 44 px in each direction. Runs the fixtures dev server in
-// Chromium (playwright-core; the client setup installs the browser), with reduced
+// headless Chromium (playwright-core; the client setup installs the shell), with reduced
 // motion, so that no animation changes a size.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
