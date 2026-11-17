@@ -508,8 +508,10 @@ pub fn apply(
         // A gone message has no provider ID here. An undo of the entry `o`
         // changes a message only if `o` changed it, and no later entry
         // changed it, except the actions of the undos of `o`. A later entry
-        // that is `undone`, and the undo of it, change nothing in sum, so
-        // they do not count: undo, then undo again, works. Step 2 of the
+        // `e` does not count for a message that the undo of `e` (its
+        // `undone_by`) changed back, and the rows of that undo do not count
+        // either: undo, then undo again, works. A message that the undo of
+        // `e` skipped, or with an unknown result, still blocks. Step 2 of the
         // undo of a `trash` changes only a message that an `untrash` of an
         // undo of `o` changed (section 7.4).
         let page: Vec<(i64, Option<String>, bool)> = store.read(|c| {
@@ -525,10 +527,22 @@ pub fn apply(
                            AND (lm.done = 1 OR lm.listed = 'unknown')
                            AND l.action_id NOT IN (SELECT action_id FROM ledger_undo
                                                    WHERE ledger_id = u.ledger_id)
-                           AND l.state <> 'undone'
-                           AND l.action_id NOT IN (
-                             SELECT x.action_id FROM ledger_undo x
-                             JOIN ledger e ON e.id = x.ledger_id WHERE e.state = 'undone'))
+                           -- A later entry that its undo reversed on this message.
+                           AND NOT (l.state = 'undone' AND EXISTS (
+                             SELECT 1 FROM ledger_message r
+                             WHERE r.ledger_id = l.undone_by
+                               AND r.message_id = am.message_id AND r.done = 1))
+                           -- The row of that undo, by any step of its changeset.
+                           AND NOT (lm.done = 1 AND EXISTS (
+                             SELECT 1 FROM ledger_undo x
+                             JOIN ledger e ON e.id = x.ledger_id AND e.state = 'undone'
+                             JOIN ledger ub ON ub.id = e.undone_by
+                             JOIN changeset_action ua ON ua.id = ub.action_id
+                             JOIN changeset_action la ON la.id = l.action_id
+                             JOIN ledger_message r ON r.ledger_id = ub.id
+                             WHERE x.action_id = l.action_id
+                               AND la.changeset_id = ua.changeset_id
+                               AND r.message_id = am.message_id AND r.done = 1)))
                        AND (u.step = 1 OR EXISTS (
                          SELECT 1 FROM ledger_undo f JOIN ledger l ON l.action_id = f.action_id
                          JOIN ledger_message lm ON lm.ledger_id = l.id
