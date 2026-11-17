@@ -71,26 +71,52 @@ test("while sending is off, a banner says so and no send has a time", async () =
   }
 });
 
-test("a cancel removes the card; a send that started keeps its card and says why", async () => {
+test("the cards follow the engine: a cancel note stays, and a new send of the draft shows", async () => {
+  const all = fx.outbox().sends;
+  let sends = all;
   const net = serve((path, method) => {
-    if (method === "POST" && path === "outbox/d-14/cancel") return [200, { cancelled: "d-14" }];
-    if (method === "POST" && path === "outbox/d-15/cancel") return [409, { error: "The send started. It cannot be cancelled." }];
-    return [200, fx.outbox()];
+    if (method === "POST" && path === "outbox/d-14/cancel") {
+      sends = sends.filter((x) => x.draft !== "d-14");
+      return [200, { cancelled: "d-14" }];
+    }
+    if (method === "POST" && path === "outbox/d-15/cancel") {
+      // The release claimed d-15 and it leaves: the next read has no d-15.
+      sends = sends.filter((x) => x.draft !== "d-15");
+      return [409, { error: "The send started. It cannot be cancelled." }];
+    }
+    return [200, { ...fx.outbox(), count: sends.length, sends }];
   });
   const app = await mount("/src/views/Outbox.svelte", { first: fx.outbox() });
+  const cards = () => [...app.target.querySelectorAll("li.card")];
+  const button = (subject) => cards().find((c) => c.textContent.includes(subject)).querySelector("button");
   try {
-    const cancel = (draft) => [...app.target.querySelectorAll("li.card")].find((c) => c.textContent.includes(draft === "d-14" ? "Signing" : "Renewal")).querySelector("button");
-    cancel("d-14").click();
-    await until(() => app.target.querySelectorAll("li.card").length === 2);
+    button("Signing").click();
+    await until(() => cards().length === 2);
     app.flushSync();
-    assert.match(text(app.target), /Cancelled\. It does not leave\./);
-    cancel("d-15").click();
-    await until(() => app.target.querySelector('[role="alert"]'));
-    assert.match(text(app.target.querySelector('[role="alert"]')), /The send started\. It cannot be cancelled\./);
-    assert.equal(app.target.querySelectorAll("li.card").length, 2);
+    assert.match(text(app.target.querySelector(".notes")), /"Re: Signing on Friday" is cancelled\. It does not leave\./);
+    button("Renewal").click();
+    await until(() => cards().length === 1);
+    app.flushSync();
+    // The card went with the poll, and the note says why.
+    assert.match(text(app.target.querySelector(".notes")), /"Renewal: \$48,000 for 12 months" started to send\. It cannot be cancelled\./);
+    // A new send of the cancelled draft d-14 comes back from the engine: it shows, with its Cancel button.
+    sends = [...sends, { ...all[0], subject: "Re: Signing on Friday, again" }];
+    app.target.querySelector("li.card button").click(); // cancel d-16; the reload brings the new d-14
+    await until(() => cards().some((c) => c.textContent.includes("again")));
+    app.flushSync();
+    assert.ok(button("again"));
     assert.ok(net.asked.includes("POST outbox/d-14/cancel"));
   } finally {
     app.destroy();
     net.restore();
   }
+});
+
+test("the fixture server cancels a send, as the API does", () => {
+  const before = fx.outbox().sends.length;
+  assert.deepEqual(fx.outboxPost("/outbox/d-16/cancel"), [200, { cancelled: "d-16" }]);
+  assert.equal(fx.outbox().sends.length, before - 1);
+  assert.equal(fx.outbox().count, before - 1);
+  assert.equal(fx.outboxPost("/outbox/d-16/cancel")[0], 404);
+  assert.equal(fx.outboxPost("/outbox/d-16/other"), undefined);
 });

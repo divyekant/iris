@@ -608,17 +608,27 @@ export function policyPost(path: string, body: { job?: string; verbs?: string[];
   return [200, policy];
 }
 
-/** GET /api/outbox: sending is on, and three sends wait. The times move with the clock. */
+/** The outbox of the fixture state: the holds run from the load of the dev server. */
+const outboxStart = Date.now();
+const outboxCancelled = new Set<string>();
+
+/** GET /api/outbox: sending is on, and three sends wait. A cancel removes a send. */
 export function outbox(): Outbox {
-  const at = (s: number) => new Date(Date.now() + s * 1000).toISOString();
-  return {
-    sending: { on: true, since: at(-3600) },
-    count: 3,
-    next: null,
-    sends: [
-      { draft: "d-14", state: "held", approved: at(-18), leaves: at(42), flags: [], readable: true, to: ["dana@acme.example"], cc: [], subject: "Re: Signing on Friday" },
-      { draft: "d-15", state: "held", approved: at(-5), leaves: at(55), flags: ["new_recipient", "money"], readable: true, to: ["dana@acme.example"], cc: ["legal@new.example"], subject: "Renewal: $48,000 for 12 months" },
-      { draft: "d-16", state: "approved", approved: at(0), leaves: at(60), flags: ["attachment"], readable: true, to: ["priya@example.com"], cc: [], subject: "The quote" },
-    ],
-  };
+  const at = (s: number) => new Date(outboxStart + s * 1000).toISOString();
+  const sends: Outbox["sends"] = [
+    { draft: "d-14", state: "held", approved: at(-18), leaves: at(42), flags: [], readable: true, to: ["dana@acme.example"], cc: [], subject: "Re: Signing on Friday" },
+    { draft: "d-15", state: "held", approved: at(-5), leaves: at(55), flags: ["new_recipient", "money"], readable: true, to: ["dana@acme.example"], cc: ["legal@new.example"], subject: "Renewal: $48,000 for 12 months" },
+    { draft: "d-16", state: "approved", approved: at(0), leaves: at(60), flags: ["attachment"], readable: true, to: ["priya@example.com"], cc: [], subject: "The quote" },
+  ].filter((x) => !outboxCancelled.has(x.draft)) as Outbox["sends"];
+  return { sending: { on: true, since: at(-3600) }, count: sends.length, next: null, sends };
+}
+
+/** POST /api/outbox/<d-N>/cancel, as the API answers: 200, or 404 for a draft with no send that waits. */
+export function outboxPost(path: string): [number, unknown] | undefined {
+  const cancel = path.match(/^\/outbox\/([^/?]+)\/cancel$/);
+  if (!cancel) return undefined;
+  const draft = decodeURIComponent(cancel[1]);
+  if (!outbox().sends.some((x) => x.draft === draft)) return [404, { error: "Not found." }];
+  outboxCancelled.add(draft);
+  return [200, { cancelled: draft }];
 }

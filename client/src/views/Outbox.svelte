@@ -17,8 +17,9 @@
   let box = $state(first);
   let now = $state(Date.now());
   let busy = $state("");
-  let errors = $state<Record<string, string>>({});
-  let done = $state<string[]>([]);
+  // What each cancel did, as lines above the cards. The cards show only the
+  // sends that the engine gives, so a new send of the same draft shows too.
+  let notes = $state<string[]>([]);
 
   const tick = setInterval(() => (now = Date.now()), 1000);
   const stop = poll(loadOutbox, (v) => (box = v), 5000);
@@ -27,7 +28,6 @@
     stop();
   });
 
-  const shown = $derived(box.sends.filter((s) => !done.includes(s.draft)));
 
   /** The time left as "0:42" or "3:05", or null when the send can leave now. */
   function left(s: OutboxSend): string | null {
@@ -54,16 +54,24 @@
 
   const to = (s: OutboxSend) => [...(s.to ?? []), ...(s.cc ?? [])];
 
+  const name = (s: OutboxSend) => (s.readable && s.subject ? `"${s.subject}"` : `The send of ${s.draft}`);
+
   async function cancel(s: OutboxSend) {
     busy = s.draft;
-    errors = { ...errors, [s.draft]: "" };
     try {
       await post(`outbox/${encodeURIComponent(s.draft)}/cancel`, {});
-      done = [...done, s.draft];
+      notes = [...notes, `${name(s)} is cancelled. It does not leave.`];
     } catch (e) {
-      errors = { ...errors, [s.draft]: own(e) };
+      // A 409: the release claimed the send. The note stays after its card goes.
+      const started = (e as { status?: number }).status === 409;
+      notes = [...notes, started ? `${name(s)} started to send. It cannot be cancelled.` : `${name(s)}: ${own(e)}`];
     } finally {
       busy = "";
+    }
+    try {
+      box = await loadOutbox();
+    } catch {
+      // The poll tries again.
     }
   }
 </script>
@@ -75,13 +83,15 @@
   <p class="off" role="status"><strong>Sending is off. Sends wait here.</strong> To turn it on, run <code>iris sending on</code> at the terminal.</p>
 {/if}
 
-{#if done.length > 0}<p class="note" role="status">{done.length === 1 ? "Cancelled. It does not leave." : `${done.length} sends cancelled. They do not leave.`}</p>{/if}
+{#if notes.length > 0}
+  <ul class="notes" role="status">{#each notes as note, i (i)}<li>{note}</li>{/each}</ul>
+{/if}
 
-{#if shown.length === 0}
+{#if box.sends.length === 0}
   <p class="empty">No mail waits to leave.</p>
 {:else}
   <ul class="cards">
-    {#each shown as s (s.draft)}
+    {#each box.sends as s (s.draft)}
       <li class="card">
         <p class="to">To {s.readable ? to(s).join(", ") : "recipients that Iris cannot read"}</p>
         <p class="subject">{s.readable ? s.subject || "(no subject)" : "Iris cannot read this draft"}</p>
@@ -95,7 +105,6 @@
           </div>
           <button type="button" class="pill" onclick={() => cancel(s)} disabled={!!busy}>{busy === s.draft ? "Cancelling" : "Cancel"}</button>
         </div>
-        {#if errors[s.draft]}<p role="alert">{errors[s.draft]}</p>{/if}
       </li>
     {/each}
   </ul>
@@ -131,9 +140,11 @@
     font-family: var(--font-family-mono);
     font-size: var(--font-size--1);
   }
-  .note {
-    color: var(--color-text-muted);
+  .notes {
+    display: grid;
+    gap: var(--space-1);
     margin: 0 0 var(--space-4);
+    color: var(--color-text-muted);
   }
   ul {
     list-style: none;
@@ -142,11 +153,6 @@
   }
   p {
     margin: 0;
-  }
-  [role="alert"] {
-    color: var(--color-text);
-    font-size: var(--font-size--1);
-    margin-top: var(--space-2);
   }
   .to {
     color: var(--color-text-muted);
