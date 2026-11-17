@@ -528,7 +528,8 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             let unchanged = before.is_some_and(|b| {
                 b.modseq == mark.modseq && b.count == mark.count && b.next == mark.next
             });
-            if before.is_some_and(|b| b.modseq == 0 || mark.modseq == 0) && !unchanged {
+            // `NOMODSEQ`: a flag change leaves no trace (spec section 5).
+            if mark.modseq == 0 || before.is_some_and(|b| b.modseq == 0) {
                 return Err(Error::HistoryExpired);
             }
             let mut changes = Vec::new();
