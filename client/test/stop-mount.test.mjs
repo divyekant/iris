@@ -251,3 +251,33 @@ test("a Resume with no answer, then a read of the old stop, stays not known unti
     band.destroy();
   }
 });
+
+test("only one Stop or Resume runs at a time", async () => {
+  const { act, stopState } = await load("/src/views/Stop.svelte");
+  Object.assign(stopState, { stopped: true, since, live: 0, busy: false, known: false, busyAction: "", note: "", error: "" });
+  const posts = [];
+  let release;
+  globalThis.fetch = async (url, init) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if ((init?.method ?? "GET") === "POST") {
+      posts.push(path);
+      await new Promise((r) => (release = r));
+    }
+    const out = path === "resume" ? { stopped: false, since: null, resumed: true } : { stopped: false, since: null, live: 0, busy: false };
+    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const button = await mount("/src/views/Stop.svelte", { place: "button" });
+  try {
+    const resuming = act("resume");
+    await until(() => posts.length === 1);
+    button.flushSync();
+    assert.equal(button.target.querySelector("button.stop-all").disabled, true);
+    await act("stop");
+    assert.deepEqual(posts, ["resume"], "no Stop while the Resume runs");
+    release();
+    await resuming;
+    assert.equal(stopState.stopped, false);
+  } finally {
+    button.destroy();
+  }
+});

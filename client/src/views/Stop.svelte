@@ -71,6 +71,9 @@
 
   /** Stop all agent work, or resume it. */
   export async function act(kind: "stop" | "resume") {
+    // One Stop or Resume at a time: two writes can commit in the other order
+    // than their answers, and then the screen shows the wrong one.
+    if (stopState.busyAction) return;
     const n = ++newest;
     failedAction = "";
     Object.assign(stopState, { busyAction: kind, error: "", note: "" });
@@ -100,7 +103,7 @@
   <button
     class="stop-all"
     type="button"
-    disabled={shared.busyAction === "stop"}
+    disabled={shared.busyAction !== ""}
     aria-label={shared.busyAction === "stop" ? "Stopping all agent work" : "Stop all agent work"}
     title="Stop all agent work. Each running agent ends. After Resume, run a job again to start it."
     onclick={() => act("stop")}
