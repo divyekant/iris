@@ -263,9 +263,12 @@ So the pipe ties the session to the engine: when the engine process ends for
 any reason, the kernel closes the pipe, and the helper stops the agent. A
 process that the agent moves out of its group
 (`setsid`) is stopped by `Isolation::stop`, which the helper calls on the
-end of the pipe with no engine. If the helper is killed too, the lifetime
-rule of the isolation ends each process of the session. So no process of a
-session outlives both the engine and the helper.
+end of the pipe with no engine. If the helper is killed too, on Linux the
+lifetime rule of the isolation ends each process of the session, so no
+process of a session outlives both the engine and the helper. On macOS
+such a process can live until the next engine calls `stop` and catches it,
+and the session is not reaped before (the macOS exception in
+[Isolation](#isolation)).
 
 The helper is the same program as the engine, so no new file is installed.
 
@@ -493,7 +496,9 @@ The one exception is the egress port of the session (see
 It shows the agent only the workspace (read and write), a private empty
 home and `/tmp` (read and write), and the programs and system files of the
 sandbox spec (read only). It shows no settings or credential file of the
-person. It ends each process in it when the session ends.
+person. It ends each process in it when the session ends: on Linux by the
+lifetime rule, on macOS by `stop` before the reap (the macOS exception
+below).
 
 `iris_session::Isolation` is the interface. It gives:
 

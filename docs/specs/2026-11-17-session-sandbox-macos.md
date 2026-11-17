@@ -21,8 +21,12 @@ evidence (see [Evidence](#evidence)).
 1. On macOS, `system(data_dir)` gives an isolation that passes its check.
 2. Goals 2, 3 and 4 of the Linux spec hold on macOS: the network is only the
    egress port of the session; the data folder is not visible other than
-   the workspace of the job; a write outside the workspace, the private
-   home and the private `/tmp` of the session is refused.
+   the workspace of the job and the private home and `/tmp` of the
+   session; a write outside these three folders is refused. The private
+   home and `/tmp` are in the data folder (`sessions/se-<id>.home` and
+   `sessions/se-<id>.tmp`), because macOS has no `tmpfs` for a normal
+   user. They are empty at the start, only this session sees them, and
+   the reap removes them. No other path of the data folder is visible.
 3. `ended(session)` is exact: it is true only when no process of the
    session runs, also a process that called `setsid`. It is never true
    while a process of the session runs.
