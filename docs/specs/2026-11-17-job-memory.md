@@ -14,7 +14,7 @@ finds its notes at the wake.
 The file lives only in the workspace folder, `<data dir>/workspaces/j-<id>`.
 The backup of the data folder (`Store::backup`, specification 1, section 5.1)
 copies `iris.db`, the content files, the key and `policy.toml`. It does not
-copy the workspaces. So these events lose the memory of each job:
+copy the workspaces (issue #350). So these events lose the memory of each job:
 
 - A restore from a backup.
 - A move of the data folder to a new computer with the backup.
@@ -36,8 +36,8 @@ notes. The agent does the work again, or asks the person again.
 
 - Show the notes to the person in the web client or the job page.
 - A history of the notes: the store keeps the last copy only.
-- A backup of `drafts/`. Drafts that matter go into the store with
-  `iris draft` (R3-01).
+- A backup of `drafts/` (issue #350 stays open for it). Drafts that matter
+  go into the store with `iris draft` (R3-01).
 - A change to `iris job` verbs or to the session socket.
 
 ## Design
@@ -58,7 +58,7 @@ CREATE TABLE job_notes (
   ON CONFLICT(job_id) DO UPDATE`).
 - `text` is a BLOB: the store keeps the bytes as they are. Iris does not
   check UTF-8 and does not change line ends.
-- 65,536 bytes (64 KiB) is the limit, `iris_job::NOTES_MAX`.
+- 65,536 bytes (64 KiB) is the limit, `iris_job::NOTES_MAX` (issue #563).
 - Nothing deletes a row. The job store deletes no job (issue #249).
 
 `iris-job` gets two functions: `notes(store, job) -> Option<Vec<u8>>` and
