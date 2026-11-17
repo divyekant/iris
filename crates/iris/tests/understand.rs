@@ -605,7 +605,7 @@ fn an_idle_turn_runs_the_hourly_proposal_step() {
     assert!(eligible >= 2, "the mailbox gives candidates of 2 threads");
     let before = calls.load(Ordering::SeqCst);
     let now = iris::engine::now_ms();
-    iris::engine::understand_turn(&store, now);
+    iris::engine::understand_turn(&store, &mut Default::default(), now);
     assert_eq!(
         calls.load(Ordering::SeqCst),
         before + 1,
@@ -613,7 +613,7 @@ fn an_idle_turn_runs_the_hourly_proposal_step() {
     );
     assert_eq!(col(&store, "SELECT tried_at FROM matter_run"), Some(now));
     // The next turn: the run is idle and the hourly gate holds.
-    iris::engine::understand_turn(&store, now + 10_000);
+    iris::engine::understand_turn(&store, &mut Default::default(), now + 10_000);
     assert_eq!(calls.load(Ordering::SeqCst), before + 1);
 }
 

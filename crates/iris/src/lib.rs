@@ -12,6 +12,7 @@ macro_rules! say {
 pub mod cost;
 pub mod engine;
 pub mod notify;
+pub mod nudge;
 pub mod reply;
 pub mod session_socket;
 pub mod sessions;

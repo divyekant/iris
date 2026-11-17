@@ -969,3 +969,165 @@ fn a_draft_is_ready_exactly_while_the_checks_of_write_pass_on_its_message() {
     understood(&b.store);
     assert!(!ready(&b.store, t) && !checks_pass_on(&b.store, t));
 }
+
+/// A mailbox with one ask that the owner sent to Ana at the time 1000, and
+/// the open commitment owed to you that understanding made of it.
+fn asked(name: &str) -> (Box_, i64) {
+    let (b, _) = mailbox(name);
+    b.store
+        .put_messages(
+            1,
+            &[msg(
+                "ask",
+                "t-ask",
+                1000,
+                "SENT",
+                "me@example.com",
+                "ana@example.org",
+                Some("Ana, can you send the slides?"),
+            )],
+        )
+        .unwrap();
+    understood(&b.store);
+    let t = thread_of(&b.store, "t-ask");
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO sender(address, kind) VALUES ('ana@example.org', 'person')",
+                [],
+            )?;
+            let s = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('commitment', 1, 'open', json_object('direction', 'owed_to_you',
+                         'owner', json_object('kind', 'sender', 'sender', 's-' || ?1)), 1, 1)",
+                [s],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role)
+                 SELECT last_insert_rowid(), m.id, 'origin' FROM message m
+                  WHERE m.provider_id = 'ask'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    (b, t)
+}
+
+fn late_threads(store: &Store, now: i64) -> Vec<i64> {
+    store
+        .read(|c| Ok(late(c, now)?))
+        .unwrap()
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect()
+}
+
+#[test]
+fn a_thread_is_late_only_while_each_rule_holds() {
+    let at = 1000 + LATE_AFTER_MS;
+    // Each change, as SQL on thread ?1, and the time of the check.
+    let cases: &[(&str, &str, i64, bool)] = &[
+        ("late", "UPDATE thread SET id = id WHERE id = ?1", at, true),
+        ("too soon", "UPDATE thread SET id = id WHERE id = ?1", at - 1, false),
+        (
+            "due later",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('date', '2999-01-01')) WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "due passed",
+            "UPDATE item SET doc = json_set(doc, '$.due', json_object('at', '1970-01-01T00:00:01Z')) WHERE ?1 > 0",
+            at,
+            true,
+        ),
+        ("a service", "UPDATE sender SET kind = 'service' WHERE ?1 > 0", at, false),
+        ("a stranger", "UPDATE sender SET kind = 'stranger' WHERE ?1 > 0", at, false),
+        ("done", "UPDATE item SET status = 'done' WHERE ?1 > 0", at, false),
+        (
+            "you owe",
+            "UPDATE item SET doc = json_set(doc, '$.direction', 'you_owe') WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "hidden",
+            "UPDATE item SET doc = json_set(doc, '$.attention', json_object('state', 'hidden')) WHERE ?1 > 0",
+            at,
+            false,
+        ),
+        (
+            "hostile",
+            "UPDATE message SET hostile = '[\"spoof\"]' WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "not understood",
+            "UPDATE message SET understood_at = NULL WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "a ready draft",
+            "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+             SELECT ?1, max(id), 'x', 'm', 'p', 0, 1 FROM message WHERE thread_id = ?1",
+            at,
+            false,
+        ),
+        (
+            "a stale draft",
+            "INSERT INTO reply_draft(thread_id, based_on, body, model, prompt, samples, created_at)
+             SELECT ?1, min(id), 'x', 'm', 'p', 0, 1 FROM message",
+            at,
+            true,
+        ),
+    ];
+    for (name, sql, now, want) in cases {
+        let (b, t) = asked(&format!("late-{}", name.replace(' ', "-")));
+        b.store
+            .write(|tx| {
+                tx.execute(sql, [t])?;
+                Ok(())
+            })
+            .unwrap();
+        let want: Vec<i64> = if *want { vec![t] } else { vec![] };
+        assert_eq!(late_threads(&b.store, *now), want, "{name}");
+    }
+
+    // Ana answers: not late. The owner sends a nudge: late again only
+    // after the wait.
+    let (b, t) = asked("late-answer");
+    let add = |id: &str, date: i64, label: &str, from: &str| {
+        b.store
+            .put_messages(
+                1,
+                &[msg(
+                    id,
+                    "t-ask",
+                    date,
+                    label,
+                    from,
+                    "x@example.org",
+                    Some("Hi"),
+                )],
+            )
+            .unwrap();
+        understood(&b.store);
+    };
+    add("answer", 2000, "INBOX", "ana@example.org");
+    assert!(late_threads(&b.store, at + 5000).is_empty());
+    add("nudge", 3000, "SENT", "me@example.com");
+    assert!(late_threads(&b.store, 3000 + LATE_AFTER_MS - 1).is_empty());
+    assert_eq!(late_threads(&b.store, 3000 + LATE_AFTER_MS), [t]);
+
+    // A nudge draft makes the thread not late until the thread changes.
+    let fake = Fake::new(r#"{"body": "Hi Ana, any news on the slides? D"}"#);
+    write(&b.store, t, Some(NUDGE_INTENT), &fake, 1).unwrap();
+    assert!(late_threads(&b.store, 3000 + LATE_AFTER_MS).is_empty());
+    let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(data["intent"], NUDGE_INTENT);
+    assert_eq!(data["reply_to"], "x@example.org");
+}

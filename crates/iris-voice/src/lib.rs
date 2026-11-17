@@ -195,6 +195,58 @@ pub fn ready_sql(threads: &str) -> String {
     )
 }
 
+/// The fixed intent of a nudge (card R3-07). It comes from Iris, not
+/// from mail, so it goes in the `intent` field of the data block. A draft
+/// with this intent is a nudge.
+pub const NUDGE_INTENT: &str = "A short, polite reminder of what I asked for in this thread. \
+The answer is late. Ask when they can do it. Do not repeat the whole ask.";
+
+/// How long after the last message of the owner a nudge can be prepared.
+pub const LATE_AFTER_MS: i64 = 2 * 86_400_000;
+
+/// The threads that need a nudge at the time `now_ms`, each with its
+/// newest message that counts, oldest first. A thread needs a nudge when:
+/// - it is the thread of the origin message of an open commitment that is
+///   owed to you by a `person`, and that the brief shows (no `hide` or
+///   `bundle` rule), with no due date or a due date before `now_ms`;
+/// - its newest message that counts is from the owner (`SENT`) and is at
+///   least [`LATE_AFTER_MS`] old, so the person did not answer, and a
+///   nudge that the owner sent starts the wait again;
+/// - [`write`] can make a draft: no message that counts is hostile or waits
+///   for understanding;
+/// - it has no draft that the person can use now ([`ready_sql`]), so a
+///   draft of the owner is never replaced.
+pub fn late(c: &Connection, now_ms: i64) -> rusqlite::Result<Vec<(i64, i64)>> {
+    let newest = in_thread!("t.id");
+    let all = in_thread!("n.thread");
+    let ready = ready_sql("SELECT n.thread");
+    let mut st = c.prepare_cached(&format!(
+        "WITH t(id) AS (
+           SELECT DISTINCT om.thread_id FROM item
+             JOIN item_source os ON os.item_id = item.id AND os.role = 'origin'
+             JOIN message om ON om.id = os.message_id
+            WHERE item.form = 'commitment' AND item.status = 'open'
+              AND json_extract(item.doc, '$.direction') = 'owed_to_you'
+              AND coalesce(json_extract(item.doc, '$.attention.state'), 'shown') = 'shown'
+              AND (SELECT kind FROM sender WHERE id =
+                     CAST(substr(json_extract(item.doc, '$.owner.sender'), 3) AS INTEGER)) = 'person'
+              AND coalesce(unixepoch(coalesce(json_extract(item.doc, '$.due.at'),
+                                              json_extract(item.doc, '$.due.date')), 'subsec') * 1000,
+                           0) < ?1),
+         n(thread, newest) AS (SELECT t.id, (SELECT m.id {newest} {NEWEST} LIMIT 1) FROM t)
+         SELECT n.thread, n.newest FROM n JOIN message nm ON nm.id = n.newest
+          WHERE coalesce(nm.internal_date, 0) <= ?1 - ?2
+            AND EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                         WHERE ml.message_id = nm.id AND l.provider_id = 'SENT')
+            AND NOT EXISTS (SELECT 1 {all}
+                             AND ({HOSTILE} OR b.message_id IS NULL OR m.understood_at IS NULL))
+            AND NOT {ready}
+          ORDER BY n.newest"
+    ))?;
+    let rows = st.query_map([now_ms, LATE_AFTER_MS], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
 fn snapshot(c: &Connection, thread: i64) -> rusqlite::Result<Snapshot> {
     let (count, not_ready, hostile) = c
         .prepare_cached(&format!(
