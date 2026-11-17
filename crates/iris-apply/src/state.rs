@@ -303,7 +303,11 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
             Value::Null => remove(&mut new, f),
             v => iris_talk::set_field(&mut new, f, v.clone()),
         });
-        if !fits {
+        // The restored item must be valid against the schemas, as after a
+        // correction (with a placeholder sender ID, so no sender row yet).
+        let mut check = new.clone();
+        iris_understand::set_senders(&mut check, &mut |_, _| 1);
+        if !fits || iris_understand::validate(&check).is_err() {
             counts.unchanged += 1;
             continue;
         }
@@ -356,19 +360,35 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
     Ok(Outcome::Applied(counts))
 }
 
-/// Remove the field at a dotted path. Gives false, and changes nothing, if
-/// the field is an element of an array: a removal would move the others.
+/// Remove the field at a dotted path, and each parent object that becomes
+/// empty: a correction makes the missing parents of its path (`due` of
+/// `due.date`). Gives false, and changes nothing, if the field is an element
+/// of an array: a removal would move the others.
 fn remove(doc: &mut Value, field: &str) -> bool {
     if doc.pointer(&pointer(field)).is_none() {
         return true;
     }
-    let (parent, last) = match field.rsplit_once('.') {
-        Some((p, l)) => (pointer(p), l),
-        None => (String::new(), field),
-    };
-    match doc.pointer_mut(&parent) {
-        Some(Value::Object(map)) => map.remove(last).is_some(),
-        _ => false,
+    let mut path = field;
+    loop {
+        let (parent, last) = match path.rsplit_once('.') {
+            Some((p, l)) => (p, l),
+            None => ("", path),
+        };
+        let at = if parent.is_empty() {
+            String::new()
+        } else {
+            pointer(parent)
+        };
+        match doc.pointer_mut(&at) {
+            Some(Value::Object(map)) => {
+                map.remove(last);
+                if parent.is_empty() || !map.is_empty() {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+        path = parent;
     }
 }
 

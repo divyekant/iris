@@ -949,3 +949,33 @@ fn a_state_entry_with_no_correction_ids_has_no_undo() {
     );
     assert!(iris_apply::undo(&b.store, entry, now()).is_err());
 }
+
+/// Invariant: the undo leaves a valid item. A correction of `due.date` on
+/// a commitment with no `due` makes `due`; the undo removes it again.
+#[test]
+fn the_undo_of_a_correction_removes_the_parent_that_it_made() {
+    let b = setup("undo-parent", "open", None);
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET doc = json_remove(doc, '$.due') WHERE id = 1",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let before = b.plain();
+    let a = b.approved(
+        Verb::Correct,
+        json!({ "field": "due.date", "value": "2026-11-20" }),
+    );
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    assert_eq!(b.doc()["due"]["date"], json!("2026-11-20"));
+    let (_, outcome) = b.undo(a);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if c.changed == 1),
+        "{outcome:?}"
+    );
+    assert_eq!(b.plain(), before);
+    assert!(iris_understand::validate(&b.doc()).is_ok());
+}
