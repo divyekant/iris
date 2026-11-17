@@ -249,6 +249,14 @@ fn an_answer_in_another_shape_is_a_decode_error() {
     fake.answer_next(&[&body]);
     let got = graph.delta(TOKEN, &inbox, None);
     assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // A page with both links.
+    let body = format!(r#"{{"value":[],"@odata.nextLink":"{link}","@odata.deltaLink":"{link}"}}"#);
+    fake.answer_next(&[&body]);
+    let got = graph.delta(TOKEN, &inbox, None);
+    assert!(matches!(got, Err(Error::Decode(_))), "{got:?}");
+    // The same page with one link is good: the test above fails for the right reason.
+    fake.answer_next(&[&format!(r#"{{"value":[],"@odata.deltaLink":"{link}"}}"#)]);
+    assert!(graph.delta(TOKEN, &inbox, None).is_ok());
     // A message with no isRead.
     let id = FakeGraph::id_of(0);
     fake.answer_next(&[&format!(
@@ -308,4 +316,18 @@ fn a_raw_message_above_the_limit_is_refused() {
     let fits = fake.add_message(&vec![b'a'; 1000], FakeGraph::folder_id("Inbox"));
     let mut sink = Vec::new();
     assert_eq!(graph.raw(TOKEN, &fits, &mut sink).unwrap(), 1000);
+}
+
+#[test]
+fn a_retry_after_above_the_backoff_cap_is_kept() {
+    // setup() caps our own waits at 50 ms.
+    let (fake, graph, _) = setup(5);
+    fake.fail_next(&[(429, Some(1))]);
+    let start = std::time::Instant::now();
+    graph.me(TOKEN).unwrap();
+    assert!(
+        start.elapsed() >= Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
 }

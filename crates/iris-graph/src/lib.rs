@@ -54,7 +54,8 @@ pub struct Config {
     pub base_url: String,
     /// The first wait after a refused call with no `Retry-After`.
     pub backoff_start: Duration,
-    /// The longest wait after a refused call.
+    /// The longest wait of the own backoff. A `Retry-After` of Graph is kept
+    /// as sent, inside the time limit of the call.
     pub backoff_max: Duration,
     /// The longest time for one call: each try, each wait after a refused
     /// try and the body.
@@ -377,9 +378,13 @@ impl Graph {
             }
         }
         let next = match (page.next_link, page.delta_link) {
-            (Some(n), _) => Next::More(self.checked(&n)?),
+            (Some(n), None) => Next::More(self.checked(&n)?),
             (None, Some(d)) => Next::Done(self.checked(&d)?),
-            (None, None) => return Err(Error::Decode("a delta page has no link".into())),
+            _ => {
+                return Err(Error::Decode(
+                    "a delta page needs exactly one of nextLink and deltaLink".into(),
+                ))
+            }
         };
         Ok(DeltaPage { changes, next })
     }
@@ -496,9 +501,9 @@ impl Graph {
                 return Ok(response);
             }
             if status == 429 || status >= 500 {
+                // Graph's own Retry-After is kept; the cap is for our waits.
                 let after = retry_after(&response)
-                    .unwrap_or_else(|| jitter(wait))
-                    .min(self.config.backoff_max);
+                    .unwrap_or_else(|| jitter(wait).min(self.config.backoff_max));
                 if Instant::now() + after >= deadline {
                     return Err(late());
                 }
