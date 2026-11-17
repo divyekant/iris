@@ -952,6 +952,10 @@ The conversation rule runs for each message that is not hostile mail:
   sent mail with the first `To`, `Cc` or `Bcc` recipient that is not an
   owner address (sent mail keeps `Bcc`). With no such party, the
   commitment is not valid. The other side is never the owner.
+- The instruction says that the sender kind `self` marks mail that the
+  owner sent. An ask in such mail is `owed_to_you`: the person that the
+  owner asks is the `owner` of the commitment. A promise in such mail is
+  `you_owe`.
 - The owner addresses are the address of the mailbox and, in sent mail,
   the `From` address (also an alias). A party with an owner address is the
   owner.

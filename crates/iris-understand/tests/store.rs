@@ -304,7 +304,7 @@ fn the_model_gives_a_commitment_and_the_mail_stays_in_the_data() {
     assert_eq!(item["form"], "commitment");
     assert_eq!(item["due"]["date"], "2026-01-02");
     assert_eq!(item["derived"]["model"], "fake-1");
-    assert_eq!(item["derived"]["prompt"], "understand/0.2");
+    assert_eq!(item["derived"]["prompt"], "understand/0.3");
     assert_eq!(item["counterparty"]["address"], "bo@example.org");
     assert_eq!(
         item["sources"][0]["quote"],
