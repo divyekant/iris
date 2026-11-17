@@ -134,9 +134,7 @@ fn parse_key((verb, cond, value, form): &Key) -> Option<(Option<Verb>, When)> {
     let mut w = when(cond, value)?;
     if verb == "hide" {
         let form = CHOICES.iter().find(|(_, f)| f.name() == form)?.1;
-        if w.sender.is_none() {
-            return None;
-        }
+        w.sender.as_ref()?;
         w.form = Some(form);
         Some((None, w))
     } else if form.is_empty() {
