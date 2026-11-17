@@ -56,16 +56,14 @@ with only these changes:
 
 | Change | Where |
 |---|---|
-| `"model": "iris/1"` in place of `"iris/0"` in each document | each schema with a `model` field, each sample, each writer in the code |
+| `"model": "iris/1.0"` in place of `"iris/0"` in each document. The schema accepts each value of the `pattern` `^iris/1\.(0|[1-9][0-9]*)$` (section 2) | each schema with a `model` field, each sample, each writer in the code |
 | `$id` `urn:iris:model:1:<name>` in place of `urn:iris:model:0:<name>`, also in each `$ref` | each schema |
 | The title `Iris open model 1: <name>`, with no `(draft)` | each schema |
 | The description of `attention` names spec 2, section 6.4, in place of "Reserved for specification 2" | `common.schema.json` |
 | The policy `version` accepts `0` and `1`, with the same meaning | `policy.schema.json`, `iris-policy` |
-| Each `date` value (a day with no time) gets the `pattern` `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` beside `"format": "date"` (section 5.4) | `common.schema.json` `$defs/date`, the `defer` date of `changeset.schema.json`, the rule `added` of `policy.schema.json` |
 | Each section of the spec text that says "version 0" says "version 1" | `docs/spec/01-mirror-store-forms.md`, `docs/spec/02-changeset-policy-ledger.md`, `docs/spec/03-job-workspace.md`, `docs/spec/README.md` |
 
-No field, enum value or rule of a schema changes in other ways. The date
-`pattern` adds no new limit for a validator that checks `format`. The freeze
+No field, enum value or rule of a schema changes in other ways. The freeze
 is a version mark, not a redesign. The fields of version 0 are in use in
 the code and in the web client. A redesign at the freeze makes every
 reader change and gives no gain that a later minor version cannot give.
@@ -81,9 +79,11 @@ first-start file and the samples write `version = 1`.
 These rules go into a new published text,
 `docs/spec/04-open-model-versions.md` (specification 4).
 
-1. The `model` field stays `"iris/1"` for each minor version of
-   version 1. The kit version (`docs/spec/VERSION`, for example `1.0`)
-   names the minor version.
+1. The `model` field names the major and the minor version:
+   `"iris/<major>.<minor>"`, for example `"iris/1.0"`. The kit version
+   (`docs/spec/VERSION`) is the same `<major>.<minor>`. A program compares
+   the major version as a number and the minor version as a number. It
+   never compares the full text.
 2. A minor version can only add:
    - an optional field;
    - a new value of an enum;
@@ -94,7 +94,7 @@ These rules go into a new published text,
    optional field required, and it never makes a rule stricter.
 4. Each valid sample of an older minor version stays in `examples/` and
    stays valid. The self-test (section 5.2) checks this rule.
-5. Each other change is a new major version: `"iris/2"` and
+5. Each other change is a new major version: `"iris/2.0"` and
    `urn:iris:model:2:<name>`.
 6. The maintainer approves each change of the model (as now,
    `docs/spec/README.md`).
@@ -104,7 +104,8 @@ These rules go into a new published text,
 A producer writes documents of the model. Iris is one producer.
 
 - Write only the fields of the minor version that the producer claims.
-- Write the `model` value `"iris/1"`.
+- Write the `model` value of the minor version that the producer claims,
+  for example `"iris/1.0"`.
 - Write each document so that it passes the schema of its kind, with no
   `format` check (section 5.4).
 - Do not write a key two times in one JSON object.
@@ -117,11 +118,16 @@ A producer conforms when each document that it writes passes
 
 A reader reads documents of the model. Iris is a reader of the policy file.
 
-- Accept each document of each minor version of version 1.
-- If a reader validates its input, use the schemas of the newest kit
-  version of version 1. Rule 2.4 makes these schemas accept each document
-  of an older minor version.
-- If a reader does not validate its input, ignore an unknown field.
+The reader knows the minor version of its own kit, `K`. It reads the
+minor version `M` of each document from `model`.
+
+- If `M` is `K` or lower, the reader can validate the document with the
+  schemas of its kit. Rule 2.4 makes these schemas accept each document of
+  an older minor version.
+- If `M` is higher than `K`, the document can hold fields, enum values and
+  verbs that the reader does not know. The reader must not validate it
+  with the schemas of its kit, because they refuse an unknown field. The
+  reader reads the fields that it knows, and ignores each unknown field.
 - If a reader finds an unknown enum value, it treats the one object that
   holds the value as not known. It can show the object as not known, or
   skip it.
@@ -130,7 +136,8 @@ A reader reads documents of the model. Iris is a reader of the policy file.
   verb or an unknown state. A minor version can add a verb, and a reader
   of an older version does not know its effect.
 
-- Refuse a document with a `model` value other than `"iris/1"`.
+- Refuse a document with a major version other than 1, or with a `model`
+  value that does not match `^iris/1\.(0|[1-9][0-9]*)$`.
 
 ### 5. The conformance kit
 
@@ -164,7 +171,7 @@ requirements.txt`.
 | Command | Does |
 |---|---|
 | `python3 run.py self-test` | Validates each file of `examples/` (each must pass) and of `examples/invalid/` (each must fail). Prints one line for each file that does not give the expected result. |
-| `python3 run.py check <folder>` | Validates each `.json`, `.jsonl` and `.toml` file at the top level of the folder. A `.jsonl` file holds one document on each line. Prints one line for each file or line that fails. |
+| `python3 run.py check <folder>` | Validates each `.json`, `.jsonl` and `.toml` file at the top level of the folder against the schemas of the kit. A document with a minor version higher than the kit fails ("newer than the kit"), because the kit cannot check it. A `.jsonl` file holds one document on each line. Prints one line for each file or line that fails. |
 | `python3 run.py --version` | Prints the kit version from `docs/spec/VERSION`. |
 
 The runner selects the schema by the file name: the text before the first
@@ -186,6 +193,9 @@ Exit codes:
 #### 5.3 The sample producer
 
 `producer/produce.py <out-folder>` uses only the Python standard library.
+It makes `<out-folder>` as a new folder, and stops with exit 1 if the path
+exists. It writes each file in the new folder with an exclusive create
+(`open(path, "x")`), so it never replaces a file.
 It reads each `.eml` file in `producer/mail/` with the `email` package, and
 writes one document for each message:
 
@@ -202,26 +212,36 @@ of Iris.
 
 #### 5.4 The `format` keyword
 
-Validators do not agree on `format`. In JSON Schema draft 2020-12, `format`
-is an annotation unless a validator turns on format checks. The Rust crate
-`jsonschema` and the Python library `jsonschema` check `email` with
-different rules.
+The schemas use three formats: `date`, `date-time` and `email`. In JSON
+Schema draft 2020-12, `format` is an annotation unless a validator turns on
+format checks, and validators do not agree on each format:
 
-So the kit does not depend on `format`:
+- `date` and `date-time` have one definition, RFC 3339. Iris refuses a
+  date that is not on the calendar (`iris-changeset`, `is_date`), so the
+  kit must refuse it too. A shape `pattern` alone accepts `2026-02-30`.
+- `email` has no common definition. The Rust crate and the Python library
+  check it with different rules.
 
-- Each invalid fixture fails also with format checks off. The Rust test
-  checks this rule (section "Acceptance criteria", item 3).
-- Two invalid fixtures fail only by `format` now:
-  `changeset-defer-bad-date.json` and `policy-added-time.toml`. The date
-  `pattern` of section 1 makes both fail with format checks off.
-- The runner runs with format checks off.
+So the kit checks `date` and `date-time`, and does not check `email`:
 
-The Iris tests keep format checks on (`iris_spec::validator`), so Iris as a
-producer meets the stricter rule.
+- The runner turns on the format checker for `date` and `date-time` only.
+  Python `jsonschema` checks `date-time` only when the library
+  `rfc3339-validator` is installed. With no such library, it accepts each
+  text with no error. So `requirements.txt` holds it, and the runner exits
+  2 if the `date-time` checker is not active.
+- Two invalid fixtures prove that each checker is active: a `date` of
+  `2026-02-30` and a `date-time` with the month 13. Each fixture has the
+  right shape, so only the format check makes it fail.
+- Each invalid fixture fails also when the `email` check accepts each
+  text. The Rust test checks this rule with an `email` format that accepts
+  each text (`with_format`).
+
+The Iris tests keep each format check on (`iris_spec::validator`), so Iris
+as a producer meets the stricter rule.
 
 ### 6. Changes in Iris
 
-1. One constant for the model value, `iris_store::MODEL = "iris/1"`. Each
+1. One constant for the model value, `iris_store::MODEL = "iris/1.0"`. Each
    writer uses it: `iris-understand`, `iris-talk`, `iris-observe`,
    `iris-changeset`, `iris-job`, `iris-workspace` and `iris-api`
    (`matters.rs`). Each of these crates depends on `iris-store` now.
@@ -230,7 +250,7 @@ producer meets the stricter rule.
    `urn:iris:model:0:common` becomes a constant beside `MODEL`, so the
    `$id` and the key cannot differ.
 2. A store migration rewrites the `model` of each stored item:
-   `UPDATE item SET doc = json_set(doc, '$.model', 'iris/1') WHERE
+   `UPDATE item SET doc = json_set(doc, '$.model', 'iris/1.0') WHERE
    json_extract(doc, '$.model') = 'iris/0'`. Only the item documents are
    stored. The changeset, the job and the matter documents are written
    when they are read.
@@ -265,9 +285,14 @@ writer validate its output against the schemas.
   version add what is missing.
 - Strict major versions only (each addition is a new major version). Not
   chosen: each new verb of releases 5 and 6 would break each reader.
-- A minor version in the `model` value (`"iris/1.1"`). Not chosen: a reader
-  that compares the value breaks at each addition. The kit version names
-  the minor version.
+- A `model` value with the major version only (`"iris/1"`) and the minor
+  version only in the kit. Not chosen: a reader of an older kit cannot
+  tell that a document is newer, so its strict schemas refuse each
+  addition.
+- Open schemas (no `additionalProperties: false`) so that an older schema
+  accepts a newer document. Not chosen: the strict schemas find a wrong
+  field name in a producer, and the version 0 samples in `invalid/` depend
+  on them. The minor version in `model` gives the reader the same result.
 - Validators checked for the runner:
   - Python `jsonschema` (maintained, draft 2020-12, offline registry
     through `referencing`): chosen. Python has `tomllib` in the standard
@@ -303,7 +328,10 @@ with a schema name of the kit.
 | A subfolder | Not read. | same |
 | A TOML date or time | Its RFC 3339 text. The self-test proves that the Python and the Rust converters give the same verdict on each sample. | `self-test` on `policy-*.toml` |
 | A schema with a `$ref` to an `$id` that is not in the kit | Exit 2 at load. No network call. | `conformance.rs` |
-| A validator that checks `format` | Same verdict on each fixture (section 5.4). | `conformance.rs`, format off |
+| A date that has the right shape and is not on the calendar | That file fails (section 5.4). | the two format fixtures |
+| No `rfc3339-validator` in the Python environment | Exit 2 ("the date-time check is not active"). | `self-test` |
+| A validator with a different `email` check | Same verdict on each fixture (section 5.4). | `conformance.rs` |
+| `produce.py` with an output path that exists | Exit 1. Nothing is written. | `conformance.rs` |
 | A very large file | The runner reads it into memory. The runner is a test tool, not a part of the product. | none (issue) |
 | Any other error | Exit 2 with the error. | none |
 
@@ -313,7 +341,7 @@ transaction, after the backup copy before a migration (spec 1, section
 
 A job workspace that a session uses during the upgrade keeps its `iris/0`
 files until its next build. Spec 3, section 11 builds the workspace before
-each session, so the next session gets `iris/1` files.
+each session, so the next session gets `iris/1.0` files.
 
 ## Impact
 
@@ -344,11 +372,16 @@ each session, so the next session gets `iris/1` files.
 - The Python `jsonschema` library and the Rust crate give the same verdict
   on each fixture of `develop` today. Evidence: a script in this session
   ran each file of `examples/` and `examples/invalid/` through Python
-  `jsonschema` 4.23.0. With format checks on, each file gave its expected
-  verdict, as in `cargo test -p iris-spec`. With format checks off, only
+  `jsonschema` 4.23.0 with its format checker. Each file gave its expected
+  verdict, as in `cargo test -p iris-spec`. With format checks off,
   `changeset-defer-bad-date.json` and `policy-added-time.toml` passed in
-  place of a fail. Section 1 adds the date `pattern` for them. The
+  place of a fail, so the kit must check `date` (section 5.4). The
   `spec-kit` test keeps the check for each later fixture.
+- Python `jsonschema` checks `date-time` only with `rfc3339-validator`.
+  Evidence: in this session, `FormatChecker(["date", "date-time"])`
+  raised `KeyError: 'date-time'` with no `rfc3339-validator`. With
+  `rfc3339-validator` 0.1.4, it refused `2026-02-30` (date) and
+  `2026-13-01T00:00:00Z` (date-time), and accepted valid values.
 - PyPI is reachable from a cloud session. Evidence: `pip download
   jsonschema==4.23.0` succeeded in this session. If a session cannot
   reach it, the `spec-kit` setup fails and local CI says so.
@@ -361,7 +394,18 @@ each session, so the next session gets `iris/1` files.
 
 ## External writes
 
-None. The kit, the producer and the migration write only local files.
+None outside the computer. The migration writes the store (section
+"Failure list"). The sample producer writes local files, with these rules:
+
+| Case | Result |
+|---|---|
+| Success | `<out-folder>` is new and holds one file for each document. Exit 0. |
+| `<out-folder>` exists (a file, a folder or a link) | Nothing is written. Exit 1 with the path. |
+| A write fails (no space, no permission) | The producer stops with exit 1. The new folder can hold some files. |
+| A crash or a stop during the writes | The new folder can hold some files, and the last file can be short. |
+| Retry after a failure or a crash | The producer refuses the existing folder. The person removes it, or names a new folder. A partial folder never passes as a complete run, because `run.py check` validates each file, and the `spec-kit` test checks the count of documents. |
+
+The `spec-kit` test runs the producer into a new temporary folder.
 
 ## Open questions
 
@@ -374,17 +418,23 @@ None. The kit, the producer and the migration write only local files.
 
 1. Each schema has `$id` `urn:iris:model:1:<name>` and no `(draft)` in its
    title. Red if `tests/schemas.rs` finds a schema with a version 0 mark.
-2. Each document that Iris writes has `"model": "iris/1"`. Red if a writer
-   test validates an `iris/0` document against a version 1 schema.
-3. Each invalid fixture fails with format checks off in the Rust
-   validator. Red if a fixture fails only by `format`.
-4. After the migration, no stored item has `"model": "iris/0"`. Red if the
+2. Each document that Iris writes has `"model": "iris/1.0"`. Red if a
+   writer test validates an `iris/0` document against a version 1 schema.
+   A sample with `"model": "iris/1.7"` passes, and samples with `"iris/1"`,
+   `"iris/1.01"` and `"iris/2.0"` fail. Red if the `model` pattern accepts
+   one of the three.
+3. Each invalid fixture fails in the Rust validator when the `email` check
+   accepts each text. The fixtures with `2026-02-30` and with the month 13
+   fail in the runner. Red if a fixture fails only by `email`, or if the
+   runner accepts an impossible date.
+4. After the migration, each stored item has `"model": "iris/1.0"`. Red if the
    migration test finds one.
 5. A policy file with `version = 0` and one with `version = 1` both load.
    Red if the policy test with a version 0 file puts Iris in observe mode.
 6. `run.py self-test` exits 0 in the `spec-kit` area. Red if a fixture
    gives a different verdict in Python than in Rust.
-7. `produce.py` writes one or more `feed` and `signal` documents, and
+7. `produce.py` writes one `feed` and one `signal` document for the
+   sample mail (the count is fixed by the files in `producer/mail/`), and
    `run.py check` on its folder exits 0. Red if the producer writes a
    field that a schema does not allow, or if it writes nothing (exit 1).
 8. `run.py check` on a folder with a bad file exits 1 and names the file.
