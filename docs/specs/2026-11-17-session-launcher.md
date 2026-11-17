@@ -156,7 +156,10 @@ the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 `TERM`, `TMPDIR`, `SHELL`, and the `pass_env` of the adapter. The built-in
 adapters pass `ANTHROPIC_API_KEY` (`claude-code`) and `OPENAI_API_KEY` and
 `CODEX_HOME` (`codex`): these are the keys of the agent tool, not of the
-mailbox. No variable of Iris goes to the agent.
+mailbox. A session with an egress port also gets `HTTPS_PROXY` and
+`https_proxy`, set by the engine to the port of the session (see
+[Model egress](#model-egress)); a value of the engine for these names is
+never passed. No variable of Iris goes to the agent.
 
 The working folder of the agent is the workspace. Its standard input is
 `/dev/null`. Its standard output and standard error are pipes to the
@@ -615,7 +618,10 @@ limit of 8 connections bound it. This is a known limit with an issue.
    ends the session with `engine`. Red if the agent runs or the row stays
    open.
 7. The environment of the agent has no variable that starts with `IRIS`, and
-   no variable outside the list. Red if the script finds one.
+   no variable outside the list. `HTTPS_PROXY` and `https_proxy` are there
+   only for an adapter with allowed hosts, with the port of the session.
+   Red if the script finds another variable, or a proxy variable with no
+   allowed host.
 8. In session mode, `iris search` does not open the store, and finds only
    granted messages: a word of a message outside the grant gives no
    result. Red if it opens the store or prints a message that is not
@@ -667,6 +673,8 @@ who does not run `iris job run`.
 4. R4-04 PR 4: the egress proxy in `iris-session`.
 5. R4-04 PR 5: the engine: supervisor, reap check, requests, session
    socket, egress ports, verbs and session mode.
+   The same PR changes the fixed rules of `JOB.md` in `iris-workspace` to
+   the text of the workspace spec (model host, no mailbox credentials).
 6. R4-04 PR 6: the read verbs `search`, `show` and `list` on the session
    socket.
 
