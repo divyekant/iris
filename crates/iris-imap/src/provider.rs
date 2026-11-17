@@ -368,6 +368,10 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 if e.highest_modseq.is_none() {
                     return Err(api("noCondstore", "an IMAP folder has no mod-sequences"));
                 }
+                // The removal rule of `CONDSTORE` only needs a `UIDNEXT` that only grows.
+                if e.uidnext.is_none() && !s.qresync() {
+                    return Err(api("noUidnext", "an IMAP folder has no UIDNEXT"));
+                }
                 cursor.push_str(&mark_line(&f.name, mark_of(&e)));
             }
             Ok(Profile {
