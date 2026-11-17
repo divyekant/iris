@@ -231,11 +231,35 @@ This mapping is a proposal for R6-10, which owns the provider interface:
 
 | Graph | Mirror label |
 |---|---|
-| The folder of the message | one label for the folder; `INBOX`, `SENT`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `sentitems`, `drafts`, `deleteditems` and `junkemail` |
+| The folder of the message | one label for the folder; `INBOX`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `drafts`, `deleteditems` and `junkemail`; `Folders/Sent Items` for `sentitems` (not `SENT`, see below) |
 | Each category | one user label (see the names below) |
 | `isRead` false | `UNREAD` |
 | `flag.flagStatus` `flagged` | `STARRED` |
 | `conversationId` | the thread ID |
+
+Trust rules. A folder or a header in the MIME text is data that the
+person or a sender can set. Two existing rules read such data as proof:
+
+- `SENT` is proof that the owner wrote the message (sender axis, the
+  hostile checks, the evidence of known people). The person can move a
+  received message into Sent Items, so the folder is not proof. For an
+  Outlook account, only a message that Iris sent itself (the sent copy of
+  a ledger send row, section 5) gets `SENT`. Each other message in
+  `sentitems` gets the label `Folders/Sent Items`, and the sender axis
+  decides it from its headers as any received mail. Known limit with its
+  own issue: mail that the owner sends from another Outlook client is not
+  owner evidence, until the release gate confirms a provenance field
+  (A16).
+- `Authentication-Results`: the header parsers trust only the header of
+  the Gmail receiver (`mx.google.com`). An Outlook message can carry a
+  forged header with that authserv-id. For an Outlook account, Iris
+  treats each `Authentication-Results` header as absent: the parsers get
+  the provider of the account and trust no authserv-id for `outlook`.
+  The DMARC result of each Outlook message is "unknown", so the sender
+  axis and the link checks use their rules for mail with no result. Known
+  limit with its own issue, until the release gate confirms which
+  authserv-id Exchange Online writes and that it removes a forged one
+  (A16).
 
 Label names must stay distinct, because search, policy rules and label
 actions match label names (spec 2). The names:
@@ -341,6 +365,8 @@ and MIME text of `$value`. All other input fails closed: the call gives
 | A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
 | A message moves after the round of its new folder | `Removed` only; the read by ID finds the new folder, and the message stays | fake move between rounds |
 | A folder of the mirror is not in the folder list | its link goes; each of its messages is read by ID: 404 is gone, else its new folder | fake folder delete |
+| An Outlook message with a forged `Authentication-Results: mx.google.com; dmarc=pass` | the header counts as absent; DMARC is unknown | unit test of the parser with the provider `outlook` |
+| A received message moved into Sent Items | label `Folders/Sent Items`, no `SENT`; the sender axis treats it as received mail | fake move to `sentitems` |
 | An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
 | 429 or 503 with `Retry-After` on a read | wait for it, then call again; a write never calls again | fake with `Retry-After` |
 | A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
@@ -417,6 +443,11 @@ Each assumption has the evidence of a Microsoft Learn page, read on
   example a converted body), the completion writes the content error and
   each later release stops, as the send spec requires: no wrong send is
   marked good.
+- A16. A provenance field that proves owner authorship of a message in
+  Sent Items (for example the MAPI property `PidTagMessageFlags`), and the
+  authserv-id that Exchange Online writes in `Authentication-Results`,
+  with the removal of a forged header. Evidence: `pending`. Until the
+  release gate confirms them, the trust rules of section 6 apply.
 - A13. An app registration needs an Entra tenant; a person with only a
   personal Microsoft account makes one with a free Azure account. Evidence:
   <https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app>.
