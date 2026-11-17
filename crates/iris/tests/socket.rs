@@ -336,7 +336,14 @@ fn the_command_waits_at_most_the_answer_wait_for_the_whole_answer() {
         }
     });
     let start = Instant::now();
-    let e = socket::request_with(&d, "drafts", json!({}), Duration::from_millis(400)).unwrap_err();
+    let e = socket::request_with(
+        &d,
+        "drafts",
+        json!({}),
+        Duration::from_millis(400),
+        "iris changeset --drafts",
+    )
+    .unwrap_err();
     assert_eq!(e.code, code::ERROR);
     assert!(
         start.elapsed() < Duration::from_secs(2),
@@ -506,7 +513,14 @@ fn a_large_document_streams_and_a_stalled_reader_frees_its_slot() {
     });
     std::thread::sleep(Duration::from_millis(100));
     let start = std::time::Instant::now();
-    let list = socket::request_with(&d, "drafts", json!({}), Duration::from_secs(5)).unwrap();
+    let list = socket::request_with(
+        &d,
+        "drafts",
+        json!({}),
+        Duration::from_secs(5),
+        "iris changeset --drafts",
+    )
+    .unwrap();
     assert_eq!(list, json!({ "changesets": [id] }));
     assert!(
         start.elapsed() < Duration::from_secs(3),
@@ -593,6 +607,10 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
         r#"{"ok":false,"code":9,"error":"x"}"#,
         r#"{"ok":false,"code":3}"#,
         r#"{"ok":"true","result":{"id":"cs-1","state":"draft","actions":[]}}"#,
+        r#"{"ok":true,"result":{"session":"invalid"}}"#,
+        r#"{"ok":true,"result":{"session":"se-0","reaped":true}}"#,
+        r#"{"ok":true,"result":{"session":"se-01","reaped":false}}"#,
+        r#"{"ok":true,"result":{"session":7,"reaped":true}}"#,
     ]
     .iter()
     .map(|l| l.as_bytes().to_vec())
@@ -604,16 +622,27 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 n";
+                let abc = b"{}[]\":,oktruefalseresultcodeerrorid1234 nsessionreaped-";
                 abc[(seed >> 33) as usize % abc.len()]
             })
             .collect();
         lines.push(line);
     }
     for line in &lines {
-        for verb in ["show", "drafts", "add", "submit", "withdraw"] {
+        for verb in [
+            "show", "drafts", "add", "submit", "withdraw", "job.run", "job.stop",
+        ] {
             match socket::parse_answer(verb, line) {
                 None => {}
+                Some(Ok(r)) if verb.starts_with("job.") => assert!(
+                    r["session"]
+                        .as_str()
+                        .and_then(iris_job::parse_session_id)
+                        .is_some()
+                        && (verb == "job.run" || r["reaped"].is_boolean()),
+                    "{verb} {}",
+                    String::from_utf8_lossy(line)
+                ),
                 Some(Ok(r)) => assert!(
                     r.is_object()
                         && (r["changesets"].is_array()
@@ -629,6 +658,8 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     let ok = br#"{"ok":true,"result":{"id":"cs-1","state":"draft","actions":[]}}"#;
     assert!(matches!(socket::parse_answer("show", ok), Some(Ok(_))));
     assert!(socket::parse_answer("drafts", ok).is_none());
+    let run = br#"{"ok":true,"result":{"session":"se-12"}}"#;
+    assert!(matches!(socket::parse_answer("job.run", run), Some(Ok(_))));
 }
 
 /// The command adds and submits the write verbs: a new mail to an account
@@ -736,4 +767,89 @@ fn the_cli_adds_draft_and_send() {
     std::fs::write(&file, "to: p@example.org").unwrap();
     let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// A fake engine: it reads one request line, then sends `answer`, or
+/// closes the connection with no answer if `answer` is `None`.
+fn one_answer(name: &str, answer: Option<&'static str>) -> PathBuf {
+    let d = dir(name);
+    std::fs::create_dir_all(&d).unwrap();
+    let l = std::os::unix::net::UnixListener::bind(d.join(socket::SOCKET)).unwrap();
+    std::thread::spawn(move || {
+        let mut s = l.incoming().next().unwrap().unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut s).read_line(&mut line).unwrap();
+        if let Some(a) = answer {
+            s.write_all(a.as_bytes()).unwrap();
+        }
+    });
+    d
+}
+
+fn job_command(d: &std::path::Path, args: &[&str]) -> Result<(), socket::Failure> {
+    use clap::Parser;
+    let mut all = vec!["iris", "--data", d.to_str().unwrap(), "job"];
+    all.extend_from_slice(args);
+    iris::run(iris::Cli::parse_from(all))
+}
+
+#[test]
+fn a_lost_job_answer_names_the_job_session_command() {
+    for (name, args) in [
+        ("lostrun", &["run", "j-1", "--agent", "script"][..]),
+        ("loststop", &["stop", "j-1"][..]),
+    ] {
+        let d = one_answer(name, None);
+        let e = job_command(&d, args).unwrap_err();
+        assert_eq!(e.code, code::ERROR, "{name}");
+        assert!(
+            e.error.contains("not known") && e.error.contains("iris job session j-1"),
+            "{name}: {}",
+            e.error
+        );
+        assert!(!e.error.contains("iris changeset"), "{name}: {}", e.error);
+    }
+}
+
+#[test]
+fn a_job_answer_of_the_engine_is_a_result() {
+    let d = one_answer(
+        "okrun",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\"}}\n"),
+    );
+    job_command(&d, &["run", "j-1", "--agent", "script"]).unwrap();
+    let d = one_answer(
+        "okstop",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\",\"reaped\":true}}\n"),
+    );
+    job_command(&d, &["stop", "j-1"]).unwrap();
+}
+
+#[test]
+fn a_stop_that_waits_too_long_gives_the_reason() {
+    let d = one_answer(
+        "slowstop",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\",\"reaped\":false,\"why\":\"the helper (process 7) still runs\"}}\n"),
+    );
+    let e = job_command(&d, &["stop", "j-1"]).unwrap_err();
+    assert!(
+        e.error.contains("the helper (process 7) still runs"),
+        "{}",
+        e.error
+    );
+}
+
+#[test]
+fn a_bad_job_id_is_a_usage_error_with_no_engine() {
+    let d = dir("badjob");
+    std::fs::create_dir_all(&d).unwrap();
+    for args in [
+        &["run", "bad", "--agent", "script"][..],
+        &["stop", "j-01"][..],
+        &["session", "x"][..],
+    ] {
+        let e = job_command(&d, args).unwrap_err();
+        assert_eq!(e.code, code::USAGE, "{args:?}: {}", e.error);
+        assert!(e.error.contains("not a job ID"), "{args:?}: {}", e.error);
+    }
 }

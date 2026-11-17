@@ -457,6 +457,17 @@ machine.
   removes `sessions/` logs older than 30 days.
 - After the reap of a session of a done job, the engine builds the
   workspace of the job the same way.
+- One build thread of the engine does these builds, in order. A build can
+  wait for the workspace lock with no limit, so no supervisor turn, stop
+  or run waits for a build.
+- In the same way, one stop thread of the engine stops the egress proxy
+  of each reaped session (`Proxy::stop`). A proxy stop joins the threads
+  of the proxy, so no supervisor turn, stop or run waits for it.
+- A supervisor turn does only fast work: the end in the store, the
+  `Proxy::close`, and the close of the socket and the pipe. Each ended session gets its own reap
+  thread for `Isolation::stop` and the reap check, which have no time
+  limit. A turn starts no second reap thread for a session while one
+  runs. So a slow session never holds the stop of another session.
 
 ### Isolation
 
@@ -546,7 +557,11 @@ no network stops them. The engine gives each session one narrow path out:
   (domain fronting), or a client that hides the name with Encrypted
   Client Hello, is a known limit (issue).
 - The proxy writes one line for each connection to its own file,
-  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). For an allowed
+  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
+  starts one proxy for each session that it registers, after the bind and
+  before the helper, with the log and the peer address of that session.
+  A revoke retry registers a second session, so it gets its own proxy. If
+  the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
   list writes it), the bytes in each direction, and the result
   (`closed`, `stopped` or `connect_failed`). For a refused request, the
@@ -655,6 +670,12 @@ exit code 3.
 
 ### The command
 
+- `iris session-hold` is not a verb of the command line: the program
+  checks this first argument before it reads the command line, and the
+  verb list (and the MCP tools) does not show it. Its command line is
+  `iris session-hold <data folder> <hold arguments>`. The helper builds the
+  isolation with the same data folder as the engine, because the isolation
+  keeps a record of each session there (R4-05).
 - `iris job run <j-id> --agent <name>` and `iris job stop <j-id>` are host
   verbs. They send a request on `iris.sock`, so only the engine starts and
   stops sessions.
@@ -668,8 +689,9 @@ exit code 3.
   start, a `launch_failed`, a stop before the start) is in the row, and
   `iris job session` shows it.
 - `iris job session <j-id>` (host verb) shows the last session of the job:
-  its ID, the agent, and its state (`starting`, `running`, `ending`,
-  `ended` with the end reason, or `reaped`). It reads the row of the store,
+  its ID, the agent, and its state: `starting` (open, no start),
+  `running` (open, started), `ending (<reason>)` (ended, not reaped yet)
+  or `ended (<reason>)` (ended and reaped). It reads the row of the store,
   so it works after a time-out or a lost connection of `iris job run`.
 - If the answer of `job.run` is lost (a time-out, a broken connection),
   `iris job run` prints that the result is unknown and tells the person to
@@ -929,8 +951,9 @@ and `dependsOn` on the board.
 | R4-04g | The hold helper in `iris-session`. | R4-04c |
 | R4-04h | The launch and the reap check (`iris_session::reap::reap_check`) in `iris-session`, and the fix of #432. | R4-04g |
 | R4-04d | The egress proxy in `iris-session`. | R4-04 |
-| R4-04e | The engine: supervisor (it calls the reap check of R4-04h), requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
-| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
+| R4-04e | The engine sessions: the supervisor (it calls the reap check of R4-04h), the end of the open sessions at the engine start, the egress port of each session, `iris job run`, `iris job stop` and `iris job session`, and the hidden `iris session-hold`. | R4-04h, R4-04d |
+| R4-04i | The session socket (`status`, and the verbs of R4-03 as the author of the session) and session mode of the command. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04e |
+| R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04i |
 
 R4-05 (the isolation of Linux) and R4-05m (macOS) depend on R4-04c, R4-04d and R4-04g. The
 cards that need a running session (R4-08, R4-11, R5-04) depend on R4-04e.

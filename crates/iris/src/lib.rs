@@ -13,6 +13,7 @@ pub mod cost;
 pub mod engine;
 pub mod notify;
 pub mod reply;
+pub mod sessions;
 pub mod socket;
 pub mod verbs;
 
@@ -262,12 +263,36 @@ pub enum Command {
         #[command(subcommand)]
         command: WatchCommand,
     },
+    /// Run, stop or show the session of an agent on a job (`j-3`). Only
+    /// the engine starts and stops sessions.
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
+    },
     /// The matters that Iris proposes and that you confirmed. Prints the
     /// JSON of the local API (`/api/matters`).
     Matters {
         #[command(subcommand)]
         command: Option<MattersCommand>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum JobCommand {
+    /// Start a session of an agent on the job. The command gives the
+    /// session ID when the engine registered it; `iris job session` shows
+    /// what happened next.
+    Run {
+        id: String,
+        /// The agent: `claude-code`, `codex`, or an agent of `agents.toml`.
+        #[arg(long)]
+        agent: String,
+    },
+    /// Stop the session of the job, and wait up to 15 seconds until each
+    /// of its processes stopped.
+    Stop { id: String },
+    /// Show the last session of the job and its state.
+    Session { id: String },
 }
 
 #[derive(Subcommand)]
@@ -523,6 +548,29 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         }
         c => add_request(c)?.map(|r| ("add", r, false)),
     };
+    if let Command::Job { command } = &cli.command {
+        // A bad job ID is a usage error, before the engine or the store.
+        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
+            command;
+        if iris_job::parse_job_id(id).is_none() {
+            return Err(socket::Failure {
+                code: socket::code::USAGE,
+                error: format!("{id} is not a job ID"),
+            });
+        }
+        let dir = match &data {
+            Ok(d) => d,
+            Err(f) => {
+                return Err(socket::Failure {
+                    code: f.code,
+                    error: f.error.clone(),
+                })
+            }
+        };
+        if let Some(r) = job_request(dir, command) {
+            return r;
+        }
+    }
     if let Some((verb, args, json)) = request {
         let out = socket_verb(&data?, verb, args, json)?;
         print!("{}", out.text);
@@ -532,6 +580,56 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error,
     })
+}
+
+/// `iris job run` and `iris job stop`: requests on the engine socket.
+/// `None` for `iris job session`, which reads the store.
+fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socket::Failure>> {
+    let (verb, id, args) = match c {
+        JobCommand::Run { id, agent } => (
+            "job.run",
+            id,
+            serde_json::json!({ "job": id, "agent": agent }),
+        ),
+        JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
+        JobCommand::Session { .. } => return None,
+    };
+    Some(
+        match socket::request_with(
+            dir,
+            verb,
+            args,
+            sessions::STOP_WAIT + std::time::Duration::from_secs(15),
+            // A lost answer: the run may be registered, or the stop may
+            // have ended the session. The store shows which.
+            &format!("iris job session {id}"),
+        ) {
+            Ok(r) => {
+                let session = r["session"].as_str().unwrap_or_default();
+                match verb {
+                    "job.run" => {
+                        println!(
+                            "{session}: registered. Run `iris job session {id}` for its state."
+                        );
+                        Ok(())
+                    }
+                    _ if r["reaped"] == true => {
+                        println!("{session}: stopped.");
+                        Ok(())
+                    }
+                    _ => Err(socket::Failure {
+                        code: socket::code::ERROR,
+                        error: format!(
+                            "{session}: the session ended, but its processes still stop ({}); \
+                         run `iris job session {id}` later",
+                            r["why"].as_str().unwrap_or("reason not known")
+                        ),
+                    }),
+                }
+            }
+            Err(f) => Err(f),
+        },
+    )
 }
 
 /// The `add` request on the engine socket of a verb that adds an action.
@@ -790,6 +888,25 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
+        Command::Job {
+            command: JobCommand::Session { id },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            match sessions::last_session(&store, job)? {
+                Some(s) => {
+                    println!(
+                        "{} {}: {}",
+                        iris_job::format_session_id(s.id),
+                        s.agent,
+                        sessions::state(&s)
+                    );
+                    Ok(())
+                }
+                None => Err(format!("{id} has no session")),
+            }
+        }
+        Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {
             let store = open()?;
             let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
@@ -1175,6 +1292,33 @@ fn check_loopback(addr: SocketAddr) -> std::io::Result<()> {
     }
 }
 
+/// Start the sessions of jobs: end each open session of the last engine,
+/// and start the supervisor thread. The helper of each session is this
+/// program with `session-hold`.
+pub fn start_sessions(store: Arc<Store>) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let data = store.dir().to_path_buf();
+    let helper: Arc<sessions::HelperCommand> = Arc::new(move |args: &[std::ffi::OsString]| {
+        let mut c = std::process::Command::new(&exe);
+        c.arg(SESSION_HOLD).arg(&data).args(args);
+        c
+    });
+    let isolation = iris_session::isolation::system(store.dir())
+        .map(|b| -> Arc<dyn iris_session::isolation::Isolation> { Arc::from(b) });
+    let s = sessions::Sessions::new(store, isolation, helper).map_err(std::io::Error::other)?;
+    let _ = sessions::SESSIONS.set(s.clone());
+    std::thread::Builder::new()
+        .name("sessions".into())
+        .spawn(move || s.supervise_forever())?;
+    Ok(())
+}
+
+/// The hidden first argument of the hold helper of a session. `main` runs
+/// it before the parse of the command line. The command line is
+/// `iris session-hold <data dir> <hold args>`: the helper builds the
+/// isolation with the same data folder as the engine.
+pub const SESSION_HOLD: &str = "session-hold";
+
 /// Serve the engine on `addr` until the process gets Ctrl-C. A thread runs
 /// the sync schedule.
 pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
@@ -1183,6 +1327,7 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
     // The engine lock and the socket come first: a second engine stops here.
     let bound = socket::bind(store.dir())?;
     let api_store = store.clone();
+    start_sessions(store.clone())?;
     let sync = engine::Engine::new(store, gmail, std::env::var("IRIS_TEST_TOKEN_URI").ok());
     std::thread::Builder::new()
         .name("sync".into())

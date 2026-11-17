@@ -323,6 +323,19 @@ pub fn answer_as(
     }
 }
 
+/// The `job` argument: a job ID such as `j-3`.
+fn job_arg(args: &serde_json::Map<String, Value>) -> Result<i64, Failure> {
+    let t = text(args, "job")?.ok_or_else(|| usage("give the job, for example j-3"))?;
+    iris_job::parse_job_id(t).ok_or_else(|| usage(format!("{t} is not a job ID")))
+}
+
+/// The sessions of this engine.
+fn sessions() -> Result<&'static Arc<crate::sessions::Sessions>, Failure> {
+    crate::sessions::SESSIONS
+        .get()
+        .ok_or_else(|| Failure::new(code::ERROR, "this engine runs no sessions"))
+}
+
 fn usage(why: impl Into<String>) -> Failure {
     Failure::new(code::USAGE, why)
 }
@@ -448,6 +461,39 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
             iris_changeset::revise(store, cs, me).map_err(|e| failure(e, cs))?;
             Ok(Done::Document(cs))
         }
+        // The host verbs of sessions (docs/specs/2026-11-17-session-launcher.md,
+        // "The command"). Only the person runs them: a session cannot start
+        // or stop a session.
+        Some(v @ ("job.run" | "job.stop")) if session => Err(Failure::new(
+            code::DENIED,
+            format!("{v} is a host verb: a session cannot run it"),
+        )),
+        Some("job.run") => {
+            only(&["job", "agent"])?;
+            let job = job_arg(args)?;
+            let agent = text(args, "agent")?.ok_or_else(|| usage("give the agent"))?;
+            let session = sessions()?
+                .run(job, agent)
+                .map_err(|e| Failure::new(code::DENIED, e))?;
+            Ok(Done::Value(
+                json!({ "session": iris_job::format_session_id(session) }),
+            ))
+        }
+        Some("job.stop") => {
+            only(&["job"])?;
+            let job = job_arg(args)?;
+            let (session, reaped) = sessions()?
+                .stop(job)
+                .map_err(|e| Failure::new(code::DENIED, e))?;
+            let mut answer = json!({
+                "session": iris_job::format_session_id(session),
+                "reaped": reaped.is_ok(),
+            });
+            if let Err(why) = reaped {
+                answer["why"] = why.into();
+            }
+            Ok(Done::Value(answer))
+        }
         Some("submit") => {
             only(&["changeset", "why"])?;
             let cs = need()?;
@@ -538,11 +584,23 @@ pub const MAX_ANSWER: u64 = 64 * 1024 * 1024;
 /// result. Code 4 when no engine answers the connect. Code 1 when the
 /// answer does not come.
 pub fn request(dir: &Path, verb: &str, args: Value) -> Result<Value, Failure> {
-    request_with(dir, verb, args, ANSWER_WAIT)
+    let recover = format!(
+        "iris changeset {}",
+        args["changeset"].as_str().unwrap_or("--drafts")
+    );
+    request_with(dir, verb, args, ANSWER_WAIT, &recover)
 }
 
-/// [`request`] with another wait for the whole answer, for tests.
-pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Result<Value, Failure> {
+/// [`request`] with another wait for the whole answer. `recover` is the
+/// command that shows the result when the answer is lost: the error of an
+/// unknown result names it.
+pub fn request_with(
+    dir: &Path,
+    verb: &str,
+    args: Value,
+    wait: Duration,
+    recover: &str,
+) -> Result<Value, Failure> {
     let mut line =
         serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
     line.push(b'\n');
@@ -556,21 +614,17 @@ pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Resu
             "the engine is not reachable: start it with `iris serve`",
         )
     })?;
-    let unknown = |hint: &str| {
+    let unknown = || {
         Failure::new(
             code::ERROR,
-            format!("the result is not known: run `iris changeset {hint}`"),
+            format!("the result is not known: run `{recover}`"),
         )
     };
-    let hint = args["changeset"]
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| "--drafts".into());
     stream
         .set_read_timeout(Some(wait))
         .and_then(|()| stream.set_write_timeout(Some(wait)))
         .and_then(|()| stream.write_all(&line))
-        .map_err(|_| unknown(&hint))?;
+        .map_err(|_| unknown())?;
     // One deadline for the whole answer: a peer that sends one byte at a
     // time cannot hold the command past `wait`. At most MAX_ANSWER.
     let deadline = Instant::now() + wait;
@@ -579,17 +633,23 @@ pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Resu
     while answer.last() != Some(&b'\n') {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() || answer.len() as u64 > MAX_ANSWER {
-            return Err(unknown(&hint));
+            return Err(unknown());
         }
-        stream
-            .set_read_timeout(Some(left))
-            .map_err(|_| unknown(&hint))?;
+        stream.set_read_timeout(Some(left)).map_err(|_| unknown())?;
         match std::io::Read::read(&mut stream, &mut chunk) {
-            Ok(0) | Err(_) => return Err(unknown(&hint)),
+            Ok(0) | Err(_) => return Err(unknown()),
             Ok(n) => answer.extend_from_slice(&chunk[..n]),
         }
     }
-    parse_answer(verb, &answer).ok_or_else(|| unknown(&hint))?
+    parse_answer(verb, &answer).ok_or_else(unknown)?
+}
+
+/// True if the result has a valid session ID (`se-<id>`).
+fn session_id(r: &Value) -> bool {
+    r["session"]
+        .as_str()
+        .and_then(iris_job::parse_session_id)
+        .is_some()
 }
 
 /// Read one answer line of the engine for `verb`. `None` when the line is
@@ -605,6 +665,8 @@ pub fn parse_answer(verb: &str, line: &[u8]) -> Option<Result<Value, Failure>> {
                     .as_array()
                     .is_some_and(|a| a.iter().all(Value::is_string)),
                 "add" => r["changeset"].is_string() && r["n"].is_u64(),
+                "job.run" => session_id(r),
+                "job.stop" => session_id(r) && r["reaped"].is_boolean(),
                 _ => r["id"].is_string() && r["state"].is_string() && r["actions"].is_array(),
             };
             valid.then(|| Ok(r.clone()))

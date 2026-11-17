@@ -46,6 +46,10 @@ pub enum Step {
     HelperStarted,
 }
 
+/// Gives the egress port of a session from its adapter (see
+/// [`Launcher::egress`]).
+pub type Egress<'a> = dyn Fn(i64, &Adapter) -> Result<Option<u16>, String> + 'a;
+
 /// What the launch needs from the engine.
 pub struct Launcher<'a> {
     pub store: &'a Store,
@@ -56,8 +60,12 @@ pub struct Launcher<'a> {
     /// program with `session-hold` first. The launch sets the folder, the
     /// environment and the three streams.
     pub helper: &'a dyn Fn(&[OsString]) -> process::Command,
-    /// The egress port of the session, if its adapter has allowed hosts.
-    pub egress_port: Option<u16>,
+    /// Gives the egress port of a session, if its adapter has allowed
+    /// hosts. The launch calls it once for each session that it registers
+    /// (a revoke retry registers a second one), after the bind and before
+    /// the helper, so each session gets its own proxy. An error ends the
+    /// session with `launch_failed`.
+    pub egress: &'a Egress<'a>,
     /// The environment of the engine. Only the names of the agent
     /// environment are read.
     pub env: &'a dyn Fn(&str) -> Option<OsString>,
@@ -73,6 +81,26 @@ pub struct Begun {
     pub session: i64,
     job: i64,
     adapter: Adapter,
+    max_minutes: u32,
+}
+
+impl Begun {
+    /// The job of the session.
+    pub fn job(&self) -> i64 {
+        self.job
+    }
+
+    /// The allowed hosts of the adapter. If there is none, the session
+    /// gets no egress port.
+    pub fn allow_hosts(&self) -> &[String] {
+        &self.adapter.allow_hosts
+    }
+
+    /// The time limit of the session, in minutes, from the same read of
+    /// `agents.toml` as the adapter.
+    pub fn max_minutes(&self) -> u32 {
+        self.max_minutes
+    }
 }
 
 /// A session after the gate: the agent runs.
@@ -144,6 +172,7 @@ impl Launcher<'_> {
             session,
             job,
             adapter,
+            max_minutes: file.max_minutes,
         })
     }
 
@@ -154,6 +183,7 @@ impl Launcher<'_> {
             mut session,
             job,
             adapter,
+            ..
         } = begun;
         let mut retried = false;
         loop {
@@ -218,7 +248,14 @@ impl Launcher<'_> {
             return a;
         }
         // 5. Start the held helper and write its process ID.
-        let helper = match self.start_helper(session, &dir, adapter) {
+        let port = match (self.egress)(session, adapter) {
+            Ok(p) => p,
+            Err(why) => {
+                let why = format!("no egress port: {why}");
+                return self.fail(session, why, None, Some(&socket_path));
+            }
+        };
+        let helper = match self.start_helper(session, &dir, adapter, port) {
             Ok(h) => h,
             Err(why) => return self.fail(session, why, None, Some(&socket_path)),
         };
@@ -339,7 +376,13 @@ impl Launcher<'_> {
         }
     }
 
-    fn start_helper(&self, session: i64, dir: &Path, adapter: &Adapter) -> Result<Helper, String> {
+    fn start_helper(
+        &self,
+        session: i64,
+        dir: &Path,
+        adapter: &Adapter,
+        egress_port: Option<u16>,
+    ) -> Result<Helper, String> {
         let logs = self.data_dir.join("sessions");
         fs::DirBuilder::new()
             .recursive(true)
@@ -352,16 +395,12 @@ impl Launcher<'_> {
             .mode(0o600)
             .open(logs.join(format!("{}.log", format_session_id(session))))
             .map_err(|e| format!("cannot make the session log: {e}"))?;
-        let command = self.isolation.command(
-            session,
-            dir,
-            self.egress_port,
-            &adapter.program,
-            &adapter.args,
-        );
+        let command =
+            self.isolation
+                .command(session, dir, egress_port, &adapter.program, &adapter.args);
         let mut args: Vec<OsString> = vec![session.to_string().into(), command.program.into()];
         args.extend(command.args);
-        let env = config::agent_env(adapter, self.egress_port, |n| (self.env)(n));
+        let env = config::agent_env(adapter, egress_port, |n| (self.env)(n));
         let mut child = (self.helper)(&args)
             .current_dir(dir)
             .env_clear()
