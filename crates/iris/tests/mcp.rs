@@ -479,3 +479,29 @@ fn each_add_tool_sends_the_request_of_its_verb() {
         );
     }
 }
+
+/// A line that is not JSON and a line over the limit are dropped, and the
+/// server reads the next line (specification 2, section 8.5).
+#[test]
+fn a_bad_or_long_line_is_dropped_and_the_next_line_is_read() {
+    let dir = data_dir("mcp-lines");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut c = Client::start(&dir);
+    {
+        let input = c.input.as_mut().unwrap();
+        writeln!(input, "not json").unwrap();
+        let long = "x".repeat(iris_mcp::MAX_LINE + 1);
+        writeln!(input, r#"{{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{{"name":"search","arguments":{{"text":"{long}"}}}}}}"#).unwrap();
+    }
+    c.send(json!({ "jsonrpc": "2.0", "id": 100, "method": "tools/list" }));
+    // The next line is the answer of the list: no answer for the dropped lines.
+    let mut line = String::new();
+    c.output.read_line(&mut line).unwrap();
+    let list: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(list["id"], json!(100), "{list}");
+    assert!(
+        list["result"]["tools"].as_array().unwrap().len() > 10,
+        "{list}"
+    );
+    c.stop();
+}
