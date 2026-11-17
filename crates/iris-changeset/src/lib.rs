@@ -29,11 +29,16 @@ use unicase::UniCase;
 
 mod flags;
 mod outbox;
+mod written;
 pub use flags::{
     action_content, attachment_spans, date_spans, draft_flags, draft_marks, has_attachment,
     has_date, has_money, money_spans, names, new_flags, words, Field, Mark, DRAFT_FLAGS,
 };
 pub use outbox::{cancel, cancel_draft, hold, send_of_draft, Cancel, CANCELLED};
+pub use written::{
+    last_mark, send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
+    NEW_WARNINGS, WRITTEN,
+};
 
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
@@ -448,12 +453,41 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
             .ok_or(Error::NotFound)?;
         }
     }
+    // A stop of a write is the stop of its mail (write spec, section 4).
+    // The send that step 2a made is in a changeset of its own: it goes in
+    // the same transaction, or the withdraw is refused if that send left
+    // or the release claimed it. The release claims on the same write
+    // connection, so only one of the two commits.
+    let sends: Vec<(i64, bool)> = {
+        let mut st = c.prepare(
+            "SELECT s.changeset_id,
+                    s.state = 'applied' OR EXISTS (SELECT 1 FROM ledger l
+                      WHERE l.action_id = s.id AND l.state = 'writing')
+             FROM write_send w
+             JOIN changeset_action d ON d.id = w.action_id
+             JOIN changeset_action s ON s.id = w.send_action_id
+             WHERE d.changeset_id = ?1",
+        )?;
+        let rows = st.query_map([changeset], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    if sends.iter().any(|&(_, left)| left) {
+        return Err(refused(
+            "the mail left or is leaving now, so it cannot be stopped".into(),
+        ));
+    }
     let changed = c.execute(
         "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
         [changeset],
     )?;
     if changed == 0 {
         return Err(refused("the changeset is withdrawn".into()));
+    }
+    for (send, _) in sends {
+        c.execute(
+            "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
+            [send],
+        )?;
     }
     Ok(())
 }
@@ -1232,20 +1266,26 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
         }
         let found: bool = match (kind, group.as_str()) {
             (Kind::Thread, "threads") => {
-                // A reply resolves to one message, its parent (send spec,
-                // section 3): the newest one with no DRAFT label.
-                c.execute(
-                    "INSERT OR IGNORE INTO action_message(action_id, message_id)
-                     SELECT ?1, m.id FROM message m WHERE m.thread_id = ?2 AND m.gone_at IS NULL
-                       AND NOT EXISTS (SELECT 1 FROM message_label ml
-                         JOIN label l ON l.id = ml.label_id
-                         WHERE ml.message_id = m.id
-                           AND (l.provider_id IN ('SPAM', 'TRASH')
-                                OR (?3 AND l.provider_id = 'DRAFT')))
-                     ORDER BY m.internal_date DESC, m.id DESC
-                     LIMIT CASE WHEN ?3 THEN 1 ELSE -1 END",
-                    params![action, row, verb == Verb::Draft],
-                )?;
+                if verb == Verb::Draft {
+                    // A reply resolves to one message, its parent (send
+                    // spec, section 3), with the rule of `reply_parent`.
+                    if let Some(m) = reply_parent(c, row)? {
+                        c.execute(
+                            "INSERT OR IGNORE INTO action_message(action_id, message_id)
+                             VALUES (?1, ?2)",
+                            params![action, m],
+                        )?;
+                    }
+                } else {
+                    c.execute(
+                        "INSERT OR IGNORE INTO action_message(action_id, message_id)
+                         SELECT ?1, m.id FROM message m WHERE m.thread_id = ?2 AND m.gone_at IS NULL
+                           AND NOT EXISTS (SELECT 1 FROM message_label ml
+                             JOIN label l ON l.id = ml.label_id
+                             WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))",
+                        params![action, row],
+                    )?;
+                }
                 c.query_row(
                     "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
                     [row],
@@ -1527,6 +1567,24 @@ fn draft_busy(c: &Connection, action: i64, draft: i64) -> Result<Option<String>>
             format_id(Kind::Draft, draft)
         )
     }))
+}
+
+/// The message that a reply in the thread `thread` (a row ID) answers
+/// (send spec, section 3): the newest message of the thread, by internal
+/// date, that is not gone, has no `DRAFT` label and is not in `SPAM` or
+/// `TRASH`. Submit resolves a `draft` action of a thread with this rule,
+/// and the write view shows the same message (write spec, section 5).
+pub fn reply_parent(c: &Connection, thread: i64) -> rusqlite::Result<Option<i64>> {
+    c.query_row(
+        "SELECT m.id FROM message m WHERE m.thread_id = ?1 AND m.gone_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM message_label ml
+             JOIN label l ON l.id = ml.label_id
+             WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH', 'DRAFT'))
+         ORDER BY m.internal_date DESC, m.id DESC LIMIT 1",
+        [thread],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 /// The parent of a reply (spec section 3): the one message that submit

@@ -89,7 +89,7 @@ fn an_old_store_gets_the_new_verbs() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 27);
+        assert_eq!(iris_store::schema_version(tx)?, 29);
         let n: i64 = tx.query_row(
             "SELECT count(*) FROM changeset_action WHERE verb = 'archive'",
             [],
@@ -100,7 +100,7 @@ fn an_old_store_gets_the_new_verbs() {
         add_action(tx, "send")?;
         // Migration 26 (issue #226): the verb of the undo of a state entry.
         add_action(tx, "restore")?;
-        // Migration 27 (R5-02) widens the same CHECK again.
+        // Migration 29 (R5-02) widens the same CHECK again.
         for verb in ["skip", "mute", "dismiss"] {
             add_action(tx, verb)?;
         }

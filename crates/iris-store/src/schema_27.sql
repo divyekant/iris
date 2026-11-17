@@ -1,84 +1,80 @@
--- Migration 27: the verbs `skip`, `mute` and `dismiss` of the person
--- (docs/specs/2026-11-17-preference-rules.md, card R5-02).
+-- Migration 27: the data of the measures page (card R5-12, the manifesto
+-- "How we measure Iris") that the store does not have yet.
 --
--- 1. The three verbs join the verb CHECK of changeset_action, with the
---    method of migration 18: a wider CHECK accepts each stored row, so only
---    the text of the table changes in sqlite_schema. They go before
---    'draft', so the text keeps the end that the check of migration 26
---    reads.
--- 2. An entry of the three verbs is a state entry: the trigger
---    ledger_undo_insert and the view ledger_can_undo of migration 26 accept
---    its undo (`restore`), as for `close`.
+-- One row for each day on which the person used the web client, by the
+-- local date of the person. The rows stay on this machine.
+CREATE TABLE use_day (
+  day TEXT PRIMARY KEY
+    CHECK (day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' AND date(day) IS day)
+) WITHOUT ROWID;
 
-PRAGMA writable_schema = ON;
-UPDATE sqlite_schema
-SET sql = replace(sql, '''correct'', ''draft'', ''send'', ''restore''))',
-                  '''correct'', ''skip'', ''mute'', ''dismiss'', ''draft'', ''send'', ''restore''))')
-WHERE type = 'table' AND name = 'changeset_action';
-PRAGMA writable_schema = RESET;
+-- One row for each source mail that the person opened on a day of use. A
+-- second open of the same mail on the same day adds no row, so a retry of
+-- an open with a lost answer does not count twice. No foreign key to
+-- `message`: a message that goes stays an open of its day.
+CREATE TABLE use_open (
+  day TEXT NOT NULL REFERENCES use_day(day),
+  message_id INTEGER NOT NULL,
+  PRIMARY KEY (day, message_id)
+) WITHOUT ROWID;
 
--- Stop the migration if the text above did not change: the CHECK of a
--- temporary table refuses 0.
-CREATE TEMP TABLE migration_27 (ok INTEGER CHECK (ok = 1));
-INSERT INTO migration_27
-SELECT instr(sql, '''skip'', ''mute'', ''dismiss'', ''draft'', ''send'', ''restore'')') > 0
-FROM sqlite_schema WHERE type = 'table' AND name = 'changeset_action';
-DROP TABLE migration_27;
+-- The two times of the measure "time from install to the first brief"
+-- (specification 1, M4): `connect`, when the first account is added (the
+-- connect step), and `brief`, when the brief first has content
+-- (iris_api::measures::check_brief, every 10 seconds in iris serve). Each
+-- time is written once. A time never changes after that. `at` is NULL when
+-- the store is older than the measure, so the time is not known.
+CREATE TABLE measure_time (
+  name TEXT PRIMARY KEY CHECK (name IN ('connect', 'brief')),
+  at INTEGER
+) WITHOUT ROWID;
 
-DROP TRIGGER ledger_undo_insert;
-
-CREATE TRIGGER ledger_undo_insert BEFORE INSERT ON ledger_undo
-WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
-                 WHERE a.id = new.action_id AND a.state IS NULL AND c.author_kind = 'person')
-  OR NOT EXISTS (SELECT 1 FROM ledger WHERE id = new.ledger_id
-                   AND state IN ('applied', 'failed') AND undo = 'inverse')
-  -- The target is the entry. Step 1 is the inverse of the verb of the
-  -- entry, with the same arguments. Step 2 is the `archive` after the `untrash` of a `trash`.
-  OR NOT EXISTS (SELECT 1 FROM changeset_action a, ledger l
-                 JOIN changeset_action o ON o.id = l.action_id
-                 WHERE a.id = new.action_id AND l.id = new.ledger_id
-                   -- The target is the whole entry.
-                   AND json(a.targets) = json_object('ledger', json_array('l-' || l.id))
-                   AND ((new.step = 1 AND json(a.args) = json(o.args)
-                         AND o.verb || '>' || a.verb IN (
-                           'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',
-                           'label>unlabel', 'unlabel>label', 'trash>untrash', 'untrash>trash'))
-                        -- The undo of a state entry: `restore`, with no arguments.
-                        -- An entry from before migration 26 has no IDs of its
-                        -- correction rows, so it has no undo.
-                        OR (new.step = 1 AND json(a.args) = '{}' AND a.verb = 'restore'
-                            AND o.verb IN ('close', 'decline', 'defer', 'correct', 'skip', 'mute', 'dismiss')
-                            AND json_type(l.ops, '$.corrections') = 'array')
-                        OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive'
-                            -- Step 1 of the same entry, in the same changeset.
-                            AND EXISTS (SELECT 1 FROM ledger_undo u1
-                                        JOIN changeset_action a1 ON a1.id = u1.action_id
-                                        WHERE u1.ledger_id = new.ledger_id AND u1.step = 1
-                                          AND a1.changeset_id = a.changeset_id))))
-  -- One open undo of an entry: no open action of another undo changeset,
-  -- and one action of each step in the same changeset.
-  OR EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
-             JOIN changeset_action na ON na.id = new.action_id
-             WHERE u.ledger_id = new.ledger_id
-               AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved')
-               AND (a.changeset_id <> na.changeset_id OR u.step = new.step))
+-- NOT EXISTS, not OR IGNORE: an UPSERT of the outer statement overrides the
+-- conflict clause of a trigger.
+CREATE TRIGGER measure_connect AFTER INSERT ON account
+WHEN NOT EXISTS (SELECT 1 FROM measure_time WHERE name = 'connect')
 BEGIN
-  SELECT RAISE(ABORT, 'iris: this undo link is not allowed');
+  INSERT INTO measure_time(name, at)
+  SELECT 'connect', CAST(unixepoch('subsec') * 1000 AS INTEGER)
+  WHERE NOT EXISTS (SELECT 1 FROM measure_time WHERE name = 'connect');
 END;
 
-DROP VIEW ledger_can_undo;
+CREATE TRIGGER measure_time_update BEFORE UPDATE ON measure_time
+BEGIN
+  SELECT RAISE(ABORT, 'iris: a measure time does not change');
+END;
 
-CREATE VIEW ledger_can_undo AS
-  SELECT l.id AS ledger_id FROM ledger l
-  WHERE l.state IN ('applied', 'failed') AND l.undo = 'inverse'
-    AND (EXISTS (SELECT 1 FROM ledger_message lm
-                 JOIN message m ON m.id = lm.message_id AND m.gone_at IS NULL
-                 WHERE lm.ledger_id = l.id AND lm.done = 1)
-         -- A state entry changed items, not messages: its `post` holds them.
-         OR EXISTS (SELECT 1 FROM changeset_action o, json_each(l.post) p
-                    WHERE o.id = l.action_id
-                      AND o.verb IN ('close', 'decline', 'defer', 'correct', 'skip', 'mute', 'dismiss')
-                      AND json_type(l.ops, '$.corrections') = 'array'))
-    AND NOT EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
-                    WHERE u.ledger_id = l.id
-                      AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'));
+-- A store from before this migration that has an account: the store has no
+-- record of the connect step or of the first brief with content, so both
+-- times are not known (NULL). The rows also stop a later account or brief
+-- from writing a time that is not the first.
+INSERT INTO measure_time(name, at)
+SELECT name, NULL FROM (SELECT 'connect' AS name UNION ALL SELECT 'brief')
+WHERE EXISTS (SELECT 1 FROM account);
+
+-- The decision of the person on each action of another author (an agent,
+-- triage or a local tool): the measure "proposed actions that you approve
+-- without an edit". A later state (applied, expired, cancelled) changes
+-- `decided_by` of the action, so the decision has its own row. A new
+-- decision of the person on the same action replaces the row.
+CREATE TABLE person_decision (
+  action_id INTEGER PRIMARY KEY REFERENCES changeset_action(id),
+  approved INTEGER NOT NULL CHECK (approved IN (0, 1)),
+  at INTEGER NOT NULL
+);
+
+CREATE TRIGGER person_decision AFTER UPDATE OF state ON changeset_action
+WHEN new.decided_by IS 'person' AND new.state IN ('approved', 'denied')
+  AND new.state IS NOT old.state
+  AND (SELECT author_kind FROM changeset WHERE id = new.changeset_id) <> 'person'
+BEGIN
+  DELETE FROM person_decision WHERE action_id = new.id;
+  INSERT INTO person_decision(action_id, approved, at)
+  VALUES (new.id, new.state = 'approved', coalesce(new.decided_at, 0));
+END;
+
+-- The decisions of the person that the actions still show.
+INSERT INTO person_decision(action_id, approved, at)
+SELECT a.id, a.state <> 'denied', coalesce(a.decided_at, 0)
+FROM changeset_action a JOIN changeset c ON c.id = a.changeset_id
+WHERE a.decided_by = 'person' AND c.author_kind <> 'person';
