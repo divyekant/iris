@@ -801,8 +801,12 @@ who does not run `iris job run`.
 - A wrong adapter line makes the agent fail at once. The log shows the exit
   code, not the error text, because no agent output is stored. The person
   runs the adapter line by hand to see the error.
-- Rollback: revert the code PRs. The table `job_session` stays and does no
-  harm.
+- Rollback: stop the engine, revert the code PRs, and restore the copy
+  `iris.db.v20.<time>-<random>.bak` that the store wrote before migration
+  21 (spec 1, section 5.5). A program of version 20 cannot open a store of
+  version 21, so the revert alone is not enough. Sessions made after the
+  migration are lost; no mail data is lost, because the mirror syncs
+  again.
 
 ## Plan
 
