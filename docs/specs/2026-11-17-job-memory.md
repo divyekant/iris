@@ -52,22 +52,40 @@ CREATE TABLE job_notes (
   text     BLOB NOT NULL CHECK (typeof(text) = 'blob' AND length(text) <= 65536),
   saved_ms INTEGER NOT NULL
 );
+
+-- The copy ends with the job, in the transaction of the move to done.
+CREATE TRIGGER job_notes_end AFTER INSERT ON job_event
+WHEN NEW.state = 'done'
+BEGIN
+  DELETE FROM job_notes WHERE job_id = NEW.job_id;
+END;
+
+-- A done job gets no copy. The move to done cannot go back.
+CREATE TRIGGER job_notes_done BEFORE INSERT ON job_notes
+WHEN (SELECT state FROM job WHERE id = NEW.job_id) = 'done'
+BEGIN
+  SELECT RAISE(IGNORE);
+END;
 ```
+
+An upsert that finds a row runs the UPDATE path, not the INSERT trigger. A
+done job has no row (the first trigger deleted it), so each upsert of a
+done job is an INSERT, and the second trigger ignores it.
 
 - One row for each job, at most. A new save replaces the row (`INSERT ...
   ON CONFLICT(job_id) DO UPDATE`).
 - `text` is a BLOB: the store keeps the bytes as they are. Iris does not
   check UTF-8 and does not change line ends.
 - 65,536 bytes (64 KiB) is the limit, `iris_job::NOTES_MAX` (issue #563).
-- Only the end of a job deletes its row (see "Remove the notes").
+- Only the move of the job to `done` deletes its row, by the trigger
+  `job_notes_end`. Each path to `done` (the finish of the agent, the
+  finish and the cancel of the person) inserts a `job_event` with the state
+  `done`, so the trigger covers each path by construction.
 
-`iris-job` gets three functions: `notes(store, job) -> Option<Vec<u8>>`,
-`save_notes(store, job, &[u8], now) -> bool` and `drop_notes`.
-`save_notes` refuses a text over the limit with `Error::Refused` and writes
-nothing. `drop_notes(store, job) -> bool` deletes the copy if the job is
-done, and gives `true` for a done job. For a done job, `save_notes` does
-the same delete, saves nothing and gives `false`. Each function does its
-state check and its write in one write transaction.
+`iris-job` gets two functions: `notes(store, job) -> Option<Vec<u8>>` and
+`save_notes(store, job, &[u8], now) -> bool`. `save_notes` refuses a text
+over the limit with `Error::Refused` and writes nothing. It gives `false`
+when the trigger ignored the write (a done job).
 
 ### Save the notes (`iris_workspace::save_notes`)
 
@@ -80,11 +98,7 @@ and saves it in the store. The result:
 | `Notes::Absent` | No `notes.md`. | No change. |
 | `Notes::NotAFile` | A link, a folder, a FIFO, a socket or a device. | No change. |
 | `Notes::TooLarge` | A regular file of more than 64 KiB. | No change. |
-| `Notes::Done` | The job is done (any file, or none). | The copy of the job is deleted. |
-
-For a done job, `save_notes` reads no file: it calls `drop_notes` and gives
-`Done`. The state check and the delete are in one write transaction, and
-the move to `done` cannot go back, so a later save cannot write a new copy.
+| `Notes::Done` | The job is done. | No copy (the trigger ignores the write). |
 
 The read:
 
@@ -140,8 +154,20 @@ reads the file only while no process of the job can write it.
    A `TooLarge` or `NotAFile` result, or an error, writes one line in the
    engine log with the job ID. The reap does not fail.
 
+3. **At each engine start** (`Sessions::new`). The reap check writes
+   `reaped_at` before the reap save. A crash of the engine between the two
+   leaves a reaped session with no save. So, at the start, before the
+   supervisor runs and before `Sessions::new` returns (no `run` and no
+   `wake` can start a session yet), the engine saves the notes of each open
+   job (working, waiting, needs you) that has no live session. A job with a
+   live session (an open session of the last engine) gets its save at the
+   reap of that session. A failed save writes one line in the engine log,
+   and the start goes on. Cost: one read of at most 64 KiB and one write
+   for each open job.
+
 The save at the reap keeps the copy current while a job waits. So a backup
-taken during a wait of 3 days holds the notes of the last session.
+taken during a wait of 3 days holds the notes of the last session. After a
+crash of the engine, the copy is current again at the next engine start.
 
 ### Restore the notes
 
@@ -174,12 +200,10 @@ grant. With this design, the build writes the copy back. So the rules
 change:
 
 - **A done job.** A done job gets no new session, so its notes have no
-  more use. `iris_job::save_notes` of a done job deletes the copy of the
-  job and saves nothing, in one write transaction. The reap of the last
-  session and each build of a done job (`build_done`, also at each engine
-  start) call it. So the copy goes when the job is done, also when the
-  person deleted the workspace folder first: the reap calls the save with
-  no file (`Absent` for an open job, `Done` for a done job).
+  more use. The trigger `job_notes_end` deletes the copy in the
+  transaction of the move to `done`, on each path to `done`, also when the
+  person deleted the workspace folder first. No later save writes a new
+  copy (`job_notes_done`).
 - **An open job** (working, waiting or needs you). The person edits
   `notes.md` while no session of the job runs. The next build or reap
   saves the edit, and the store keeps no older copy. A deleted folder does
@@ -225,7 +249,8 @@ stays as it is, and the session starts.
 | A folder. | `NotAFile`. | Unit test. |
 | No `notes.md`, and a copy in the store. | The build writes the copy, byte for byte. | Unit test. |
 | No `notes.md`, and no copy. | The build writes `# Notes`. | Existing test. |
-| The job is done, with or without its folder. | The copy is deleted at the reap or the next build; no build restores it. | Unit test. |
+| The job moves to `done` by any path, with or without its folder. | The copy is deleted in the same transaction. A later save writes nothing, and a build writes `# Notes`. | Unit test: finish by the agent, finish and cancel by the person. |
+| The engine crashes after `reaped_at` and before the reap save. | The next engine start saves the notes of the job. | Unit test of the start save. |
 | The workspace folder is gone, and the job wakes. | The launch build makes the folder and restores the notes. | Engine test with the fake clock. |
 | The agent changes the file after the reap and before the build. | Not possible: no process of the job runs between a reap and the next launch. | The reap check (R4-04). |
 | A launch of the job runs, or a newer session of the job is live, at the reap. | The reap thread does not save. The build of that launch and the reap of that session save. | Review: the check and the mark are one step under the state lock, which `run` also takes for its mark. |
@@ -237,10 +262,10 @@ stays as it is, and the session starts.
 ## Impact
 
 - `crates/iris-store/src/schema_<N>.sql`: the table `job_notes`.
-- `crates/iris-job`: `NOTES_MAX`, `notes`, `save_notes`, `drop_notes`.
+- `crates/iris-job`: `NOTES_MAX`, `notes`, `save_notes`.
 - `crates/iris-workspace`: `save_notes`, the restore in `build`, the rule
   line. New dependency: `libc` (already in `Cargo.lock`).
-- `crates/iris/src/sessions.rs`: the save in `reap_one`.
+- `crates/iris/src/sessions.rs`: the save in `reap_one` and in `Sessions::new`, and the busy refusal of `wake`.
 - `docs/spec/03-job-workspace.md`: sections 3, 9 and the sample.
 - Memory: one buffer of at most 64 KiB + 1 during a save. Disk: at most
   64 KiB in `iris.db` for each job.
