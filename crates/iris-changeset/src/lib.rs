@@ -903,8 +903,9 @@ pub fn outside_marks(
     action: i64,
     content: &iris_compose::Content,
 ) -> Result<Vec<Mark>> {
-    // Memory holds only the recipients that no row names yet (at most the
-    // recipients of the draft), never the addresses of the thread.
+    // Memory holds the recipients that no row names yet (at most the
+    // recipients of the draft) and one header row, never a list of the
+    // addresses of the thread or of one header.
     let mut open: HashSet<String> = content
         .to
         .iter()
@@ -925,9 +926,9 @@ pub fn outside_marks(
         while let (false, Some(r)) = (open.is_empty(), rows.next()?) {
             for i in 0..3 {
                 if let Some(v) = r.get::<_, Option<String>>(i)? {
-                    for (a, _) in iris_senders::head::addresses(&v) {
+                    iris_senders::head::each_address(&v, |a, _| {
                         open.remove(&a);
-                    }
+                    });
                 }
             }
         }

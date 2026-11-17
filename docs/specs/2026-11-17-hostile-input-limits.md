@@ -176,8 +176,10 @@ the thread messages in the store, the scope rows of the job.
   `docs/spec/schema/changeset.schema.json`.
 - Memory: the check holds only the recipients of the draft (at most the
   limit of `Content::check`). It streams your addresses and the thread
-  headers, one row at a time, and removes each recipient that a row names.
-  It never holds the addresses of the thread.
+  headers, one row at a time, and removes each recipient that a row names
+  (`iris_senders::head::each_address`, one address at a time). It never
+  holds a list of the addresses of the thread or of one header. The text of
+  one header row is in memory while the check reads it.
 
 ## Assumptions
 

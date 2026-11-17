@@ -554,3 +554,34 @@ fn a_large_thread_gives_the_same_answer() {
     );
     assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
 }
+
+/// One header with many addresses: the flag stays right. The parse gives
+/// one address at a time (`each_address`), with no list of the header.
+#[test]
+fn one_large_header_gives_the_same_answer() {
+    let dir = TempDir::new("header");
+    let s = store(&dir);
+    let cc: Vec<String> = (0..20_000).map(|i| format!("q{i}@crowd.example")).collect();
+    s.put_messages(
+        1,
+        &[NewMessage {
+            provider_id: "wide".into(),
+            thread_provider_id: "gt1".into(),
+            internal_date: Some(3),
+            header: Header {
+                from_addr: Some("priya@example.com".into()),
+                to_addrs: Some(OWNER.into()),
+                cc_addrs: Some(cc.join(", ")),
+                message_id_hdr: Some("<wide@x.org>".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let local = author(AuthorKind::Local, None);
+    let (_, f) = draft(&s, &local, "t-1", &["q19999@crowd.example"], &[]);
+    assert!(!f.contains(&"outside_thread".to_string()), "{f:?}");
+    let (_, f) = draft(&s, &local, "t-1", &["q20000@crowd.example"], &[]);
+    assert!(f.contains(&"outside_thread".to_string()), "{f:?}");
+}
