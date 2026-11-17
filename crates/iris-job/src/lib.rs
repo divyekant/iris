@@ -200,13 +200,25 @@ struct Move<'a> {
     why: Option<&'a str>,
 }
 
+/// A move out of `needs_you` takes the time of the question if the clock is
+/// earlier: the time of a question can be 1 ms ahead of the clock
+/// ([`ask_in`]), and the answer or the end must not fail on the time.
 fn add_event(c: &Connection, job: i64, state: State, by: By, m: Move, now_ms: i64) -> Result<()> {
-    let found: Option<i64> = c
-        .query_row("SELECT 1 FROM job WHERE id = ?1", [job], |r| r.get(0))
+    let found: Option<(String, i64)> = c
+        .query_row(
+            "SELECT state, updated_at FROM job WHERE id = ?1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
-    if found.is_none() {
+    let Some((current, updated)) = found else {
         return Err(Error::NotFound);
-    }
+    };
+    let now_ms = if current == State::NeedsYou.as_str() {
+        now_ms.max(updated)
+    } else {
+        now_ms
+    };
     c.execute(
         "INSERT INTO job_event
            (job_id, at, state, by, wait_thread, wait_until, question, answer, end_kind, why)
@@ -324,7 +336,8 @@ pub fn session_ask(
     })
 }
 
-/// The agent asks the person one question.
+/// The agent asks the person one question. The time of the question is
+/// `now_ms`, or 1 ms after the newest event of the job if that is later.
 pub fn ask(store: &Store, job: i64, question: &str, why: Option<&str>, now_ms: i64) -> Result<()> {
     transaction(store, |c| ask_in(c, job, question, why, now_ms))
 }
@@ -336,12 +349,17 @@ pub fn ask_in(
     why: Option<&str>,
     now_ms: i64,
 ) -> Result<()> {
+    // A question is later than each earlier event of its job, so the
+    // `updated` time of a job in `needs_you` names one question: an answer
+    // binds to it ([`Asked`]), even when the clock gives the same
+    // millisecond twice.
+    let at = now_ms.max(get_in(c, job)?.updated_ms.saturating_add(1));
     let m = Move {
         question: Some(question),
         why,
         ..Move::default()
     };
-    add_event(c, job, State::NeedsYou, By::Agent, m, now_ms)
+    add_event(c, job, State::NeedsYou, By::Agent, m, at)
 }
 
 /// The engine (a reply or the end of the wait) or the person ends the wait.
@@ -380,12 +398,42 @@ pub fn woken(store: &Store) -> Result<Vec<(i64, i64, String)>> {
     })?)
 }
 
-/// The person answers the question.
-pub fn answer(store: &Store, job: i64, text: &str, now_ms: i64) -> Result<()> {
-    transaction(store, |c| answer_in(c, job, text, now_ms))
+/// The question that the person saw: its text and the `updated` of the job
+/// document (RFC 3339 with milliseconds) at that time.
+#[derive(Clone, Copy, Debug)]
+pub struct Asked<'a> {
+    pub question: &'a str,
+    pub updated: &'a str,
 }
 
-pub fn answer_in(c: &Connection, job: i64, text: &str, now_ms: i64) -> Result<()> {
+/// The person answers the question. With `asked`, the answer applies only
+/// if the job still asks that question: an answer to an older question
+/// gets [`Error::Refused`], in the same transaction as the move.
+pub fn answer(
+    store: &Store,
+    job: i64,
+    text: &str,
+    asked: Option<Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| answer_in(c, job, text, asked, now_ms))
+}
+
+pub fn answer_in(
+    c: &Connection,
+    job: i64,
+    text: &str,
+    asked: Option<Asked>,
+    now_ms: i64,
+) -> Result<()> {
+    if let Some(a) = asked {
+        let j = get_in(c, job)?;
+        if j.question.as_deref() != Some(a.question)
+            || iris_talk::rfc3339(j.updated_ms) != a.updated
+        {
+            return Err(Error::Refused("the job asks another question now".into()));
+        }
+    }
     let m = Move {
         answer: Some(text),
         ..Move::default()

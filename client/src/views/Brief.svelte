@@ -4,7 +4,7 @@
   and links its full list. Read only in release 1.
 -->
 <script lang="ts">
-  import { get, loadBrief, newest, type Brief, type Item, type Status } from "../api";
+  import { get, loadBrief, newest, type Brief, type Item, type Job, type Status } from "../api";
   import { poll as every, watch } from "../clock";
   import { NOTHING, across, copying, dueSoon, greeting, nextDay, party, partyKey, signals, summary, unfinished, when } from "../format";
   import Code from "./Code.svelte";
@@ -14,6 +14,8 @@
   import Arrived from "./Arrived.svelte";
   import Watches from "./Watches.svelte";
   import MatterCard from "./MatterCard.svelte";
+  import Question from "./Question.svelte";
+  import { loadQuestions } from "../jobs";
   import { loadProposed, type Proposed } from "../matters";
   import { arrivedLine, loadWatches, type Watch } from "../watches";
   import { flushHolds, HOLD } from "../act";
@@ -23,10 +25,11 @@
     status: firstStatus = null,
     watches: firstWatches,
     proposed: firstProposed,
+    questions: firstQuestions,
     now: start = new Date(),
     poll = 5000,
     hold = HOLD,
-  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; now?: Date; poll?: number; hold?: number } = $props();
+  }: { brief: Brief; status?: Status | null; watches?: Watch[]; proposed?: Proposed | null; questions?: Job[]; now?: Date; poll?: number; hold?: number } = $props();
 
   // The API puts a conversation with a stranger only under Strangers, with exact counts (dk, 2026-11-16).
   // svelte-ignore state_referenced_locally
@@ -100,6 +103,40 @@
       // The next poll tries again.
     }
   }
+  // The questions of the agents (R5-05) load apart from the brief too, with their own ticket. A failed load keeps the last list.
+  // svelte-ignore state_referenced_locally
+  let questions = $state(firstQuestions ?? []);
+  const questionsTicket = newest();
+  async function reloadQuestions() {
+    const fresh = questionsTicket();
+    try {
+      const q = await loadQuestions();
+      if (fresh()) questions = q;
+    } catch {
+      // The next poll tries again.
+    }
+  }
+  // svelte-ignore state_referenced_locally
+  if (firstQuestions === undefined) reloadQuestions();
+  // After an answer: one quiet line names the job, and the next question (or none) shows at once.
+  let sent = $state<Job | null>(null);
+  // The unsent answer of each question, by job and question time: a poll that changes the card keeps it.
+  const questionKey = (q: Job) => `${q.id} ${q.updated}`;
+  let drafts = $state<Record<string, string>>({});
+  // The question that the person picked with "Next question", if it is still open.
+  let picked = $state("");
+  // Else a question with an unsent answer stays on the card while it is open, so a newer question never takes the field away.
+  let shown = $derived(questions.find((q) => questionKey(q) === picked) ?? questions.find((q) => drafts[questionKey(q)]?.trim()) ?? questions[0]);
+  function nextQuestion() {
+    const at = shown ? questions.indexOf(shown) : -1;
+    picked = questionKey(questions[(at + 1) % questions.length]);
+  }
+  const answeredJob = (job: Job) => {
+    sent = job;
+    delete drafts[questionKey(job)];
+    questions = questions.filter((q) => q.id !== job.id);
+    reloadQuestions();
+  };
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
@@ -107,7 +144,7 @@
   if (firstProposed === undefined) reloadProposed();
   $effect(() => {
     if (!poll) return;
-    const timer = setInterval(() => (reloadWatches(), reloadProposed()), poll * 12);
+    const timer = setInterval(() => (reloadWatches(), reloadProposed(), reloadQuestions()), poll * 12);
     return () => clearInterval(timer);
   });
 
@@ -208,6 +245,30 @@
   <div class="codes">
     {#each codes as item (item.id)}<Code {item} {now} />{/each}
   </div>
+{/if}
+
+<!-- The question of an agent (R5-05): one card, the newest question, answered in place. -->
+{#snippet sentLine(job: Job)}
+  <p class="sent" role="status">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    Sent. The agent of “{job.goal}” continues with your answer.
+  </p>
+{/snippet}
+{#if shown}
+  <section aria-labelledby="questions">
+    <h2 id="questions"><span>{questions.length === 1 ? "A question for you" : "Questions for you"}</span> <span class="count">{questions.length}</span></h2>
+    {#if sent}{@render sentLine(sent)}{/if}
+    <!-- A new question of the same job is a new card: the key has the time of the question. -->
+    {#key questionKey(shown)}<Question job={shown} draft={drafts[questionKey(shown)] ?? ""} ondraft={(t) => (drafts[questionKey(shown)] = t)} onanswered={answeredJob} onchanged={reloadQuestions} />{/key}
+    {#if questions.length > 1}
+      <div class="more">
+        <button type="button" class="all touch" onclick={nextQuestion}>Next question</button>
+        <a class="all touch" href="#/jobs">All {questions.length} questions</a>
+      </div>
+    {/if}
+  </section>
+{:else if sent}
+  <div class="alone">{@render sentLine(sent)}</div>
 {/if}
 
 {#if soon.length}
@@ -394,6 +455,30 @@
   }
   .all:hover {
     color: var(--color-text);
+  }
+  .more {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  button.all {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--font-size--1);
+    cursor: pointer;
+  }
+  .alone {
+    margin-bottom: var(--space-12);
+  }
+  .sent {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-3);
+    color: var(--color-text-muted);
+    overflow-wrap: anywhere;
   }
   .note {
     margin: var(--space-2) 0 0;

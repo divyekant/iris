@@ -694,6 +694,20 @@ function startPreview(id: string) {
   // The engine order: the thread, then the date.
   return list && { messages: list.map(([m, readable], i) => ({ ...(summaryOf(m) as Summary), date: at(15, 9 + 3 * i, 12), readable })) };
 }
+/** POST /api/jobs/<id>/answer, as the engine answers: the job with the answer, 400 for no text, 409 with no question (R5-05). */
+export function answerJob(id: string, body: { answer?: unknown; question?: unknown; updated?: unknown }): [number, unknown] {
+  const job = jobs[id];
+  if (!job) return [404, { error: "not found" }];
+  const said = body.answer;
+  if (typeof said !== "string" || !said.trim()) return [400, { error: "the answer must have 1 to 10000 characters and no NUL character" }];
+  if (typeof body.question !== "string" || typeof body.updated !== "string") return [400, { error: "the body needs question and updated" }];
+  if (job.state !== "needs_you" || job.question !== body.question || job.updated !== body.updated) return [409, { error: "The job does not ask this question now." }];
+  const asked = jobDetails[id]?.job.events ?? [];
+  jobs[id] = { ...job, state: "working", question: undefined, updated: new Date().toISOString() };
+  const events = [...asked, { at: jobs[id].updated, state: "working" as const, by: "person" as const, answer: said }];
+  jobDetails[id] = { job: { ...jobs[id], events }, changesets: jobDetails[id]?.changesets ?? [], threads: jobDetails[id]?.threads ?? {} };
+  return [200, jobDetails[id]];
+}
 /** POST /api/jobs: the fixture job j-12 stands for the new job. */
 export function startJob(): [number, unknown] {
   return [201, jobs["j-12"]];

@@ -390,38 +390,106 @@ async fn the_person_answers_the_question_of_a_job_once() {
     let s = store(&dir);
     let job = iris_job::create(&s, "Pay the invoice.", None, NOW).unwrap();
     let uri = format!("/api/jobs/{}/answer", iris_job::format_job_id(job));
+    // The body of an answer to the question that the job asks now.
+    let to_now = |answer: &str| {
+        let j = iris_job::job_json(&iris_job::get(&s, job).unwrap());
+        json!({ "answer": answer, "question": j["question"].as_str().unwrap_or(""), "updated": j["updated"] })
+    };
     // No question yet.
-    let (code, _) = post(&s, &uri, json!({ "answer": "The blue card." })).await;
+    let (code, _) = post(&s, &uri, to_now("The blue card.")).await;
     assert_eq!(code, StatusCode::CONFLICT);
     ask(&s, job, "Which card?", None, NOW + 1).unwrap();
+    let with = |answer: Value| {
+        let mut b = to_now("");
+        b["answer"] = answer;
+        b
+    };
     for bad in [
         json!({}),
-        json!({ "answer": " \n " }),
-        json!({ "answer": "x".repeat(10_001) }),
-        json!({ "answer": "a\u{0}b" }),
+        json!({ "answer": "Yes." }),
+        with(json!(" \n ")),
+        with(json!("x".repeat(10_001))),
+        with(json!("a\u{0}b")),
         // Over the limit before any trim (the review of PR #575).
-        json!({ "answer": format!("  {}  ", "x".repeat(9_999)) }),
+        with(json!(format!("  {}  ", "x".repeat(9_999)))),
     ] {
         let (code, v) = post(&s, &uri, bad.clone()).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
         assert!(v["error"].is_string(), "{bad}");
     }
     assert_eq!(
-        post(&s, "/api/jobs/j-999/answer", json!({ "answer": "Yes." }))
-            .await
-            .0,
+        post(&s, "/api/jobs/j-999/answer", to_now("Yes.")).await.0,
         StatusCode::NOT_FOUND
     );
     // The answer is stored as the person gave it: the indent of the first
     // line stays.
     let given = "    card: blue\n    limit: 2400\n";
-    let (code, doc) = post(&s, &uri, json!({ "answer": given })).await;
+    let (code, doc) = post(&s, &uri, to_now(given)).await;
     assert_eq!(code, StatusCode::OK, "{doc}");
     assert_eq!(doc["job"]["state"], "working");
     let last = doc["job"]["events"].as_array().unwrap().last().unwrap();
     assert_eq!(last["answer"], given);
     assert_eq!(last["by"], "person");
     // A second answer finds no question.
-    let (code, _) = post(&s, &uri, json!({ "answer": "The red card." })).await;
+    let (code, _) = post(&s, &uri, to_now("The red card.")).await;
     assert_eq!(code, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_answer_to_an_older_question_is_refused() {
+    let dir = temp("answer-race");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Pay the invoice.", None, NOW).unwrap();
+    let uri = format!("/api/jobs/{}/answer", iris_job::format_job_id(job));
+    let seen = || {
+        let j = iris_job::job_json(&iris_job::get(&s, job).unwrap());
+        (j["question"].clone(), j["updated"].clone())
+    };
+    // Tab A shows question 1. Tab B answers it, and the agent asks again,
+    // with the same text and with another text.
+    ask(&s, job, "Which card?", None, NOW + 1).unwrap();
+    let (q1, u1) = seen();
+    let (code, _) = post(
+        &s,
+        &uri,
+        json!({ "answer": "Blue.", "question": q1, "updated": u1 }),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    for question in ["Which card?", "Which date?"] {
+        // The agent asks again in the same millisecond as the answer.
+        let at = iris_job::get(&s, job).unwrap().updated_ms;
+        ask(&s, job, question, None, at).unwrap();
+        // The old answer of tab A does not reach the new question.
+        let (code, v) = post(
+            &s,
+            &uri,
+            json!({ "answer": "Red.", "question": q1, "updated": u1 }),
+        )
+        .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{v}");
+        assert_eq!(
+            iris_job::get(&s, job).unwrap().state,
+            iris_job::State::NeedsYou
+        );
+        // The same question at another time, and another question at the
+        // same time, are older questions too.
+        let (q, u) = seen();
+        for (q, u) in [(q.clone(), u1.clone()), (json!("Which pen?"), u.clone())] {
+            let (code, _) = post(
+                &s,
+                &uri,
+                json!({ "answer": "Red.", "question": q, "updated": u }),
+            )
+            .await;
+            assert_eq!(code, StatusCode::CONFLICT);
+        }
+        let (code, _) = post(
+            &s,
+            &uri,
+            json!({ "answer": "Red.", "question": q, "updated": u }),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+    }
 }

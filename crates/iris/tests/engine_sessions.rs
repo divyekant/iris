@@ -1078,7 +1078,14 @@ fn an_answer_starts_a_session_with_the_answer() {
     let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
     assert!(!job.contains("## Your answer"), "{job}");
 
-    iris_job::answer(&f.store, f.job, "The blue card. Not ```this```.", now()).unwrap();
+    iris_job::answer(
+        &f.store,
+        f.job,
+        "The blue card. Not ```this```.",
+        None,
+        now(),
+    )
+    .unwrap();
     s.wake(now());
     let next = next_session(&s, &f, first);
     let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
