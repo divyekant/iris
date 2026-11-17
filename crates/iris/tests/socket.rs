@@ -737,3 +737,56 @@ fn the_cli_adds_draft_and_send() {
     let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// A fake engine: it reads one request line, then sends `answer`, or
+/// closes the connection with no answer if `answer` is `None`.
+fn one_answer(name: &str, answer: Option<&'static str>) -> PathBuf {
+    let d = dir(name);
+    std::fs::create_dir_all(&d).unwrap();
+    let l = std::os::unix::net::UnixListener::bind(d.join(socket::SOCKET)).unwrap();
+    std::thread::spawn(move || {
+        let mut s = l.incoming().next().unwrap().unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut s).read_line(&mut line).unwrap();
+        if let Some(a) = answer {
+            s.write_all(a.as_bytes()).unwrap();
+        }
+    });
+    d
+}
+
+fn job_command(d: &std::path::Path, args: &[&str]) -> Result<(), socket::Failure> {
+    use clap::Parser;
+    let mut all = vec!["iris", "--data", d.to_str().unwrap(), "job"];
+    all.extend_from_slice(args);
+    iris::run(iris::Cli::parse_from(all))
+}
+
+#[test]
+fn a_lost_job_answer_names_the_job_session_command() {
+    for (name, args) in [
+        ("lostrun", &["run", "j-1", "--agent", "script"][..]),
+        ("loststop", &["stop", "j-1"][..]),
+    ] {
+        let d = one_answer(name, None);
+        let e = job_command(&d, args).unwrap_err();
+        assert_eq!(e.code, code::ERROR, "{name}");
+        assert!(
+            e.error.contains("not known") && e.error.contains("iris job session j-1"),
+            "{name}: {}",
+            e.error
+        );
+        assert!(!e.error.contains("iris changeset"), "{name}: {}", e.error);
+    }
+}
+
+#[test]
+fn a_job_answer_of_the_engine_is_a_result() {
+    let d = one_answer("okrun", Some("{\"ok\":true,\"result\":{\"session\":\"se-1\"}}\n"));
+    job_command(&d, &["run", "j-1", "--agent", "script"]).unwrap();
+    let d = one_answer(
+        "okstop",
+        Some("{\"ok\":true,\"result\":{\"session\":\"se-1\",\"reaped\":true}}\n"),
+    );
+    job_command(&d, &["stop", "j-1"]).unwrap();
+}

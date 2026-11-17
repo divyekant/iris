@@ -7,17 +7,26 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iris::sessions::{last_session, state, HelperCommand, Sessions};
 use iris_changeset::{Author, AuthorKind};
 use iris_job::{add_scope, create, revoke_scope, session, By, EndReason, Ref, Session};
 use iris_session::isolation::{Command, Isolation};
+use iris_session::launch::Step;
 use iris_store::Store;
 
-/// Runs the command with no isolation. For the test scripts only.
+/// Runs the command with no isolation. For the test scripts only. It
+/// keeps each session that got a stop.
 struct Plain;
+
+static STOPPED: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+
+fn stopped(session: i64) -> bool {
+    STOPPED.lock().unwrap().contains(&session)
+}
 
 impl Isolation for Plain {
     fn check(&self) -> Result<(), String> {
@@ -39,7 +48,8 @@ impl Isolation for Plain {
     fn name(&self, session: i64) -> String {
         format!("plain-{session}")
     }
-    fn stop(&self, _session: i64) -> std::io::Result<()> {
+    fn stop(&self, session: i64) -> std::io::Result<()> {
+        STOPPED.lock().unwrap().push(session);
         Ok(())
     }
     fn ended(&self, _session: i64) -> std::io::Result<bool> {
@@ -62,6 +72,11 @@ impl Drop for Fixture {
 }
 
 fn fixture(name: &str, script: &str) -> Fixture {
+    fixture_with(name, script, "")
+}
+
+/// A fixture with `extra` lines in the agent table of `agents.toml`.
+fn fixture_with(name: &str, script: &str, extra: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!("iris-es-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let data = root.join("data");
@@ -80,7 +95,7 @@ fn fixture(name: &str, script: &str) -> Fixture {
     let script = script.replace('\\', "\\\\").replace('"', "\\\"");
     fs::write(
         data.join("agents.toml"),
-        format!("[agent.script]\ncommand = [\"/bin/sh\", \"-c\", \"{script}\"]\n"),
+        format!("[agent.script]\ncommand = [\"/bin/sh\", \"-c\", \"{script}\"]\n{extra}"),
     )
     .unwrap();
     Fixture {
@@ -100,6 +115,10 @@ fn helper() -> Arc<HelperCommand> {
 
 fn sessions(f: &Fixture) -> Arc<Sessions> {
     Sessions::new(f.store.clone(), Ok(Arc::new(Plain)), helper()).unwrap()
+}
+
+fn workspace(f: &Fixture) -> PathBuf {
+    f.store.dir().join(format!("workspaces/j-{}", f.job))
 }
 
 fn now() -> i64 {
@@ -250,6 +269,86 @@ fn a_session_cannot_run_or_stop_a_session() {
     }
 }
 
+fn a_done_job_gets_its_workspace_again_after_the_reap() {
+    let f = fixture("done", "sleep 30");
+    let s = sessions(&f);
+    let id = s.run(f.job, "script").unwrap();
+    until(&s, &f, id, |r| r.started_ms.is_some());
+    // A file of the last build: the next build removes `.iris`.
+    let marker = workspace(&f).join(".iris/marker");
+    fs::write(&marker, "x").unwrap();
+    iris_job::finish(&f.store, f.job, By::Person, iris_job::End::Cancel, None, now()).unwrap();
+    let row = until(&s, &f, id, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    assert!(!marker.exists(), "the workspace is built again");
+    assert!(workspace(&f).join("JOB.md").exists());
+}
+
+fn the_engine_start_builds_each_done_job_again() {
+    let f = fixture("donestart", "true");
+    let marker = workspace(&f).join(".iris/marker");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "x").unwrap();
+    // Session logs: one of 31 days ago goes, one of today stays.
+    let logs = f.store.dir().join("sessions");
+    fs::create_dir_all(&logs).unwrap();
+    let old = logs.join("se-90.log");
+    let new = logs.join("se-91.log");
+    fs::write(&new, "").unwrap();
+    let file = fs::File::create(&old).unwrap();
+    file.set_modified(std::time::SystemTime::now() - Duration::from_secs(31 * 86_400))
+        .unwrap();
+    drop(file);
+    iris_job::finish(&f.store, f.job, By::Person, iris_job::End::Cancel, None, NOW).unwrap();
+    let _s = sessions(&f);
+    assert!(!marker.exists(), "the workspace is built again");
+    assert!(workspace(&f).join("JOB.md").exists());
+    assert!(!old.exists(), "a log older than 30 days goes");
+    assert!(new.exists());
+}
+
+fn an_orphan_session_gets_a_stop_while_its_helper_runs() {
+    let f = fixture("orphan", "true");
+    let id = iris_job::register(&f.store, f.job, "script", NOW).unwrap();
+    // A helper of the last engine that still runs.
+    let mut helper = Process::new("sleep").arg("30").spawn().unwrap();
+    iris_job::set_helper(&f.store, id, i64::from(helper.id())).unwrap();
+    let s = sessions(&f);
+    s.turn(now());
+    assert!(stopped(id), "the isolation stop comes before the reap");
+    assert_eq!(session(&f.store, id).unwrap().reaped_ms, None);
+    helper.kill().unwrap();
+    helper.wait().unwrap();
+    until(&s, &f, id, |r| r.reaped_ms.is_some());
+}
+
+fn a_revoke_retry_gives_the_egress_log_to_the_new_session() {
+    let f = fixture_with("retry", "sleep 30", "allow_hosts = [\"example.com\"]\n");
+    let s = sessions(&f);
+    // A revoke after the first build: the launch registers a second session.
+    let (store, job, once) = (f.store.clone(), f.job, AtomicBool::new(false));
+    s.set_after(Arc::new(move |step, _| {
+        if step == Step::Built && !once.swap(true, Ordering::SeqCst) {
+            revoke_scope(&store, job, Ref::Thread(5), By::Person, now()).unwrap();
+        }
+    }));
+    let first = s.run(f.job, "script").unwrap();
+    let end = Instant::now() + Duration::from_secs(20);
+    let second = loop {
+        s.turn(now());
+        let last = last_session(&f.store, f.job).unwrap().unwrap();
+        if last.id != first && last.started_ms.is_some() {
+            break last.id;
+        }
+        assert!(Instant::now() < end, "no second session: {last:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let log = |id: i64| f.store.dir().join(format!("sessions/se-{id}.egress.log"));
+    assert!(log(second).exists(), "the running session has its egress log");
+    assert!(!log(first).exists(), "no log has the name of the first session");
+    s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -292,6 +391,22 @@ fn main() {
         (
             "a_session_cannot_run_or_stop_a_session",
             a_session_cannot_run_or_stop_a_session,
+        ),
+        (
+            "a_done_job_gets_its_workspace_again_after_the_reap",
+            a_done_job_gets_its_workspace_again_after_the_reap,
+        ),
+        (
+            "the_engine_start_builds_each_done_job_again",
+            the_engine_start_builds_each_done_job_again,
+        ),
+        (
+            "an_orphan_session_gets_a_stop_while_its_helper_runs",
+            an_orphan_session_gets_a_stop_while_its_helper_runs,
+        ),
+        (
+            "a_revoke_retry_gives_the_egress_log_to_the_new_session",
+            a_revoke_retry_gives_the_egress_log_to_the_new_session,
         ),
     ];
     let mut failed = 0;
