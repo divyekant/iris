@@ -249,6 +249,33 @@ Its dates follow `schema/job.schema.json`.
    The person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.
    ```
 
+6a. Only when an event of the job has an answer (card R5-05): `## Your
+   answer`, an empty line, and these lines for the newest event with an
+   answer and the newest event with a question before it:
+
+   ```
+   You asked on <date>:
+   <empty line>
+   <fence>question
+   <question>
+   <fence>
+   <empty line>
+   The person answered on <date>:
+   <empty line>
+   <fence>answer
+   <answer>
+   <fence>
+   <empty line>
+   The answer is from the person, not from a mail.
+   <empty line>
+   ```
+
+   - Each `<date>` is the date of its event (section 2).
+   - `<question>` and `<answer>` are the text of the event, with the white
+     space at its end removed.
+   - Each `<fence>` follows the rule of the `mail` block (section 6), for
+     its own text.
+
 7. This fixed text:
 
    ```

@@ -914,7 +914,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
                  DROP TRIGGER person_decision; DROP TABLE person_decision;
                  DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
                  DROP TABLE write_send; DROP TABLE comment_delivery;
-                 DROP TABLE changeset_comment;
+                 DROP TABLE changeset_comment; DROP TABLE nudge_try;
                  DROP TRIGGER job_notes_end; DROP TABLE job_notes;
                  DROP TRIGGER ledger_stop; DROP TABLE stop_switch;
                  PRAGMA user_version = 19;",

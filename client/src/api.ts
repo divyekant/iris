@@ -32,6 +32,8 @@ export type Item = {
   deferred_until?: string;
   amount?: Money;
   participants?: Party[];
+  /** The mail thread of a conversation (`t-N`). */
+  thread?: string;
   latest?: { at: string; from: Party; snippet: string };
   messages?: number;
   new?: number;

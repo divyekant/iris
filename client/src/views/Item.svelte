@@ -9,6 +9,7 @@
   import { href } from "../route";
   import Act from "./Act.svelte";
   import { canStart } from "../start";
+  import { quiet } from "../act";
   import Code from "./Code.svelte";
 
   let { item: given, now: start = new Date() }: { item: Item; now?: Date } = $props();
@@ -67,6 +68,8 @@
   });
   // "Handle this" (R4-10): the start of a job, on its own page.
   let startable = $derived(canStart(item));
+  // "Reply" (R3-10): the write view of the thread. A gone conversation has no mail to answer.
+  let thread = $derived(item.form === "conversation" && item.status !== "gone" ? item.thread : undefined);
   let made = $derived(
     item.derived.by === "rule" ? `a fixed rule (${item.derived.rule})` : item.derived.by === "model" ? `the model ${item.derived.model}` : "you",
   );
@@ -79,9 +82,17 @@
   {#snippet handle()}
     {#if startable}<a class="handle" href={href.start(item.id)}>Handle this</a>{/if}
   {/snippet}
+  {#snippet reply()}
+    {#if thread}<a class="reply" href={href.reply(thread)}>Reply</a>{/if}
+  {/snippet}
 
-  <Act {item} onchange={(next) => (item = next)} more={handle} />
-  {#if item.form !== "commitment" && startable}<div class="alone">{@render handle()}</div>{/if}
+  <!-- Reply sits outside Act, so it stays in each phase of a verb: the hold, the answer and a failure. -->
+  <div class="verbs">
+    {@render reply()}
+    <Act {item} onchange={(next) => (item = next)} more={handle} />
+  </div>
+  <!-- Where Act shows no row with Mute, Skip or Dismiss, Handle this stands alone. A commitment keeps Handle this in its own row. -->
+  {#if item.form !== "commitment" && !quiet(item) && startable}<div class="alone">{@render handle()}</div>{/if}
 
   {#if item.form === "signal" && item.code}
     <div class="code"><Code {item} {now} /></div>
@@ -159,6 +170,29 @@
   .alone {
     display: flex;
     margin: 0 0 var(--space-8);
+  }
+  .verbs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0 var(--space-2);
+  }
+  /* The row or the note of Act takes the rest of the line. */
+  .verbs > :global(div) {
+    flex: 1;
+  }
+  .reply {
+    margin-bottom: var(--space-8);
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--size-touch);
+    padding: 0 var(--space-6);
+    border-radius: var(--radius-full);
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+    font-weight: 500;
+    text-decoration: none;
+    transition: background var(--transition-fast);
   }
   .alone .handle {
     margin-left: 0;
