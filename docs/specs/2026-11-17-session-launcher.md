@@ -248,9 +248,14 @@ steps of the workspace spec:
    helper.
 6. Start and release, as one gate: open a write transaction
    (`BEGIN IMMEDIATE`), and check that the session did not end. If it
-   ended (a revoke or a job move came during steps 3 to 5), roll back,
-   close the pipe, wait for the helper, and go back to step 2 once. A
-   second end of the same kind ends the launch with the reason. Else set
+   ended during steps 3 to 5, roll back, close the pipe, wait for the
+   helper and run the reap check. Then act on the end reason:
+   - `revoke`: the grant changed, so go back to step 2 once, with a new
+     build. A second `revoke` ends the launch with the reason.
+   - Each other reason (`stop`, `job_state`, `engine`): the launch ends
+     with that reason, with no retry. So a stop during the launch cancels
+     the run, and `iris job run` prints that the session was stopped
+     before its start and exits with 1. Else set
    `started_at` (`iris_job::start_in`), write `start` to the pipe, and
    then commit.
 
@@ -413,15 +418,19 @@ no network stops them. The engine gives each session one narrow path out:
 - The proxy relays the bytes and does not read them. TLS runs from the
   agent to the model host, so the engine sees no key and no text.
 - The proxy writes one line for each connection to its own file,
-  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`): the host, the
-  bytes in each direction, and the result. Only the proxy writes this file,
+  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). For an allowed
+  `CONNECT`, the line has the host (a value of the allowed list, as the
+  list writes it), the bytes in each direction, and the result. For a
+  refused request, the line has only a fixed reason (`not_connect`,
+  `host_not_allowed`, `port_not_allowed`, `too_long`) and no text of the
+  request. Only the proxy writes this file,
   so it needs no shared append path with the helper. The file has a limit
   of 1 MiB. At the limit the proxy writes one line that says the rest is
   dropped, then only counts: at the end of the session it writes one last
   line with the count of dropped lines, inside a reserved 4 KiB. So the
   two logs of a session never pass 64 KiB and 1 MiB. An egress line holds
-  the host of the `CONNECT` line, which the proxy checked against the
-  allowed hosts, so it holds no text of the agent.
+  no text of the agent: only a value of the allowed list, numbers and
+  fixed words.
 - When the session ends, the engine closes the port and each open
   connection of the session.
 
@@ -564,7 +573,8 @@ is refused before a row is written.
 | The helper is killed and the agent group lives | The reap check fails on rule 2; the session stays live and a `run` is refused | Supervisor test: kill the helper, keep the group |
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
-| A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line | Proxy test |
+| A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line with a fixed reason and no request text | Proxy test: `CONNECT <marker>:443` leaves no marker in the log |
+| `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `run` exits with 1 | Launch test with a stop hook |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
