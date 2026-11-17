@@ -645,7 +645,7 @@ fn a_slow_isolation_stop_does_not_hold_a_stop_of_another_job() {
     until(&s, &f, a, |r| r.reaped_ms.is_some());
 }
 
-fn the_end_of_a_session_closes_its_egress_port_before_the_reap() {
+fn the_end_of_a_session_closes_its_proxy_before_the_reap() {
     // The agent writes its proxy address, and ignores the TERM of the
     // helper: it lives about 5 s after the end.
     let f = fixture_with(
@@ -664,22 +664,34 @@ fn the_end_of_a_session_closes_its_egress_port_before_the_reap() {
     }
     let text = fs::read_to_string(&url).unwrap();
     let port: u16 = text.trim().rsplit(':').next().unwrap().parse().unwrap();
-    std::net::TcpStream::connect(("127.0.0.1", port)).expect("the port is open");
+    // The test connects from 127.0.0.1, not from the peer address of the
+    // session: the proxy refuses it, and its log says why.
+    let log = f.store.dir().join(format!("sessions/se-{id}.egress.log"));
+    let lines = |word: &str| {
+        fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches(word)
+            .count()
+    };
+    let knock = |word: &str| {
+        let before = lines(word);
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the port is bound");
+        let _ = std::io::Read::read(&mut c, &mut [0u8; 64]);
+        let end = Instant::now() + Duration::from_secs(4);
+        while lines(word) == before {
+            assert!(Instant::now() < end, "no `{word}` line in the egress log");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    knock("not_session");
     iris_job::end(&f.store, id, EndReason::Stop, None, now()).unwrap();
     s.turn(now());
-    let end = Instant::now() + Duration::from_secs(4);
-    loop {
-        let closed = std::net::TcpStream::connect(("127.0.0.1", port)).is_err();
-        if closed {
-            break;
-        }
-        assert!(Instant::now() < end, "the port stays open after the end");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    // The proxy is closed, and its port stays bound until the reap.
+    knock("reason=stopped");
     assert_eq!(
         session(&f.store, id).unwrap().reaped_ms,
         None,
-        "the agent still runs: the port closed before the reap"
+        "the agent still runs: the proxy closed before the reap"
     );
     until(&s, &f, id, |r| r.reaped_ms.is_some());
 }
@@ -776,8 +788,8 @@ fn main() {
             a_slow_isolation_stop_does_not_hold_a_stop_of_another_job,
         ),
         (
-            "the_end_of_a_session_closes_its_egress_port_before_the_reap",
-            the_end_of_a_session_closes_its_egress_port_before_the_reap,
+            "the_end_of_a_session_closes_its_proxy_before_the_reap",
+            the_end_of_a_session_closes_its_proxy_before_the_reap,
         ),
     ];
     let mut failed = 0;

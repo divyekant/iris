@@ -461,12 +461,10 @@ machine.
   wait for the workspace lock with no limit, so no supervisor turn, stop
   or run waits for a build.
 - In the same way, one stop thread of the engine stops the egress proxy
-  of each ended session, as the shutdown order says. A proxy stop joins
-  the threads of the proxy, so no supervisor turn, stop or run waits for
-  it.
+  of each reaped session (`Proxy::stop`). A proxy stop joins the threads
+  of the proxy, so no supervisor turn, stop or run waits for it.
 - A supervisor turn does only fast work: the end in the store, the
-  close of the socket and the pipe, and the send of the proxy to the stop
-  thread. Each ended session gets its own reap
+  `Proxy::close`, and the close of the socket and the pipe. Each ended session gets its own reap
   thread for `Isolation::stop` and the reap check, which have no time
   limit. A turn starts no second reap thread for a session while one
   runs. So a slow session never holds the stop of another session.
@@ -559,11 +557,11 @@ no network stops them. The engine gives each session one narrow path out:
   (domain fronting), or a client that hides the name with Encrypted
   Client Hello, is a known limit (issue).
 - The proxy writes one line for each connection to its own file,
-  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The engine
-  starts the proxy before the build. If a revoke makes the launch register
-  a second session, the engine moves the log to the name of the second
-  session before its build, and never over a file of that name. If the
-  move fails, the second session ends with `launch_failed`. For an allowed
+  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). The launch
+  starts one proxy for each session that it registers, after the bind and
+  before the helper, with the log and the peer address of that session.
+  A revoke retry registers a second session, so it gets its own proxy. If
+  the proxy does not start, the session ends with `launch_failed`. For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
   list writes it), the bytes in each direction, and the result
   (`closed`, `stopped` or `connect_failed`). For a refused request, the

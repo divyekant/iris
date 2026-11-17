@@ -7,7 +7,7 @@
 //! limit, stops a session that ended in the store (a stop, a revoke, a job
 //! move), and runs the reap check until it passes.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -20,9 +20,10 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use iris_job::{format_session_id, EndReason, Session};
-use iris_session::egress::{Proxy, SystemResolver};
+use iris_session::config::Adapter;
+use iris_session::egress::{session_peer, Proxy, SystemResolver};
 use iris_session::isolation::Isolation;
-use iris_session::launch::{Launcher, Outcome, Step};
+use iris_session::launch::{Egress, Launcher, Outcome, Step};
 use iris_session::reap::reap_check;
 use iris_store::Store;
 
@@ -74,6 +75,9 @@ struct State {
     running: HashMap<i64, Live>,
     /// The reason of the last failed reap check of each session.
     left: HashMap<i64, String>,
+    /// The closed egress proxies of launches that ended with no running
+    /// session, until the reap of their session.
+    parked: HashMap<i64, Proxy>,
     /// The sessions with a reap thread.
     busy: HashSet<i64>,
 }
@@ -160,7 +164,7 @@ impl Sessions {
     /// The count of egress proxies that run. For tests.
     pub fn open_proxies(&self) -> usize {
         let st = self.state();
-        st.running.values().filter(|l| l.proxy.is_some()).count()
+        st.parked.len() + st.running.values().filter(|l| l.proxy.is_some()).count()
     }
 
     /// Calls `f` after each step of each launch. For tests.
@@ -224,7 +228,9 @@ impl Sessions {
                 h(step, s);
             }
         };
-        let begun = self.launcher(&*isolation, None, &after).begin(job, agent);
+        let begun = self
+            .launcher(&*isolation, &|_, _| Ok(None), &after)
+            .begin(job, agent);
         let begun = match begun {
             Ok(b) => b,
             Err(e) => {
@@ -267,6 +273,10 @@ impl Sessions {
         let _ = self.releases.send(proxy);
     }
 
+    fn is_reaped(&self, session: i64) -> bool {
+        iris_job::session(&self.store, session).is_ok_and(|r| r.reaped_ms.is_some())
+    }
+
     /// The live session of `job`, if one exists.
     fn live_of(&self, job: i64) -> Option<i64> {
         iris_job::live_sessions(&self.store)
@@ -283,7 +293,7 @@ impl Sessions {
     fn launcher<'a>(
         &'a self,
         isolation: &'a dyn Isolation,
-        egress_port: Option<u16>,
+        egress: &'a Egress<'a>,
         after: &'a dyn Fn(Step, i64),
     ) -> Launcher<'a> {
         Launcher {
@@ -291,7 +301,7 @@ impl Sessions {
             data_dir: self.data_dir(),
             isolation,
             helper: &*self.helper,
-            egress_port,
+            egress,
             env: &|name| std::env::var_os(name),
             now: &now_ms,
             after,
@@ -301,70 +311,42 @@ impl Sessions {
     /// Steps 3 to 6, on the launch thread.
     fn launch(&self, isolation: &dyn Isolation, begun: iris_session::launch::Begun) {
         let job = begun.job();
-        let session = begun.session;
         let limit_ms = i64::from(begun.max_minutes()) * 60_000;
-        let proxy = if begun.allow_hosts().is_empty() {
-            Ok(None)
-        } else {
-            self.egress(session, begun.allow_hosts().to_vec()).map(Some)
-        };
         let hook = self.hook();
-        let outcome = match proxy {
-            Ok(proxy) => {
-                let port = proxy.as_ref().map(Proxy::port);
-                // A revoke retry registers a new session: the egress log
-                // moves to it before its build, so the log of the session
-                // that runs always has its name.
-                let logged = Cell::new(session);
-                let after = |step: Step, s: i64| {
-                    if step == Step::Registered {
-                        self.registered(job, s);
-                    }
-                    if step == Step::Registered && proxy.is_some() && s != logged.get() {
-                        match move_log(&self.egress_log(logged.get()), &self.egress_log(s)) {
-                            Ok(()) => logged.set(s),
-                            Err(e) => {
-                                // The launch sees the end and stops.
-                                say!("iris: {}: no egress log: {e}", format_session_id(s));
-                                let _ = iris_job::end(
-                                    &self.store,
-                                    s,
-                                    EndReason::LaunchFailed,
-                                    None,
-                                    now_ms(),
-                                );
-                            }
-                        }
-                    }
-                    if let Some(h) = &hook {
-                        h(step, s);
-                    }
-                };
-                let outcome = self.launcher(isolation, port, &after).finish(begun);
-                Some((outcome, proxy))
+        let after = |step: Step, s: i64| {
+            if step == Step::Registered {
+                self.registered(job, s);
             }
-            Err(why) => {
-                say!(
-                    "iris: {}: no egress port: {why}",
-                    format_session_id(session)
-                );
-                let _ = iris_job::end(
-                    &self.store,
-                    session,
-                    EndReason::LaunchFailed,
-                    None,
-                    now_ms(),
-                );
-                None
+            if let Some(h) = &hook {
+                h(step, s);
             }
         };
+        // One proxy for each session of the launch: the first, and the one
+        // of a revoke retry. Each has the log and the peer address of its
+        // session.
+        let proxies: RefCell<HashMap<i64, Proxy>> = RefCell::default();
+        let egress = |session: i64, adapter: &Adapter| -> Result<Option<u16>, String> {
+            if adapter.allow_hosts.is_empty() {
+                return Ok(None);
+            }
+            let p = self.egress(session, adapter.allow_hosts.clone())?;
+            let port = p.port();
+            proxies.borrow_mut().insert(session, p);
+            Ok(Some(port))
+        };
+        let outcome = self.launcher(isolation, &egress, &after).finish(begun);
+        let mut proxies = proxies.into_inner();
+        // The session of a launch that ended with no agent, if its cleanup
+        // reaped it: each reap asks for the build of a done job.
+        let mut reaped = false;
         // One lock: no turn sees the launch over before the running
         // session is in the map.
         let mut st = self.state();
         st.launching.remove(&job);
         st.stopping.remove(&job);
         match outcome {
-            Some((Outcome::Running(r), proxy)) => {
+            Outcome::Running(r) => {
+                let proxy = proxies.remove(&r.session);
                 st.running.insert(
                     r.session,
                     Live {
@@ -379,19 +361,24 @@ impl Sessions {
                     },
                 );
             }
-            Some((Outcome::Ended { session, why, .. } | Outcome::Open { session, why }, proxy)) => {
+            Outcome::Ended { session, why, .. } | Outcome::Open { session, why } => {
                 say!("iris: {}: {why}", format_session_id(session));
-                if let Some(p) = proxy {
-                    // The session ended: its proxy stops now.
-                    self.release(p);
-                }
-                // Each reap asks for the build of a done job: the turns for
-                // their reaps, and this launch for a reap in its cleanup.
-                if iris_job::session(&self.store, session).is_ok_and(|r| r.reaped_ms.is_some()) {
-                    let _ = self.builds.send(job);
-                }
+                reaped = self.is_reaped(session);
             }
-            None => {}
+        }
+        // Each other proxy belongs to a session that ended: close it now,
+        // and stop it at the reap of its session (the shutdown order).
+        for (session, p) in proxies {
+            p.close();
+            if self.is_reaped(session) {
+                self.release(p);
+            } else {
+                st.parked.insert(session, p);
+            }
+        }
+        drop(st);
+        if reaped {
+            let _ = self.builds.send(job);
         }
     }
 
@@ -408,7 +395,8 @@ impl Sessions {
             .mode(0o600)
             .open(self.egress_log(session))
             .map_err(|e| e.to_string())?;
-        Proxy::start(allowed, log, Box::new(SystemResolver)).map_err(|e| e.to_string())
+        let peer = session_peer(session).ok_or("the session ID has no peer address")?;
+        Proxy::start(allowed, log, Box::new(SystemResolver), peer).map_err(|e| e.to_string())
     }
 
     fn egress_log(&self, session: i64) -> PathBuf {
@@ -557,8 +545,8 @@ impl Sessions {
     fn shutdown(&self, l: &mut Live) {
         l.socket = None;
         l.pipe = None;
-        if let Some(p) = l.proxy.take() {
-            self.release(p);
+        if let Some(p) = &l.proxy {
+            p.close();
         }
     }
 
@@ -579,6 +567,9 @@ impl Sessions {
                     if let Some(p) = l.proxy.take() {
                         self.release(p);
                     }
+                }
+                if let Some(p) = st.parked.remove(&session) {
+                    self.release(p);
                 }
                 st.left.remove(&session);
                 drop(st);
@@ -645,12 +636,6 @@ fn is_session_log(name: &str) -> bool {
         .strip_suffix(".egress.log")
         .or_else(|| name.strip_suffix(".log"));
     id.and_then(iris_job::parse_session_id).is_some()
-}
-
-/// Moves a log file to a new name, and never over a file of that name.
-fn move_log(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(from, to)?;
-    std::fs::remove_file(from)
 }
 
 /// The last session of `job`, if one exists.
