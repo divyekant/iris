@@ -25,6 +25,8 @@ toml = { version = "=0.9.8", default-features = false, features = ["std", "parse
 httparse = "=1.10.1"
 # Already in Cargo.lock. poll() for the accept loop of the egress proxy.
 libc = "=0.2.191"
+# Already in Cargo.lock. The label of the launchd job of a macOS session.
+sha2 = { version = "=0.11.1", default-features = false }
 # Already in Cargo.lock (through tokio). Binds the session address of the
 # relay before the connect (egress::connect_from).
 socket2 = "=0.6.5"
