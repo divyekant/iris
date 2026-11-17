@@ -1666,3 +1666,57 @@ fn no_state_verb_counts_toward_bulk() {
         );
     }
 }
+
+/// `skip`, `mute` and `dismiss` take one item each (R5-02): an action with
+/// two items is denied at submit.
+#[test]
+fn skip_mute_and_dismiss_take_one_item() {
+    let dir = TempDir::new("one-item");
+    let s = store(&dir);
+    let forms = [
+        (Verb::Skip, "feed", "feed.json", "f", "new"),
+        (
+            Verb::Mute,
+            "conversation",
+            "conversation.json",
+            "v",
+            "active",
+        ),
+        (Verb::Dismiss, "signal", "signal-code.json", "s", "active"),
+    ];
+    for (verb, form, file, prefix, status) in forms {
+        let mut ids = Vec::new();
+        s.write(|tx| {
+            for _ in 0..2 {
+                let row: i64 =
+                    tx.query_row("SELECT coalesce(max(id), 0) + 1 FROM item", [], |r| {
+                        r.get(0)
+                    })?;
+                let mut doc =
+                    iris_spec::read_json(&iris_spec::schema_dir().join("examples").join(file));
+                doc["id"] = json!(format!("{prefix}-{row}"));
+                tx.execute(
+                    "INSERT INTO item(id, form, account_id, status, doc, created_at, updated_at)
+                     VALUES (?1, ?2, 1, ?3, ?4, 0, 0)",
+                    rusqlite::params![row, form, status, doc.to_string()],
+                )?;
+                ids.push(format!("{prefix}-{row}"));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let cs = create(&s, &agent(), NOW).unwrap();
+        let targets: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let a = args(json!({"reason": "No."}));
+        add_action(&s, cs, &agent(), verb, &targets, &a, None).unwrap();
+        add_action(&s, cs, &agent(), verb, &targets[..1], &a, None).unwrap();
+        submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+        let two = hash_doc(&s, cs, 1, 1);
+        assert_eq!(two["decision"]["state"], "denied", "{two}");
+        assert!(two["decision"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("one target"));
+        assert_eq!(hash_doc(&s, cs, 1, 2)["decision"]["state"], "proposed");
+    }
+}

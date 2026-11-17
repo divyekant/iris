@@ -1059,7 +1059,10 @@ fn resolve(c: &Connection, action: i64, verb: Verb, targets: &str) -> Result<Opt
     if ids.is_empty() {
         return Ok(Some("the action has no target".into()));
     }
-    if write && ids.len() != 1 {
+    // A write verb, and `skip`, `mute` and `dismiss`
+    // (docs/specs/2026-11-17-preference-rules.md), take one target.
+    let one = write || matches!(verb, Verb::Skip | Verb::Mute | Verb::Dismiss);
+    if one && ids.len() != 1 {
         return Ok(Some(format!("{} takes one target", verb.as_str())));
     }
     let mut seen = HashSet::with_capacity(ids.len());
