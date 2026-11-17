@@ -9,7 +9,7 @@
 R3-01 lets an agent or a person write a draft and approve a send. Each
 `draft` and `send` action goes to a person, but the review screen shows
 only the flags `first_contact` and `bulk` for it. The person does not see
-that a draft goes to a new address, promises money or a date, mentions an
+that a draft goes to a new address, names an amount or a date, mentions an
 attachment that is not there, or copies text from a message of another
 person. These are the mistakes that a person cannot undo after the send.
 
@@ -27,7 +27,8 @@ its flag before the send.
 - `outside_thread`: it needs the session of release 4 ("after the session
   read external mail"). No action gets it in this card.
 - A new screen, a new flag name or a reason text for each flag. The flag
-  names and their words exist (schema `$defs/flag`, `FLAGS`).
+  names exist (schema `$defs/flag`). Only the words of `money` and `date`
+  change (section 2).
 - A check that uses the model. The checks are fixed rules (see "Options not
   chosen").
 - The held state and the cancel (R3-02).
@@ -53,10 +54,18 @@ function.
 | Flag | Rule |
 |---|---|
 | `new_recipient` | An address of `to` or `cc` has no `sender_evidence` row with the rule `sent`, and is not the account address. A typing error in a known address (a wrong recipient) is a new address, so it gets this flag. |
-| `money` | The body or the subject has an amount: a currency sign (`$`, `€`, `£`, `¥`, `₹`) next to a digit, or a number next to a currency code or word (`USD`, `EUR`, `GBP`, `INR`, `JPY`, `CAD`, `AUD`, `CHF`, `dollar(s)`, `euro(s)`, `pound(s)`, `rupee(s)`). |
-| `date` | The body or the subject has a date: a month name or its short form next to a number, a weekday name, `today`, `tonight`, `tomorrow`, `next week`, `next month`, `end of the day`, `end of the week`, `EOD`, `EOW`, an ISO date (`2026-11-17`) or a numeric date (`17/11`, `11/17/2026`). |
+| `money` | The body or the subject names an amount: a currency sign (`$`, `€`, `£`, `¥`, `₹`) next to a digit, or a number next to a currency code or word (`USD`, `EUR`, `GBP`, `INR`, `JPY`, `CAD`, `AUD`, `CHF`, `dollar(s)`, `euro(s)`, `pound(s)`, `rupee(s)`). |
+| `date` | The body or the subject names a date: a month name or its short form next to a number, a weekday name, `today`, `tonight`, `tomorrow`, `next week`, `next month`, `end of the day`, `end of the week`, `EOD`, `EOW`, an ISO date (`2026-11-17`) or a numeric date (`17/11`, `11/17/2026`). |
 | `attachment` | The body or the subject has a word of the attachment group: `attach`, `attached`, `attachment(s)`, `enclosed`. Iris drafts have no attachments (issue #235), so a mention always means a missing attachment. |
-| `untrusted_content` | The body has a run of 8 words that is a phrase in the clean text of a message that the account did not send (`message_fts`, the sender is not the account address). |
+| `untrusted_content` | The body has a run of 8 words that is a phrase in the clean text (`message_fts`) of an external message: a message with no `SENT` and no `DRAFT` label. Spec 1 and `iris-senders` mark mail of the owner by these labels, not by `From`, because any sender can write the address of the account in `From`. |
+
+`money` and `date` flag each amount and each date that the text names,
+not only a promise: a rule cannot tell a promise from a mention, and a
+missed promise is the risk. So this card changes the meaning of the two
+flags in spec 2, section 5.3, from "promises" to "names", and the words of
+the review screen (`client/src/review.ts`, `FLAGS`) to "Names an amount of
+money" and "Names a date". The owner picks the words (decision on this
+card).
 
 Words match with no case difference and on word bounds. A match inside a
 longer word does not count (`attachments` counts, `reattach` does not).
@@ -114,6 +123,7 @@ at most 256 KiB, at most 50 addresses).
 | Random text, random Unicode, a body of 256 KiB | No panic; the same flags for the same input; the `untrusted_content` check makes at most one query for each 8 words | property test `draft_flags_hold_for_random_text` |
 | A body with FTS5 syntax (`"`, `*`, `NEAR`, `AND`, `^`) | The words are letters and digits only; the query is a phrase of words | property test (the generator writes these) |
 | A store with no `sender_evidence` row (no sync of sent mail yet) | Each address is new: `new_recipient` | example test |
+| A received message whose `From` is the account address (a forged sender) | External: no `SENT` or `DRAFT` label, so its text gives `untrusted_content` | example test |
 | A message with no clean text yet (not understood) | Not compared; `untrusted_content` can be missed | known limit, issue |
 | The full-text query fails (a store error) | Submit fails with the error; no action changes | the store error path of submit |
 
@@ -121,7 +131,10 @@ at most 256 KiB, at most 50 addresses).
 
 - `crates/iris-changeset`: `draft_flags`, the call in submit.
 - `crates/iris-apply`: the second call in the release.
-- No migration, no schema change, no screen change.
+- `docs/spec/02-changeset-policy-ledger.md`, section 5.3: `money` and
+  `date` name an amount or a date.
+- `client/src/review.ts`: the words of `money` and `date`.
+- No migration and no schema change.
 
 ## Assumptions
 

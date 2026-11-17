@@ -234,8 +234,8 @@ The engine adds flags. An author cannot remove a flag.
 |---|---|
 | `new_recipient` | A `send` goes to an address that the owner never sent mail to. |
 | `outside_thread` | A `send` goes to an address that is not in the thread, after the session read external mail (release 4). |
-| `money` | The text of a draft promises an amount of money. |
-| `date` | The text of a draft promises a date. |
+| `money` | The text of a draft names an amount of money (`docs/specs/2026-11-17-send-checks.md`). |
+| `date` | The text of a draft names a date (`docs/specs/2026-11-17-send-checks.md`). |
 | `attachment` | The text refers to an attachment, and none is attached, or an attachment is attached. |
 | `first_contact` | The target thread is with a `stranger`. |
 | `untrusted_content` | The text of the draft contains text from an external message. |
