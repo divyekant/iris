@@ -123,8 +123,14 @@
   // The unsent answer of each question, by job and question time: a poll that changes the card keeps it.
   const questionKey = (q: Job) => `${q.id} ${q.updated}`;
   let drafts = $state<Record<string, string>>({});
-  // A question with an unsent answer stays on the card while it is open, so a newer question never takes the field away.
-  let shown = $derived(questions.find((q) => drafts[questionKey(q)]?.trim()) ?? questions[0]);
+  // The question that the person picked with "Next question", if it is still open.
+  let picked = $state("");
+  // Else a question with an unsent answer stays on the card while it is open, so a newer question never takes the field away.
+  let shown = $derived(questions.find((q) => questionKey(q) === picked) ?? questions.find((q) => drafts[questionKey(q)]?.trim()) ?? questions[0]);
+  function nextQuestion() {
+    const at = shown ? questions.indexOf(shown) : -1;
+    picked = questionKey(questions[(at + 1) % questions.length]);
+  }
   const answeredJob = (job: Job) => {
     sent = job;
     delete drafts[questionKey(job)];
@@ -254,7 +260,12 @@
     {#if sent}{@render sentLine(sent)}{/if}
     <!-- A new question of the same job is a new card: the key has the time of the question. -->
     {#key questionKey(shown)}<Question job={shown} draft={drafts[questionKey(shown)] ?? ""} ondraft={(t) => (drafts[questionKey(shown)] = t)} onanswered={answeredJob} onchanged={reloadQuestions} />{/key}
-    {#if questions.length > 1}<a class="all touch" href="#/jobs">All {questions.length} questions</a>{/if}
+    {#if questions.length > 1}
+      <div class="more">
+        <button type="button" class="all touch" onclick={nextQuestion}>Next question</button>
+        <a class="all touch" href="#/jobs">All {questions.length} questions</a>
+      </div>
+    {/if}
   </section>
 {:else if sent}
   <div class="alone">{@render sentLine(sent)}</div>
@@ -444,6 +455,19 @@
   }
   .all:hover {
     color: var(--color-text);
+  }
+  .more {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  button.all {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--font-size--1);
+    cursor: pointer;
   }
   .alone {
     margin-bottom: var(--space-12);

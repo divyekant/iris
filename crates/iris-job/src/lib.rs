@@ -200,13 +200,25 @@ struct Move<'a> {
     why: Option<&'a str>,
 }
 
+/// A move out of `needs_you` takes the time of the question if the clock is
+/// earlier: the time of a question can be 1 ms ahead of the clock
+/// ([`ask_in`]), and the answer or the end must not fail on the time.
 fn add_event(c: &Connection, job: i64, state: State, by: By, m: Move, now_ms: i64) -> Result<()> {
-    let found: Option<i64> = c
-        .query_row("SELECT 1 FROM job WHERE id = ?1", [job], |r| r.get(0))
+    let found: Option<(String, i64)> = c
+        .query_row(
+            "SELECT state, updated_at FROM job WHERE id = ?1",
+            [job],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
-    if found.is_none() {
+    let Some((current, updated)) = found else {
         return Err(Error::NotFound);
-    }
+    };
+    let now_ms = if current == State::NeedsYou.as_str() {
+        now_ms.max(updated)
+    } else {
+        now_ms
+    };
     c.execute(
         "INSERT INTO job_event
            (job_id, at, state, by, wait_thread, wait_until, question, answer, end_kind, why)

@@ -280,8 +280,10 @@ fn the_text_limits() {
     // The question is 1 ms after the create, which has the same time.
     ask(&store, job, "Which?", None, NOW).unwrap();
     assert_eq!(get(&store, job).unwrap().updated_ms, NOW + 1);
-    refused(answer(&store, job, &"a".repeat(10_001), None, NOW + 1));
-    answer(&store, job, &"a".repeat(10_000), None, NOW + 1).unwrap();
+    // The answer of the person in the millisecond of the clock still applies.
+    refused(answer(&store, job, &"a".repeat(10_001), None, NOW));
+    answer(&store, job, &"a".repeat(10_000), None, NOW).unwrap();
+    assert_eq!(events(&store, job).unwrap().last().unwrap().at_ms, NOW + 1);
     agree(&store, job);
 }
 

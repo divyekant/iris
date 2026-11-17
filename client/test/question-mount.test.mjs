@@ -228,6 +228,44 @@ test("a draft answer stays when a newer question of another job comes", async ()
   }
 });
 
+test("the person picks another question, and each draft stays with its question", async () => {
+  const at = (h) => `2026-11-17T${String(h).padStart(2, "0")}:00:00.000Z`;
+  const mine = { ...job(), updated: at(8) };
+  const other = { ...job(), id: "j-20", goal: "Book the flight.", question: "Window or aisle?", updated: at(9) };
+  let list = [other, mine];
+  const asked = serve((path, body) => {
+    if (body) {
+      list = list.filter((q) => q.id !== "j-20");
+      return [200, { job: { ...other, state: "working" }, changesets: [], threads: {} }];
+    }
+    return path.startsWith("jobs") ? [200, { jobs: list, next: null }] : [200, path.startsWith("watches") ? [] : { proposed: [], confirmed: [] }];
+  });
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: list, brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 0 });
+  const next = () => [...view.target.querySelectorAll("button")].find((b) => b.textContent === "Next question");
+  try {
+    // The newest question shows. The person picks the older one and starts an answer.
+    assert.match(text(view.target), /Window or aisle\?/);
+    next().click();
+    view.flushSync();
+    assert.match(text(view.target), /Pay the full amount/);
+    await type(view, "Half typed");
+    // The draft does not hold the card: the person goes back and answers the other question.
+    next().click();
+    view.flushSync();
+    assert.match(text(view.target), /Window or aisle\?/);
+    assert.equal(view.target.querySelector("textarea").value, "");
+    await type(view, "Aisle.");
+    button(view).click();
+    await until(() => asked.some(([m]) => m === "POST"));
+    assert.deepEqual(asked.find(([m]) => m === "POST")[2].answer, "Aisle.");
+    // The first question comes back with its draft.
+    await until(() => /Pay the full amount/.test(text(view.target)));
+    assert.equal(view.target.querySelector("textarea").value, "Half typed");
+  } finally {
+    view.destroy();
+  }
+});
+
 test("the brief loads the questions when it opens with none given", async () => {
   // App mounts the brief with no questions: the brief asks the engine.
   const asked = serve((path) => (path.startsWith("jobs") ? [200, { jobs: [job()], next: null }] : [200, path.startsWith("watches") ? [] : { proposed: [], confirmed: [] }]));
