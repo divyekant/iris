@@ -89,7 +89,7 @@ fn an_old_store_gets_the_new_verbs() {
     }
     let s = Store::open(&dir.0).unwrap();
     s.write(|tx| {
-        assert_eq!(iris_store::schema_version(tx)?, 25);
+        assert_eq!(iris_store::schema_version(tx)?, 26);
         let n: i64 = tx.query_row(
             "SELECT count(*) FROM changeset_action WHERE verb = 'archive'",
             [],
@@ -98,7 +98,7 @@ fn an_old_store_gets_the_new_verbs() {
         assert_eq!(n, 1);
         add_action(tx, "draft")?;
         add_action(tx, "send")?;
-        // Migration 25 (R5-02) widens the same CHECK again.
+        // Migration 26 (R5-02) widens the same CHECK again.
         for verb in ["skip", "mute", "dismiss"] {
             add_action(tx, verb)?;
         }

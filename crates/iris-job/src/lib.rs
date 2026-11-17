@@ -617,6 +617,23 @@ pub fn add_scope_in(c: &Connection, job: i64, what: Ref, by: By, now_ms: i64) ->
     Ok(())
 }
 
+/// True when the agent of `job` read mail that you did not send: a
+/// message of a scope row (revoked or not) with neither the label `SENT`
+/// nor `DRAFT` (spec R4-06, "The mark"). A message that is not in the store
+/// has no label, so it marks the job.
+pub fn reads_outside_in(c: &Connection, job: i64) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM job_scope s
+           JOIN job_scope_message sm ON sm.scope_id = s.id
+           WHERE s.job_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
+                             WHERE ml.message_id = sm.message_id
+                               AND l.provider_id IN ('SENT', 'DRAFT')))",
+        [job],
+        |r| r.get(0),
+    )
+}
+
 /// Revoke `what` from the active scope of `job`. The row stays, with the
 /// revoke, and the next build drops its mail. Only the person or the engine
 /// revokes. A ref that is not in the active scope changes nothing.

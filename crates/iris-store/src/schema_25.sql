@@ -1,25 +1,17 @@
--- Migration 25: the verbs `skip`, `mute` and `dismiss` of the person
--- (docs/specs/2026-11-17-preference-rules.md, card R5-02).
+-- Migration 25: limits for hostile input (docs/specs/2026-11-17-hostile-input-limits.md,
+-- card R4-06).
 --
--- The three verbs join the verb CHECK of changeset_action, with the method
--- of migration 18: a wider CHECK accepts each stored row, so only the text
--- of the table changes in sqlite_schema, and RESET loads the schema again.
-
-PRAGMA writable_schema = ON;
-UPDATE sqlite_schema
-SET sql = replace(sql, '''draft'', ''send''))', '''draft'', ''send'', ''skip'', ''mute'', ''dismiss''))')
-WHERE type = 'table' AND name = 'changeset_action';
-PRAGMA writable_schema = RESET;
-
--- Stop the migration if the text above did not change: the CHECK of a
--- temporary table refuses 0.
-CREATE TEMP TABLE migration_25 (ok INTEGER CHECK (ok = 1));
-INSERT INTO migration_25
-SELECT instr(sql, '''send'', ''skip'', ''mute'', ''dismiss'')') > 0
-FROM sqlite_schema WHERE type = 'table' AND name = 'changeset_action';
-DROP TABLE migration_25;
-
--- A schema change that the other connections see: it changes the schema
--- cookie, as the CREATE TABLE statements of migration 18 do.
-CREATE TABLE migration_25_done (id INTEGER PRIMARY KEY);
-DROP TABLE migration_25_done;
+-- Only a person approves a draft or a send with a warning flag (spec 2,
+-- section 6.5). The check reads the new row on a change of the state or of
+-- the flags: a move to approved, and a flag that an update adds to an
+-- action that a rule approved (trigger action_flags allows it). A held,
+-- applied or failed send keeps the decision that approved it (migration
+-- 22), so this check on `approved` covers them.
+CREATE TRIGGER action_flagged_write BEFORE UPDATE OF state, flags ON changeset_action
+WHEN new.state = 'approved' AND new.verb IN ('draft', 'send')
+  AND new.decided_by IS NOT 'person'
+  AND EXISTS (SELECT 1 FROM json_each(new.flags)
+              WHERE value IN ('new_recipient', 'outside_thread', 'money', 'date'))
+BEGIN
+  SELECT RAISE(ABORT, 'iris: only a person approves a draft or a send with a warning flag');
+END;

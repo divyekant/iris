@@ -605,7 +605,7 @@ in the file.
 | Limit | Result |
 |---|---|
 | A `send` never goes at once. | It waits in the held outbox for the hold delay, after the approval (release 3). |
-| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 23). |
+| A `draft` or a `send` with the flag `new_recipient`, `outside_thread`, `money` or `date`. | Review, even if a rule allows it. Only a person approves it (store migration 25). |
 | An action with the flag `bulk`. | Review, even if a rule allows it. |
 | An action by an author other than `person`, whose target has hostile mail: a message with a hostile mark, a message that waits for its link check (a `link_check` row), or a message from a `hostile` sender (specification 1, section 6.7). For a thread or a draft target, each message of the thread counts. | Only `archive`, `trash` and `label`. Other verbs are denied. |
 | Stop is on (release 4). | No provider write. Actions in the outbox wait. |
@@ -675,7 +675,7 @@ The pass also proposes a `hide` rule from the choices of the person
   `hide` proposal of its form.
 - An undone choice whose item, origin message, header or sender cannot
   be read again stops each `hide` proposal of its form.
-- The row has `verb = 'hide'` and the `form` (store migration 26). An
+- The row has `verb = 'hide'` and the `form` (store migration 27). An
   `allow` row has the form `''`.
 
 Failure list of the proposals:

@@ -81,7 +81,7 @@ cannot tell which sender the person wants to see.
 - The engine keeps a `muted` conversation muted when a new message
   arrives (`iris-talk`, already built). A `skipped` feed item and a
   `dismissed` signal keep their status. Only `gone` replaces each one.
-- Store migration 25: the three verbs join the verb CHECK of
+- Store migration 26: the three verbs join the verb CHECK of
   `changeset_action`, with the method of migration 18.
 - The open model schemas of the changeset and of the policy
   (`docs/spec/schema/`) add the three verbs. They are verbs of the policy
@@ -144,7 +144,7 @@ the rule cannot disagree.
 
 ### 3. The table
 
-Migration 24 (the proposal PR) makes `rule_proposal` hold a `hide` proposal:
+Migration 27 (the proposal PR) makes `rule_proposal` hold a `hide` proposal:
 
 - The column `verb` accepts `hide`. For a `hide` row, the verb is the
   effect of the rule.
@@ -211,7 +211,7 @@ and an item of another status (409). None of these changes an item.
 | A choice after the last pass | An accept with a stale count | `current` counts again in the accept transaction (R5-01) | Unit test of `current` with a new refusal |
 | A refusal whose item, origin message, header or sender is gone | The refusal is lost | It stops each `hide` proposal of its form | Unit test |
 | Two passes with the same decisions | A second open row for the same rule | `form` is never NULL, so the unique key holds and the upsert updates the row | Unit test |
-| Migration 24 after a deleted proposal | A new proposal gets the ID of a deleted one, and a stale accept names another rule | The migration keeps the `seq` of `sqlite_sequence` | Migration test |
+| Migration 27 after a deleted proposal | A new proposal gets the ID of a deleted one, and a stale accept names another rule | The migration keeps the `seq` of `sqlite_sequence` | Migration test |
 | A choice on hostile mail | A rule learned from an attack | No candidate, no count | Unit test |
 | A mute of conversations that the person started | A rule that hides each conversation that the person starts | An origin from the person gives no candidate | Unit test |
 | A click on a verb by mistake | An item leaves the brief, with no undo until #226 | The client hold: Undo in the Undo time sends nothing | Client test (R5-02d) |
@@ -220,7 +220,7 @@ and an item of another status (409). None of these changes an item.
 
 ## Impact
 
-- `crates/iris-store`: migrations 23 (the verbs) and 24 (the proposals).
+- `crates/iris-store`: migrations 26 (the verbs) and 27 (the proposals).
 - `crates/iris-changeset`: the three verbs in `Verb` and `STATE_VERBS`.
 - `crates/iris-apply`: `state.rs`, the status moves of section 1.
 - `crates/iris-api`: the verb route and `VerbBody` rules; the `kind` of
@@ -280,7 +280,7 @@ scripts/local-ci/run.sh
 
 ## Rollout
 
-Migrations 23 and 24 run on the first start of the new program. No flag.
+Migrations 26 and 27 run on the first start of the new program. No flag.
 
 ## Risks
 
@@ -307,7 +307,7 @@ Migrations 23 and 24 run on the first start of the new program. No flag.
   items that the rule hides (property test over random choices).
 - API tests for each verb: the status move, 409 for another form or
   status, 404 for an unknown verb.
-- A migration test: a store at migration 22 with proposals keeps each
+- A migration test: a store at migration 26 with proposals keeps each
   row and ID. With IDs 1 and 2 kept and ID 3 deleted before the
   migration, the next proposal gets ID 4.
 - A repeated pass test: two passes with the same decisions leave one
