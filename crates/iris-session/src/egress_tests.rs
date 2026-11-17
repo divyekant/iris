@@ -577,3 +577,73 @@ fn a_tunnel_needs_the_sni_of_its_allowed_host() {
     b.proxy.stop().unwrap();
     assert!(!log_text(&b.log).contains("other"), "{}", log_text(&b.log));
 }
+
+/// Property test of the ClientHello gate over truncated, mutated, random
+/// and oversized bytes: only a complete ClientHello with the server name of
+/// the host passes, and no input makes the check panic.
+#[test]
+fn only_a_complete_hello_with_the_host_name_passes() {
+    let name = "api.example.test";
+    let good = hello(name);
+    let other = hello("zzz.other-site.test");
+    // Each strict prefix is incomplete; the full hello passes.
+    for n in 0..good.len() {
+        assert_eq!(check_hello(&good[..n], name), Ok(false), "prefix {n}");
+    }
+    assert_eq!(check_hello(&good, name), Ok(true));
+    for n in 0..=other.len() {
+        assert_ne!(check_hello(&other[..n], name), Ok(true), "other prefix {n}");
+    }
+    let mut r = Rng(13);
+    let needle = name.as_bytes();
+    for _ in 0..20_000 {
+        let base = if r.next(2) == 0 { &good } else { &other };
+        let mut b = base.clone();
+        for _ in 0..=r.next(4) {
+            let i = r.next(b.len() as u64) as usize;
+            match r.next(3) {
+                0 => b[i] = r.next(256) as u8,
+                1 => {
+                    b.remove(i);
+                }
+                _ => b.insert(i, r.next(256) as u8),
+            }
+        }
+        if check_hello(&b, name) == Ok(true) {
+            // The server name is plain text in the ClientHello: a pass needs
+            // the name in the bytes, so a mutated or other name never passes.
+            let lower = b.to_ascii_lowercase();
+            assert!(lower.windows(needle.len()).any(|w| w == needle), "{b:?}");
+            assert!(std::ptr::eq(base, &good));
+        }
+    }
+    for _ in 0..20_000 {
+        let len = r.next(600) as usize;
+        let mut b: Vec<u8> = (0..len).map(|_| r.next(256) as u8).collect();
+        if r.next(2) == 0 && b.len() >= 5 {
+            b[..5].copy_from_slice(&[0x16, 0x03, 0x01, (len >> 8) as u8, len as u8]);
+        }
+        assert_ne!(check_hello(&b, name), Ok(true));
+    }
+    // A ClientHello that claims more than HELLO_MAX bytes is refused at the
+    // limit, not read without end.
+    let mut big = vec![0x16, 0x03, 0x01, 0x40, 0x00, 0x01, 0x00, 0xff, 0xff];
+    big.resize(HELLO_MAX, 0);
+    assert!(check_hello(&big, name).is_err());
+}
+
+/// A connection whose setup fails (no file descriptor for a clone, no
+/// thread) still gets its one log line and an answer.
+#[test]
+fn a_failed_setup_still_writes_one_line() {
+    for fault in [Fault::Clone, Fault::Spawn] {
+        let b = proxy("fault", echo(), false, LOG_LIMIT);
+        *lock(&b.proxy.shared.fault) = Some(fault);
+        let (_s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+        assert!(line.starts_with("HTTP/1.1 403"), "{line}");
+        b.proxy.stop().unwrap();
+        let text = log_text(&b.log);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("reason=no_resources"), "{text}");
+    }
+}
