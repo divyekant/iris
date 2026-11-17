@@ -513,9 +513,10 @@ person. It ends each process in it when the session ends.
   call from the engine. For example on Linux, the agent runs in a new PID
   namespace whose first process is a child of the helper with
   `PR_SET_PDEATHSIG`; when the first process of a PID namespace ends, the
-  kernel kills each process in it. R4-05 (Linux) and R4-05m (macOS) give the mechanism of each
-  system, and an isolation that cannot keep this rule does not pass the
-  check of the system.
+  kernel kills each process in it. R4-05 gives the mechanism on Linux,
+  and a Linux isolation that cannot keep this rule does not pass its
+  check. On macOS this rule does not apply: the macOS exception below
+  replaces it.
 - The macOS exception (`docs/specs/2026-11-17-session-sandbox-macos.md`,
   "The change of the lifetime rule"): macOS has no mechanism for the
   lifetime rule, so on macOS a process of a session can live after the

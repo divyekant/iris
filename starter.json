@@ -93,6 +93,16 @@
       "tools": [
         "python3 --version"
       ]
+    },
+    "probes": {
+      "paths": [
+        "scripts/probes/**"
+      ],
+      "check": "python3 -m py_compile scripts/probes/macos-sandbox-probe.py",
+      "test": "python3 scripts/probes/macos-sandbox-probe.py --self-check",
+      "tools": [
+        "python3 --version"
+      ]
     }
   },
   "cloud": {

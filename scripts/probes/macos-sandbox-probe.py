@@ -618,7 +618,24 @@ def main():
     print("report: " + out, file=sys.stderr)
 
 
+def self_check():
+    """Checks that run on each system (CI is Linux): the profile text."""
+    import tempfile as tf
+    d = tf.mkdtemp()
+    path = os.path.join(d, "p.sb")
+    write_profile(path, "/w", "/p", 1234, ["/x"])
+    text = open(path).read()
+    assert "(deny default)" in text
+    assert '(remote ip "localhost:1234")' in text
+    assert '(subpath "/System")' not in text
+    assert "kern.proc" not in text
+    print("self-check ok")
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-check"]:
+        self_check()
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] in ("hopper", "sleeper", "helper"):
         mode, outdir, deadline, marker = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
         if mode == "hopper":
