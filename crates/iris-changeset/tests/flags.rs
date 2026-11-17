@@ -496,12 +496,15 @@ fn each_mark_of_the_test_set_is_on_its_words() {
 /// or the word.
 #[test]
 fn a_mark_covers_the_whole_amount_and_date() {
-    let cases: [(&str, &str); 9] = [
+    let cases: [(&str, &str); 12] = [
         ("pay 100 $ now", "100 $"),
         ("pay $ 1,250.50.", "$ 1,250.50"),
         ("pay €12", "€12"),
         ("pay usd200", "usd200"),
         ("pay 30 USD", "30 USD"),
+        ("pay USD 1,200.", "USD 1,200"),
+        ("pay 1,200.50 USD", "1,200.50 USD"),
+        ("pay 2,500usd", "2,500usd"),
         ("by 2026-11-17", "2026-11-17"),
         ("by 11/17/2026", "11/17/2026"),
         ("by end of the day", "end of the day"),
@@ -515,6 +518,27 @@ fn a_mark_covers_the_whole_amount_and_date() {
             .unwrap_or_else(|| panic!("{text:?}"));
         assert_eq!(&text[r], want);
     }
+}
+
+/// True if the mark is not a piece of a longer number of its field.
+fn whole(body: &str, subject: &str, m: &Mark) -> bool {
+    let text = if m.field == Field::Body {
+        body
+    } else {
+        subject
+    };
+    let num = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit());
+    let mut before = text[..m.range.start].chars().rev();
+    let mut after = text[m.range.end..].chars();
+    let (b1, b2) = (before.next(), before.next());
+    let (a1, a2) = (after.next(), after.next());
+    let sep = |c: Option<char>| matches!(c, Some(',' | '.'));
+    let first = text[m.range.clone()].chars().next();
+    let last = text[m.range.clone()].chars().next_back();
+    !(num(b1) && num(first))
+        && !(num(a1) && num(last))
+        && !(sep(b1) && num(b2) && num(first))
+        && !(sep(a1) && num(a2) && num(last))
 }
 
 /// Random text: the flags of the marks are the flags of draft_flags, and
@@ -570,7 +594,8 @@ fn marks_agree_with_the_flags_for_random_text() {
             let text = marked(&c, m);
             let alone = match m.flag {
                 "new_recipient" => text == to,
-                "money" => has_money(text),
+                // The whole amount: no digit, and no `,` or `.` with a digit, just outside.
+                "money" => has_money(text) && whole(&c.body, &c.subject, m),
                 "date" => has_date(text),
                 "attachment" => has_attachment(text),
                 "untrusted_content" => words(text).len() == 8 && matches!(m.source, Some(1 | 3)),

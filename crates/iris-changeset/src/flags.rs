@@ -150,44 +150,52 @@ pub fn has_money(text: &str) -> bool {
     !money_spans(text).is_empty()
 }
 
+/// The range grown over the number characters (digits, `,` and `.`) on
+/// each side, so a mark covers the whole amount ("1,250.50"). A `,` or a
+/// `.` at an end of the range is not part of the number.
+fn grow(text: &str, r: Range<usize>) -> Range<usize> {
+    let number = |c: char| c.is_ascii_digit() || c == ',' || c == '.';
+    let mut start = r.start;
+    while let Some(c) = text[..start].chars().next_back().filter(|&c| number(c)) {
+        start -= c.len_utf8();
+    }
+    let mut end = r.end;
+    while let Some(c) = text[end..].chars().next().filter(|&c| number(c)) {
+        end += c.len_utf8();
+    }
+    let s = &text[start..end];
+    let lead = s.len() - s.trim_start_matches([',', '.']).len();
+    let trail = s.len() - s.trim_end_matches([',', '.']).len();
+    (start + lead).min(r.start)..(end - trail).max(r.end)
+}
+
 /// The byte range of each amount of [`has_money`]: the sign or the
-/// currency word with its number.
+/// currency word with its whole number.
 pub fn money_spans(text: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let digit_at = |i: usize| chars.get(i).is_some_and(|(_, c)| c.is_ascii_digit());
-    let number = |c: char| c.is_ascii_digit() || c == ',' || c == '.';
+    let end_of = |i: usize| chars[i].0 + chars[i].1.len_utf8();
     for (i, &(_, c)) in chars.iter().enumerate() {
         if CURRENCY_SIGNS.contains(&c) {
             let near = i.checked_sub(1).is_some_and(digit_at);
             let before = near || (i >= 2 && chars[i - 1].1 == ' ' && digit_at(i - 2));
-            let far = !digit_at(i + 1);
-            let after = !far || (chars.get(i + 1).map(|x| x.1) == Some(' ') && digit_at(i + 2));
+            let close = digit_at(i + 1);
+            let after = close || (chars.get(i + 1).map(|x| x.1) == Some(' ') && digit_at(i + 2));
             if !(before || after) {
                 continue;
             }
-            let mut start = i;
-            if before {
-                start = if near { i - 1 } else { i - 2 };
-                while start > 0 && number(chars[start - 1].1) {
-                    start -= 1;
-                }
-            }
-            let mut last = i;
-            if after {
-                last = if far { i + 2 } else { i + 1 };
-                while chars.get(last + 1).is_some_and(|x| number(x.1)) {
-                    last += 1;
-                }
-            }
-            // A number ends on a digit: "$5." marks "$5".
-            while last > i && !chars[last].1.is_ascii_digit() {
-                last -= 1;
-            }
-            while start < i && !chars[start].1.is_ascii_digit() {
-                start += 1;
-            }
-            out.push(chars[start].0..chars[last].0 + chars[last].1.len_utf8());
+            let first = match (before, near) {
+                (false, _) => i,
+                (true, true) => i - 1,
+                (true, false) => i - 2,
+            };
+            let last = match (after, close) {
+                (false, _) => i,
+                (true, true) => i + 1,
+                (true, false) => i + 2,
+            };
+            out.push(grow(text, chars[first].0..end_of(last)));
         }
     }
     let (w, spans) = spanned(text);
@@ -199,14 +207,14 @@ pub fn money_spans(text: &str) -> Vec<Range<usize>> {
         if (digits.len() < t.len() && joined(digits))
             || (letters.len() < t.len() && joined(letters))
         {
-            out.push(spans[i].clone());
+            out.push(grow(text, spans[i].clone()));
             continue;
         }
         if joined(t) {
             let before = i.checked_sub(1).is_some_and(|p| digit_start(&w[p]));
             let after = w.get(i + 1).is_some_and(|n| digit_start(n));
             if before || after {
-                out.push(widen(&spans, i, before, after));
+                out.push(grow(text, widen(&spans, i, before, after)));
             }
         }
     }
