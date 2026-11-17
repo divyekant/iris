@@ -274,6 +274,37 @@ async fn a_confirm_answers_the_state_of_the_matter_first() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A route that takes no body refuses each other body with 400, before it
+/// changes anything: the decline of a valid proposal stays undone. No
+/// body, and the JSON object `{}` of the web client, pass.
+#[tokio::test]
+async fn a_route_with_no_body_refuses_a_body() {
+    let (dir, s) = setup("nobody");
+    let bad = ["{", "x", "[]", "null", "1", "\"\"", "{\"a\": 1}", "{} {}"];
+    for body in bad {
+        let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", body).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+        // The other routes with no body: the check comes before the lookup of the ID.
+        for uri in [
+            "/api/senders/p-999/accept",
+            "/api/changesets/x-999/withdraw",
+            "/api/policy/discard",
+            "/api/notices/n-999/done",
+            "/api/watches/w-999/remove",
+        ] {
+            let (code, _) = call(&s, Method::POST, uri, body).await;
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{uri} {body}");
+        }
+    }
+    let (_, list) = call(&s, Method::GET, "/api/matters", "").await;
+    assert_eq!(ids(&list["proposed"]), vec!["g-2", "g-1"]);
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-1/decline", " {} ").await;
+    assert_eq!(code, StatusCode::OK);
+    let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
+    assert_eq!(code, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Decisions commit while another thread reads: each list document passes
 /// the schema, and each view names the same members in both parts.
 #[test]

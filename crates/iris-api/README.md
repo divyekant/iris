@@ -95,7 +95,7 @@ a stranger.
 ## Policy
 
 The policy view of the web client (specification 2, section 6.3). Each
-endpoint gives the policy object below. `POST` endpoints take a JSON body.
+endpoint gives the policy object below. `POST` endpoints take a JSON body. A route with no body (the sender answers, the withdraw of a changeset, the policy discard, the notice done, the watch remove and the matter decline) takes no bytes or `{}`, and gives 400 for any other body before it changes anything.
 
 | Endpoint | Does |
 |---|---|
