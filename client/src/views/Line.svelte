@@ -275,7 +275,6 @@
     border-left: 2px solid var(--color-border);
     color: var(--color-text-muted);
     font-size: var(--font-size--1);
-    white-space: pre-line;
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
