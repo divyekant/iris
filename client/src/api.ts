@@ -138,7 +138,8 @@ export type Rule = {
 export type Mode = "observe" | "apply";
 
 /** A rule that Iris proposes. `rule` is the rule that an accept adds to the file; its `line` is 0. */
-export type Proposal = { id: number; approvals: number; created_at: number; rule: Rule };
+/** `kind`: `approvals` (an allow rule, R5-01) or `choices` (a hide rule from skips, mutes and dismisses, R5-02). */
+export type Proposal = { id: number; kind?: "approvals" | "choices"; approvals: number; created_at: number; rule: Rule };
 
 /** GET /api/policy: the active policy and the file on disk, compared to it. */
 export type Policy = {
