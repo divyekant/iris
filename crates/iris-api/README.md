@@ -5,8 +5,9 @@ and the read verbs of the `iris` program their data from the store. The API
 reads only, except the policy changes of the web client (see
 [Policy](#policy)), the review of the person: decisions and withdraws
 (see [Review](#review)), the state verbs of the person (see
-[State verbs](#state-verbs)), and the cancel of a send in the outbox (see
-[Outbox](#outbox)).
+[State verbs](#state-verbs)), the cancel of a send in the outbox (see
+[Outbox](#outbox)), and the press of Send in the write view (see
+[Write](#write)).
 
 ## Use
 
@@ -181,6 +182,18 @@ sections 5 and 6). The API reads the switch. It cannot change it: only
 |---|---|
 | `GET /api/outbox?limit=&after=` | Gives `{"sending": {"on", "since"}, "count", "sends", "next"}`. `count` is the number of all sends that wait. `sends` is one page in the order of the action ID: `limit` 1 to 200 (default 200). `next` is the `after` of the next page, or `null` on the last page. Each send has `draft` (`d-N`), `state` (`approved` or `held`), `approved`, `leaves` (`null` while sending is off), `flags`, and `to`, `cc` and `subject` from the stored raw bytes of the draft. A draft that Iris cannot read has `"readable": false` and no recipients. One answer is one snapshot of the store. |
 | `POST /api/outbox/{d-N}/cancel` | No body. Cancels the open send of the draft: the send becomes `denied` by `person` with the reason "Cancelled in the outbox.". The answer is `{"cancelled": "d-N"}`. If the release claimed the send, the answer is a 409 "The send started. It cannot be cancelled.", and nothing changes. A draft with no send that waits, or an ID that is not a draft, is a 404. |
+
+## Write
+
+The write view of the web client (spec `docs/specs/2026-11-17-write.md`).
+One press of Send writes a new mail or a reply. The engine makes the draft,
+then the send. The send leaves after the hold, and only while sending is on.
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/write` | The body is `account` (`a-N`, a new mail) or `thread` (`t-N`) with `parent` (`m-N`, a reply), and `to`, `cc`, `subject` (a new mail only), `body`, `key` (16 to 64 letters, digits or hyphens) and `flags` (the warnings that the person saw). In one transaction: the changeset of the author `person`, the `draft` action, its submit, the approval and the send mark. A new write is a 201 `{"write": "cs-N"}`. A second try with the same key and the same mail is a 200 with the same `cs-N`, and writes nothing. A 409 `{"error", "flags"}` writes nothing: the warnings are not the warnings that the person saw (`flags` holds the new warnings), a new mail came into the thread, or the key belongs to another mail. A body that is not valid, or a mail that the submit denies, is a 400. |
+| `GET /api/write/{cs-N}` | The state of the write: `saving`, `waiting` (`draft`, `sending`, `leaves_at`), `review` (`reason`), `sent` or `stopped` (`reason`, `draft`). One answer is one snapshot of the store. A changeset that is not a write is a 404. |
+| `GET /api/threads/{t-N}/reply` | The start values of a reply: `account`, `parent` (`id`, `from`, `date`, and `text` cut to 600 characters), `to`, `cc` and `subject`. The parent is the newest mail of the thread that is not spam, trash or a draft. If the person wrote it, the reply goes to its recipients. Otherwise it goes to its sender. A thread with no mail to reply to is a 409. A thread that does not exist is a 404. |
 
 ## Stranger gate
 

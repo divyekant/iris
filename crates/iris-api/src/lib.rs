@@ -37,6 +37,7 @@ mod read;
 mod review;
 mod verbs;
 mod watch;
+mod write;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
 pub use drafts::write_drafts;
@@ -168,6 +169,9 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/watches/{id}/remove", post(post_watch_remove))
         .route("/api/outbox", get(get_outbox))
         .route("/api/outbox/{draft}/cancel", post(post_outbox_cancel))
+        .route("/api/write", post(post_write))
+        .route("/api/write/{id}", get(get_write))
+        .route("/api/threads/{id}/reply", get(get_reply))
         .route("/api/matters", get(get_matters))
         .route("/api/matters/{id}", get(get_matter))
         .route("/api/matters/{id}/confirm", post(post_matter_confirm))
@@ -781,6 +785,49 @@ async fn post_outbox_cancel(
             "The send started. It cannot be cancelled.",
         ),
         Cancelled::NotOpen => not_found(),
+    })
+}
+
+/// The press of Send in the write view (docs/specs/2026-11-17-write.md,
+/// section 2): 201 for a new write, 200 for an earlier try of the same
+/// press, 409 with `flags` for warnings that the person did not see.
+async fn post_write(
+    State(s): State<Arc<Store>>,
+    b: std::result::Result<Json<write::WriteBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(match write::write(&s, &b, now_ms())? {
+        write::Pressed::New(cs) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "write": cs })),
+        )
+            .into_response(),
+        write::Pressed::Again(cs) => Json(serde_json::json!({ "write": cs })).into_response(),
+        write::Pressed::Conflict(text, flags) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": text, "flags": flags })),
+        )
+            .into_response(),
+    })
+}
+
+/// The state of a write (`cs-N`), section 4. 404 for a changeset that is
+/// not a write.
+async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = iris_changeset::parse_changeset_id(&id) else {
+        return Ok(not_found());
+    };
+    Ok(match write::state(&s, row)? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    })
+}
+
+/// The start values of a reply in a thread (`t-N`), section 5.
+async fn get_reply(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(match write::reply(&s, &id)? {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
     })
 }
 
