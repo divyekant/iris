@@ -1,6 +1,6 @@
 // Words for the review screen (R2-06): a changeset of spec 2 section 5.1 in
 // plain sentences. Pure functions, so the tests need no DOM.
-import type { Action, Changeset, Item, Target } from "./api";
+import type { Action, Changeset, DraftView, Item, Part, Recipient, Target } from "./api";
 import { href } from "./route";
 
 const n = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
@@ -33,6 +33,10 @@ export function verb(a: Action): string {
       return `Defer to ${arg(a, "until") || arg(a, "date")}`;
     case "correct":
       return `Correct ${arg(a, "field") || "a field of"}`;
+    case "send":
+      return "Send";
+    case "draft":
+      return "Write the draft of";
     default:
       return a.verb;
   }
@@ -185,3 +189,51 @@ export function short(value: string | null | undefined, now = new Date()): strin
   return date.toLocaleString("en-US", { month: "short", day: "numeric", year, hour: "numeric", minute: "2-digit" });
 }
 
+
+/** The verbs whose action holds a mail text: the review shows the draft (card R4-07). */
+export const mail = (a: Action) => a.verb === "send" || a.verb === "draft";
+
+const who = (r: Recipient) => r.name || r.address;
+
+/** What a draft or a send changes, in words: "a reply to Dana Wu", "a new mail to Ana and 2 more". */
+export function to(d: DraftView): string {
+  const names = [...d.to, ...d.cc].map(who);
+  const list = names.length > 2 ? `${names[0]} and ${names.length - 1} more` : names.join(" and ");
+  return `${d.reply ? "a reply" : "a new mail"}${list ? ` to ${list}` : ""}`;
+}
+
+const quote = (texts: string[]) => [...new Set(texts.map((t) => t.trim()))].map((t) => `“${t}”`).join(", ");
+
+/**
+ * Each flag of an action, in words, with the words or the addresses that gave
+ * it. A flag that no part of the draft carries now (for example, the owner
+ * wrote to the address after the submit) keeps the words of FLAGS only.
+ */
+export function causes(a: Action, d: DraftView | undefined): { flag: string; text: string; source?: string }[] {
+  const parts = d ? [...d.subject, ...d.body] : [];
+  const with_ = (flag: string) => parts.filter((p: Part) => p.flags?.includes(flag));
+  return a.flags.map((flag) => {
+    const words = FLAGS[flag] ?? flag;
+    if (!d) return { flag, text: words };
+    switch (flag) {
+      case "new_recipient": {
+        const list = [...d.to, ...d.cc].filter((r) => r.flags?.includes(flag)).map((r) => r.address);
+        return { flag, text: list.length ? `${list.length === 1 ? "A new address" : "New addresses"}: ${list.join(", ")}` : words };
+      }
+      case "money":
+      case "date":
+      case "attachment": {
+        const found = with_(flag).map((p) => p.text);
+        if (!found.length) return { flag, text: words };
+        if (flag === "attachment") return { flag, text: `Says ${quote(found)}, but the mail has no attachment` };
+        return { flag, text: `${flag === "money" ? "Names an amount" : "Names a date"}: ${[...new Set(found)].join(", ")}` };
+      }
+      case "untrusted_content": {
+        const source = with_(flag).find((p) => p.source)?.source;
+        return { flag, text: "Holds text from a mail of another person", ...(source ? { source } : {}) };
+      }
+      default:
+        return { flag, text: words };
+    }
+  });
+}

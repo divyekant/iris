@@ -7,8 +7,9 @@
   one question in the page.
 -->
 <script lang="ts">
-  import { get, post, type Changeset, type Item, type Target } from "../api";
-  import { author, detail, FLAGS, itemRow, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
+  import { href } from "../route";
+  import { get, post, type Changeset, type DraftView, type Item, type Part, type Target } from "../api";
+  import { author, causes, detail, FLAGS, itemRow, mail, to, key, messageRow, outcome, pages, plan, short, shown, target, targets, verb, waits, type Row } from "../review";
 
   // `onchange` gets the changeset after a decision, so that the review shows it as it is now.
   let { changeset: c, onchange = () => {} }: { changeset: Changeset; onchange?: (c: Changeset) => void } = $props();
@@ -53,7 +54,29 @@
   // The changes whose last load failed. They load again only with "Try again".
   let failed: Record<string, boolean> = $state({});
   let problem = $state("");
-  const complete = (a: (typeof actions)[number]) => (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size;
+  // The draft of each draft and send action (card R4-07), and the mail that each copied text came from.
+  let drafts: Record<string, DraftView> | null = $state(null);
+  let sources: Record<string, Target> = $state({});
+  let mails = $derived(actions.some(mail));
+  $effect(() => {
+    if (!mails || drafts) return;
+    get<{ drafts: DraftView[] }>(`changesets/${encodeURIComponent(c.id)}/drafts`).then(
+      async (got) => {
+        const ids = [...new Set(got.drafts.flatMap((d) => d.body.concat(d.subject).flatMap((p: Part) => (p.source ? [p.source] : []))))];
+        if (ids.length) {
+          const list = (await get<{ messages: Target[] }>(`messages?ids=${ids.map(encodeURIComponent).join(",")}`)).messages;
+          sources = Object.fromEntries(list.map((m) => [m.id, m]));
+        }
+        drafts = Object.fromEntries(got.drafts.map((d) => [`${d.revision}.${d.n}`, d]));
+      },
+      (e) => (problem = e instanceof Error ? e.message : String(e)),
+    );
+  });
+  const variant = typeof window !== "undefined" ? ((window as { __variant?: string }).__variant ?? "A") : "A";
+  const plain = variant === "B";
+  const TAG: Record<string, string> = { new_recipient: "new address", money: "amount", date: "date", attachment: "no attachment", untrusted_content: "copied from another mail" };
+  const complete = (a: (typeof actions)[number]) =>
+    mail(a) ? !!drafts?.[key(a)] : (rows[key(a)]?.length ?? -1) >= new Set(targets(a)).size;
   function load(a: (typeof actions)[number]) {
     loader.more(a, PAGE).then(
       (list) => {
@@ -151,6 +174,28 @@
   }
 </script>
 
+{#snippet text(parts: Part[])}
+  {#each parts as p, i (i)}{#if p.flags?.length && !plain}<mark title={p.flags.join(", ")}>{p.text}</mark>{#if variant === "C"}<span class="tag">{p.flags.map((f) => TAG[f]).join(", ")}</span>{/if}{:else}{p.text}{/if}{/each}
+{/snippet}
+
+<!-- The draft as the receiver gets it, with each part that gave a flag marked (card R4-07). -->
+{#snippet draft(d: DraftView)}
+  <div class="mail">
+    <dl>
+      {#each [["To", d.to], ["Cc", d.cc]] as [label, list] (label)}
+        {#if (list as DraftView["to"]).length}
+          <dt>{label}</dt>
+          <dd>
+            {#each list as DraftView["to"] as r, i (r.address)}{i ? ", " : ""}{#if r.flags?.length && !plain}<mark>{r.name ? `${r.name} <${r.address}>` : r.address}</mark>{#if variant === "C"}<span class="tag">new address</span>{/if}{:else}{r.name ? `${r.name} <${r.address}>` : r.address}{/if}{/each}
+          </dd>
+        {/if}
+      {/each}
+    </dl>
+    <p class="subject-line">{@render text(d.subject)}</p>
+    <p class="text">{@render text(d.body)}</p>
+  </div>
+{/snippet}
+
 {#snippet lines(a: (typeof actions)[number])}
   {@const list = rows[key(a)] ?? []}
   {#if list.length}
@@ -211,14 +256,21 @@
     <ol class="actions">
       {#each open as a (key(a))}
         {@const id = `${c.id}-${key(a)}`}
+        {@const d = drafts?.[key(a)]}
         <li class:off={off[key(a)]}>
           <input type="checkbox" {id} checked={!off[key(a)]} disabled={busy} onchange={(e) => (off[key(a)] = !e.currentTarget.checked)} />
           <div class="body">
-            <label class="what" for={id}><b>{verb(a)}</b> {target(a)}</label>
+            <label class="what" for={id}><b>{verb(a)}</b> {mail(a) ? (d ? to(d) : "a mail") : target(a)}</label>
             {#if detail(a)}<p class="because">{detail(a)}</p>{/if}
             {#if a.why}<p class="because">{a.why}</p>{/if}
-            {#each a.flags as flag (flag)}<p class="flag">{FLAGS[flag] ?? flag}</p>{/each}
+            {#each causes(a, d).filter((f) => variant !== "C" || !d || f.text === (FLAGS[f.flag] ?? f.flag)) as f (f.flag)}
+              {@const m = f.source ? sources[f.source] : undefined}
+              <p class="flag">
+                {f.text}{#if m && !m.gone}: <a href={href.mail(m.id)}>{m.from.name || m.from.address}, “{m.subject}”</a>{/if}
+              </p>
+            {/each}
             {#if off[key(a)]}<p class="denied">Iris will deny this change.</p>{/if}
+            {#if d}{@render draft(d)}{/if}
             {@render lines(a)}
           </div>
         </li>
@@ -394,6 +446,58 @@
     margin: 0 var(--space-2) 1px 0;
     border-radius: var(--radius-full);
     background: var(--color-warning);
+  }
+  .flag a {
+    color: inherit;
+    text-underline-offset: 3px;
+  }
+  /* The draft as the receiver gets it. A part that gave a flag has a warning line under it. */
+  .mail {
+    margin-top: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-md);
+    background: var(--color-background-elevated);
+    border: 1px solid var(--color-border-subtle);
+  }
+  .mail dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--space-1) var(--space-3);
+    margin: 0;
+    font-size: var(--font-size--1);
+  }
+  .mail dt {
+    color: var(--color-text-faint);
+  }
+  .mail dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .subject-line {
+    margin: var(--space-3) 0 0;
+    font-weight: 600;
+  }
+  .text {
+    margin: var(--space-2) 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-width: 70ch;
+  }
+  .tag {
+    margin-left: var(--space-1);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-warning);
+    color: var(--color-text-muted);
+    font-size: var(--font-size--1);
+    white-space: nowrap;
+  }
+  mark {
+    background: none;
+    color: inherit;
+    text-decoration: underline 2px var(--color-warning);
+    text-underline-offset: 4px;
+    text-decoration-skip-ink: none;
   }
   /* Each row of a change shows. After about six rows, the box scrolls. */
   .messages {

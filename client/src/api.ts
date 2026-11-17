@@ -200,13 +200,32 @@ export type Action = {
   n: number;
   revision: number;
   verb: string;
-  targets: { threads?: string[]; messages?: string[]; items?: string[] };
+  targets: { threads?: string[]; messages?: string[]; items?: string[]; drafts?: string[]; accounts?: string[] };
   resolved: { messages: string[] };
   args: Record<string, unknown>;
   why: string | null;
   flags: string[];
   hash: string | null;
   decision: Decision | null;
+};
+
+/** A part of a draft text, with the draft flags that its words gave (card R4-07). */
+export type Part = { text: string; flags?: string[]; source?: string };
+/** A recipient of a draft, with the flag `new_recipient` if Iris finds no mail of the owner to it. */
+export type Recipient = { address: string; name?: string | null; flags?: string[] };
+/**
+ * GET /api/changesets/{id}/drafts: the draft of each `draft` and `send` action,
+ * as the review shows it. Each part of the text carries the flags that it gave.
+ */
+export type DraftView = {
+  revision: number;
+  n: number;
+  draft: string | null;
+  reply: Summary | null;
+  to: Recipient[];
+  cc: Recipient[];
+  subject: Part[];
+  body: Part[];
 };
 
 export type Changeset = {
