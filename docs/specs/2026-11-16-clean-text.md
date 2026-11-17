@@ -207,7 +207,8 @@ not used makes no cut in either case.
   versions for their links only: they add no text and no attachment.
   A hidden link has no text, so it is not in the list. The texts and hrefs have at most `LINK_BYTES` (1 MiB) in all. `links_cut` is
   true when a limit can skip a link: past `LINK_BYTES`; an HTML part past
-  its output limit or past `PART_LIMIT`; `MAX_PARTS`, `MAX_DEPTH` or a
+  its output limit or past `PART_LIMIT`; a shown HTML element past the
+  stack limit (its content goes out); `MAX_PARTS`, `MAX_DEPTH` or a
   parser limit; a message that Iris cannot parse. `clean_cut(raw, true)`
   reads the first bytes of a longer message: `links_cut` is also true when
   an HTML part reaches the end of `raw`. The caller reads the rest of the

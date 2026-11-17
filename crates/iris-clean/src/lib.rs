@@ -769,21 +769,22 @@ impl<'a> Walker<'a> {
         }
         if self.links_only {
             if html {
-                let (_, full, links) = html::convert(&mime::decode(&bytes, charset), self.is_reply);
-                self.links.add(links);
-                self.links.cut |= full;
+                let c = html::convert(&mime::decode(&bytes, charset), self.is_reply);
+                self.links.add(c.links);
+                self.links.cut |= c.links_cut;
             }
             return;
         }
         let text = mime::decode(&bytes, charset);
         drop(bytes);
         let text = if html {
-            let (md, full, links) = html::convert(&text, self.is_reply);
-            self.cut |= full;
-            self.links.add(links);
-            // The links after the output limit are not in the list.
-            self.links.cut |= full;
-            md
+            let c = html::convert(&text, self.is_reply);
+            self.cut |= c.full;
+            self.links.add(c.links);
+            // The links after the output limit, or deep past the stack
+            // limit, are not in the list.
+            self.links.cut |= c.links_cut;
+            c.md
         } else {
             text
         };

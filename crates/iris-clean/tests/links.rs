@@ -411,3 +411,19 @@ fn generated_parts_give_the_html_answer_of_their_headers() {
     }
     assert!(found > 300 && found < 2700, "{found}");
 }
+
+#[test]
+fn a_shown_link_past_the_html_stack_limit_cuts_the_links() {
+    let deep = |open: &str| {
+        format!(
+            "{open}{}<a href=\"https://evil.example.net/\">bank.example.com</a>",
+            "<span>".repeat(600)
+        )
+    };
+    let c = clean(&html(&deep("")));
+    assert!(c.links.is_empty());
+    assert!(c.links_cut, "a browser shows the link");
+    // Deep content that is hidden from the start hides no shown link.
+    let c = clean(&html(&deep("<div style=\"display:none\">")));
+    assert!(!c.links_cut);
+}

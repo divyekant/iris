@@ -229,14 +229,26 @@ impl Writer {
 /// Return the Markdown and true if the output reached [`OUT_LIMIT`].
 #[cfg(test)]
 pub fn to_markdown(html: &str, drop_quotes: bool) -> (String, bool) {
-    let (out, full, _) = convert(html, drop_quotes);
-    (out, full)
+    let c = convert(html, drop_quotes);
+    (c.md, c.full)
 }
 
-/// The Markdown of `to_markdown`, and each link whose text is not its target, as
-/// `(text, href)`: the text as the Markdown shows it, the href as the HTML
-/// gives it. A link after the output limit is not in the list.
-pub(crate) fn convert(html: &str, drop_quotes: bool) -> (String, bool, Vec<(String, String)>) {
+/// The result of [`convert`].
+pub(crate) struct Converted {
+    /// The Markdown of `to_markdown`.
+    pub md: String,
+    /// True if the output reached [`OUT_LIMIT`].
+    pub full: bool,
+    /// Each link whose text is not its target, as `(text, href)`: the text
+    /// as a person sees it, the href as the HTML gives it.
+    pub links: Vec<(String, String)>,
+    /// True when a limit can hide a link from `links`: the output limit, or
+    /// a shown element past the stack limit (its content goes out).
+    pub links_cut: bool,
+}
+
+/// Convert HTML to Markdown, with the list of links.
+pub(crate) fn convert(html: &str, drop_quotes: bool) -> Converted {
     let b = html.as_bytes();
     let mut w = Writer {
         line_start: true,
@@ -252,6 +264,7 @@ pub(crate) fn convert(html: &str, drop_quotes: bool) -> (String, bool, Vec<(Stri
     let mut overflow: Vec<String> = Vec::new();
     // Elements past the name limit. Each end tag closes one of them.
     let mut overflow_lost = 0usize;
+    let mut deep_shown = false;
     let mut i = 0;
     while i < b.len() && !w.full {
         if b[i] != b'<' {
@@ -335,6 +348,8 @@ pub(crate) fn convert(html: &str, drop_quotes: bool) -> (String, bool, Vec<(Stri
             continue;
         }
         if stack.len() >= MAX_STACK {
+            // A browser shows this element: its links can be out of the list.
+            deep_shown |= shown;
             if overflow.len() < MAX_STACK * 8 {
                 overflow.push(tag.name.clone());
             } else {
@@ -352,7 +367,12 @@ pub(crate) fn convert(html: &str, drop_quotes: bool) -> (String, bool, Vec<(Stri
         hidden += own_hidden as usize;
     }
     w.close_link();
-    (w.out, w.full, w.links)
+    Converted {
+        links_cut: w.full || deep_shown,
+        md: w.out,
+        full: w.full,
+        links: w.links,
+    }
 }
 
 fn pop_to(stack: &mut Vec<Open>, at: usize, hidden: &mut usize, w: &mut Writer) {

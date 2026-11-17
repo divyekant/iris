@@ -55,39 +55,47 @@ pub fn deceptive(links: &[Link], cut: bool, from_domain: &str, authenticated: bo
 
 /// The host of a link text that is a web address: `https://www.x.com/a`,
 /// `www.x.com` or `x.com`. A text with other words is not a web address. A
-/// text that starts with `http://`, `https://` or `www.` starts with a web
-/// address, also across lines: a next word continues it when it starts
+/// web address can go across lines: a next word continues it when it starts
 /// with `.`, `/`, `?`, `#` or `:`, or when the address so far ends with `.`,
-/// `-` or `/` (`https://bank.com<br>/login`, `https://bank.<br>com`). Other
-/// words after it are a description (`https://bank.com<br>View account`).
+/// `-` or `/` (`https://bank.com<br>/login`, `bank.<br>com`). After a text
+/// that starts with `http://`, `https://` or `www.`, other words are a
+/// description (`https://bank.com<br>View account`). The dots `。`, `．`
+/// and `｡` are dots.
 fn shown_host(shown: &str) -> Option<String> {
     // Direction marks change the order that a person sees, not the letters.
+    // The dots of other scripts are dots of a host name (UTS 46).
     let lower: String = shown
         .trim()
         .to_lowercase()
         .chars()
-        .filter(|c| !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .filter(|c| {
+            !matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .map(|c| match c {
+            '\u{3002}' | '\u{ff0e}' | '\u{ff61}' => '.',
+            c => c,
+        })
         .collect();
-    let lower = if ["http://", "https://", "www."]
+    let prefixed = ["http://", "https://", "www."]
         .iter()
-        .any(|p| lower.starts_with(p))
-    {
-        let mut words = lower.split_whitespace();
-        let mut address = words.next()?.to_string();
-        for w in words {
-            let joins =
-                w.starts_with(['.', '/', '?', '#', ':']) || address.ends_with(['.', '-', '/']);
-            if !joins {
-                break;
-            }
-            address.push_str(w);
+        .any(|p| lower.starts_with(p));
+    let mut words = lower.split_whitespace();
+    let mut address = words.next()?.to_string();
+    let mut rest_words = false;
+    for w in words {
+        let joins = w.starts_with(['.', '/', '?', '#', ':']) || address.ends_with(['.', '-', '/']);
+        if !joins {
+            rest_words = true;
+            break;
         }
-        address
-    } else if lower.contains(char::is_whitespace) {
+        address.push_str(w);
+    }
+    // Words after an address with a web prefix are a description. A text
+    // with no prefix is an address only when it has no other words.
+    if rest_words && !prefixed {
         return None;
-    } else {
-        lower
-    };
+    }
+    let lower = address;
     let rest = ["https://", "http://"]
         .iter()
         .find_map(|p| lower.strip_prefix(p))
@@ -334,6 +342,34 @@ mod tests {
         assert!(!one(
             "https://bank.\ncom/login",
             "https://bank.com/",
+            "x.org",
+            false
+        ));
+    }
+
+    #[test]
+    fn dots_of_other_scripts_and_a_bare_host_across_lines_count() {
+        for text in [
+            "paypal\u{ff0e}com",
+            "https://paypal\u{3002}com/login",
+            "www.paypal\u{ff61}com",
+            "paypal.\ncom",
+            "paypal\n.com/login",
+            "\u{ff50}aypal.com",
+        ] {
+            assert!(
+                one(text, "https://evil.example.net/", "x.org", false),
+                "{text:?}"
+            );
+            assert!(
+                !one(text, "https://www.paypal.com/", "x.org", false),
+                "{text:?}"
+            );
+        }
+        // Other words make a bare text no address.
+        assert!(!one(
+            "Visit\npaypal.com",
+            "https://evil.example.net/",
             "x.org",
             false
         ));
