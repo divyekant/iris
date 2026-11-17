@@ -395,6 +395,11 @@ export const changesets: Changeset[] = [
   },
 ];
 
+/** The comments of the person on each changeset of a job (card R4-08), oldest first. */
+export const comments: Record<string, { id: number; changeset: string; revision: number; text: string; at: string }[]> = {
+  "cs-79": [{ id: 1, changeset: "cs-79", revision: 1, text: "Use the price of the October quote, not the list price.", at: "2026-11-17T08:20:00Z" }],
+};
+
 /** The draft of each draft and send action of a changeset, with the parts that gave each flag (card R4-07). */
 export const drafts: Record<string, DraftView[]> = {
   "cs-79": [
@@ -599,6 +604,7 @@ export function answer(path: string): unknown {
   }
   if (name === "messages" && id) return message(id);
   if (name === "messages" && q.get("ids")) return { messages: q.get("ids")!.split(",").map(summaryOf) };
+  if (name === "changesets" && id && url.pathname.endsWith("/comments")) return changesets.some((c) => c.id === id) ? { comments: comments[id] ?? [] } : undefined;
   if (name === "changesets" && id && url.pathname.endsWith("/drafts")) return drafts[id] ? { drafts: drafts[id] } : undefined;
   if (name === "changesets" && id) return changesets.find((c) => c.id === id);
   if (name === "changesets") return { changesets };
