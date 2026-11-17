@@ -5,11 +5,11 @@
   shows as text only.
 -->
 <script lang="ts">
-  import type { JobDetail, Policy } from "../api";
+  import type { JobDetail } from "../api";
   import { clock, day, due, now, steps, waitMail } from "../jobs";
   import Grants from "./Grants.svelte";
 
-  let { detail, policy }: { detail: JobDetail; policy?: Policy | null } = $props();
+  let { detail }: { detail: JobDetail } = $props();
 
   let job = $derived(detail.job);
   let limit = $derived(due(job));
@@ -36,7 +36,7 @@
   {/if}
 </section>
 
-{#if policy}<Grants {job} {policy} />{/if}
+<Grants {job} />
 
 <section aria-labelledby="steps">
   <h2 id="steps"><span>Each step</span> <span class="count">{list.length}</span></h2>

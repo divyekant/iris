@@ -4,28 +4,42 @@
   this job. Deny and review rules, and the fixed safety limits, still apply.
 -->
 <script lang="ts">
-  import { post, type Job, type Policy, type Rule } from "../api";
-  import { verbs as said } from "../rules";
-  import { GRANTS, grantsOf, ruleOf } from "../start";
+  import { get, post, type Job, type Policy, type Rule } from "../api";
+  import { conditions, verbs as said } from "../rules";
+  import { GRANTS, grantView } from "../start";
 
-  let { job, policy: given }: { job: Job; policy: Policy } = $props();
-  // svelte-ignore state_referenced_locally
-  let policy = $state(given);
+  let { job }: { job: Job } = $props();
+  // The page reads the policy itself, so that a failed read shows with a retry, not as no grants.
+  let policy = $state<Policy | null>(null);
+  let failed = $state("");
   let busy = $state(false);
   let problem = $state("");
 
+  async function load() {
+    failed = "";
+    try {
+      policy = await get<Policy>("policy");
+    } catch (error) {
+      failed = (error as Error).message;
+    }
+  }
+  $effect(() => {
+    load();
+  });
+
   let open = $derived(job.state !== "done");
-  let mine = $derived(grantsOf(policy.rules, job.id));
-  // A grant with other verbs (for example from an edit of the file) shows as its own line.
-  let others = $derived(mine.filter((r) => !GRANTS.some((g) => ruleOf([r], g))));
+  let view = $derived(policy ? grantView(policy.rules, job.id) : null);
 
   async function change(path: string, body: object) {
+    if (!policy) return;
     busy = true;
     problem = "";
     try {
       policy = await post<Policy>(path, { version: policy.version, ...body });
     } catch (error) {
       problem = (error as Error).message;
+      // The policy can be newer than the page (a 409): read it again, so that each switch shows the policy as it is.
+      await get<Policy>("policy").then((p) => (policy = p)).catch(() => {});
     } finally {
       busy = false;
     }
@@ -33,8 +47,10 @@
   const allow = (verbs: readonly string[]) => change("policy/grant", { job: job.id, verbs });
   const remove = (rule: Rule) => change("policy/remove", { id: rule.id });
 
-  function toggle(group: (typeof GRANTS)[number]) {
-    const rule = ruleOf(mine, group);
+  function toggle(event: Event, group: (typeof GRANTS)[number]) {
+    const rule = view?.switches[group.key];
+    // The switch shows the policy, not the click: it moves when the policy changes.
+    (event.currentTarget as HTMLInputElement).checked = !!rule;
     if (rule) remove(rule);
     else allow(group.verbs);
   }
@@ -42,32 +58,48 @@
 
 <section aria-labelledby="grants">
   <h2 id="grants">Without asking you</h2>
-  <p class="note">
-    {#if open}The agent asks you before each change to your mail. Allow some changes in this job only.{:else}The job ended, so these grants allow nothing more.{/if}
-    {#if policy.mode === "observe"}Iris is in observe mode now: it applies nothing, also with a grant.{/if}
-  </p>
+  {#if failed}
+    <p class="error" role="alert">Iris cannot read your policy now, so the grants of this job do not show. {failed}</p>
+    <button class="quiet" type="button" onclick={load}>Try again</button>
+  {:else if policy && view}
+    <p class="note">
+      {#if !open}The job ended, so these grants allow nothing more.
+      {:else if view.general.length}The agent asks you before each change to your mail, except for the changes that the rules of your whole policy below allow. Allow more changes in this job only.
+      {:else}The agent asks you before each change to your mail. Allow some changes in this job only.{/if}
+      {#if policy.mode === "observe"}Iris is in observe mode now: it applies nothing, also with a grant.{/if}
+    </p>
 
-  <ul class="groups">
-    {#each GRANTS as g (g.key)}
-      {@const on = !!ruleOf(mine, g)}
-      <li>
-        <label class:on>
-          <span class="text">
-            <span class="title">{g.title}</span>
-            <span class="what">{g.note}</span>
-          </span>
-          <input type="checkbox" role="switch" checked={on} disabled={busy || (!open && !on)} onchange={() => toggle(g)} />
-        </label>
-      </li>
-    {/each}
-    {#each others as r (r.id)}
-      <li class="other">
-        <span class="text"><span class="title">{said(r)}</span><span class="what">From your policy file, rule {r.id}</span></span>
-        <button class="quiet" type="button" disabled={busy} onclick={() => remove(r)}>Remove</button>
-      </li>
-    {/each}
-  </ul>
-  {#if problem}<p class="error" role="alert">{problem}</p>{/if}
+    <ul class="groups">
+      {#each GRANTS as g (g.key)}
+        {@const on = !!view.switches[g.key]}
+        <li>
+          <label class:on>
+            <span class="text">
+              <span class="title">{g.title}</span>
+              <span class="what">{g.note}</span>
+            </span>
+            <input type="checkbox" role="switch" checked={on} disabled={busy || (!open && !on)} onchange={(e) => toggle(e, g)} />
+          </label>
+        </li>
+      {/each}
+      {#each view.others as r (r.id)}
+        <li class="other">
+          <span class="text"><span class="title">{said(r)}</span><span class="what">{[...conditions(r).filter((c) => c !== "By agent" && c !== `Job ${job.id}`), `From your policy file, rule ${r.id}`].join(". ")}</span></span>
+          <button class="quiet" type="button" disabled={busy} onclick={() => remove(r)}>Remove</button>
+        </li>
+      {/each}
+    </ul>
+    {#if view.general.length}
+      <h3>Also allowed by your whole policy</h3>
+      <ul class="general">
+        {#each view.general as r (r.id)}
+          <li><span class="title">{said(r)}</span> <span class="what">{[...conditions(r), `rule ${r.id}`].join(". ")}</span></li>
+        {/each}
+      </ul>
+      <p class="note"><a href="#/rules">Change these rules</a></p>
+    {/if}
+    {#if problem}<p class="error" role="alert">{problem}</p>{/if}
+  {/if}
 </section>
 
 <style>
@@ -167,6 +199,18 @@
   }
   .quiet:hover {
     color: var(--color-text);
+  }
+  h3 {
+    font-size: var(--font-size--1);
+    font-weight: 600;
+    margin: var(--space-4) 0 var(--space-2);
+  }
+  .general {
+    margin-bottom: var(--space-2);
+  }
+  .general li {
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--color-border-subtle);
   }
   .error {
     margin-top: var(--space-3);

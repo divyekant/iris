@@ -71,8 +71,31 @@ export function grantsOf(rules: Rule[], job: string): Rule[] {
   return rules.filter((r) => r.job === job && r.effect === "allow");
 }
 
-/** The rule of a group: a grant of the job with the same verbs, or undefined. */
-export function ruleOf(rules: Rule[], group: { verbs: readonly string[] }): Rule | undefined {
-  const want = [...group.verbs].sort().join();
-  return rules.find((r) => [...r.verbs].sort().join() === want);
+type Group = (typeof GRANTS)[number];
+
+/** True if `rule` is the rule that the switch of `group` adds: the verbs of the group, `author = "agent"` and no other condition. */
+export function isSwitch(rule: Rule, group: { verbs: readonly string[] }): boolean {
+  const same = (a: readonly string[]) => [...a].sort().join();
+  const keys = Object.keys(rule.when ?? {});
+  return same(rule.verbs) === same(group.verbs) && keys.length === 1 && rule.when.author === "agent";
+}
+
+/**
+ * What the job page shows of the policy for `job`. Each switch has the first
+ * rule of the job that it adds. Each other grant of the job (other verbs, a
+ * condition, a second copy) is its own line, so the person sees and can
+ * remove each grant. `general` holds the allow rules of the whole policy that
+ * can also apply to an agent: no job, and no author or the author agent.
+ */
+export function grantView(rules: Rule[], job: string): { switches: Record<Group["key"], Rule | undefined>; others: Rule[]; general: Rule[] } {
+  const mine = grantsOf(rules, job);
+  const taken = new Set<number>();
+  const switches = {} as Record<Group["key"], Rule | undefined>;
+  for (const g of GRANTS) {
+    const r = mine.find((r) => !taken.has(r.id) && isSwitch(r, g));
+    if (r) taken.add(r.id);
+    switches[g.key] = r;
+  }
+  const general = rules.filter((r) => r.effect === "allow" && !r.job && (r.when?.author == null || r.when.author === "agent"));
+  return { switches, others: mine.filter((r) => !taken.has(r.id)), general };
 }

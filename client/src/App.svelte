@@ -132,9 +132,8 @@
         <Jobs pages={{ needs_you, working, waiting, done }} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "job"}
-      <!-- The grants of the job come from the active policy; without it the page shows no grants. -->
-      {#await Promise.all([get<JobDetail>(`jobs/${encodeURIComponent(route.id)}`), get<Policy>("policy").catch(() => null)]) then [detail, policy]}
-        <Job {detail} {policy} />
+      {#await get<JobDetail>(`jobs/${encodeURIComponent(route.id)}`) then detail}
+        <Job {detail} />
       {:catch error}{@render failed(error)}{/await}
     {:else if route.view === "matters"}
       {#await get<MatterList>("matters") then list}<Matters {list} />{:catch error}{@render failed(error)}{/await}
