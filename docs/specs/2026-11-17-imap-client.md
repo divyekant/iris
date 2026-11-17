@@ -7,7 +7,7 @@
 ## Problem
 
 Iris reads mail from Gmail only. Many people keep mail at a provider that
-gives IMAP (RFC 3501 and RFC 9051) and no Gmail API: Fastmail, iCloud, a
+gives IMAP (RFC 3501) and no Gmail API: Fastmail, iCloud, a
 company server, a self-hosted Dovecot. Release 6 adds providers. The
 provider interface (R6-10) is in work in another thread. The IMAP client
 does not depend on it, so it is built first.
@@ -35,6 +35,10 @@ does not depend on it, so it is built first.
   client for each connection.
 - Writes to the mailbox: `STORE`, `MOVE`, `COPY`, `APPEND`, `EXPUNGE` and
   send (SMTP). The apply of actions to IMAP is a later card.
+- IMAP4rev2 (RFC 9051) and `UTF8=ACCEPT` (RFC 6855). The client speaks
+  IMAP4rev1 and turns on neither, so the server sends folder names in
+  modified UTF-7, which is ASCII (RFC 3501 section 5.1.3). A server
+  without the capability `IMAP4rev1` is `Error::Missing`.
 - `STARTTLS` on port 143 and plain connections. The client connects with
   TLS from the first byte (port 993) only.
 - `IDLE` and `NOTIFY` (push). The engine syncs on its timer.
@@ -82,26 +86,56 @@ All reads use UIDs, never message sequence numbers.
   does not set `\Seen` either.
 - A folder name goes to the server as a quoted string. A name with a byte
   that a quoted string cannot hold (CR, LF, NUL, or a byte above 127) is
-  `Error::Name`. Names from `LIST` use modified UTF-7, which is ASCII.
+  `Error::Name`. In IMAP4rev1 mode, names from `LIST` use modified UTF-7,
+  which is ASCII, so only a server defect gives such a name.
+- `folders` removes the quoted-string escapes (`\\` and `\"`) from a
+  name, because the parser keeps them. A name in a literal has no escapes.
 - `list` gives only messages inside the asked range. For `<from>:*`, a
   server gives the last message also when its UID is below `<from>`
   (RFC 3501 section 6.4.8). The client drops such a message.
 
-### 3. Sync modes (for part B)
+### 3. Sync of a folder (for part B)
 
-The client gives the reads. Part B does the sync with them, in this way:
+The client gives the reads. Part B does the sync with them. The mode is
+chosen for each folder at each sync, from the `EXAMINE` result, not from
+the capabilities alone:
 
-| Server has | Changed flags and new mail | Removed mail |
+| `EXAMINE` gives | Changed flags and new mail | Removed mail |
 |---|---|---|
-| `QRESYNC` | `changes(since)` | the `VANISHED` ranges of `changes` |
-| `CONDSTORE` only | `changes(since)` | a full UID compare with `list` |
-| neither | a full compare with `list` | a full compare with `list` |
+| `HIGHESTMODSEQ`, and `QRESYNC` is on | `changes(since)` | the `VANISHED` ranges of `changes` |
+| `HIGHESTMODSEQ`, no `QRESYNC` | `changes(since)` | a full UID compare with `list` |
+| no `HIGHESTMODSEQ` (no `CONDSTORE`, or `NOMODSEQ` for the folder) | a full compare with `list` | a full compare with `list` |
 
-- The key of a mirror entry is (folder, `UIDVALIDITY`, UID). When the
-  `UIDVALIDITY` of a folder changes, all UIDs of the folder are new: part B
-  drops the entries of the folder and lists it again.
-- The same message in two folders is two entries. Part B decides how the
-  mirror shows one message in two folders (see Open questions).
+The checkpoint of a folder is (`UIDVALIDITY`, `HIGHESTMODSEQ`):
+
+1. Part B reads the checkpoint from `EXAMINE`, before any `changes` or
+   `list` call.
+2. Part B saves the results of the calls.
+3. Part B saves the checkpoint of step 1 only after all results of steps
+   2 are saved. A change that comes during the calls has a mod-sequence
+   above the checkpoint, so the next `changes(since)` gives it again.
+   Applying a change two times gives the same mirror.
+4. After a crash or an error before step 3, the old checkpoint stays.
+   The next sync does the same calls again. With no saved checkpoint, the
+   next sync does a full compare.
+5. If `changes` gives `Error::TooLarge` (for example, a very long
+   `VANISHED` list), part B does a full compare of the folder for this
+   sync.
+
+The key of a mirror entry is (folder, `UIDVALIDITY`, UID). When the
+`UIDVALIDITY` of a folder changes, all old UIDs of the folder are invalid:
+
+1. In one transaction, part B marks each entry of the old `UIDVALIDITY`
+   gone, as for a removed message (spec 1: the item keeps its sources,
+   and the raw mail stays for the retention time), and saves the new
+   `UIDVALIDITY` with no `HIGHESTMODSEQ`.
+2. Part B lists the folder as a new folder. A message that the reset
+   brought back under a new UID is a new entry.
+3. After a crash between the steps, the saved `UIDVALIDITY` is the new
+   one with no checkpoint, so the next sync does the full list again.
+
+The same message in two folders is two entries. Part B decides how the
+mirror shows one message in two folders (see Open questions).
 
 ### 4. Memory
 
@@ -128,7 +162,7 @@ The client gives the reads. Part B does the sync with them, in this way:
 ## Failure list
 
 The server is outside the control of Iris. Supported input: responses as
-RFC 3501, RFC 9051 and RFC 7162 give them, in the forms that `imap-proto`
+RFC 3501 and RFC 7162 give them, in the forms that `imap-proto`
 parses. All other input gives an error, and the caller ends the session.
 
 | Input | Result | Test |
@@ -143,6 +177,9 @@ parses. All other input gives an error, and the caller ends the session.
 | A message below `<from>` in `list` | dropped | `list_range` |
 | A server with no TLS | handshake error, no plain fallback | `no_plain` |
 | A folder name with CR, LF, NUL or 8-bit bytes | `Error::Name`, nothing sent | `bad_name` |
+| A server without `IMAP4rev1` | `Error::Missing` | `rev2_only` |
+| A status response with a byte above 127 just after `]` (this input makes `imap-proto` 0.17 panic) | `Error::Protocol`, checked before the parser | fuzz test |
+| A quoted folder name with escapes | the escapes removed | `folders_and_examine` |
 
 A session after an error is not used again. The caller connects again.
 
@@ -185,9 +222,8 @@ None. The client opens folders with `EXAMINE` and fetches with
    server after random adds, flag changes, removals and `UIDVALIDITY`
    changes, in each of the three modes. It goes red if `changes`, `list`
    or `VANISHED` lose an event.
-2. `fetch_raw` of a 20 MiB message keeps the peak memory of the client
-   under 2 MiB above its start. It goes red if the client buffers the
-   message.
+2. `fetch_raw` of a 20 MiB message works, although each buffered response
+   is at most 1 MiB. It goes red if the client buffers the message.
 3. Random and cut server responses never make the client panic or hang.
 
 ## Verify
