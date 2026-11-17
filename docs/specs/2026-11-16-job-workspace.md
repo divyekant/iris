@@ -589,7 +589,8 @@ cargo test -p iris-workspace
 
 ## Rollout
 
-The migration adds one table. The builder has no caller until R4-04.
+The migration adds two tables: `job_scope` and `job_scope_message`. The
+builder has no caller until R4-04.
 
 ## Risks
 
