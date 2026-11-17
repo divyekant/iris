@@ -142,7 +142,8 @@ fn show(app: &AppHandle, route: Option<String>) {
         .min_inner_size(420.0, 480.0)
         .title_bar_style(TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(LogicalPosition::new(20.0, 24.0))
+        // y 34: the centre of the buttons meets the centre of the view text.
+        .traffic_light_position(LogicalPosition::new(20.0, 34.0))
         .initialization_script(INIT)
         .on_navigation(move |url| navigate(&handle, url))
         .on_page_load(|w, p| {

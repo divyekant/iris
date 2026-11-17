@@ -65,7 +65,8 @@
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
 
-<!-- The Mac app drags its window by the empty part of this bar (apps/mac). -->
+<!-- The Mac app drags its window by the empty part of this bar and of its
+     view row (apps/mac). A link still opens its view. -->
 <header data-tauri-drag-region>
   <a class="name touch" href="#/brief">
     <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
@@ -74,7 +75,7 @@
     </svg>
     Iris
   </a>
-  <nav aria-label="Views">
+  <nav aria-label="Views" data-tauri-drag-region>
     {#each NAV as [link, label] (link)}
       <a href={link} aria-current={active === link ? "page" : undefined}>{label}</a>
     {/each}
