@@ -78,6 +78,26 @@ fn setup(name: &str) -> (std::path::PathBuf, Arc<Store>) {
     (dir, s)
 }
 
+/// The document and the members of a view name the same items, with the
+/// same counts.
+fn agree(v: &Value) {
+    let mut named: Vec<&str> = Vec::new();
+    for form in ["commitment", "conversation", "record"] {
+        let list = v["items"][form].as_array().unwrap();
+        assert_eq!(v["matter"]["counts"][form], list.len(), "{v}");
+        named.extend(list.iter().map(|d| d["id"].as_str().unwrap()));
+    }
+    let mut doc: Vec<&str> = v["matter"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i.as_str().unwrap())
+        .collect();
+    named.sort_unstable();
+    doc.sort_unstable();
+    assert_eq!(named, doc, "{v}");
+}
+
 fn ids(list: &Value) -> Vec<&str> {
     list.as_array()
         .unwrap()
@@ -99,6 +119,7 @@ async fn list_view_confirm_and_decline() {
     }
     let (code, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
     assert_eq!(code, StatusCode::OK);
+    agree(&v);
     assert_eq!(v["matter"]["items"], json!(["r-1", "v-2", "c-3"]));
     assert_eq!(
         v["matter"]["counts"],
@@ -147,6 +168,7 @@ async fn list_view_confirm_and_decline() {
     )
     .await;
     assert_eq!(code, StatusCode::OK);
+    agree(&v);
     assert!(schema.is_valid(&v["matter"]), "{}", v["matter"]);
     assert_eq!(v["matter"]["status"], "confirmed");
     assert_eq!(v["matter"]["title"], "Tokyo");
@@ -174,6 +196,7 @@ async fn list_view_confirm_and_decline() {
     // Decline: the full grouping stays in the document.
     let (code, v) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
     assert_eq!(code, StatusCode::OK);
+    agree(&v);
     assert!(schema.is_valid(&v["matter"]), "{}", v["matter"]);
     assert_eq!(v["matter"]["items"], json!(["r-4", "c-5"]));
     let (code, _) = call(&s, Method::POST, "/api/matters/g-2/decline", "").await;
@@ -204,8 +227,81 @@ async fn a_stale_proposal_is_not_shown_and_not_decided() {
     })
     .unwrap();
     let (_, v) = call(&s, Method::GET, "/api/matters/g-1", "").await;
+    agree(&v);
     assert_eq!(v["matter"]["items"], json!(["r-1", "c-3"]));
     let (code, _) = call(&s, Method::GET, "/api/matters/x-1", "").await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Decisions commit while another thread reads: each list document passes
+/// the schema, and each view names the same members in both parts.
+#[test]
+fn reads_during_decisions_are_consistent() {
+    let dir = std::env::temp_dir().join(format!("iris-api-matters-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let s = Arc::new(Store::open(&dir).unwrap());
+    let a = s.add_account("gmail", "owner@example.com").unwrap();
+    let msgs: Vec<NewMessage> = (0..2)
+        .map(|t| NewMessage {
+            provider_id: format!("g{t}"),
+            thread_provider_id: format!("gt{t}"),
+            ..Default::default()
+        })
+        .collect();
+    let ids = s.put_messages(a, &msgs).unwrap();
+    const N: i64 = 40;
+    s.write(|tx| {
+        for i in 0..2 * N {
+            tx.execute(
+                "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
+                 VALUES ('record', ?1, 'kept', '{}', 0, 0)",
+                [a],
+            )?;
+            tx.execute(
+                "INSERT INTO item_source(item_id, message_id, role) VALUES (?1, ?2, 'origin')",
+                params![tx.last_insert_rowid(), ids[(i % 2) as usize]],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    for m in 0..N {
+        iris_matters::write(&s, |tx| {
+            iris_matters::insert_proposal(tx, "T", "fake", None, &[2 * m + 1, 2 * m + 2], 1_000)
+        })
+        .unwrap();
+    }
+    let writer = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            for m in 1..=N {
+                let id = format!("g-{m}");
+                let keep = [format!("r-{}", 2 * m - 1)];
+                if m % 2 == 0 {
+                    iris_api::confirm_matter(&s, &id, "Kept", &keep, 2_000).unwrap();
+                } else {
+                    iris_api::decline_matter(&s, &id, 2_000).unwrap();
+                }
+            }
+        })
+    };
+    let schema = iris_spec::validator("matter");
+    let mut reads = 0;
+    while !writer.is_finished() || reads < 20 {
+        let list = iris_api::matters(&s).unwrap();
+        for key in ["proposed", "confirmed"] {
+            for m in list[key].as_array().unwrap() {
+                assert!(schema.is_valid(m), "{m}");
+            }
+        }
+        let id = format!("g-{}", 1 + reads % N);
+        if let Some(v) = iris_api::matter(&s, &id).unwrap() {
+            agree(&v);
+            assert!(schema.is_valid(&v["matter"]), "{v}");
+        }
+        reads += 1;
+    }
+    writer.join().unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }

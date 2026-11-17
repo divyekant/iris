@@ -1159,17 +1159,22 @@ pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
 /// the matter, so they replace the values of the document. Each output of
 /// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
-    let id: i64 = r.get(0)?;
-    let form: String = r.get(1)?;
-    let text: String = r.get(3)?;
+    doc_at(r, 0)
+}
+
+/// As [`doc_of`], with the columns id, form, status and doc from `at`.
+pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
+    let id: i64 = r.get(at)?;
+    let form: String = r.get(at + 1)?;
+    let text: String = r.get(at + 3)?;
     let mut doc: Value = serde_json::from_str(&text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(at + 3, rusqlite::types::Type::Text, Box::new(e))
     })?;
     if let Some(map) = doc.as_object_mut() {
         if let Some(id) = item_id(id, &form) {
             map.insert("id".into(), id.into());
         }
-        map.insert("status".into(), Value::String(r.get(2)?));
+        map.insert("status".into(), Value::String(r.get(at + 2)?));
         let matter: Option<i64> = r.get("matter")?;
         map.insert(
             "matter".into(),

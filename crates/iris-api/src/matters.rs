@@ -5,10 +5,10 @@
 
 use iris_matters::Error as MatterError;
 use iris_store::{format_id, parse_id, Kind, Store};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
-use crate::read::{doc_of, rfc3339, row_of, MATTER};
+use crate::read::{doc_at, rfc3339, row_of, MATTER};
 use crate::{Error, Result};
 
 /// The forms of a member, with the ID kind of each.
@@ -18,38 +18,107 @@ const MEMBER_FORMS: [(&str, Kind); 3] = [
     ("record", Kind::Record),
 ];
 
-/// The members of a matter that its document and its view show: the live
+/// One statement reads each matter of a response with its members, so the
+/// document and the member list come from one snapshot: a decision that
+/// commits during the read cannot mix the two. Each matter row comes with
+/// one row for each member that it shows (or one row of NULLs): the live
 /// members of a proposal, the kept members of a confirmed matter, and each
-/// member of a declined matter (the full grouping that the person declined).
-const SHOWN: &str = "SELECT mi.item_id FROM matter_item mi JOIN matter m ON m.id = mi.matter_id
-     WHERE mi.matter_id = ?1 AND CASE m.status
-       WHEN 'proposed' THEN mi.item_id IN (SELECT item_id FROM matter_live WHERE matter_id = ?1)
-       WHEN 'confirmed' THEN mi.kept = 1
-       ELSE 1 END";
+/// member of a declined matter (the full grouping that the person
+/// declined). A proposal that is not valid now is not read.
+fn select(filter: &str, order: &str) -> String {
+    format!(
+        "SELECT m.id, m.title, m.status, m.model, m.prompt, m.created_at, m.updated_at,
+                m.decided_at, item.id, item.form, item.status, item.doc, {MATTER}
+           FROM matter m
+           LEFT JOIN matter_item mi ON mi.matter_id = m.id AND CASE m.status
+                WHEN 'proposed' THEN mi.item_id IN
+                  (SELECT l.item_id FROM matter_live l WHERE l.matter_id = m.id)
+                WHEN 'confirmed' THEN mi.kept = 1
+                ELSE 1 END
+           LEFT JOIN item ON item.id = mi.item_id
+          WHERE (m.status <> 'proposed' OR m.id IN (SELECT matter_id FROM matter_valid))
+            AND ({filter})
+          ORDER BY {order}, m.id DESC, item.id"
+    )
+}
+
+/// The matters of one statement of [`select`], in its order: each matter
+/// document with the documents of its members by form (when `members`).
+fn load(
+    c: &Connection,
+    sql: &str,
+    args: impl rusqlite::Params,
+    members: bool,
+) -> rusqlite::Result<Vec<(Value, Map<String, Value>)>> {
+    let mut st = c.prepare(sql)?;
+    let mut rows = st.query(args)?;
+    let mut out: Vec<(Value, Map<String, Value>)> = Vec::new();
+    let mut last = None;
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        if last != Some(id) {
+            last = Some(id);
+            let mut doc = json!({
+                "model": "iris/0",
+                "id": format_id(Kind::Matter, id),
+                "title": r.get::<_, String>(1)?,
+                "status": r.get::<_, String>(2)?,
+                "items": [],
+                "counts": {"commitment": 0, "conversation": 0, "record": 0},
+                "created": rfc3339(r.get(5)?),
+                "updated": rfc3339(r.get(6)?),
+                "derived": {"by": "model", "model": r.get::<_, String>(3)?,
+                            "prompt": r.get::<_, String>(4)?},
+            });
+            if let Some(d) = r.get::<_, Option<i64>>(7)? {
+                doc["decided"] = rfc3339(d).into();
+            }
+            let by_form = MEMBER_FORMS
+                .iter()
+                .map(|(f, _)| ((*f).to_string(), Value::Array(Vec::new())))
+                .collect();
+            out.push((doc, by_form));
+        }
+        let Some(item) = r.get::<_, Option<i64>>(8)? else {
+            continue;
+        };
+        let form: String = r.get(9)?;
+        let Some((f, kind)) = MEMBER_FORMS.iter().find(|(f, _)| *f == form) else {
+            continue;
+        };
+        let (doc, by_form) = out.last_mut().expect("a matter row comes first");
+        if let Some(Value::Array(list)) = doc.get_mut("items") {
+            list.push(format_id(*kind, item).into());
+        }
+        let n = doc["counts"][*f].as_i64().unwrap_or(0) + 1;
+        doc["counts"][*f] = n.into();
+        if members {
+            if let Some(Value::Array(list)) = by_form.get_mut(*f) {
+                list.push(doc_at(r, 8)?);
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// The valid proposals (the view `matter_valid`), newest first, and the
-/// confirmed matters, by the last change, newest first.
+/// confirmed matters, by the last change, newest first. One statement.
 pub fn matters(store: &Store) -> Result<Value> {
-    Ok(store.read(|c| {
-        let ids = |sql: &str| -> rusqlite::Result<Vec<i64>> {
-            let mut st = c.prepare(sql)?;
-            let v = st.query_map([], |r| r.get(0))?.collect();
-            v
-        };
-        let proposed = ids(
-            "SELECT m.id FROM matter m JOIN matter_valid v ON v.matter_id = m.id
-             ORDER BY m.created_at DESC, m.id DESC",
-        )?;
-        let confirmed = ids(
-            "SELECT id FROM matter WHERE status = 'confirmed' ORDER BY updated_at DESC, id DESC",
-        )?;
-        let docs = |list: Vec<i64>| -> rusqlite::Result<Vec<Value>> {
-            list.into_iter()
-                .filter_map(|m| matter_doc(c, m).transpose())
-                .collect()
-        };
-        Ok(json!({ "proposed": docs(proposed)?, "confirmed": docs(confirmed)? }))
-    })?)
+    let sql = select(
+        "m.status IN ('proposed', 'confirmed')",
+        "m.status = 'confirmed',
+         CASE m.status WHEN 'proposed' THEN m.created_at ELSE m.updated_at END DESC",
+    );
+    let all = store.read(|c| Ok(load(c, &sql, [], false)?))?;
+    let (mut proposed, mut confirmed) = (Vec::new(), Vec::new());
+    for (doc, _) in all {
+        if doc["status"] == "proposed" {
+            proposed.push(doc);
+        } else {
+            confirmed.push(doc);
+        }
+    }
+    Ok(json!({ "proposed": proposed, "confirmed": confirmed }))
 }
 
 /// One matter (`g-4`) with the documents of its members, by form. `None`
@@ -134,88 +203,11 @@ fn form_of(id: &str) -> &'static str {
         .map_or("", |(f, _)| *f)
 }
 
-/// The matter document with its member documents, or `None`.
+/// The matter document with its member documents, or `None`. One
+/// statement.
 fn view(c: &Connection, row: i64) -> rusqlite::Result<Option<Value>> {
-    let Some(doc) = matter_doc(c, row)? else {
-        return Ok(None);
-    };
-    let mut st = c.prepare(&format!(
-        "SELECT id, form, status, doc, {MATTER} FROM item
-         WHERE id IN ({SHOWN}) ORDER BY id"
-    ))?;
-    let mut by_form = Map::new();
-    for (form, _) in MEMBER_FORMS {
-        by_form.insert(form.into(), Value::Array(Vec::new()));
-    }
-    for d in st.query_map([row], |r| Ok((r.get::<_, String>(1)?, doc_of(r)?)))? {
-        let (form, d) = d?;
-        if let Some(Value::Array(list)) = by_form.get_mut(&form) {
-            list.push(d);
-        }
-    }
-    Ok(Some(json!({ "matter": doc, "items": by_form })))
-}
-
-/// The open-model document of a matter (`matter.schema.json`), or `None`
-/// for no such row or for a proposal that is not valid now.
-fn matter_doc(c: &Connection, row: i64) -> rusqlite::Result<Option<Value>> {
-    let head = c
-        .query_row(
-            "SELECT title, status, model, prompt, created_at, updated_at, decided_at,
-                    (status <> 'proposed' OR id IN (SELECT matter_id FROM matter_valid))
-               FROM matter WHERE id = ?1",
-            [row],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, Option<i64>>(6)?,
-                    r.get::<_, bool>(7)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((title, status, model, prompt, created, updated, decided, shown)) = head else {
-        return Ok(None);
-    };
-    if !shown {
-        return Ok(None);
-    }
-    let mut st = c.prepare(&format!(
-        "SELECT i.id, i.form FROM item i WHERE i.id IN ({SHOWN}) ORDER BY i.id"
-    ))?;
-    let mut items = Vec::new();
-    let mut counts = Map::new();
-    for (form, _) in MEMBER_FORMS {
-        counts.insert(form.into(), 0.into());
-    }
-    for r in st.query_map(params![row], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-    })? {
-        let (id, form) = r?;
-        if let Some((f, kind)) = MEMBER_FORMS.iter().find(|(f, _)| *f == form) {
-            items.push(Value::String(format_id(*kind, id)));
-            let n = counts[*f].as_i64().unwrap_or(0) + 1;
-            counts.insert((*f).into(), n.into());
-        }
-    }
-    let mut doc = json!({
-        "model": "iris/0",
-        "id": format_id(Kind::Matter, row),
-        "title": title,
-        "status": status,
-        "items": items,
-        "counts": counts,
-        "created": rfc3339(created),
-        "updated": rfc3339(updated),
-        "derived": { "by": "model", "model": model, "prompt": prompt },
-    });
-    if let Some(d) = decided {
-        doc["decided"] = rfc3339(d).into();
-    }
-    Ok(Some(doc))
+    let sql = select("m.id = ?1", "m.id");
+    Ok(load(c, &sql, [row], true)?
+        .pop()
+        .map(|(doc, items)| json!({ "matter": doc, "items": items })))
 }
