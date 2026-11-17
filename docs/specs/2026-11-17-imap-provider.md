@@ -118,10 +118,17 @@ the `\Sent` folder gets the system label `SENT_COPY`. Neither label is
 proof of authorship: the sender axis and the hostile checks ignore them,
 and a sent copy is no evidence of a known person (limit issue, filed with
 the code PR). The understanding skips a message with `UNSENT` or
-`SENT_COPY` as it skips one with `DRAFT`: the engine part of this card
-adds both to each query of `crates/iris-understand` that excludes `DRAFT`
-(`batch.rs`, the item query of `store.rs`) and to the guard of
-`store::understand`. No IMAP account can sync before that part, because
+`SENT_COPY` as it skips one with `DRAFT`. The same holds for each other
+check of received mail. The engine part of this card adds one store
+helper, the SQL condition "not `DRAFT`, `UNSENT` or `SENT_COPY`", and uses
+it in each query that excludes `DRAFT` from received mail today: the
+understanding (`crates/iris-understand`, `batch.rs`, the item query of
+`store.rs`, the guard of `store::understand`), the watches
+(`crates/iris-store/src/watch.rs`), the search, the conversations
+(`crates/iris-talk`) and the flags of the changeset. A test of that part
+lists each query in `crates/*/src` that names `'DRAFT'` and fails if one
+does not use the helper. A watch test covers a message that gets the
+`\Draft` flag after its body was saved: no arrival notice. No IMAP account can sync before that part, because
 only that part adds the account.
 
 A move at the server is a delete and an add (section 3), so a message
