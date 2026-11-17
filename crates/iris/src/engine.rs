@@ -266,30 +266,50 @@ impl Worker {
         let first = self.access()?;
         let (store, account, uri) = (&self.store, self.account, self.test_token_uri.as_deref());
         let (token, got, sealed) = (&mut self.token, &mut self.got, &mut self.sealed);
-        // After HTTP 401 the apply asks for a new token: the token in
-        // memory goes, and the stored sign-in gives a new one.
-        let mut renew = || {
-            *token = None;
-            access(store, account, uri, token, got, sealed)
-                .ok()
-                .map(|t| t.expose().to_string())
+        // The error of the last renewal. A refusal by Google marks the
+        // account in `access`; any other error keeps the account.
+        let mut renew_error: Option<Error> = None;
+        let (step, refused) = {
+            // After HTTP 401 the apply asks for a new token: the token in
+            // memory goes, and the stored sign-in gives a new one.
+            let mut renew = || {
+                *token = None;
+                match access(store, account, uri, token, got, sealed) {
+                    Ok(t) => {
+                        renew_error = None;
+                        Some(t.expose().to_string())
+                    }
+                    Err(e) => {
+                        renew_error = Some(e);
+                        None
+                    }
+                }
+            };
+            let mut t = iris_apply::Token {
+                token: first.expose().to_string(),
+                renew: &mut renew,
+                refused: false,
+            };
+            let step = iris_apply::step(store, &self.gmail, &mut t, account, now_ms());
+            (step, t.refused)
         };
-        let mut t = iris_apply::Token {
-            token: first.expose().to_string(),
-            renew: &mut renew,
-            refused: false,
-        };
-        let step = iris_apply::step(store, &self.gmail, &mut t, account, now_ms());
-        let refused = t.refused;
+        // The token state comes before the result of the step: a refusal
+        // during the recovery also ends with an error of the step.
+        if refused {
+            if let Some(e) = renew_error {
+                // No new token: `NeedsSignIn` if Google refused the stored
+                // sign-in, else an error that the next turn tries again.
+                return Err(e);
+            }
+            // Gmail refused two tokens (specification 1, section 4.7).
+            mark_needs_sign_in(&self.store, account, &self.sealed)?;
+            return Err(Error::NeedsSignIn);
+        }
         let step = step.map_err(Error::Apply)?;
         for (action, r) in &step.results {
             if let Err(e) = r {
                 say!("iris: account {account}: action {action}: {e}");
             }
-        }
-        if refused {
-            mark_needs_sign_in(&self.store, account, &self.sealed)?;
-            return Err(Error::NeedsSignIn);
         }
         Ok(step.next)
     }
