@@ -95,13 +95,19 @@ and arguments of the adapter:
 1. Make two pipes, and start `bwrap` with their ends on file descriptors 3
    and 4. `bwrap` sets up the namespaces and waits.
 2. Read the JSON line of file descriptor 3 (at most 4 KiB, in 5 seconds).
-   It gives `child-pid` (the init, as a host process ID) and
-   `pid-namespace` (the inode of the PID namespace).
-3. Write the record `<data dir>/sessions/se-<id>.sandbox` (mode `0600`,
+   It gives `child-pid`: the init, as a host process ID. The isolation
+   reads no other field.
+3. Get the inode of the PID namespace of the init: open a `pidfd` of the
+   process ID, read the inode of `/proc/<pid>/ns/pid`, then check that the
+   `pidfd` is not readable (the init did not exit). The init is blocked on
+   file descriptor 4, so it cannot exit by itself. A process ID stays with
+   its process until the reap, so if the init still runs after the read,
+   the inode is the one of the init. Else `spawn` fails.
+4. Write the record `<data dir>/sessions/se-<id>.sandbox` (mode `0600`,
    `create_new`): the init process ID and the namespace inode.
-4. If the session has an egress port: make the listener of the session in
+5. If the session has an egress port: make the listener of the session in
    its network namespace (see [Egress on Linux](#egress-on-linux)).
-5. Write one byte to file descriptor 4. `bwrap` runs the program of the
+6. Write one byte to file descriptor 4. `bwrap` runs the program of the
    adapter.
 
 If a step fails, `spawn` sends `SIGKILL` to the init and to `bwrap`, reaps
@@ -124,7 +130,7 @@ zombie only after each of them ended. So:
   same chain ends each process of the session.
 
 `stop(session)` reads the record. If there is no record, `bwrap` did not
-reach step 3, and its init cannot outlive `bwrap`: `stop` returns `Ok`.
+reach step 4, and its init cannot outlive `bwrap`: `stop` returns `Ok`.
 Else it opens a `pidfd` of the init process ID, checks that
 `/proc/<pid>/ns/pid` has the inode of the record (so a reused process ID
 is never signaled), sends `SIGKILL` through the `pidfd`, and waits at most
@@ -145,7 +151,7 @@ listens on the egress port of the session on the host loopback address
 (launcher spec). The agent connects to `127.0.0.1:<port>` in its own
 namespace, so a second listener and a relay connect the two:
 
-1. In step 4 of `spawn`, the helper forks one child process. The child
+1. In step 5 of `spawn`, the helper forks one child process. The child
    opens `/proc/<init>/ns/net`, gets the user namespace that owns it
    (`ioctl NS_GET_USERNS`), and joins the user namespace, then the network
    namespace (`setns`). The helper is the owner of that user namespace, so
@@ -213,7 +219,14 @@ or an exit of its parent.
 
 - `stop(session)` lists the processes (`proc_listallpids`), sends
   `SIGKILL` to each process of the session, and lists again until no
-  process of the session remains, for at most 5 seconds.
+  process of the session remains, for at most 5 seconds. Before each
+  signal it reads the start time of the process (`proc_pidinfo`), checks
+  the three tests again, and reads the start time again; it sends the
+  signal only if the two start times agree. macOS has no `pidfd`, so a
+  short window stays between the last check and `kill`, in which the
+  process can exit and the system can give its ID to a new process.
+  Known limit, with an issue. The process ID of macOS goes up to 99999
+  before it wraps, which makes a reuse in this window unlikely.
 - `ended(session)` is true if one list finds no process of the session.
 - `name(session)` is the session marker path.
 
@@ -242,7 +255,7 @@ Both systems use one view: the agent sees only these paths.
 | The workspace of the job | Read and write |
 | The private home of the session | Read and write |
 | System programs and libraries: Linux `/usr`, `/bin`, `/sbin`, `/lib*`, `/etc`, `/opt` and `/nix/store` if present; macOS `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/private/etc`, `/opt/homebrew` and the system paths of the Codex profile | Read |
-| The folder of the adapter program (the parent of its real path) and the `iris` program file | Read |
+| The file of the adapter program (its real path) and the file of the `iris` program | Read |
 | Linux: a new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
 
 Each other path is not visible (Linux) or denied (macOS). This holds the
@@ -258,9 +271,17 @@ namespace does not block on Linux).
   `agents.toml`). This card adds `CLAUDE_CODE_OAUTH_TOKEN` to the variables
   of the `claude-code` adapter, so a person with a Claude subscription can
   use a token from `claude setup-token`.
-- The isolation refuses (check fails with the reason) a view where a read
-  path is the data folder, holds the data folder, or is inside the data
-  folder. The workspace is the one exception.
+- The isolation shows the program file only, not its folder. A folder
+  such as the home of the person, or `~/.local/bin`, can hold credentials
+  and other files of the person. So an adapter program that needs other
+  files outside the system folders (for example a Node.js program of
+  `nvm` in the home folder) does not run in a session. Known limit, with
+  an issue: a later card can add a list of read paths to `agents.toml`,
+  which the person sets.
+- The data folder is always empty in the view: the isolation mounts an
+  empty folder (Linux) or denies the path (macOS) after each read path,
+  and only then gives the workspace. So a system folder that holds the
+  data folder (for example a data folder in `/opt`) does not show it.
 - On Linux the workspace is mounted after the private home, so the view
   also holds when the data folder is inside `HOME`.
 
@@ -308,6 +329,8 @@ before the agent runs, or `ended` is false.
 
 | Input or event | Result | Test |
 |---|---|---|
+| An adapter program in the home folder of the person (for example `/home/alice/my-tool`) | Only the file is in the view: `/home/alice/.ssh` is not | Linux sandbox test with a program in a folder that also holds a marker file |
+| The init exits or its process ID is reused before the namespace read | The `pidfd` check fails: `spawn` fails, no record | Unit test of the identity read on a process that exited |
 | `bwrap` is missing, or the system refuses a user namespace | `check` fails with the reason; `run` is refused | Linux test with a missing `bwrap` path |
 | The agent connects to an address other than `127.0.0.1:<port>` (a public address, a host port, the port of another session) | No route, or connection refused; nothing is reached | Linux sandbox test |
 | The agent sends UDP (for example DNS) | No route | Linux sandbox test |
@@ -353,6 +376,11 @@ macOS watchdog is one more small process for each session.
   sees. Evidence: a probe as the user `nobody` on Linux 6.18 with
   `bwrap` 0.9.0 (six runs, each one passed; the sandbox reached the
   listener, and `1.1.1.1` gave "Network is unreachable").
+- `bwrap --info-fd` writes a JSON object with `child-pid`. Evidence:
+  `bwrap(1)`, and the probe output of `bwrap` 0.9.0:
+  `{"child-pid": 2355, "cgroup-namespace": ..., "pid-namespace": ...}`.
+  The design reads only `child-pid`, so an older `bwrap` with fewer fields
+  works too.
 - The user namespace of `/proc/<init>/ns/user` can change after the info
   line (`bwrap` makes a second user namespace), so the join uses the owner
   of the network namespace (`NS_GET_USERNS`). Evidence: the same probe
