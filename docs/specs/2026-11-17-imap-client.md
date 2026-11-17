@@ -73,7 +73,9 @@ does not depend on it, so it is built first.
 
 ### 2. Reads
 
-All reads use UIDs, never message sequence numbers.
+All reads use UIDs, never message sequence numbers, except `window`:
+part B pages by windows of sequence numbers, because UIDs can be sparse
+(`docs/specs/2026-11-17-imap-provider.md`, section 5).
 
 | Call | IMAP command | Result |
 |---|---|---|

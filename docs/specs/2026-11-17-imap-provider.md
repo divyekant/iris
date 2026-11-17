@@ -53,7 +53,7 @@ Errors map as follows:
 |---|---|
 | `SignIn` | `Unauthorized` |
 | `Io`, `Closed`, `Tls` | `Transport` |
-| `Protocol`, `TooLarge` | `Decode` (a read) |
+| `Protocol`, `TooLarge` | `Decode` (a read). In `changes`, `TooLarge` is `HistoryExpired`: a removal history above the 1 MiB response limit (a long `VANISHED` list) starts a full resync, which reads in bounded windows |
 | `Refused` | `Api` status 400 (a read: the folder is gone or the server refuses) |
 | `Missing` | `Api` status 400, reason `missing` |
 | `Name` | `Api` status 400, reason `badName` |
@@ -98,7 +98,8 @@ thread.
 | `STARRED` | `STARRED` | system | the `\Flagged` flag |
 | `SPAM` | `SPAM` | system | a folder with `\Junk` |
 | `TRASH` | `TRASH` | system | a folder with `\Trash` |
-| A folder label | `folder:<name>` | system for a special-use folder, else user | each other folder, also `\Sent`, `\Drafts` and `\Archive` |
+| `SENT_COPY` | `SENT_COPY` | system | a folder with `\Sent` |
+| A folder label | `folder:<name>` | user | each other folder, also `\Sent`, `\Drafts` and `\Archive` |
 | `UNSENT` | `UNSENT` | system | a folder with `\Drafts`, or the `\Draft` flag |
 | A keyword label | `kw:<keyword>` | user | a keyword flag (no `\` at the start) |
 
@@ -110,20 +111,33 @@ message in the `\Sent` or the `\Drafts` folder gets the system label
 `folder:<name>` only. The send card gives `SENT` to the copies that Iris
 itself sent.
 
-A draft must still stay out of the understanding (spec 1 section 6.7).
-So a message in the `\Drafts` folder or with the `\Draft` flag gets the
-system label `UNSENT`. `UNSENT` is not proof of authorship: the sender
-axis and the hostile checks ignore it. The understanding skips a message
-with `UNSENT` as it skips one with `DRAFT`: the engine part of this card
-adds `UNSENT` to each query of `crates/iris-understand` that excludes
-`DRAFT` (`batch.rs` and the item query of `store.rs`). No IMAP account
-can sync before that part, because only that part adds the account.
+A draft and a sent copy must still stay out of the understanding of
+received mail (spec 1 section 6.7). So a message in the `\Drafts` folder
+or with the `\Draft` flag gets the system label `UNSENT`, and a message in
+the `\Sent` folder gets the system label `SENT_COPY`. Neither label is
+proof of authorship: the sender axis and the hostile checks ignore them,
+and a sent copy is no evidence of a known person (limit issue, filed with
+the code PR). The understanding skips a message with `UNSENT` or
+`SENT_COPY` as it skips one with `DRAFT`: the engine part of this card
+adds both to each query of `crates/iris-understand` that excludes `DRAFT`
+(`batch.rs`, the item query of `store.rs`) and to the guard of
+`store::understand`. No IMAP account can sync before that part, because
+only that part adds the account.
 
-A message in the `\Archive` folder has the label `folder:<name>` and no
-`INBOX`: the mirror shows it as archived.
+A move at the server is a delete and an add (section 3), so a message
+moved into the Drafts or the Sent folder is a new message with the label
+from its first sync, before any understanding. Only a `\Draft` flag set
+in place gives `UNSENT` to a message that the understanding read before.
+Then its items stay, as the items of a gone message stay (spec 1): the
+label stops new understanding only. This is a limit issue too.
+
+Each folder label has the kind `user`, the special-use folders too. So a
+message in the `\Archive` folder has no system label, as the provider
+spec (section 4) says, and the mirror shows it as archived.
+
 
 `labels` gives the fixed labels `INBOX`, `UNREAD`, `STARRED`, `UNSENT`,
-`SPAM` and `TRASH` that apply, each folder label, and a
+`SENT_COPY`, `SPAM` and `TRASH` that apply, each folder label, and a
 keyword label for each keyword in the `PERMANENTFLAGS` and the `FLAGS` of
 each folder. It gives no counts.
 
@@ -193,9 +207,16 @@ mirror does not have.
 
 - `profile`: `Api` 400 `noCondstore` if the server has no `CONDSTORE` or
   if the `EXAMINE` of a folder gives no `HIGHESTMODSEQ` (limit issue #629).
-  Else the address of the account, as the person gave it to
-  `iris account add-imap` (section 8), not the IMAP user name. The sync
-  and the apply compare it with the address of the account row. Counts 0
+  Else the address of the account row. IMAP gives no identity of a
+  mailbox that Iris can trust (the user name is the person's own input
+  too). So the binding of an account to its mailbox is the host, the port
+  and the user of the account row: the engine makes the provider of an
+  account only from these values, and `add-imap` never changes them for
+  an existing account (section 8). The address check of the sync and the
+  apply then always passes for IMAP, by design. If the person signs in to
+  another mailbox with `--user`, the mirror is the mail of that mailbox
+  under the given address: Iris cannot detect it, and the person can see
+  it at once in the mail. Counts 0
   (the trait allows 0), and the cursor of now.
 - `messages(label, page)`: the page token is a bound and the folder name
   (section 2). Each page is one window of 2,000 sequence numbers of one
@@ -302,6 +323,8 @@ times after an unknown result (spec 2 section 7.2).
 | A new folder with more than 2,000 messages | pages of at most 2,000 records | `changes_pages` |
 | A LIST order change between two message pages | each folder once | `message_pages_follow_folder_names` |
 | A `NO` to a `STORE` | `Transport` | `modify_refused` |
+| A `\Sent` folder message | `SENT_COPY`, no `SENT` | `labels_of_special_folders_and_flags` |
+| An answer of `changes` above 1 MiB | `HistoryExpired` | `changes_too_large` |
 | A read of a message in a deleted folder | `NotFound` | `folder_gone` |
 | A `STORE` `OK` with no `FETCH` for a target UID | `Transport` | `modify_unconfirmed` |
 | `add-imap` of an address that another mailbox has | refused, nothing written | `add_imap_other_mailbox` |
