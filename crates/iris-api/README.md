@@ -6,7 +6,8 @@ reads only, except the policy changes of the web client (see
 [Policy](#policy)), the review of the person: decisions and withdraws
 (see [Review](#review)), the state verbs of the person (see
 [State verbs](#state-verbs)), the cancel of a send in the outbox (see
-[Outbox](#outbox)), and the press of Send in the write view (see
+[Outbox](#outbox)), the days of use of the measures page (see
+[Measures](#measures)), and the press of Send in the write view (see
 [Write](#write)).
 
 ## Use
@@ -31,7 +32,7 @@ UTC. IDs have the format of specification 1, section 5.7 (`m-42`).
 | Endpoint | Gives |
 |---|---|
 | `/api/status` | `{"mode": "observe", "accounts": [...], "messages": {"total", "fetched", "understood", "gone"}}`. Each account has `id`, `address`, `provider`, `state`, `mirror_ready_at`, `sync` (`{"kind", "step"}` of an unfinished first sync or resync, or `null`) and `last_sync` (`{"kind", "started", "ended", "result"}` or `null`). With no account, `accounts` is `[]`. |
-| `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). |
+| `/api/brief` | The first brief of specification 1, section 8. See [Brief](#brief). The first brief with content writes the time of the first brief (see [Measures](#measures)). |
 | `/api/brief/{section}?limit=&after=` | One page of a list section of the brief (`you_owe`, `owed_to_you`, `conversations`, `feed`, `signals` or `strangers`), of the bundle of rule N (`bundle-N`, newest first), or of the items that a `hide` rule leaves out (`hidden`, newest first; each item has the rule and the reason in `attention`): `{"count", "items", "next"}`, in the same order and with the same filter as the brief. The page has `duplicates` only when an item of the page has a duplicate, as in the brief. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. With no `after`, the page starts at the first item. `next` is a text value that holds the section name and the sort keys of the last item of the page. Do not make or change it. The API does not sign it, so a made cursor gives the items after its keys. The next page starts after these keys in the order of the section. An item that leaves the section, or that changes its sort key behind these keys, moves no other item. An item whose sort key moves across these keys between two pages can show twice or not show. For a new view, read the section again from the start. An empty `after`, or an `after` that is not a cursor of the same section, is a 400. An unknown section is a 404. `bundle-N` is a 404 when the active policy has no `bundle` rule N and no item of the brief is in its bundle. |
 | `/api/handled?limit=&after=` | `{"count", "actions": [...], "next"}`: each action that a rule decided without the person, in its state now (`approved`, `held`, `applied`, `failed`, `undone` or `denied`; not `in_review`, which the review lists), the newest first. A `failed` action can have changed some of its messages. `count` is the count of all such actions. Each action is `{"changeset", "revision", "n", "verb", "args", "messages", "state", "rule", "policy", "why", "reason", "at"}`. `messages` is the count of its messages. `why` is the reason of the author, and `reason` is the reason of the decision. `limit` is 1 to 200, default 50. `after` is the `next` value of the page before. An `after` that is not such a value is a 400. |
 | `/api/gate?limit=&after=` | The senders that wait at the stranger gate. See [Stranger gate](#stranger-gate). |
@@ -173,6 +174,55 @@ Each entry is `{"id", "verb", "args", "state", "at", "error", "messages",
 - `author` is `{"kind", "name", "job", "goal"}`: `goal` is the goal of the job of an agent.
 - `decided_by` is `rule` (with `rule` and `policy`) or `person`. `reason` is the reason of the decision, and `why` is the reason of the author.
 - `can_undo` is true when an undo can start now (the view `ledger_can_undo`). `undo_open` is true while an undo waits or applies. `undone_by` is the entry of the undo. `undo_of` is the entry that this entry undoes.
+
+## Measures
+
+The measures of the manifesto, "How we measure Iris" (card R5-12). The
+engine computes them from the store. Nothing leaves the machine.
+
+| Endpoint | Does |
+|---|---|
+| `GET /api/measures` | `{"days", "first_brief", "mirror", "memory", "approvals", "undo"}`. See below. |
+
+- `days`: the newest 28 days of use, the newest first, each
+  `{"day", "opens"}`. `opens` counts the different source mails that the
+  person opened on that day. A day with no entry is a day with no use.
+- `first_brief`: `{"connect", "brief", "seconds"}`, or `null` before the
+  first brief with content. `connect` is the time of the first account (the
+  connect step). `brief` is the time of the first brief with content: an
+  item of a section, a record or a bundle. The engine checks the brief every
+  10 seconds in `iris serve`, after `iris mirror` and `iris understand`, and
+  at each `/api/brief`. The store
+  writes each time once (migration 27). A store from before migration
+  27 that has an account has no record of the two times: each field is
+  `null`, and the measure stays not known.
+- `mirror`: the newest mirror check (`iris mirror verify`) of each account,
+  each `{"account", "checked", "differences", "complete"}`. An account with
+  no check has `checked` and `differences` `null`, and `complete` `false`.
+  `differences` is `null` if the log has no count. `complete` is `false`
+  when an error stopped the check.
+- `memory`: `{"rss_kib", "messages"}`. `rss_kib` is the resident memory of
+  the engine from `ps`, or `null`.
+- `approvals`: `{"decided", "approved"}`, the decisions of the person on the
+  actions of an agent or of triage. The state verbs of the person are not in
+  the count.
+- `undo`: `{"applied", "undone"}`. `applied` counts the applied actions, and
+  not an undo. `undone` counts the actions of them that an undo reversed.
+
+Each request of the web client while the person is active (an input of the
+person in the last 5 minutes) has the header `x-iris-day: YYYY-MM-DD`, the
+local date of the person. A poll of a tab that nobody uses has no header.
+The API counts the measures from it:
+
+- The first request of a day counts a use of that day, before the request
+  runs. So a read of the measures already has the day.
+- `GET /api/messages/{id}` (the mail view) with success counts an open of
+  that mail on that day. A mail counts once for each day, so a repeated
+  request changes nothing.
+
+The day must be the date of the engine in UTC, or the day before or after
+it. A request with no header, or with another day, counts nothing and runs
+as usual.
 
 ## State verbs
 

@@ -1,6 +1,6 @@
 //! The write view of the person (docs/specs/2026-11-17-write.md): one press
 //! of Send approves a `draft` action and asks for the send of the draft
-//! that the action makes. The send mark (`write_send`, migration 27) keeps
+//! that the action makes. The send mark (`write_send`, migration 28) keeps
 //! the ask until the draft exists. [`send_written`] then makes the send.
 
 use std::collections::BTreeSet;

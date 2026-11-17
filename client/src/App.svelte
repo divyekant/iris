@@ -2,6 +2,7 @@
   import { access } from "./access.svelte.ts";
   import { followSignIn, get, loadBrief, loadOutbox, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
+  import type { Measures as MeasuresData } from "./measures";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
   import Brief from "./views/Brief.svelte";
@@ -127,7 +128,7 @@
     {:else if route.view === "ask"}
       <Ask />
     {:else if route.view === "measures"}
-      <Measures />
+      {#await get<MeasuresData>("measures") then measures}<Measures {measures} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "review"}
       {#await Promise.all([get<{ changesets: Changeset[] }>("changesets"), get<Status>("status")]) then [open, status]}
         <Review changesets={open.changesets} mode={status.mode === "observe" ? "observe" : "apply"} />
