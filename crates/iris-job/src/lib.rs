@@ -257,18 +257,7 @@ pub fn session_wait(
     now_ms: i64,
 ) -> Result<()> {
     transaction(store, |c| {
-        let open: bool = c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM job_session
-               WHERE id = ?1 AND job_id = ?2 AND ended_at IS NULL)",
-            params![session, job],
-            |r| r.get(0),
-        )?;
-        if !open {
-            return Err(Error::Refused(format!(
-                "{} is not open",
-                format_session_id(session)
-            )));
-        }
+        open_in(c, session, job)?;
         if let Some(t) = w.thread {
             let scoped: bool = c.query_row(
                 "SELECT EXISTS (SELECT 1 FROM job_scope
@@ -283,6 +272,55 @@ pub fn session_wait(
             }
         }
         wait_in(c, job, w, why, now_ms)
+    })
+}
+
+/// The check of the text of a question (`max` 2000) or an answer (`max`
+/// 10000) as the agent or the person gave it: not only white space, at most
+/// `max` characters, and no NUL. The callers store the text as given, so
+/// the check and the store see the same text.
+pub fn check_text(text: &str, max: usize) -> std::result::Result<(), String> {
+    if text.trim().is_empty() || text.chars().count() > max || text.contains('\0') {
+        return Err(format!(
+            "the text must have 1 to {max} characters, not only white space, and no NUL character"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses unless `session` is a session of `job` that did not end.
+fn open_in(c: &Connection, session: i64, job: i64) -> Result<()> {
+    let open: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM job_session
+           WHERE id = ?1 AND job_id = ?2 AND ended_at IS NULL)",
+        params![session, job],
+        |r| r.get(0),
+    )?;
+    if open {
+        Ok(())
+    } else {
+        Err(Error::Refused(format!(
+            "{} is not open",
+            format_session_id(session)
+        )))
+    }
+}
+
+/// `ask` of a session (card R5-05): in one write transaction, a check that
+/// `session` of `job` is still open, then the move to `needs_you`. The
+/// trigger of migration 21 ends the session with `job_state` in the same
+/// transaction. A session that a revoke or a stop ended is refused, and
+/// nothing changes.
+pub fn session_ask(
+    store: &Store,
+    session: i64,
+    job: i64,
+    question: &str,
+    now_ms: i64,
+) -> Result<()> {
+    transaction(store, |c| {
+        open_in(c, session, job)?;
+        ask_in(c, job, question, None, now_ms)
     })
 }
 
@@ -319,9 +357,11 @@ pub fn wake_in(c: &Connection, job: i64, by: By, why: Option<&str>, now_ms: i64)
     add_event(c, job, State::Working, by, m, now_ms)
 }
 
-/// The jobs that wait for a new session after a wake by the engine: the
-/// job is `working`, its newest event is a wake by the engine, and the last
-/// session of the job ended with `job_state` (the move to `waiting`). A
+/// The jobs that wait for a new session after a wake by the engine or an
+/// answer of the person (card R5-05): the job is `working`, its newest
+/// event is a wake by the engine or has an answer, and the last session of
+/// the job ended with `job_state` (the move to `waiting` or `needs_you`). A
+/// wake by the person has no answer and starts no session. A
 /// session that starts after the wake becomes the last session, so the job
 /// leaves the list. The order is the order of the rows, not of the clock.
 /// Gives each job, its last session and the agent of that session.
@@ -332,8 +372,8 @@ pub fn woken(store: &Store) -> Result<Vec<(i64, i64, String)>> {
              JOIN job_session s
                ON s.id = (SELECT max(id) FROM job_session WHERE job_id = j.id)
              WHERE j.state = 'working' AND s.end_reason = 'job_state'
-               AND (SELECT by FROM job_event WHERE job_id = j.id
-                    ORDER BY id DESC LIMIT 1) = 'engine'",
+               AND (SELECT by = 'engine' OR answer IS NOT NULL FROM job_event
+                    WHERE job_id = j.id ORDER BY id DESC LIMIT 1)",
         )?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

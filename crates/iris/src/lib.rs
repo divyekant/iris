@@ -109,6 +109,13 @@ pub enum Command {
         #[arg(long)]
         why: Option<String>,
     },
+    /// In a job workspace: end the session, and ask the person one
+    /// question. Iris shows it in the brief, and starts a new session of
+    /// the job with the answer in `JOB.md`. A verb of a session only.
+    Ask {
+        /// The question, at most 2000 characters.
+        question: String,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -333,6 +340,13 @@ pub enum JobCommand {
     Stop { id: String },
     /// Show the last session of the job and its state.
     Session { id: String },
+    /// Answer the question of the job. Iris starts a new session of the
+    /// job with the answer in `JOB.md`.
+    Answer {
+        id: String,
+        /// The answer, at most 10000 characters.
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -577,8 +591,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
-        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
-            command;
+        let (JobCommand::Run { id, .. }
+        | JobCommand::Stop { id }
+        | JobCommand::Session { id }
+        | JobCommand::Answer { id, .. }) = command;
         if iris_job::parse_job_id(id).is_none() {
             return Err(socket::Failure {
                 code: socket::code::USAGE,
@@ -598,7 +614,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } | Command::Wait { .. } = &cli.command {
+    if let Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -716,6 +732,18 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "{} waits until {}",
             verbs::field(r["job"].as_str().unwrap_or("-")),
             verbs::field(r["until"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
+    }
+    if let Command::Ask { question } = c {
+        // The ask ends this session: after a lost answer, `iris status` in
+        // a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "question": question });
+        let r = socket::request_at(path, "ask", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} asks the person and waits for the answer",
+            verbs::field(r["job"].as_str().unwrap_or("-"))
         );
         return Ok(());
     }
@@ -858,7 +886,7 @@ fn job_request(dir: &std::path::Path, c: &JobCommand) -> Option<Result<(), socke
             serde_json::json!({ "job": id, "agent": agent }),
         ),
         JobCommand::Stop { id } => ("job.stop", id, serde_json::json!({ "job": id })),
-        JobCommand::Session { .. } => return None,
+        JobCommand::Session { .. } | JobCommand::Answer { .. } => return None,
     };
     Some(
         match socket::request_with(
@@ -1285,7 +1313,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } | Command::Wait { .. } => Err("this is a verb of a session".into()),
+        Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } => {
+            Err("this is a verb of a session".into())
+        }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
@@ -1304,6 +1334,18 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
                 }
                 None => Err(format!("{id} has no session")),
             }
+        }
+        Command::Job {
+            command: JobCommand::Answer { id, text },
+        } => {
+            let job = iris_job::parse_job_id(id).ok_or(format!("{id} is not a job ID"))?;
+            let store = open()?;
+            iris_api::job_row(&store, id)
+                .map_err(|e| e.to_string())?
+                .ok_or(format!("no job has the ID {id}"))?;
+            iris_api::answer_job(&store, job, text, engine::now_ms()).map_err(|e| e.to_string())?;
+            println!("{id}: answered. Iris starts a new session of the job.");
+            Ok(())
         }
         Command::Job { .. } => Err("the engine socket runs this verb".into()),
         Command::Matters { command } => {

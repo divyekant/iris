@@ -1017,6 +1017,70 @@ fn a_reply_on_the_wait_thread_wakes_the_job() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// Card R5-05: the agent asks one question, the session ends, and the
+/// answer of the person starts a new session with the answer in `JOB.md`.
+fn an_answer_starts_a_session_with_the_answer() {
+    let f = fixture("ask", "sleep 30");
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({ "question": "  " }),
+        serde_json::json!({ "question": "x".repeat(2001) }),
+        // Over the limit before any trim (the review of PR #575).
+        serde_json::json!({ "question": format!(" {} ", "x".repeat(1999)) }),
+    ] {
+        let v = ask(&f, "ask", bad).unwrap();
+        assert_eq!(v["code"], 2, "{v}");
+    }
+    let v = ask(
+        &f,
+        "ask",
+        serde_json::json!({ "question": "  Which card do I use?" }),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["result"]["state"], "needs_you", "{v}");
+    let row = until(&s, &f, first, |r| r.reaped_ms.is_some());
+    assert_eq!(row.end, Some(EndReason::JobState));
+    // No session starts before the answer.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+    let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
+    assert!(!job.contains("## Your answer"), "{job}");
+
+    iris_job::answer(&f.store, f.job, "The blue card. Not ```this```.", now()).unwrap();
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    let job = fs::read_to_string(workspace(&f).join("JOB.md")).unwrap();
+    assert!(job.contains("## Your answer\n\nYou asked on "), "{job}");
+    assert!(
+        job.contains("\n```question\n  Which card do I use?\n```\n"),
+        "{job}"
+    );
+    // The fence is longer than each run of backticks in the answer.
+    assert!(
+        job.contains("\n````answer\nThe blue card. Not ```this```.\n````\n"),
+        "{job}"
+    );
+    // A second wake call starts no second session.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    let _ = s.stop(f.job).unwrap();
+}
+
+/// A wake by the person has no answer and starts no session.
+fn a_wake_by_the_person_starts_no_session() {
+    let f = fixture("personwake", "sleep 30");
+    let s = sessions(&f);
+    let (until_day, _) = day(3);
+    let first = wait(&s, &f, serde_json::json!({ "until": until_day }));
+    iris_job::wake(&f.store, f.job, By::Person, None, now()).unwrap();
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first.id);
+}
+
 /// R4-08 (docs/specs/2026-11-17-review-comments.md, section 5): a review
 /// comment on a job with no live session starts a session with no command.
 /// That session reads the comment and submits a new revision.
@@ -1176,6 +1240,14 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "an_answer_starts_a_session_with_the_answer",
+            an_answer_starts_a_session_with_the_answer,
+        ),
+        (
+            "a_wake_by_the_person_starts_no_session",
+            a_wake_by_the_person_starts_no_session,
+        ),
         (
             "a_failed_start_for_a_comment_is_tried_once",
             a_failed_start_for_a_comment_is_tried_once,

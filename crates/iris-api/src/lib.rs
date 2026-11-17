@@ -172,6 +172,7 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/policy/grant", post(post_grant))
         .route("/api/jobs", get(get_jobs).post(post_job))
         .route("/api/jobs/{id}", get(get_job))
+        .route("/api/jobs/{id}/answer", post(post_job_answer))
         .route("/api/policy/accept", post(post_accept))
         .route("/api/policy/dismiss", post(post_dismiss))
         .route("/api/notices", get(get_notices))
@@ -821,6 +822,26 @@ async fn get_job(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<
     let Some(row) = job_row(&s, &id)? else {
         return Ok(not_found());
     };
+    Ok(stream(move |w| write_job(&s, row, w)).await)
+}
+
+#[derive(Deserialize)]
+struct JobAnswerBody {
+    answer: String,
+}
+
+/// The answer of the person to the question of a job (card R5-05). The
+/// answer is the job document.
+async fn post_job_answer(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<JobAnswerBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let Some(row) = job_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    answer_job(&s, row, &b.answer, now_ms())?;
     Ok(stream(move |w| write_job(&s, row, w)).await)
 }
 
