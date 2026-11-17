@@ -1,0 +1,363 @@
+# Spec: the Outlook provider (Microsoft Graph)
+
+- Date: 2026-11-17
+- Card: R6-04
+- Status: Draft
+
+## Problem
+
+Iris mirrors only Gmail. Many people keep their mail in Outlook.com or in
+Microsoft 365. These mailboxes have no Gmail API. Microsoft gives one API
+for them: Microsoft Graph (Graph). Graph has another model of mail than
+Gmail: each message is in one folder, a message has categories in place of
+labels, and the change feed is a delta query for each folder, not one
+history ID for the mailbox.
+
+## Goal
+
+1. A crate `crates/iris-graph` holds a thin Graph mail client for the
+   mirror: folders, delta queries, the raw MIME of a message, and the write
+   calls (read state, flag, categories, move, draft and send).
+2. A crate `crates/iris-fakegraph` holds a fake Graph server on top of the
+   synthetic mailbox. CI tests the client against the fake. No test calls
+   Microsoft.
+3. `crates/iris-auth` signs in to a Microsoft account with the
+   authorization code flow and PKCE, as a public client (no secret).
+4. After the provider interface (card R6-10) merges, the Graph client
+   implements that interface, and the engine syncs an Outlook account.
+
+The card is done when an Outlook mailbox syncs with zero differences
+against the fake server. The release gate is 7 days with zero differences
+on a real Outlook mailbox on dk's Mac, after R1-07 ends.
+
+## Not in scope
+
+- Exchange Web Services, IMAP to Outlook and on-premises Exchange.
+- Calendar, contacts and tasks.
+- The Exchange archive mailbox. A move to the archive mailbox changes the
+  immutable ID (assumption A3), so the mirror sees a delete.
+- Category colors and the category list of the mailbox
+  (`outlook/masterCategories`). That call needs one more scope
+  (`MailboxSettings.Read`). The mirror reads the categories of each message.
+- One shared Iris app registration. See "Options not chosen".
+
+## Design
+
+### 1. The client
+
+`iris_graph::Graph` follows `iris_gmail::Gmail`: it is synchronous, it uses
+`ureq` (the one HTTP stack of the program), and each call takes the access
+token as a parameter. The client stores no token.
+
+Each request:
+
+- goes to `https://graph.microsoft.com/v1.0/me/...`, or to a test base URL;
+- sends `Prefer: IdType="ImmutableId"`, so that a message keeps its ID when
+  it moves between folders (A3);
+- waits for a free place in a gate of 4 requests at the same time for each
+  client (A5), because Graph counts each app and mailbox pair.
+
+A `@odata.nextLink` or a `@odata.deltaLink` is a full URL. The client calls
+it only if it starts with the base URL of the client. Else the client gives
+`Error::Decode` and sends no request. Thus a changed answer cannot send the
+token to another host.
+
+Waits after a refusal:
+
+- HTTP 429, and HTTP 503 of any call: wait for `Retry-After` when the
+  answer has it, else 1 second, then double up to 5 minutes, plus up to 50
+  percent at random (A5). A write that must go one time only (send) never
+  waits and tries again (see "External writes").
+- HTTP 5xx of a read: wait as above and try again.
+- HTTP 401: `Error::Unauthorized`. The caller gets a new access token one
+  time.
+- HTTP 404: `Error::NotFound`.
+- Other status: `Error::Api { status, code, message }`, with `code` from the
+  Graph error body `{"error":{"code","message"}}` (A8).
+
+### 2. Folders
+
+`folders(token)` reads `/me/mailFolders?includeHiddenFolders=true` and, for
+each folder with `childFolderCount > 0`, its `childFolders`, page by page.
+It gives each folder with its ID, parent ID, display name, the counts, and
+the well-known name when the folder is one of `inbox`, `sentitems`,
+`drafts`, `deleteditems`, `junkemail`, `archive` or `outbox` (A7). It finds
+the well-known names with one call `GET /me/mailFolders/{name}` each.
+
+The client does not use `mailFolders/delta`. Microsoft does not say if it
+gives child folders at all depths (A2). A mailbox has tens of folders, so a
+full read at each sync costs a few calls.
+
+### 3. Delta of the messages of one folder
+
+`delta(token, folder, link)`:
+
+- With no link: `GET /me/mailFolders/{id}/messages/delta` with
+  `$select=id,conversationId,parentFolderId,categories,isRead,flag,isDraft,receivedDateTime,internetMessageId`
+  and `Prefer: odata.maxpagesize=200`.
+- With a link: the stored `nextLink` or `deltaLink`, as it is.
+
+A page gives a list of changes and one of two links:
+
+- `More(nextLink)`: call it for the next page.
+- `Done(deltaLink)`: the end of this round. Store it for the next sync.
+
+A change is one of:
+
+- `Message(m)`: the message is in the folder now, with the fields above.
+  Graph can give the same message more than one time (A1). The last one
+  in the page order is the current state.
+- `Removed(id)`: an item with `@removed`. The message left the folder: a
+  delete or a move (A1). The caller does not delete the message at once:
+  a move gives `Removed` in one folder and `Message` in another, with the
+  same immutable ID. The caller marks the message gone only when no folder
+  has it after the round of each folder.
+
+A token that Graph does not accept any more gives HTTP 410, or another 4xx
+with a code such as `syncStateNotFound` (A1). The client gives
+`Error::DeltaReset` for 410 and for each 4xx of a call with a stored link,
+except 401, 403 and 429. The caller then starts that folder again with no
+link: a full resync of one folder.
+
+### 4. Raw message
+
+`raw(token, id, sink)` calls `GET /me/messages/{id}/$value` and copies the
+body to the sink through a buffer of 64 KiB. The body is the MIME text of
+the message (A4). The client never holds the full message. The client
+counts the bytes and stops with `Error::Decode` above 150 MiB. This limit
+is a choice of the client, above the largest message that Iris expects.
+
+Graph builds this MIME text from its own store (A4). Thus the bytes of one
+message can change between two fetches with no change of the mail. The
+mirror compares the content, not the hash of the raw bytes, for an Outlook
+account. R6-10 decides where this compare lives.
+
+### 5. Write calls
+
+| Call | Graph | Answer |
+|---|---|---|
+| `set_read(id, bool)` | `PATCH /me/messages/{id}` `{"isRead"}` | 200 |
+| `set_flag(id, bool)` | `PATCH` `{"flag":{"flagStatus":"flagged" or "notFlagged"}}` | 200 |
+| `set_categories(id, list)` | `PATCH` `{"categories":[...]}`, the full list | 200 |
+| `move_to(id, folder)` | `POST /me/messages/{id}/move` `{"destinationId"}` | 201, the message |
+| `create_draft(mime)` | `POST /me/messages`, `text/plain`, base64 MIME | 201, the draft |
+| `send_draft(id)` | `POST /me/messages/{id}/send` | 202, no body |
+
+`set_categories` replaces the full list (A6). The caller reads the
+categories of the message first, and sends the full new list.
+
+### 6. Map to the mirror
+
+This mapping is a proposal for R6-10, which owns the provider interface:
+
+| Graph | Mirror label |
+|---|---|
+| The folder of the message | one label for the folder; `INBOX`, `SENT`, `DRAFT`, `TRASH` and `SPAM` for `inbox`, `sentitems`, `drafts`, `deleteditems` and `junkemail` |
+| Each category | one user label with the category name |
+| `isRead` false | `UNREAD` |
+| `flag.flagStatus` `flagged` | `STARRED` |
+| `conversationId` | the thread ID |
+
+Archive in Iris is a move to the well-known `archive` folder. Inbox is a
+move to `inbox`. Trash is a move to `deleteditems`.
+
+### 7. Sign-in
+
+`iris-auth` gets a Microsoft client next to the Google client:
+
+- The user gives the application (client) ID of an own app registration
+  (decision record `docs/decisions/2026-11-microsoft-sign-in.md`, in the
+  sign-in PR). A public client has no secret.
+- Endpoints: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize`
+  and `/token`, fixed in the code, as for Google.
+- Scopes: `offline_access https://graph.microsoft.com/Mail.ReadWrite
+  https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read`.
+  The code exchange and each refresh check that the `scope` of the answer
+  has `Mail.ReadWrite` (A10).
+- PKCE with S256 and a random `state`.
+- Redirect: `http://localhost:<port>/oauth/callback`. Microsoft ignores the
+  port of a `localhost` redirect (A9). The listener binds `127.0.0.1`.
+- A refresh gives a new refresh token (A11). The refresh returns it, and
+  the caller seals it with the store secret box in place of the old one.
+  Microsoft does not revoke the old token, so a crash between the refresh
+  and the write loses nothing.
+- `invalid_grant` on a refresh gives `Error::Revoked`: the account needs a
+  new sign-in.
+- The address of the account is `mail` of `GET /me`, else
+  `userPrincipalName`.
+
+## Options not chosen
+
+- One shared Iris app registration, with its client ID in the code. A
+  public client has no secret, so this is allowed, and setup is shorter.
+  Not chosen now: Microsoft can block consent to an unverified multitenant
+  app in a work tenant (A12), the project must own the registration, and
+  the Google decision (path A) gives each user an own client. Keep the
+  client ID a setting, so that a shared ID can come later with no code
+  change.
+- `mailFolders/delta` for the folder tree: the depth is not documented (A2).
+- `$batch` requests: Graph runs at most 4 requests of a batch at the same
+  time (A5), so a batch saves round trips but not time, and makes the
+  errors of each part harder. The gate of 4 is enough.
+- A Graph SDK crate: no maintained Rust SDK for Graph mail fits a sync
+  client on `ureq`. The client needs about 10 endpoints. Checked:
+  `graph-rs-sdk` (async, `reqwest` and `tokio`, a second HTTP stack and
+  more memory). The JSON parse uses `serde_json`, the MIME parse stays in
+  `iris-clean` (`mail-parser`).
+- IMAP to Outlook.com: card R6-03 builds IMAP for other providers. Graph
+  gives categories, flags and immutable IDs that IMAP does not.
+
+## Failure list
+
+Supported input: JSON answers of Graph v1.0 in the shape of the Learn pages,
+and MIME text of `$value`. All other input fails closed: the call gives
+`Error::Decode` and the mirror changes nothing.
+
+| Input or event | Result | Test |
+|---|---|---|
+| An answer that is not JSON, or JSON in another shape | `Error::Decode`, no change | fake returns bad JSON |
+| A JSON answer above 16 MiB | `Error::Decode` | client limit |
+| A `nextLink` or `deltaLink` to another host | `Error::Decode`, no request | unit test |
+| A `$value` body above 150 MiB | `Error::Decode`, the sink has a part: discard it | fake with a limit |
+| The connection ends in a page or a body | `Error::Transport`; the caller calls the same link again | fake that cuts |
+| The same message two times in one round | the last one wins | fake replays |
+| A message moves during the round of a folder | `Removed` in one folder, `Message` in the other | fake move |
+| An expired delta link | `Error::DeltaReset`, a full round of that folder | fake expiry |
+| 429 or 503 with `Retry-After` | wait for it, then call again (not a send) | fake with `Retry-After` |
+| A crash in a round | the last stored link is the start; Graph replays changes, the mirror applies each one again with the same result | R6-10 part |
+
+## Impact
+
+- New crates `iris-graph` and `iris-fakegraph`. No change to the store, the
+  sync or the API before R6-10 merges.
+- `iris-auth`: a Microsoft client. The Google client does not change.
+- Part B (after R6-10): the provider interface for Graph, the account kind
+  `outlook`, the `iris` sign-in command for Microsoft, and the docs.
+
+Memory: the client keeps one page of at most 200 changes and a 64 KiB copy
+buffer. The PR of the client measures the peak with the fake.
+
+## Assumptions
+
+Each assumption has the evidence of a Microsoft Learn page, read on
+2026-11-17. A wrong assumption fails closed as the design says.
+
+- A1. Message delta: `@removed` with `reason: deleted` for a delete or a
+  move out of the folder; replays and repeats can occur; an expired token
+  gives a 4xx such as `syncStateNotFound`, or 410 with a `Location`.
+  Evidence: <https://learn.microsoft.com/en-us/graph/delta-query-messages>,
+  <https://learn.microsoft.com/en-us/graph/delta-query-overview>. Page size:
+  `Prefer: odata.maxpagesize` is honoured, with no documented maximum; the
+  client follows the links and does not count on a size.
+- A2. `mailFolders/delta` depth: not documented. Evidence:
+  <https://learn.microsoft.com/en-us/graph/api/mailfolder-delta>. The design
+  does not use it.
+- A3. An immutable ID stays the same on a move in the same mailbox, and
+  delta honours the `Prefer` header. It changes on a move to the archive
+  mailbox. Evidence: <https://learn.microsoft.com/en-us/graph/outlook-immutable-id>.
+- A4. `$value` gives the MIME text, built by Graph. Evidence:
+  <https://learn.microsoft.com/en-us/graph/outlook-get-mime-message>. Size
+  limit and drafts: `pending`; the client has its own limit, and the build
+  tests a draft against the real mailbox in the release gate.
+- A5. Outlook limits for each app and mailbox: 4 requests at the same time,
+  10,000 requests in 10 minutes, 150 MB upload in 5 minutes; 429 has
+  `Retry-After`. Evidence: <https://learn.microsoft.com/en-us/graph/throttling-limits>,
+  <https://learn.microsoft.com/en-us/graph/throttling>.
+- A6. `PATCH` keeps the fields that the body does not name; a collection
+  in the body replaces the full collection. Evidence:
+  <https://learn.microsoft.com/en-us/graph/api/message-update>. The replace
+  of the collection is `pending` (standard OData, not stated); the caller
+  always sends the full list, which is correct under both readings.
+- A7. Well-known folder names work in each language of the mailbox.
+  Evidence: <https://learn.microsoft.com/en-us/graph/api/resources/mailfolder>.
+- A8. Error body `{"error":{"code","message"}}`. Evidence:
+  <https://learn.microsoft.com/en-us/graph/errors>.
+- A9. A desktop app registers `http://localhost`; the port is ignored for a
+  `localhost` redirect. Evidence:
+  <https://learn.microsoft.com/en-us/entra/identity-platform/reply-url>.
+- A10. The token answer has `scope`; the app compares it with the request.
+  Evidence: <https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc>.
+- A11. Refresh tokens replace themselves at each use and the old one stays
+  valid; the default life is 90 days. Evidence:
+  <https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens>.
+- A12. Consent to an unverified multitenant app can be blocked in a work
+  tenant with risk-based step-up consent. Evidence:
+  <https://learn.microsoft.com/en-us/entra/identity-platform/publisher-verification-overview>.
+- A13. An app registration needs an Entra tenant; a person with only a
+  personal Microsoft account makes one with a free Azure account. Evidence:
+  <https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app>.
+  Whether the tenant stays after the free trial: `pending`. The decision
+  record tells dk to check it.
+
+## External writes
+
+Each write goes to the mailbox of the person through Graph. The changeset,
+the ledger and the apply rules of spec 2 stay the same; R6-10 maps them.
+
+| Call | Success | Definite rejection (4xx, not 429) | Unknown result (time-out, lost answer, 5xx, 429 of a send) | Retry |
+|---|---|---|---|---|
+| `set_read`, `set_flag`, `set_categories` | the answer has the new state | `Error::Api`, the mirror does not change | `write_result_unknown()` true; the caller reads the message to learn the state | the same PATCH again is safe: it sets a state, it does not add |
+| `move_to` | 201 with the moved message | `Error::Api` | unknown; the caller reads the message: its `parentFolderId` shows the result | safe after the read, because the ID does not change (A3) |
+| `create_draft` | 201 with the draft ID | `Error::Api` | unknown; a draft can exist. The caller finds it by its `Message-ID` header in `drafts` before a new create | not before the search |
+| `send_draft` | 202 | `Error::Api` | unknown. The caller never sends again: the ledger keeps the claim (spec 2 section 7.5) | never, also not after 429 |
+
+## Open questions
+
+- Does `$value` work for a draft, and what is its size limit? The fake
+  follows the docs; the real check runs in the release gate.
+- Does the browser on the Mac reach `127.0.0.1` for `http://localhost`?
+  If not, the listener also binds `[::1]` on the same port.
+
+## Acceptance criteria
+
+1. The client against the fake lists the folder tree with child folders,
+   runs the delta of each folder to the end, and fetches each raw message.
+   A missing child folder, a missed page or a missed message makes it red.
+2. A move in the fake gives `Removed` in one folder and `Message` in the
+   other, with one ID. A new ID makes it red.
+3. An expired link gives `Error::DeltaReset`. Any other error makes it red.
+4. A link to another host sends no request. A request at the other host
+   makes it red.
+5. The fake counts requests at the same time; the most is 4. A fifth makes
+   it red.
+6. `send_draft` makes one request also after 429 or 503. A second request
+   makes it red.
+7. A Microsoft sign-in against a fake token endpoint gives a new refresh
+   token on refresh, and a missing `Mail.ReadWrite` scope gives an error.
+8. After R6-10: an Outlook account syncs with zero differences against the
+   fake, also after a move, a delete and an expired link.
+
+## Verify
+
+```bash
+cargo test -p iris-graph -p iris-fakegraph -p iris-auth --locked
+scripts/local-ci/run.sh
+```
+
+## Rollout
+
+1. This spec.
+2. PR: `iris-graph` read calls and `iris-fakegraph`.
+3. PR: the write calls of `iris-graph`, with the fake.
+4. PR: the Microsoft sign-in in `iris-auth`, and the decision record with
+   the app registration steps for dk.
+5. After R6-10: the provider implementation and the engine wiring.
+6. Release gate after R1-07: dk registers the app, signs in, and runs 7
+   days on a real Outlook mailbox.
+
+## Risks
+
+- Graph builds the MIME text, so the raw bytes can change. The compare of
+  content, not bytes, handles it (section 4).
+- A work tenant can block consent (A12). Then that user needs an admin
+  consent, or a shared verified app later.
+- Rollback: the crates have no caller until part B. Remove the account kind
+  `outlook` to turn the provider off.
+
+## Plan
+
+1. R6-04: spec (this PR).
+2. R6-04: read client and fake.
+3. R6-04: write calls.
+4. R6-04: sign-in and the decision record.
+5. R6-04: provider and wiring, after R6-10.
