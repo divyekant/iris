@@ -350,16 +350,25 @@ each running session:
   shutdown order. The default time limit is 30 minutes. `agents.toml` can set
   `[session] max_minutes`, from 1 to 1440.
 
-The shutdown order, the same for each end of a session:
+The shutdown order, the same for each end of a session (also the exit of
+the agent, which the helper reports, and a launch that fails after its
+proxy started):
 
 1. End the grant: the end is in the store. From now on the session socket
    takes no new request (exit code 3).
-2. Finish the accepted requests: each request that passed the check of the
+2. Close the egress proxy of the session (`Proxy::close`, see "Model
+   egress"). This comes before each wait: no step below keeps a tunnel
+   open. The proxy keeps its port bound. The engine stops the proxy
+   (`Proxy::stop`, which frees the port) only after the reap check of the
+   session passes. A launch that fails before the helper starts closes
+   and keeps its proxy in the same way, and the supervisor stops it after
+   the reap check.
+3. Finish the accepted requests: each request that passed the check of the
    session socket before the end gets its reply, for at most 10 seconds.
    Then close the session socket and each of its connections.
-3. Close the pipe of the helper. The helper stops the group and calls
+4. Close the pipe of the helper. The helper stops the group and calls
    `Isolation::stop`.
-4. Call `Isolation::stop` from the engine too, and run the reap check.
+5. Call `Isolation::stop` from the engine too, and run the reap check.
 
 So a verb that ends its own session (`iris done`) gets its reply before
 any process of the agent gets a signal.
@@ -555,7 +564,7 @@ no network stops them. The engine gives each session one narrow path out:
   after a stop; a `CONNECT` past this bound gets `403` with `too_many`.
 - When the session ends (`ended_at` is set: a stop, a revoke, the exit of
   the agent or a time limit), the supervisor closes the proxy on its next
-  turn (`Proxy::close`). The supervisor turns each second, and a
+  turn (`Proxy::close`, step 2 of the shutdown order, before each wait). The supervisor turns each second, and a
   `iris job stop` or a revoke through the engine also wakes it. The close
   ends each open tunnel and each resolve in progress, and from then on
   the proxy answers each new connection with a close and the log line
