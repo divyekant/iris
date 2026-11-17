@@ -470,7 +470,8 @@ no network stops them. The engine gives each session one narrow path out:
   address that it connects to: it refuses a loopback, private, link-local,
   unique local, multicast, unspecified, documentation or other reserved
   address (IPv4 and IPv6, also an IPv4 address mapped in IPv6). The proxy
-  connects only to the checked address, never to the name again, so a
+  connects only to the checked address, on port 443 whatever port the
+  resolver gives, never to the name again, so a
   second resolution cannot change it. If no address passes, the request
   gets `403` with the reason `address_not_public`. A local model host is
   not supported in a session (known limit, with an issue). Each other request,

@@ -237,6 +237,8 @@ struct Shared {
     log: Mutex<Log>,
     conns: Mutex<Conns>,
     stopping: AtomicBool,
+    /// The local address of the socket that wakes the accept loop at a stop.
+    wake: Mutex<Option<SocketAddr>>,
     /// A setup failure that a test makes.
     #[cfg(test)]
     fault: Mutex<Option<Fault>>,
@@ -323,6 +325,7 @@ impl Proxy {
                 cancels: HashMap::new(),
             }),
             stopping: AtomicBool::new(false),
+            wake: Mutex::new(None),
             #[cfg(test)]
             fault: Mutex::new(None),
         });
@@ -352,10 +355,18 @@ impl Proxy {
         let Some(accept) = self.accept.take() else {
             return Ok(());
         };
-        self.shared.stopping.store(true, Ordering::SeqCst);
-        // Wake the accept loop, which then sees the stop and drops the listener.
-        let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
+        // Wake the accept loop, which then sees the stop and drops the
+        // listener. The lock holds until the address of the wake socket is
+        // known, so that the loop can tell the wake from a client.
+        let wake = {
+            let mut known = lock(&self.shared.wake);
+            self.shared.stopping.store(true, Ordering::SeqCst);
+            let wake = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
+            *known = wake.as_ref().ok().and_then(|w| w.local_addr().ok());
+            wake
+        };
         let mut panicked = accept.join().is_err();
+        drop(wake);
         let threads = {
             let mut c = lock(&self.shared.conns);
             for s in c.streams.values().flatten() {
@@ -392,10 +403,31 @@ impl Drop for Proxy {
 
 fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
     for stream in listener.incoming() {
+        let Ok(stream) = stream else {
+            if shared.stopping.load(Ordering::SeqCst) {
+                return;
+            }
+            continue;
+        };
         if shared.stopping.load(Ordering::SeqCst) {
-            return;
+            // A client accepted during the stop gets its line and a close.
+            let wake = *lock(&shared.wake);
+            if wake.is_some() && stream.peer_addr().ok() == wake {
+                return;
+            }
+            finish(
+                &shared,
+                Finish {
+                    end: End::Stopped,
+                    answer: None,
+                },
+            );
+            if wake.is_none() {
+                // No wake socket comes: this was the last accept.
+                return;
+            }
+            continue;
         }
-        let Ok(stream) = stream else { continue };
         let mut c = lock(&shared.conns);
         c.threads.retain(|t| !t.is_finished());
         if c.streams.len() >= MAX_CONNECTIONS {
@@ -740,6 +772,23 @@ impl Drop for Place {
     }
 }
 
+/// The addresses that the proxy can connect to: each public address of the
+/// resolver, on port 443. `public_only` is false only in tests, which keep
+/// the address and port of a loopback test server.
+fn targets(addrs: Vec<SocketAddr>, public_only: bool) -> Vec<SocketAddr> {
+    if !public_only {
+        return addrs;
+    }
+    addrs
+        .into_iter()
+        .filter(|a| is_public(a.ip()))
+        .map(|mut a| {
+            a.set_port(443);
+            a
+        })
+        .collect()
+}
+
 fn resolve_and_connect(
     resolver: &dyn Resolve,
     name: &str,
@@ -749,10 +798,7 @@ fn resolve_and_connect(
     let Ok(addrs) = resolver.resolve(name, 443) else {
         return Phase::Failed;
     };
-    let checked: Vec<SocketAddr> = addrs
-        .into_iter()
-        .filter(|a| !public_only || is_public(a.ip()))
-        .collect();
+    let checked = targets(addrs, public_only);
     if checked.is_empty() {
         return Phase::NotPublic;
     }
