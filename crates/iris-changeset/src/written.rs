@@ -22,6 +22,11 @@ pub const WRITTEN: &str = "Written in the write view.";
 /// the warnings that the person saw at the press.
 pub const NEW_WARNINGS: &str = "The warnings of the mail changed after the press of Send.";
 
+/// The life of a send mark: 24 hours after the press. The approval of the
+/// person belongs to the press, so a mark that got no send in this time
+/// never gets one (write spec, section 3, step 2).
+pub const MARK_MS: i64 = 24 * 60 * 60 * 1000;
+
 fn person() -> Author {
     Author {
         kind: AuthorKind::Person,
@@ -212,7 +217,7 @@ pub fn send_written(store: &Store, account: i64, now_ms: i64) -> Result<usize> {
         let mut st = c.prepare(&format!(
             "SELECT w.action_id {OPEN} AND d.account_id = ?1 ORDER BY w.created_at, w.action_id"
         ))?;
-        let rows = st.query_map([account], |r| r.get(0))?;
+        let rows = st.query_map([account, now_ms - MARK_MS], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     })?;
     let mut made = 0;
@@ -225,14 +230,15 @@ pub fn send_written(store: &Store, account: i64, now_ms: i64) -> Result<usize> {
 }
 
 /// The marks that wait for their send: no send yet, a draft row that
-/// Gmail did not send or change, and a changeset that the person did not
-/// withdraw. A mark that fails one of these never gets a send.
+/// Gmail did not send or change, a changeset that the person did not
+/// withdraw, and a press after `?2` (the time [`MARK_MS`] ago). A mark
+/// that fails one of these never gets a send.
 const OPEN: &str = "FROM write_send w
     JOIN draft d ON d.action_id = w.action_id
     JOIN changeset_action a ON a.id = w.action_id
     JOIN changeset c ON c.id = a.changeset_id
     WHERE w.send_action_id IS NULL AND c.state <> 'withdrawn'
-      AND d.foreign_at IS NULL AND d.sent_at IS NULL";
+      AND d.foreign_at IS NULL AND d.sent_at IS NULL AND w.created_at > ?2";
 
 /// One mark: read it again in the write transaction, so a second run
 /// finds the send and makes nothing.
@@ -240,7 +246,7 @@ fn send_one(c: &Connection, mark: i64, now_ms: i64) -> Result<bool> {
     let row: Option<(i64, String)> = c
         .query_row(
             &format!("SELECT d.id, w.flags {OPEN} AND w.action_id = ?1"),
-            [mark],
+            [mark, now_ms - MARK_MS],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;

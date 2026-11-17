@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iris_apply::{Outcome, Token, HOLD_MS};
-use iris_changeset::{send_written, write_mail, written_since, Mail, Press, Refusal, Written};
+use iris_changeset::{
+    send_written, write_mail, written_since, Mail, Press, Refusal, Written, MARK_MS,
+};
 use iris_fakegmail::FakeGmail;
 use iris_gmail::{Config, Gmail};
 use iris_store::Store;
@@ -540,4 +542,18 @@ fn a_send_with_a_new_warning_goes_to_review() {
     assert_eq!(b.states(cs).1.as_deref(), Some("in_review"));
     b.step_at(now() + HOLD_MS + 1_000);
     assert_eq!(b.sends(), 0);
+}
+
+/// Acceptance 8: the approval of a press lives 24 hours. A mark that got
+/// no send in that time (Iris stopped after the press) never gets one.
+#[test]
+fn an_old_mark_gets_no_send() {
+    let b = setup("old-mark");
+    let cs = b.write();
+    b.apply_mark();
+    let pressed: i64 = b.one("SELECT created_at FROM write_send", []);
+    let end = pressed + MARK_MS;
+    assert_eq!(send_written(&b.store, b.account, end).unwrap(), 0);
+    assert_eq!(b.states(cs), ("applied".into(), None));
+    assert_eq!(send_written(&b.store, b.account, end - 1).unwrap(), 1);
 }

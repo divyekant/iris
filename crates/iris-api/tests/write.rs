@@ -325,3 +325,34 @@ async fn only_a_write_has_a_state() {
         assert_eq!(code, StatusCode::NOT_FOUND, "{id}");
     }
 }
+
+/// A mark 24 hours old with no send is stopped: step 2a makes no send for
+/// it (spec section 4). The test moves the press back past the trigger
+/// that keeps the mark fixed.
+#[tokio::test]
+async fn an_old_write_is_stopped() {
+    let dir = temp("old");
+    let s = store(&dir);
+    let (_, v) = call(
+        &s,
+        "POST",
+        "/api/write",
+        Some(new_mail(KEY, json!(["new_recipient"]))),
+    )
+    .await;
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(&s);
+    s.write(|tx| {
+        tx.execute_batch(
+            "DROP TRIGGER write_send_update;
+             UPDATE write_send SET created_at = created_at - 86400000;",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(
+        st,
+        json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1"})
+    );
+}

@@ -107,13 +107,17 @@ pub fn write(store: &Store, b: &WriteBody, now_ms: i64) -> Result<Pressed> {
     }
 }
 
-/// The state of the write `cs` (a changeset row ID), section 4. `None` if
-/// the changeset has no send mark.
-pub fn state(store: &Store, cs: i64) -> Result<Option<Value>> {
+/// The text of a write whose mark got no send in [`iris_changeset::MARK_MS`].
+pub const TOO_OLD: &str =
+    "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.";
+
+/// The state of the write `cs` (a changeset row ID) at `now_ms`, section 4.
+/// `None` if the changeset has no send mark.
+pub fn state(store: &Store, cs: i64, now_ms: i64) -> Result<Option<Value>> {
     Ok(store.read(|conn| {
         // One snapshot: the engine moves the write at the same time.
         let tx = conn.unchecked_transaction()?;
-        let v = state_in(&tx, cs)?;
+        let v = state_in(&tx, cs, now_ms)?;
         tx.finish()?;
         Ok(v)
     })?)
@@ -127,13 +131,14 @@ type Mark = (
     bool,
     bool,
     String,
+    i64,
 );
 
-fn state_in(c: &Connection, cs: i64) -> rusqlite::Result<Option<Value>> {
+fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Value>> {
     let mark: Option<Mark> = c
         .query_row(
             "SELECT a.state, coalesce(a.reason, l.error), w.send_action_id, d.id,
-                    d.foreign_at IS NOT NULL, d.sent_at IS NOT NULL, c.state
+                    d.foreign_at IS NOT NULL, d.sent_at IS NOT NULL, c.state, w.created_at
              FROM write_send w
              JOIN changeset_action a ON a.id = w.action_id
              JOIN changeset c ON c.id = a.changeset_id
@@ -150,11 +155,12 @@ fn state_in(c: &Connection, cs: i64) -> rusqlite::Result<Option<Value>> {
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             },
         )
         .optional()?;
-    let Some((state, reason, send, draft, foreign, sent, changeset)) = mark else {
+    let Some((state, reason, send, draft, foreign, sent, changeset, pressed)) = mark else {
         return Ok(None);
     };
     let draft = draft.map(|d| format_id(Kind::Draft, d));
@@ -190,6 +196,8 @@ fn state_in(c: &Connection, cs: i64) -> rusqlite::Result<Option<Value>> {
         }
         "applied" if sent => stopped("The mail went out from Gmail."),
         "applied" if foreign => stopped("The draft changed in Gmail. Send it from Gmail."),
+        // Step 2a makes no send for this mark any more.
+        "approved" | "applied" if pressed <= now_ms - iris_changeset::MARK_MS => stopped(TOO_OLD),
         "approved" | "applied" => json!({"state": "saving"}),
         _ => stopped(reason.as_deref().unwrap_or("Iris could not save the mail.")),
     }))

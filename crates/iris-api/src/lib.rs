@@ -817,7 +817,7 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
     let Some(row) = iris_changeset::parse_changeset_id(&id) else {
         return Ok(not_found());
     };
-    Ok(match write::state(&s, row)? {
+    Ok(match write::state(&s, row, now_ms())? {
         Some(v) => Json(v).into_response(),
         None => not_found(),
     })
