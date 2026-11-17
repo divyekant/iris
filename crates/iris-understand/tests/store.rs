@@ -465,14 +465,13 @@ fn a_new_run_keeps_a_skip_and_a_dismiss() {
             chosen,
             "{name}: another quote"
         );
-        // Two new items with the quote of the chosen item: the match is not
-        // one to one, so both stay visible.
+        // Two new items with the content of the chosen item: the match is
+        // not one to one, so both stay visible.
         let same = answer.replace(
             "}], \"phishing\"",
             &format!(
                 "}}, {}], \"phishing\"",
-                answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
-                    .replace("\"title\": \"", "\"title\": \"Other ")
+                &answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
             ),
         );
         let out = understand(&b.store, m, &Fake::with(&[&same]), NOW).unwrap();
@@ -481,9 +480,18 @@ fn a_new_run_keeps_a_skip_and_a_dismiss() {
             assert_ne!(
                 b.col::<String>("SELECT status FROM item WHERE id = ?1", *i),
                 chosen,
-                "{name}: the same quote twice"
+                "{name}: the same content twice"
             );
         }
+        // One new item with the quote of the chosen item, but another title
+        // (or another code): not the same item, so it stays visible.
+        let other = answer.replace("\"title\": \"", "\"title\": \"Other ");
+        let out = understand(&b.store, m, &Fake::with(&[&other]), NOW).unwrap();
+        assert_ne!(
+            b.col::<String>("SELECT status FROM item WHERE id = ?1", out.items[0]),
+            chosen,
+            "{name}: another title"
+        );
         let out = understand(&b.store, m, &Fake::with(&[answer]), NOW).unwrap();
         let new = out.items[0];
         assert_ne!(new, item);

@@ -89,8 +89,11 @@ cannot tell which sender the person wants to see.
   item (spec 1, section 7.5). After a run writes its items, a new item takes
   the status of a `skipped` feed item or a `dismissed` signal only on a
   one-to-one match: exactly one pinned item and exactly one new item of the
-  message with the same form and the same quote. Each other new item stays
-  visible, also when two items share a quote: the worst result is a
+  message with the same form and the same content (the document without
+  `id`, `status`, `created`, `updated`, `derived`, `model` and
+  `attention`). Each other new item stays visible, also one that differs
+  only in a code or a title, and also when two new items match: the worst
+  result is a
   duplicate in front of the person, never a hidden item that the person
   did not choose. A conversation keeps
   `muted` at each new message (spec 1, section 6.8).

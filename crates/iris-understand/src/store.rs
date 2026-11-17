@@ -949,15 +949,17 @@ fn put_item(
 /// dismissed, stays out of the brief after a new run
 /// (docs/specs/2026-11-17-preference-rules.md). The new item takes its
 /// status only on a one-to-one match: exactly one pinned item and exactly
-/// one new item of the message with the same form and the same quote, and
-/// the pinned item has the chosen status. Each other new item stays
-/// visible. Call after the run writes its items: each item of the message
+/// one new item of the message with the same form and the same content
+/// (the document without the fields that each run or the person changes),
+/// and the pinned item has the chosen status. Each other new item stays
+/// visible, also one that differs in one field, such as a code. Call after the run writes its items: each item of the message
 /// that is not pinned is new.
 fn keep_choices(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
     tx.execute(
         "WITH mine AS (
            SELECT i.id, i.form, i.status,
-                  json_extract(i.doc, '$.sources[0].quote') AS quote,
+                  json_remove(i.doc, '$.id', '$.status', '$.created', '$.updated',
+                              '$.derived', '$.model', '$.attention') AS body,
                   EXISTS (SELECT 1 FROM item_pin p WHERE p.item_id = i.id) AS pinned
            FROM item_source s JOIN item i ON i.id = s.item_id
            WHERE s.message_id = ?1 AND s.role = 'origin' AND i.form IN ('feed', 'signal')
@@ -965,8 +967,8 @@ fn keep_choices(tx: &Transaction, message: i64) -> rusqlite::Result<()> {
          pair AS (
            SELECT max(CASE WHEN pinned THEN status END) AS status,
                   max(CASE WHEN NOT pinned THEN id END) AS new
-           FROM mine WHERE quote IS NOT NULL
-           GROUP BY form, quote
+           FROM mine WHERE body IS NOT NULL
+           GROUP BY form, body
            HAVING sum(pinned) = 1 AND sum(NOT pinned) = 1
          )
          UPDATE item SET status = pair.status,
