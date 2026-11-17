@@ -274,6 +274,7 @@
       height: var(--size-touch);
     }
     .away {
+      min-width: var(--size-touch);
       min-height: var(--size-touch);
     }
   }
