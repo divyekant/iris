@@ -715,3 +715,21 @@ fn a_connection_that_races_a_stop_writes_one_line() {
         assert_eq!(text.lines().count(), accepted, "{text}");
     }
 }
+
+/// A stop after the 200 and before a full ClientHello logs the allowed
+/// host with the result stopped, as each allowed CONNECT does.
+#[test]
+fn a_stop_during_the_hello_logs_the_host() {
+    let b = proxy("hello-stop", echo(), false, LOG_LIMIT);
+    let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
+    assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    let h = hello("api.example.test");
+    s.write_all(&h[..h.len() / 2]).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    b.proxy.stop().unwrap();
+    let text = log_text(&b.log);
+    assert!(
+        text.contains("host=api.example.test up=0 down=0 result=stopped"),
+        "{text}"
+    );
+}
