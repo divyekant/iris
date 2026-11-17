@@ -41,7 +41,7 @@ pub struct Notice {
 /// waits for the model, up to [`LATE_MS`] after the fetch. Its date must be at most [`WINDOW_MS`] before the
 /// fetch, so that the old mail of a sync gives no notice. A mail with no `body` row waits: the
 /// hostile check writes with the body. A mail with a `link_check` row waits
-/// too: its link check did not run yet (migration 18). Each guard reads the store in the
+/// too: its link check did not run yet (migration 20). Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {

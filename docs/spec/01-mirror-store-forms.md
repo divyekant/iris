@@ -339,6 +339,7 @@ iris/
       3fa1...c9.eml
   policy.toml        the policy file (specification 2)
   iris.sock          the socket of the iris command (specification 2)
+  workspaces/        the workspace of each agent job (docs/specs/2026-11-16-job-workspace.md)
 ```
 
 To back up Iris, stop the engine and copy the folder. `iris backup <path>`
@@ -368,6 +369,16 @@ is never lost.
 
 New content files after step 2 are not in the backup, and the copy of
 `iris.db` does not refer to them.
+
+`iris backup` does not copy `workspaces/`. A copy of the whole folder while
+the engine is stopped copies `workspaces/` too, with the files of the agent.
+The build makes the files of a
+workspace again from the store, before each session. The files of the agent
+(`drafts/` and `notes.md`) are not in a copy of `iris backup`: after a
+restore from it, the next build makes them empty. A draft that the agent submits is in the store
+(specification 2), so only work that the agent did not submit is lost. This
+is a known limit, with a GitHub issue, until the notes between sessions
+(R5-06) move into the store.
 
 ### 5.2 SQLite settings
 
@@ -443,7 +454,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
 | `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
 | `matter`, `matter_item`, `matter_run` | See `docs/specs/2026-11-16-matters.md` (migration 16). | Matters: the proposals of Iris, the decisions of the person, and the last proposal call. |
-| `link_check` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER UNIQUE, FK to `message` | Migration 18: the live messages whose content has not had the link check of the hostile mark `link` (section 6.7). At the migration: each live message. Triggers add a row for new content, for a message that comes back, and for a message that loses the label `SENT` or `DRAFT`. Each batch run first reads all rows (`recheck_links`), before it makes the model, so a model error or failed tries cannot hold the check back. A message with a deceptive link is understood at once, with no model, so it goes to quarantine and its items go. A message that it understands counts toward the message limit of the run. A check that finds no deceptive link removes a `link` mark of earlier content. Each trigger gives the message a new row (a new `id`), and a check removes only the row that it read, so a change during a check queues the message again. A row goes only when the store has the result for the content that the check read. A row whose file Iris cannot read stays. Notices and watches wait while a message has a row. |
+| `link_check` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER UNIQUE, FK to `message` | Migration 20: the live messages whose content has not had the link check of the hostile mark `link` (section 6.7). At the migration: each live message. Triggers add a row for new content, for a message that comes back, and for a message that loses the label `SENT` or `DRAFT`. Each batch run first reads all rows (`recheck_links`), before it makes the model, so a model error or failed tries cannot hold the check back. A message with a deceptive link is understood at once, with no model, so it goes to quarantine and its items go. A message that it understands counts toward the message limit of the run. A check that finds no deceptive link removes a `link` mark of earlier content. Each trigger gives the message a new row (a new `id`), and a check removes only the row that it read, so a change during a check queues the message again. A row goes only when the store has the result for the content that the check read. A row whose file Iris cannot read stays. Notices and watches wait while a message has a row. |
 | `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY

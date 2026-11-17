@@ -114,7 +114,7 @@ struct Row {
 /// Rows of `link_check` in one read of [`recheck_links`].
 pub const LINK_CHECKS: i64 = 200;
 
-/// The link check of each message in `link_check` (migration 18): new
+/// The link check of each message in `link_check` (migration 20): new
 /// content, and mail that the engine understood before the mark `link`. It
 /// reads each row, in pages of [`LINK_CHECKS`], with no model. A message
 /// with a deceptive link is understood at once: the mark makes it hostile,

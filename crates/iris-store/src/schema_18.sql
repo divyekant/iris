@@ -1,53 +1,99 @@
--- Migration 18: the hostile mark `link` (card R5-10, specification 1,
--- section 6.7).
+-- Migration 18: drafts and sends (docs/specs/2026-11-16-send.md, card R3-01).
 --
--- One row for each live message whose content has not had the link check.
--- Each batch run first reads all rows (`iris_understand::store::recheck_links`),
--- before it makes the model: the check needs no model, so a model error or a
--- message with failed tries cannot hold it back. A message with a deceptive
--- link is understood at once with no model, so it goes to quarantine. The
--- row goes when the check read the file and the store has its result.
---
--- The rows at the migration: each live message. Mail understood before the
--- mark had no link check.
+-- 1. The verbs `draft` and `send` join the verb CHECK of changeset_action.
+--    SQLite cannot change a CHECK in place. A wider CHECK accepts each
+--    stored row, so the migration changes only the text of the table in
+--    sqlite_schema (the SQLite procedure for a schema change that does not
+--    change stored rows), and RESET loads the schema again. The CREATE
+--    TABLE statements below change the schema cookie, so each other
+--    connection loads the new schema too.
+-- 2. The table `draft`: one row for each draft that Iris made at Gmail.
+-- 3. The table `action_draft`: the draft target of an action, from submit.
+-- 4. The table `ledger_send`: the one send of each draft that can have
+--    gone out.
 
--- `id` changes each time a trigger queues the message again, so a check
--- that read an older state does not remove the row of a newer one.
-CREATE TABLE link_check (
-  -- AUTOINCREMENT: a new row never gets the ID of an older one.
+PRAGMA writable_schema = ON;
+UPDATE sqlite_schema
+SET sql = replace(sql, '''decline'', ''correct''))', '''decline'', ''correct'', ''draft'', ''send''))')
+WHERE type = 'table' AND name = 'changeset_action';
+PRAGMA writable_schema = RESET;
+
+-- Stop the migration if the text above did not change: the CHECK of a
+-- temporary table refuses 0.
+CREATE TEMP TABLE migration_18 (ok INTEGER CHECK (ok = 1));
+INSERT INTO migration_18
+SELECT instr(sql, '''correct'', ''draft'', ''send'')') > 0
+FROM sqlite_schema WHERE type = 'table' AND name = 'changeset_action';
+DROP TABLE migration_18;
+
+CREATE TABLE draft (
+  -- AUTOINCREMENT: the engine never uses an ID again (specification 1, 5.7).
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  message_id INTEGER NOT NULL UNIQUE REFERENCES message(id) ON DELETE CASCADE
+  account_id INTEGER NOT NULL REFERENCES account(id),
+  -- The thread of a reply. NULL for a new mail.
+  thread_id INTEGER REFERENCES thread(id),
+  -- The Gmail draft ID.
+  provider_id TEXT NOT NULL,
+  -- The Message-ID that Iris set, with no angle brackets. It stays the same
+  -- for each change of the draft.
+  message_id_hdr TEXT NOT NULL UNIQUE,
+  -- The checked content (iris-compose), as JSON, with the reply headers.
+  content TEXT NOT NULL CHECK (json_valid(content)),
+  -- The content hash (iris_compose::hash) that a send approval binds to.
+  hash TEXT NOT NULL,
+  -- The exact message that Iris wrote. The release sends these bytes.
+  raw BLOB NOT NULL,
+  -- The `draft` action that made the draft.
+  action_id INTEGER NOT NULL UNIQUE REFERENCES changeset_action(id),
+  -- The time of the send that Gmail confirmed, in milliseconds, and the
+  -- Gmail ID of the sent message.
+  sent_at INTEGER,
+  sent_message TEXT,
+  -- The time when the engine found a form at Gmail that Iris does not
+  -- write (for example an attachment or a Bcc). Iris then no longer
+  -- changes or sends the draft.
+  foreign_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK ((sent_at IS NULL) = (sent_message IS NULL)),
+  UNIQUE (account_id, provider_id)
 );
 
-INSERT INTO link_check(message_id)
-  SELECT id FROM message WHERE gone_at IS NULL AND content_sha256 IS NOT NULL;
+-- The draft of a `send` action. Submit writes it from the targets
+-- `{"drafts": ["d-N"]}`.
+CREATE TABLE action_draft (
+  action_id INTEGER PRIMARY KEY REFERENCES changeset_action(id),
+  draft_id INTEGER NOT NULL REFERENCES draft(id)
+);
 
--- New content, and a message that comes back, need the check again.
-CREATE TRIGGER link_check_insert AFTER INSERT ON message
-  WHEN NEW.content_sha256 IS NOT NULL AND NEW.gone_at IS NULL
+CREATE INDEX action_draft_draft ON action_draft(draft_id);
+
+-- The draft of a submitted action does not change, as the messages and
+-- the items of an action (migrations 7 and 10): the approval binds to it.
+CREATE TRIGGER action_draft_insert BEFORE INSERT ON action_draft
+WHEN (SELECT state FROM changeset_action WHERE id = new.action_id) IS NOT NULL
 BEGIN
-  -- A new row, with a new ID. No OR IGNORE or OR REPLACE: the conflict
-  -- rule of the outer statement would replace it.
-  DELETE FROM link_check WHERE message_id = NEW.id;
-  INSERT INTO link_check(message_id) VALUES (NEW.id);
+  SELECT RAISE(ABORT, 'iris: a submitted action does not change');
 END;
 
-CREATE TRIGGER link_check_update AFTER UPDATE OF content_sha256, gone_at ON message
-  WHEN NEW.content_sha256 IS NOT NULL AND NEW.gone_at IS NULL
-   AND (OLD.content_sha256 IS NOT NEW.content_sha256 OR OLD.gone_at IS NOT NULL)
+CREATE TRIGGER action_draft_delete BEFORE DELETE ON action_draft
+WHEN (SELECT state FROM changeset_action WHERE id = old.action_id) IS NOT NULL
 BEGIN
-  -- A new row, with a new ID. No OR IGNORE or OR REPLACE: the conflict
-  -- rule of the outer statement would replace it.
-  DELETE FROM link_check WHERE message_id = NEW.id;
-  INSERT INTO link_check(message_id) VALUES (NEW.id);
+  SELECT RAISE(ABORT, 'iris: a submitted action does not change');
 END;
 
--- The check skips your own mail (`SENT`, `DRAFT`). When such a label goes,
--- the message is received mail, and needs the check.
-CREATE TRIGGER link_check_label AFTER DELETE ON message_label
-  WHEN (SELECT provider_id FROM label WHERE id = OLD.label_id) IN ('SENT', 'DRAFT')
+-- Submit inserts and deletes these rows. Nothing updates them.
+CREATE TRIGGER action_draft_update BEFORE UPDATE ON action_draft
 BEGIN
-  DELETE FROM link_check WHERE message_id = OLD.message_id;
-  INSERT INTO link_check(message_id) SELECT m.id FROM message m
-    WHERE m.id = OLD.message_id AND m.content_sha256 IS NOT NULL AND m.gone_at IS NULL;
+  SELECT RAISE(ABORT, 'iris: a submitted action does not change');
 END;
+
+-- The one send of each draft that can have gone out. The claim of a send
+-- inserts the row; the primary key allows one claim for each draft, for
+-- each writer. Only a definite rejection of the send deletes the row, in
+-- the same transaction as its `failed` state. An unknown result keeps it
+-- (issue #280).
+CREATE TABLE ledger_send (
+  draft_id INTEGER PRIMARY KEY REFERENCES draft(id),
+  ledger_id INTEGER NOT NULL UNIQUE REFERENCES ledger(id)
+);

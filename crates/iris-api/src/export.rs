@@ -8,7 +8,7 @@ use std::path::Path;
 
 use iris_store::{format_id, new_private_dir, Kind, Store};
 
-use crate::read::{doc_of, message_in};
+use crate::read::{doc_of, message_in, MATTER};
 use crate::Result;
 
 /// What [`export`] wrote.
@@ -62,7 +62,9 @@ fn write(store: &Store, dest: &Path) -> iris_store::Result<Exported> {
     store.read(|c| {
         // One snapshot for all reads: it starts at the first read.
         let tx = c.unchecked_transaction()?;
-        let mut st = tx.prepare("SELECT id, form, status, doc FROM item ORDER BY id")?;
+        let mut st = tx.prepare(&format!(
+            "SELECT id, form, status, doc, {MATTER} FROM item ORDER BY id"
+        ))?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             line(&mut items, &doc_of(r)?)?;

@@ -479,7 +479,7 @@ fn a_mail_waits_for_its_link_check_then_gets_one_notice() {
     let (_d, s) = store("link-check");
     activate(&s, ANN);
     let id = put(&s, &mail(), 0);
-    // A saved mail from before the mark `link` (migration 18).
+    // A saved mail from before the mark `link` (migration 20).
     s.write(|tx| {
         tx.execute("INSERT INTO link_check(message_id) VALUES (?1)", [id])?;
         Ok(())

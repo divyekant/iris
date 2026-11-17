@@ -131,8 +131,13 @@ struct Store {
     /// answer: `(status, applied)`. With `applied`, the fake makes the change
     /// first, as when Gmail applies a call and the answer is lost.
     write_failures: VecDeque<(u16, bool)>,
+    /// A failure for the next request whose log line contains the text.
+    path_failure: Option<(String, u16)>,
     /// The most items on one list page, below `maxResults`.
     page_limit: usize,
+    /// A draft edit that the next `drafts.get` of the draft starts, after
+    /// its answer: the person edits the draft between a read and a send.
+    edit_after_get: Option<(String, Vec<u8>)>,
     /// Each request: method, path and query.
     log: Vec<String>,
     /// The drafts: (draft id, message index). A sent or deleted draft
@@ -198,7 +203,9 @@ impl Store {
             history_floor: HISTORY_BASE,
             failures: VecDeque::new(),
             write_failures: VecDeque::new(),
+            path_failure: None,
             page_limit: usize::MAX,
+            edit_after_get: None,
             log: Vec::new(),
             drafts: Vec::new(),
             next_draft: 1,
@@ -488,6 +495,13 @@ impl FakeGmail {
         self.store.lock().unwrap().failures.extend(statuses);
     }
 
+    /// The next request whose log line (for example
+    /// `GET /gmail/v1/users/me/drafts?q=...`) contains `text` gets this
+    /// HTTP status code in place of an answer.
+    pub fn fail_next_matching(&self, text: &str, status: u16) {
+        self.store.lock().unwrap().path_failure = Some((text.to_string(), status));
+    }
+
     /// The next write requests (POST) get these HTTP status codes, one
     /// each, in place of an answer. Status 0 lets one write pass. With
     /// `applied`, the fake makes the change first, so the result at the
@@ -508,6 +522,12 @@ impl FakeGmail {
     /// false if there is no such draft. Makes no request log line.
     pub fn edit_draft(&self, id: &str, raw: &[u8]) -> bool {
         self.store.lock().unwrap().replace_draft(id, raw.to_vec())
+    }
+
+    /// Change the message of draft `id` just after the next `drafts.get`
+    /// of it answers, as a person who edits the draft at that moment.
+    pub fn edit_draft_after_get(&self, id: &str, raw: &[u8]) {
+        self.store.lock().unwrap().edit_after_get = Some((id.to_string(), raw.to_vec()));
     }
 
     /// Delete a draft, as the person does in Gmail. Returns false if there
@@ -572,7 +592,18 @@ async fn log_and_fail(State(s): State<Shared>, req: Request, next: Next) -> Resp
             Some(q) => format!("{} {}?{q}", req.method(), req.uri().path()),
             None => format!("{} {}", req.method(), req.uri().path()),
         };
+        let matched = s
+            .path_failure
+            .as_ref()
+            .is_some_and(|(t, _)| line.contains(t.as_str()));
         s.log.push(line);
+        if matched {
+            let (_, c) = s.path_failure.take().expect("checked");
+            return error(
+                StatusCode::from_u16(c).unwrap_or(StatusCode::BAD_REQUEST),
+                "Injected failure.",
+            );
+        }
         match s.failures.pop_front() {
             Some(c) => Some((c, false)),
             None if req.method() != axum::http::Method::GET => s.write_failures.pop_front(),
@@ -1175,12 +1206,16 @@ async fn get_draft(
             "The fake supports only format=raw for a draft.",
         );
     }
-    let s = s.lock().unwrap();
+    let mut s = s.lock().unwrap();
     let Some(i) = s.draft(&id) else {
         return error(StatusCode::NOT_FOUND, "Requested entity was not found.");
     };
     let mut body = s.draft_json(&id, i);
     body["message"]["raw"] = Value::String(base64::encode_url(&s.raw(i)));
+    if s.edit_after_get.as_ref().is_some_and(|(d, _)| *d == id) {
+        let (_, raw) = s.edit_after_get.take().expect("checked");
+        s.replace_draft(&id, raw);
+    }
     Json(body).into_response()
 }
 

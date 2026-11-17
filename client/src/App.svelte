@@ -1,6 +1,6 @@
 <script lang="ts">
   import { access } from "./access.svelte.ts";
-  import { followSignIn, get, loadBrief, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
+  import { followSignIn, get, loadBrief, own, type Changeset, type GatePage, type HandledPage, type JobDetail, type JobPage, type MatterList, type MatterView, type Item as ItemData, type Message as MessageData, type Page, type Policy, type Status } from "./api";
   import { home } from "./format";
   import { NAV, parse, SECTIONS, type Route } from "./route";
   import Setup from "./views/Setup.svelte";
@@ -17,8 +17,11 @@
   import Gate from "./views/Gate.svelte";
   import Jobs from "./views/Jobs.svelte";
   import Job from "./views/Job.svelte";
+  import Matters from "./views/Matters.svelte";
+  import Matter from "./views/Matter.svelte";
   import PolicyNotice from "./views/PolicyNotice.svelte";
   import SignInNotice from "./views/SignInNotice.svelte";
+  import Notices from "./views/Notices.svelte";
 
   let hash = $state(typeof location === "undefined" ? "" : location.hash);
   let route: Route = $derived(parse(hash));
@@ -66,10 +69,11 @@
 <main>
   {#if access.problem}<p class="problem" role="alert">{access.problem}</p>{/if}
   <SignInNotice />
+  <Notices />
   {#if access.none && !["home", "setup", "brief"].includes(route.view)}
     <p class="problem">Iris has no account yet. <a href="#/setup">Set up Iris</a> to copy your mail.</p>
   {/if}
-  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job"}
+  {#if route.view === "item" || route.view === "mail" || route.view === "section" || route.view === "bundle" || route.view === "handled" || route.view === "gate" || route.view === "job" || route.view === "matter"}
     <button class="back" type="button" onclick={back}>Back</button>
   {/if}
   {#key hash}
@@ -128,6 +132,10 @@
       {#await get<JobDetail>(`jobs/${encodeURIComponent(route.id)}`) then detail}
         <Job {detail} />
       {:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "matters"}
+      {#await get<MatterList>("matters") then list}<Matters {list} />{:catch error}{@render failed(error)}{/await}
+    {:else if route.view === "matter"}
+      {#await get<MatterView>(`matters/${encodeURIComponent(route.id)}`) then view}<Matter {view} />{:catch error}{@render failed(error)}{/await}
     {:else if route.view === "rules"}
       {#await get<Policy>("policy") then policy}<Rules {policy} />{:catch error}{@render failed(error)}{/await}
     {/if}

@@ -730,8 +730,10 @@ dependencies = [
  "iris-apply",
  "iris-auth",
  "iris-changeset",
+ "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
+ "iris-matters",
  "iris-model",
  "iris-policy",
  "iris-service",
@@ -758,6 +760,7 @@ dependencies = [
  "iris-apply",
  "iris-changeset",
  "iris-job",
+ "iris-matters",
  "iris-model",
  "iris-observe",
  "iris-policy",
@@ -779,7 +782,9 @@ dependencies = [
 name = "iris-apply"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "iris-changeset",
+ "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
  "iris-policy",
@@ -790,6 +795,7 @@ dependencies = [
  "iris-talk",
  "iris-understand",
  "rusqlite",
+ "serde",
  "serde_json",
  "unicase",
 ]
@@ -811,6 +817,7 @@ dependencies = [
 name = "iris-changeset"
 version = "0.0.0"
 dependencies = [
+ "iris-compose",
  "iris-spec",
  "iris-store",
  "iris-talk",
@@ -889,8 +896,12 @@ dependencies = [
 name = "iris-matters"
 version = "0.0.0"
 dependencies = [
+ "iris-model",
  "iris-store",
+ "iris-understand",
  "rusqlite",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

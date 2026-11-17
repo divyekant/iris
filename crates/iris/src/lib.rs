@@ -157,6 +157,23 @@ pub enum Command {
     Label(LabelTargets),
     /// Remove a label in a draft changeset.
     Unlabel(LabelTargets),
+    /// Write a reply to a thread (`t-3`) or a new mail from an account
+    /// (`a-1`) in a draft changeset. The file is a JSON object with `to`,
+    /// `cc`, `subject` (not for a reply) and `body`. Needs the engine.
+    #[command(name = "draft")]
+    Compose {
+        target: String,
+        file: PathBuf,
+        #[command(flatten)]
+        to: Draft,
+    },
+    /// Send a draft that Iris made (`d-4`), in a draft changeset. Only a
+    /// person approves a send, and it waits for the hold. Needs the engine.
+    Send {
+        id: String,
+        #[command(flatten)]
+        to: Draft,
+    },
     /// Submit a draft changeset. Prints the state of each action. Needs the engine.
     Submit {
         /// The changeset ID, for example cs-12.
@@ -213,6 +230,23 @@ pub enum Command {
         #[command(subcommand)]
         command: WatchCommand,
     },
+    /// The matters that Iris proposes and that you confirmed. Prints the
+    /// JSON of the local API (`/api/matters`).
+    Matters {
+        #[command(subcommand)]
+        command: Option<MattersCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MattersCommand {
+    /// The valid proposals and the confirmed matters (the default).
+    List,
+    /// One matter (`g-4`) with its members, by form.
+    Show { id: String },
+    /// Ask the model for new proposals now: at most one call, after the
+    /// wait of a model error, and only for a new set of candidates.
+    Propose,
 }
 
 #[derive(Subcommand)]
@@ -263,10 +297,28 @@ pub struct LabelTargets {
 
 /// The action of a verb that adds one: the verb, the targets, the
 /// arguments and the draft.
-fn action(c: &Command) -> Option<(&'static str, Vec<String>, serde_json::Value, &Draft)> {
+type Action<'a> = (&'static str, Vec<String>, serde_json::Value, &'a Draft);
+
+fn action(c: &Command) -> Result<Option<Action<'_>>, socket::Failure> {
     use serde_json::json;
     let reason = |r: &Option<String>, default: &str| json!({ "reason": r.clone().unwrap_or_else(|| default.into()) });
-    Some(match c {
+    Ok(Some(match c {
+        Command::Compose { target, file, to } => {
+            let usage = |error: String| socket::Failure {
+                code: socket::code::USAGE,
+                error,
+            };
+            let text = std::fs::read_to_string(file)
+                .map_err(|e| usage(format!("{}: {e}", file.display())))?;
+            let args: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                usage(format!(
+                    "{}: not a JSON object of the draft: {e}",
+                    file.display()
+                ))
+            })?;
+            ("draft", vec![target.clone()], args, to)
+        }
+        Command::Send { id, to } => ("send", vec![id.clone()], json!({}), to),
         Command::Close { id, reason: r, to } => ("close", vec![id.clone()], reason(r, "Done."), to),
         Command::Decline { id, reason: r, to } => {
             ("decline", vec![id.clone()], reason(r, "Declined."), to)
@@ -293,8 +345,8 @@ fn action(c: &Command) -> Option<(&'static str, Vec<String>, serde_json::Value, 
         Command::Trash(t) => ("trash", t.ids.clone(), json!({}), &t.to),
         Command::Label(t) => ("label", t.ids.clone(), json!({ "label": t.label }), &t.to),
         Command::Unlabel(t) => ("unlabel", t.ids.clone(), json!({ "label": t.label }), &t.to),
-        _ => return None,
-    })
+        _ => return Ok(None),
+    }))
 }
 
 #[derive(Subcommand)]
@@ -411,7 +463,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
-    if let Some((verb, targets, args, to)) = action(&cli.command) {
+    if let Some((verb, targets, args, to)) = action(&cli.command)? {
         let mut request = serde_json::json!({ "verb": verb, "targets": targets, "args": args });
         if let Some(cs) = &to.changeset {
             request["changeset"] = cs.clone().into();
@@ -603,6 +655,18 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
+        Command::Matters { command } => {
+            let store = open()?;
+            let text = match command.as_ref().unwrap_or(&MattersCommand::List) {
+                MattersCommand::Propose => {
+                    cost::propose_matters(&store, iris_matters::Gate::Now, engine::now_ms())?
+                        .ok_or("an understanding run holds the lock; try again later")?
+                }
+                c => verbs::matters(&store, c)?,
+            };
+            println!("{text}");
+            Ok(())
+        }
         Command::Backup { path } => {
             let files = open()?.backup(path).map_err(|e| format!("backup: {e}"))?;
             println!("iris: backup in {} ({files} content files)", path.display());
@@ -644,7 +708,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Unread(_)
         | Command::Trash(_)
         | Command::Label(_)
-        | Command::Unlabel(_) => unreachable!("run() sends these verbs to the socket"),
+        | Command::Unlabel(_)
+        | Command::Compose { .. }
+        | Command::Send { .. } => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,

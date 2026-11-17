@@ -28,6 +28,7 @@ mod auth;
 mod export;
 pub mod gate;
 mod jobs;
+mod matters;
 mod notice;
 pub mod policy;
 mod read;
@@ -38,6 +39,7 @@ pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
 pub use export::{export, Exported};
 pub use jobs::*;
+pub use matters::{confirm_matter, decline_matter, matter, matters};
 pub use notice::*;
 pub use read::*;
 pub use review::*;
@@ -157,6 +159,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/notices/{id}/done", post(post_notice_done))
         .route("/api/watches", get(get_watches).post(post_watch))
         .route("/api/watches/{id}/remove", post(post_watch_remove))
+        .route("/api/matters", get(get_matters))
+        .route("/api/matters/{id}", get(get_matter))
+        .route("/api/matters/{id}/confirm", post(post_matter_confirm))
+        .route("/api/matters/{id}/decline", post(post_matter_decline))
         // No fallback: `iris_web::router()` has the fallback of the server.
         .route("/api", any(|| async { not_found() }))
         .route("/api/{*rest}", any(|| async { not_found() }))
@@ -236,7 +242,11 @@ async fn post_decide(
 
 /// The withdraw of the person (section 5.5). The answer is the changeset
 /// after the withdraw. The request has no body.
-async fn post_withdraw(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+async fn post_withdraw(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
@@ -458,6 +468,7 @@ async fn get_declined(
 async fn post_answer(
     State(s): State<Arc<Store>>,
     Path((id, answer)): Path<(String, String)>,
+    _: NoBody,
 ) -> Result<Response> {
     Ok(gate::answer(&s, &id, &answer, now_ms())?
         .map_or_else(not_found, |d| Json(d).into_response()))
@@ -514,6 +525,30 @@ async fn get_policy(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(policy::policy(&s)?).into_response())
 }
 
+/// The body of a route that takes none: zero bytes, or a JSON text that is
+/// the empty object `{}` (the web client sends `{}`). `serde_json` parses
+/// the JSON. Any other body, a body of only spaces too, gives 400 before the
+/// route changes anything.
+struct NoBody;
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for NoBody {
+    type Rejection = Error;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self> {
+        let b = Bytes::from_request(req, state)
+            .await
+            .map_err(|e| Error::Query(e.body_text()))?;
+        let none = b.is_empty()
+            || serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&b)
+                .is_ok_and(|m| m.is_empty());
+        if none {
+            Ok(NoBody)
+        } else {
+            Err(Error::Query("this route takes no body".into()))
+        }
+    }
+}
+
 /// A JSON body that does not parse gives the JSON error of the API.
 fn body<T>(b: std::result::Result<Json<T>, JsonRejection>) -> Result<T> {
     b.map(|Json(v)| v).map_err(|e| Error::Query(e.body_text()))
@@ -532,7 +567,7 @@ async fn post_confirm(
     Ok(Json(policy::confirm(&s, &b.sha256, now_s())?).into_response())
 }
 
-async fn post_discard(State(s): State<Arc<Store>>) -> Result<Response> {
+async fn post_discard(State(s): State<Arc<Store>>, _: NoBody) -> Result<Response> {
     Ok(Json(policy::discard(&s)?).into_response())
 }
 
@@ -625,7 +660,11 @@ async fn get_notices(State(s): State<Arc<Store>>) -> Result<Response> {
     Ok(Json(notices(&s)?).into_response())
 }
 
-async fn post_notice_done(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+async fn post_notice_done(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
     if !notice_done(&s, &id, now_ms())? {
         return Ok(not_found());
     }
@@ -654,11 +693,48 @@ async fn post_watch(
 async fn post_watch_remove(
     State(s): State<Arc<Store>>,
     Path(id): Path<String>,
+    _: NoBody,
 ) -> Result<Response> {
     if !remove_watch(&s, &id)? {
         return Ok(not_found());
     }
     Ok(Json(serde_json::json!({ "removed": id })).into_response())
+}
+
+/// The valid proposals and the confirmed matters.
+async fn get_matters(State(s): State<Arc<Store>>) -> Result<Response> {
+    Ok(Json(matters(&s)?).into_response())
+}
+
+/// One matter with its members. A proposal that is not valid now is 404.
+async fn get_matter(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    Ok(matter(&s, &id)?.map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+#[derive(Deserialize)]
+struct MatterConfirm {
+    title: String,
+    items: Vec<String>,
+}
+
+/// The person confirms a proposal: the title and the members to keep.
+async fn post_matter_confirm(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<MatterConfirm>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    Ok(confirm_matter(&s, &id, &b.title, &b.items, now_ms())?
+        .map_or_else(not_found, |d| Json(d).into_response()))
+}
+
+/// The person declines a proposal.
+async fn post_matter_decline(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    _: NoBody,
+) -> Result<Response> {
+    Ok(decline_matter(&s, &id, now_ms())?.map_or_else(not_found, |d| Json(d).into_response()))
 }
 
 fn now_s() -> i64 {

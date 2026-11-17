@@ -50,7 +50,7 @@ test("a changed file shows its difference, and blocks the changes from here unti
   assert.match(t, /Confirm or discard the change of your file first/);
   // Each mode button and each remove button waits.
   assert.equal(html.match(/name="mode"[^>]*disabled|disabled[^>]*name="mode"/g)?.length, 2);
-  assert.equal(html.match(/class="quiet remove[^"]*"[^>]*disabled/g)?.length, 4);
+  assert.equal(html.match(/class="quiet remove[^"]*"[^>]*disabled/g)?.length, fx.policy.rules.length);
   const comments = { ...fx.policy, file: { ...fx.policy.file, mode: "observe", added: [], changed: [] } };
   assert.match(text(await render("/src/views/Rules.svelte", { policy: comments })), /Only comments or spaces changed/);
 });
@@ -85,7 +85,7 @@ test("a confirmed file that is gone blocks the changes from here, and the view c
   const t = text(html);
   assert.match(t, /Your policy file is missing .* Put the file back/);
   assert.match(t, /Put your policy file back first/);
-  assert.equal(html.match(/class="quiet remove[^"]*"[^>]*disabled/g)?.length, 4);
+  assert.equal(html.match(/class="quiet remove[^"]*"[^>]*disabled/g)?.length, fx.policy.rules.length);
   assert.match(text(await render("/src/views/PolicyNotice.svelte", { policy: gone })), /Your policy file is missing/);
 });
 

@@ -405,7 +405,9 @@ pub fn item(store: &Store, id: &str) -> Result<Option<Value>> {
         .ok_or_else(|| bad_id(id))?;
     Ok(store.read(|c| {
         Ok(c.query_row(
-            "SELECT id, form, status, doc FROM item WHERE id = ?1 AND form = ?2",
+            &format!(
+                "SELECT id, form, status, doc, {MATTER} FROM item WHERE id = ?1 AND form = ?2"
+            ),
             params![row, form],
             doc_of,
         )
@@ -465,7 +467,7 @@ pub fn items(store: &Store, filter: &Filter, limit: u32) -> Result<Page> {
     let (outer, inner) = (date("item"), date("i"));
     let items = store.read(|c| {
         let mut st = c.prepare(&format!(
-            "SELECT id, form, status, doc FROM item
+            "SELECT id, form, status, doc, {MATTER} FROM item
              WHERE (?1 IS NULL OR form = ?1)
                AND (status = ?2 OR (?2 IS NULL AND status != 'gone'))
                AND (?3 IS NULL OR json_extract(doc, '$.type') = ?3)
@@ -824,7 +826,7 @@ fn read_section(
         .join(", ");
     let seek = after.map_or_else(|| "1".to_string(), |_| seek_sql(&keys));
     let mut st = c.prepare(&format!(
-        "SELECT id, form, status, doc, {list} FROM item WHERE ({shown}) AND ({seek})
+        "SELECT id, form, status, doc, {list}, {MATTER} FROM item WHERE ({shown}) AND ({seek})
          ORDER BY {order} LIMIT {limit}"
     ))?;
     let (items, page_keys): (Vec<_>, Vec<_>) = st
@@ -1146,20 +1148,38 @@ fn empty_summary() -> MessageSummary {
     }
 }
 
-/// The document of an item row (id, form, status, doc). The row is the true
-/// copy of the ID and the status, so they replace the values of the document.
+/// The column `matter` of an item row: the row ID of the confirmed matter
+/// that keeps the item, or NULL. The query must name the table `item`.
+pub(crate) const MATTER: &str = "(SELECT mi.matter_id FROM matter_item mi
+      JOIN matter m ON m.id = mi.matter_id
+     WHERE mi.item_id = item.id AND mi.kept = 1 AND m.status = 'confirmed') AS matter";
+
+/// The document of an item row (id, form, status, doc, and the column
+/// [`MATTER`] by name). The row is the true copy of the ID, the status and
+/// the matter, so they replace the values of the document. Each output of
+/// an item (the API, the read verbs, the export) uses this function.
 pub(crate) fn doc_of(r: &rusqlite::Row) -> rusqlite::Result<Value> {
-    let id: i64 = r.get(0)?;
-    let form: String = r.get(1)?;
-    let text: String = r.get(3)?;
+    doc_at(r, 0)
+}
+
+/// As [`doc_of`], with the columns id, form, status and doc from `at`.
+pub(crate) fn doc_at(r: &rusqlite::Row, at: usize) -> rusqlite::Result<Value> {
+    let id: i64 = r.get(at)?;
+    let form: String = r.get(at + 1)?;
+    let text: String = r.get(at + 3)?;
     let mut doc: Value = serde_json::from_str(&text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(at + 3, rusqlite::types::Type::Text, Box::new(e))
     })?;
     if let Some(map) = doc.as_object_mut() {
         if let Some(id) = item_id(id, &form) {
             map.insert("id".into(), id.into());
         }
-        map.insert("status".into(), Value::String(r.get(2)?));
+        map.insert("status".into(), Value::String(r.get(at + 2)?));
+        let matter: Option<i64> = r.get("matter")?;
+        map.insert(
+            "matter".into(),
+            matter.map_or(Value::Null, |m| format_id(Kind::Matter, m).into()),
+        );
     }
     Ok(doc)
 }

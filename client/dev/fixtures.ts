@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Action, AskAnswer, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -9,6 +9,8 @@ import receipt from "../../docs/spec/schema/examples/record-receipt.json" with {
 import booking from "../../docs/spec/schema/examples/record-booking.json" with { type: "json" };
 import feed from "../../docs/spec/schema/examples/feed.json" with { type: "json" };
 import signal from "../../docs/spec/schema/examples/signal-code.json" with { type: "json" };
+import matterConfirmed from "../../docs/spec/schema/examples/matter-confirmed.json" with { type: "json" };
+import matterProposed from "../../docs/spec/schema/examples/matter-proposed.json" with { type: "json" };
 
 export const items = [youOwe, owedToYou, payment, conversation, receipt, booking, feed, signal] as unknown as Item[];
 
@@ -168,25 +170,29 @@ const rules: Rule[] = [
     when: { sender: "@bank.example" },
     line: 35,
   }),
+  // Notify rules (R5-08): the rules of the notices below.
+  rule({ id: 7, name: "Mail from the clinic", effect: "notify", when: { sender: "@clinic.example" }, added: "2026-11-16", line: 44 }),
+  rule({ id: 8, name: "Replies from Dana", effect: "notify", when: { sender: "dana@harbor.example" }, added: "2026-11-16", line: 51 }),
+  rule({ id: 9, name: "Bank security codes", effect: "notify", when: { sender: "@bank.example", form: "signal" }, added: "2026-11-16", line: 58 }),
 ];
 
 export const policy: Policy = {
   mode: "observe",
   version: 3,
-  next_id: 6,
+  next_id: 10,
   rules,
   proposals: [
     {
       id: 1,
       approvals: 14,
       created_at: 1794787200,
-      rule: rule({ id: 6, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
+      rule: rule({ id: 10, name: "Archive mail from deals@acme.example", effect: "allow", verbs: ["archive"], when: { sender: "deals@acme.example" }, by: "proposal", added: "2026-11-16", line: 0 }),
     },
     {
       id: 2,
       approvals: 11,
       created_at: 1794790800,
-      rule: rule({ id: 6, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
+      rule: rule({ id: 10, name: "Mark mail from services as read", effect: "allow", verbs: ["read"], when: { sender_kind: "service" }, by: "proposal", added: "2026-11-16", line: 0 }),
     },
   ],
   error: null,
@@ -342,6 +348,26 @@ export function act(id: string, verb: string, body: { date?: string }): Item | u
   return item;
 }
 
+/** Notices by rule (R5-08): four mails that notify rules matched. */
+export const notices = [
+  { id: "n-4", rule: 7, rule_name: "Mail from the clinic", title: "Harbor Clinic", text: "Your test results are ready", created: "2026-11-16T14:12:00Z",
+    message: { id: "m-1", thread: "t-1", date: "2026-11-16T14:11:00Z", from: { name: "Harbor Clinic", address: "results@clinic.example" }, subject: "Your test results are ready", labels: ["INBOX"] } },
+  { id: "n-3", rule: 8, rule_name: "Replies from Dana", title: "Dana Whitfield", text: "Re: Contract draft v3, signed", created: "2026-11-16T13:40:00Z",
+    message: { id: "m-2", thread: "t-2", date: "2026-11-16T13:39:00Z", from: { name: "Dana Whitfield", address: "dana@harbor.example" }, subject: "Re: Contract draft v3, signed", labels: ["INBOX"] } },
+  { id: "n-2", rule: 7, rule_name: "Mail from the clinic", title: "Harbor Clinic", text: "Appointment moved to Thursday", created: "2026-11-16T11:05:00Z", message: null },
+  { id: "n-1", rule: 9, rule_name: "Bank security codes", title: "First Harbor Bank", text: "Your sign-in code", created: "2026-11-16T09:00:00Z",
+    message: { id: "m-3", thread: "t-3", date: "2026-11-16T09:00:00Z", from: { name: "First Harbor Bank", address: "alerts@bank.example" }, subject: "Your sign-in code", labels: ["INBOX"] } },
+];
+
+export function noticePost(path: string): [number, unknown] | undefined {
+  const done = path.match(/^\/notices\/([^/?]+)\/done$/);
+  if (!done) return undefined;
+  const i = notices.findIndex((n) => n.id === decodeURIComponent(done[1]));
+  if (i < 0) return [404, { error: "not found" }];
+  notices.splice(i, 1);
+  return [200, { done: done[1] }];
+}
+
 /** Watches (R5-07): one mail that came, and two watches that wait. */
 export const watches = [
   {
@@ -451,10 +477,26 @@ export function answer(path: string): unknown {
   if (name === "search") return { messages: [] };
   if (name === "policy") return policy;
   if (name === "watches") return watches;
+  if (name === "matters" && id) return matterViews[id];
+  if (name === "matters") return matters;
   if (name === "jobs" && id) return jobDetails[id];
   if (name === "jobs") return jobPage(q.get("state"));
+  if (name === "notices") return notices;
   return undefined;
 }
+
+// Matters: the two examples, with members from the item examples above.
+const members = (base: object, list: Item[]): MatterView => {
+  const by = (form: string) => list.filter((i) => i.form === form);
+  const items = { commitment: by("commitment"), conversation: by("conversation"), record: by("record") };
+  const counts = { commitment: items.commitment.length, conversation: items.conversation.length, record: items.record.length };
+  return { matter: { ...(base as Matter), items: list.map((i) => i.id), counts }, items };
+};
+export const matterViews: Record<string, MatterView> = {
+  "g-4": members(matterConfirmed, [youOwe, conversation, booking] as unknown as Item[]),
+  "g-5": members(matterProposed, [receipt, owedToYou] as unknown as Item[]),
+};
+export const matters: MatterList = { proposed: [matterViews["g-5"].matter], confirmed: [matterViews["g-4"].matter] };
 
 /** POST /api/senders/<id>/<answer> in the fixture state: the sender row after the answer. */
 // The answers at the gate in the dev server: the state of each sender, from the fixtures.

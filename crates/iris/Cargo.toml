@@ -21,11 +21,13 @@ iris-apply = { version = "0.0.0", path = "../iris-apply" }
 iris-service = { version = "0.0.0", path = "../iris-service" }
 iris-auth = { version = "0.0.0", path = "../iris-auth" }
 iris-gmail = { version = "0.0.0", path = "../iris-gmail" }
+iris-matters = { version = "0.0.0", path = "../iris-matters" }
 iris-model = { version = "0.0.0", path = "../iris-model" }
 iris-policy = { version = "0.0.0", path = "../iris-policy" }
 iris-store = { version = "0.0.0", path = "../iris-store" }
 iris-sync = { version = "0.0.0", path = "../iris-sync" }
 iris-changeset = { version = "0.0.0", path = "../iris-changeset" }
+iris-compose = { version = "0.0.0", path = "../iris-compose" }
 iris-triage = { version = "0.0.0", path = "../iris-triage" }
 iris-understand = { version = "0.0.0", path = "../iris-understand" }
 iris-web = { version = "0.0.0", path = "../iris-web" }
