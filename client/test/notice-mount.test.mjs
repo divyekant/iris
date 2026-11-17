@@ -71,5 +71,29 @@ test("no notice, no section", async () => {
 test("the Rules screen has a group for notify rules", async () => {
   const { GROUPS } = await load("/src/rules.ts");
   assert.equal(GROUPS.at(-1).effect, "notify");
-  assert.equal(GROUPS.at(-1).title, "Tell me at once");
+  assert.equal(GROUPS.at(-1).title, "Notify");
+});
+
+test("with the props of App, the notices load from the engine, and a later poll adds new ones", async () => {
+  let list = copy(fx.notices).slice(1, 2);
+  const asked = serve((path) => (path === "notices" ? [200, list] : [404, {}]));
+  const view = await mount("/src/views/Notices.svelte", {});
+  try {
+    await until(() => cards(view).length === 1);
+    assert.match(text(cards(view)[0]), /Dana Whitfield/);
+    view.destroy();
+  } catch (e) {
+    view.destroy();
+    throw e;
+  }
+  const polled = await mount("/src/views/Notices.svelte", { poll: 20 });
+  try {
+    await until(() => cards(polled).length === 1);
+    // A new notice comes: the next poll shows it.
+    list = copy(fx.notices).slice(0, 2);
+    await until(() => cards(polled).length === 2);
+    assert.ok(asked.filter(([, p]) => p === "notices").length >= 2);
+  } finally {
+    polled.destroy();
+  }
 });
