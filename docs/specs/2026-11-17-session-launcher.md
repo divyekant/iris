@@ -802,10 +802,13 @@ who does not run `iris job run`.
   code, not the error text, because no agent output is stored. The person
   runs the adapter line by hand to see the error.
 - Rollback: stop the engine, revert the code PRs, and restore the copy
-  `iris.db.v20.<time>-<random>.bak` that the store wrote before migration
-  21 (spec 1, section 5.5). A program of version 20 cannot open a store of
-  version 21, so the revert alone is not enough. Each change to the store
-  after the migration is lost; the next sync gets the mail again.
+  `iris.db.v<N>.<time>-<random>.bak` that the store wrote before the
+  upgrade (spec 1, section 5.5). `<N>` is the version of the store before
+  the upgrade, for example 19 if the store skipped version 20. Run a
+  program that knows version `<N>`. A program that knows only version 20
+  or lower cannot open a store of version 21, so the revert alone is not
+  enough. Each change to the store after the upgrade is lost; the next
+  sync gets the mail again.
 
 ## Plan
 
