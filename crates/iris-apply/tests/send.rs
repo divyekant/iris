@@ -244,6 +244,18 @@ fn a_reply_goes_into_its_thread() {
         .trim_matches(['<', '>', ' '])
         .to_string();
     let subject = header("Subject");
+    // The parent is understood: the mirror has its subject, so submit
+    // flags the same subject as the apply.
+    let n = b
+        .store
+        .write(|tx| {
+            Ok(tx.execute(
+                "UPDATE header SET subject = ?1 WHERE message_id = ?2",
+                rusqlite::params![subject, parent],
+            )?)
+        })
+        .unwrap();
+    assert_eq!(n, 1);
     let a = b.approved(
         Verb::Draft,
         &format!("t-{thread}"),
@@ -710,4 +722,65 @@ fn a_warning_after_the_approval_denies_the_send() {
         other => panic!("{other:?}"),
     }
     assert_eq!(b.sends(), 0);
+}
+
+/// The subject of a reply comes from Gmail at the apply. If the mirror had
+/// another subject at submit (a parent that is not understood yet), the
+/// flags of the final content are checked again, and a new flag denies the
+/// draft with no `drafts.create` call.
+#[test]
+fn a_reply_subject_with_a_new_warning_denies_the_draft() {
+    let b = setup("subject");
+    // The newest message of a thread whose subject names an amount, a date
+    // or an attachment.
+    let rows: Vec<(i64, i64, String)> = b
+        .store
+        .read(|c| {
+            let mut st = c.prepare(
+                "SELECT m.thread_id, m.id, m.provider_id FROM message m
+                 WHERE m.gone_at IS NULL
+                   AND m.internal_date = (SELECT max(internal_date) FROM message
+                                          WHERE thread_id = m.thread_id AND gone_at IS NULL)
+                 ORDER BY m.id",
+            )?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    let warns = |s: &str| {
+        iris_changeset::has_money(s)
+            || iris_changeset::has_date(s)
+            || iris_changeset::has_attachment(s)
+    };
+    let (thread, parent, _) = rows
+        .into_iter()
+        .find(|(_, _, provider)| {
+            let head = b
+                .gmail
+                .metadata(TOKEN, provider, &["Subject", "Message-ID"])
+                .unwrap();
+            let has = |n: &str| head.headers.iter().find(|h| h.name.eq_ignore_ascii_case(n));
+            has("Message-ID").is_some() && has("Subject").is_some_and(|h| warns(&h.value))
+        })
+        .expect("the synthetic mailbox has a subject with a warning");
+    // The mirror does not know the subject yet.
+    b.sql(
+        "UPDATE header SET subject = NULL WHERE message_id = ?1",
+        [parent],
+    );
+    let a = b.approved(
+        Verb::Draft,
+        &format!("t-{thread}"),
+        json!({"to": ["priya@example.com"], "body": "Thanks."}),
+        0,
+    );
+    let creates = b.posts("/drafts");
+    match b.apply(a) {
+        Ok(Outcome::Denied(why)) => assert!(why.contains("warnings"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.state(a), "denied");
+    assert_eq!(b.posts("/drafts"), creates);
 }

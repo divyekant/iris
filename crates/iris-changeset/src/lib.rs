@@ -28,7 +28,9 @@ use sha2::{Digest, Sha256};
 use unicase::UniCase;
 
 mod flags;
-pub use flags::{action_content, draft_flags, has_attachment, has_date, has_money, words};
+pub use flags::{
+    action_content, draft_flags, has_attachment, has_date, has_money, new_flags, words,
+};
 
 /// The flag `bulk`: more than this count of messages in one action, or in
 /// one revision (section 5.3).
@@ -944,7 +946,17 @@ fn check_write(c: &Connection, action: i64, verb: Verb, args: &str) -> Result<Op
             [action],
             |r| r.get(0),
         )?;
-        return draft_busy(c, action, draft);
+        if let Some(why) = draft_busy(c, action, draft)? {
+            return Ok(Some(why));
+        }
+        // The flags come from the stored bytes (docs/specs/2026-11-17-send-checks.md).
+        if action_content(c, action)?.is_none() {
+            return Ok(Some(format!(
+                "{} has no content that Iris can check",
+                format_id(Kind::Draft, draft)
+            )));
+        }
+        return Ok(None);
     }
     let Ok(content) = serde_json::from_str::<iris_compose::Content>(args) else {
         return Ok(Some(

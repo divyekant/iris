@@ -268,24 +268,36 @@ fn copied(c: &Connection, text: &str) -> Result<bool> {
 }
 
 /// The draft content and the account address of a `draft` or `send`
-/// action, or `None` if it has no checked content (submit denies it).
+/// action, or `None` if it has no checked content. Submit denies a `send`
+/// with no checked content (`check_write`), and gives no draft flag to a
+/// `draft` with none (submit denies it too).
+///
+/// A `send` reads the stored raw bytes of its draft, the bytes that Gmail
+/// gets, and only if they hash to the draft hash that the approval binds.
+/// The JSON `content` of the row is not read: another writer can change it.
 pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Content)>> {
     let (verb, targets, args): (String, String, String) = c.query_row(
         "SELECT verb, targets, args FROM changeset_action WHERE id = ?1",
         [action],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    // Another writer can store a draft row with no content: no flags then.
-    let found: Option<(String, Option<String>)> = match verb.as_str() {
-        "send" => c
-            .query_row(
-                "SELECT a.address, json_extract(d.content, '$.content')
-                 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
-                 JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1",
-                [action],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?,
+    match verb.as_str() {
+        "send" => {
+            let row: Option<(String, Vec<u8>, String)> = c
+                .query_row(
+                    "SELECT a.address, d.raw, d.hash
+                     FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+                     JOIN account a ON a.id = d.account_id WHERE ad.action_id = ?1",
+                    [action],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            Ok(row.and_then(|(address, raw, hash)| {
+                let read = iris_compose::read(&raw, &address)?;
+                (iris_compose::hash(&read.content, read.reply.as_ref()) == hash)
+                    .then_some((address, read.content))
+            }))
+        }
         "draft" => {
             let address: Option<String> = c
                 .query_row(
@@ -299,20 +311,40 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
                     |r| r.get(0),
                 )
                 .optional()?;
-            address.map(|a| (a, Some(args)))
+            let Some(address) = address else {
+                return Ok(None);
+            };
+            let Ok(mut content) = serde_json::from_str::<Content>(&args) else {
+                return Ok(None);
+            };
+            // The subject from the mirror. The apply sets the subject from
+            // Gmail and checks the flags of the final content again.
+            if let Some(p) = crate::parent(c, action)? {
+                content.subject = iris_compose::reply_subject(&p.subject);
+            }
+            Ok(content.check().ok().map(|c| (address, c)))
         }
-        _ => None,
-    };
-    let Some((address, Some(json))) = found else {
-        return Ok(None);
-    };
-    let Ok(mut content) = serde_json::from_str::<Content>(&json) else {
-        return Ok(None);
-    };
-    if verb == "draft" {
-        if let Some(p) = crate::parent(c, action)? {
-            content.subject = iris_compose::reply_subject(&p.subject);
-        }
+        _ => Ok(None),
     }
-    Ok(content.check().ok().map(|c| (address, c)))
+}
+
+/// The draft flags of `content` that the approved flags of `action` do
+/// not have. The apply of a `draft` and the release of a `send` call it on
+/// the content that Gmail gets, and deny the action if it is not empty.
+pub fn new_flags(
+    c: &Connection,
+    action: i64,
+    account: &str,
+    content: &Content,
+) -> Result<Vec<&'static str>> {
+    let approved: String = c.query_row(
+        "SELECT coalesce(flags, '[]') FROM changeset_action WHERE id = ?1",
+        [action],
+        |r| r.get(0),
+    )?;
+    let approved: Vec<String> = serde_json::from_str(&approved).unwrap_or_default();
+    Ok(draft_flags(c, account, content)?
+        .into_iter()
+        .filter(|f| !approved.iter().any(|a| a == f))
+        .collect())
 }

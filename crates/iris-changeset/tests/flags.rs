@@ -318,15 +318,17 @@ fn submit_flags_a_draft_and_its_send() {
         json!(["new_recipient", "money", "attachment"]),
         "{a}"
     );
-    // The draft that the apply makes holds the same content.
-    let stored = json!({"content": {"to": ["sam@example.org"], "cc": [], "subject": "Pay",
-                                    "body": "I owe you $40, see attached."}});
+    // The draft that the apply makes: its raw bytes and their hash. The
+    // JSON content of the row is not read (another writer can change it).
+    let c = content("sam@example.org", "Pay", "I owe you $40, see attached.");
+    let raw = iris_compose::compose(OWNER, "iris.1@example.com", &c, None, 1);
+    let hash = iris_compose::hash(&c, None);
     s.write(|tx| {
         Ok(tx.execute(
             "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
                                action_id, created_at, updated_at)
-             VALUES (1, 'r1', 'iris.1@example.com', ?1, 'h1', x'00', 1, 0, 0)",
-            [stored.to_string()],
+             VALUES (1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
+            rusqlite::params![hash, raw],
         )?)
     })
     .unwrap();
@@ -336,6 +338,20 @@ fn submit_flags_a_draft_and_its_send() {
         json!(["new_recipient", "money", "attachment"]),
         "{a}"
     );
+    // Raw bytes that do not hash to the row hash: no checked content, so
+    // submit denies the send.
+    s.write(|tx| {
+        tx.execute(
+            "UPDATE changeset_action SET state = 'denied' WHERE verb = 'send'",
+            [],
+        )?;
+        Ok(tx.execute("UPDATE draft SET hash = 'other' WHERE id = 1", [])?)
+    })
+    .unwrap();
+    let a = one(Verb::Send, "d-1", &json!({}));
+    assert_eq!(a["decision"]["state"], "denied", "{a}");
+    let why = a["decision"]["reason"].as_str().unwrap();
+    assert!(why.contains("no content that Iris can check"), "{why}");
 }
 
 /// A small seeded generator (xorshift), so a failure repeats.
