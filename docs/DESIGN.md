@@ -112,6 +112,7 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 | Question box | `Ask.svelte` | A round field at the bottom of the Ask view, sticky, with a round `primary` button with an arrow. The button stays faint while the box is empty or a question waits. After an error, the question comes back to the box. |
 | Outbox | `Outbox.svelte` | Option A (the owner's pick, card R3-02): one raised card for each send that waits to leave. The card has the recipients in muted text, the subject, and one line for each warning with a `warning` dot and the words of the flag. At the end of the card: "Leaves in 0:42" and a thin line in `primary` that fills as the one-minute hold ends, with an outline round "Cancel" button at the right. While sending is off, a banner with a `warning` line on the left says "Sending is off. Sends wait here." and names `iris sending on`; each card says "Waits until sending is on" in faint text and has no line. The cards show only the sends that the engine gives, so a new send of a cancelled draft shows again. After each cancel, one quiet line above the cards says what happened ("… is cancelled. It does not leave." or "… started to send. It cannot be cancelled."), and the line stays after the card goes. |
 | Thread with reply | `Write.svelte` | The write view, option C "In the thread" (card R3-04). A reply shows the subject of the thread as the title, then the newest 20 mails of the conversation, oldest first, one card each (`border-subtle`, `radius-lg`): the initials, the sender ("You" for your mail), the date and the text. The older mails are muted small text; the mail that the reply answers reads in full size. A hostile mail has an `error` line on the left and a warning. A cut text links to the whole mail. A line says how many older mails are not shown. The reply form is the last card: `background-elevated` with a 2px `primary` line at the top. Its first line names the recipients ("Reply to Priya Raman") with a quiet "Change" that opens the chips. Under it: the text with no border, the round `primary` "Send" button, a faint hint ("It waits 60 seconds in the Outbox, so you can still cancel it.") and a quiet "Discard". A new mail uses the same form under the title "New mail", with the "To" line, a quiet "Add copy" and the subject in `font-size-1`. |
+| Intent line | `Write.svelte` | In a reply only (card R3-04, intent path): one line between the recipients and the text, with a `border-subtle` line under it. A text field with no border ("Tell Iris what to say") and an outline pill, "Write it for me" ("Writing" while the engine works). The draft of the engine goes in the text field for the person to edit. While the call runs, the form is disabled. A refusal shows under the line with a `warning` line on the left. |
 | Address chip | `Write.svelte` | One `background-surface` round chip for each address, with a faint "×" to remove it. A comma, a space, Enter or a move out of the field makes a chip. Backspace in an empty field removes the last chip. A pasted list with names (`Priya Shah <priya@example.com>`) gives one chip for each address, once. A chip whose form is not an address has a 1px `error` ring. The engine decides the address check. |
 | Warnings before Send | `Write.svelte` | After a 409 with warnings, one line for each warning above the Send button, with a `warning` line on the left and the words of the flag. The next press sends these warnings. |
 | Send state | `Write.svelte` | After the press, the mail shows as the last card of the thread ("You", the recipients and the text), and its state is a card with a dashed `border` under it: a title ("Saving your mail", "On its way to …", "Look at this mail before it leaves" with a `warning` line, "Sent to …", "This mail did not leave" in muted text), a muted line, and for a send that waits, "Leaves in 0:49" with the thin `primary` line of the outbox. An outline pill stops the mail ("Stop this mail" while saving, "Cancel the send" while it waits). A quiet "Write another" starts a new mail. |
@@ -120,6 +121,34 @@ Add each shared part here when it is built. The parts are in `client/src/views/`
 contrast of each text color, of `primary` and of each semantic color on each
 background, and the contrast of `on-primary` on `primary`. It also checks that
 no view has a color literal.
+
+## Project site
+
+The project site is the static HTML in `docs/` (`index.html`, `privacy.html`
+and the builder guide in `docs/guide/`). GitHub Pages serves it from
+`develop` `/docs`. `docs/site.css` holds its styles. The site has no script.
+
+The site uses only the dark palette. Each site variable is a token of this
+file:
+
+| Site variable | Token | Use |
+|---|---|---|
+| `--bg` | `background` | Page background |
+| `--text` | `text` | Main text, the current page in the menu |
+| `--muted` | `text-muted` | The date of the privacy policy |
+| `--link` | `primary` | Links, the line of a caution |
+| `--surface` | `background-surface` | Code blocks, field names |
+| `--line` | `border` | Lines between table rows |
+
+Site parts:
+
+- The menu (`nav`) at the top of each guide page. The current page has
+  `aria-current="page"` and the `text` color.
+- A code block (`pre`), with the mono font, radius `md` and a side scroll.
+- A table, with a side scroll on a narrow screen.
+- A caution (`.caution`): a 4px line of `primary` on the left.
+- A field list (`ul.fields`): the required fields of a document, as chips
+  with radius `sm`.
 
 ## Rules
 

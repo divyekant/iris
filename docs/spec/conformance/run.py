@@ -97,7 +97,37 @@ def no_constant(name):
     raise ValueError(f"{name} is not JSON")
 
 
+MAX_DEPTH = 256
+
+
+def depth(text):
+    """The deepest nesting of arrays and objects in JSON text, without a
+    parse. A string can hold brackets, so a scan skips each string."""
+    deepest = level = 0
+    in_string = escaped = False
+    for c in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c in "[{":
+            level += 1
+            deepest = max(deepest, level)
+        elif c in "]}":
+            level -= 1
+    return deepest
+
+
 def parse_json(text):
+    # A deep document stops before the parse: the depth at which the parser,
+    # the schema check or a repr runs out of stack changes with the Python version.
+    if depth(text) > MAX_DEPTH:
+        raise ValueError(f"nesting deeper than {MAX_DEPTH} levels")
     return json.loads(text, object_pairs_hook=no_duplicates, parse_constant=no_constant)
 
 

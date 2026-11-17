@@ -95,6 +95,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// In a job workspace: end the session, and wait for a reply on a thread
+    /// of the job or for a date. Iris starts a new session of the job when
+    /// the reply comes or the date passes. A verb of a session only.
+    Wait {
+        /// The end of the wait: the start of the day YYYY-MM-DD, UTC.
+        #[arg(long)]
+        until: String,
+        /// The thread (`t-8841`) whose reply ends the wait first.
+        #[arg(long)]
+        reply: Option<String>,
+        /// The reason of the wait, for the person.
+        #[arg(long)]
+        why: Option<String>,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -209,6 +223,13 @@ pub enum Command {
     /// input and output, for an MCP client. The same verbs, author and
     /// policy as the command.
     Mcp,
+    /// Open the web client of the running engine in the browser, with a new
+    /// one-time sign-in address. Needs the engine.
+    Open {
+        /// Print the address and open nothing.
+        #[arg(long)]
+        print: bool,
+    },
     /// Show a changeset (`cs-12`), or list your drafts. Needs the engine.
     #[command(arg_required_else_help = true)]
     Changeset {
@@ -541,6 +562,9 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         code: socket::code::ERROR,
         error: e.to_string(),
     });
+    if let Command::Open { print } = &cli.command {
+        return open_web(&data?, *print);
+    }
     let request = socket_request(&cli.command)?;
     if let Command::Job { command } = &cli.command {
         // A bad job ID is a usage error, before the engine or the store.
@@ -565,10 +589,10 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } = &cli.command {
+    if let Command::List { .. } | Command::Wait { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
-            error: "list is a verb of a session: run it in a job workspace".into(),
+            error: "this is a verb of a session: run it in a job workspace".into(),
         });
     }
     if let Some((verb, args, json)) = request {
@@ -672,6 +696,19 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
         return Err(denied(
             "a session cannot draft, send or nudge: a job has no grant of an account or a draft",
         ));
+    }
+    if let Command::Wait { until, reply, why } = c {
+        // The wait ends this session: after a lost answer, `iris status`
+        // in a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "until": until, "reply": reply, "why": why });
+        let r = socket::request_at(path, "wait", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} waits until {}",
+            verbs::field(r["job"].as_str().unwrap_or("-")),
+            verbs::field(r["until"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
     }
     // The read verbs of a session (R4-04f): only the grant of the job.
     let read = match c {
@@ -885,6 +922,123 @@ pub fn socket_verb(
     json: bool,
 ) -> Result<Printed, socket::Failure> {
     socket_verb_at(&dir.join(socket::SOCKET), verb, args, json)
+}
+
+/// `iris open`: a new sign-in address from the engine (the socket verb
+/// `sign-in`, `docs/specs/2026-11-17-mac-app.md`), printed or opened in the
+/// browser. The code never goes into the arguments of a process: another
+/// OS user can read them. The browser gets the path of a new page of [`open_page`].
+fn open_web(dir: &std::path::Path, print: bool) -> Result<(), socket::Failure> {
+    let r = socket::request_with(
+        dir,
+        "sign-in",
+        serde_json::json!({}),
+        socket::ANSWER_WAIT,
+        "iris open",
+    )?;
+    let url = r["url"].as_str().unwrap_or_default();
+    let error = |e: String| socket::Failure {
+        code: socket::code::ERROR,
+        error: e,
+    };
+    if print {
+        println!("{url}");
+        return Ok(());
+    }
+    let page = open_page(dir, url).map_err(|e| error(format!("open: {e}")))?;
+    let opened = opener(std::env::consts::OS, &page)
+        .is_some_and(|mut c| c.status().is_ok_and(|s| s.success()));
+    if !opened {
+        return Err(error(format!(
+            "open: no browser opened. Open {} or run iris open --print",
+            page.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The redirect pages of `iris open` in the data folder:
+/// `open-<pid>-<ns>.html`, one page for each call.
+pub const OPEN_PAGE: (&str, &str) = ("open-", ".html");
+
+/// Write a new redirect page to `url` with mode `0600`. Each call gets its
+/// own file, so two calls never give the browser the same page. The file is
+/// new (`create_new`), so the command never writes through a file or a link
+/// that is there. Pages older than the life of a code are removed. Gives the
+/// path of the page.
+pub fn open_page(dir: &std::path::Path, url: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // The engine gives `http://<ip>:<port>/#code=<hex>`. Only these bytes,
+    // so the page needs no HTML escape.
+    let plain = url
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b":/.#=[]".contains(&b));
+    if !plain || !url.starts_with("http://") {
+        return Err(std::io::Error::other(
+            "the engine gave an address that is not valid",
+        ));
+    }
+    remove_old_pages(dir);
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let (start, end) = OPEN_PAGE;
+    let path = dir.join(format!("{start}{}-{ns}{end}", std::process::id()));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    f.write_all(
+        format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Iris</title>\
+             <meta http-equiv=\"refresh\" content=\"0;url={url}\">\n"
+        )
+        .as_bytes(),
+    )?;
+    f.sync_all()?;
+    Ok(path)
+}
+
+/// Remove the redirect pages whose code ended: older than
+/// [`iris_api::CODE_LIFE`].
+fn remove_old_pages(dir: &std::path::Path) {
+    let (start, end) = OPEN_PAGE;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > iris_api::CODE_LIFE);
+        if name.starts_with(start) && name.ends_with(end) && old {
+            // A link is removed, not followed.
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// The command that opens `page` in the browser on the system `os`. Its
+/// only argument is the path.
+pub fn opener(os: &str, page: &std::path::Path) -> Option<std::process::Command> {
+    let program = match os {
+        "macos" => "/usr/bin/open",
+        "linux" => "xdg-open",
+        _ => return None,
+    };
+    let mut c = std::process::Command::new(program);
+    c.arg(page)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Some(c)
 }
 
 /// [`socket_verb`] on the socket at `path`.
@@ -1122,7 +1276,7 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } => Err("list is a verb of a session".into()),
+        Command::List { .. } | Command::Wait { .. } => Err("this is a verb of a session".into()),
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
@@ -1233,7 +1387,8 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         | Command::Label(_)
         | Command::Unlabel(_)
         | Command::Compose { .. }
-        | Command::Send { .. } => unreachable!("run() sends these verbs to the socket"),
+        | Command::Send { .. }
+        | Command::Open { .. } => unreachable!("run() sends these verbs to the socket"),
         Command::Understand {
             estimate,
             approve,
@@ -1590,6 +1745,8 @@ pub fn serve(store: Arc<Store>, addr: SocketAddr) -> std::io::Result<()> {
             std::future::pending::<()>().await
         };
         // The one-time code of the API sign-in (specification 2, section 8.6).
+        // `iris open` asks the socket for more codes.
+        let _ = socket::AUTH.set(auth.clone());
         if let Some(url) = auth.sign_in_url() {
             say!("iris: sign-in address of the local API: {url}");
         }

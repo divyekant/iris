@@ -41,7 +41,7 @@ mod verbs;
 mod watch;
 mod write;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
-pub use auth::{Auth, SIGN_IN};
+pub use auth::{Auth, CODE_LIFE, SIGN_IN};
 pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
@@ -133,6 +133,7 @@ pub fn router_with_model(store: Arc<Store>, auth: Arc<Auth>, connect: Connect) -
 fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Router {
     let ask = Router::new()
         .route("/api/ask", post(post_ask))
+        .route("/api/threads/{id}/draft", post(post_draft))
         .with_state((store.clone(), connect));
     Router::new()
         .route("/api/status", get(get_status))
@@ -155,6 +156,10 @@ fn routes(store: Arc<Store>, auth: Arc<Auth>, connect: Option<Connect>) -> Route
         .route("/api/changesets/{id}/drafts", get(get_drafts))
         .route("/api/changesets/{id}/decide", post(post_decide))
         .route("/api/changesets/{id}/withdraw", post(post_withdraw))
+        .route(
+            "/api/changesets/{id}/comments",
+            get(get_comments).post(post_comment),
+        )
         .route("/api/messages", get(get_messages))
         .route("/api/messages/{id}", get(get_message))
         .route("/api/messages/{id}/raw", get(get_raw))
@@ -315,6 +320,38 @@ async fn post_withdraw(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CommentBody {
+    revision: i64,
+    text: String,
+    key: String,
+}
+
+/// A review comment of the person on the newest revision of a changeset of
+/// a job (docs/specs/2026-11-17-review-comments.md). The answer is the
+/// comment. A retry with the same key gives the same comment.
+async fn post_comment(
+    State(s): State<Arc<Store>>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<CommentBody>, JsonRejection>,
+) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    let b = body(b)?;
+    let c = review::comment(&s, row, b.revision, &b.text, &b.key, now_ms())?;
+    Ok(Json(c).into_response())
+}
+
+/// Each review comment of a changeset, oldest first.
+async fn get_comments(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
+    let Some(row) = changeset_row(&s, &id)? else {
+        return Ok(not_found());
+    };
+    Ok(Json(review::comments(&s, row)?).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AskBody {
     question: String,
 }
@@ -332,6 +369,37 @@ async fn post_ask(
         .await
         .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
     Ok(Json(a).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftBody {
+    /// What the reply must say, in the words of the person. Empty: Iris
+    /// writes the reply from the thread alone.
+    #[serde(default)]
+    intent: String,
+    /// The mail that the form answers (`m-N`, the `parent` of the reply
+    /// start values). A newer parent makes a 409 before the call.
+    parent: String,
+}
+
+/// A draft of the reply in the voice of the person (R3-04 intent path,
+/// R3-05). The model call runs on a blocking thread, so the other requests
+/// go on. The draft is saved in the store; nothing goes to Gmail.
+async fn post_draft(
+    State((s, connect)): State<(Arc<Store>, Option<Connect>)>,
+    Path(id): Path<String>,
+    b: std::result::Result<Json<DraftBody>, JsonRejection>,
+) -> Result<Response> {
+    let b = body(b)?;
+    let connect =
+        connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
+    let d = tokio::task::spawn_blocking(move || {
+        write::draft(&s, &connect, &id, &b.parent, &b.intent, now_ms)
+    })
+    .await
+    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 
 #[derive(Deserialize)]

@@ -45,6 +45,7 @@
     flags: string[];
     toText?: string;
     ccText?: string;
+    intent?: string;
   };
   function storage(): Storage | undefined {
     try {
@@ -110,7 +111,7 @@
   // Save each part of the form that a reload must keep: the text of an address
   // not yet a chip, and the warnings that the next press sends, too.
   $effect(() => {
-    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText };
+    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText, intent };
     if (write) return;
     try {
       storage()?.setItem(place, JSON.stringify(form));
@@ -139,6 +140,27 @@
     }
   }
   const remove = (field: "to" | "cc", a: string) => (field === "to" ? (to = to.filter((x: string) => x !== a)) : (cc = cc.filter((x: string) => x !== a)));
+
+  // The intent path (spec section 8): the engine writes the text in the voice of
+  // the person from what they want to say. The person reads and edits it before Send.
+  let intent = $state(saved?.intent ?? "");
+  let drafting = $state(false);
+  let draftNote = $state("");
+  async function draftIt() {
+    if (!thread || drafting) return;
+    drafting = true;
+    draftNote = "";
+    try {
+      const parent = reply?.parent.id;
+      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent });
+      // The text goes in the form only if it answers the mail that the form shows.
+      if (v.based_on !== parent) draftNote = "A new mail came into this thread. Read it, then ask again.";
+      else if (alive) body = v.body;
+    } catch (e) {
+      draftNote = own(e);
+    }
+    drafting = false;
+  }
 
   // After the engine took the mail: the write `cs-N` and its state.
   let write = $state("");
@@ -346,7 +368,7 @@
 {:else}
   <form class="dock" onsubmit={(e) => (e.preventDefault(), send())}>
     <!-- While the press runs, the form does not change: the engine takes the mail as it was. -->
-    <fieldset disabled={busy}>
+    <fieldset disabled={busy || drafting}>
     {#if accounts.length > 1}
       <label class="line">
         <span class="k">From</span>
@@ -378,6 +400,12 @@
     {/if}
     {#if !reply}
       <input class="subject" type="text" placeholder="Subject" aria-label="Subject" bind:value={subject} />
+    {:else}
+      <div class="intent">
+        <input type="text" placeholder="Tell Iris what to say" aria-label="What the reply must say" bind:value={intent} onkeydown={(e) => e.key === "Enter" && (e.preventDefault(), draftIt())} />
+        <button type="button" class="pill" onclick={draftIt}>{drafting ? "Writing" : "Write it for me"}</button>
+      </div>
+      {#if draftNote}<p class="note" role="alert">{draftNote}</p>{/if}
     {/if}
     <textarea class="body" aria-label={reply ? "Reply text" : "Mail text"} placeholder={reply ? "Write your reply" : "Write your mail"} bind:value={body}></textarea>
 
@@ -613,6 +641,32 @@
     background: none;
     border: 0;
     padding: var(--space-4) 0;
+  }
+  .intent {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .intent input {
+    flex: 1;
+    min-width: 180px;
+    font: inherit;
+    color: var(--color-text);
+    background: none;
+    border: 0;
+    padding: var(--space-1) 0;
+  }
+  .intent input:focus {
+    outline: none;
+  }
+  .note {
+    margin: var(--space-2) 0 0;
+    font-size: var(--font-size--1);
+    border-left: 4px solid var(--color-warning);
+    padding-left: var(--space-3);
   }
   .flags {
     list-style: none;

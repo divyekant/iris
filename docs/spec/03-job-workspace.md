@@ -11,7 +11,8 @@
 A job workspace is a folder for one job. An agent of the job works in this
 folder. This specification gives the layout of the folder and the format of
 each file, so that another tool can build the same folder (section 10) from
-the same inputs: the mail, the job and its scope, as one read transaction
+the same inputs: the mail, the job, its scope and the review comments of
+its changesets, as one read transaction
 gives them.
 
 This specification is a part of version 1 of the open model. The schemas in
@@ -45,6 +46,7 @@ and a schema do not agree, the schema is correct and this text has a defect.
   commitments/c-<id>.json the job item of each commitment
   records/r-<id>.json     the job item of each record
   people/p-<id>.json      each known person of the granted messages
+  comments/cs-<id>.md     the review comments of each changeset of the job
   drafts/                 the agent writes drafts here
   notes.md                the notes of the agent
 ```
@@ -52,14 +54,15 @@ and a schema do not agree, the schema is correct and this text has a defect.
 - Each folder has mode `0700`. Each file that the build writes has mode
   `0600`.
 - The build owns `JOB.md`, `job.json`, `threads/`, `commitments/`,
-  `records/` and `people/`. It writes them new on each build.
+  `records/`, `people/` and `comments/`. It writes them new on each build.
 - The agent owns `drafts/` and `notes.md`. The build makes them only when
   they are not there. A new `notes.md` holds the line `# Notes`. The build
   never reads or changes them after that.
 - The build makes `.iris/` new and empty on each build. The session of the
   job (R4-04) uses it.
 - The folders `threads/`, `commitments/`, `records/` and `people/` are
-  always there, also when they are empty.
+  always there, also when they are empty. The folder `comments/` is there
+  only when it holds one or more files (section 7a).
 - The build does not touch other paths in the folder.
 
 ## 4. The granted messages
@@ -80,6 +83,12 @@ A ref has a list of messages. The list is set when the person adds the ref:
 
 An add of a ref that is in the scope adds the messages of that moment to
 its list. A revoked ref has no list.
+
+When a job that waits for a reply on a thread of its scope wakes, the
+engine adds the replies to the list of that thread ref: each new message of
+the thread that is clean and that you did not send
+(`docs/specs/2026-11-17-wait.md`). No other message joins a list without an
+add.
 
 The granted messages are the clean messages of the lists of the active
 refs. A job in the state `done` has no granted messages. An item ref of a
@@ -170,6 +179,39 @@ from the messages in the thread files where the address is a party:
 | `from_you` | The count of your messages. |
 | `threads` | The `t-` ID of each thread, in order of the number of the ID. |
 
+## 7a. The comment files
+
+The person can comment on the newest revision of a changeset of the job in
+the review (specification 2, section 5.5). The design is in
+`docs/specs/2026-11-17-review-comments.md`. There is one file
+`comments/cs-<id>.md` for each changeset with `author_job` equal to the
+`j-` ID of the job and with one or more comments. The file has these lines,
+in this order:
+
+1. `# Comments on cs-<id>`, then an empty line.
+2. `Changeset cs-<id>. Newest revision: <n>. State: <state>.` `<n>` is the
+   newest revision of the changeset, and `<state>` is its state
+   (specification 2, section 5).
+3. For each comment, in the order of the comments, numbered from 1:
+
+   ```
+   <empty line>
+   ## Comment <k>, revision <r>, <date>
+   <empty line>
+   <fence>comment
+   <text>
+   <fence>
+   ```
+
+   - `<r>` is the revision that the person commented on. `<date>` is the
+     date of the comment (section 2).
+   - `<text>` is the text of the comment, with the white space at its end
+     removed.
+   - `<fence>` follows the rule of the `mail` block (section 6).
+
+Each line ends with LF. The file ends with the LF after the last fence.
+A comment is the text of the person, not mail text.
+
 ## 8. `job.json`
 
 The job document of the job (`schema/job.schema.json`). It holds the state
@@ -193,7 +235,16 @@ Its dates follow `schema/job.schema.json`.
    The commitments, the records and the people of these messages are in `commitments/`, `records/` and `people/`. `job.json` has the state and the events of the job.
    ```
 
-6. This fixed text:
+6. Only when one or more comment files exist (section 7a): `## Review
+   comments`, an empty line, one line ``- `comments/cs-<id>.md` `` for each
+   comment file in order of the number of the changeset ID, an empty line,
+   this paragraph, and an empty line:
+
+   ```
+   The person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.
+   ```
+
+7. This fixed text:
 
    ```
    ## Rules
