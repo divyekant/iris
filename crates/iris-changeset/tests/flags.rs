@@ -5,8 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use iris_changeset::{
-    add_action, create, draft_flags, has_attachment, has_date, has_money, submit, write_document,
-    Author, AuthorKind, Verb,
+    add_action, create, draft_flags, draft_marks, has_attachment, has_date, has_money, names,
+    submit, words, write_document, Author, AuthorKind, Field, Mark, Verb,
 };
 use iris_compose::Content;
 use iris_store::{Body, Header, NewMessage, Store};
@@ -434,4 +434,149 @@ fn draft_flags_hold_for_random_text() {
     let c = content("priya@example.com", "Hi", &big);
     let got = s.read(|x| Ok(draft_flags(x, OWNER, &c).unwrap())).unwrap();
     assert!(got.is_empty());
+}
+
+/// The text of each mark of a content.
+fn marked<'a>(c: &'a Content, m: &Mark) -> &'a str {
+    match m.field {
+        Field::To(i) => &c.to[i][m.range.clone()],
+        Field::Cc(i) => &c.cc[i][m.range.clone()],
+        Field::Subject => &c.subject[m.range.clone()],
+        Field::Body => &c.body[m.range.clone()],
+    }
+}
+
+/// Card R4-07: each flag of the test set is on the words that gave it.
+#[test]
+fn each_mark_of_the_test_set_is_on_its_words() {
+    let dir = TempDir::new("marks");
+    let s = store(&dir);
+    let mut c = content(
+        "priya@example.com",
+        "Renewal by Friday",
+        &format!(
+            "The renewal is $48,000 for 12 months, or 5 dollars a day. Sign by Dec 4. \
+             The quote is attached.\n\n{THEIRS}."
+        ),
+    );
+    c.cc = vec!["legal@new.example".into()];
+    let marks = s.read(|x| Ok(draft_marks(x, OWNER, &c).unwrap())).unwrap();
+    let got: Vec<(&str, Field, &str)> = marks
+        .iter()
+        .filter(|m| m.flag != "untrusted_content")
+        .map(|m| (m.flag, m.field, marked(&c, m)))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("new_recipient", Field::Cc(0), "legal@new.example"),
+            ("money", Field::Body, "$48,000"),
+            ("money", Field::Body, "5 dollars"),
+            ("date", Field::Subject, "Friday"),
+            ("date", Field::Body, "Dec 4"),
+            ("attachment", Field::Body, "attached"),
+        ]
+    );
+    let copied: Vec<&Mark> = marks
+        .iter()
+        .filter(|m| m.flag == "untrusted_content")
+        .collect();
+    assert_eq!(copied.len(), 2, "{marks:?}");
+    for m in copied {
+        assert_eq!((m.field, m.source), (Field::Body, Some(1)));
+        assert!(THEIRS.contains(marked(&c, m)), "{:?}", marked(&c, m));
+    }
+    assert_eq!(
+        names(&marks),
+        s.read(|x| Ok(draft_flags(x, OWNER, &c).unwrap())).unwrap()
+    );
+}
+
+/// The amounts and dates that a mark covers, from the neighbors of the sign
+/// or the word.
+#[test]
+fn a_mark_covers_the_whole_amount_and_date() {
+    let cases: [(&str, &str); 9] = [
+        ("pay 100 $ now", "100 $"),
+        ("pay $ 1,250.50.", "$ 1,250.50"),
+        ("pay €12", "€12"),
+        ("pay usd200", "usd200"),
+        ("pay 30 USD", "30 USD"),
+        ("by 2026-11-17", "2026-11-17"),
+        ("by 11/17/2026", "11/17/2026"),
+        ("by end of the day", "end of the day"),
+        ("by next week", "next week"),
+    ];
+    for (text, want) in cases {
+        let r = iris_changeset::money_spans(text)
+            .into_iter()
+            .chain(iris_changeset::date_spans(text))
+            .next()
+            .unwrap_or_else(|| panic!("{text:?}"));
+        assert_eq!(&text[r], want);
+    }
+}
+
+/// Random text: the flags of the marks are the flags of draft_flags, and
+/// each mark is a part of its field that gives its flag by itself.
+#[test]
+fn marks_agree_with_the_flags_for_random_text() {
+    let dir = TempDir::new("marks-prop");
+    let s = store(&dir);
+    let mut g = Gen(0x2545_f491_4f6c_dd1d);
+    const MORE: [&str; 9] = [
+        " $48,000.",
+        "5 dollars",
+        "100 $",
+        "usd200",
+        "Dec 4",
+        "next week",
+        "end of the day",
+        " attached",
+        THEIRS,
+    ];
+    for _ in 0..400 {
+        let mut body = g.text(120);
+        for _ in 0..g.next() % 3 {
+            body.push_str(MORE[(g.next() % MORE.len() as u64) as usize]);
+            body.push_str(&g.text(20));
+        }
+        let subject = format!("Hi {}", g.text(20));
+        let to = if g.next().is_multiple_of(2) {
+            "priya@example.com"
+        } else {
+            "new@x.example"
+        };
+        let Ok(c) = (Content {
+            to: vec![to.into()],
+            cc: Vec::new(),
+            subject,
+            body,
+        })
+        .check() else {
+            continue;
+        };
+        let (marks, flags) = s
+            .read(|x| {
+                Ok((
+                    draft_marks(x, OWNER, &c).unwrap(),
+                    draft_flags(x, OWNER, &c).unwrap(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(names(&marks), flags, "{c:?}");
+        for m in &marks {
+            assert!(!m.range.is_empty(), "{m:?}");
+            let text = marked(&c, m);
+            let alone = match m.flag {
+                "new_recipient" => text == to,
+                "money" => has_money(text),
+                "date" => has_date(text),
+                "attachment" => has_attachment(text),
+                "untrusted_content" => words(text).len() == 8 && matches!(m.source, Some(1 | 3)),
+                f => panic!("{f}"),
+            };
+            assert!(alone, "{m:?} {text:?}");
+        }
+    }
 }
