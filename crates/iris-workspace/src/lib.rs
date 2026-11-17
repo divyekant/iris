@@ -146,37 +146,40 @@ fn write_stage(store: &Store, job: i64, stage: &Path) -> Result<Built> {
     out.expect("the read ran")
 }
 
-fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
+/// The grant of a job (spec, "The grant"): the messages and the items that
+/// its workspace holds now. The build writes the files of this grant, and the
+/// engine checks each action of a session against it
+/// (docs/specs/2026-11-17-job-verbs.md), so the two cannot disagree.
+#[derive(Debug, Default)]
+pub struct Grant {
+    /// Each granted message.
+    pub messages: BTreeSet<i64>,
+    /// Each item of the workspace: a commitment or a record, not gone, with
+    /// each source in one grant.
+    pub items: BTreeSet<i64>,
+    threads: Threads,
+}
+
+impl Grant {
+    /// If the grant holds one or more messages of `thread`.
+    pub fn has_thread(&self, thread: i64) -> bool {
+        self.threads.contains_key(&thread)
+    }
+}
+
+/// The grant of `job`, in the read or write transaction of the caller. A
+/// done job grants nothing. Memory holds the ID sets and one message body.
+pub fn grant_in(c: &Connection, job: i64) -> Result<Grant> {
     let j = iris_job::get_in(c, job)?;
-    // A done job grants nothing.
-    let refs = if j.state == iris_job::State::Done {
-        Vec::new()
-    } else {
-        iris_job::scope_in(c, job)?
-    };
-    let mut built = Built {
-        revoked: iris_job::revoked_count_in(c, job)?,
-        ..Built::default()
-    };
+    let mut grant = Grant::default();
+    if j.state == iris_job::State::Done {
+        return Ok(grant);
+    }
+    let refs = iris_job::scope_in(c, job)?;
 
-    let mut doc = BufWriter::new(new_file(&stage.join("job.json"))?);
-    iris_job::write_document_in(c, job, &mut doc)?;
-    doc.into_inner().map_err(|e| e.into_error())?;
-
-    // The granted messages (spec, "The grant"): each clean message of a
-    // thread of the scope, and each clean source message of an item of the
-    // scope. A row that is gone from the store is left out.
-    let sources = |i: i64| -> rusqlite::Result<Vec<(i64, i64)>> {
-        let mut q = c.prepare_cached(
-            "SELECT m.id, m.thread_id FROM item_source s
-             JOIN message m ON m.id = s.message_id WHERE s.item_id = ?1",
-        )?;
-        let rows = q.query_map([i], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        rows.collect()
-    };
-    let mut threads = Threads::new();
-    let mut granted = BTreeSet::new();
-    // The clean messages that the thread refs grant, and those of each item ref.
+    // The granted messages: each clean message of a thread of the scope,
+    // and each clean source message of an item of the scope. A row that is
+    // gone from the store is left out.
     let mut by_thread = BTreeSet::new();
     let mut by_item: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
     for r in &refs {
@@ -232,12 +235,13 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
             if !clean(c, &m)? {
                 continue;
             }
-            threads
+            grant
+                .threads
                 .entry(t)
                 .or_insert_with(|| (account, BTreeSet::new()))
                 .1
                 .insert((m.at, m.id));
-            granted.insert(m.id);
+            grant.messages.insert(m.id);
             match *r {
                 Ref::Thread(_) => by_thread.insert(m.id),
                 Ref::Item(i) => by_item.entry(i).or_default().insert(m.id),
@@ -252,10 +256,6 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
             items.insert(i?);
         }
     }
-
-    for (_, folder, _) in FORMS {
-        new_dir(&stage.join(folder))?;
-    }
     for i in items {
         let row: Option<(String, String)> = c
             .query_row("SELECT form, status FROM item WHERE id = ?1", [i], |r| {
@@ -265,26 +265,62 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
         let Some((form, status)) = row else {
             continue;
         };
-        let Some((_, folder, kind)) = FORMS.iter().find(|(f, _, _)| *f == form) else {
-            // feed, signal and conversation never go into a workspace.
-            continue;
-        };
-        let s = sources(i)?;
-        // An item goes in only if one grant holds each of its sources: the
-        // thread refs, or its own item ref. A message of an item ref grants
-        // no other item, because one message can feed more than one item.
-        let all_in = |g: &BTreeSet<i64>| s.iter().all(|(m, _)| g.contains(m));
-        let ok = all_in(&by_thread) || by_item.get(&i).is_some_and(all_in);
-        if status == "gone" || s.is_empty() || !ok {
+        // feed, signal and conversation never go into a workspace.
+        if status == "gone" || !FORMS.iter().any(|(f, _, _)| *f == form) {
             continue;
         }
+        let s = sources(c, i)?;
+        // An item goes in only if one grant holds each of its sources: the
+        // thread refs together (each source in the list of a thread ref,
+        // workspace spec, build step 2), or its own item ref. A message of an item ref grants
+        // no other item, because one message can feed more than one item.
+        let all_in = |g: &BTreeSet<i64>| s.iter().all(|m| g.contains(m));
+        if !s.is_empty() && (all_in(&by_thread) || by_item.get(&i).is_some_and(all_in)) {
+            grant.items.insert(i);
+        }
+    }
+    Ok(grant)
+}
+
+/// The source messages of an item that are in the store.
+fn sources(c: &Connection, item: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut q = c.prepare_cached(
+        "SELECT m.id FROM item_source s
+         JOIN message m ON m.id = s.message_id WHERE s.item_id = ?1 ORDER BY m.id",
+    )?;
+    let rows = q.query_map([item], |r| r.get(0))?;
+    rows.collect()
+}
+
+fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
+    let j = iris_job::get_in(c, job)?;
+    let mut built = Built {
+        revoked: iris_job::revoked_count_in(c, job)?,
+        ..Built::default()
+    };
+
+    let mut doc = BufWriter::new(new_file(&stage.join("job.json"))?);
+    iris_job::write_document_in(c, job, &mut doc)?;
+    doc.into_inner().map_err(|e| e.into_error())?;
+
+    let Grant { items, threads, .. } = grant_in(c, job)?;
+
+    for (_, folder, _) in FORMS {
+        new_dir(&stage.join(folder))?;
+    }
+    for i in items {
+        let form: String = c.query_row("SELECT form FROM item WHERE id = ?1", [i], |r| r.get(0))?;
+        let (_, folder, kind) = FORMS
+            .iter()
+            .find(|(f, _, _)| *f == form)
+            .expect("the grant holds only the forms of FORMS");
         let id = format_id(*kind, i);
         // Store rows only, no text of the model: understanding gives the
         // model inputs from outside the grant, and the store does not record
         // which input a value came from.
-        let sources: Vec<String> = s
-            .iter()
-            .map(|(m, _)| format_id(Kind::Message, *m))
+        let sources: Vec<String> = sources(c, i)?
+            .into_iter()
+            .map(|m| format_id(Kind::Message, m))
             .collect();
         // No status: a later message, which the job can lack, can set it.
         let doc = json!({ "model": "iris/0", "id": id, "form": form, "sources": sources });
@@ -336,18 +372,25 @@ pub fn readable(c: &Connection, id: i64) -> rusqlite::Result<bool> {
 }
 
 /// True if `m` can go into a workspace: clean for the conversation rule, not
-/// gone, and not the source of a signal, which can hold a security code.
+/// gone, not mail that can be hostile (`iris_store::may_be_hostile!()`: also
+/// mail that waits for its link check), and not the source of a signal, which
+/// can hold a security code.
 fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {
     if !m.for_reader() {
         return Ok(false);
     }
-    let signal: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
-         WHERE s.message_id = ?1 AND i.form = 'signal')",
+    let bad: bool = c.query_row(
+        concat!(
+            "SELECT ",
+            iris_store::may_be_hostile!(),
+            " OR EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
+               WHERE s.message_id = m.id AND i.form = 'signal')
+             FROM message m WHERE m.id = ?1"
+        ),
         [m.id],
         |r| r.get(0),
     )?;
-    Ok(!signal)
+    Ok(!bad)
 }
 
 /// Write `threads/t-<id>.md` with the granted messages of `thread`. Gives

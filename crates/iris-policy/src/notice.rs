@@ -40,7 +40,8 @@ pub struct Notice {
 /// its items, [`WINDOW_MS`] or less before `now_ms`, so that a rule on a form
 /// waits for the model, up to [`LATE_MS`] after the fetch. Its date must be at most [`WINDOW_MS`] before the
 /// fetch, so that the old mail of a sync gives no notice. A mail with no `body` row waits: the
-/// hostile check writes with the body. Each guard reads the store in the
+/// hostile check writes with the body. A mail with a `link_check` row waits
+/// too: its link check did not run yet (migration 20). Each guard reads the store in the
 /// transaction that writes the notice. A notice keeps the rule and the
 /// policy version of its time.
 pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
@@ -58,17 +59,18 @@ pub fn refresh(store: &Store, now_ms: i64) -> Result<Vec<Notice>> {
             return Ok(Vec::new());
         }
         let ids: Vec<i64> = tx
-            .prepare(
+            .prepare(concat!(
                 "SELECT m.id FROM message m
                  WHERE (m.fetched_at >= ?1 OR (m.understood_at >= ?1 AND m.fetched_at >= ?3))
                    AND m.gone_at IS NULL
                    AND m.internal_date >= m.fetched_at - ?2
                    AND EXISTS (SELECT 1 FROM body b WHERE b.message_id = m.id)
+                   AND NOT ", iris_store::may_be_hostile!(), "
                    AND NOT EXISTS (SELECT 1 FROM notice n WHERE n.message_id = m.id)
                    AND NOT EXISTS (SELECT 1 FROM message_label ml JOIN label l ON l.id = ml.label_id
                        WHERE ml.message_id = m.id AND l.provider_id IN ('SPAM', 'TRASH'))
                  ORDER BY m.id",
-            )?
+            ))?
             .query_map(params![now_ms - WINDOW_MS, WINDOW_MS, now_ms - LATE_MS], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let now = now_ms.div_euclid(1000);

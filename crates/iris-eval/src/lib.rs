@@ -43,7 +43,7 @@ pub struct Answer {
 pub fn expected(mb: &Mailbox, i: usize) -> Answer {
     let t = mb.truth(i);
     Answer {
-        form: (t.sender != Sender::Hostile).then_some(t.form),
+        form: (!t.hostile()).then_some(t.form),
         sender: Some(t.sender),
         fields: mb
             .fields(i)

@@ -93,8 +93,11 @@ impl Rule {
 
     /// The message row IDs of the rule, minus the messages of earlier rules.
     /// Read the rules in one transaction, so no message is in two rules.
+    /// No rule takes a message that waits for its link check (store
+    /// migration 20): its items can be of mail that is hostile.
     pub fn query(self) -> String {
         let mut q = self.select().to_string();
+        q.push_str(" EXCEPT SELECT message_id FROM link_check");
         for earlier in Rule::ALL.iter().take_while(|r| **r != self) {
             q.push_str(" EXCEPT ");
             q.push_str(earlier.select());

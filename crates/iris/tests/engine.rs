@@ -638,6 +638,9 @@ fn mail_that_waits_for_a_model_is_read_again_only_after_a_change() {
 fn the_engine_stores_the_triage_proposal() {
     let s = setup("engine-triage", 5);
     s.worker(s.account).sync().unwrap();
+    // Triage leaves out mail that waits for its link check. The understand
+    // thread of the engine ends the checks; here the test ends them first.
+    iris_understand::store::recheck_links(&s.store, 0, None).unwrap();
     s.store
         .write(|tx| {
             tx.execute(

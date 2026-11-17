@@ -14,6 +14,7 @@ pub mod batch;
 pub mod budget;
 pub mod correct;
 pub mod head;
+pub mod link;
 pub mod prompt;
 pub mod rules;
 mod schema;
@@ -66,6 +67,9 @@ impl Kind {
 pub enum Mark {
     Dmarc,
     Spoof,
+    /// A link that shows one web address and goes to another owner
+    /// ([`link::deceptive`]).
+    Link,
     Spam,
     Phishing,
 }
@@ -75,6 +79,7 @@ impl Mark {
         match self {
             Mark::Dmarc => "dmarc",
             Mark::Spoof => "spoof",
+            Mark::Link => "link",
             Mark::Spam => "spam",
             Mark::Phishing => "phishing",
         }
@@ -128,11 +133,24 @@ pub struct Text {
     pub cut: bool,
     /// A `text/calendar` part with the method `REQUEST` (from `iris-clean`).
     pub invitation: bool,
+    /// The HTML links whose text is not their target (from `iris-clean`),
+    /// for the mark `link`.
+    pub links: Vec<iris_clean::Link>,
+    /// `iris-clean` could not list each link.
+    pub links_cut: bool,
 }
 
 impl Text {
     pub fn of(raw: &[u8]) -> Text {
-        let c = iris_clean::clean(raw);
+        Text::of_cut(raw, false, false)
+    }
+
+    /// [`Text::of`] for the first bytes of a message: `raw_cut` is true
+    /// when `raw` is a prefix of a longer message (`iris_clean::clean_cut`),
+    /// and `html_after` when the rest can hold an HTML part
+    /// (`iris_clean::html_part_in`). Then the link list is cut.
+    pub fn of_cut(raw: &[u8], raw_cut: bool, html_after: bool) -> Text {
+        let c = iris_clean::clean_cut(raw, raw_cut);
         let mut attachment_text = Vec::new();
         let mut attachments = Vec::with_capacity(c.attachments.len());
         for a in c.attachments {
@@ -148,6 +166,8 @@ impl Text {
             attachment_text,
             cut: c.cut,
             invitation: c.invitation,
+            links: c.links,
+            links_cut: c.links_cut || html_after,
         }
     }
 }
@@ -170,10 +190,43 @@ impl Analysis {
 }
 
 /// Steps 1 to 3: parse the headers, make the clean text, compute the hostile
-/// marks `dmarc`, `spoof` and `spam`.
+/// marks `dmarc`, `spoof`, `link` and `spam`.
 pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
+    analyze_cut(raw, false, false, cx)
+}
+
+/// The DMARC result of the message. It counts only with its `header.from`
+/// domain, and only for the domain of the From address.
+fn dmarc_of(head: &Head) -> Option<&str> {
+    let from_domain = head::ascii_domain(head::domain(head.from_addr.as_deref().unwrap_or("")));
+    head.auth
+        .as_ref()
+        .filter(|a| {
+            a.dmarc_from
+                .as_deref()
+                .is_some_and(|d| head::ascii_domain(d) == from_domain)
+        })
+        .and_then(|a| a.dmarc.as_deref())
+}
+
+/// True when the links of a received message give the mark `link`
+/// ([`link::deceptive`]). The caller skips your sent mail.
+pub fn link_mark(head: &Head, links: &[iris_clean::Link], links_cut: bool) -> bool {
+    let from_domain = head::domain(head.from_addr.as_deref().unwrap_or(""));
+    link::deceptive(
+        links,
+        links_cut,
+        from_domain,
+        dmarc_of(head) == Some("pass"),
+    )
+}
+
+/// [`analyze`] for the first bytes of a message, with the flags of
+/// [`Text::of_cut`]. A link past the cut can be missing, so the mark `link`
+/// reads the flags too.
+pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) -> Analysis {
     let head = Head::parse(raw);
-    let mut text = Text::of(raw);
+    let mut text = Text::of_cut(raw, raw_cut, html_after);
     if !cx.same_sender.is_empty() {
         // The cut mark is not part of the text: it stays at the end.
         let strip = |t: &str| {
@@ -192,17 +245,7 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
     let mut marks = Vec::new();
     let from = head.from_addr.as_deref().unwrap_or("");
     let from_domain = head::domain(from);
-    // A DMARC result counts only with its `header.from` domain, and only
-    // for the domain of this From address.
-    let dmarc = head
-        .auth
-        .as_ref()
-        .filter(|a| {
-            a.dmarc_from
-                .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
-        })
-        .and_then(|a| a.dmarc.as_deref());
+    let dmarc = dmarc_of(&head);
     // Mail with the label SENT is yours (spec 1 section 6.7): its own
     // `From` header cannot make it a spoof or a DMARC fail.
     let sent = cx.labels.iter().any(|l| l == "SENT");
@@ -218,6 +261,9 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
                 marks.push(Mark::Spoof);
             }
         }
+    }
+    if !sent && link_mark(&head, &text.links, text.links_cut) {
+        marks.push(Mark::Link);
     }
     if cx.labels.iter().any(|l| l == "SPAM") {
         marks.push(Mark::Spam);

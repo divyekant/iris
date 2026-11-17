@@ -33,7 +33,7 @@ fn agent() -> Author {
         kind: AuthorKind::Agent,
         name: Some("Claude Code".into()),
         session: Some("se-12".into()),
-        job: Some("j-142".into()),
+        job: None,
     }
 }
 

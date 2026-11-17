@@ -458,6 +458,7 @@ Times are integers: milliseconds since the Unix epoch, UTC.
 | `understand_run` | `id` INTEGER PK, `started_at`, `ended_at`, `model` TEXT, `prompt` TEXT, `messages`, `calls`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `unknown_calls`, `unknown_cost_micro_usd`, `reserved_micro_usd`, `stop` TEXT | Each run of understanding, with its calls, tokens and cost (`docs/specs/2026-11-16-cost-control.md`). |
 | `understand_estimate` | `code` TEXT PK, `model_version`, `messages`, `input_tokens`, `output_tokens`, `cost_micro_usd`, `created_at` | One-time estimate receipts for the budget approval (`docs/specs/2026-11-16-cost-control.md`). |
 | `matter`, `matter_item`, `matter_run` | See `docs/specs/2026-11-16-matters.md` (migration 16). | Matters: the proposals of Iris, the decisions of the person, and the last proposal call. |
+| `link_check` | `id` INTEGER PK AUTOINCREMENT, `message_id` INTEGER UNIQUE, FK to `message` | Migration 20: the live messages whose content has not had the link check of the hostile mark `link` (section 6.7). At the migration: each live message. Triggers add a row for new content, for a message that comes back, and for a message that loses the label `SENT` or `DRAFT`. Each batch run first reads all rows (`recheck_links`), before it makes the model, so a model error or failed tries cannot hold the check back. A message with a deceptive link is understood at once, with no model, so it goes to quarantine and its items go. A message that it understands counts toward the message limit of the run. A check that finds no deceptive link removes a `link` mark of earlier content. Each trigger gives the message a new row (a new `id`), and a check removes only the row that it read, so a change during a check queues the message again. A row goes only when the store has the result for the content that the check read. A row whose file Iris cannot read stays. While a message has a row, it counts as hostile mail for each gate that lets the model, a rule, an agent, a notice or a watch use mail (the SQL condition `iris_store::may_be_hostile!()`): rules and agents cannot act on it as on clean mail, Ask, the thread context of the model and job workspaces leave it out, the triage rules of observe mode leave it out, and notices and watches wait. Each start and each end of a check marks the message in `attention_due`. |
 | `model_setting` | `id` INTEGER PK (one row), `version` INTEGER, `provider` TEXT, `base_url` TEXT, `model` TEXT, `price_in`, `price_out`, `api_key` BLOB (encrypted), `max_tokens`, `timeout_s`, `budget_micro_usd` | The model of understanding, and the budget that the person approved for paid runs (`docs/specs/2026-11-16-cost-control.md`). |
 
 The `message`, `thread`, `sender` and `item` tables use `INTEGER PRIMARY KEY
@@ -743,14 +744,14 @@ The `hostile` column of the message holds each mark that applies:
 |---|---|
 | `dmarc` | `Authentication-Results` reports a DMARC fail for the domain of `From`. |
 | `spoof` | The display name is the name of a known person, the address is not the address of that person, and DKIM or DMARC does not pass for the domain of the address. If DKIM and DMARC pass, the address is a new sender, with the kind `stranger`. |
+| `link` | An HTML link of the message (from `Clean.links`) shows a web address with the host `S` (text that starts with `http://`, `https://` or `www.`, or a first word that is a domain with a known public suffix, not a file name such as `report.pdf`), and its target is an `http` or `https` URL that a browser opens on another owner. Iris reads the target with the WHATWG URL standard. The owner of a host is its registrable domain by the public suffix list, with the hosts and the `From` domain in punycode (so `münchen.de` and `xn--mnchen-3ya.de` are one owner). The link is deceptive if one of these is true: the target host is an IP address or Iris cannot read it; the target has a user part, a backslash or a percent sign in front of its path; the target host has another owner than `S`. If DMARC passes for the domain of `From` and that domain has the owner of `S`, the link is not deceptive: the sender owns the shown domain and can link through any redirect. DMARC for another domain proves nothing about `S`. If `iris-clean` could not list each link (`links_cut`), or the part of the file past the read limit has a part header (after a delimiter of a declared boundary) with the type `text/html`, the message gets the mark. |
 | `spam` | The message has the label `SPAM`. |
 | `phishing` | The understanding step marks the message as phishing. |
 
-A message with the label `SENT` is your mail. It never gets the marks `dmarc`
-and `spoof`, because these marks test the `From` header of mail that you
-receive.
+A message with the label `SENT` is your mail. It never gets the marks `dmarc`,
+`spoof` and `link`, because these marks test mail that you receive.
 
-The engine computes the marks `dmarc`, `spoof` and `spam` again at each change
+The engine computes the marks `dmarc`, `spoof`, `link` and `spam` again at each change
 of the label set of the message. The mark `phishing` stays until a rebuild.
 When a mark is set, or the last mark is cleared, the engine runs understanding
 again on the message (section 7.1).
