@@ -31,9 +31,12 @@ stops these actions when the agent follows such a message.
    the workspace of its own job. So it cannot read the store key, the
    database, the engine socket `iris.sock` or the socket of another
    session.
-4. A process of a session cannot write a file outside its workspace and its
-   private home. So it cannot change a settings file that a program outside
-   the sandbox runs later (for example the hooks of an agent tool).
+4. A process of a session cannot write a file outside its workspace, its
+   private home and its private `/tmp`. The private home and `/tmp` are
+   empty `tmpfs` mounts of the session: no host file is in them, and they
+   are gone when the session ends. So a process cannot change a host file,
+   for example a settings file that a program outside the sandbox runs
+   later (the hooks of an agent tool).
 5. No process of a session outlives its helper (the lifetime rule).
 6. `stop` and `ended` find the processes of a session after a restart of
    the engine.
@@ -277,8 +280,9 @@ The agent sees only these paths.
 | System programs and libraries: `/usr` without `/usr/local`, and `/bin`, `/sbin` and `/lib*` (a link to `/usr`, or the folder) | Read |
 | The system files that programs read at the start, each one if present: in `/etc`, the files `ld.so.cache`, `ld.so.conf`, `passwd`, `group`, `nsswitch.conf`, `hosts`, `localtime`, `os-release`, and the folders `ld.so.conf.d` and `alternatives`; only the public certificate authority files: `ssl/certs`, `ssl/cert.pem`, `ssl/openssl.cnf`, `pki/tls/certs`, `pki/tls/cert.pem`, `pki/tls/openssl.cnf`, `pki/ca-trust/extracted` and `ca-certificates/extracted`. The folders of private keys (`ssl/private`, `pki/tls/private`) are not in the view | Read |
 | The file of the adapter program (its real path) and the file of the `iris` program | Read |
-| A new `/proc`, a minimal `/dev`, and an empty `/tmp` | As `bwrap` makes them |
-| The root of the view (a `tmpfs` of `bwrap`) and each other folder that the view makes | Read only (`--remount-ro /`) |
+| A new `/proc`, a minimal `/dev` | As `bwrap` makes them |
+| The private `/tmp`: an empty `tmpfs` of the session, gone at its end | Read and write |
+| The root of the view (a `tmpfs` of `bwrap`), the empty `/usr/local` and the empty data folder (both `tmpfs`), and each other folder that the view makes | Read only: `--remount-ro` of `/usr/local`, of the data folder and of `/` after the last mount. A remount is not recursive, so the workspace keeps its write access |
 
 Each other path is not visible. This holds the data folder, the home
 folder of the person, `/opt`, `/srv`, `/var`, `/run`, each other file of
@@ -320,7 +324,9 @@ each adapter program is.
 ### Check
 
 `bwrap` is found, and one probe run of `bwrap` with the options of
-`command()` and the program `true` exits with 0 in 5 seconds. The kernel
+`command()` (the data folder in the place of the workspace, so each
+mount of a real view happens) and the program `true` exits with 0 in 5
+seconds. The kernel
 gives a `pidfd` (`pidfd_open` exists, Linux 5.3). A system that refuses
 user namespaces (for example an AppArmor rule) fails the probe; the reason
 names the `bwrap` error.
