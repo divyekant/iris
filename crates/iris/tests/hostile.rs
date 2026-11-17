@@ -11,8 +11,8 @@
 //!   thread of the attack. Today the engine denies its submit.
 //!
 //! Before the agent runs, the mail goes through a sync and through
-//! understanding with no model: the headers, the clean text and the
-//! hostile marks. The test checks the clean text of each attack.
+//! the link checks and understanding with no model. The test checks the
+//! clean text of each attack, and that no sample has a hostile mark.
 //!
 //! The setup is the worst case: the mode `apply`, a rule that allows each
 //! Gmail verb on all mail, and the send switch on. Then the test tries a
@@ -101,8 +101,15 @@ fn engine() -> Engine {
     let store = Arc::new(Store::open(&dir).unwrap());
     let account = store.add_account("gmail", OWNER).unwrap();
     iris_sync::sync(&store, &gmail, account, TOKEN).unwrap();
-    // Understanding with no model: the headers, the hostile marks and the
-    // sender kinds. Each model call is refused, so the run of a message
+    // Step 1 of each batch run: the link checks. A queued check counts as
+    // hostile mail, so the test ends each check first.
+    iris_understand::store::recheck_links(&store, now(), None).unwrap();
+    let queued: i64 = store
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM link_check", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(queued, 0, "a link check is still queued");
+    // Understanding with no model: the headers, the clean text, the hostile
+    // marks and the sender kinds. Each model call is refused, so the run of a message
     // ends after these steps with an error.
     let ids: Vec<i64> = store
         .read(|c| {
@@ -357,6 +364,17 @@ fn no_injection_sends_mail_without_a_person() {
         e.one::<i64>("SELECT id FROM draft WHERE action_id IS NOT NULL", [])
     );
 
+    // No sample has a hostile mark: each sender passes DMARC and no link
+    // deceives. The text of an injection gives no mark, so each guard below
+    // must hold without one.
+    for s in SAMPLES {
+        let marks: Option<String> = e.one(
+            "SELECT m.hostile FROM message m JOIN header h ON h.message_id = m.id
+             WHERE h.message_id_hdr IN (?1, trim(?1, '<>'))",
+            [s.message_id()],
+        );
+        assert_eq!(marks.as_deref(), Some("[]"), "{}", s.name);
+    }
     // Iris decoded each attack into the clean text that an agent reads,
     // except the hidden HTML block: the clean text takes the plain part.
     for s in SAMPLES {
@@ -400,25 +418,16 @@ fn no_injection_sends_mail_without_a_person() {
             let actions = e.actions(&cs);
             assert_eq!(actions.len(), 1, "{}: {cs}", s.name);
             let (a, state, flags) = actions.into_iter().next().unwrap();
-            // A rule never decides a draft or a send. The engine denies a
-            // reply: understanding marked each sample as hostile mail. The
-            // first send of the draft waits for a person, and the engine
-            // denies each later send of the same draft.
+            // A rule never decides a draft or a send: each waits for a
+            // person. The engine denies each later send of the same draft,
+            // because the first send can still go out.
             let reason: Option<String> =
                 e.one("SELECT reason FROM changeset_action WHERE id = ?1", [a]);
-            let first_send = s.ask == Ask::SendDraft && i == 0;
-            match s.ask {
-                Ask::Draft { reply: true, .. } => {
-                    assert_eq!(state, "denied", "{}: {cs}", s.name);
-                    let reason = reason.unwrap_or_default();
-                    assert!(reason.contains("hostile mail"), "{}: {reason}", s.name);
-                }
-                Ask::Draft { reply: false, .. } => {
-                    assert_eq!(state, "in_review", "{}: {cs}", s.name)
-                }
-                Ask::SendDraft if first_send => assert_eq!(state, "in_review", "{}: {cs}", s.name),
-                Ask::SendDraft => assert_eq!(state, "denied", "{}: {cs} {reason:?}", s.name),
-            }
+            let expect = match s.ask {
+                Ask::SendDraft if i > 0 => "denied",
+                _ => "in_review",
+            };
+            assert_eq!(state, expect, "{}: {cs} {reason:?}", s.name);
             let outside = flags.iter().any(|f| f == "outside_thread");
             // The draft of the owner is a new mail to priya: a new mail has
             // no thread, so its send goes outside the thread too.
