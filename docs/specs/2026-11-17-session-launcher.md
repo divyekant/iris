@@ -166,6 +166,16 @@ line that says the rest is dropped, and then keeps reading the pipes and
 drops the bytes, so the agent never blocks on a full pipe and the log never
 grows past the limit.
 
+The log never holds a secret value that the session passed. Before each
+write, the helper replaces each value of a passed secret variable with
+`[hidden]`. The secret variables are the keys of the built-in adapters
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) and each `pass_env` variable. A
+value shorter than 8 bytes is refused at the run, because a short value
+can hide normal text. The filter keeps the last bytes of each chunk (the
+length of the longest value, less one) until the next chunk, so a value
+split across two reads is also found. An encoded form of a value (for
+example Base64) is not found: this is a known limit with an issue.
+
 ### The hold helper
 
 A held process must run no code of the agent until step 4 (workspace spec).
@@ -184,12 +194,17 @@ not the agent:
      error, which is a second pipe to the engine. The engine writes
      `agent_pgid` (the spawn move).
    - Any other line, or the end of the pipe: the helper exits with no child.
+
+   The helper itself is started inside the outer part of the isolation, so
+   the isolation binds the life of each process of the session to the
+   helper (see [Isolation](#isolation), lifetime rule).
 3. After the start, the helper waits for two events: the child exits, or
    the pipe ends (the engine stopped, or the engine closed the pipe to stop
    the session).
 4. On each of the two events, the helper stops the group of the agent:
    `SIGTERM` to the group, a wait of up to 5 seconds, then `SIGKILL` to the
-   group. It does this also after a normal exit of the agent, so a
+   group. Then it calls `Isolation::stop` of the session, which ends each
+   process that left the group. It does this also after a normal exit of the agent, so a
    background child that the agent left in its group stops too. Then the
    helper reaps the agent, and exits with the exit code of the agent (or
    the code of the signal).
@@ -198,8 +213,10 @@ So the pipe ties the session to the engine: when the engine process ends for
 any reason, the kernel closes the pipe, and the helper stops the agent. The
 helper waits for the group with `kill(-pgid, 0)`: the group has a process
 while the call succeeds. A process that the agent moves out of its group
-(`setsid`) is stopped by the isolation (R4-05), which ends each process of
-the isolation with the session.
+(`setsid`) is stopped by `Isolation::stop`, which the helper calls on the
+end of the pipe with no engine. If the helper is killed too, the lifetime
+rule of the isolation ends each process of the session. So no process of a
+session outlives both the engine and the helper.
 
 The helper is the same program as the engine, so no new file is installed.
 
@@ -330,6 +347,14 @@ ends.
   process of the session runs, or with an error.
 - `ended(session)`: true only if the isolation holds no process of the
   session (rule 3 of the reap check).
+- The lifetime rule: when the helper process ends for any reason, also
+  `SIGKILL`, each process in the isolation of the session ends, with no
+  call from the engine. For example on Linux, the agent runs in a new PID
+  namespace whose first process is a child of the helper with
+  `PR_SET_PDEATHSIG`; when the first process of a PID namespace ends, the
+  kernel kills each process in it. R4-05 gives the mechanism of each
+  system, and an isolation that cannot keep this rule does not pass the
+  check of the system.
 
 The engine calls `stop` on each end of a session, after it closes the pipe:
 on a stop, a revoke, a job move, a time limit, an exit of the agent, a
@@ -362,8 +387,14 @@ no network stops them. The engine gives each session one narrow path out:
   host or port gets `403` and closes.
 - The proxy relays the bytes and does not read them. TLS runs from the
   agent to the model host, so the engine sees no key and no text.
-- The proxy writes one line to the session log for each connection: the
-  host, the bytes in each direction, and the result.
+- The proxy writes one line for each connection to its own file,
+  `<data dir>/sessions/se-<id>.egress.log` (mode `0600`): the host, the
+  bytes in each direction, and the result. Only the proxy writes this file,
+  so it needs no shared append path with the helper. The file has a limit
+  of 1 MiB. At the limit the proxy writes one line that says the rest is
+  dropped, then only counts: at the end of the session it writes one last
+  line with the count of dropped lines, inside a reserved 4 KiB. So the
+  two logs of a session never pass 10 MiB and 1 MiB.
 - When the session ends, the engine closes the port and each open
   connection of the session.
 
@@ -480,7 +511,11 @@ is refused before a row is written.
 | The helper is killed and the agent group lives | The reap check fails on rule 2; the session stays live and a `run` is refused | Supervisor test: kill the helper, keep the group |
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
-| A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one log line | Proxy test |
+| A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line | Proxy test |
+| An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
+| The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
+| An agent that prints a passed key | The log has `[hidden]` in place of the value, also when a read splits the value | Helper property test: random chunk splits of output with the value |
+| A `pass_env` value shorter than 8 bytes | The run is refused with the name | Adapter test |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
 | An `allow_hosts` entry with a port, a wildcard or an IP address | Refused with the line | Parser test |
 
@@ -533,8 +568,8 @@ not of Iris. The proxy relays bytes and makes no request of its own:
 
 | Result | What happens |
 |---|---|
-| Success | The proxy relays the answer. The log line has the bytes. |
-| A definite rejection (the host refuses the TLS connection or answers an error) | The proxy relays it, or closes both sides. The agent tool decides what to do. The log line has the result. |
+| Success | The proxy relays the answer. The egress log line has the bytes. |
+| A definite rejection (the host refuses the TLS connection or answers an error) | The proxy relays it, or closes both sides. The agent tool decides what to do. The egress log line has the result. |
 | An unknown result (a time-out, a lost connection, an engine crash) | The proxy closes both sides. On an engine crash the kernel closes them, and the helper stops the agent. The provider can have taken and billed the request. |
 | A retry | Iris never retries and never replays a request: it cannot read the TLS bytes. The agent tool can retry, by its own rules. |
 
