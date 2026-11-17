@@ -595,12 +595,17 @@ fn marks_agree_with_the_flags_for_random_text() {
             })
             .unwrap();
         assert_eq!(names(&marks), flags, "{c:?}");
-        // One mark for each piece of text: no two marks of one flag in one field overlap or touch.
+        // One mark for each piece of text: no two marks of one flag in one
+        // field overlap, and two that touch have two sources.
         for (i, a) in marks.iter().enumerate() {
             for b in &marks[i + 1..] {
                 let apart = a.range.end < b.range.start || b.range.end < a.range.start;
+                let overlap = a.range.start < b.range.end && b.range.start < a.range.end;
                 assert!(
-                    a.flag != b.flag || a.field != b.field || apart,
+                    a.flag != b.flag
+                        || a.field != b.field
+                        || apart
+                        || (!overlap && a.source != b.source),
                     "{a:?} {b:?}"
                 );
             }

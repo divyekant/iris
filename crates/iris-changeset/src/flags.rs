@@ -437,9 +437,10 @@ fn scan(c: &Connection, account: &str, content: &Content, all: bool) -> Result<V
     Ok(merge(marks))
 }
 
-/// One mark for each piece of text: the marks of one flag in one field
-/// that overlap or touch become one mark ("$1,200 USD" is one amount),
-/// with the first source. The marks come in the order of [`DRAFT_FLAGS`],
+/// One mark for each piece of text: the marks of one flag, one field and
+/// one source that overlap or touch become one mark ("$1,200 USD" is one
+/// amount). Marks of two sources stay apart, so each copied run keeps its
+/// message; the copied runs never overlap. The marks come in the order of [`DRAFT_FLAGS`],
 /// then of the field, then of the text.
 fn merge(mut marks: Vec<Mark>) -> Vec<Mark> {
     let rank = |f: &str| DRAFT_FLAGS.iter().position(|x| *x == f);
@@ -450,10 +451,10 @@ fn merge(mut marks: Vec<Mark>) -> Vec<Mark> {
             Some(last)
                 if last.flag == m.flag
                     && last.field == m.field
+                    && last.source == m.source
                     && m.range.start <= last.range.end =>
             {
                 last.range.end = last.range.end.max(m.range.end);
-                last.source = last.source.or(m.source);
             }
             _ => out.push(m),
         }

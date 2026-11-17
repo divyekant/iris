@@ -206,3 +206,80 @@ async fn each_flag_of_the_test_set_shows_on_its_action_and_words() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// A writer that marks action 2 as approved at the first write of a draft.
+/// If the drafts are read one at a time, the answer leaves action 2 out.
+struct Decides<'a> {
+    store: &'a Store,
+    out: Vec<u8>,
+    writes: usize,
+}
+
+impl std::io::Write for Decides<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.writes += 1;
+        if self.writes == 2 {
+            self.store
+                .write(|tx| {
+                    Ok(tx.execute(
+                        "UPDATE changeset_action SET state = 'approved', decided_by = 'person' WHERE n = 2",
+                        [],
+                    )?)
+                })
+                .unwrap();
+        }
+        self.out.extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_drafts_stream_one_at_a_time_and_name_a_flag_with_no_mark() {
+    let dir = temp("stream");
+    let s = store(&dir);
+    let cs = create(&s, &agent(), NOW).unwrap();
+    let mail = json!({"to": ["dana@acme.example"], "cc": ["legal@new.example"],
+                      "subject": "Renewal", "body": "Hello Dana"})
+    .as_object()
+    .unwrap()
+    .clone();
+    for _ in 0..3 {
+        add_action(&s, cs, &agent(), Verb::Draft, &["a-1"], &mail, None).unwrap();
+    }
+    submit(&s, cs, &agent(), "Write to Dana.", NOW).unwrap();
+
+    // The memory holds one draft: the second draft is read after the first is written.
+    let mut w = Decides {
+        store: &s,
+        out: Vec::new(),
+        writes: 0,
+    };
+    iris_api::write_drafts(&s, cs, &mut w).unwrap();
+    let v: Value = serde_json::from_slice(&w.out).unwrap();
+    let ns: Vec<i64> = v["drafts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["n"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ns, [1, 3], "{v}");
+    assert_eq!(v["drafts"][0]["unmarked"], json!([]));
+
+    // The owner writes to the new address after the submit: the action keeps
+    // its flag, and the flag has no mark now.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO sender_evidence(message_id, address, rule) VALUES (2, 'legal@new.example', 'sent')",
+            [],
+        )?)
+    })
+    .unwrap();
+    let (code, v) = get(&s, &format!("/api/changesets/cs-{cs}/drafts")).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let d = &v["drafts"][0];
+    assert_eq!(d["cc"], json!([{"address": "legal@new.example"}]));
+    assert_eq!(d["unmarked"], json!(["new_recipient"]));
+}

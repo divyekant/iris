@@ -38,6 +38,7 @@ mod verbs;
 mod watch;
 pub use ask::{answer, AskAnswer, AskSource, Connect};
 pub use auth::{Auth, SIGN_IN};
+pub use drafts::write_drafts;
 pub use export::{export, Exported};
 pub use jobs::*;
 pub use matters::{confirm_matter, decline_matter, matter, matters};
@@ -224,7 +225,7 @@ async fn get_drafts(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resu
     let Some(row) = changeset_row(&s, &id)? else {
         return Ok(not_found());
     };
-    Ok(Json(drafts::drafts(&s, row)?).into_response())
+    Ok(stream(move |w| drafts::write_drafts(&s, row, w)).await)
 }
 
 #[derive(Deserialize)]
