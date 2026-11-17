@@ -385,6 +385,7 @@ pub fn draft(
     store: &Store,
     connect: &crate::Connect,
     thread: &str,
+    parent: &str,
     intent: &str,
     now_ms: fn() -> i64,
 ) -> Result<Option<Value>> {
@@ -392,15 +393,24 @@ pub fn draft(
     let Some((Kind::Thread, row)) = parse_id(thread) else {
         return Ok(None);
     };
-    let exists: bool = store.read(|c| {
-        Ok(c.query_row(
+    let (exists, now_parent): (bool, Option<i64>) = store.read(|c| {
+        let exists = c.query_row(
             "SELECT EXISTS (SELECT 1 FROM thread WHERE id = ?1)",
             [row],
             |r| r.get(0),
-        )?)
+        )?;
+        Ok((exists, iris_changeset::reply_parent(c, row)?))
     })?;
     if !exists {
         return Ok(None);
+    }
+    // The draft answers the mail that the form shows. A newer parent costs
+    // no call: the person reads the new mail first. The draft gives
+    // `based_on`, so the client can check it again after the call.
+    if now_parent.map(|m| format_id(Kind::Message, m)).as_deref() != Some(parent) {
+        return Err(Error::Conflict(
+            "A new mail came into this thread. Read it, then ask again.".into(),
+        ));
     }
     let intent = (!intent.trim().is_empty()).then_some(intent);
     let d = iris_voice::draft(store, row, intent, &|r| connect(r), now_ms(), &now_ms).map_err(

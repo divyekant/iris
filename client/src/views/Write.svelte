@@ -45,6 +45,7 @@
     flags: string[];
     toText?: string;
     ccText?: string;
+    intent?: string;
   };
   function storage(): Storage | undefined {
     try {
@@ -110,7 +111,7 @@
   // Save each part of the form that a reload must keep: the text of an address
   // not yet a chip, and the warnings that the next press sends, too.
   $effect(() => {
-    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText };
+    const form: Saved = { account, to, cc, subject, body, key, sig, flags, toText, ccText, intent };
     if (write) return;
     try {
       storage()?.setItem(place, JSON.stringify(form));
@@ -142,7 +143,7 @@
 
   // The intent path (spec section 8): the engine writes the text in the voice of
   // the person from what they want to say. The person reads and edits it before Send.
-  let intent = $state("");
+  let intent = $state(saved?.intent ?? "");
   let drafting = $state(false);
   let draftNote = $state("");
   async function draftIt() {
@@ -150,8 +151,11 @@
     drafting = true;
     draftNote = "";
     try {
-      const v = await post<{ body: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent });
-      if (alive) body = v.body;
+      const parent = reply?.parent.id;
+      const v = await post<{ body: string; based_on: string }>(`threads/${encodeURIComponent(thread)}/draft`, { intent, parent });
+      // The text goes in the form only if it answers the mail that the form shows.
+      if (v.based_on !== parent) draftNote = "A new mail came into this thread. Read it, then ask again.";
+      else if (alive) body = v.body;
     } catch (e) {
       draftNote = own(e);
     }

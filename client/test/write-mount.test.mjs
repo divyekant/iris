@@ -348,7 +348,7 @@ test("Write it for me sends the intent to the engine and puts its draft in the t
     await until(() => app.target.querySelector("textarea").value.startsWith("Hi Priya"));
     const [post] = net.posts();
     assert.equal(post.path, "threads/t-2/draft");
-    assert.deepEqual(post.body, { intent: "yes, Wednesday" });
+    assert.deepEqual(post.body, { intent: "yes, Wednesday", parent: "m-9" }, "the draft answers the mail that the form shows");
     assert.equal(app.target.querySelector("fieldset").disabled, false);
     assert.equal(app.target.querySelector("button[type=submit]").disabled, false, "the person can send the draft");
   } finally {
@@ -368,6 +368,37 @@ test("a refused draft shows its reason and keeps the text", async () => {
     await until(() => app.target.querySelector(".note"));
     assert.match(text(app.target.querySelector(".note")), /hostile mail/);
     assert.equal(app.target.querySelector("textarea").value, "My own words.");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a draft for another mail than the one the form shows does not go in the text", async () => {
+  const net = serve(() => [200, { body: "Text for a newer mail.", based_on: "m-10", samples: 1, unknown_cost: false, overrun: false }]);
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    type(app.target.querySelector("textarea"), "My own words.");
+    app.flushSync();
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Write it for me").click();
+    await until(() => app.target.querySelector(".note"));
+    assert.match(text(app.target.querySelector(".note")), /A new mail came into this thread/);
+    assert.equal(app.target.querySelector("textarea").value, "My own words.");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("the intent stays when the person leaves the form and comes back", async () => {
+  const net = serve(() => [404, {}]);
+  let app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    type(app.target.querySelector(".intent input"), "yes, Wednesday");
+    app.flushSync();
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+    assert.equal(app.target.querySelector(".intent input").value, "yes, Wednesday");
   } finally {
     app.destroy();
     net.restore();

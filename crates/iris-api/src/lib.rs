@@ -342,6 +342,9 @@ struct DraftBody {
     /// writes the reply from the thread alone.
     #[serde(default)]
     intent: String,
+    /// The mail that the form answers (`m-N`, the `parent` of the reply
+    /// start values). A newer parent makes a 409 before the call.
+    parent: String,
 }
 
 /// A draft of the reply in the voice of the person (R3-04 intent path,
@@ -355,9 +358,11 @@ async fn post_draft(
     let b = body(b)?;
     let connect =
         connect.ok_or_else(|| Error::Unavailable("This engine has no model client.".into()))?;
-    let d = tokio::task::spawn_blocking(move || write::draft(&s, &connect, &id, &b.intent, now_ms))
-        .await
-        .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
+    let d = tokio::task::spawn_blocking(move || {
+        write::draft(&s, &connect, &id, &b.parent, &b.intent, now_ms)
+    })
+    .await
+    .map_err(|e| Error::Store(std::io::Error::other(e.to_string()).into()))??;
     Ok(d.map_or_else(not_found, |v| Json(v).into_response()))
 }
 

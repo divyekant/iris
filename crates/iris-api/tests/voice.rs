@@ -123,7 +123,7 @@ async fn an_intent_gives_a_draft_in_your_voice() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "say yes"}),
+        json!({"intent": "say yes", "parent": "m-1"}),
     )
     .await;
     assert_eq!(code, StatusCode::OK, "{v}");
@@ -148,8 +148,23 @@ async fn an_intent_gives_a_draft_in_your_voice() {
         .unwrap();
     assert!(left < 1_000_000, "{left}");
     // An empty intent: the draft comes from the thread alone.
-    let (code, _) = post(&s, fake(), "/api/threads/t-1/draft", json!({})).await;
+    let (code, _) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"parent": "m-1"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::OK);
+    // A body with no parent.
+    let (code, _) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
 }
 
 /// Each refusal saves no draft and names what to do.
@@ -157,13 +172,19 @@ async fn an_intent_gives_a_draft_in_your_voice() {
 async fn a_refused_draft_saves_nothing() {
     // No model client, and no budget.
     let s = store("refused", None);
-    let (code, _) = post(&s, None, "/api/threads/t-1/draft", json!({"intent": "yes"})).await;
+    let (code, _) = post(
+        &s,
+        None,
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes", "parent": "m-1"}),
+    )
+    .await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     let (code, v) = post(
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "yes"}),
+        json!({"intent": "yes", "parent": "m-1"}),
     )
     .await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{v}");
@@ -171,7 +192,7 @@ async fn a_refused_draft_saves_nothing() {
     // A thread that does not exist, and an ID that is not a thread.
     let s = store("refused-2", Some(1_000_000));
     for uri in ["/api/threads/t-9/draft", "/api/threads/m-1/draft"] {
-        let (code, _) = post(&s, fake(), uri, json!({"intent": "yes"})).await;
+        let (code, _) = post(&s, fake(), uri, json!({"intent": "yes", "parent": "m-1"})).await;
         assert_eq!(code, StatusCode::NOT_FOUND, "{uri}");
     }
     // A long intent, and a field that the route does not know.
@@ -180,7 +201,7 @@ async fn a_refused_draft_saves_nothing() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": long}),
+        json!({"intent": long, "parent": "m-1"}),
     )
     .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -188,7 +209,7 @@ async fn a_refused_draft_saves_nothing() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "yes", "to": "x"}),
+        json!({"intent": "yes", "parent": "m-1", "to": "x"}),
     )
     .await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -199,7 +220,7 @@ async fn a_refused_draft_saves_nothing() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "yes"}),
+        json!({"intent": "yes", "parent": "m-1"}),
     )
     .await;
     assert_eq!(code, StatusCode::CONFLICT, "{v}");
@@ -214,7 +235,7 @@ async fn a_refused_draft_saves_nothing() {
         &s,
         fake(),
         "/api/threads/t-1/draft",
-        json!({"intent": "yes"}),
+        json!({"intent": "yes", "parent": "m-1"}),
     )
     .await;
     assert_eq!(code, StatusCode::CONFLICT, "{v}");
@@ -287,11 +308,12 @@ async fn property_a_draft_answers_the_parent_of_the_form() {
         let start_code = res.status();
         let start: Value =
             serde_json::from_slice(&to_bytes(res.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let parent = start["parent"]["id"].as_str().unwrap_or("m-1").to_string();
         let (code, v) = post(
             &s,
             fake(),
             "/api/threads/t-1/draft",
-            json!({"intent": "yes"}),
+            json!({"intent": "yes", "parent": parent}),
         )
         .await;
         if start_code == StatusCode::OK {
@@ -302,4 +324,45 @@ async fn property_a_draft_answers_the_parent_of_the_form() {
             assert_ne!(code, StatusCode::OK, "case {case}: {v}");
         }
     }
+}
+
+/// A mail that comes into the thread after the form opened: the draft for
+/// the old parent is a 409 before the call, so it costs nothing and saves
+/// nothing.
+#[tokio::test]
+async fn a_newer_mail_stops_the_draft_before_the_call() {
+    let s = store("newer", Some(1_000_000));
+    s.write(|tx| {
+        tx.execute(
+            "INSERT INTO message(account_id, thread_id, provider_id, internal_date, understood_at)
+               VALUES (1, 1, 'g2', 1794000009000, 1)",
+            [],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO header(message_id, from_addr, to_addrs, subject)
+               VALUES (?1, 'ana@example.org', 'owner@example.com', 'Lunch')",
+            [id],
+        )?;
+        tx.execute(
+            "INSERT INTO body(message_id, subject, sender, text)
+               VALUES (?1, 'Lunch', 'ana', 'Or Friday?')",
+            [id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = post(
+        &s,
+        fake(),
+        "/api/threads/t-1/draft",
+        json!({"intent": "yes", "parent": "m-1"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert!(drafts(&s).is_empty());
+    let runs: i64 = s
+        .read(|c| Ok(c.query_row("SELECT count(*) FROM understand_run", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(runs, 0, "no call");
 }
