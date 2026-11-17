@@ -26,8 +26,20 @@ function serve(answer) {
   return sent;
 }
 
+// The box opens from one quiet button; it stays open after a send.
+async function open(view) {
+  const button = await until(() => view.target.querySelector(".comments button.quiet") || view.target.querySelector(".comments textarea"));
+  if (button.tagName === "BUTTON") {
+    assert.match(button.textContent, /Ask Claude Code for a change/);
+    assert.equal(view.target.querySelector(".comments textarea"), null, "no box before the tap");
+    button.click();
+    view.flushSync();
+  }
+  return view.target.querySelector(".comments textarea");
+}
+
 async function write(view, text) {
-  const box = view.target.querySelector(".comments textarea");
+  const box = await open(view);
   box.value = text;
   box.dispatchEvent(new Event("input", { bubbles: true }));
   view.flushSync();
@@ -61,7 +73,6 @@ test("a send again after an unknown result sends the same key; a new text gets a
   });
   const view = await mount("/src/views/Request.svelte", { changeset: changeset(job) });
   try {
-    await until(() => view.target.querySelector(".comments textarea"));
     await write(view, "Keep the invoices.");
     const alert = await until(() => view.target.querySelector(".comments [role=alert]"));
     assert.match(alert.textContent, /does not know if it saved/);
@@ -82,7 +93,6 @@ test("a refused comment loads the request again and says why", async () => {
   serve(() => [409, { error: "the changeset has a newer revision" }]);
   const view = await mount("/src/views/Request.svelte", { changeset: changeset(job) });
   try {
-    await until(() => view.target.querySelector(".comments textarea"));
     await write(view, "Keep the invoices.");
     const alert = await until(() => view.target.querySelector(".request > [role=alert]"));
     assert.match(alert.textContent, /did not save your comment: the changeset has a newer revision/);

@@ -11,8 +11,8 @@
   type Comment = { id: number; changeset: string; revision: number; text: string; at: string };
 
   // `refused` loads the request again after a 409: the request changed after the page loaded it.
-  let { changeset: c, agent, refused = () => {}, folded = false }: { changeset: Changeset; agent: string; refused?: (why: string) => void; folded?: boolean } = $props();
-  // Option B of the compare: the box opens from one quiet button.
+  let { changeset: c, agent, refused = () => {} }: { changeset: Changeset; agent: string; refused?: (why: string) => void } = $props();
+  // The box opens from one quiet button (option B, the owner's pick).
   let writing = $state(false);
 
   // The engine keeps 1 to 4,000 characters (spec section 3).
@@ -80,7 +80,7 @@
       {/each}
     </ol>
   {/if}
-  {#if c.state === "open" && folded && !writing}
+  {#if c.state === "open" && !writing}
     <button type="button" class="quiet" onclick={() => (writing = true)}>Ask {agent} for a change</button>
   {:else if c.state === "open"}
     <form onsubmit={send}>
