@@ -132,7 +132,13 @@ The granted messages of a job:
   start. The callers come with
   R4-04 and R4-09 (known limit until then, with a GitHub issue).
 
-- A thread of the scope grants each clean message of the thread.
+- A thread of the scope grants each clean message of the thread that
+  arrived at or before the add of the ref (`internal_date` at or before
+  `at` of the scope row). A message that arrives later is granted only if
+  it is a reply in the granted chain: its `In-Reply-To` names the
+  `Message-ID` of a granted message of the same thread. So a reply to the
+  job mail comes in, and an unrelated message that Gmail puts in the
+  thread stays out until the person grants it.
 - An item of the scope that is not `gone` grants each clean source message
   (`item_source`) of the item, and no other message of its thread. Gmail can put two subjects
   in one thread (spec 1), so an item does not grant its whole thread.
@@ -223,9 +229,12 @@ these rules:
   `submit` and again just before the apply, with the same results as for
   a message. A feed, signal or conversation item is never a target in a
   session, so `correct` on one is refused.
-- `iris draft` and `iris send` target an account and a draft, which are not
-  in the grant. The engine refuses them in session mode until a card
-  defines the grant of the account and of a job draft (R4-03).
+- `iris draft`, `iris send` and `iris nudge` make draft and send actions,
+  which target an account and a draft that are not in the grant. The
+  engine refuses these verbs in session mode until a card defines the
+  grant of the account and of a job draft (R4-03). It also refuses, at
+  `submit`, each draft or send action in a changeset of a session, on
+  each path that makes one.
 - `iris changeset <cs-id>`, `submit` and `withdraw` in a session give only
   changesets of the job of the session. In a session, the engine gives no
   subject or text of a target message in a changeset document.
@@ -444,6 +453,7 @@ Markdown and JSON with `serde_json`.
 | A revoke by an agent | Refused | Unit test, and raw SQL |
 | A revoke during a build | `Built::revoked` differs from `revoked_count`, so the launcher builds again before the session (R4-04) | Unit test: the count grows on each revoke and the build gives the count it read |
 | An add of a ref whose row does not exist | Refused | Unit test |
+| A message that arrives in a scope thread after the add | Granted only if its `In-Reply-To` names a granted message of the thread | Unit test: a reply comes in, an unrelated message stays out |
 | A revoke at the same time as the apply of a session action | Before the cutoff: the action is refused. After the cutoff: the provider call goes on, and the ledger shows it (R4-03) | Test with R4-03 |
 | A revoke, a hostile mark, a gone message or a signal after the read of a build | The files keep the message until the next build (known limit). The read verbs see the change at once (R4-03, R4-04) | Unit test: the next build drops a revoked ref |
 | Two builds of one workspace at the same time | The second waits for the lock of the first | Unit test: a held lock makes `try` fail, and a build after it succeeds |
