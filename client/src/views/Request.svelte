@@ -533,6 +533,12 @@
     font-size: var(--font-size--1);
     text-decoration: none;
   }
+  @media (max-width: 600px), (pointer: coarse) {
+    .messages a {
+      align-items: center;
+      min-height: var(--size-touch);
+    }
+  }
   .messages a:hover {
     background: var(--color-background-surface);
   }

@@ -34,6 +34,7 @@
       // A sign-in address opened in this tab: the access state shows a failure.
       if (/^#code=/.test(location.hash)) return void followSignIn().then(() => (hash = location.hash));
       hash = location.hash;
+      if (moreOpen) document.getElementById("more")?.hidePopover();
       scrollTo(0, 0);
     };
     addEventListener("hashchange", update);
@@ -44,13 +45,25 @@
   // svelte-ignore state_referenced_locally
   if (typeof location !== "undefined" && !["home", "setup", "brief"].includes(route.view)) get("status").catch(() => {});
 
+  // Line icons of the phone tabs, drawn on a 24px grid.
+  const ICONS: Record<string, string> = {
+    "#/brief": "M5 6h14M5 12h14M5 18h9",
+    "#/matters": "M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z",
+    "#/ask": "M4.5 6.5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H10l-4 3.5v-3.5h0.5a2 2 0 0 1-2-2z",
+    "#/review": "M4 12.5l4.5 4.5L20 6.5",
+    more: "M5.5 12h.01M12 12h.01M18.5 12h.01",
+  };
   const JOB_STATES = ["needs_you", "working", "waiting", "done"] as const;
   const TITLES = { commitment: "Commitments", conversation: "Conversations", feed: "Feed", signal: "Signals" };
+  // On a phone, the first views of NAV are tabs at the bottom. "More" opens the rest.
+  const TABS = NAV.slice(0, 4);
+  const MORE = NAV.slice(4);
+  let moreOpen = $state(false);
   const back = () => (history.length > 1 ? history.back() : (location.hash = "#/brief"));
 </script>
 
 <header>
-  <a class="name" href="#/brief">
+  <a class="name touch" href="#/brief">
     <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
       <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-primary)" stroke-width="2" />
       <circle cx="12" cy="12" r="3.5" fill="var(--color-primary)" />
@@ -63,6 +76,26 @@
     {/each}
   </nav>
 </header>
+
+<nav class="tabs" aria-label="Main views">
+  {#each TABS as [link, label] (link)}
+    <a href={link} aria-current={active === link ? "page" : undefined}>
+      <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d={ICONS[link]} /></svg>
+      {label}
+    </a>
+  {/each}
+  <button type="button" popovertarget="more" class:current={MORE.some(([link]) => link === active)}>
+    <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d={ICONS.more} /></svg>
+    More
+  </button>
+</nav>
+<div id="more" popover ontoggle={(e) => (moreOpen = (e as ToggleEvent).newState === "open")}>
+  <ul>
+    {#each MORE as [link, label] (link)}
+      <li><a href={link} aria-current={active === link ? "page" : undefined}>{label}</a></li>
+    {/each}
+  </ul>
+</div>
 
 {#snippet failed(error: unknown)}
   {#if own(error)}<p role="alert">{own(error)}</p>{/if}
@@ -151,8 +184,8 @@
 </main>
 
 <footer class="site">
-  <a href="#/rules">Rules</a>
-  <a href="#/measures">Measures</a>
+  <a class="touch" href="#/rules">Rules</a>
+  <a class="touch" href="#/measures">Measures</a>
   <span>Iris runs on your machine.</span>
 </footer>
 
@@ -257,6 +290,7 @@
     padding: var(--space-6);
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-2) var(--space-6);
     color: var(--color-text-faint);
     font-size: var(--font-size--1);
@@ -264,18 +298,120 @@
   .site a {
     color: var(--color-text-muted);
   }
+  /* A touch screen: each control is at least the size of a finger tip. */
+  @media (max-width: 600px), (pointer: coarse) {
+    main :global(:is(button, summary, select, input:not([type="checkbox"], [type="radio"]))) {
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+    }
+    /* A link that stands alone, not in a sentence, has the class "touch". */
+    :global(.touch) {
+      display: inline-flex;
+      align-items: center;
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+    }
+    header nav a {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: var(--size-touch);
+      min-height: var(--size-touch);
+      padding: 0;
+    }
+  }
+  .tabs,
+  #more {
+    display: none;
+  }
+  /* A phone: the tabs stay at the bottom, in reach of the thumb. */
   @media (max-width: 600px) {
     header {
-      gap: var(--space-4);
+      position: static;
       padding: var(--space-3) var(--space-4);
+    }
+    header nav {
+      display: none;
     }
     main {
       padding: var(--space-4) var(--space-4) var(--space-12);
     }
-    nav {
-      gap: var(--space-4);
-      /* Fade the right edge, so that the row shows that it scrolls. */
-      mask-image: linear-gradient(to right, black 85%, transparent);
+    .site {
+      padding: var(--space-6) var(--space-4) calc(var(--space-24) + env(safe-area-inset-bottom));
+    }
+    .tabs {
+      position: fixed;
+      inset: auto 0 0;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0;
+      overflow: visible;
+      mask-image: none;
+      padding: 0 var(--space-2) env(safe-area-inset-bottom);
+      border-top: 1px solid var(--color-border-subtle);
+      background: var(--color-background-elevated);
+    }
+    .tabs a,
+    .tabs button {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-1);
+      min-height: var(--space-16);
+      padding: 0;
+      border: 0;
+      background: none;
+      font: inherit;
+      font-size: var(--font-size--2);
+      font-weight: 500;
+      color: var(--color-text-muted);
+      cursor: pointer;
+    }
+    .tabs button svg {
+      stroke-width: 3;
+    }
+    .tabs svg {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.75;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .tabs [aria-current="page"],
+    .tabs .current {
+      color: var(--color-primary);
+    }
+    #more {
+      inset: auto var(--space-2) calc(var(--space-16) + var(--space-2) + env(safe-area-inset-bottom)) auto;
+      margin: 0;
+      min-width: calc(var(--space-32) + var(--space-16));
+      padding: var(--space-2);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg);
+      background: var(--color-background-elevated);
+      color: var(--color-text);
+    }
+    #more:popover-open {
+      display: block;
+    }
+    #more ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    #more a {
+      display: flex;
+      align-items: center;
+      min-height: calc(var(--space-12) - var(--space-1));
+      padding: 0 var(--space-3);
+      border-radius: var(--radius-md);
+      text-decoration: none;
+    }
+    #more a[aria-current="page"] {
+      color: var(--color-primary);
+      background: var(--color-background-surface);
     }
   }
   @media (prefers-reduced-motion: reduce) {

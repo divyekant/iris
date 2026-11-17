@@ -216,7 +216,7 @@
     <ul>
       {#each soon.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={brief.you_owe.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
     </ul>
-    {#if soon.length > SHOWN}<a class="all" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
+    {#if soon.length > SHOWN}<a class="all touch" href="#/brief/you_owe">All {brief.you_owe.count} that you owe</a>{/if}
   </section>
 {/if}
 
@@ -225,7 +225,7 @@
   <section aria-labelledby="matter">
     <h2 id="matter"><span>{proposed.count === 1 ? "A matter to confirm" : "Matters to confirm"}</span> <span class="count">{proposed.count}</span></h2>
     {#key proposed.view.matter.id}<MatterCard view={proposed.view} ondecided={() => (done(), reloadProposed())} delay={hold} />{/key}
-    {#if proposed.count > 1}<a class="all" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
+    {#if proposed.count > 1}<a class="all touch" href="#/matters">All {proposed.count} that Iris proposes</a>{/if}
   </section>
 {/if}
 
@@ -235,7 +235,7 @@
     {#if proposal}
       <p class="note">Triage proposes to {Object.entries(proposal.verbs).map(([verb, n]) => `${verb} ${n.toLocaleString("en-US")} ${n === 1 ? "message" : "messages"}`).join(", ")}.</p>
     {/if}
-    <a class="all" href="#/review">Open the review</a>
+    <a class="all touch" href="#/review">Open the review</a>
   </section>
 {/if}
 
@@ -256,7 +256,7 @@
           {#each part.items.slice(0, SHOWN) as item (item.id)}<Line {item} {now} twins={part.duplicates?.[item.id]} ondone={done} delay={hold} />{/each}
         </ul>
       {/if}
-      <a class="all" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
+      <a class="all touch" href={`#/brief/${part.key}`}>All {part.total ?? part.count}</a>
     </section>
   {/if}
 {/each}
@@ -274,7 +274,7 @@
   <section aria-labelledby="handled">
     <h2 id="handled"><span>Handled without you</span> <span class="count">{handled.count}</span></h2>
     <p class="note">{[hidden ? `${hidden.toLocaleString("en-US")} hidden from this brief` : "", decided ? `${decided.toLocaleString("en-US")} ${decided === 1 ? "message" : "messages"} that your rules decided` : ""].filter(Boolean).join(", ")}.</p>
-    <a class="all" href="#/handled">See what and why</a>
+    <a class="all touch" href="#/handled">See what and why</a>
   </section>
 {/if}
 
@@ -291,15 +291,15 @@
       <p class="label">To read when you choose</p>
       <ul class="chips">
         {#each publishers.slice(0, SHOWN) as [key, group] (key)}
-          <li><a href="#/brief/feed">{group.name}{#if feedComplete} <span>{group.items.length}</span>{/if}</a></li>
+          <li><a class="touch" href="#/brief/feed">{group.name}{#if feedComplete} <span>{group.items.length}</span>{/if}</a></li>
         {/each}
-        {#if publishers.length > SHOWN || !feedComplete}<li><a href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
+        {#if publishers.length > SHOWN || !feedComplete}<li><a class="touch" href="#/brief/feed">All {brief.feed.count}</a></li>{/if}
       </ul>
     {/if}
     {#if records.length}
       <p class="label">Records</p>
       <ul class="chips types">
-        {#each records as [type, n] (type)}<li><a href={`#/records/${type}`}>{type} <span>{n}</span></a></li>{/each}
+        {#each records as [type, n] (type)}<li><a class="touch" href={`#/records/${type}`}>{type} <span>{n}</span></a></li>{/each}
       </ul>
     {/if}
   </section>
@@ -410,7 +410,8 @@
     gap: var(--space-2);
   }
   .chips a {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
     padding: var(--space-1) var(--space-3);
     border: 1px solid var(--color-border-subtle);
     border-radius: var(--radius-full);
@@ -449,7 +450,8 @@
   }
   @media (max-width: 600px) {
     h1 {
-      font-size: var(--font-size-3);
+      font-size: var(--font-size-2);
+      line-height: 1.3;
     }
     .opening {
       margin: var(--space-4) 0 var(--space-8);

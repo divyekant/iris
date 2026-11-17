@@ -138,7 +138,7 @@
       </li>
     {/each}
   </ul>
-  {#if shown.length < members.length}<a class="more" href={href.matter(matter.id)}>And {members.length - shown.length} more</a>{/if}
+  {#if shown.length < members.length}<a class="more touch" href={href.matter(matter.id)}>And {members.length - shown.length} more</a>{/if}
   <div class="acts" role="status">
     {#if phase.at === "idle"}
       <button class="keep" type="button" onclick={edit}>Keep together</button>
@@ -239,6 +239,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  @media (max-width: 600px), (pointer: coarse) {
+    .what a {
+      display: block;
+      line-height: var(--size-touch);
+    }
   }
   .what a:hover {
     text-decoration: underline;

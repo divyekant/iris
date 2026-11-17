@@ -52,7 +52,7 @@
   <footer>
     {#if message.items.length}
       <span>Items from this mail:</span>
-      {#each message.items as id (id)}<a href={href.item(id)}>{id}</a>{/each}
+      {#each message.items as id (id)}<a class="touch" href={href.item(id)}>{id}</a>{/each}
     {/if}
     {#if !(message.gone && message.text === null)}
       <button type="button" class="raw" onclick={original}>Download the original</button>
