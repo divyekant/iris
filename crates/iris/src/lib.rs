@@ -11,6 +11,7 @@ macro_rules! say {
 
 pub mod cost;
 pub mod engine;
+pub mod notify;
 pub mod socket;
 pub mod verbs;
 

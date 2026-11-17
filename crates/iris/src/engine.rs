@@ -316,9 +316,11 @@ pub const ATTENTION_EVERY: Duration = Duration::from_secs(10);
 /// each item ([`iris_policy::refresh_attention`]). It is apart from the
 /// understanding thread, because one understanding run can take hours.
 /// The same thread writes the rules that Iris proposes from the approvals
-/// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]).
+/// of the person (spec 2 section 6.6, [`iris_policy::propose::refresh`]),
+/// and the notices by rule ([`iris_policy::notice::refresh`]).
 fn attention_loop(store: Arc<Store>) {
     let mut mark = None;
+    let system = crate::notify::spawn(crate::notify::show);
     loop {
         if let Err(e) = iris_policy::refresh_attention(&store, now_ms().div_euclid(1000)) {
             say!("iris: attention: {e}");
@@ -326,6 +328,15 @@ fn attention_loop(store: Arc<Store>) {
         if let Err(e) = iris_policy::propose::refresh(&store, now_ms().div_euclid(1000), &mut mark)
         {
             say!("iris: proposed rules: {e}");
+        }
+        // Notices by rule (R5-08): the row commits first, so a crash before
+        // the system notice still leaves the notice in the web client. The
+        // system notice runs on its own thread: this loop never waits for it.
+        match iris_policy::notice::refresh(&store, now_ms()) {
+            Ok(new) => new.into_iter().for_each(|n| {
+                let _ = system.try_send(n);
+            }),
+            Err(e) => say!("iris: notices: {e}"),
         }
         std::thread::sleep(ATTENTION_EVERY);
     }
