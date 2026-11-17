@@ -26,17 +26,22 @@ changeset. The policy of the person or the person approves each action.</li>
 </ul>
 
 <h2 id="command">The <code>iris</code> command</h2>
-<p>Add <code>--json</code> to a command to get documents of the open model:
-one JSON document for one object, and JSON Lines for a list. Without
-<code>--json</code>, the command prints short text. Each line of a list
-starts with an ID, so the next command can use it.</p>
+<p>Without <code>--json</code>, a command prints short text. Each line of a
+list starts with an ID, so the next command can use it. Add
+<code>--json</code> to get JSON. Only some of the JSON outputs are documents
+of the open model:</p>
 <table>
-<tr><th>Command</th><th>Does</th></tr>
-<tr><td><code>iris status</code></td><td>Shows the state of the install, or of the job in a session.</td></tr>
-<tr><td><code>iris search &lt;query&gt;</code></td><td>Full-text search of the mail.</td></tr>
-<tr><td><code>iris show &lt;id&gt;</code></td><td>Shows one item or one message.</td></tr>
-<tr><td><code>iris changeset &lt;cs-id&gt;</code></td><td>Shows a changeset.</td></tr>
+<tr><th>Command</th><th>JSON output</th></tr>
+<tr><td><code>iris show &lt;item-id&gt;</code></td><td>The item document. An item has JSON only, so <code>--json</code> is not necessary. In a session: the job item.</td></tr>
+<tr><td><code>iris list --json</code> (session only)</td><td>Job items, as JSON Lines.</td></tr>
+<tr><td><code>iris changeset</code>, <code>submit</code>, <code>withdraw</code>, <code>revise</code> with <code>--json</code></td><td>The changeset document.</td></tr>
+<tr><td><code>iris export &lt;folder&gt;</code></td><td>The items in <code>items.jsonl</code> (see <a href="read.html#export">Read an export</a>).</td></tr>
 </table>
+<p>The other JSON outputs have no schema in version 1.0, and they can
+change. Do not validate them with the schemas of the open model. Examples:
+<code>iris status --json</code>, <code>iris search --json</code>,
+<code>iris show &lt;m-id&gt; --json</code> (a message) and
+<code>iris matters</code>.</p>
 <p>The command writes errors to standard error. The exit codes are:</p>
 <table>
 <tr><th>Code</th><th>Meaning</th></tr>
@@ -83,7 +88,12 @@ standard input and output, one on each line.</p>
 arguments. A verb with subcommands gives one tool for each subcommand, for
 example <code>watch_add</code>.</li>
 <li>The result of a call is the output of the verb, with
-<code>--json</code> where the verb has it.</li>
+<code>--json</code> where the verb has it. Each tool that adds an action
+gives the JSON answer of the engine, for example
+<code>{"changeset": "cs-80", "n": 1}</code>.</li>
+<li>If the verb ends with an exit code other than 0, the result is an
+error. It holds the output, then the line <code>iris: &lt;error&gt;</code>,
+then <code>exit code N</code>.</li>
 <li>MCP gives no power that the command does not give. The verbs of the
 person and of the host (for example <code>serve</code>,
 <code>export</code> and <code>model</code>) are not tools.</li>

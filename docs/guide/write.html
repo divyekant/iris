@@ -106,9 +106,23 @@ refers to <code>common.schema.json</code> by its <code>$id</code>
 <li>Turn on the formats <code>date</code> and <code>date-time</code>. You
 do not need to check <code>email</code>, because validators do not agree on
 it.</li>
-<li>Run the validator on each file in
+<li>Read each fixture file as one or more documents:
+<ul>
+<li>A <code>.json</code> file is one document.</li>
+<li>A <code>.jsonl</code> file has one document on each line.</li>
+<li>A <code>.toml</code> file is a policy file. Parse the TOML, and change
+each TOML date or time into RFC 3339 text, for example
+<code>2026-12-01</code>. Validate the result with
+<code>policy.schema.json</code>.</li>
+</ul></li>
+<li>Select the schema of each document. The text of the file name before the
+first <code>-</code> or <code>.</code> names the schema, for example
+<code>commitment</code> for <code>commitment-payment.json</code>. In
+<code>items.jsonl</code>, the <code>form</code> of each line names the
+schema.</li>
+<li>Run the validator on each document in
 <a href="https://github.com/divyekant/iris/tree/develop/docs/spec/schema/examples">schema/examples/</a>.
-Each file must pass.</li>
+Each document must pass.</li>
 <li>Run the validator on each file in
 <a href="https://github.com/divyekant/iris/tree/develop/docs/spec/schema/examples/invalid">schema/examples/invalid/</a>.
 Each file must fail.</li>

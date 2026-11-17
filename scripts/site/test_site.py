@@ -13,7 +13,9 @@ The site is static HTML. These tests make sure that:
 
 import html
 import json
+import random
 import re
+import sys
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
@@ -177,6 +179,49 @@ class SiteTest(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(check({"model": model}, 3), want)
         self.assertEqual(check({}, 3), "refuse")
+        for value in ([], "iris/1.0", 1, None, True, [{"model": "iris/1.0"}]):
+            with self.subTest(value=value):
+                self.assertEqual(check(value, 3), "refuse")
+
+    def test_the_reader_sample_code_agrees_with_the_rule_on_random_input(self):
+        page = self.pages[DOCS / "guide" / "read.html"]
+        code = [t for a, t in page.blocks if a.get("data-code") == "minor"][0]
+        scope = {}
+        exec(html.unescape(code), scope)
+        check = scope["check_model"]
+        rng = random.Random(8)
+        parts = ["iris", "IRIS", "/", "1", "2", ".", "0", "00", "7", "\n", " ", "x", "-1"]
+
+        def model():
+            kind = rng.randrange(3)
+            if kind == 0:  # A valid model, with a minor of up to 6000 digits.
+                n = rng.choice([1, 2, 3, 40, 6000])
+                digits = str(rng.randrange(1, 10)) + "".join(rng.choice("0123456789") for _ in range(n - 1))
+                return "iris/1." + rng.choice([digits, "0", str(rng.randrange(10))])
+            if kind == 1:
+                return "".join(rng.choice(parts) for _ in range(rng.randrange(8)))
+            return rng.choice([None, 3, 1.0, [], {}, True])
+
+        def oracle(doc, k):
+            m = doc.get("model") if isinstance(doc, dict) else None
+            if not isinstance(m, str) or not re.fullmatch(r"iris/1\.(0|[1-9][0-9]*)", m):
+                return "refuse"
+            # The oracle uses int() with no digit limit. The code under test
+            # runs with the default limit of Python (4300 digits from 3.11).
+            limit = getattr(sys, "get_int_max_str_digits", lambda: 0)()
+            setter = getattr(sys, "set_int_max_str_digits", lambda n: None)
+            setter(0)
+            try:
+                minor = int(m[len("iris/1."):])
+            finally:
+                setter(limit)
+            return "show only" if minor > k else "ok"
+
+        for _ in range(3000):
+            k = rng.choice([0, 3, 9, 10, 123])
+            doc = rng.choice([{"model": model()}, model(), {}, [model()]])
+            with self.subTest(doc=repr(doc)[:80], k=k):
+                self.assertEqual(check(doc, k), oracle(doc, k))
 
 
 if __name__ == "__main__":

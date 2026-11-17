@@ -49,18 +49,21 @@ minor version higher than <code>K</code>. Refuse it with the reason "newer
 than the schemas". Examples of an action: apply or approve a changeset
 action, send mail, change a job. A newer rule can change what a valid
 document is, so your reader cannot check such a document.</p>
-<p>This Python code does rule 1 and selects between rule 2 and rule 3:</p>
+<p>This Python code does rule 1 and selects between rule 2 and rule 3.
+It accepts each JSON value, also a value that is not an object:</p>
 <pre data-code="minor">import re
 
 MODEL = re.compile(r"iris/1\.(0|[1-9][0-9]*)")
 
 
 def check_model(doc, known_minor):
-    """Give "ok", "show only" or "refuse" for one JSON document.
+    """Give "ok", "show only" or "refuse" for one parsed JSON value.
 
     known_minor is K: the newest minor version of the schemas of the reader.
     After "ok", validate the document with the schemas.
     """
+    if not isinstance(doc, dict):
+        return "refuse"
     model = doc.get("model")
     if not isinstance(model, str):
         return "refuse"
@@ -68,7 +71,10 @@ def check_model(doc, known_minor):
     match = MODEL.fullmatch(model)
     if match is None:
         return "refuse"
-    if int(match.group(1)) &gt; known_minor:
+    # A minor version has no leading zero, so a longer number is a larger
+    # number. This compares a very long number with no int() conversion.
+    minor, known = match.group(1), str(known_minor)
+    if (len(minor), minor) &gt; (len(known), known):
         return "show only"
     return "ok"</pre>
 <p>The policy file has no <code>model</code> field. Its
