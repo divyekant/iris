@@ -17,8 +17,9 @@ use crate::reply::Connect;
 pub const MAX_PER_TURN: usize = 3;
 
 /// The late threads ([`iris_voice::Late`]) that a nudge call was made for.
-/// A thread gets one call for each newest message and person, also if the call failed,
-/// so an invalid answer does not cost a call each turn.
+/// A thread gets one call for each newest message, person and commitment,
+/// also if the answer was not valid, so an invalid answer does not cost a
+/// call each turn. A model failure marks nothing: the shared wait governs.
 /// shortcut: the set is in memory, so a restart of the engine gives each late thread one more call; store it if restarts are frequent.
 pub type Tried = HashSet<iris_voice::Late>;
 
@@ -56,16 +57,14 @@ pub fn step(
     let model = connect(&row)?;
     let mut saved = 0;
     for l in late.into_iter().take(MAX_PER_TURN) {
-        let outcome = call(store, &row, model.as_ref(), &l, now_ms)?;
-        if matches!(outcome, Outcome::Refused) {
-            break;
+        // A refusal or a model failure marks nothing: the budget and the
+        // shared wait decide when the thread gets its call.
+        match call(store, &row, model.as_ref(), &l, now_ms)? {
+            Outcome::Refused | Outcome::ModelFailed => break,
+            Outcome::Saved => saved += 1,
+            Outcome::Failed => {}
         }
         tried.insert(l);
-        match outcome {
-            Outcome::Saved => saved += 1,
-            Outcome::ModelFailed => break,
-            _ => {}
-        }
     }
     Ok(saved)
 }
@@ -99,7 +98,7 @@ fn call(
                 params![
                     now_ms,
                     row.model,
-                    iris_voice::PROMPT,
+                    iris_voice::NUDGE_PROMPT,
                     row.price.is_some().then_some(0)
                 ],
             )?;
@@ -172,6 +171,9 @@ mod tests {
 
         fn ask(&self, _: &str, _: &str) -> Result<Reply, iris_model::Error> {
             self.0.set(self.0.get() + 1);
+            if self.1 == "fail" {
+                return Err(iris_model::Error::Server(500));
+            }
             Ok(Reply {
                 text: self.1.into(),
                 usage: Usage {
@@ -273,8 +275,19 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        // An invalid answer: one call, then no call again for the same
-        // newest message.
+        // A model failure: the shared wait starts, and no mark stays, so
+        // the thread gets its call after the wait.
+        answer.set("fail");
+        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
+        assert_eq!((calls.get(), tried.len()), (1, 0));
+        let wait = count(&store, "SELECT retry_at FROM model_setting");
+        assert!(wait > late);
+        assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
+        assert_eq!(calls.get(), 1, "no call during the wait");
+        calls.set(0);
+        // An invalid answer after the wait: one call, then no call again
+        // for the same newest message.
+        let late = wait;
         answer.set("not json");
         assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));
         assert_eq!(step(&store, &connect, &mut tried, late), Ok(0));

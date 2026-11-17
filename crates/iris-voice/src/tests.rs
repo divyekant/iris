@@ -1000,6 +1000,9 @@ fn asked(name: &str) -> (Box_, i64) {
             tx.execute(
                 "INSERT INTO item(form, account_id, status, doc, created_at, updated_at)
                  VALUES ('commitment', 1, 'open', json_object('direction', 'owed_to_you',
+                         'title', 'Send the slides',
+                         'sources', json_array(json_object('role', 'origin',
+                                                           'quote', 'can you send the slides?')),
                          'owner', json_object('kind', 'sender', 'sender', 's-' || ?1)), 1, 1)",
                 [s],
             )?;
@@ -1196,7 +1199,52 @@ fn a_nudge_is_saved_only_while_the_thread_is_late() {
     let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
     assert_eq!(data["intent"], NUDGE_INTENT);
     assert_eq!(data["reply_to"], "ana@example.org");
+    assert_eq!(
+        data["commitment"],
+        json!({"title": "Send the slides", "due": null, "quote": "can you send the slides?"})
+    );
+    assert!(fake.calls.borrow()[0]
+        .0
+        .contains("\"commitment\": only in a reminder"));
     assert_eq!(saved(&b.store, t).unwrap().1.as_deref(), Some(NUDGE_INTENT));
+    let prompt: String = b
+        .store
+        .read(|c| Ok(c.query_row("SELECT prompt FROM reply_draft", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(prompt, NUDGE_PROMPT);
+    let to = b.store.read(|c| Ok(nudge_to(c, t, now)?)).unwrap();
+    assert_eq!(to.as_deref(), Some("ana@example.org"));
+
+    // A long thread: the origin of the ask is out of the six newest
+    // messages, and the commitment is in the data all the same.
+    let (b, _) = asked("nudge-long");
+    for i in 0..8 {
+        let (label, from, to) = match i % 2 {
+            0 => ("INBOX", "ana@example.org", "me@example.com"),
+            _ => ("SENT", "me@example.com", "ana@example.org"),
+        };
+        b.store
+            .put_messages(
+                1,
+                &[msg(
+                    &format!("more{i}"),
+                    "t-ask",
+                    1001 + i,
+                    label,
+                    from,
+                    to,
+                    Some("ok"),
+                )],
+            )
+            .unwrap();
+    }
+    understood(&b.store);
+    let fake = Fake::new(r#"{"body": "x"}"#);
+    let l = one_late(&b.store, 1008 + LATE_AFTER_MS);
+    nudge(&b.store, &l, &fake, 1008 + LATE_AFTER_MS).unwrap();
+    let data: Value = serde_json::from_str(&fake.calls.borrow()[0].1).unwrap();
+    assert_eq!(data["thread"].as_array().unwrap().len(), 6);
+    assert_eq!(data["commitment"]["quote"], "can you send the slides?");
 
     // A thread that is not late gets no call.
     let (b, _) = asked("nudge-not-late");

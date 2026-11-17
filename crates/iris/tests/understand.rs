@@ -742,7 +742,7 @@ fn a_turn_runs_the_nudge_step() {
     let drafts = |s: &Store| {
         col(
             s,
-            "SELECT count(*) FROM understand_run WHERE prompt = 'draft/0.1'",
+            "SELECT count(*) FROM understand_run WHERE prompt = 'nudge/0.1'",
         )
     };
     assert_eq!(drafts(&store), Some(0));

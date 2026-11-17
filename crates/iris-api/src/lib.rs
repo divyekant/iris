@@ -868,20 +868,32 @@ async fn get_write(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Resul
 }
 
 /// The draft of a thread (`t-N`) that the person can use now: a reply in
-/// the voice of the owner (R3-05) or a nudge (R3-07). 404 when there is
+/// the voice of the owner (R3-05) or a nudge (R3-07), with the address of
+/// the person that owes (`to`) while the thread is late. 404 when there is
 /// none, or when it is stale. The draft is text only: nothing is sent.
 async fn get_draft(State(s): State<Arc<Store>>, Path(id): Path<String>) -> Result<Response> {
     let Some((iris_store::Kind::Thread, thread)) = iris_store::parse_id(&id) else {
         return Ok(not_found());
     };
     let draft = s
-        .read(|c| Ok(iris_voice::ready(c, thread)?))
+        .read(|c| {
+            let Some((based_on, intent, body)) = iris_voice::ready(c, thread)? else {
+                return Ok(None);
+            };
+            let nudge = intent.as_deref() == Some(iris_voice::NUDGE_INTENT);
+            let to = match nudge {
+                true => iris_voice::nudge_to(c, thread, now_ms())?,
+                false => None,
+            };
+            Ok(Some((based_on, nudge, to, body)))
+        })
         .map_err(Error::from)?;
     Ok(match draft {
-        Some((based_on, intent, body)) => Json(serde_json::json!({
+        Some((based_on, nudge, to, body)) => Json(serde_json::json!({
             "thread": id,
             "based_on": iris_store::format_id(iris_store::Kind::Message, based_on),
-            "nudge": intent.as_deref() == Some(iris_voice::NUDGE_INTENT),
+            "nudge": nudge,
+            "to": to,
             "body": body,
         }))
         .into_response(),
