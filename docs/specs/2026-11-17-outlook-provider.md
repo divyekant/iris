@@ -270,10 +270,13 @@ actions match label names (spec 2). The names:
 - A folder that is not well-known: the label `Folders/<path>`, where the
   path is the display names from the top folder, joined with `/`. For
   example `Folders/Receipts/Projects`. In a display name, `%` becomes
-  `%25` and `/` becomes `%2F`, so that each `/` of the label is a level.
-  Its provider ID is `folder:<id>`. If two folder labels are equal under
-  the case folding of spec 2, each gets ` #` and the first 8 characters
-  of its folder ID at the end.
+  `%25`, `/` becomes `%2F` and `#` becomes `%23`, so that each `/` of
+  the label is a level and no name has a `#`. Its provider ID is
+  `folder:<id>`.
+- If two or more folder labels (the fixed names included) are equal under
+  the case folding of spec 2, each of them gets ` #` and the full folder
+  ID at the end. Folder IDs are unique and no escaped name has a `#`, so
+  the new names are unique.
 - A category: the label with the category name, provider ID
   `category:<name>`. If the name is a system label name of spec 1 section
   4.10, or starts with `Folders/` or `Categories/`, the label is
@@ -312,8 +315,17 @@ categories are not moves, and work in each folder. R6-10 keeps the same rule for
 - The user gives the application (client) ID of an own app registration
   (decision record `docs/decisions/2026-11-microsoft-sign-in.md`, in the
   sign-in PR). A public client has no secret.
-- Endpoints: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize`
-  and `/token`, fixed in the code, as for Google.
+- Endpoints: `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize`
+  and `/token`, with the host fixed in the code, as for Google. The user
+  gives `<tenant>` with the client ID: `common` (the default) or the
+  tenant ID (a GUID) of the registration. Iris accepts only these two
+  forms. The decision record tells the user which to give:
+  - A registration with the account type "Any Entra ID Tenant + Personal
+    Microsoft accounts" works with `common`, for an Outlook.com account
+    and for a work or school account. The decision record recommends it.
+  - A single-tenant registration works only with its own tenant ID, and
+    only for the accounts of that tenant. Microsoft refuses it at
+    `common`. A personal account cannot use it.
 - Scopes: `offline_access https://graph.microsoft.com/Mail.ReadWrite
   https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read`.
   The code exchange and each refresh that names a `scope` check that it has
