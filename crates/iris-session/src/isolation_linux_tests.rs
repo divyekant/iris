@@ -708,3 +708,41 @@ fn a_linked_data_folder_is_hidden_at_its_real_path() {
     fs::remove_file(&link).unwrap();
     assert!(Bwrap::new(&link).is_err());
 }
+
+/// A HOME with a link in its path: the private home is at the real path,
+/// and HOME in the sandbox names it, so the agent can write there.
+#[test]
+fn a_linked_home_is_usable() {
+    let d = Data::new();
+    let real = d.dir.with_extension("home-real");
+    let link = d.dir.with_extension("home-link");
+    let _ = fs::remove_dir_all(&real);
+    let _ = fs::remove_file(&link);
+    fs::create_dir_all(real.join("user")).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let iso = d.iso();
+    let mut args = iso.view(Some(&link.join("user")), &[], &d.ws);
+    args.extend([
+        "--".into(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "echo x > \"$HOME/f\" && cat \"$HOME/f\" && echo \"$HOME\"".into(),
+    ]);
+    let out = std::process::Command::new(&iso.bwrap)
+        .args(&args)
+        .env("HOME", link.join("user"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let real_home = fs::canonicalize(real.join("user")).unwrap();
+    assert!(
+        out.status.success(),
+        "{text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(text, format!("x\n{}\n", real_home.display()));
+    // The private home is empty: nothing reached the host folder.
+    assert!(!real.join("user/f").exists());
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_dir_all(&real);
+}

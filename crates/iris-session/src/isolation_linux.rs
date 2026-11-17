@@ -141,8 +141,17 @@ impl Bwrap {
             "--tmpfs".as_ref(),
             "/tmp".as_ref(),
         ]);
+        // The private home at its real path (bwrap does not resolve a
+        // link in a mount point), and HOME names that path.
+        let home = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
         if let Some(home) = home.filter(|h| h.is_absolute() && *h != Path::new("/")) {
-            push(&["--tmpfs".as_ref(), home.as_os_str()]);
+            push(&[
+                "--tmpfs".as_ref(),
+                home.as_os_str(),
+                "--setenv".as_ref(),
+                "HOME".as_ref(),
+                home.as_os_str(),
+            ]);
         }
         for r in reads {
             push(&["--ro-bind".as_ref(), r.as_os_str(), r.as_os_str()]);
@@ -373,9 +382,7 @@ impl Isolation for Bwrap {
         }
         // Each mount point of the view is a real path: bwrap does not
         // resolve a link in a destination.
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|h| fs::canonicalize(&h).unwrap_or(h));
+        let home = std::env::var_os("HOME").map(PathBuf::from);
         let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
         let mut a = self.view(home.as_deref(), &reads, &workspace);
         if let Some(dir) = iris.as_deref().and_then(Path::parent) {
