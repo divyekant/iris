@@ -815,3 +815,69 @@ fn mail_that_waits_for_its_link_check_is_left_out() {
     build(&store, job, &ws).unwrap();
     assert!(walk(&ws).1.contains("DANA-TEXT"));
 }
+
+/// The files follow the published layout of the open model
+/// (docs/spec/03-job-workspace.md): the Markdown files byte for byte, and
+/// each JSON file against its schema.
+#[test]
+fn the_files_follow_the_published_layout() {
+    let tmp = TempDir::new("layout");
+    let store = store(&tmp.0.join("data"));
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    let spec = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/spec/03-job-workspace.md"),
+    )
+    .unwrap();
+    let read = |p: &str| fs::read_to_string(ws.join(p)).unwrap();
+    for (path, want) in samples(&spec) {
+        let got = read(&path);
+        if path.ends_with(".md") {
+            assert_eq!(got, want, "{path} differs from the published sample");
+        } else {
+            let (got, want): (serde_json::Value, serde_json::Value) = (
+                serde_json::from_str(&got).unwrap(),
+                serde_json::from_str(&want).unwrap(),
+            );
+            assert_eq!(got, want, "{path} differs from the published sample");
+        }
+    }
+    // Each JSON file of the folder follows its schema.
+    let (paths, _) = walk(&ws);
+    for p in paths.iter().filter(|p| p.ends_with(".json")) {
+        let schema = match p.split('/').next().unwrap() {
+            "job.json" => "job",
+            "commitments" | "records" => "jobitem",
+            "people" => "person",
+            other => panic!("no schema for {other}"),
+        };
+        let doc: serde_json::Value = serde_json::from_str(&read(p)).unwrap();
+        assert!(iris_spec::validator(schema).is_valid(&doc), "{p}: {doc}");
+    }
+}
+
+/// Each sample of the published text: the path after a line
+/// `<!-- sample: <path> -->`, and the text of the fenced block after it.
+fn samples(spec: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut lines = spec.lines();
+    while let Some(l) = lines.next() {
+        let Some(path) = l
+            .strip_prefix("<!-- sample: ")
+            .and_then(|r| r.strip_suffix(" -->"))
+        else {
+            continue;
+        };
+        let open = lines.next().unwrap();
+        let fence: String = open.chars().take_while(|c| *c == '`').collect();
+        let mut text = String::new();
+        for l in lines.by_ref().take_while(|l| *l != fence) {
+            text.push_str(l);
+            text.push('\n');
+        }
+        out.push((path.to_owned(), text));
+    }
+    assert_eq!(out.len(), 4, "the published text has 4 samples");
+    out
+}

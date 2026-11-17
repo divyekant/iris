@@ -818,6 +818,7 @@ name = "iris-changeset"
 version = "0.0.0"
 dependencies = [
  "iris-compose",
+ "iris-senders",
  "iris-spec",
  "iris-store",
  "iris-talk",

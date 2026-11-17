@@ -219,8 +219,12 @@ gets its saved status again.
   `userRateLimitExceeded`, and on HTTP 5xx, the engine waits and tries again.
   The wait starts at 1 second, doubles each time to a maximum of 5 minutes,
   and has a random part of up to 50 percent.
-- On HTTP 401, the engine gets a new access token with the refresh token, one
-  time. If the new token gets HTTP 401 too, or Google refuses the refresh
+- On HTTP 401, the engine gets a new access token with the refresh token.
+  An access token lives about 1 hour, and one call of a first sync can run
+  for many hours. A 401 from a token at the end of its life is not a
+  refusal: the engine gets a new token and continues. A 401 from a token
+  that is not at the end of its life is a refusal. If two tokens are
+  refused in one call, or Google refuses the refresh
   token (`invalid_grant`), the account goes to the state "needs sign-in", and
   the brief shows it. A network error or a server error of the token endpoint
   keeps the state: the next sync tries again. A refusal changes the state only

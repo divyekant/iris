@@ -644,9 +644,23 @@ fn the_command_adds_and_submits_draft_and_send() {
                 "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
                  INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
                    VALUES (1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');
-                 INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+",
+            )?;
+            // Its raw bytes: submit flags a send from them.
+            let c = iris_compose::Content {
+                to: vec!["p@example.org".into()],
+                cc: Vec::new(),
+                subject: "Hi".into(),
+                body: "Hello".into(),
+            }
+            .check()
+            .unwrap();
+            let raw = iris_compose::compose("owner@example.com", "iris.1@example.com", &c, None, 1);
+            tx.execute(
+                "INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
                                    action_id, created_at, updated_at)
-                   VALUES (1, 'r1', 'iris.1@example.com', '{}', 'h1', x'00', 1, 0, 0);",
+                 VALUES (1, 'r1', 'iris.1@example.com', '{}', ?1, ?2, 1, 0, 0)",
+                rusqlite::params![iris_compose::hash(&c, None), raw],
             )?;
             Ok(())
         })
