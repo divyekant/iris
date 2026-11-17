@@ -503,7 +503,9 @@ fn work(store: &Store, me: &Author, line: &[u8]) -> Result<Done, Failure> {
         Some("search") if session => {
             only(&["text", "limit"])?;
             let q = text(args, "text")?.ok_or_else(|| usage("give the search text"))?;
-            let q = iris_store::Query::parse(q).map_err(|e| usage(e.to_string()))?;
+            let q = iris_store::Query::parse(q)
+                .and_then(|q| q.check_granted().map(|()| q))
+                .map_err(|e| usage(e.to_string()))?;
             let limit = match args.get("limit") {
                 None | Some(Value::Null) => 50,
                 Some(v) => v

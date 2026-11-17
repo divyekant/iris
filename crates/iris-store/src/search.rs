@@ -87,23 +87,52 @@ impl Query {
     }
 
     pub(crate) fn run(&self, conn: &Connection, limit: u32) -> Result<Vec<i64>> {
-        self.run_among(conn, limit, None)
+        self.run_with(conn, limit, None)
     }
 
-    /// [`Query::run`] over the messages `among` only, if given: the grant
-    /// of a job session. The IDs go in as one JSON array, so the query has
-    /// one bound value for each count of IDs.
-    pub fn run_among(
+    /// [`Query::run`] for a job session: over the granted `messages` only,
+    /// and `form:` counts only the granted `items`. A session decides each
+    /// match only from what its workspace holds, so `label:` is refused: a
+    /// workspace holds no labels. The IDs go in as JSON arrays, so the
+    /// query has one bound value for each set of IDs.
+    pub fn run_granted(
         &self,
         conn: &Connection,
         limit: u32,
-        among: Option<&std::collections::BTreeSet<i64>>,
+        messages: &std::collections::BTreeSet<i64>,
+        items: &std::collections::BTreeSet<i64>,
     ) -> Result<Vec<i64>> {
-        let (mut sql, mut args) = self.select();
-        if let Some(ids) = among {
+        self.check_granted()?;
+        self.run_with(conn, limit, Some((messages, items)))
+    }
+
+    /// Refuse a query that a job session cannot run: `label:`, because a
+    /// workspace holds no labels.
+    pub fn check_granted(&self) -> Result<()> {
+        if self.filters.iter().any(|f| matches!(f, Filter::Label(_))) {
+            return Err(Error::Query(
+                "label: is not a filter of a job session: a workspace holds no labels".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn run_with(
+        &self,
+        conn: &Connection,
+        limit: u32,
+        grant: Option<(
+            &std::collections::BTreeSet<i64>,
+            &std::collections::BTreeSet<i64>,
+        )>,
+    ) -> Result<Vec<i64>> {
+        let json = |ids: &std::collections::BTreeSet<i64>| -> Value {
             let list: Vec<String> = ids.iter().map(i64::to_string).collect();
-            let list = format!("[{}]", list.join(","));
-            args.push(list.into());
+            format!("[{}]", list.join(",")).into()
+        };
+        let (mut sql, mut args) = self.select(grant.map(|(_, items)| json(items)));
+        if let Some((messages, _)) = grant {
+            args.push(json(messages));
             sql.push_str(&format!(
                 " AND m.id IN (SELECT value FROM json_each(?{}))",
                 args.len()
@@ -127,7 +156,7 @@ impl Query {
         after: i64,
         since: i64,
     ) -> Result<Option<i64>> {
-        let (mut sql, mut args) = self.select();
+        let (mut sql, mut args) = self.select(None);
         args.push(after.into());
         args.push(since.into());
         let (a, s) = (args.len() - 1, args.len());
@@ -149,8 +178,9 @@ impl Query {
     }
 
     /// The SELECT of the matching messages that are not gone, with its bound
-    /// values `?1` to `?n`.
-    fn select(&self) -> (String, Vec<Value>) {
+    /// values `?1` to `?n`. With `items` (a JSON array of item IDs), `form:`
+    /// counts only those items.
+    fn select(&self, items: Option<Value>) -> (String, Vec<Value>) {
         let mut sql = String::from("SELECT m.id FROM message m WHERE m.gone_at IS NULL");
         let mut args: Vec<Value> = Vec::new();
         let mut arg = |sql: &mut String, cond: &str, v: Value| {
@@ -186,12 +216,22 @@ impl Query {
                        WHERE ml.message_id = m.id AND (l.name = ? COLLATE NOCASE OR l.provider_id = ?))",
                     v.clone().into(),
                 ),
-                Filter::Form(v) => arg(
-                    &mut sql,
-                    " AND EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
-                       WHERE s.message_id = m.id AND i.form = ?)",
-                    v.clone().into(),
-                ),
+                Filter::Form(v) => {
+                    arg(
+                        &mut sql,
+                        " AND EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
+                           WHERE s.message_id = m.id AND i.form = ?",
+                        v.clone().into(),
+                    );
+                    if let Some(items) = &items {
+                        arg(
+                            &mut sql,
+                            " AND i.id IN (SELECT value FROM json_each(?))",
+                            items.clone(),
+                        );
+                    }
+                    sql.push(')');
+                }
             }
         }
         (sql, args)

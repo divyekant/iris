@@ -1015,8 +1015,11 @@ Release 1 has no verb that adds an action, so no request can skip the policy.
 The socket comes with the first verb that adds an action (release 2). Then
 each verb that adds, submits or withdraws an action goes through the socket
 (`docs/specs/2026-11-16-engine-socket.md`). In host mode, the read verbs
-(`status`, `search`, `show`, `brief` and `list`) keep the exception of
-release 1: they change nothing, so they cannot skip the policy. In session
+(`status`, `search`, `show` and `brief`) keep the exception of
+release 1: they change nothing, so they cannot skip the policy. A host
+`list` is not built yet (issue #523): until its card, `iris list` in host
+mode gets exit code 2, and when it comes it reads the store directly under
+the same exception. In session
 mode (release 4), each read verb goes through the session socket, and the
 engine applies the current grant of the job of the session
 (`docs/specs/2026-11-16-job-workspace.md`). A session never opens the store

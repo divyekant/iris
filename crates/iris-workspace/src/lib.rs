@@ -440,7 +440,7 @@ impl Grant {
         limit: u32,
     ) -> Result<Vec<serde_json::Value>> {
         let ids = q
-            .run_among(c, limit, Some(&self.messages))
+            .run_granted(c, limit, &self.messages, &self.items)
             .map_err(Error::Store)?;
         let mut out = Vec::new();
         for m in ids {
