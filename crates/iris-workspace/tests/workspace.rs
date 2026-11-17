@@ -792,3 +792,26 @@ fn your_other_account_is_not_a_person() {
         assert!(!text.contains("me@home.example"), "{p}: {text}");
     }
 }
+
+#[test]
+fn mail_that_waits_for_its_link_check_is_left_out() {
+    // Mail that Iris understood before the link mark waits for its link
+    // check (store migration 20): it can be hostile, so no workspace gets it.
+    let tmp = TempDir::new("link-check");
+    let store = store(&tmp.0.join("data"));
+    store
+        .write(|tx| Ok(tx.execute("INSERT INTO link_check(message_id) VALUES (1)", [])?))
+        .unwrap();
+    let job = job(&store);
+    let ws = default_dir(&tmp.0.join("data"), job);
+    build(&store, job, &ws).unwrap();
+    let (_, text) = walk(&ws);
+    assert!(!text.contains("DANA-TEXT"), "{text}");
+    assert!(text.contains("MY-REPLY-TEXT"), "{text}");
+    // After the check, the next build has the message.
+    store
+        .write(|tx| Ok(tx.execute("DELETE FROM link_check WHERE message_id = 1", [])?))
+        .unwrap();
+    build(&store, job, &ws).unwrap();
+    assert!(walk(&ws).1.contains("DANA-TEXT"));
+}

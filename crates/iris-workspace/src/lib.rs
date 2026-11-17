@@ -326,18 +326,25 @@ fn stage_in(c: &Connection, job: i64, stage: &Path) -> Result<Built> {
 }
 
 /// True if `m` can go into a workspace: clean for the conversation rule, not
-/// gone, and not the source of a signal, which can hold a security code.
+/// gone, not mail that can be hostile (`iris_store::may_be_hostile!()`: also
+/// mail that waits for its link check), and not the source of a signal, which
+/// can hold a security code.
 fn clean(c: &Connection, m: &iris_talk::Mail) -> rusqlite::Result<bool> {
     if !m.for_reader() {
         return Ok(false);
     }
-    let signal: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
-         WHERE s.message_id = ?1 AND i.form = 'signal')",
+    let bad: bool = c.query_row(
+        concat!(
+            "SELECT ",
+            iris_store::may_be_hostile!(),
+            " OR EXISTS (SELECT 1 FROM item_source s JOIN item i ON i.id = s.item_id
+               WHERE s.message_id = m.id AND i.form = 'signal')
+             FROM message m WHERE m.id = ?1"
+        ),
         [m.id],
         |r| r.get(0),
     )?;
-    Ok(!signal)
+    Ok(!bad)
 }
 
 /// Write `threads/t-<id>.md` with the granted messages of `thread`. Gives
