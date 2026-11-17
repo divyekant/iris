@@ -1135,7 +1135,8 @@ agent that does not work in a folder. The rules for the MCP interface:
   verb that the command does not have. It gives no verb of the person
   (`sending`, `cancel`), no verb of the host (`serve`, `account`,
   `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
-  and not `matters propose`, which spends model budget. A test checks
+  and not `matters propose` or `write` (the draft in your voice, R3-05),
+  which spend model budget. A test checks
   that each verb is a tool or is in this list.
 - Each tool call takes the path of its verb in the same mode, so MCP adds
   no power. In host mode, these are the paths:

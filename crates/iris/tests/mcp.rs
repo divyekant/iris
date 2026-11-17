@@ -545,6 +545,8 @@ const NOT_TOOLS: &[&str] = &[
     "understand",
     "mcp",
     "matters_propose",
+    // `iris write` (R3-05) asks the model for a draft: it spends model budget.
+    "write",
 ];
 
 /// Each verb of the command is a tool, or it is in `NOT_TOOLS`. Each tool is
