@@ -36,7 +36,15 @@
       "properties": { "by": { "const": "model" } }
     }
   },
-  "if": { "properties": { "status": { "const": "proposed" } } },
-  "then": { "not": { "required": ["decided"] } },
-  "else": { "required": ["decided"] }
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "proposed" } } },
+      "then": { "not": { "required": ["decided"] } },
+      "else": { "required": ["decided"] }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["proposed", "declined"] } } },
+      "then": { "properties": { "items": { "minItems": 2 } } }
+    }
+  ]
 }

@@ -6,11 +6,14 @@
 //! the one validity rule of a proposal as the view `matter_valid`. This
 //! crate writes through these rules: it never decides validity in Rust.
 //!
-//! This part has the writes of the person ([`confirm`], [`decline`]), the
-//! write of a proposal ([`insert_proposal`]) and the clean-up of step 0 of
-//! the proposal step ([`clean`]). The model call comes in the next part.
+//! The crate has the writes of the person ([`confirm`], [`decline`]), and
+//! the proposal step ([`propose`]) with its write ([`insert_proposal`]) and
+//! its clean-up ([`clean`]).
 
 use std::fmt;
+
+pub mod propose;
+pub use propose::{propose, Gate, Outcome, Skip};
 
 use iris_store::Store;
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -34,6 +37,10 @@ pub enum Error {
     Conflict(&'static str),
     /// The request is not valid (HTTP 400).
     Bad(&'static str),
+    /// Understanding, or another proposal step, holds the run lock.
+    Busy,
+    /// The program could not make the model from the model row.
+    Model(String),
 }
 
 impl fmt::Display for Error {
@@ -42,6 +49,8 @@ impl fmt::Display for Error {
             Error::Store(e) => write!(f, "store: {e}"),
             Error::NotFound => f.write_str("no such matter"),
             Error::Conflict(why) | Error::Bad(why) => f.write_str(why),
+            Error::Busy => f.write_str("a run is in progress"),
+            Error::Model(e) => write!(f, "model: {e}"),
         }
     }
 }
@@ -154,7 +163,9 @@ pub fn confirm(store: &Store, matter: i64, title: &str, keep: &[i64], now: i64) 
     write(store, |tx| confirm_in(tx, matter, &title, &sorted, now))
 }
 
-fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64) -> Result<()> {
+/// The check before each decision: `matter` is a proposal that is valid now.
+/// The trigger `matter_decide` holds the same rule in the store.
+fn decidable(tx: &Transaction, matter: i64) -> Result<()> {
     if status(tx, matter)? != "proposed" {
         return Err(Error::Conflict("the matter is decided"));
     }
@@ -166,6 +177,11 @@ fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64
     if !valid {
         return Err(Error::Conflict("the proposal is not valid now"));
     }
+    Ok(())
+}
+
+fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64) -> Result<()> {
+    decidable(tx, matter)?;
     for item in keep {
         let member: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM matter_item WHERE matter_id = ?1 AND item_id = ?2)",
@@ -206,10 +222,11 @@ fn confirm_in(tx: &Transaction, matter: i64, title: &str, keep: &[i64], now: i64
 
 /// The person declines the proposal `matter`. Its members stay as rows and
 /// are pinned, so the same grouping does not come back after a rebuild. A
-/// decline of a decided matter gets `Conflict`.
+/// decline of a decided matter, or of a proposal that is not valid now, gets
+/// `Conflict`.
 pub fn decline(store: &Store, matter: i64, now: i64) -> Result<()> {
     write(store, |tx| {
-        status(tx, matter)?;
+        decidable(tx, matter)?;
         let n = tx.execute(
             "UPDATE matter SET status = 'declined', updated_at = ?2, decided_at = ?2
                  WHERE id = ?1 AND status = 'proposed'",
