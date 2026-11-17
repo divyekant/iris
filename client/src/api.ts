@@ -436,7 +436,8 @@ export async function get<T>(path: string): Promise<T> {
 export async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await call(path, "application/json", body);
   const answer = await response.json().catch(() => null);
-  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status });
+  // The body goes with the error too: a 409 of a start names the open job.
+  if (!response.ok) throw Object.assign(new Error(answer?.error ?? `The engine answered ${response.status}.`), { status: response.status, body: answer });
   return answer as T;
 }
 

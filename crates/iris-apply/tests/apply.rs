@@ -1266,6 +1266,7 @@ fn session_job(b: &Box, ms: &[i64]) -> i64 {
         .write(|tx| {
             tx.execute_batch(
                 "UPDATE message SET understood_at = 1;
+                 DELETE FROM link_check;
                  INSERT OR IGNORE INTO header(message_id, from_addr)
                    SELECT id, 'dana@example.com' FROM message;
                  UPDATE header SET from_addr = 'dana@example.com' WHERE from_addr IS NULL;",
