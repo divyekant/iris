@@ -318,7 +318,14 @@ fn the_count_holds_each_byte_that_the_agent_wrote() {
 fn a_process_that_keeps_the_pipe_open_gives_a_lower_bound() {
     // setsid moves the child out of the group, and the test isolation
     // stops nothing, so the child keeps the output pipe open.
-    let mut r = run("setsid sleep 5 & exit 0", Duration::ZERO);
+    let ready = std::env::temp_dir().join(format!("iris-hold-setsid-{}", std::process::id()));
+    let _ = std::fs::remove_file(&ready);
+    // The agent exits only after the child left the group.
+    let script = format!(
+        "setsid sh -c 'touch {f}; exec sleep 5' & while [ ! -e {f} ]; do sleep 0.05; done; exit 0",
+        f = ready.display()
+    );
+    let mut r = run(&script, Duration::ZERO);
     r.send("start\n");
     r.line();
     assert_eq!(r.line(), "exited 0");
