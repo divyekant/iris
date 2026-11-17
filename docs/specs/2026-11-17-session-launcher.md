@@ -49,10 +49,6 @@ command. Each tool has its own command line.
   isolation, so no agent runs outside an isolation.
 - The write verbs in a session and the one draft changeset of a session
   (R4-03).
-- The read verbs `search`, `show` and `list` in a session. The session socket
-  refuses them in this card, with the reason, and the agent reads the files
-  of the workspace. A later card adds them with the grant rules of the
-  workspace spec (known limit, with a GitHub issue).
 - `iris wait`, `iris ask` and the wake (release 5). A wake that starts a
   session calls the same launcher.
 - A start from the web client (R4-10). The web client calls the same
@@ -284,7 +280,8 @@ session ended. The check passes only if all of these are true:
    or `helper_pid` is NULL, or `kill(helper_pid, 0)` fails with `ESRCH`.
 2. The group of the agent is empty. `agent_pgid` is NULL, or
    `kill(-agent_pgid, 0)` fails with `ESRCH`.
-3. The isolation confirms that it holds no process of the session
+3. `Isolation::stop` of the session returned with no error, and the
+   isolation confirms that it holds no process of the session
    (`Isolation::ended`). The test isolation has no process of its own, so
    it confirms at once.
 
@@ -301,8 +298,10 @@ false "still runs"), never a false "ended". This is a known limit with an
 issue: the person then waits for the process to end, or restarts the
 machine.
 - Then the engine builds the workspace of each done job whose workspace
-  folder exists (workspace spec, "The granted messages of a job"): the mail
-  files go, and `JOB.md`, `job.json`, `drafts/` and `notes.md` stay. It
+  folder exists and that has no live session (workspace spec, "The granted
+  messages of a job"): the mail files go, and `JOB.md`, `job.json`,
+  `drafts/` and `notes.md` stay. A done job with a live session gets this
+  build only after the reap check of the session passes (next point). It
   removes `sessions/` logs older than 30 days.
 - After the reap of a session of a done job, the engine builds the
   workspace of the job the same way.
@@ -323,10 +322,22 @@ ends.
 - the program and the arguments that run the adapter command inside the
   isolation, with the egress port as the only network that it permits;
 - a check that the isolation works on this system;
+- `name(session)`: the durable identity of the isolation of one session,
+  for example a cgroup path on Linux. It depends only on the session ID,
+  so a new engine finds the isolation of a session after a restart.
+- `stop(session)`: ends each process in the isolation of the session, also
+  a process that left the process group (`setsid`). It returns when no
+  process of the session runs, or with an error.
 - `ended(session)`: true only if the isolation holds no process of the
   session (rule 3 of the reap check).
- This card gives no isolation for
-a real system: R4-05 gives one for macOS and one for Linux. With no
+
+The engine calls `stop` on each end of a session, after it closes the pipe:
+on a stop, a revoke, a job move, a time limit, an exit of the agent, a
+failed launch, and at the engine start for each live session. The
+supervisor calls `stop` again on each turn while the reap check fails. So
+no process of a session runs past its end, also when the helper is gone.
+
+This card gives no isolation for a real system: R4-05 gives one for macOS and one for Linux. With no
 isolation, `iris job run` fails with the reason, so no agent runs as the
 OS user with access to the data folder (spec 2, C2 and C6).
 
@@ -370,12 +381,25 @@ The engine listens on `.iris/socket` of each running session. A request has
 the same form as on `iris.sock` (one line of JSON). The engine knows the
 session from the socket that took the request, never from the request.
 
-The session socket answers `status` (the job: ID, goal, state, due date;
-the counts of the workspace). R4-03 adds the engine side of the other
+The session socket answers these verbs of this card:
+
+- `status`: the job (ID, goal, state, due date) and the counts of the
+  workspace.
+- `search`, `show` and `list`: the read verbs with the grant rules of the
+  workspace spec ("The same grant limits each verb of a session"). A
+  search runs only over the messages of `job_scope_message` of the active
+  refs of the job, and adds nothing to the workspace. `show` and `list`
+  give only the items of the workspace, with the fields of the item file.
+  The engine reads the grant at each call, so a revoke takes effect at
+  once. These verbs come in their own PR (plan, PR 6). Until it merges,
+  the socket refuses them with exit code 3 and the reason.
+
+R4-03 adds the engine side of the other
 session verbs: one entry point that takes the request and the author of the
 session (kind `agent`, `name` the adapter, `session` `se-<id>`, `job`
 `j-<id>`) and applies the grant checks. When that entry point is on
-`develop`, the session socket gives it each verb other than `status`. Until
+`develop`, the session socket gives it each verb that is not in the list
+above. Until
 then each other verb gets the exit code 3 and the reason. A host verb (for
 example `brief`, `ledger`, `job run`) gets exit code 3 in each case.
 
@@ -450,7 +474,9 @@ is refused before a row is written.
 | An `agents.toml` with an unknown key, a bad name, or an `IRIS` variable | Refused with the line | Parser test (property test over names) |
 | A raw SQL update or delete of `job_session` outside the five moves | Refused by the triggers | Store test |
 | A request on the session socket for another verb | Exit code 3, nothing changes | Socket test |
-| An agent process that leaves the process group | The isolation ends it (R4-05) | R4-05 test |
+| An agent process that leaves the process group | `Isolation::stop` ends it on each end of the session; the reap check needs `ended` | Test isolation that records the calls; R4-05 test on each system |
+| A done job with a live session at the engine start | The build waits for the reap check of the session | Supervisor test |
+| A `search` in a session for a word of a message outside the grant | No result | Socket test |
 | The helper is killed and the agent group lives | The reap check fails on rule 2; the session stays live and a `run` is refused | Supervisor test: kill the helper, keep the group |
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
@@ -497,9 +523,24 @@ only waits: its resident memory is small, and the build measures it
 
 ## External writes
 
-None. The launcher starts local processes and writes local files. The agent
-writes changes only through the verbs, and nothing leaves before `submit`
+The launcher writes nothing outside the product. The agent writes changes
+to the mailbox only through the verbs, and nothing leaves before `submit`
 (spec 2).
+
+The agent tool calls its model host through the egress proxy. Each call is
+a request of the agent tool, on the account and the key of the agent tool,
+not of Iris. The proxy relays bytes and makes no request of its own:
+
+| Result | What happens |
+|---|---|
+| Success | The proxy relays the answer. The log line has the bytes. |
+| A definite rejection (the host refuses the TLS connection or answers an error) | The proxy relays it, or closes both sides. The agent tool decides what to do. The log line has the result. |
+| An unknown result (a time-out, a lost connection, an engine crash) | The proxy closes both sides. On an engine crash the kernel closes them, and the helper stops the agent. The provider can have taken and billed the request. |
+| A retry | Iris never retries and never replays a request: it cannot read the TLS bytes. The agent tool can retry, by its own rules. |
+
+The cost of these calls is on the account of the agent tool. The budget of
+Iris (cost control) does not count it. The session time limit and the
+limit of 8 connections bound it. This is a known limit with an issue.
 
 ## Open questions
 
@@ -525,8 +566,10 @@ writes changes only through the verbs, and nothing leaves before `submit`
    open.
 7. The environment of the agent has no variable that starts with `IRIS`, and
    no variable outside the list. Red if the script finds one.
-8. In session mode, `iris search` fails with exit code 3 and does not open
-   the store. Red if it prints a result.
+8. In session mode, `iris search` does not open the store, and finds only
+   granted messages: a word of a message outside the grant gives no
+   result. Red if it opens the store or prints a message that is not
+   granted.
 9. With no isolation, `iris job run` fails before a session row is written.
    Red if a row or a process appears.
 10. After `iris job stop`, a second `run` fails until the processes of the
@@ -574,6 +617,8 @@ who does not run `iris job run`.
 4. R4-04 PR 4: the egress proxy in `iris-session`.
 5. R4-04 PR 5: the engine: supervisor, reap check, requests, session
    socket, egress ports, verbs and session mode.
+6. R4-04 PR 6: the read verbs `search`, `show` and `list` on the session
+   socket.
 
 ## Spec checks
 
