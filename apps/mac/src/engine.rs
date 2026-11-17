@@ -23,12 +23,9 @@ const WAIT: Duration = Duration::from_secs(5);
 /// The longest answer line.
 const MAX_ANSWER: u64 = 1 << 20;
 
-/// The engine socket in the data folder: `IRIS_DATA` when the app starts
-/// from a terminal with it, else the default folder of macOS. A start from
-/// Finder has no `IRIS_DATA` (issue #541).
-pub fn socket(home: &Path, data: Option<PathBuf>) -> PathBuf {
-    data.unwrap_or_else(|| home.join("Library/Application Support/iris"))
-        .join("iris.sock")
+/// The engine socket in the default data folder of macOS (issue #541).
+pub fn socket(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/iris/iris.sock")
 }
 
 /// The `iris` program. A Mac app gets no `PATH` of a shell, so the app looks
@@ -102,6 +99,14 @@ pub struct Page {
     pub restarted: bool,
 }
 
+/// True when the open window needs a new sign-in address: the engine
+/// started again (`restarted`), or the window shows a local page while the
+/// engine answers (`signed_in` is false), for example when the app opened
+/// before the engine.
+pub fn sign_in_needed(restarted: bool, signed_in: bool) -> bool {
+    restarted || !signed_in
+}
+
 /// The state of the notices: the largest notice row ID that the app read.
 #[derive(Debug, Default)]
 pub struct Poll {
@@ -121,12 +126,28 @@ impl Poll {
     }
 
     /// Read one result. `None` when it is not valid: the state stays, and the
-    /// next call asks again.
+    /// next call asks again. A valid result is one of these:
+    /// - no notices, with any `last`: no news, or a new start of the app
+    ///   (the first call, or a call after a gap);
+    /// - after the first call, 1 to [`PAGE`] notices with row IDs above the
+    ///   cursor, in increasing order, and `last` equal to the largest ID.
     pub fn read(&mut self, r: &Value) -> Option<Page> {
         let last = r["last"].as_u64()?;
         let open = r["open"].as_u64()?;
         let engine = r["engine"].as_u64()?;
         let list = r["notices"].as_array()?;
+        if !list.is_empty() {
+            let ids = list
+                .iter()
+                .map(|n| n["id"].as_str()?.strip_prefix("n-")?.parse::<u64>().ok())
+                .collect::<Option<Vec<_>>>()?;
+            let after = self.last?;
+            let rising = ids.windows(2).all(|w| w[0] < w[1]);
+            let ok = ids.len() <= PAGE && rising && ids[0] > after && ids.last() == Some(&last);
+            if !ok {
+                return None;
+            }
+        }
         let notices = list.iter().map(notice).collect::<Option<Vec<_>>>()?;
         self.last = Some(last);
         let restarted = self.engine.is_some_and(|e| e != engine);
@@ -316,12 +337,8 @@ mod tests {
         );
         assert_eq!(program(home, |_| false), None);
         assert_eq!(
-            socket(home, None),
+            socket(home),
             PathBuf::from("/Users/p/Library/Application Support/iris/iris.sock")
-        );
-        assert_eq!(
-            socket(home, Some("/tmp/d".into())),
-            PathBuf::from("/tmp/d/iris.sock")
         );
     }
 
@@ -366,6 +383,10 @@ mod tests {
             .read(&json!({ "notices": [], "last": 27, "open": 0, "engine": 6 }))
             .unwrap();
         assert!(again.restarted);
+        assert!(sign_in_needed(again.restarted, true));
+        // The app opened before the engine: the first answer signs in.
+        assert!(sign_in_needed(first.restarted, false));
+        assert!(!sign_in_needed(full.restarted, true));
         // A result that is not valid changes nothing.
         for bad in [
             json!(null),
@@ -374,6 +395,48 @@ mod tests {
         ] {
             assert_eq!(p.read(&bad), None);
             assert_eq!(p.args(), json!({ "after": 27 }));
+        }
+    }
+
+    #[test]
+    fn the_cursor_moves_only_with_a_valid_page() {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        for _ in 0..20_000 {
+            let mut p = Poll::default();
+            let first = rng.next().is_multiple_of(3);
+            let after = rng.next() % 50;
+            if !first {
+                p.read(&json!({ "notices": [], "last": after, "open": 0, "engine": 5 }))
+                    .unwrap();
+            }
+            // Random IDs around the cursor, in random order, and a random
+            // `last`: valid and not valid pages.
+            let n = (rng.next() % (PAGE as u64 + 3)) as usize;
+            let ids: Vec<u64> = (0..n).map(|_| rng.next() % 80).collect();
+            let last = match rng.next() % 3 {
+                0 => ids.iter().copied().max().unwrap_or(after),
+                1 => rng.next() % 1000,
+                _ => after,
+            };
+            let before = p.args();
+            let valid = ids.is_empty()
+                || (!first
+                    && ids.len() <= PAGE
+                    && ids.windows(2).all(|w| w[0] < w[1])
+                    && ids[0] > after
+                    && ids.last() == Some(&last));
+            let read = p.read(&page(&ids, last));
+            assert_eq!(
+                read.is_some(),
+                valid,
+                "first {first} after {after} {ids:?} last {last}"
+            );
+            if valid {
+                assert_eq!(p.args(), json!({ "after": last }));
+                assert_eq!(read.unwrap().notices.len(), ids.len());
+            } else {
+                assert_eq!(p.args(), before, "a page that is not valid moves nothing");
+            }
         }
     }
 

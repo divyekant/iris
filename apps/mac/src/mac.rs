@@ -25,7 +25,7 @@ const ID: &str = "io.github.divyekant.iris.app";
 /// the navigation and starts the engine: the page needs no Tauri command.
 const START: &str = "start.iris.invalid";
 /// The most notices that wait for a click at the same time. Each one holds
-/// a small thread. More notices show with no click action.
+/// a small thread. More notices show with no click action (issue #590).
 const WAIT_MAX: usize = 20;
 
 const TRAY_ICON: &[u8] = include_bytes!("../icons/tray.png");
@@ -54,7 +54,7 @@ pub fn run() {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
-    let socket = engine::socket(&home, std::env::var_os("IRIS_DATA").map(PathBuf::from));
+    let socket = engine::socket(&home);
     let app = tauri::Builder::default()
         .manage(Shell {
             home,
@@ -173,9 +173,8 @@ fn address(shell: &Shell) -> WebviewUrl {
                 .map(str::to_owned)
         })
         .and_then(|u| Url::parse(&u).ok());
-    if let Some(u) = &url {
-        *shell.origin.lock().unwrap() = Some(u.origin().ascii_serialization());
-    }
+    // No origin while the window shows a local page.
+    *shell.origin.lock().unwrap() = url.as_ref().map(|u| u.origin().ascii_serialization());
     match url {
         Some(u) => WebviewUrl::External(u),
         None if engine::program(&shell.home, |p| p.exists()).is_some() => {
@@ -254,7 +253,10 @@ fn notices(app: AppHandle) {
             .ok()
             .and_then(|r| poll.read(&r));
         if let Some(page) = page {
-            if page.restarted {
+            // A new start of the engine, or an engine that answers while the
+            // window shows "Iris is not running": sign the window in.
+            let signed_in = app.state::<Shell>().origin.lock().unwrap().is_some();
+            if engine::sign_in_needed(page.restarted, signed_in) {
                 sign_in_again(&app);
             }
             menu_bar(&app, page.open);
