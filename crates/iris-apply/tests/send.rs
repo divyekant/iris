@@ -988,6 +988,33 @@ fn the_step_holds_a_new_send_and_names_its_end() {
     let next = out.next.expect("a time to wake");
     assert!(next > before && next <= now() + HOLD_MS, "{next}");
     assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
+    // Issue #421: the document of a changeset with a held send agrees with
+    // the published schema.
+    let mut out = Vec::new();
+    iris_changeset::write_document(&b.store, changeset_of(&b, s), &mut out).unwrap();
+    let doc: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(doc["state"], "open", "{doc}");
+    assert_eq!(doc["actions"][0]["decision"]["state"], "held", "{doc}");
+    let errors: Vec<String> = iris_spec::validator("changeset")
+        .iter_errors(&doc)
+        .map(|e| format!("{e} at {}", e.instance_path()))
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    // Only a send can be held: the held rule names the verb of another
+    // verb, and only while the action is held.
+    let verb_error = |state: &str| {
+        let mut other = doc.clone();
+        other["actions"][0]["verb"] = json!("archive");
+        other["actions"][0]["decision"]["state"] = json!(state);
+        let found = iris_spec::validator("changeset")
+            .iter_errors(&other)
+            .any(|e| {
+                e.instance_path().to_string() == "/actions/0/verb" && e.to_string().contains("send")
+            });
+        found
+    };
+    assert!(verb_error("held"));
+    assert!(!verb_error("approved"));
 }
 
 /// While the switch is off, the step holds the send, makes no call and
@@ -996,7 +1023,7 @@ fn the_step_holds_a_new_send_and_names_its_end() {
 fn the_step_sends_nothing_while_the_switch_is_off() {
     let b = setup("step-off");
     let (s, _) = b.new_mail(AGED);
-    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    iris_apply::set_sending(&b.store, false).unwrap();
     let out = b.step();
     assert!(out.results.is_empty() && out.next.is_none(), "{out:?}");
     assert_eq!((b.state(s).as_str(), b.sends()), ("held", 0));
@@ -1016,8 +1043,44 @@ fn the_step_recovers_a_lost_send_while_the_switch_is_off() {
     b.fake.fail_next_matching("rfc822msgid", 400);
     assert!(b.release(s).is_err());
     assert_eq!((ledger(&b.store, s).0.as_str(), b.sends()), ("writing", 1));
-    iris_apply::set_sending(&b.store, false, now()).unwrap();
+    iris_apply::set_sending(&b.store, false).unwrap();
     let out = b.step();
     assert!(out.results.is_empty(), "{:?}", out.results);
     assert_eq!((b.state(s).as_str(), b.sends()), ("applied", 1));
+}
+
+/// Issue #420: a writer that holds the store delays `iris sending on`. The
+/// hold then counts from the end of that wait, not from the call.
+#[test]
+fn sending_on_after_a_wait_gets_a_full_hold() {
+    let b = setup("switch-wait");
+    let (s, _) = b.new_mail(AGED);
+    iris_apply::set_sending(&b.store, false).unwrap();
+    let store = std::sync::Arc::new(Store::open(b.store.dir()).unwrap());
+    let (go, started) = std::sync::mpsc::channel();
+    let blocker = {
+        let store = store.clone();
+        std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    go.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(now())
+                })
+                .unwrap()
+        })
+    };
+    started.recv().unwrap();
+    iris_apply::set_sending(&store, true).unwrap();
+    let freed = blocker.join().unwrap();
+    let on = iris_apply::sending(&b.store).unwrap().unwrap();
+    assert!(
+        on >= freed,
+        "on_at {on} is before the writer ended at {freed}"
+    );
+    match b.release(s) {
+        Ok(Outcome::Hold(until)) => assert!(until >= freed + HOLD_MS, "{until}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(b.sends(), 0);
 }
