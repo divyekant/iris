@@ -217,6 +217,19 @@ test("the setup flow shows the copy progress and says that the mailbox does not 
   assert.match(t, /Nothing in your mailbox changes/);
 });
 
+test("a conversation item opens the reply form of its thread, unless the conversation is gone (R3-10)", async () => {
+  const html = await render("/src/views/Item.svelte", { item: item("v-88"), now: NOW });
+  assert.match(html, /<a class="reply[^"]*" href="#\/write\/t-9001">Reply</);
+  // Reply leads the row of the conversation verbs.
+  assert.match(text(html), /Reply Mute/);
+  // A muted conversation has no verbs row: Reply stands alone.
+  assert.match(await render("/src/views/Item.svelte", { item: { ...item("v-88"), status: "muted" }, now: NOW }), /class="alone[^"]*">(?:<!--[^>]*-->)*<a class="reply[^"]*" href="#\/write\/t-9001"/);
+  const gone = await render("/src/views/Item.svelte", { item: { ...item("v-88"), status: "gone" }, now: NOW });
+  assert.doesNotMatch(gone, /href="#\/write\//);
+  // Only a conversation has the reply: a commitment of the same thread does not.
+  assert.doesNotMatch(await render("/src/views/Item.svelte", { item: item("c-311"), now: NOW }), /href="#\/write\//);
+});
+
 test("the setup flow says mirror ready and that nothing changed", async () => {
   const status = { ...fx.status, messages: { total: 84212, fetched: 84212, understood: 100, gone: 0 } };
   const html = await render("/src/views/Setup.svelte", { status, poll: 0 });
