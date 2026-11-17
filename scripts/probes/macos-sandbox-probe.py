@@ -268,8 +268,8 @@ def kill_loop(cid, limit=5.0):
                 except OSError:
                     pass
         c = coalition_counts(cid)
-        if not members and isinstance(c, tuple) and c[0] == c[1]:
-            break
+        if not members and (not isinstance(c, tuple) or c[0] == c[1]):
+            break  # ESRCH: the coalition is gone, so it is empty
         empty_scans = empty_scans + 1 if not members else 0
         time.sleep(0.01)
     return {"passes": passes, "seconds": round(time.time() - t0, 3), "counts_end": coalition_counts(cid),
@@ -304,6 +304,89 @@ def test_kill_loop(marker, profile, n):
     time.sleep(1.5)
     res["after_loop"] = escapers_alive(outdir)
     res["counts_after_loop"] = coalition_counts(cid)
+    return res
+
+
+def run_init(outdir, deadline, marker):
+    """The first process of a sandbox: fork the escapers (same sandbox), then
+    on SIGUSR1 call kill(-1, SIGKILL) in the non-POSIX form (the caller is
+    not a target) until no process is left to signal."""
+    import errno
+    go = []
+    signal.signal(signal.SIGUSR1, lambda *_: go.append(1))
+    with open(os.path.join(outdir, "init.json"), "w") as f:
+        json.dump({"pid": os.getpid(), "coalition": coalition(os.getpid())}, f)
+    for fn in (run_hopper, run_sleeper):
+        if os.fork() == 0:
+            fn(outdir, deadline, marker)
+    while not go and time.time() < deadline:
+        time.sleep(0.05)
+    libc = ctypes.CDLL(None, use_errno=True)
+    t0, passes, signaled, none_in_row = time.time(), 0, 0, 0
+    while time.time() - t0 < 5 and none_in_row < 3:
+        passes += 1
+        r = libc.syscall(37, -1, signal.SIGKILL, 0)  # SYS_kill, posix = 0
+        if r == 0:
+            signaled += 1
+            none_in_row = 0
+        elif ctypes.get_errno() == errno.ESRCH:
+            none_in_row += 1
+        else:
+            none_in_row = 0
+        while True:  # reap the children of init
+            try:
+                if os.waitpid(-1, os.WNOHANG)[0] == 0:
+                    break
+            except ChildProcessError:
+                break
+    with open(os.path.join(outdir, "killer.json"), "w") as f:
+        json.dump({"passes": passes, "passes_that_signaled": signaled, "seconds": round(time.time() - t0, 3),
+                   "last_errno": ctypes.get_errno()}, f)
+    os._exit(0)
+
+
+def test_init_killer(marker, profile, n):
+    """A launchd job whose program is a sandboxed init with the escapers."""
+    outdir = tempfile.mkdtemp(prefix="iris-probe-")
+    label = "com.iris.probe.init.%d.%d" % (os.getpid(), n)
+    deadline = time.time() + DEADLINE_S
+    plist = os.path.join(outdir, label + ".plist")
+    with open(plist, "wb") as f:
+        plistlib.dump({"Label": label, "RunAtLoad": True, "KeepAlive": False,
+                       "ProgramArguments": ["/usr/bin/sandbox-exec", "-f", profile, sys.executable,
+                                            os.path.abspath(__file__), "init", outdir, str(deadline), marker],
+                       "StandardOutPath": os.path.join(outdir, "init.log"),
+                       "StandardErrorPath": os.path.join(outdir, "init.log")}, f)
+    subprocess.run(["/bin/launchctl", "bootstrap", uid_domain(), plist], capture_output=True)
+    for _ in range(150):
+        if os.path.exists(os.path.join(outdir, "init.json")):
+            break
+        time.sleep(0.02)
+    try:
+        with open(os.path.join(outdir, "init.json")) as f:
+            init = json.load(f)
+    except OSError:
+        log = open(os.path.join(outdir, "init.log")).read()[-400:] if os.path.exists(os.path.join(outdir, "init.log")) else ""
+        bootout(label)
+        return {"error": "init did not start", "log": log}
+    time.sleep(1.5)
+    cid = init["coalition"][0]
+    res = {"before": escapers_alive(outdir), "counts_before": coalition_counts(cid)}
+    os.kill(init["pid"], signal.SIGUSR1)
+    for _ in range(400):
+        if os.path.exists(os.path.join(outdir, "killer.json")):
+            break
+        time.sleep(0.02)
+    time.sleep(1.5)
+    try:
+        with open(os.path.join(outdir, "killer.json")) as f:
+            res["killer"] = json.load(f)
+    except OSError:
+        res["killer"] = "no result"
+    res["after"] = escapers_alive(outdir)
+    res["counts_after"] = coalition_counts(cid)
+    res["members_after"] = len(pids_in_coalition(cid))
+    res["bootout"] = bootout(label)
     return res
 
 
@@ -477,12 +560,8 @@ def main():
                         | ({"/opt/homebrew"} if os.path.isdir("/opt/homebrew") else set()))
     write_profile(lifetime_profile, tmp_root, sb_dir, 9, read_extra)
     try:
-        report["baseline_plain_child_sigkill"] = test_baseline(marker, None)
-        report["launchd_bootout"] = [test_launchd(marker, None, "bootout", 0)]
-        report["launchd_sigkill"] = [test_launchd(marker, None, "sigkill", 1)]
-        report["kill_loop"] = [test_kill_loop(marker, None, 200 + i) for i in range(ROUNDS)]
-        report["kill_loop_sandboxed"] = [test_kill_loop(marker, lifetime_profile, 300 + i) for i in range(2)]
-        report["containment"] = test_containment(marker)
+        report["kill_loop"] = [test_kill_loop(marker, None, 200 + i) for i in range(3)]
+        report["init_killer"] = [test_init_killer(marker, lifetime_profile, 400 + i) for i in range(10)]
     finally:
         left = marker_pids(marker)
         report["cleanup_marker_pids_found"] = len(left)
@@ -508,6 +587,8 @@ if __name__ == "__main__":
             run_sleeper(outdir, deadline, marker)
         else:
             run_helper(outdir, deadline, marker, sys.argv[5] if len(sys.argv) > 5 else "")
+    elif len(sys.argv) > 1 and sys.argv[1] == "init":
+        run_init(sys.argv[2], float(sys.argv[3]), sys.argv[4])
     elif len(sys.argv) > 2 and sys.argv[1] == "inside":
         run_inside(sys.argv[2])
     else:
