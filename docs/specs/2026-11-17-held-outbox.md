@@ -49,7 +49,18 @@ delay ends. A cancel removes it."
 | `approved` | `held` | engine | The apply step of the account, at its next turn. The decision fields of the approval stay. |
 | `held` | `applied`, `failed` | engine | The release (R3-01, section 5). The claim moves the action only if it is still `held`. |
 | `held` | `denied` | engine | The release denies it: the draft changed or is gone at Gmail, or its warnings grew (R3-03). |
-| `approved`, `held` | `cancelled` | person | The cancel, only while no ledger row of the action exists. |
+| `approved`, `held` | `denied` | person | The cancel in the outbox, only while no ledger row of the action exists. The reason is "Cancelled in the outbox." |
+| `approved`, `held` | `cancelled` | author | The withdraw of the changeset, only while no ledger row of the action exists. |
+| `approved`, `held` | `expired` | expiry | 14 days after the submit, at the move to `held`, at the claim, or at the expiry tick, if no ledger row exists. |
+
+The cancel uses `denied` by `person`, not `cancelled`. The table allows
+`cancelled` only by `author` (a CHECK of migration 7), and a change of a
+CHECK needs a rebuild of the table. A cancel is a decision of the person
+against the send, so `denied` with its reason says what happened. The
+outbox and the review screen show the reason.
+
+Each open send expires 14 days after its submit, also a held one. So a
+send that waits with the switch off for a long time cannot leave later.
 
 The hold starts at the later of the approval (`decided_at`) and the time
 the switch went on (`send_switch.on_at`). The release step already waits
@@ -62,11 +73,16 @@ goes on.
 - Trigger `action_state` (spec R3-01, section 5.1):
   - accepts `approved>held`, `held>applied`, `held>failed`, `held>denied`
     and `held>cancelled`;
-  - accepts `approved>cancelled` and `held>cancelled` of a `send` with
-    `decided_by = 'person'` and the reason "Cancelled in the outbox.", with
-    no withdraw of the changeset;
-  - refuses a cancel while a ledger row of the action exists;
-  - accepts `>held` only for the verb `send`.
+  - accepts `held>expired` with the rule of `approved>expired` (14 days
+    after the submit);
+  - accepts `held>denied` by `engine` (the release) and by `person` (the
+    cancel), and `held>cancelled` only with a withdraw of the changeset;
+  - refuses each move out of `approved` or `held` other than to `applied`
+    or `failed` while a ledger row of the action is in `writing`;
+  - accepts `>held` only for the verb `send`, from `approved`.
+- Trigger `changeset_withdraw` cancels each `held` action that has no
+  ledger row, as it cancels an `approved` one. A claimed send continues to
+  its end (recovery of R3-01).
 - Trigger `ledger_insert` accepts an action in `held` for the verb `send`.
 - Table `send_switch`: one row (`id = 1`), `on_at` (milliseconds, `NULL`
   when off), `changed_at`. The migration writes the row with `on_at = NULL`.
@@ -79,6 +95,13 @@ goes on.
 - The release reads the switch in the claim transaction. If the switch is
   off, the release makes no call and gives `Outcome::Hold`, and the send
   stays `held`. A switch that goes off during a hold stops the send.
+- The release holds the apply lock (`apply.lock`) from before its claim to
+  the end of its `drafts.send` call. `iris sending off` takes the same lock
+  before it writes the switch, and tries for up to 60 seconds. So when the
+  command says "Sending is off.", no send call is in progress, and each
+  later claim reads the switch as off. If the lock stays busy, the command
+  writes nothing and says "A send is in progress. Run the command again."
+  `iris sending on` needs no lock: the next claim reads it.
 - The web client shows the state of the switch in the outbox. It cannot
   change the switch in this card, so an agent that can reach the API cannot
   turn sending on.
@@ -92,8 +115,10 @@ The sync thread of each account runs the apply step after each sync:
    `draft`), oldest first, with `iris_apply::apply`. The apply keeps all
    its checks: the policy mode, the expiry, the lock, the ledger and the
    recovery.
-2. Move each `approved` send of the account to `held` (one `UPDATE ...
-   WHERE state = 'approved' AND verb = 'send'`).
+2. Move each `approved` send of the account to `held`, in one
+   transaction. A send whose submit is 14 days old or older becomes
+   `expired` in place of `held`. The claim of the release checks the same
+   expiry again.
 3. If the switch is on, call `iris_apply::release` for each `held` send of
    the account whose hold ended, oldest first.
 
@@ -105,9 +130,10 @@ lock) ends the step: the next turn tries again.
 ### 5. The cancel
 
 - `iris_changeset::cancel(store, action, now)` moves a `send` in `approved`
-  or `held` to `cancelled`, in one transaction with
-  `UPDATE ... WHERE id = ?1 AND verb = 'send' AND state IN ('approved',
-  'held') AND NOT EXISTS (ledger row)`. It gives `true` if the row changed.
+  or `held` to `denied` by `person` with the reason "Cancelled in the
+  outbox.", in one transaction with `UPDATE ... WHERE id = ?1 AND verb =
+  'send' AND state IN ('approved', 'held') AND NOT EXISTS (ledger row)`. It
+  gives `true` if the row changed.
 - The release claims with `UPDATE ... WHERE state = 'held'` in its claim
   transaction. Both run on the one write connection of the store, so only
   one of the two commits. A cancel after the claim changes nothing and
@@ -146,6 +172,11 @@ Supported input: actions of the store that passed submit.
 | A cancel and a release at the same time | One commits: the cancel (no call) or the claim (the cancel says it started) | concurrency test |
 | A cancel after the claim | No change; the answer says the send started | changeset test |
 | A cancel of another verb, or of a closed action | No change; an error | changeset test |
+| A withdraw of the changeset while its send is held | The send becomes `cancelled`; no call | store test |
+| A withdraw after the claim | The send continues to its end (recovery) | store test |
+| `iris sending off` while a release calls `drafts.send` | The command waits for the lock; it says off only after the call ended | engine test |
+| An approved send 14 days after its submit | `expired`, not `held`; no call | changeset test |
+| A held send 14 days after its submit (the switch was off) | `expired` at the claim or the tick; no call | release test |
 | A crash while held | The send stays `held` after the restart, and the hold counts from `decided_at` or `on_at` | restart test |
 | A crash after the claim | Recovery of R3-01 | existing tests |
 | The clock goes back | The hold is longer. The clock goes forward: the hold is shorter (known limit, issue #399) | none |
@@ -182,10 +213,14 @@ None.
 1. A held send does not leave before its hold ends. Red if the engine
    releases a send at once.
 2. A cancel of a held send removes it, and no `drafts.send` goes out. Red if
-   the claim does not check `held`.
-3. With the switch off, no send leaves. Red if the release does not read
+   the claim does not check `held`. A withdraw of its changeset does the
+   same.
+3. `iris sending off` returns only when no send call is in progress. Red if
+   the command does not take the apply lock.
+4. With the switch off, no send leaves. Red if the release does not read
    the switch.
-4. An approved `draft` reaches Gmail with no command. Red if the engine
+5. An expired approval never moves to `held` and never leaves.
+6. An approved `draft` reaches Gmail with no command. Red if the engine
    does not call the apply.
 
 ## Verify
