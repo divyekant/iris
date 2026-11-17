@@ -1017,6 +1017,95 @@ fn a_reply_on_the_wait_thread_wakes_the_job() {
     let _ = s.stop(f.job).unwrap();
 }
 
+/// R4-08 (docs/specs/2026-11-17-review-comments.md, section 5): a review
+/// comment on a job with no live session starts a session with no command.
+/// That session reads the comment and submits a new revision.
+fn a_comment_starts_a_session_that_submits_a_new_revision() {
+    let f = fixture("comment", "sleep 30");
+    f.store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (id, account_id, thread_id, provider_id, internal_date, understood_at)
+                   VALUES (1, 1, 5, 'm1', 1000, 1);
+                 INSERT INTO header (message_id, date, from_addr, to_addrs, subject)
+                   VALUES (1, 1000, 'dana@example.com', 'me@example.com', 'Contract');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    // A new add of the thread grants the message.
+    add_scope(&f.store, f.job, Ref::Thread(5), By::Person, NOW).unwrap();
+    let s = sessions(&f);
+    let first = s.run(f.job, "script").unwrap();
+    until(&s, &f, first, |r| r.started_ms.is_some());
+    // The agent proposes an archive, then the session ends.
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "archive", "targets": ["m-1"]}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let cs = v["result"]["changeset"].as_str().unwrap().to_string();
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Old."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let _ = s.stop(f.job).unwrap();
+    until(&s, &f, first, |r| r.reaped_ms.is_some());
+    // No comment: a wake starts nothing.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, first);
+
+    let row = iris_changeset::parse_changeset_id(&cs).unwrap();
+    iris_changeset::transaction(&f.store, |c| {
+        iris_changeset::comment_in(
+            c,
+            row,
+            1,
+            "Keep it in the inbox.",
+            "k-0123456789abcdef",
+            now(),
+        )
+    })
+    .unwrap();
+    s.wake(now());
+    let next = next_session(&s, &f, first);
+    let file = fs::read_to_string(workspace(&f).join(format!("comments/{cs}.md"))).unwrap();
+    assert!(file.contains("Keep it in the inbox."), "{file}");
+    // The gate wrote the delivery: one more wake starts no other session.
+    s.wake(now());
+    assert_eq!(last_session(&f.store, f.job).unwrap().unwrap().id, next.id);
+    // The new session submits revision 2.
+    let v = ask(&f, "revise", serde_json::json!({"changeset": cs})).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let v = ask(
+        &f,
+        "add",
+        serde_json::json!({"verb": "read", "targets": ["m-1"], "changeset": cs}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let v = ask(
+        &f,
+        "submit",
+        serde_json::json!({"changeset": cs, "why": "Read only."}),
+    )
+    .unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let mut doc = Vec::new();
+    iris_changeset::write_document(&f.store, row, &mut doc).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+    assert_eq!(
+        (doc["revision"].as_i64(), doc["why"].as_str()),
+        (Some(2), Some("Read only."))
+    );
+    let _ = s.stop(f.job).unwrap();
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -1028,6 +1117,10 @@ fn main() {
         .filter_map(|a| a.to_str())
         .find(|a| !a.starts_with('-'));
     let tests: &[(&str, fn())] = &[
+        (
+            "a_comment_starts_a_session_that_submits_a_new_revision",
+            a_comment_starts_a_session_that_submits_a_new_revision,
+        ),
         (
             "a_job_waits_three_days_and_continues",
             a_job_waits_three_days_and_continues,

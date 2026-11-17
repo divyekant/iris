@@ -693,6 +693,7 @@ impl Sessions {
         if let Err(e) = iris_workspace::wake_due(&self.store, now) {
             say!("iris: the wake of the waiting jobs failed: {e}");
         }
+        self.comment_wake(now);
         let Ok(woken) = iris_job::woken(&self.store) else {
             return;
         };
@@ -713,6 +714,47 @@ impl Sessions {
                     "iris: {}: the session after the wake did not start: {e}",
                     iris_job::format_job_id(job)
                 );
+            }
+        }
+    }
+
+    /// The review comments of R4-08 (docs/specs/2026-11-17-review-comments.md,
+    /// section 5, stage 2): a `waiting` job with a pending comment gets a
+    /// wake of the engine, and a `working` job with a pending comment and no
+    /// live session gets a new session. The comment stays pending until the
+    /// gate of a session writes its delivery, so a session that is live now
+    /// or a launch that runs now gets nothing more here.
+    fn comment_wake(self: &Arc<Self>, now: i64) {
+        let mut jobs = None;
+        if let Err(e) = self.store.read(|c| {
+            jobs = Some(iris_changeset::commented_jobs_in(c));
+            Ok(())
+        }) {
+            say!("iris: the read of the review comments failed: {e}");
+            return;
+        }
+        let jobs = match jobs.expect("the read ran") {
+            Ok(j) => j,
+            Err(e) => {
+                say!("iris: the read of the review comments failed: {e}");
+                return;
+            }
+        };
+        for (job, state) in jobs {
+            if self.live_of(job).is_some() || self.state().launching.contains(&job) {
+                continue;
+            }
+            let id = iris_job::format_job_id(job);
+            if state == "waiting" {
+                if let Err(e) =
+                    iris_job::wake(&self.store, job, iris_job::By::Engine, Some("comment"), now)
+                {
+                    say!("iris: {id}: the wake for a review comment failed: {e}");
+                }
+                continue;
+            }
+            if let Err(e) = self.resume(job) {
+                say!("iris: {id}: the session for a review comment did not start: {e}");
             }
         }
     }
