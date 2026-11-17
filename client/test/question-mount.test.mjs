@@ -6,7 +6,9 @@ import { load, mount, until } from "./mount.mjs";
 
 const fx = await load("/dev/fixtures.ts");
 const text = (el) => el.textContent.replace(/\s+/g, " ");
-const job = () => JSON.parse(JSON.stringify(fx.jobs["j-14"]));
+// A copy from the start: a test of the fixture answer changes the fixture job.
+const asking = JSON.stringify(fx.jobs["j-14"]);
+const job = () => JSON.parse(asking);
 
 // Answer each request with `answer(path, body)`: [status, body].
 function serve(answer) {
@@ -125,12 +127,14 @@ test("after an answer, the brief says so and shows the next question at once", a
     assert.match(text(view.target), /A question for you 1/);
     assert.equal(view.target.querySelector("textarea").value, "");
     assert.ok(asked.some(([m, p]) => m === "GET" && p.startsWith("jobs?state=needs_you")));
-    // The answer of the last question leaves the line and no card.
+    // The answer of the last question leaves the line, and no section.
     left = [];
     await type(view, "The blue one.");
     button(view).click();
     await until(() => /“Renew the passport\.”/.test(text(view.target)));
     assert.equal(view.target.querySelector("textarea"), null);
+    assert.equal(view.target.querySelector("#questions"), null);
+    assert.doesNotMatch(text(view.target), /Questions? for you/);
   } finally {
     view.destroy();
   }
@@ -171,4 +175,29 @@ test("the preview keeps an answer as the person wrote it", () => {
   assert.equal(doc.job.events.at(-1).answer, given);
   assert.equal(fx.answerJob("j-14", "again")[0], 409);
   assert.equal(fx.answerJob("j-15", "  ")[0], 400);
+});
+
+test("a draft answer stays when a newer question of another job comes", async () => {
+  const at = (h) => `2026-11-17T${String(h).padStart(2, "0")}:00:00.000Z`;
+  const mine = { ...job(), updated: at(8) };
+  const newer = { ...job(), id: "j-20", goal: "Book the flight.", question: "Window or aisle?", updated: at(9) };
+  let list = [mine];
+  serve((path) => (path === "brief" ? [200, fx.brief] : path === "status" ? [200, fx.answer("status")] : path.startsWith("jobs") ? [200, { jobs: list, next: null }] : [200, path.startsWith("watches") ? [] : { proposed: [], confirmed: [] }]));
+  const view = await mount("/src/views/Brief.svelte", { watches: [], proposed: null, questions: [mine], brief: fx.brief, now: new Date("2026-11-16T09:05:00Z"), poll: 5 });
+  try {
+    await type(view, "Half typed");
+    list = [newer, mine];
+    await until(() => /Questions for you 2/.test(text(view.target)));
+    view.flushSync();
+    // The card with the unsent answer stays, with its text.
+    assert.match(text(view.target), /Pay the full amount/);
+    assert.equal(view.target.querySelector("textarea").value, "Half typed");
+    // With no draft, the newest question shows; the draft comes back with its question.
+    await type(view, "");
+    await until(() => /Window or aisle\?/.test(text(view.target)));
+    list = [{ ...mine, updated: at(10) }, newer];
+    await until(() => /Pay the full amount/.test(text(view.target)));
+  } finally {
+    view.destroy();
+  }
 });

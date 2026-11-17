@@ -9,9 +9,16 @@
   import { answerJob } from "../jobs";
   import { href } from "../route";
 
-  let { job, onanswered, onchanged }: { job: Job; onanswered: (job: Job) => void; onchanged: () => void } = $props();
+  let {
+    job,
+    draft = "",
+    ondraft = () => {},
+    onanswered,
+    onchanged,
+  }: { job: Job; draft?: string; ondraft?: (text: string) => void; onanswered: (job: Job) => void; onchanged: () => void } = $props();
 
-  let text = $state("");
+  // svelte-ignore state_referenced_locally
+  let text = $state(draft);
   let busy = $state(false);
   let error = $state("");
   let empty = $derived(!text.trim());
@@ -49,7 +56,7 @@
   <p class="text">{job.question}</p>
   <form onsubmit={send}>
     <label class="hidden" for={`answer-${job.id}`}>Your answer</label>
-    <textarea id={`answer-${job.id}`} bind:value={text} onkeydown={keys} rows="2" maxlength="10000" placeholder="Your answer" disabled={busy}></textarea>
+    <textarea id={`answer-${job.id}`} bind:value={text} oninput={(e) => ondraft(e.currentTarget.value)} onkeydown={keys} rows="2" maxlength="10000" placeholder="Your answer" disabled={busy}></textarea>
     <div class="row">
       <button type="submit" disabled={empty || busy}>{busy ? "Sending" : "Answer"}</button>
       <span class="hint">The agent reads it in a new session.</span>

@@ -120,7 +120,17 @@
   if (firstQuestions === undefined) reloadQuestions();
   // After an answer: one quiet line names the job, and the next question (or none) shows at once.
   let sent = $state<Job | null>(null);
-  const answeredJob = (job: Job) => ((sent = job), (questions = questions.filter((q) => q.id !== job.id)), reloadQuestions());
+  // The unsent answer of each question, by job and question time: a poll that changes the card keeps it.
+  const questionKey = (q: Job) => `${q.id} ${q.updated}`;
+  let drafts = $state<Record<string, string>>({});
+  // A question with an unsent answer stays on the card while it is open, so a newer question never takes the field away.
+  let shown = $derived(questions.find((q) => drafts[questionKey(q)]?.trim()) ?? questions[0]);
+  const answeredJob = (job: Job) => {
+    sent = job;
+    delete drafts[questionKey(job)];
+    questions = questions.filter((q) => q.id !== job.id);
+    reloadQuestions();
+  };
   // The watches load apart from the brief, so a slow or failed watch load never holds the brief.
   // svelte-ignore state_referenced_locally
   if (firstWatches === undefined) reloadWatches();
@@ -232,19 +242,22 @@
 {/if}
 
 <!-- The question of an agent (R5-05): one card, the newest question, answered in place. -->
-{#if questions.length || sent}
+{#snippet sentLine(job: Job)}
+  <p class="sent" role="status">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    Sent. The agent of “{job.goal}” continues with your answer.
+  </p>
+{/snippet}
+{#if shown}
   <section aria-labelledby="questions">
     <h2 id="questions"><span>{questions.length === 1 ? "A question for you" : "Questions for you"}</span> <span class="count">{questions.length}</span></h2>
-    {#if sent}
-      <p class="sent" role="status">
-        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-        Sent. The agent of “{sent.goal}” continues with your answer.
-      </p>
-    {/if}
+    {#if sent}{@render sentLine(sent)}{/if}
     <!-- A new question of the same job is a new card: the key has the time of the question. -->
-    {#if questions.length}{#key `${questions[0].id} ${questions[0].updated}`}<Question job={questions[0]} onanswered={answeredJob} onchanged={reloadQuestions} />{/key}{/if}
+    {#key questionKey(shown)}<Question job={shown} draft={drafts[questionKey(shown)] ?? ""} ondraft={(t) => (drafts[questionKey(shown)] = t)} onanswered={answeredJob} onchanged={reloadQuestions} />{/key}
     {#if questions.length > 1}<a class="all touch" href="#/jobs">All {questions.length} questions</a>{/if}
   </section>
+{:else if sent}
+  <div class="alone">{@render sentLine(sent)}</div>
 {/if}
 
 {#if soon.length}
@@ -431,6 +444,9 @@
   }
   .all:hover {
     color: var(--color-text);
+  }
+  .alone {
+    margin-bottom: var(--space-12);
   }
   .sent {
     display: flex;
