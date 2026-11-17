@@ -1039,10 +1039,16 @@ agent that does not work in a folder. The rules for the MCP interface:
 - `iris mcp` serves the tools on standard input and output
   (`crates/iris-mcp`, card R5-11).
 - One MCP tool for each verb of the command, with the same name and the same
-  arguments. `iris changeset --drafts` is the tool `drafts`, and the file of
-  `iris draft` is the object `draft`. MCP gives no verb that the command
-  does not have, and no verb of the person or of the host (`serve`,
-  `account`, `model`, `sending`, `backup`).
+  arguments. A verb with subcommands gives one tool for each subcommand,
+  with an underscore (`watch_add`, `watch_list`, `watch_remove`,
+  `matters_list`, `matters_show`). `iris changeset --drafts` is the tool
+  `drafts`, and the file of `iris draft` is the object `draft`. MCP gives no
+  verb that the command does not have. It gives no verb of the person
+  (`sending`, `cancel`), no verb of the host (`serve`, `account`,
+  `mirror`, `backup`, `export`, `service`, `model`, `understand`, `mcp`),
+  and not `matters propose`, which spends model budget. The read tools and
+  the watch tools take the direct path of their verb (section 8.1). A test
+  checks that each verb is a tool or is in this list.
 - Each tool call takes the path of its verb in the same mode, so MCP adds
   no power. In host mode: the read verbs read the store (section 8.1), and
   the other verbs go through `iris.sock` with the author `local`. In

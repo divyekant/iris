@@ -29,6 +29,16 @@ pub enum Call {
     Search { text: String, limit: u32 },
     /// `iris show <id> --json`.
     Show { id: String },
+    /// `iris watch add <text>`.
+    WatchAdd { text: String },
+    /// `iris watch list --json`.
+    WatchList,
+    /// `iris watch remove <id>`.
+    WatchRemove { id: String },
+    /// `iris matters list`.
+    MattersList,
+    /// `iris matters show <id>`.
+    MattersShow { id: String },
 }
 
 /// The kind of an argument: its JSON Schema and its check.
@@ -228,7 +238,42 @@ const SPECS: &[Spec] = &[
         args: &[CHANGESET],
         adds: false,
     },
+    Spec {
+        name: "watch_add",
+        about: "Watch for a new mail that matches the search text, for example \"visa from:embassy\". The engine checks each minute.",
+        args: &[arg("text", Kind::Text, "The search text.")],
+        adds: false,
+    },
+    Spec {
+        name: "watch_list",
+        about: "Show each watch, newest first, with the mail that arrived. Gives JSON Lines.",
+        args: &[],
+        adds: false,
+    },
+    Spec {
+        name: "watch_remove",
+        about: "Remove a watch (w-3): one that waits, or one that you saw.",
+        args: &[arg("id", Kind::Text, "The watch ID, for example w-3.")],
+        adds: false,
+    },
+    Spec {
+        name: "matters_list",
+        about: "The valid proposals of matters and the confirmed matters.",
+        args: &[],
+        adds: false,
+    },
+    Spec {
+        name: "matters_show",
+        about: "One matter (g-4) with its members, by form.",
+        args: &[arg("id", Kind::Text, "The matter ID, for example g-4.")],
+        adds: false,
+    },
 ];
+
+/// The name of each tool, in the order of `tools/list`.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    SPECS.iter().map(|s| s.name)
+}
 
 /// The optional arguments of each verb that adds an action.
 const DRAFT_ARGS: &[Arg] = &[
@@ -348,6 +393,17 @@ fn request(spec: &Spec, args: &Map<String, Value>) -> Call {
         "drafts" => socket("drafts", json!({})),
         "withdraw" => socket("withdraw", changeset()),
         "revise" => socket("revise", changeset()),
+        "watch_add" => Call::WatchAdd {
+            text: text("text").unwrap_or_default(),
+        },
+        "watch_list" => Call::WatchList,
+        "watch_remove" => Call::WatchRemove {
+            id: text("id").unwrap_or_default(),
+        },
+        "matters_list" => Call::MattersList,
+        "matters_show" => Call::MattersShow {
+            id: text("id").unwrap_or_default(),
+        },
         other => unreachable!("no request for the tool {other}"),
     }
 }
@@ -601,7 +657,7 @@ mod tests {
                         assert!(v.is_null() || v.is_string(), "{args}");
                     }
                 }
-                Call::Status | Call::Show { .. } => {}
+                _ => {}
             }
         }
         assert!(accepted > 100, "only {accepted} calls were valid");

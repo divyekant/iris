@@ -356,6 +356,28 @@ fn each_tool_gives_the_output_and_the_code_of_its_verb() {
             json!({ "changeset": "cs-999", "why": "x" }),
         ),
     ];
+    // A watch add on each path: the same text, with the ID of its own watch.
+    let (mcp, code, _) = c.run3("watch_add", json!({ "text": "visa" }));
+    let (text, cli_code, _) = cli(&["watch", "add", "visa"]);
+    assert_eq!((mcp.replacen("w-1", "w-2", 1), code), (text, cli_code));
+    let cases: Vec<(Vec<&str>, &str, Value)> = cases
+        .into_iter()
+        .chain([
+            (vec!["watch", "list", "--json"], "watch_list", json!({})),
+            (
+                vec!["watch", "remove", "w-999"],
+                "watch_remove",
+                json!({ "id": "w-999" }),
+            ),
+            (vec!["matters", "list"], "matters_list", json!({})),
+            (vec!["matters"], "matters_list", json!({})),
+            (
+                vec!["matters", "show", "g-999"],
+                "matters_show",
+                json!({ "id": "g-999" }),
+            ),
+        ])
+        .collect();
     for (argv, tool, args) in cases {
         let mcp = c.run3(tool, args);
         assert_eq!(mcp, cli(&argv), "{argv:?}");
@@ -504,4 +526,50 @@ fn a_bad_or_long_line_is_dropped_and_the_next_line_is_read() {
         "{list}"
     );
     c.stop();
+}
+
+/// The verbs that have no tool: the verbs of the person (the send switch
+/// and the cancel of a send), of the host (sign-in, service, model, backup,
+/// export, sync, understanding, the engine), and the paid proposal of
+/// matters.
+const NOT_TOOLS: &[&str] = &[
+    "serve",
+    "account",
+    "mirror",
+    "backup",
+    "export",
+    "service",
+    "model",
+    "sending",
+    "cancel",
+    "understand",
+    "mcp",
+    "matters_propose",
+];
+
+/// Each verb of the command is a tool, or it is in `NOT_TOOLS`. Each tool is
+/// a verb of the command (`drafts` is `changeset --drafts`).
+#[test]
+fn each_verb_of_the_command_is_a_tool_or_named_as_not_a_tool() {
+    use clap::CommandFactory;
+    let tools: Vec<&str> = iris_mcp::names().collect();
+    let mut verbs = Vec::new();
+    for c in iris::Cli::command().get_subcommands() {
+        let name = c.get_name();
+        let subs: Vec<_> = c.get_subcommands().collect();
+        if subs.is_empty() || NOT_TOOLS.contains(&name) {
+            verbs.push(name.to_string());
+        } else {
+            verbs.extend(subs.iter().map(|s| format!("{name}_{}", s.get_name())));
+        }
+    }
+    for v in &verbs {
+        assert!(
+            tools.contains(&v.as_str()) != NOT_TOOLS.contains(&v.as_str()),
+            "{v}: a tool, or in NOT_TOOLS, not both"
+        );
+    }
+    for t in tools {
+        assert!(t == "drafts" || verbs.iter().any(|v| v == t), "{t}");
+    }
 }

@@ -598,6 +598,7 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
             Err(e) => Outcome::fail(socket::code::ERROR, e),
         };
         let open = || Store::open(&dir).map_err(|e| format!("store: {e}"));
+        let watch = |c: WatchCommand| read(open().and_then(|s| verbs::watch(&s, &c)));
         match c {
             Call::Socket { verb, args } => match socket_verb(&dir, verb, args, true) {
                 Ok(p) => Outcome {
@@ -611,6 +612,20 @@ fn mcp(dir: PathBuf) -> Result<(), String> {
                 read(open().and_then(|s| verbs::search(&s, &text, limit, true)))
             }
             Call::Show { id } => read(open().and_then(|s| verbs::show(&s, &id, true))),
+            Call::WatchAdd { text } => watch(WatchCommand::Add { text }),
+            Call::WatchList => watch(WatchCommand::List { json: true }),
+            Call::WatchRemove { id } => watch(WatchCommand::Remove { id }),
+            // `iris matters` prints its text with a newline (`println!`).
+            Call::MattersList => read(
+                open()
+                    .and_then(|s| verbs::matters(&s, &MattersCommand::List))
+                    .map(|t| t + "\n"),
+            ),
+            Call::MattersShow { id } => read(
+                open()
+                    .and_then(|s| verbs::matters(&s, &MattersCommand::Show { id }))
+                    .map(|t| t + "\n"),
+            ),
         }
     };
     // rmcp uses timers for its time limits. At most MCP_CALLS calls run at

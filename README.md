@@ -155,8 +155,9 @@ standard input and output. Use it with an agent that speaks MCP but does not
 use a terminal. Each tool has the name and the arguments of its verb:
 `status`, `search`, `show`, `draft`, `send`, `close`, `decline`, `defer`,
 `correct`, `archive`, `inbox`, `read`, `unread`, `trash`, `label`,
-`unlabel`, `submit`, `changeset`, `drafts`, `withdraw` and `revise`. The
-result is the JSON of `--json`.
+`unlabel`, `submit`, `changeset`, `drafts`, `withdraw`, `revise`,
+`watch_add`, `watch_list`, `watch_remove`, `matters_list` and
+`matters_show`. The result is what the verb prints with `--json`.
 
 The tools take the same path as the command, with the same author (`local`),
 the same policy and the same review. The read tools read the store. The
