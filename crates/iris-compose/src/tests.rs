@@ -478,3 +478,25 @@ fn a_subject_with_changed_spaces_does_not_read_back() {
     assert!(read(changed.as_bytes(), ME).is_none());
     assert!(read_sent(changed.as_bytes(), ME).is_none());
 }
+
+/// Spec section 1: `From` is checked by address only, because Gmail can
+/// add the display name of the account. A display name reads back with
+/// the same hash on both read paths; another address still gives none.
+#[test]
+fn a_display_name_on_from_reads_back_on_both_paths() {
+    let c = content(&["p@x.org"], "Hi", "Body").check().unwrap();
+    let raw =
+        String::from_utf8(compose(ME, "iris.9@example.com", &c, None, 1_800_000_000)).unwrap();
+    let named = raw.replacen(
+        "From: <owner@example.com>",
+        "From: \"Owner\" <owner@example.com>",
+        1,
+    );
+    assert_ne!(named, raw);
+    let sent = format!("Received: by 10.0.0.1; Mon, 1 Jan 2027\r\n{named}");
+    for back in [read(named.as_bytes(), ME), read_sent(sent.as_bytes(), ME)] {
+        assert_eq!(hash(&back.unwrap().content, None), hash(&c, None));
+    }
+    let other = named.replacen("<owner@example.com>", "<other@example.com>", 1);
+    assert!(read(other.as_bytes(), ME).is_none());
+}
