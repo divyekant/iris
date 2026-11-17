@@ -20,13 +20,13 @@ function serve(answer) {
 const button = (view, label, n = 0) => [...view.target.querySelectorAll(".proposal button")].filter((b) => b.textContent.trim() === label)[n];
 
 test("Add the rule sends the version and the proposal ID, and the new policy has no suggestion", async () => {
-  const added = { ...same, version: 4, proposals: [same.proposals[1]], rules: [...same.rules, { ...same.proposals[0].rule, line: 40 }] };
+  const added = { ...same, version: 4, proposals: same.proposals.slice(1), rules: [...same.rules, { ...same.proposals[0].rule, line: 40 }] };
   const asked = serve(() => [200, added]);
   const view = await mount("/src/views/Rules.svelte", { policy: same, every: 0 });
   try {
-    assert.equal(view.target.querySelectorAll(".proposal").length, 2);
+    assert.equal(view.target.querySelectorAll(".proposal").length, 3);
     button(view, "Add the rule").click();
-    await until(() => view.target.querySelectorAll(".proposal").length === 1);
+    await until(() => view.target.querySelectorAll(".proposal").length === 2);
     assert.deepEqual(asked, [["/api/policy/accept", { version: 3, id: 1 }]]);
     assert.match(text(view.target), /Archive mail from deals@acme\.example .*Rule 10 · line 40 · Iris proposed it/);
   } finally {

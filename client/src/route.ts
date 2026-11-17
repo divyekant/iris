@@ -4,7 +4,7 @@ export type Form = "commitment" | "conversation" | "feed" | "signal";
 export type SectionKey = "you_owe" | "owed_to_you" | "conversations" | "strangers" | "signals" | "feed";
 
 export type Route =
-  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" | "matters" | "outbox" }
+  | { view: "home" | "setup" | "brief" | "ask" | "measures" | "rules" | "review" | "handled" | "jobs" | "matters" | "outbox" | "history" }
   | { view: "records"; type: string }
   | { view: "list"; form: Form }
   | { view: "section"; key: SectionKey }
@@ -65,7 +65,7 @@ export function parse(hash: string): Route {
     if (parts.length === 1 || (parts.length === 2 && parts[1] === "")) return { view: "write", thread: null };
     return parts.length === 2 && THREAD_ID.test(id) ? { view: "write", thread: id } : { view: "home" };
   }
-  if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled" || name === "outbox") return { view: name };
+  if (name === "setup" || name === "brief" || name === "ask" || name === "measures" || name === "rules" || name === "review" || name === "handled" || name === "outbox" || name === "history") return { view: name };
   return { view: "home" };
 }
 
@@ -87,6 +87,7 @@ export const NAV = [
   // The first view of More on a phone: a reply starts from its thread.
   ["#/write", "Write"],
   ["#/outbox", "Outbox"],
+  ["#/history", "History"],
   ["#/jobs", "Jobs"],
   ["#/commitments", "Commitments"],
   ["#/conversations", "Conversations"],

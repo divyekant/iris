@@ -67,8 +67,11 @@
   const accept = (id: number) => send("accept", { version: policy.version, id });
   const dismiss = (id: number) => send("dismiss", { id });
   let proposals = $derived(policy.proposals ?? []);
-  // One sentence for the reason of a proposal: the count and the verb, from the approvals of the person.
-  const why = (p: Proposal) => `You approved all ${p.approvals} ${p.rule.verbs.join(", ")} changes like this.`;
+  // One sentence for the reason of a proposal: the count, from the approvals or the choices of the person.
+  const why = (p: Proposal) =>
+    p.kind === "choices"
+      ? `You hid all ${p.approvals} items like this.`
+      : `You approved all ${p.approvals} ${p.rule.verbs.join(", ")} changes like this.`;
   const title = (r: Rule) => GROUPS.find((g) => g.effect === r.effect)?.title ?? r.effect;
   const author = (r: Rule) => (r.by === "proposal" ? "Iris proposed it" : "You wrote it");
   // Each field that can make a rule changed, and that the rule sentence does not show.
@@ -163,7 +166,7 @@
 {#if proposals.length}
   <section aria-labelledby="proposals">
     <h2 id="proposals" class="label">Suggested by Iris</h2>
-    <p class="muted note">Iris saw a pattern in your approvals. A suggestion goes into your file only when you add it.</p>
+    <p class="muted note">Iris saw a pattern in what you approve and hide. A suggestion goes into your file only when you add it.</p>
     <ul class="rules">
       {#each proposals as p (p.id)}
         <li class="proposal">

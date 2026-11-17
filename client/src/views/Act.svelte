@@ -1,13 +1,14 @@
 <!--
   What the person does with an open or deferred commitment: Done, Later or
-  Decline. A click waits a few seconds with Undo before Iris records it, so a
+  Decline. With a feed item, a conversation or a signal: Skip, Mute or
+  Dismiss, which take it out of the brief. A click waits a few seconds with Undo before Iris records it, so a
   wrong click costs nothing. Iris records the change through a changeset and
   the ledger (spec 2 section 4).
 -->
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { get, post, type Item } from "../api";
-  import { day, first, firstName, hold, HOLD, nextWeek, said, started, type Verb } from "../act";
+  import { day, first, firstName, hold, HOLD, nextWeek, quiet, said, started, type Verb } from "../act";
 
   // `delay`: the time for Undo, shorter in tests. `clock`: the time now.
   let {
@@ -30,6 +31,7 @@
   let pending: ReturnType<typeof hold> | undefined;
 
   let open = $derived(item.form === "commitment" && (item.status === "open" || item.status === "deferred"));
+  let away = $derived(quiet(item));
   // The days of Later come from the time when Later opens, and a click checks them again.
   let now = $state(new Date(0));
   let soon = $derived(first(now));
@@ -149,6 +151,12 @@
         </label>
       </div>
     {/if}
+  </div>
+{:else if away}
+  <div class="act">
+    <div class="row">
+      <button class="pill" type="button" onclick={() => away && choose(away.verb)}>{away.label}</button>
+    </div>
   </div>
 {/if}
 
