@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, LedgerEntry, LedgerPage, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, ReplyStart, Rule, Status, Summary, Target } from "../src/api";
 import type { Measures } from "../src/measures";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
@@ -592,8 +592,25 @@ export function answer(path: string): unknown {
   if (name === "jobs") return jobPage(q.get("state"));
   if (name === "notices") return notices;
   if (name === "measures") return measures;
+  if (name === "threads" && id === "t-8841" && url.pathname.endsWith("/reply")) return replyStart;
   return undefined;
 }
+
+/** GET /api/threads/t-8841/reply: the start values of a reply, with the conversation (R3-04). */
+const replyStart: ReplyStart = {
+  account: "a-1",
+  parent: { id: "m-55212", from: { name: "Priya Raman", address: "priya@northwind.example" }, date: "2026-11-17T09:12:00Z", text: "Thanks. Could you also add the Q3 numbers next to them?" },
+  to: ["priya@northwind.example"],
+  cc: [],
+  subject: "Re: Q4 numbers for the board",
+  topic: "Re: Q4 numbers for the board",
+  conversation: [
+    { id: "m-55210", from: { name: "Priya Raman", address: "priya@northwind.example" }, date: "2026-11-14T16:40:00Z", to: "you@example.com", you: false, hostile: false, text: ASK_MAIL["m-55210"], cut: false },
+    { id: "m-55211", from: { name: null, address: "you@example.com" }, date: "2026-11-15T08:05:00Z", to: "priya@northwind.example", you: true, hostile: false, text: ASK_MAIL["m-55211"], cut: false },
+    { id: "m-55212", from: { name: "Priya Raman", address: "priya@northwind.example" }, date: "2026-11-17T09:12:00Z", to: "you@example.com", you: false, hostile: false, text: "Thanks. Could you also add the Q3 numbers next to them, so the board sees the trend?\n\nPriya", cut: false },
+  ],
+  earlier: 0,
+};
 
 // Matters: the two examples, with members from the item examples above.
 const members = (base: object, list: Item[]): MatterView => {
