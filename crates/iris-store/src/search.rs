@@ -261,7 +261,7 @@ fn next_token(text: &str) -> (String, bool, &str) {
 }
 
 /// The start of a day `YYYY-MM-DD`, UTC, in milliseconds since the Unix epoch.
-fn day_ms(text: &str) -> Result<i64> {
+pub fn day_ms(text: &str) -> Result<i64> {
     let bad = || Error::Query(format!("{text} is not a date in the form YYYY-MM-DD"));
     let parts: Vec<&str> = text.split('-').collect();
     let [y, m, d] = parts[..] else {
