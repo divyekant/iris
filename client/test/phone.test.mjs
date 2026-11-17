@@ -56,7 +56,10 @@ async function serve() {
     logLevel: "error",
   });
   await vite.listen();
-  const browser = await chromium.launch();
+  const browser = await chromium.launch().catch((e) => {
+    // A Linux machine with no Chromium system libraries fails here. Name the fix.
+    throw new Error(`Chromium did not start. On Linux, install its system libraries one time: cd client && npx playwright-core install-deps chromium\n${e.message}`);
+  });
   after(async () => {
     await browser.close();
     await vite.close();

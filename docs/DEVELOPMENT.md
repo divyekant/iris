@@ -8,6 +8,9 @@ its checks. For the rules of the workflow, read `AGENTS.md`.
 - git 2.30 or later
 - Python 3.9 or later (local CI uses `python3`)
 - The tools of each area in `starter.json` (see the `tools` lines)
+- On Linux, the system libraries of Chromium for the client phone tests. In
+  `client/`, run `npx playwright-core install-deps chromium` one time (it uses
+  `sudo`). See `client/README.md`.
 - `gh`, signed in to GitHub, for the review command
 - `codex`, signed in, for the review command
 

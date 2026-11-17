@@ -19,7 +19,7 @@ serves a fallback page that tells you to build the client.
 
 ## Work on the client
 
-1. Install the packages: `pnpm install --frozen-lockfile`. Then install the browser of the phone tests (`test/phone.test.mjs`): `npx playwright-core install --only-shell chromium`. It downloads the headless Chromium shell (about 270 MB on disk) one time, and does nothing if the shell is there. Local CI runs this step in its private HOME (`.local-ci/home`), where it cannot see a browser of the host, so it downloads the shell one time for each checkout, also in a cloud session.
+1. Install the packages: `pnpm install --frozen-lockfile`. Then install the browser of the phone tests (`test/phone.test.mjs`): `npx playwright-core install --only-shell chromium`. It downloads the headless Chromium shell (about 270 MB on disk) one time, and does nothing if the shell is there. Local CI runs this step in its private HOME (`.local-ci/home`), where it cannot see a browser of the host, so it downloads the shell one time for each checkout, also in a cloud session. On Linux, Chromium also needs system libraries. Install them one time with `npx playwright-core install-deps chromium` (it uses `sudo` to run the package manager). If they are missing, the phone tests stop with a message that gives this command. A cloud session has them.
 2. Start the dev server: `pnpm dev`. It sends `/api` to the engine on
    `127.0.0.1:4800` (`iris serve`). With no engine, use
    `pnpm dev --mode fixtures`: the answers come from `dev/fixtures.ts`, which
