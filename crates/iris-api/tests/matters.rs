@@ -234,6 +234,46 @@ async fn a_stale_proposal_is_not_shown_and_not_decided() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The answer to a confirm comes from the state of the matter first: a
+/// matter that is gone answers 404, and a proposal that is not valid now
+/// answers 409, for each list of members, with a right or a wrong kind.
+#[tokio::test]
+async fn a_confirm_answers_the_state_of_the_matter_first() {
+    let (dir, s) = setup("first");
+    // Item 5 goes from the store: the store deletes proposal g-2.
+    s.write(|tx| Ok(tx.execute("DELETE FROM item WHERE id = 5", [])?))
+        .unwrap();
+    // Items 2 and 3 are gone: g-1 keeps one live member, so it is not valid.
+    s.write(|tx| Ok(tx.execute("UPDATE item SET status = 'gone' WHERE id IN (2, 3)", [])?))
+        .unwrap();
+    let lists = [
+        vec!["r-4", "c-5"],
+        vec!["c-4", "r-5"],
+        vec!["r-4"],
+        vec!["v-5"],
+        vec!["r-1", "v-2"],
+        vec!["r-1", "c-2"],
+        vec!["v-1"],
+    ];
+    for (matter, want) in [
+        ("g-2", StatusCode::NOT_FOUND),
+        ("g-1", StatusCode::CONFLICT),
+    ] {
+        for items in &lists {
+            let body = json!({"title": "Trip", "items": items}).to_string();
+            let (code, _) = call(
+                &s,
+                Method::POST,
+                &format!("/api/matters/{matter}/confirm"),
+                &body,
+            )
+            .await;
+            assert_eq!(code, want, "{matter} {items:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Decisions commit while another thread reads: each list document passes
 /// the schema, and each view names the same members in both parts.
 #[test]

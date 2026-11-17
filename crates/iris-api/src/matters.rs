@@ -5,7 +5,7 @@
 
 use iris_matters::Error as MatterError;
 use iris_store::{format_id, parse_id, Kind, Store};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde_json::{json, Map, Value};
 
 use crate::read::{doc_at, rfc3339, row_of, MATTER};
@@ -141,27 +141,14 @@ pub fn confirm_matter(
     let row = row_of(id, Kind::Matter)?;
     let mut keep = Vec::with_capacity(items.len());
     for item in items {
-        keep.push(member_row(item)?);
+        keep.push(member(item)?);
     }
-    // The kind of each ID must agree with the form of its row.
-    let forms_agree = store.read(|c| {
-        for (item, row) in items.iter().zip(&keep) {
-            let form: Option<String> = c
-                .query_row("SELECT form FROM item WHERE id = ?1", [row], |r| r.get(0))
-                .optional()?;
-            if form.as_deref() != Some(form_of(item)) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    })?;
-    if !forms_agree {
-        return Err(Error::Query("an item to keep is not a member".into()));
-    }
+    // The form of each ID is checked in the decision transaction, after the
+    // check of the matter: a matter that is gone answers 404 first.
     decided(
         store,
         row,
-        iris_matters::confirm(store, row, title, &keep, now_ms),
+        iris_matters::confirm_forms(store, row, title, &keep, now_ms),
     )
 }
 
@@ -187,20 +174,16 @@ fn decided(
     }
 }
 
-/// The row of a member ID (`c-`, `v-` or `r-`).
-fn member_row(id: &str) -> Result<i64> {
-    match parse_id(id) {
-        Some((k, row)) if MEMBER_FORMS.iter().any(|(_, m)| *m == k) => Ok(row),
-        _ => Err(Error::Query(format!("not a valid ID: {id}"))),
-    }
-}
-
-fn form_of(id: &str) -> &'static str {
-    let kind = parse_id(id).map(|(k, _)| k);
-    MEMBER_FORMS
-        .iter()
-        .find(|(_, k)| Some(*k) == kind)
-        .map_or("", |(f, _)| *f)
+/// The row and the form of a member ID (`c-`, `v-` or `r-`).
+fn member(id: &str) -> Result<(i64, &'static str)> {
+    parse_id(id)
+        .and_then(|(k, row)| {
+            MEMBER_FORMS
+                .iter()
+                .find(|(_, m)| *m == k)
+                .map(|(f, _)| (row, *f))
+        })
+        .ok_or_else(|| Error::Query(format!("not a valid ID: {id}")))
 }
 
 /// The matter document with its member documents, or `None`. One
