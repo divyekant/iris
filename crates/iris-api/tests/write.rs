@@ -210,6 +210,39 @@ async fn a_withdraw_stops_the_write() {
     );
 }
 
+/// Step 2a runs after the last read of the client (`saving`) and before
+/// the withdraw: the withdraw stops the send too (spec section 4).
+#[tokio::test]
+async fn a_withdraw_after_step_2a_stops_the_send() {
+    let dir = temp("withdraw-2a");
+    let s = store(&dir);
+    let (_, v) = call(
+        &s,
+        "POST",
+        "/api/write",
+        Some(new_mail(KEY, json!(["new_recipient"]))),
+    )
+    .await;
+    let cs = v["write"].as_str().unwrap().to_string();
+    made(&s);
+    assert_eq!(iris_changeset::send_written(&s, 1, &now).unwrap(), 1);
+    let (code, _) = call(&s, "POST", &format!("/api/changesets/{cs}/withdraw"), None).await;
+    assert_eq!(code, StatusCode::OK);
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st["state"], "stopped");
+    assert_eq!(
+        st["reason"],
+        "You stopped this mail. The draft stays in your Gmail drafts."
+    );
+    assert_eq!(
+        count(
+            &s,
+            "SELECT count(*) FROM changeset_action WHERE verb = 'send' AND state = 'cancelled'"
+        ),
+        1
+    );
+}
+
 /// Bodies that are not valid get 400 and write nothing.
 #[tokio::test]
 async fn a_body_that_is_not_valid_writes_nothing() {

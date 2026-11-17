@@ -401,6 +401,65 @@ fn a_withdraw_after_the_draft_makes_no_send() {
     assert_eq!(b.states(cs).1, None);
 }
 
+/// A stop of the write is the stop of its mail. Step 2a can run after the
+/// last read of the client (`saving`) and before the withdraw: the
+/// withdraw then also cancels the send that step 2a made, in each open
+/// state of that send (`held` and `in_review`), and no mail leaves.
+#[test]
+fn a_withdraw_after_step_2a_stops_the_send() {
+    for review in [false, true] {
+        let b = setup(if review {
+            "withdraw-2a-review"
+        } else {
+            "withdraw-2a"
+        });
+        let cs = b.write();
+        if review {
+            // A warning that the person did not see puts the send in
+            // review (see a_send_with_a_new_warning_goes_to_review).
+            b.apply_mark();
+            b.sql("DROP TRIGGER write_send_update", []);
+            b.sql("UPDATE write_send SET flags = '[]'", []);
+            send_written(&b.store, b.account, &|| now()).unwrap();
+        } else {
+            b.step();
+        }
+        let open = b.states(cs).1.unwrap();
+        let want = if review { "in_review" } else { "held" };
+        assert_eq!(open, want);
+        iris_changeset::withdraw(&b.store, cs, None).unwrap();
+        assert_eq!(
+            b.states(cs).1.as_deref(),
+            Some("cancelled"),
+            "review {review}"
+        );
+        b.step_at(now() + HOLD_MS + 1_000);
+        b.step_at(now() + HOLD_MS + 1_000);
+        assert_eq!(b.sends(), 0, "review {review}");
+    }
+}
+
+/// A withdraw after the send left is refused: the stop cannot hold, so it
+/// does not say that it did. The changeset stays as it was. (A send that
+/// the release claimed has a ledger row in `writing`, and the same query
+/// refuses it.)
+#[test]
+fn a_withdraw_after_the_send_left_is_refused() {
+    let b = setup("withdraw-sent");
+    let cs = b.write();
+    b.apply_mark();
+    send_written(&b.store, b.account, &|| now() - HOLD_MS - 1_000).unwrap();
+    b.step();
+    assert_eq!(b.states(cs).1.as_deref(), Some("applied"));
+    let before: String = b.one("SELECT state FROM changeset WHERE id = ?1", [cs]);
+    let r = iris_changeset::withdraw(&b.store, cs, None);
+    assert!(matches!(r, Err(iris_changeset::Error::Refused(_))), "{r:?}");
+    assert_eq!(
+        b.one::<String>("SELECT state FROM changeset WHERE id = ?1", [cs]),
+        before
+    );
+}
+
 /// Acceptance 4: two runs of step 2a make one send.
 #[test]
 fn each_mark_gets_one_send() {

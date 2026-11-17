@@ -186,6 +186,9 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
             }),
             "in_review" => json!({"state": "review", "draft": draft, "reason": why}),
             "applied" => json!({"state": "sent", "draft": draft}),
+            "cancelled" if changeset == "withdrawn" => {
+                stopped("You stopped this mail. The draft stays in your Gmail drafts.")
+            }
             _ => stopped(why.as_deref().unwrap_or("The send stopped.")),
         }));
     }

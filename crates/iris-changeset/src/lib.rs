@@ -452,12 +452,41 @@ pub fn withdraw_in(c: &Connection, changeset: i64, author: Option<&Author>) -> R
             .ok_or(Error::NotFound)?;
         }
     }
+    // A stop of a write is the stop of its mail (write spec, section 4).
+    // The send that step 2a made is in a changeset of its own: it goes in
+    // the same transaction, or the withdraw is refused if that send left
+    // or the release claimed it. The release claims on the same write
+    // connection, so only one of the two commits.
+    let sends: Vec<(i64, bool)> = {
+        let mut st = c.prepare(
+            "SELECT s.changeset_id,
+                    s.state = 'applied' OR EXISTS (SELECT 1 FROM ledger l
+                      WHERE l.action_id = s.id AND l.state = 'writing')
+             FROM write_send w
+             JOIN changeset_action d ON d.id = w.action_id
+             JOIN changeset_action s ON s.id = w.send_action_id
+             WHERE d.changeset_id = ?1",
+        )?;
+        let rows = st.query_map([changeset], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    if sends.iter().any(|&(_, left)| left) {
+        return Err(refused(
+            "the mail left or is leaving now, so it cannot be stopped".into(),
+        ));
+    }
     let changed = c.execute(
         "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
         [changeset],
     )?;
     if changed == 0 {
         return Err(refused("the changeset is withdrawn".into()));
+    }
+    for (send, _) in sends {
+        c.execute(
+            "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1 AND state <> 'withdrawn'",
+            [send],
+        )?;
     }
     Ok(())
 }
