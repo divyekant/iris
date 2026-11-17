@@ -661,3 +661,55 @@ async fn withdraws_each_changeset_once() {
     );
     assert_eq!(get(&s, &uri).await.0, StatusCode::METHOD_NOT_ALLOWED);
 }
+
+/// Review comments (docs/specs/2026-11-17-review-comments.md, section 3).
+#[tokio::test]
+async fn the_person_comments_on_a_changeset_of_a_job() {
+    let dir = temp("comment");
+    let s = store(&dir);
+    s.write(|tx| Ok(tx.execute("UPDATE message SET understood_at = 1", [])?))
+        .unwrap();
+    let j = iris_job::create(&s, "Tidy", None, NOW).unwrap();
+    iris_job::add_scope(&s, j, iris_job::Ref::Thread(1), iris_job::By::Person, NOW).unwrap();
+    let who = Author {
+        job: Some(iris_job::format_job_id(j)),
+        ..agent()
+    };
+    let cs = create(&s, &who, NOW).unwrap();
+    add_action(&s, cs, &who, Verb::Archive, &["m-1"], &Map::new(), None).unwrap();
+    submit(&s, cs, &who, "Archive.", NOW).unwrap();
+    let uri = format!("/api/changesets/cs-{cs}/comments");
+    let body = json!({"revision": 1, "text": "Keep it.", "key": "k-0123456789abcdef"}).to_string();
+
+    let (code, first) = post(&s, &uri, &body).await;
+    assert_eq!(code, StatusCode::OK, "{first}");
+    assert_eq!(
+        (&first["changeset"], &first["revision"], &first["text"]),
+        (&json!(format!("cs-{cs}")), &json!(1), &json!("Keep it."))
+    );
+    // A retry after a lost answer gives the same comment.
+    assert_eq!(post(&s, &uri, &body).await, (StatusCode::OK, first.clone()));
+
+    // A bad body is a 400, a refused state a 409, an unknown changeset a 404.
+    let bad = json!({"revision": 1, "text": " ", "key": "k-1123456789abcdef"}).to_string();
+    assert_eq!(post(&s, &uri, &bad).await.0, StatusCode::BAD_REQUEST);
+    let old = json!({"revision": 2, "text": "x", "key": "k-2123456789abcdef"}).to_string();
+    assert_eq!(post(&s, &uri, &old).await.0, StatusCode::CONFLICT);
+    let host = changeset(&s, "Archive.", &[&["m-3"]], NOW);
+    let other = format!("/api/changesets/cs-{host}/comments");
+    let ok = json!({"revision": 1, "text": "x", "key": "k-3123456789abcdef"}).to_string();
+    assert_eq!(post(&s, &other, &ok).await.0, StatusCode::CONFLICT);
+    assert_eq!(
+        post(&s, "/api/changesets/cs-99/comments", &ok).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    assert_eq!(
+        get(&s, &uri).await,
+        (StatusCode::OK, json!({"comments": [first]}))
+    );
+    assert_eq!(
+        get(&s, &other).await,
+        (StatusCode::OK, json!({"comments": []}))
+    );
+}

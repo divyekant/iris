@@ -395,7 +395,8 @@ fn downgrade(s: &Store) {
             "DROP TRIGGER measure_connect;
              DROP TRIGGER person_decision; DROP TABLE person_decision;
              DROP TABLE use_open; DROP TABLE use_day; DROP TABLE measure_time;
-             DROP TABLE write_send; PRAGMA user_version = 26;",
+             DROP TABLE write_send; DROP TABLE comment_delivery;
+             DROP TABLE changeset_comment; PRAGMA user_version = 26;",
         )?;
         Ok(())
     })
