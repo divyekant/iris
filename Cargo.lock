@@ -750,7 +750,9 @@ dependencies = [
 name = "iris-apply"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "iris-changeset",
+ "iris-compose",
  "iris-fakegmail",
  "iris-gmail",
  "iris-policy",
@@ -761,6 +763,7 @@ dependencies = [
  "iris-talk",
  "iris-understand",
  "rusqlite",
+ "serde",
  "serde_json",
  "unicase",
 ]

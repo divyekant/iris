@@ -373,14 +373,6 @@ fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
             let verb = text(args, "verb")?
                 .and_then(Verb::parse)
                 .ok_or_else(|| usage("verb must be a verb of specification 2, section 4"))?;
-            // shortcut: draft and send wait for their apply and release (card
-            // R3-01, part 4, issue #340); remove this refusal in that PR.
-            if matches!(verb, Verb::Draft | Verb::Send) {
-                return Err(usage(format!(
-                    "{} is not available yet: Iris cannot apply it",
-                    verb.as_str()
-                )));
-            }
             let targets: Vec<&str> = args["targets"]
                 .as_array()
                 .filter(|t| !t.is_empty())
