@@ -12,6 +12,8 @@ use std::io::{self, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -237,8 +239,6 @@ struct Shared {
     log: Mutex<Log>,
     conns: Mutex<Conns>,
     stopping: AtomicBool,
-    /// The local address of the socket that wakes the accept loop at a stop.
-    wake: Mutex<Option<SocketAddr>>,
     /// A setup failure that a test makes.
     #[cfg(test)]
     fault: Mutex<Option<Fault>>,
@@ -280,6 +280,8 @@ pub struct Proxy {
     port: u16,
     shared: Arc<Shared>,
     accept: Option<JoinHandle<()>>,
+    /// The write end of the wake pipe of the accept loop. A stop drops it.
+    wake: Option<UnixStream>,
 }
 
 impl Proxy {
@@ -325,15 +327,19 @@ impl Proxy {
                 cancels: HashMap::new(),
             }),
             stopping: AtomicBool::new(false),
-            wake: Mutex::new(None),
             #[cfg(test)]
             fault: Mutex::new(None),
         });
+        // The accept loop waits in poll on the listener and on the read end
+        // of this pair, which a stop closes.
+        let (wake, woken) = UnixStream::pair()?;
+        listener.set_nonblocking(true)?;
         let s = shared.clone();
         let accept = thread::Builder::new()
             .name("iris-egress".into())
-            .spawn(move || accept_loop(listener, s))?;
+            .spawn(move || accept_loop(listener, woken, s))?;
         Ok(Proxy {
+            wake: Some(wake),
             port,
             shared,
             accept: Some(accept),
@@ -355,18 +361,12 @@ impl Proxy {
         let Some(accept) = self.accept.take() else {
             return Ok(());
         };
-        // Wake the accept loop, which then sees the stop and drops the
-        // listener. The lock holds until the address of the wake socket is
-        // known, so that the loop can tell the wake from a client.
-        let wake = {
-            let mut known = lock(&self.shared.wake);
-            self.shared.stopping.store(true, Ordering::SeqCst);
-            let wake = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
-            *known = wake.as_ref().ok().and_then(|w| w.local_addr().ok());
-            wake
-        };
+        self.shared.stopping.store(true, Ordering::SeqCst);
+        // Close the write end of the wake pipe: the accept loop sees the
+        // hang-up in poll and returns. This opens no file descriptor, so it
+        // cannot fail when the process has none left.
+        drop(self.wake.take());
         let mut panicked = accept.join().is_err();
-        drop(wake);
         let threads = {
             let mut c = lock(&self.shared.conns);
             for s in c.streams.values().flatten() {
@@ -401,20 +401,55 @@ impl Drop for Proxy {
     }
 }
 
-fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else {
-            if shared.stopping.load(Ordering::SeqCst) {
-                return;
+/// Waits until the listener has a connection (true) or the wake pipe is
+/// closed (false). The wait has no time limit.
+fn wait(listener: &TcpListener, woken: &UnixStream) -> bool {
+    let mut fds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: woken.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: fds is a valid array of two pollfd values for the call,
+        // and both descriptors stay open while this function runs.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if n < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
             }
-            continue;
+            return false;
+        }
+        if fds[1].revents != 0 {
+            return false;
+        }
+        if fds[0].revents != 0 {
+            return true;
+        }
+    }
+}
+
+fn accept_loop(listener: TcpListener, woken: UnixStream, shared: Arc<Shared>) {
+    while wait(&listener, &woken) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => continue,
         };
+        // macOS gives the accepted socket the non-blocking mode of the
+        // listener; Linux does not. The connection code needs blocking reads.
+        if stream.set_nonblocking(false).is_err() {
+            finish(&shared, refuse(stream, Reason::NoResources));
+            continue;
+        }
         if shared.stopping.load(Ordering::SeqCst) {
             // A client accepted during the stop gets its line and a close.
-            let wake = *lock(&shared.wake);
-            if wake.is_some() && stream.peer_addr().ok() == wake {
-                return;
-            }
             finish(
                 &shared,
                 Finish {
@@ -422,10 +457,6 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
                     answer: None,
                 },
             );
-            if wake.is_none() {
-                // No wake socket comes: this was the last accept.
-                return;
-            }
             continue;
         }
         let mut c = lock(&shared.conns);
@@ -683,12 +714,7 @@ fn handle(shared: &Shared, mut client: TcpStream, id: u64) -> Finish {
             answer: None,
         };
     }
-    let first = match read_hello(
-        shared,
-        &mut client,
-        head[len..].to_vec(),
-        &shared.allowed[host],
-    ) {
+    let first = match read_hello(shared, &mut client, head[len..].to_vec(), host) {
         Ok(first) => first,
         Err(end) => return Finish { end, answer: None },
     };
@@ -823,8 +849,9 @@ fn read_hello(
     shared: &Shared,
     client: &mut TcpStream,
     mut buf: Vec<u8>,
-    name: &str,
+    host: usize,
 ) -> Result<Vec<u8>, End> {
+    let name = &shared.allowed[host];
     let end = Instant::now() + HEAD_TIME;
     loop {
         match check_hello(&buf, name) {
@@ -839,7 +866,9 @@ fn read_hello(
         let mut chunk = [0u8; 1024];
         let room = (HELLO_MAX - buf.len()).min(chunk.len());
         match client.read(&mut chunk[..room]) {
-            Ok(0) | Err(_) if shared.stopping.load(Ordering::SeqCst) => return Err(End::Stopped),
+            Ok(0) | Err(_) if shared.stopping.load(Ordering::SeqCst) => {
+                return Err(tunnel(host, 0, 0, "stopped"))
+            }
             Ok(0) => return Err(End::Refused(Reason::NotTls)),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(e)
