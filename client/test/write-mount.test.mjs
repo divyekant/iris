@@ -370,3 +370,35 @@ test("a late state read of the write before Write another does not show", async 
     net.restore();
   }
 });
+
+test("the form does not change while the press runs, and the state names the mail that the engine took", async () => {
+  let answer;
+  const late = new Promise((resolve) => (answer = resolve));
+  const net = serve(() => [500, {}]);
+  globalThis.fetch = async (url, init = {}) => {
+    const path = String(url).replace(/^\/api\//, "");
+    if (init.method === "POST" && path === "write") {
+      await late;
+      return new Response(JSON.stringify({ write: "cs-3" }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ state: "waiting", draft: "d-3", sending: false, leaves_at: null }), { status: 200 });
+  };
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    press(app);
+    app.flushSync();
+    assert.equal(app.target.querySelector("fieldset").disabled, true, "the form is frozen");
+    // An edit that gets through (a script, an old browser) does not change what the state names.
+    app.target.querySelector(".chip button").click();
+    type(app.target.querySelector("#write-to"), "ana@example.com ");
+    app.flushSync();
+    answer();
+    await until(() => app.target.querySelector(".done h1"));
+    await until(() => app.target.querySelector(".done h1").textContent.includes("On its way"));
+    assert.match(text(app.target.querySelector(".done h1")), /On its way to sam@okafor\.example/);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});

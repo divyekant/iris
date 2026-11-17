@@ -148,10 +148,12 @@
     problem = "";
     const target = thread ? { thread, parent: reply?.parent.id } : { account, subject };
     const sent = key;
+    const mail = { ...target, to: [...to], cc: [...cc], body, key, flags: [...flags] };
     try {
-      const v = await post<{ write: string }>("write", { ...target, to, cc, body, key, flags });
+      const v = await post<{ write: string }>("write", mail);
       forget(sent);
       if (!alive) return;
+      sentTo = mail.to;
       unknown = false;
       write = v.write;
       follow();
@@ -241,7 +243,9 @@
     copy = false;
   }
 
-  const who = $derived(to[0] ?? "");
+  // The recipient of the mail that the engine took, not of the form now.
+  let sentTo = $state<string[]>([]);
+  const who = $derived(sentTo[0] ?? "");
 </script>
 
 {#if write}
@@ -298,6 +302,8 @@
   {/if}
 
   <form class="sheet" onsubmit={(e) => (e.preventDefault(), send())}>
+    <!-- While the press runs, the form does not change: the engine takes the mail as it was. -->
+    <fieldset disabled={busy}>
     {#if accounts.length > 1}
       <label class="line">
         <span class="k">From</span>
@@ -342,10 +348,15 @@
       <p class="hint">It waits 60 seconds in the Outbox, so you can still cancel it.</p>
       <button type="button" class="quiet" onclick={discard}>Discard</button>
     </div>
+    </fieldset>
   </form>
 {/if}
 
 <style>
+  /* The fieldset only disables the form while the press runs: no box of its own. */
+  fieldset {
+    display: contents;
+  }
   .title {
     font-size: var(--font-size-2);
     font-weight: 500;
