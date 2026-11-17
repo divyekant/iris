@@ -1303,7 +1303,7 @@ pub fn start_sessions(store: Arc<Store>) -> std::io::Result<()> {
         c.arg(SESSION_HOLD).arg(&data).args(args);
         c
     });
-    let isolation = iris_session::isolation::system()
+    let isolation = iris_session::isolation::system(store.dir())
         .map(|b| -> Arc<dyn iris_session::isolation::Isolation> { Arc::from(b) });
     let s = sessions::Sessions::new(store, isolation, helper).map_err(std::io::Error::other)?;
     let _ = sessions::SESSIONS.set(s.clone());

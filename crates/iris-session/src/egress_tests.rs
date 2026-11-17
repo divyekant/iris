@@ -806,23 +806,55 @@ fn the_proxy_takes_only_its_session_address() {
 /// and the port stays bound until the stop.
 #[test]
 fn close_ends_each_tunnel_and_keeps_the_port() {
+    /// An end (EOF or an error) well before the 5 s read time-out. A
+    /// time-out is a failure, not a close.
+    fn ended_soon(s: &mut TcpStream) {
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let t = Instant::now();
+        let mut buf = [0u8; 64];
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(e) => {
+                    assert!(
+                        !matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ),
+                        "no end: {e}"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    }
     let b = proxy("close", echo(), false, LOG_LIMIT);
     let (mut s, line) = send(&b.proxy, "CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
     assert!(line.starts_with("HTTP/1.1 200"), "{line}");
+    // The tunnel relays bytes before the close.
+    let mut sent = hello("api.example.test");
+    sent.extend_from_slice(b"ping");
+    s.write_all(&sent).unwrap();
+    let mut got = vec![0u8; sent.len()];
+    s.read_exact(&mut got).unwrap();
+    assert_eq!(got, sent);
     b.proxy.close();
-    let mut x = [0u8; 1];
-    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    assert_eq!(s.read(&mut x).unwrap_or(0), 0, "the tunnel ended");
+    ended_soon(&mut s);
     let mut late = TcpStream::connect(("127.0.0.1", b.proxy.port())).unwrap();
-    late.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let _ = late.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\n\r\n");
-    assert_eq!(late.read(&mut x).unwrap_or(0), 0, "no answer after close");
+    ended_soon(&mut late);
     assert!(
         TcpListener::bind(("127.0.0.1", b.proxy.port())).is_err(),
         "the port stays bound"
     );
     b.proxy.stop().unwrap();
     let text = log_text(&b.log);
+    assert!(
+        text.contains("result=stopped") || text.contains("result=closed"),
+        "{text}"
+    );
     assert!(text.contains("ended reason=stopped"), "{text}");
 }
 

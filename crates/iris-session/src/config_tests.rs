@@ -321,6 +321,7 @@ fn engine_env() -> HashMap<&'static str, &'static str> {
         ("HTTPS_PROXY", "http://engine:1"),
         ("https_proxy", "http://engine:1"),
         ("ANTHROPIC_API_KEY", "k1"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "k0"),
         ("OPENAI_API_KEY", "k2"),
         ("CODEX_HOME", "/c"),
         ("MY_TOOL_KEY", "k3"),
@@ -355,6 +356,7 @@ fn the_agent_env_has_only_the_listed_variables() {
         keys,
         [
             "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
             "HOME",
             "HTTPS_PROXY",
             "LANG",
@@ -366,7 +368,7 @@ fn the_agent_env_has_only_the_listed_variables() {
     assert_eq!(c["https_proxy"], "http://127.0.0.1:4000");
     let x = env_of(&adapter(&f, "codex", Some(&path)).unwrap(), Some(4001));
     assert!(x.contains_key("OPENAI_API_KEY") && x.contains_key("CODEX_HOME"));
-    assert!(!x.contains_key("ANTHROPIC_API_KEY"));
+    assert!(!x.contains_key("ANTHROPIC_API_KEY") && !x.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
     // No allowed host: no proxy variable, also when a port is given and
     // the engine has its own proxy variables.
     let m = env_of(&adapter(&f, "mine", Some(&path)).unwrap(), Some(4002));

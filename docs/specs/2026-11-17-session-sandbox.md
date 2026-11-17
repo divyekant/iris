@@ -312,6 +312,13 @@ each adapter program is.
   `nvm` in the home folder) does not run in a session. Known limit, with
   an issue: a later card can add a list of read paths to `agents.toml`,
   which the person sets.
+- Each mount point of the view is a real path. `bwrap` mounts at a path
+  as it is given, and does not resolve a link in it. So `system()`
+  resolves the data folder (`canonicalize`) and fails if it cannot, and
+  `command()` resolves the workspace and `HOME`. The sandbox sets `HOME`
+  to the real path of the private home (`/home/iris` if the engine has
+  no usable `HOME`), and `TMPDIR` to the private `/tmp`. A data folder that is a link is
+  hidden at its real path.
 - The data folder is always empty in the view: the isolation mounts an
   empty `tmpfs` there after each read path and each program file, and
   only then gives the workspace. So a data folder inside `/usr` (for

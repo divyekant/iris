@@ -10,7 +10,7 @@ fn main() -> std::process::ExitCode {
             eprintln!("iris: session-hold needs the data folder");
             return std::process::ExitCode::from(iris_session::hold::BAD_ARGS as u8);
         }
-        let code = match iris_session::isolation::system() {
+        let code = match iris_session::isolation::system(std::path::Path::new(&args[2])) {
             Ok(isolation) => iris_session::hold::hold_main(&*isolation, &args[3..]),
             Err(e) => {
                 eprintln!("iris: {e}");

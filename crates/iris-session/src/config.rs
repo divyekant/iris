@@ -333,7 +333,11 @@ pub fn adapter(file: &AgentsFile, name: &str, path: Option<&OsStr>) -> Result<Ad
                 "Glob".into(),
                 "Grep".into(),
             ],
-            vec!["ANTHROPIC_API_KEY".to_string()],
+            vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                // A token of `claude setup-token`: the session has no home of the person.
+                "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            ],
             vec!["api.anthropic.com".to_string()],
         ),
         "codex" => (
