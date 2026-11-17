@@ -1,18 +1,12 @@
 // The phone view (card R6-05): at 360, 390 and 768 px on a touch screen, the
 // brief, the review, an item and a mail show no horizontal scroll, and each
 // control is at least 44 px in each direction. Runs the fixtures dev server in
-// a real browser (Playwright), with reduced motion, so that no animation changes a size.
+// Chromium (playwright-core; the client setup installs the browser), with reduced
+// motion, so that no animation changes a size.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { chromium } from "playwright-core";
 import { createServer } from "vite";
-
-let playwright = null;
-try {
-  playwright = createRequire(import.meta.url)("playwright");
-} catch {
-  // shortcut: no Playwright on this machine (it is not a dependency), so the test skips. Add it to package.json when CI runs the client in a browser.
-}
 
 // c-311: a commitment with a quote. v-88: a conversation with 3 source mails. r-1201: a record.
 const ROUTES = ["#/brief", "#/review", "#/item/c-311", "#/item/v-88", "#/item/r-1201", "#/mail/m-55210"];
@@ -62,7 +56,7 @@ async function serve() {
     logLevel: "error",
   });
   await vite.listen();
-  const browser = await playwright.chromium.launch();
+  const browser = await chromium.launch();
   after(async () => {
     await browser.close();
     await vite.close();
@@ -70,7 +64,7 @@ async function serve() {
   return { base: vite.resolvedUrls.local[0], browser };
 }
 
-test("the brief, the review, an item and a mail fit a phone", { skip: !playwright && "Playwright is not installed" }, async () => {
+test("the brief, the review, an item and a mail fit a phone", async () => {
   const { base, browser } = await serve();
   for (const width of WIDTHS) {
     const page = await browser.newPage({ viewport: { width, height: 800 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
@@ -98,7 +92,7 @@ test("the brief, the review, an item and a mail fit a phone", { skip: !playwrigh
   }
 });
 
-test("on a phone, More opens the other views and a tap goes to one", { skip: !playwright && "Playwright is not installed" }, async () => {
+test("on a phone, More opens the other views and a tap goes to one", async () => {
   const { base, browser } = await serve();
   const page = await browser.newPage({ viewport: { width: 360, height: 800 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
   await page.goto(base + "#/brief");
@@ -155,7 +149,7 @@ function unsafe([top, right, bottom, left, atEnd]) {
   return out;
 }
 
-test("the page keeps out of the notch and the home indicator", { skip: !playwright && "Playwright is not installed" }, async () => {
+test("the page keeps out of the notch and the home indicator", async () => {
   const { base, browser } = await serve();
   const cases = [
     { width: 390, height: 844, insets: { top: 47, right: 0, bottom: 34, left: 0 } },
@@ -194,7 +188,7 @@ function covered() {
   return out;
 }
 
-test("the tabs cover nothing that sticks to the bottom of the screen", { skip: !playwright && "Playwright is not installed" }, async () => {
+test("the tabs cover nothing that sticks to the bottom of the screen", async () => {
   const { base, browser } = await serve();
   const page = await browser.newPage({ viewport: { width: 360, height: 640 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
   const cdp = await page.context().newCDPSession(page);

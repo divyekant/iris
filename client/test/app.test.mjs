@@ -30,7 +30,7 @@ test("the app shows the access problem above each view", async () => {
 });
 
 // Card R6-05: on a phone, the first four views are tabs, and More opens the others.
-// test/phone.test.mjs checks the layout in a browser where Playwright is installed.
+// test/phone.test.mjs checks the layout in a browser.
 test("the app has the phone tabs and a More popover with the other views", async () => {
   const html = await render("/src/App.svelte");
   const tabs = html.match(/<nav class="tabs[^"]*" aria-label="Main views">([\s\S]*?)<\/nav>/)?.[1] ?? "";

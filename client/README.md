@@ -19,7 +19,7 @@ serves a fallback page that tells you to build the client.
 
 ## Work on the client
 
-1. Install the packages: `pnpm install --frozen-lockfile`.
+1. Install the packages: `pnpm install --frozen-lockfile`. Then install the browser of the phone tests (`test/phone.test.mjs`): `npx playwright-core install chromium`. The command does nothing if the browser is there.
 2. Start the dev server: `pnpm dev`. It sends `/api` to the engine on
    `127.0.0.1:4800` (`iris serve`). With no engine, use
    `pnpm dev --mode fixtures`: the answers come from `dev/fixtures.ts`, which

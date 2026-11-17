@@ -50,7 +50,7 @@
         "client/**",
         ".kalos.yaml"
       ],
-      "setup": "cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile",
+      "setup": "cd client && npx --yes pnpm@10.28.0 install --frozen-lockfile && npx playwright-core install chromium",
       "setup_inputs": [
         "client/package.json",
         "client/pnpm-lock.yaml",
