@@ -1,6 +1,6 @@
 // Answers of the local API, made from the examples of docs/spec/schema/examples.
 // The dev server (`pnpm dev --mode fixtures`) and the tests use them. They are not in the build.
-import type { Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
+import type { Outbox, Action, AskAnswer, DraftView, Brief, GateAnswer, GatePage, Changeset, HandledPage, Item, Job, JobDetail, Matter, MatterList, MatterView, Message, Policy, Rule, Status, Summary, Target } from "../src/api";
 import youOwe from "../../docs/spec/schema/examples/commitment-you-owe.json" with { type: "json" };
 import owedToYou from "../../docs/spec/schema/examples/commitment-owed-to-you.json" with { type: "json" };
 import payment from "../../docs/spec/schema/examples/commitment-payment.json" with { type: "json" };
@@ -509,6 +509,7 @@ export function answer(path: string): unknown {
   if (name === "records") return { receipt: 1, booking: 1 };
   if (name === "brief" && id === "hidden") return { count: hidden.length, items: hidden, next: null };
   if (name === "handled") return handled;
+  if (name === "outbox") return outbox();
   if (name === "gate") return page(id === "declined" ? "declined" : "waiting");
   if (name === "brief" && id) {
     const section = briefNow()[id as "you_owe"];
@@ -605,4 +606,29 @@ export function policyPost(path: string, body: { job?: string; verbs?: string[];
   } else return [404, { error: "Not found." }];
   policy.version = (policy.version ?? 0) + 1;
   return [200, policy];
+}
+
+/** The outbox of the fixture state: the holds run from the load of the dev server. */
+const outboxStart = Date.now();
+const outboxCancelled = new Set<string>();
+
+/** GET /api/outbox: sending is on, and three sends wait. A cancel removes a send. */
+export function outbox(): Outbox {
+  const at = (s: number) => new Date(outboxStart + s * 1000).toISOString();
+  const sends: Outbox["sends"] = [
+    { draft: "d-14", state: "held", approved: at(-18), leaves: at(42), flags: [], readable: true, to: ["dana@acme.example"], cc: [], subject: "Re: Signing on Friday" },
+    { draft: "d-15", state: "held", approved: at(-5), leaves: at(55), flags: ["new_recipient", "money"], readable: true, to: ["dana@acme.example"], cc: ["legal@new.example"], subject: "Renewal: $48,000 for 12 months" },
+    { draft: "d-16", state: "approved", approved: at(0), leaves: at(60), flags: ["attachment"], readable: true, to: ["priya@example.com"], cc: [], subject: "The quote" },
+  ].filter((x) => !outboxCancelled.has(x.draft)) as Outbox["sends"];
+  return { sending: { on: true, since: at(-3600) }, count: sends.length, next: null, sends };
+}
+
+/** POST /api/outbox/<d-N>/cancel, as the API answers: 200, or 404 for a draft with no send that waits. */
+export function outboxPost(path: string): [number, unknown] | undefined {
+  const cancel = path.match(/^\/outbox\/([^/?]+)\/cancel$/);
+  if (!cancel) return undefined;
+  const draft = decodeURIComponent(cancel[1]);
+  if (!outbox().sends.some((x) => x.draft === draft)) return [404, { error: "Not found." }];
+  outboxCancelled.add(draft);
+  return [200, { cancelled: draft }];
 }
