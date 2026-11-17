@@ -84,6 +84,12 @@ A ref has a list of messages. The list is set when the person adds the ref:
 An add of a ref that is in the scope adds the messages of that moment to
 its list. A revoked ref has no list.
 
+When a job that waits for a reply on a thread of its scope wakes, the
+engine adds the replies to the list of that thread ref: each new message of
+the thread that is clean and that you did not send
+(`docs/specs/2026-11-17-wait.md`). No other message joins a list without an
+add.
+
 The granted messages are the clean messages of the lists of the active
 refs. A job in the state `done` has no granted messages. An item ref of a
 `gone` item grants nothing.
