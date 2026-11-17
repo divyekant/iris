@@ -127,7 +127,7 @@ agent. The prompt is fixed text. It holds no mail text and no goal text:
 | Adapter | Program and arguments |
 |---|---|
 | `claude-code` | `claude -p <prompt> --allowedTools "Bash(iris:*)" Read Write Edit Glob Grep` |
-| `codex` | `codex exec --sandbox workspace-write <prompt>` |
+| `codex` | `codex exec --sandbox workspace-write --skip-git-repo-check <prompt>` (the workspace is not a Git repository; `codex exec --help` lists the flag) |
 | `<name>` from `agents.toml` | The `command` list of the file, then the prompt as the last argument. |
 
 The file `<data dir>/agents.toml` is optional:
@@ -542,6 +542,21 @@ exit code 3.
 - `iris job run <j-id> --agent <name>` and `iris job stop <j-id>` are host
   verbs. They send a request on `iris.sock`, so only the engine starts and
   stops sessions.
+- The engine answers `job.run` right after step 2 of the launch (the
+  register), with the session ID `se-<id>`, or with the refusal of steps 1
+  and 2. Steps 3 to 7 then run on a thread of the engine, not inside the
+  request. So the answer comes in well under the 30 seconds of the socket
+  client, also for a slow build. `iris job run` prints the session ID and
+  that the session starts, and exits with 0.
+- `iris job session <j-id>` (host verb) shows the last session of the job:
+  its ID, the agent, and its state (`starting`, `running`, `ending`,
+  `ended` with the end reason, or `reaped`). It reads the row of the store,
+  so it works after a time-out or a lost connection of `iris job run`.
+- If the answer of `job.run` is lost (a time-out, a broken connection),
+  `iris job run` prints that the result is unknown and tells the person to
+  run `iris job session <j-id>`. A second `run` of the job is safe: it is
+  refused at step 2 while the first session is live, with the ID of that
+  session, so it never starts a second agent.
 - Session mode: if the current folder or a folder above it has `.iris/`,
   the command is in session mode. In session mode the command never opens
   the store, also for the read verbs of host mode. It sends each verb to
@@ -624,6 +639,8 @@ is refused before a row is written.
 | A revoke right after the gate commits, before the agent reads a file | The agent exists at the commit (the gate waited for `started`), so the revoke ends a running session and the supervisor stops it | Launch test: revoke hook right after the commit; the session ends with `revoke` and its group stops |
 | The helper does not confirm the spawn in 2 seconds | Roll back; `launch_failed`; the helper stops a late agent | Launch test with a helper that waits 3 seconds |
 | The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |
+| A build that takes longer than the socket time-out | `job.run` already answered after the register; the launch goes on; `iris job session` shows it | Launch test with a slow build hook |
+| The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `run` exits with 1 | Launch test with a stop hook |
 | An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
@@ -644,7 +661,8 @@ is refused before a row is written.
   `job.stop` on `iris.sock`, the session socket, the verbs `iris job run`,
   `iris job stop` and the hidden `iris session-hold`, and session mode.
 - Spec 1 section 5.1: `sessions/` and `agents.toml` in the data folder.
-- Spec 2 section 8.2: the verbs `iris job run` and `iris job stop`.
+- Spec 2 section 8.2: the verbs `iris job run`, `iris job stop` and
+  `iris job session`.
 
 Memory: the supervisor holds one small record for each running session
 (the child handle, the pipes, the session ID, the egress listener). The
