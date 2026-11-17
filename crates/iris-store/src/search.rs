@@ -87,7 +87,28 @@ impl Query {
     }
 
     pub(crate) fn run(&self, conn: &Connection, limit: u32) -> Result<Vec<i64>> {
-        let (mut sql, args) = self.select();
+        self.run_among(conn, limit, None)
+    }
+
+    /// [`Query::run`] over the messages `among` only, if given: the grant
+    /// of a job session. The IDs go in as one JSON array, so the query has
+    /// one bound value for each count of IDs.
+    pub fn run_among(
+        &self,
+        conn: &Connection,
+        limit: u32,
+        among: Option<&std::collections::BTreeSet<i64>>,
+    ) -> Result<Vec<i64>> {
+        let (mut sql, mut args) = self.select();
+        if let Some(ids) = among {
+            let list: Vec<String> = ids.iter().map(i64::to_string).collect();
+            let list = format!("[{}]", list.join(","));
+            args.push(list.into());
+            sql.push_str(&format!(
+                " AND m.id IN (SELECT value FROM json_each(?{}))",
+                args.len()
+            ));
+        }
         sql.push_str(" ORDER BY m.internal_date DESC, m.id DESC LIMIT ");
         sql.push_str(&limit.to_string());
         let mut st = conn.prepare(&sql)?;
