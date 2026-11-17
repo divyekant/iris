@@ -39,23 +39,23 @@ const QUOTE_CHARS: usize = 500;
 const NAME_CHARS: usize = 200;
 const NO_SUBJECT: &str = "(no subject)";
 
-/// One message that the conversation counts.
-struct Mail {
-    id: i64,
-    at: i64,
+/// One understood message of a thread, with the rule of the conversation.
+pub struct Mail {
+    pub id: i64,
+    pub at: i64,
     /// Lowercase.
-    from: String,
-    from_name: Option<String>,
-    to: Vec<String>,
-    cc: Vec<String>,
-    subject: String,
-    text: String,
-    mine: bool,
-    service: bool,
-    gone: bool,
+    pub from: String,
+    pub from_name: Option<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub text: String,
+    pub mine: bool,
+    pub service: bool,
+    pub gone: bool,
     /// Not a draft and not hostile mail. A message counts when it is clean,
     /// not gone, and from you or from an address.
-    clean: bool,
+    pub clean: bool,
 }
 
 /// The conversation item of a thread, as the store has it.
@@ -374,6 +374,13 @@ pub fn set_field(doc: &mut Value, field: &str, value: Value) -> bool {
     *at = value;
     *doc = new;
     true
+}
+
+/// Each understood message of the thread, also when it is gone, oldest
+/// first. A message is for a reader when it is `clean` and not `gone`: then
+/// it is not a draft and not hostile mail (specification 1, section 6.7).
+pub fn messages(conn: &Connection, thread: i64) -> rusqlite::Result<Vec<Mail>> {
+    mails(conn, thread, None)
 }
 
 /// Each message of the thread that is understood or `current`, also when it
