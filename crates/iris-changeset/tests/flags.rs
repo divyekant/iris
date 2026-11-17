@@ -120,6 +120,12 @@ fn each_case_of_the_test_set_gives_its_flag() {
             vec!["attachment"],
         ),
         (
+            "file kind",
+            known,
+            "I included the report PDF.".into(),
+            vec!["attachment"],
+        ),
+        (
             "wrong recipient",
             "priya@exmaple.com",
             "Hi.".into(),
@@ -222,6 +228,11 @@ fn each_case_of_the_test_set_gives_its_flag() {
         .read(|c| Ok(draft_flags(c, OWNER, &content(known, "Pay $5 by Monday", "Hi.")).unwrap()))
         .unwrap();
     assert_eq!(got, vec!["money", "date"]);
+    // A copied run in the subject counts too.
+    let got = s
+        .read(|c| Ok(draft_flags(c, OWNER, &content(known, &copied, "Hi.")).unwrap()))
+        .unwrap();
+    assert_eq!(got, vec!["untrusted_content"]);
 }
 
 /// A store with no `sent` evidence: each address is new.

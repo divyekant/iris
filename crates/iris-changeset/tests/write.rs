@@ -396,6 +396,14 @@ fn a_stranger_thread_flags_first_contact_with_gone_messages() {
         )?)
     })
     .unwrap();
+    // The owner wrote to priya before: no new_recipient flag here.
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO sender_evidence(message_id, address, rule) VALUES (1, 'priya@example.com', 'sent')",
+            [],
+        )?)
+    })
+    .unwrap();
     let flags = |a: &Value| a["flags"].clone();
     let got = one(&s, AuthorKind::Person, Verb::Draft, &["t-1"], REPLY());
     assert_eq!(flags(&got), json!(["first_contact"]), "{got}");

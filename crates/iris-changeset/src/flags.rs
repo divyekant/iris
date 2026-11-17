@@ -54,13 +54,28 @@ const DAY_WORDS: [&str; 12] = [
     "eod",
     "eow",
 ];
-const ATTACHMENT_WORDS: [&str; 6] = [
+const ATTACHMENT_WORDS: [&str; 21] = [
     "attach",
+    "attaches",
     "attached",
     "attaching",
     "attachment",
     "attachments",
+    "enclose",
     "enclosed",
+    "encloses",
+    "pdf",
+    "doc",
+    "docx",
+    "xls",
+    "xlsx",
+    "ppt",
+    "pptx",
+    "csv",
+    "zip",
+    "screenshot",
+    "screenshots",
+    "enclosing",
 ];
 
 /// The words of a text, as the full-text index splits them: runs of
@@ -222,7 +237,10 @@ pub fn draft_flags(c: &Connection, account: &str, content: &Content) -> Result<V
         ("money", texts.iter().any(|t| has_money(t))),
         ("date", texts.iter().any(|t| has_date(t))),
         ("attachment", texts.iter().any(|t| has_attachment(t))),
-        ("untrusted_content", copied(c, &content.body)?),
+        (
+            "untrusted_content",
+            copied(c, &content.subject)? || copied(c, &content.body)?,
+        ),
     ] {
         if on {
             flags.push(flag);
@@ -231,11 +249,11 @@ pub fn draft_flags(c: &Connection, account: &str, content: &Content) -> Result<V
     Ok(flags)
 }
 
-/// True if a run of [`RUN`] words of the body, at a start of 0, 8, 16 and
+/// True if a run of [`RUN`] words of the text, at a start of 0, 8, 16 and
 /// so on, is a phrase of the clean text of an external message: no `SENT`
 /// and no `DRAFT` label (the mail of the owner, as in `iris-senders`). A copied run of 15 words or more always has such a start.
-fn copied(c: &Connection, body: &str) -> Result<bool> {
-    let w = words(body);
+fn copied(c: &Connection, text: &str) -> Result<bool> {
+    let w = words(text);
     let mut st = c.prepare_cached(
         "SELECT EXISTS (SELECT 1 FROM message_fts f
                         WHERE message_fts MATCH ?1
@@ -262,7 +280,8 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
         [action],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    let found: Option<(String, String)> = match verb.as_str() {
+    // Another writer can store a draft row with no content: no flags then.
+    let found: Option<(String, Option<String>)> = match verb.as_str() {
         "send" => c
             .query_row(
                 "SELECT a.address, json_extract(d.content, '$.content')
@@ -285,11 +304,11 @@ pub fn action_content(c: &Connection, action: i64) -> Result<Option<(String, Con
                     |r| r.get(0),
                 )
                 .optional()?;
-            address.map(|a| (a, args))
+            address.map(|a| (a, Some(args)))
         }
         _ => None,
     };
-    let Some((address, json)) = found else {
+    let Some((address, Some(json))) = found else {
         return Ok(None);
     };
     let Ok(mut content) = serde_json::from_str::<Content>(&json) else {
