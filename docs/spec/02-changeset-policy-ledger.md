@@ -946,7 +946,7 @@ and goes through the policy as an agent changeset does. A rule with
 | `iris export <path>` | Writes each item as JSON Lines, and copies the raw messages. | host | 1 |
 | `iris brief` | Shows the brief. | host | 1 |
 | `iris search <query>` | Full-text search (specification 1, section 5.6). In session mode, it searches only the messages that the job grants (`docs/specs/2026-11-16-job-workspace.md`), and it adds nothing to the workspace. | both | 1 |
-| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item has only `id`, `form` and `sources`, with no text of the model and no status. | both | 1 |
+| `iris show <id>` | Shows one item or message. Release 1 has no read path for a thread or a sender, so a thread and a sender come in a later release. In session mode, only an item or a message that the job grants, and an item is a job item (`id`, `form` and `sources`, with no text of the model and no status). | both | 1 |
 | `iris list <form> [filters]` | Lists items of one form. In session mode, only the items of the workspace, with the fields of `show`. | both | 1 |
 | `iris archive`, `inbox`, `label`, `unlabel`, `read`, `unread`, `trash` `<ids> [--changeset <cs-id>]` | Adds an action to a draft changeset. | both | 2 |
 | `iris close`, `defer`, `decline`, `correct` `<id> [--changeset <cs-id>]` | Adds a state action to a draft changeset. | both | 2 |
@@ -986,7 +986,9 @@ refused in session mode until a card defines their grant.
   program reads these commands with `--json`, where the command has it.
 - `--json` prints the open model documents (specification 1, section 6, and
   section 5.1 here). One JSON document for one object, and JSON Lines for a
-  list.
+  list. Exception: in session mode, an item is a job item
+  (`jobitem.schema.json`, `docs/specs/2026-11-16-job-workspace.md`), not the
+  full item document.
 - The command writes errors to standard error. An error message says what
   failed and what to do.
 
