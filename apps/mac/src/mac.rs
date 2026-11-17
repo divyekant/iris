@@ -41,6 +41,9 @@ struct Shell {
     socket: PathBuf,
     /// The route to open after the next page load.
     route: Mutex<Option<String>>,
+    /// The origin of the engine of the last sign-in address, for example
+    /// `http://127.0.0.1:4800`. Only this origin loads in the window.
+    origin: Mutex<Option<String>>,
     /// The menu item with the count of notices.
     count: Mutex<Option<MenuItem<tauri::Wry>>>,
     /// The last count that the menu bar shows. `u64::MAX` before the first.
@@ -57,6 +60,7 @@ pub fn run() {
             home,
             socket,
             route: Mutex::new(None),
+            origin: Mutex::new(None),
             count: Mutex::new(None),
             open: AtomicU64::new(u64::MAX),
         })
@@ -142,7 +146,7 @@ fn show(app: &AppHandle, route: Option<String>) {
         .initialization_script(INIT)
         .on_navigation(move |url| navigate(&handle, url))
         .on_page_load(|w, p| {
-            let engine = engine::is_engine(p.url().scheme(), p.url().host_str(), p.url().port());
+            let engine = is_engine(&w.state::<Shell>(), p.url());
             if p.event() == PageLoadEvent::Finished && engine {
                 let route = w.state::<Shell>().route.lock().unwrap().take();
                 if let Some(r) = route {
@@ -169,6 +173,9 @@ fn address(shell: &Shell) -> WebviewUrl {
                 .map(str::to_owned)
         })
         .and_then(|u| Url::parse(&u).ok());
+    if let Some(u) = &url {
+        *shell.origin.lock().unwrap() = Some(u.origin().ascii_serialization());
+    }
     match url {
         Some(u) => WebviewUrl::External(u),
         None if engine::program(&shell.home, |p| p.exists()).is_some() => {
@@ -178,14 +185,20 @@ fn address(shell: &Shell) -> WebviewUrl {
     }
 }
 
+/// True when `url` has the exact origin of the engine of the last sign-in.
+fn is_engine(shell: &Shell, url: &Url) -> bool {
+    shell.origin.lock().unwrap().as_deref() == Some(url.origin().ascii_serialization().as_str())
+}
+
 /// Allow the engine and the local pages in the window. "Start Iris" starts
-/// the engine. Each other address opens in the default browser.
+/// the engine. Each other address, also another loopback port, opens in the
+/// default browser.
 fn navigate(app: &AppHandle, url: &Url) -> bool {
     if url.host_str() == Some(START) {
         start(app.clone());
         return false;
     }
-    if url.scheme() == "tauri" || engine::is_engine(url.scheme(), url.host_str(), url.port()) {
+    if url.scheme() == "tauri" || is_engine(&app.state::<Shell>(), url) {
         return true;
     }
     if matches!(url.scheme(), "http" | "https" | "mailto") {

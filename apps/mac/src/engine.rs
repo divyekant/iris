@@ -71,16 +71,13 @@ pub fn checked_url(url: &str) -> Option<&str> {
         .strip_prefix("http://127.0.0.1:")
         .or_else(|| url.strip_prefix("http://[::1]:"))?;
     let (port, code) = rest.split_once("/#code=")?;
-    let port_ok = !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit());
+    // A port of 1 to 65535 with no sign and no leading zero.
+    let port_ok = port.bytes().all(|b| b.is_ascii_digit())
+        && !port.starts_with('0')
+        && port.parse::<u16>().is_ok();
     let code_ok =
         !code.is_empty() && code.len() <= 64 && code.bytes().all(|b| b.is_ascii_hexdigit());
     (port_ok && code_ok).then_some(url)
-}
-
-/// True when `url` is the web client of the engine: a loopback address with
-/// a port.
-pub fn is_engine(scheme: &str, host: Option<&str>, port: Option<u16>) -> bool {
-    scheme == "http" && matches!(host, Some("127.0.0.1" | "[::1]")) && port.is_some()
 }
 
 /// One notice to show.
@@ -214,10 +211,97 @@ mod tests {
         ] {
             assert_eq!(checked_url(bad), None, "{bad}");
         }
-        assert!(is_engine("http", Some("127.0.0.1"), Some(4800)));
-        assert!(!is_engine("https", Some("127.0.0.1"), Some(4800)));
-        assert!(!is_engine("http", Some("example.com"), Some(4800)));
-        assert!(!is_engine("http", Some("127.0.0.1"), None));
+    }
+
+    /// A small deterministic random source for the property tests.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            from[(self.next() % from.len() as u64) as usize]
+        }
+    }
+
+    /// The grammar of a sign-in address, written apart from `checked_url`.
+    fn in_grammar(url: &str) -> bool {
+        let Some(rest) = ["http://127.0.0.1:", "http://[::1]:"]
+            .iter()
+            .find_map(|p| url.strip_prefix(p))
+        else {
+            return false;
+        };
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let (port, tail) = rest.split_at(digits);
+        let port_ok = matches!(port.parse::<u32>(), Ok(1..=65535)) && !port.starts_with('0');
+        let code = tail.strip_prefix("/#code=").unwrap_or("");
+        port_ok && (1..=64).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    #[test]
+    fn each_accepted_url_is_a_loopback_sign_in_address() {
+        let parts = [
+            "http://",
+            "https://",
+            "127.0.0.1",
+            "[::1]",
+            "localhost",
+            "example.com",
+            ":",
+            "4800",
+            "0",
+            "65535",
+            "65536",
+            "99999",
+            "/",
+            "#code=",
+            "/#code=",
+            "ab12",
+            "ZZ",
+            "%2F",
+            "@",
+            "?",
+            "&",
+            "\"",
+            "<",
+            " ",
+            "\n",
+            "javascript:",
+            "..",
+            "x",
+        ];
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for _ in 0..50_000 {
+            let n = 1 + rng.next() % 8;
+            let url: String = (0..n).map(|_| rng.pick(&parts)).collect();
+            assert_eq!(checked_url(&url).is_some(), in_grammar(&url), "{url}");
+        }
+        // Each valid address is accepted, and one changed byte of it is
+        // accepted only when the result is still in the grammar.
+        let hostile = b"\"<> /@#%g0\n";
+        for _ in 0..20_000 {
+            let host = rng.pick(&["127.0.0.1", "[::1]"]);
+            let port = 1 + rng.next() % 65535;
+            let len = 1 + (rng.next() % 64) as usize;
+            let code: String = (0..len)
+                .map(|_| char::from(b"0123456789abcdefABCDEF"[(rng.next() % 22) as usize]))
+                .collect();
+            let url = format!("http://{host}:{port}/#code={code}");
+            assert_eq!(checked_url(&url), Some(url.as_str()));
+            let mut bytes = url.clone().into_bytes();
+            let at = (rng.next() % bytes.len() as u64) as usize;
+            bytes[at] = hostile[(rng.next() % hostile.len() as u64) as usize];
+            let changed = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                checked_url(&changed).is_some(),
+                in_grammar(&changed),
+                "{changed}"
+            );
+        }
     }
 
     #[test]
