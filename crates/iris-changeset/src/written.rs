@@ -226,7 +226,13 @@ pub fn written_since(store: &Store, mark: i64) -> Result<bool> {
 /// Step 2a of the apply step (write spec, section 3): the send of each
 /// marked draft of `account`, oldest mark first, each in one transaction.
 /// Gives the count of marks that got a send action.
-pub fn send_written(store: &Store, account: i64, now_ms: i64) -> Result<usize> {
+///
+/// `clock` gives the time now. Each send reads it in its own transaction:
+/// the age check of the mark and the approval of the send use that time,
+/// so the hold of 60 seconds starts when the send exists, also after slow
+/// Gmail calls earlier in the step.
+pub fn send_written(store: &Store, account: i64, clock: &dyn Fn() -> i64) -> Result<usize> {
+    let now_ms = clock();
     let marks: Vec<i64> = store.read(|c| {
         let mut st = c.prepare(&format!(
             "SELECT w.action_id {OPEN} AND d.account_id = ?1 ORDER BY w.created_at, w.action_id"
@@ -236,7 +242,7 @@ pub fn send_written(store: &Store, account: i64, now_ms: i64) -> Result<usize> {
     })?;
     let mut made = 0;
     for mark in marks {
-        if transaction(store, |c| send_one(c, mark, now_ms))? {
+        if transaction(store, |c| send_one(c, mark, clock()))? {
             made += 1;
         }
     }

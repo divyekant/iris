@@ -109,6 +109,27 @@ impl Box {
         iris_apply::step(&self.store, &self.gmail, &mut token, self.account, at).unwrap()
     }
 
+    /// The apply step with a clock that gives `start` at its first read
+    /// and `later` after it, as if the Gmail calls of step 2 took that long.
+    fn slow_step(&self, start: i64, later: i64) -> iris_apply::Step {
+        let (t, mut renew) = self.token();
+        let mut token = Token {
+            token: t,
+            renew: &mut renew,
+            refused: false,
+        };
+        let reads = std::cell::Cell::new(0);
+        let clock = || {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                start
+            } else {
+                later
+            }
+        };
+        iris_apply::step_clock(&self.store, &self.gmail, &mut token, self.account, &clock).unwrap()
+    }
+
     fn sends(&self) -> usize {
         self.fake
             .requests()
@@ -261,7 +282,7 @@ fn a_written_mail_is_sent_one_time() {
     let b = setup("sent-once");
     let cs = b.write();
     b.apply_mark();
-    send_written(&b.store, b.account, now() - HOLD_MS - 1_000).unwrap();
+    send_written(&b.store, b.account, &|| now() - HOLD_MS - 1_000).unwrap();
     b.step();
     assert_eq!(b.states(cs), ("applied".into(), Some("applied".into())));
     b.step();
@@ -376,7 +397,7 @@ fn a_withdraw_after_the_draft_makes_no_send() {
         "UPDATE changeset SET state = 'withdrawn' WHERE id = ?1",
         [cs],
     );
-    assert_eq!(send_written(&b.store, b.account, now()).unwrap(), 0);
+    assert_eq!(send_written(&b.store, b.account, &|| now()).unwrap(), 0);
     assert_eq!(b.states(cs).1, None);
 }
 
@@ -393,8 +414,8 @@ fn each_mark_gets_one_send() {
         refused: false,
     };
     iris_apply::apply(&b.store, &b.gmail, &mut token, b.account, action).unwrap();
-    assert_eq!(send_written(&b.store, b.account, now()).unwrap(), 1);
-    assert_eq!(send_written(&b.store, b.account, now()).unwrap(), 0);
+    assert_eq!(send_written(&b.store, b.account, &|| now()).unwrap(), 1);
+    assert_eq!(send_written(&b.store, b.account, &|| now()).unwrap(), 0);
     assert_eq!(
         b.one::<i64>(
             "SELECT count(*) FROM changeset_action WHERE verb = 'send'",
@@ -419,7 +440,7 @@ fn a_draft_sent_at_gmail_gets_no_send() {
     };
     iris_apply::apply(&b.store, &b.gmail, &mut token, b.account, action).unwrap();
     b.sql("UPDATE draft SET sent_at = 1, sent_message = 'x'", []);
-    assert_eq!(send_written(&b.store, b.account, now()).unwrap(), 0);
+    assert_eq!(send_written(&b.store, b.account, &|| now()).unwrap(), 0);
 }
 
 /// The store refuses a mark for an action that the person did not approve,
@@ -443,7 +464,7 @@ fn the_store_guards_the_mark() {
         refused: false,
     };
     iris_apply::apply(&b.store, &b.gmail, &mut token, b.account, action).unwrap();
-    send_written(&b.store, b.account, now()).unwrap();
+    send_written(&b.store, b.account, &|| now()).unwrap();
     let r = b
         .store
         .write(|tx| Ok(tx.execute("UPDATE write_send SET send_action_id = NULL", [])?));
@@ -554,7 +575,7 @@ fn a_send_with_a_new_warning_goes_to_review() {
     b.apply_mark();
     b.sql("DROP TRIGGER write_send_update", []);
     b.sql("UPDATE write_send SET flags = '[]'", []);
-    send_written(&b.store, b.account, now()).unwrap();
+    send_written(&b.store, b.account, &|| now()).unwrap();
     assert_eq!(b.states(cs).1.as_deref(), Some("in_review"));
     b.step_at(now() + HOLD_MS + 1_000);
     assert_eq!(b.sends(), 0);
@@ -569,7 +590,34 @@ fn an_old_mark_gets_no_send() {
     b.apply_mark();
     let pressed: i64 = b.one("SELECT created_at FROM write_send", []);
     let end = pressed + MARK_MS;
-    assert_eq!(send_written(&b.store, b.account, end).unwrap(), 0);
+    assert_eq!(send_written(&b.store, b.account, &|| end).unwrap(), 0);
     assert_eq!(b.states(cs), ("applied".into(), None));
-    assert_eq!(send_written(&b.store, b.account, end - 1).unwrap(), 1);
+    assert_eq!(send_written(&b.store, b.account, &|| end - 1).unwrap(), 1);
+}
+
+/// A slow step: the hold of the send starts when step 2a makes the send,
+/// not at the start of the step, so the person keeps the full 60 seconds.
+#[test]
+fn a_slow_step_keeps_the_full_hold() {
+    let b = setup("slow-hold");
+    b.write();
+    let start = now();
+    let later = start + 2 * HOLD_MS;
+    b.slow_step(start, later);
+    let decided: i64 = b.one(
+        "SELECT s.decided_at FROM write_send w JOIN changeset_action s ON s.id = w.send_action_id",
+        [],
+    );
+    assert_eq!(decided, later);
+}
+
+/// A slow step that crosses the 24 hours of the mark makes no send: the age
+/// check reads the clock when it makes the send.
+#[test]
+fn a_slow_step_past_the_mark_life_makes_no_send() {
+    let b = setup("slow-old");
+    let cs = b.write();
+    let pressed: i64 = b.one("SELECT created_at FROM write_send", []);
+    b.slow_step(pressed + MARK_MS - 1, pressed + MARK_MS);
+    assert_eq!(b.states(cs), ("applied".into(), None));
 }

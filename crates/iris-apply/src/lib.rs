@@ -34,7 +34,7 @@ mod step;
 
 pub use send::{release, sending, set_sending, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
-pub use step::{step, Step};
+pub use step::{step, step_clock, Step};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
 use iris_policy::Mode;

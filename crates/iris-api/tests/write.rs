@@ -153,7 +153,7 @@ async fn a_press_writes_the_mail_after_its_warnings() {
         json!({"state": "saving"}),
         "the draft exists, step 2a did not run"
     );
-    iris_changeset::send_written(&s, 1, now()).unwrap();
+    iris_changeset::send_written(&s, 1, &now).unwrap();
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
     assert_eq!(st["state"], "waiting", "{st}");
     assert_eq!(st["draft"], "d-1");
