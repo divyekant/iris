@@ -189,6 +189,11 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
             _ => stopped(why.as_deref().unwrap_or("The send stopped.")),
         }));
     }
+    // Step 2a makes no send for this mark any more, whatever the state of
+    // its draft action (spec section 4).
+    if pressed <= now_ms - iris_changeset::MARK_MS {
+        return Ok(Some(stopped(TOO_OLD)));
+    }
     Ok(Some(match state.as_str() {
         "cancelled" => stopped("You stopped this mail."),
         "applied" if changeset == "withdrawn" => {
@@ -196,8 +201,6 @@ fn state_in(c: &Connection, cs: i64, now_ms: i64) -> rusqlite::Result<Option<Val
         }
         "applied" if sent => stopped("The mail went out from Gmail."),
         "applied" if foreign => stopped("The draft changed in Gmail. Send it from Gmail."),
-        // Step 2a makes no send for this mark any more.
-        "approved" | "applied" if pressed <= now_ms - iris_changeset::MARK_MS => stopped(TOO_OLD),
         "approved" | "applied" => json!({"state": "saving"}),
         _ => stopped(reason.as_deref().unwrap_or("Iris could not save the mail.")),
     }))

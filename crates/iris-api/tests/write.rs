@@ -350,9 +350,12 @@ async fn an_old_write_is_stopped() {
         Ok(())
     })
     .unwrap();
+    let old = json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1"});
     let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
-    assert_eq!(
-        st,
-        json!({"state": "stopped", "reason": "Iris did not send this mail in 24 hours, so it stopped. Look for the draft in your Gmail drafts.", "draft": "d-1"})
-    );
+    assert_eq!(st, old);
+    // A second stop cause does not hide the age: the draft also changed in Gmail.
+    s.write(|tx| Ok(tx.execute("UPDATE draft SET foreign_at = 1", [])?))
+        .unwrap();
+    let (_, st) = call(&s, "GET", &format!("/api/write/{cs}"), None).await;
+    assert_eq!(st, old);
 }
