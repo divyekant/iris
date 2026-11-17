@@ -12,14 +12,17 @@ use iris_provider::{
 
 use crate::{Auth, Entry, Folder, Search, Session, Special};
 
+/// The label of a draft that is not proof of authorship (spec section 4):
+/// a message in a `\Drafts` folder or with the `\Draft` flag. The
+/// understanding skips it as it skips `DRAFT`.
+pub const UNSENT: &str = "UNSENT";
+
 /// The messages of one page of [`Provider::messages`], and of one page of
 /// [`Provider::changes`] for a new folder.
 const WINDOW: u32 = 2000;
 /// The sequence numbers of one page of [`Provider::changes`] for a known
 /// folder: only the changed messages of them come back.
 const CHANGED_WINDOW: u32 = 20_000;
-/// The most UIDs of a search in one page.
-const SEARCH_PAGE: usize = 500;
 /// The most deletes of one folder in one [`Provider::changes`] sequence.
 /// More give a full resync.
 const DELETES_MAX: u32 = 20_000;
@@ -150,6 +153,9 @@ fn labels_of(f: &Folder, flags: &[String]) -> Vec<String> {
     }
     if has("\\Flagged") {
         out.push("STARRED".into());
+    }
+    if has("\\Draft") || f.special == Some(Special::Drafts) {
+        out.push(UNSENT.into());
     }
     out.extend(
         flags
@@ -310,7 +316,7 @@ fn removals<S: Read + Write>(
         return Ok(None);
     }
     let present: BTreeSet<u32> = if mark.next > old.next {
-        s.search(Search::Uids(old.next, mark.next - 1))
+        s.search(None, Search::Uids(old.next, mark.next - 1))
             .map_err(read_error)?
             .into_iter()
             .filter(|u| (old.next..mark.next).contains(u))
@@ -341,6 +347,10 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             let mut cursor = String::new();
             for f in mail_folders(s)? {
                 let e = s.examine(&f.name).map_err(read_error)?;
+                // A `NOMODSEQ` folder has no change record: no sync (issue #629).
+                if e.highest_modseq.is_none() {
+                    return Err(api("noCondstore", "an IMAP folder has no mod-sequences"));
+                }
                 cursor.push_str(&mark_line(&f.name, mark_of(&e)));
             }
             Ok(Profile {
@@ -364,7 +374,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 threads_unread: None,
             };
             let mut out: BTreeMap<String, Label> = BTreeMap::new();
-            for id in ["UNREAD", "STARRED"] {
+            for id in ["UNREAD", "STARRED", UNSENT] {
                 out.insert(id.into(), label(id, id, "system"));
             }
             for f in mail_folders(s)? {
@@ -403,6 +413,7 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 None => (None, u64::MAX),
             };
             let search = match label {
+                Some(UNSENT) => Some(Search::Draft),
                 Some("UNREAD") => Some(Search::Unseen),
                 Some("STARRED") => Some(Search::Flagged),
                 Some(l) => l.strip_prefix("kw:").map(Search::Keyword),
@@ -430,27 +441,26 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
             if let Some((f, bound)) = found {
                 let e = s.examine(&f.name).map_err(read_error)?;
                 let mut got: Vec<Entry> = Vec::new();
-                // The next bound: a UID for a search, else a sequence number.
-                let more = match search {
-                    Some(key) => {
-                        let mut uids: Vec<u32> = s.search(key).map_err(read_error)?;
-                        uids.retain(|u| u64::from(*u) < bound);
-                        uids.sort_unstable_by(|a, b| b.cmp(a));
-                        let full = uids.len() > SEARCH_PAGE;
-                        uids.truncate(SEARCH_PAGE);
-                        s.fetch_uids(&uids, |en| got.push(en)).map_err(read_error)?;
-                        uids.last().filter(|_| full).copied()
-                    }
-                    None => {
-                        let high = u64::from(e.exists).min(bound.saturating_sub(1)) as u32;
-                        let low = high.saturating_sub(WINDOW - 1).max(1);
-                        if high > 0 {
-                            s.window(low, high, None, |en| got.push(en))
-                                .map_err(read_error)?;
+                // A window of sequence numbers: for a search too, so that
+                // each answer holds at most WINDOW UIDs.
+                let high = u64::from(e.exists).min(bound.saturating_sub(1)) as u32;
+                let low = high.saturating_sub(WINDOW - 1).max(1);
+                if high > 0 {
+                    match search {
+                        // Each message of a Drafts folder is UNSENT.
+                        Some(Search::Draft) if f.special == Some(Special::Drafts) => s
+                            .window(low, high, None, |en| got.push(en))
+                            .map_err(read_error)?,
+                        Some(key) => {
+                            let uids = s.search(Some((low, high)), key).map_err(read_error)?;
+                            s.fetch_uids(&uids, |en| got.push(en)).map_err(read_error)?;
                         }
-                        (low > 1).then_some(low)
+                        None => s
+                            .window(low, high, None, |en| got.push(en))
+                            .map_err(read_error)?,
                     }
-                };
+                }
+                let more = (low > 1).then_some(low);
                 got.sort_by_key(|e| std::cmp::Reverse(e.uid));
                 messages.extend(got.iter().map(|en| {
                     let m = history_message(f, e.uidvalidity, en);

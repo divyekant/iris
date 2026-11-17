@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iris_fakeimap::{Caps, FakeImap, PASSWORD, USER};
-use iris_imap::Imap;
+use iris_imap::{Imap, UNSENT};
 use iris_provider::{Error, Provider};
 use iris_store::Store;
 use iris_sync::{first_sync, sync, verify};
@@ -370,14 +370,24 @@ fn labels_of_special_folders_and_flags() {
         vec!["folder:Sent"]
     );
     // Nor DRAFT: a folder or a flag is not proof that the owner wrote it.
+    // UNSENT keeps the draft out of the understanding.
     assert_eq!(
         labels(format!("{}:{draft}:INBOX", validity("INBOX"))),
-        vec!["INBOX"]
+        vec!["INBOX", UNSENT]
     );
     assert_eq!(
         labels(format!("{}:{in_drafts}:Drafts", validity("Drafts"))),
-        vec!["folder:Drafts"]
+        vec!["folder:Drafts", UNSENT]
     );
+    let unsent = mail.messages(PASSWORD, Some(UNSENT), None).unwrap();
+    let mut ids: Vec<String> = unsent.messages.into_iter().map(|m| m.id).collect();
+    let mut page = unsent.next_page_token;
+    while let Some(p) = page {
+        let next = mail.messages(PASSWORD, Some(UNSENT), Some(&p)).unwrap();
+        ids.extend(next.messages.into_iter().map(|m| m.id));
+        page = next.next_page_token;
+    }
+    assert_eq!(ids.len(), 2, "{ids:?}");
     let ids: Vec<String> = mail
         .labels(PASSWORD)
         .unwrap()

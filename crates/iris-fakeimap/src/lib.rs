@@ -497,17 +497,35 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 match conn.folder.as_ref().and_then(|n| s.folders.get(n)) {
                     None => "BAD no folder".to_owned(),
                     Some(f) => {
-                        let key = w.get(3).map(|x| x.to_ascii_uppercase()).unwrap_or_default();
-                        let arg = w.get(4).cloned().unwrap_or_default();
+                        // An optional set of sequence numbers before the key.
+                        let seqs = w
+                            .get(3)
+                            .filter(|x| x.starts_with(|c: char| c.is_ascii_digit()))
+                            .map(|x| uid_set(x, f.messages.len() as u32));
+                        let at = if seqs.is_some() { 4 } else { 3 };
+                        let key = w
+                            .get(at)
+                            .map(|x| x.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        let arg = w.get(at + 1).cloned().unwrap_or_default();
+                        let in_seqs = |i: usize| {
+                            seqs.as_ref().is_none_or(|r| {
+                                r.iter().any(|(a, b)| (*a..=*b).contains(&(i as u32 + 1)))
+                            })
+                        };
                         let has = |m: &Message, flag: &str| {
                             m.flags.iter().any(|x| x.eq_ignore_ascii_case(flag))
                         };
                         let hits: Vec<String> = f
                             .messages
                             .iter()
+                            .enumerate()
+                            .filter(|(i, _)| in_seqs(*i))
+                            .map(|(_, x)| x)
                             .filter(|(u, m)| match key.as_str() {
                                 "UNSEEN" => !has(m, "\\Seen"),
                                 "FLAGGED" => has(m, "\\Flagged"),
+                                "DRAFT" => has(m, "\\Draft"),
                                 "KEYWORD" => has(m, &arg),
                                 "UID" => uid_set(&arg, u32::MAX)
                                     .iter()

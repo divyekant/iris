@@ -15,7 +15,7 @@
 
 mod provider;
 
-pub use provider::Imap;
+pub use provider::{Imap, UNSENT};
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -191,6 +191,8 @@ const HEADS: &str = "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)
 pub enum Search<'a> {
     Unseen,
     Flagged,
+    /// The `\Draft` flag.
+    Draft,
     /// A keyword: an IMAP atom, else [`Error::Name`].
     Keyword(&'a str),
     /// The UIDs from the first to the second.
@@ -679,16 +681,20 @@ impl<S: Read + Write> Session<S> {
     }
 
     /// The UIDs of the open folder that match `key`.
-    pub fn search(&mut self, key: Search<'_>) -> Result<Vec<u32>> {
+    /// With `seqs`, only the messages with a sequence number in that range
+    /// (at most `EXISTS`), so the answer has at most that many UIDs.
+    pub fn search(&mut self, seqs: Option<(u32, u32)>, key: Search<'_>) -> Result<Vec<u32>> {
         let key = match key {
             Search::Unseen => "UNSEEN".to_owned(),
             Search::Flagged => "FLAGGED".to_owned(),
+            Search::Draft => "DRAFT".to_owned(),
             Search::Keyword(k) if is_atom(k) => format!("KEYWORD {k}"),
             Search::Keyword(_) => return Err(Error::Name),
             Search::Uids(a, b) => format!("UID {a}:{b}"),
         };
         let mut out = Vec::new();
-        self.run(&format!("UID SEARCH {key}"), None, |r, _| {
+        let set = seqs.map_or(String::new(), |(a, b)| format!("{a}:{b} "));
+        self.run(&format!("UID SEARCH {set}{key}"), None, |r, _| {
             if let Response::MailboxData(MailboxDatum::Search(u)) = r {
                 out.extend(u);
             }
