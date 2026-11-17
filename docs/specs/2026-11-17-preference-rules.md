@@ -59,7 +59,11 @@ cannot tell which sender the person wants to see.
 | `dismiss` | Signal | `active` | `dismissed` |
 
 - Each verb is a state verb (spec 2, section 4): one item target, the
-  optional argument `reason` (500 characters or fewer, for each path: submit refuses a longer one), no provider call.
+  argument `reason`, and no provider call. As for `close`, a changeset
+  action must have `reason` (500 characters or fewer, not blank), and submit denies an
+  action without it. The request body of the API can leave it out: the
+  API then writes a default reason ("Skipped.", "Muted." or "Dismissed.")
+  in the action.
 - The web client calls `POST /api/items/<id>/<verb>`, as for `close`. The
   engine makes a changeset of the author `person` with one action, and
   applies it in the same request through `iris_apply::apply_state`.

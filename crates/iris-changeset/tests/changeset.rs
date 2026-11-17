@@ -1755,7 +1755,15 @@ fn skip_mute_and_dismiss_take_one_item() {
         let a = args(json!({"reason": "No."}));
         add_action(&s, cs, &agent(), verb, &targets, &a, None).unwrap();
         add_action(&s, cs, &agent(), verb, &targets[..1], &a, None).unwrap();
+        // A changeset action needs a reason, as `close` does.
+        add_action(&s, cs, &agent(), verb, &targets[..1], &Map::new(), None).unwrap();
         submit(&s, cs, &agent(), "Tidy up.", NOW).unwrap();
+        let none = hash_doc(&s, cs, 1, 3);
+        assert_eq!(none["decision"]["state"], "denied", "{none}");
+        assert!(none["decision"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("needs one reason"));
         let two = hash_doc(&s, cs, 1, 1);
         assert_eq!(two["decision"]["state"], "denied", "{two}");
         assert!(two["decision"]["reason"]
