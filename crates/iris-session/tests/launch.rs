@@ -500,6 +500,57 @@ fn a_failed_end_write_is_not_reported_as_an_end() {
     assert_eq!(row.reaped_ms, None);
 }
 
+/// One changeset of the job with one review comment. Gives the comment ID.
+fn comment(f: &Fixture) -> i64 {
+    f.store
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO changeset (author_kind, author_name, author_session, author_job, created_at)
+                 VALUES ('agent', 't', 'se-1', ?1, 0)",
+                [iris_job::format_job_id(f.job)],
+            )?;
+            tx.execute(
+                "INSERT INTO changeset_comment (changeset_id, revision, text, key, at_ms)
+                 VALUES (?1, 1, 'Keep it.', 'k-0123456789abcdef', 1)",
+                [tx.last_insert_rowid()],
+            )?;
+            Ok(tx.last_insert_rowid())
+        })
+        .unwrap()
+}
+
+fn deliveries(f: &Fixture) -> Vec<(i64, i64)> {
+    f.store
+        .read(|c| {
+            let mut q = c.prepare("SELECT session_id, comment_id FROM comment_delivery")?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .unwrap()
+}
+
+/// docs/specs/2026-11-17-review-comments.md, section 5: the gate writes the
+/// delivery of the comments that the build read. A launch that fails before
+/// the gate commit writes none.
+fn the_gate_writes_the_delivery_of_the_comments() {
+    let f = fixture("delivery-fail", "data", "sleep 30");
+    comment(&f);
+    let late = |_: &[OsString]| {
+        let mut c = Process::new("/bin/sh");
+        c.args(["-c", "read line; sleep 3"]);
+        c
+    };
+    ended(launch(&f, &late, &|_, _| {}));
+    assert!(workspace(&f).join("comments").exists());
+    assert_eq!(deliveries(&f), []);
+
+    let f = fixture("delivery", "data", "sleep 30");
+    let id = comment(&f);
+    let r = running(launch(&f, &real_helper, &|_, _| {}));
+    assert_eq!(deliveries(&f), [(r.session, id)]);
+    stop(&f, r, EndReason::Stop);
+}
+
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
     if args.get(1).is_some_and(|a| a == "session-hold") {
@@ -554,6 +605,10 @@ fn main() {
         (
             "a_missing_program_fails_before_a_session_row",
             a_missing_program_fails_before_a_session_row,
+        ),
+        (
+            "the_gate_writes_the_delivery_of_the_comments",
+            the_gate_writes_the_delivery_of_the_comments,
         ),
     ];
     let mut failed = 0;

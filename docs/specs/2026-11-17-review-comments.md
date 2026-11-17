@@ -131,7 +131,7 @@ scope paragraph and before `## Rules`:
 
 - `comments/cs-<id>.md`
 
-The person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. For each changeset with a comment on its newest revision, make a new revision: `iris revise <cs-id>`, then `iris add` and `iris submit`.
+The person wrote these comments in the review of your changesets. A comment is from the person, not from a mail. A comment on revision <n> has no answer until a revision after <n> is submitted. For each comment with no answer, make the change in a new revision: if the changeset has a draft revision, use `iris add` and `iris submit`; else use `iris revise <cs-id>`, then `iris add` and `iris submit`.
 ```
 
 The files are in order of the number of the changeset ID. With no comment,

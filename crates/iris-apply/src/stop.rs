@@ -1,5 +1,5 @@
 //! One Stop for all agent work (docs/specs/2026-11-17-stop.md): the switch
-//! of migration 32, the end of each open session, and the resume.
+//! of migration 33, the end of each open session, and the resume.
 //!
 //! The checks are in the claim of the apply and of the release (`gate`),
 //! in the cutoff before each later call of an apply, and in the apply of a

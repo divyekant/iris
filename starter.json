@@ -78,6 +78,21 @@
       "tools": [
         "python3 --version"
       ]
+    },
+    "site": {
+      "paths": [
+        "docs/*.html",
+        "docs/guide/**",
+        "docs/site.css",
+        "docs/spec/schema/**",
+        "docs/spec/VERSION",
+        "scripts/site/**"
+      ],
+      "check": "python3 -m py_compile scripts/site/test_site.py",
+      "test": "python3 -m unittest discover -s scripts/site -v",
+      "tools": [
+        "python3 --version"
+      ]
     }
   },
   "cloud": {

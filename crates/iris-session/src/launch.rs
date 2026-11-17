@@ -231,7 +231,7 @@ impl Launcher<'_> {
         let dir = iris_workspace::default_dir(self.data_dir, job);
         // 3. Build. A revoke during the build changes the revoke count.
         let mut tries = 0;
-        loop {
+        let comment = loop {
             tries += 1;
             let built = match iris_workspace::build(self.store, job, &dir) {
                 Ok(b) => b,
@@ -242,7 +242,7 @@ impl Launcher<'_> {
                 return a;
             }
             match iris_job::revoked_count(self.store, job) {
-                Ok(n) if n == built.revoked => break,
+                Ok(n) if n == built.revoked => break built.comment,
                 Ok(_) if tries < BUILD_TRIES => {}
                 Ok(_) => {
                     let why = format!("the scope changed during each of {BUILD_TRIES} builds");
@@ -252,7 +252,7 @@ impl Launcher<'_> {
                     return self.fail(session, format!("cannot read the scope: {e}"), None, None)
                 }
             }
-        }
+        };
         // 4. Bind the session socket.
         let socket_path = dir.join(".iris").join("socket");
         let socket = match bind(&socket_path) {
@@ -281,7 +281,7 @@ impl Launcher<'_> {
         }
         (self.after)(Step::HelperStarted, session);
         // 6. The gate.
-        self.gate(job, session, helper, socket, socket_path)
+        self.gate(job, session, comment, helper, socket, socket_path)
     }
 
     /// Step 6: the check of the end, the start and the spawn, in one write
@@ -291,6 +291,7 @@ impl Launcher<'_> {
         &self,
         job: i64,
         session: i64,
+        comment: Option<i64>,
         mut helper: Helper,
         socket: UnixListener,
         socket_path: PathBuf,
@@ -337,6 +338,17 @@ impl Launcher<'_> {
                 }
                 Err(e) => {
                     result = Some(Err(Gate::Failed(format!("the start move failed: {e}"))));
+                    return Err(rollback());
+                }
+            }
+            // The build of this session read each comment up to `comment`
+            // (docs/specs/2026-11-17-review-comments.md, section 5).
+            if let Some(id) = comment {
+                if let Err(e) = tx.execute(
+                    "INSERT INTO comment_delivery (session_id, comment_id) VALUES (?1, ?2)",
+                    [session, id],
+                ) {
+                    result = Some(Err(Gate::Failed(format!("cannot write the delivery: {e}"))));
                     return Err(rollback());
                 }
             }
