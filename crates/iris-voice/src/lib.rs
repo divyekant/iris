@@ -455,7 +455,9 @@ pub fn write(
         .write(|tx| {
             // The draft answers the thread that the model read: a sync that
             // added, removed or changed a message makes this run save nothing.
-            if snapshot(tx, thread)? != snap {
+            // The samples too: a sample marked hostile during the call
+            // makes this run save nothing (issue #459).
+            if snapshot(tx, thread)? != snap || !samples_ok(tx, account, &ids)? {
                 return Ok(false);
             }
             tx.execute(

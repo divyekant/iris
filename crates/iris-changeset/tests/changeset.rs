@@ -1587,3 +1587,127 @@ fn open_actions_expire_14_days_after_the_submit() {
     );
     assert!(doc(&s, draft)["actions"][0]["decision"].is_null());
 }
+
+/// Random `ledger` targets (section 7.4): submit proposes an undo only for
+/// the exact target of its own linked entry, with the changed messages of
+/// the entry, and denies each other shape with no message row.
+#[test]
+fn random_ledger_targets() {
+    let dir = TempDir::new("fuzz-ledger");
+    let s = store(&dir);
+    // Entry l-1: an archive of messages 1 and 2, applied.
+    let cs = create(&s, &agent(), NOW).unwrap();
+    add_action(
+        &s,
+        cs,
+        &agent(),
+        Verb::Archive,
+        &["m-1", "m-2"],
+        &Map::new(),
+        None,
+    )
+    .unwrap();
+    submit(&s, cs, &agent(), "Archive.", NOW).unwrap();
+    s.write(|tx| {
+        tx.execute_batch(
+            "UPDATE changeset_action SET state = 'approved', decided_by = 'person',
+               decided_at = 1 WHERE id = 1;
+             INSERT INTO ledger(action_id, account_id, ops, state, undo, at)
+             VALUES (1, 1, '{}', 'writing', 'inverse', 1);
+             INSERT INTO ledger_message(ledger_id, message_id, call, pre, post)
+             VALUES (1, 1, 1, '[\"INBOX\"]', '[]'), (1, 2, 1, '[\"INBOX\"]', '[]');
+             UPDATE ledger SET call = 1;
+             UPDATE ledger_message SET done = 1;
+             UPDATE ledger SET state = 'applied';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let person = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let ids = [
+        json!("l-1"),
+        json!("l-2"),
+        json!("l-01"),
+        json!("l-0"),
+        json!("l-"),
+        json!("l-1 "),
+        json!("L-1"),
+        json!("m-1"),
+        json!(1),
+        json!(null),
+        json!("l-99999999999999999999"),
+    ];
+    let (mut proposed, mut denied) = (0, 0);
+    for round in 0..300 {
+        let list: Vec<Value> = (0..next(3))
+            .map(|_| ids[next(ids.len() as u64) as usize].clone())
+            .collect();
+        let mut targets = Map::new();
+        targets.insert("ledger".into(), json!(list));
+        if next(6) == 0 {
+            targets.insert("messages".into(), json!(["m-1"]));
+        }
+        let targets = Value::Object(targets).to_string();
+        let exact = targets == "{\"ledger\":[\"l-1\"]}";
+        let cs = create(&s, &person, NOW).unwrap();
+        let action = s
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                     VALUES (?1, 1, 1, 'inbox', ?2, '{}')",
+                    rusqlite::params![cs, targets],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .unwrap();
+        // The link needs the whole entry as the target (migration 23).
+        let linked = next(3) != 0
+            && s.write(|tx| {
+                Ok(tx.execute(
+                    "INSERT INTO ledger_undo(action_id, ledger_id, step) VALUES (?1, 1, 1)",
+                    [action],
+                )?)
+            })
+            .map_err(|e| assert!(!exact && e.to_string().contains("iris:"), "{e}"))
+            .is_ok();
+        submit(&s, cs, &person, "Undo.", NOW).unwrap();
+        let mut out = Vec::new();
+        write_document(&s, cs, &mut out).unwrap();
+        let d: Value = serde_json::from_slice(&out).unwrap();
+        let a = &d["actions"][0];
+        let resolved = a["resolved"]["messages"].as_array().unwrap();
+        match a["decision"]["state"].as_str().unwrap() {
+            "proposed" => {
+                assert!(linked && exact, "round {round}: {a}");
+                assert_eq!(resolved, &vec![json!("m-1"), json!("m-2")], "round {round}");
+                let errors: Vec<String> = iris_spec::validator("changeset")
+                    .iter_errors(&d)
+                    .map(|e| format!("{e} at {}", e.instance_path()))
+                    .collect();
+                assert!(errors.is_empty(), "round {round}: {errors:#?}");
+                proposed += 1;
+                // The next round can link the entry again.
+                withdraw(&s, cs, Some(&person)).unwrap();
+            }
+            "denied" => {
+                assert!(!(linked && exact), "round {round}: {a}");
+                assert!(resolved.is_empty(), "round {round}: {a}");
+                denied += 1;
+            }
+            other => panic!("round {round}: {other}"),
+        }
+    }
+    assert!(proposed > 0 && denied > 0, "{proposed} {denied}");
+}

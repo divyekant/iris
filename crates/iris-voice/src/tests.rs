@@ -836,3 +836,30 @@ fn large_bodies_are_cut_in_the_read() {
         &ex[..20]
     );
 }
+
+/// A sample marked SPAM during the call, with the thread unchanged: the
+/// save refuses the draft.
+#[test]
+fn a_sample_marked_spam_during_the_call_saves_nothing() {
+    let (b, t) = mailbox("sample-during");
+    let store = &b.store;
+    let mut fake = Fake::new(r#"{"body": "ok"}"#);
+    fake.during = Some(Box::new(move || {
+        store
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO message_label(message_id, label_id)
+                     SELECT m.id, l.id FROM message m, label l
+                     WHERE m.provider_id = 's2' AND l.provider_id = 'SPAM'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }));
+    assert!(matches!(
+        write(store, t, None, &fake, 1),
+        Err(Error::Changed)
+    ));
+    assert_eq!(saved(store, t), None);
+}

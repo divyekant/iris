@@ -171,8 +171,8 @@ mailbox. A session with an egress port also gets `HTTPS_PROXY` and
 never passed. No variable of Iris goes to the agent.
 
 The working folder of the agent is the workspace. Its standard input is
-`/dev/null`. Its standard output and standard error are pipes to the
-helper. The helper reads both pipes and drops the bytes: no output of the
+`/dev/null`. Its standard output and standard error go to one pipe to the
+helper. The helper reads the pipe and drops the bytes: no output of the
 agent is stored. The agent can read a credential (a passed key, or a file
 of the agent tool), and a filter cannot find each form of it, so the only
 safe log of agent output is none. The helper reads without end, so the
@@ -184,6 +184,10 @@ standard output) holds only status lines that the helper writes from
 fixed text and numbers: the start, the process group ID, each signal that
 the helper sends, the exit code or signal of the agent, the count of
 output bytes that the helper dropped, and the result of `Isolation::stop`.
+After the reap, the helper waits at most 2 seconds for the end of the
+output pipe, so that the count holds each byte. If a process that the stop
+missed keeps the pipe open, the line gives the count as a lower bound and
+says that the pipe is still open.
 A status line holds no text of the agent. The log has a limit of 64 KiB.
 The agent writes its own notes in `notes.md` of the workspace.
 
@@ -204,7 +208,10 @@ not the agent:
      Then the helper writes one line `started <pgid>` on its standard
      error, which is a second pipe to the engine. The engine writes
      `agent_pgid` (the spawn move).
-   - Any other line, or the end of the pipe: the helper exits with no child.
+   - Any other line, a line longer than 64 bytes, or the end of the pipe:
+     the helper exits with no child.
+   - If the start of the agent fails, the helper writes one line `failed`
+     on its second pipe and exits with no child.
 
    The helper itself is started inside the outer part of the isolation, so
    the isolation binds the life of each process of the session to the
@@ -212,6 +219,9 @@ not the agent:
 3. After the start, the helper waits for two events: the child exits, or
    the pipe ends (the engine stopped, or the engine closed the pipe to stop
    the session).
+   The helper uses one thread to read the output, and one thread for each
+   event. If one of these threads does not start, the helper cannot read
+   the output or see an event, so it does step 4 at once.
 4. On each of the two events, the helper stops the group of the agent. It
    does not reap the agent before the last signal: it sees the exit with
    `waitid(P_PID, pid, WEXITED | WNOWAIT)`, which leaves the agent as a
