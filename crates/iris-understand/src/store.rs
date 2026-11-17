@@ -122,8 +122,9 @@ pub const LINK_CHECKS: i64 = 200;
 /// store has the result of the check for the content that it read: no
 /// deceptive link, or the mark `link`. Other rows stay for the next run (a
 /// file that Iris cannot read, a change during the check). Returns the
-/// count of messages that got the mark.
-pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
+/// count of messages that got the mark. With `max_marks`, it stops before
+/// one more message would get the mark: the run limit counts them.
+pub fn recheck_links(store: &Store, now_ms: i64, max_marks: Option<u64>) -> Result<u64> {
     let mut marked = 0;
     let mut after = 0;
     loop {
@@ -145,6 +146,10 @@ pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
             let Some((mark, sha)) = link_mark_of(store, id) else {
                 continue;
             };
+            if mark && max_marks.is_some_and(|n| marked >= n) {
+                // The message limit of the run: the rest waits.
+                return Ok(marked);
+            }
             if mark {
                 // Hostile mail never reaches the model (section 6.7). An
                 // error leaves the row for the next run.
@@ -153,6 +158,19 @@ pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
             // The row goes only for the content that the check read, and,
             // for a deceptive link, only when the message has the mark.
             let done = store.write(|tx| {
+                if !mark {
+                    // A mark of earlier content goes: the check of this
+                    // content found no deceptive link.
+                    tx.execute(
+                        "UPDATE message SET hostile = (
+                           SELECT json_group_array(value) FROM json_each(hostile)
+                           WHERE value <> 'link')
+                         WHERE id = ?1 AND content_sha256 IS ?2 AND EXISTS (
+                           SELECT 1 FROM json_each(coalesce(hostile, '[]'))
+                           WHERE value = 'link')",
+                        params![id, sha],
+                    )?;
+                }
                 let n = tx.execute(
                     "DELETE FROM link_check WHERE message_id = ?1 AND EXISTS (
                        SELECT 1 FROM message m WHERE m.id = ?1

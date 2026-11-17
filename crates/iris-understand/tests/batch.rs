@@ -1028,3 +1028,67 @@ fn new_mail_gets_the_link_check_when_iris_cannot_make_the_model() {
         .unwrap();
     assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(1));
 }
+
+#[test]
+fn the_link_check_counts_toward_the_message_limit() {
+    let b = store("link-limit");
+    b.model(false, None);
+    for i in 0..3 {
+        let raw = bank(&format!("https://evil{i}.example.net/pay"));
+        b.add_raw(&format!("m{i}"), &format!("t{i}"), 1, &raw, &["INBOX"]);
+    }
+    let marked = "SELECT count(*) FROM message WHERE hostile LIKE '%\"link\"%'";
+    let limits = Limits {
+        max_messages: Some(1),
+        ..Limits::default()
+    };
+    let r = b.run(&limits).unwrap();
+    assert_eq!(r.messages, 1);
+    assert_eq!(b.col(marked), Some(1));
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(2));
+    b.run(&Limits::default()).unwrap();
+    assert_eq!(b.col(marked), Some(3));
+    assert_eq!(b.script.calls(), 0);
+}
+
+#[test]
+fn new_honest_content_clears_the_link_mark_of_the_old_content() {
+    let b = store("link-clear");
+    b.model(false, None);
+    let m = b.add_raw(
+        "m",
+        "t",
+        1,
+        &bank("https://evil.example.net/pay"),
+        &["INBOX"],
+    );
+    b.run(&Limits::default()).unwrap();
+    let marks = |b: &Box_| -> String {
+        b.store
+            .read(|c| {
+                Ok(
+                    c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(marks(&b), r#"["link"]"#);
+    // New content, as a sync writes it: the old marks stay until a check.
+    let honest = bank("https://bank.example.com/pay").replace('\n', "\r\n");
+    let sha = b.store.put_content(honest.as_bytes()).unwrap();
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2, understood_at = NULL WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    assert_eq!(marks(&b), "[]");
+    assert!(!b.understood(m), "the model work still waits");
+}
