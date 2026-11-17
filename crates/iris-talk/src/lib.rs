@@ -615,7 +615,7 @@ fn doc(
     });
 
     Ok(Some(json!({
-        "model": "iris/0",
+        "model": iris_store::MODEL,
         "id": format_id(Kind::Conversation, id),
         "form": "conversation",
         "status": status,

@@ -501,7 +501,7 @@ pub fn write_document(store: &Store, job: i64, out: &mut impl Write) -> Result<(
 /// The fields of the job document without `events`: the summary of a job.
 pub fn job_json(j: &Job) -> Value {
     let mut m = Map::new();
-    m.insert("model".into(), "iris/0".into());
+    m.insert("model".into(), iris_store::MODEL.into());
     m.insert("id".into(), format_job_id(j.id).into());
     m.insert("goal".into(), j.goal.as_str().into());
     if let Some(due) = j.due_ms {

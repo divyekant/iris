@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:job",
-  "title": "Iris open model 0 (draft): job",
-  "description": "Draft. One job: a goal with limits for an agent, its state and the events of each state change. See docs/specs/2026-11-16-job-store.md.",
+  "$id": "urn:iris:model:1:job",
+  "title": "Iris open model 1: job",
+  "description": "One job: a goal with limits for an agent, its state and the events of each state change. See docs/specs/2026-11-16-job-store.md.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,7 +16,7 @@
   ],
   "properties": {
     "model": {
-      "const": "iris/0"
+      "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$"
     },
     "id": {
       "type": "string",
@@ -28,13 +28,13 @@
       "maxLength": 2000
     },
     "due": {
-      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
     },
     "created": {
-      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
     },
     "updated": {
-      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
     },
     "state": {
       "enum": [
@@ -162,10 +162,10 @@
       ],
       "properties": {
         "thread": {
-          "$ref": "urn:iris:model:0:common#/$defs/threadId"
+          "$ref": "urn:iris:model:1:common#/$defs/threadId"
         },
         "until": {
-          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+          "$ref": "urn:iris:model:1:common#/$defs/dateTime"
         }
       }
     },
@@ -185,7 +185,7 @@
       ],
       "properties": {
         "at": {
-          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+          "$ref": "urn:iris:model:1:common#/$defs/dateTime"
         },
         "state": {
           "enum": [

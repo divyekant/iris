@@ -167,13 +167,13 @@ valid.
 
 ### 5.1 Format
 
-A changeset is one JSON document. This is the format of version 0. The JSON
+A changeset is one JSON document. This is the format of version 1. The JSON
 Schema of the changeset is `schema/changeset.schema.json`, with sample
 documents in `schema/examples/` (files `changeset*.json`).
 
 ```json
 {
-  "model": "iris/0",
+  "model": "iris/1.0",
   "id": "cs-77",
   "revision": 1,
   "author": { "kind": "agent", "name": "Claude Code", "session": "se-12", "job": "j-142" },
@@ -398,9 +398,12 @@ the schema does not see:
   of a TOML date, and a float with no fraction (`id = 1.0`) in place of an
   integer.
 
+The `version` of the file is `1`. Iris also accepts `version = 0`, with the
+same meaning, because files of version 0 exist ([specification 4](04-open-model-versions.md), rule 2.7).
+
 ```toml
-# Iris policy. Version 0 (draft).
-version = 0
+# Iris policy. Version 1.
+version = 1
 
 # observe: Iris applies nothing. apply: rules decide, and the rest goes to review.
 mode = "apply"
@@ -468,7 +471,7 @@ Conditions in `when`:
 | `author` | `person`, `agent`, `triage` or `local`. Each value matches only that author. |
 | `older_than_days` | The age of the message in days. |
 
-Version 0 has no other condition, and no expression language. A new condition
+Version 1 has no other condition, and no expression language. A new condition
 needs a change to this specification.
 
 Each condition matches one message. For an action on an item, the message is
@@ -1322,7 +1325,7 @@ another OS user, if it must not approve. The documentation must say this.
    engine accepts other addresses.
 2. Label names. A label that an agent creates is a new label at Gmail. Version
    0 lets `label` create labels. A rule could limit this later.
-3. The format of the hold delay per recipient. Version 0 has one delay for all
+3. The format of the hold delay per recipient. Version 1 has one delay for all
    sends.
 
 ## Assumptions
@@ -1330,7 +1333,7 @@ another OS user, if it must not approve. The documentation must say this.
 - A person can change a message in Gmail between the read of step 2 and the
   provider call of step 4 in section 7.2. The window is the time of one
   provider call. If the person changes a label of the action in that window,
-  the undo can reverse that change. Version 0 accepts this risk.
+  the undo can reverse that change. Version 1 accepts this risk.
 - Gmail `messages.batchModify` accepts up to 1,000 message IDs (Gmail
   reference, checked on 2026-11-15), and a repeat with the same labels has
   the same result.

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:changeset",
-  "title": "Iris open model 0 (draft): changeset",
-  "description": "Draft. One changeset document: the proposed mailbox and Iris changes of one author, with the state and the decision of each action. See docs/spec/02-changeset-policy-ledger.md, sections 4 and 5.",
+  "$id": "urn:iris:model:1:changeset",
+  "title": "Iris open model 1: changeset",
+  "description": "One changeset document: the proposed mailbox and Iris changes of one author, with the state and the decision of each action. See docs/spec/02-changeset-policy-ledger.md, sections 4 and 5.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,7 +18,7 @@
   ],
   "properties": {
     "model": {
-      "const": "iris/0"
+      "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$"
     },
     "id": {
       "type": "string",
@@ -38,7 +38,7 @@
       ]
     },
     "created": {
-      "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+      "$ref": "urn:iris:model:1:common#/$defs/dateTime"
     },
     "submitted": {
       "oneOf": [
@@ -46,7 +46,7 @@
           "type": "null"
         },
         {
-          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+          "$ref": "urn:iris:model:1:common#/$defs/dateTime"
         }
       ]
     },
@@ -538,7 +538,7 @@
               "type": "array",
               "uniqueItems": true,
               "items": {
-                "$ref": "urn:iris:model:0:common#/$defs/messageId"
+                "$ref": "urn:iris:model:1:common#/$defs/messageId"
               }
             }
           }
@@ -834,7 +834,7 @@
                 ],
                 "properties": {
                   "date": {
-                    "$ref": "urn:iris:model:0:common#/$defs/date"
+                    "$ref": "urn:iris:model:1:common#/$defs/date"
                   }
                 }
               }
@@ -1220,7 +1220,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "$ref": "urn:iris:model:0:common#/$defs/threadId"
+            "$ref": "urn:iris:model:1:common#/$defs/threadId"
           }
         },
         "messages": {
@@ -1228,7 +1228,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "$ref": "urn:iris:model:0:common#/$defs/messageId"
+            "$ref": "urn:iris:model:1:common#/$defs/messageId"
           }
         },
         "items": {
@@ -1313,7 +1313,7 @@
           "type": "string"
         },
         "at": {
-          "$ref": "urn:iris:model:0:common#/$defs/dateTime"
+          "$ref": "urn:iris:model:1:common#/$defs/dateTime"
         }
       },
       "dependentRequired": {

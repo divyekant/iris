@@ -946,7 +946,7 @@ fn session_mode_uses_only_the_session_socket() {
             std::io::BufReader::new(&s).read_line(&mut line).unwrap();
             let v: serde_json::Value = serde_json::from_str(&line).unwrap();
             let verb = v["verb"].as_str().unwrap().to_string();
-            let item = json!({"model": "iris/0", "id": "c-1", "form": "commitment",
+            let item = json!({"model": "iris/1.0", "id": "c-1", "form": "commitment",
                 "sources": ["m-1"]});
             let result = match verb.as_str() {
                 "search" => json!({"messages": [{"id": "m-1", "thread": "t-1",

@@ -14,7 +14,7 @@ use toml_edit::{DocumentMut, Item, Value};
 /// The text of a new policy file: the policy of the first start.
 pub const DEFAULT_TEXT: &str = "\
 # The policy of Iris (spec 2, section 6). Iris keeps the comments in this file.
-version = 0
+version = 1
 
 # observe: Iris applies nothing. apply: rules decide, and the rest goes to review.
 mode = \"observe\"

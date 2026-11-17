@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:common",
-  "title": "Iris open model 0 (draft): common definitions",
-  "description": "Draft. Definitions that each form schema uses. See docs/spec/01-mirror-store-forms.md, section 6.1.",
+  "$id": "urn:iris:model:1:common",
+  "title": "Iris open model 1: common definitions",
+  "description": "Definitions that each form schema uses. See docs/spec/01-mirror-store-forms.md, section 6.1.",
   "$defs": {
     "messageId": {
       "type": "string",
@@ -187,7 +187,7 @@
       ]
     },
     "attention": {
-      "description": "Reserved for specification 2.",
+      "description": "The attention of the item. See docs/spec/02-changeset-policy-ledger.md, section 6.4.",
       "type": "object",
       "required": [
         "state"
@@ -227,7 +227,7 @@
       ],
       "properties": {
         "model": {
-          "const": "iris/0"
+          "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$"
         },
         "id": {
           "type": "string"

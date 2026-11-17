@@ -2,7 +2,7 @@
 
 - Date: 2026-11-17
 - Card: R6-07
-- Status: Draft
+- Status: Agreed
 
 ## Problem
 
@@ -293,8 +293,8 @@ as a producer meets the stricter rule.
 | PR | Content | Depends on |
 |---|---|---|
 | 1 | This spec | none |
-| 2 | The freeze: section 1, section 6 items 1 to 4 (without `conformance.rs`), the spec text changes | PR 1 approved by dk |
-| 3 | The kit: specification 4, `docs/spec/VERSION`, `conformance/`, `conformance.rs`, the `spec-kit` area | PR 2 |
+| 2 | The freeze: section 1, section 6 items 1 to 4 (without `conformance.rs`), the spec text changes, and specification 4 with sections 2, 3 and 4 of this design (the version rules that the freeze needs) | PR 1 approved by dk |
+| 3 | The kit: section 5 of specification 4, `docs/spec/VERSION`, `conformance/`, `conformance.rs`, the `spec-kit` area | PR 2 |
 
 PR 2 changes the schemas and the code together, because the tests of each
 writer validate its output against the schemas.

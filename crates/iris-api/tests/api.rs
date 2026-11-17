@@ -133,7 +133,7 @@ fn exec_doc(store: &Store, row: i64) -> String {
 /// row `source` as its origin. Gives the row ID.
 fn add_item(store: &Store, form: &str, status: &str, source: i64, created: i64, doc: Value) -> i64 {
     let mut full = json!({
-        "model": "iris/0",
+        "model": "iris/1.0",
         "id": "x-0",
         "form": form,
         "status": "wrong",

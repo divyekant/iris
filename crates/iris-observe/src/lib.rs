@@ -145,7 +145,8 @@ pub fn write_changeset(
         let total: u64 = counts.iter().map(|(_, n)| n).sum();
         write!(
             out,
-            r#"{{"model":"iris/0","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
+            r#"{{"model":"{model}","id":"cs-{id}","revision":1,"author":{{"kind":"triage","name":"Iris"}},"why":"Triage proposes these mailbox changes. Nothing is applied.","created":{created:?},"submitted":{created:?},"state":"{state}","actions":["#,
+            model = iris_store::MODEL,
             id = changeset_number(c, account)?,
             state = if total == 0 { "closed" } else { "open" },
         )?;

@@ -1,26 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:conversation",
-  "title": "Iris open model 0 (draft): conversation",
-  "description": "Draft. The talk with one person or one group. See docs/spec/01-mirror-store-forms.md, section 6.3.",
+  "$id": "urn:iris:model:1:conversation",
+  "title": "Iris open model 1: conversation",
+  "description": "The talk with one person or one group. See docs/spec/01-mirror-store-forms.md, section 6.3.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["thread", "participants", "role", "latest", "messages", "new", "your_turn"],
-  "allOf": [{ "$ref": "urn:iris:model:0:common#/$defs/item" }],
+  "allOf": [{ "$ref": "urn:iris:model:1:common#/$defs/item" }],
   "properties": {
     "id": { "pattern": "^v-[1-9][0-9]*$" },
     "form": { "const": "conversation" },
     "status": { "enum": ["active", "quiet", "muted", "gone"] },
-    "thread": { "$ref": "urn:iris:model:0:common#/$defs/threadId" },
-    "participants": { "type": "array", "minItems": 1, "items": { "$ref": "urn:iris:model:0:common#/$defs/party" } },
+    "thread": { "$ref": "urn:iris:model:1:common#/$defs/threadId" },
+    "participants": { "type": "array", "minItems": 1, "items": { "$ref": "urn:iris:model:1:common#/$defs/party" } },
     "role": { "enum": ["direct", "group", "cc"] },
     "latest": {
       "type": "object",
       "required": ["at", "from", "snippet"],
       "additionalProperties": false,
       "properties": {
-        "at": { "$ref": "urn:iris:model:0:common#/$defs/dateTime" },
-        "from": { "$ref": "urn:iris:model:0:common#/$defs/party" },
+        "at": { "$ref": "urn:iris:model:1:common#/$defs/dateTime" },
+        "from": { "$ref": "urn:iris:model:1:common#/$defs/party" },
         "snippet": { "type": "string", "maxLength": 200 }
       }
     },

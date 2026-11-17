@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:policy",
-  "title": "Iris open model 0 (draft): policy file",
-  "description": "Draft. The policy file policy.toml, as the JSON form of its TOML data: a TOML date is a string YYYY-MM-DD. See docs/spec/02-changeset-policy-ledger.md, sections 6.1 and 6.2. The engine also refuses a file larger than 256 KiB and two rules with the same id. The engine also refuses a value of a TOML type with the same JSON form as the type that the field needs: a text in quotes in place of a date, and a float with no fraction (1.0) in place of an integer. A schema cannot check these three rules.",
+  "$id": "urn:iris:model:1:policy",
+  "title": "Iris open model 1: policy file",
+  "description": "The policy file policy.toml, as the JSON form of its TOML data: a TOML date is a string YYYY-MM-DD. See docs/spec/02-changeset-policy-ledger.md, sections 6.1 and 6.2. The engine also refuses a file larger than 256 KiB and two rules with the same id. The engine also refuses a value of a TOML type with the same JSON form as the type that the field needs: a text in quotes in place of a date, and a float with no fraction (1.0) in place of an integer. A schema cannot check these three rules.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,7 +11,8 @@
   ],
   "properties": {
     "version": {
-      "const": 0
+      "$comment": "0 and 1 have the same meaning. See docs/spec/04-open-model-versions.md, rule 2.7.",
+      "enum": [0, 1]
     },
     "mode": {
       "enum": [

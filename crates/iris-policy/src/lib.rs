@@ -331,10 +331,11 @@ pub fn parse(text: &str) -> Result<Policy, Error> {
         line: e.span().map_or(0, |s| line_of(text, s.start)),
         message: e.message().trim().to_string(),
     })?;
-    if raw.version != 0 {
+    // Version 0 and version 1 have the same meaning (spec 4, rule 2.7).
+    if raw.version != 0 && raw.version != 1 {
         return Err(Error {
             line: find_line(text, "version"),
-            message: format!("version {} is not known; use version = 0", raw.version),
+            message: format!("version {} is not known; use version = 1", raw.version),
         });
     }
     let mode = match raw.mode.as_str() {

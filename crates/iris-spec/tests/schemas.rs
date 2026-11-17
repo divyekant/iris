@@ -60,10 +60,13 @@ fn each_form_has_a_schema_and_a_sample() {
         "person",
     ] {
         let schema = read_json(&dir.join(format!("{name}.schema.json")));
-        assert_eq!(schema["$id"], format!("urn:iris:model:0:{name}"));
+        assert_eq!(schema["$id"], format!("urn:iris:model:1:{name}"));
         assert!(
-            schema["title"].as_str().unwrap().contains("(draft)"),
-            "{name}.schema.json must be marked draft"
+            schema["title"]
+                .as_str()
+                .unwrap()
+                .starts_with("Iris open model 1: "),
+            "{name}.schema.json must name version 1 of the open model"
         );
         let has_sample = json_files(&dir.join("examples"))
             .iter()

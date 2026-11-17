@@ -82,7 +82,7 @@ fn open_makes_the_data_folder() {
     }
     store
         .read(|c| {
-            assert_eq!(iris_store::schema_version(c)?, 30);
+            assert_eq!(iris_store::schema_version(c)?, 31);
             let journal: String = c.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
             assert_eq!(journal, "wal");
             let cache: i64 = c.query_row("PRAGMA cache_size", [], |r| r.get(0))?;

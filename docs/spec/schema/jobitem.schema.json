@@ -1,20 +1,20 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:iris:model:0:jobitem",
-  "title": "Iris open model 0 (draft): job item",
-  "description": "Draft. The identity of one commitment or record in the workspace of a job, and in a session. It holds no text of the model and no status. See docs/specs/2026-11-16-job-workspace.md.",
+  "$id": "urn:iris:model:1:jobitem",
+  "title": "Iris open model 1: job item",
+  "description": "The identity of one commitment or record in the workspace of a job, and in a session. It holds no text of the model and no status. See docs/specs/2026-11-16-job-workspace.md.",
   "type": "object",
   "additionalProperties": false,
   "required": ["model", "id", "form", "sources"],
   "properties": {
-    "model": { "const": "iris/0" },
+    "model": { "type": "string", "pattern": "^iris/1\\.(0|[1-9][0-9]*)$" },
     "id": { "type": "string", "pattern": "^[cr]-[1-9][0-9]*$" },
     "form": { "enum": ["commitment", "record"] },
     "sources": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "$ref": "urn:iris:model:0:common#/$defs/messageId" }
+      "items": { "$ref": "urn:iris:model:1:common#/$defs/messageId" }
     }
   },
   "allOf": [
