@@ -447,7 +447,24 @@ fn a_new_run_keeps_a_skip_and_a_dismiss() {
                 Ok(())
             })
             .unwrap();
-        let out = understand(&b.store, m, &Fake::with(&[answer]), NOW).unwrap();
+        // A second item of the same form with another quote is not the
+        // same item: it stays visible.
+        let two = answer.replace(
+            "}], \"phishing\"",
+            &format!(
+                "}}, {}], \"phishing\"",
+                &answer[answer.find("{\"form").unwrap()..answer.find("}]").unwrap() + 1]
+                    .replace("Can you send me the signed lease by Friday?", "The lease")
+            ),
+        );
+        let out = understand(&b.store, m, &Fake::with(&[&two]), NOW).unwrap();
+        assert_eq!(out.items.len(), 2, "{two}");
+        let other = out.items[1];
+        assert_ne!(
+            b.col::<String>("SELECT status FROM item WHERE id = ?1", other),
+            chosen,
+            "{name}: another quote"
+        );
         let new = out.items[0];
         assert_ne!(new, item);
         assert_eq!(
