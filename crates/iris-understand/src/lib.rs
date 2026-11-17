@@ -195,6 +195,32 @@ pub fn analyze(raw: &[u8], cx: &Context) -> Analysis {
     analyze_cut(raw, false, false, cx)
 }
 
+/// The DMARC result of the message. It counts only with its `header.from`
+/// domain, and only for the domain of the From address.
+fn dmarc_of(head: &Head) -> Option<&str> {
+    let from_domain = head::domain(head.from_addr.as_deref().unwrap_or(""));
+    head.auth
+        .as_ref()
+        .filter(|a| {
+            a.dmarc_from
+                .as_deref()
+                .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
+        })
+        .and_then(|a| a.dmarc.as_deref())
+}
+
+/// True when the links of a received message give the mark `link`
+/// ([`link::deceptive`]). The caller skips your sent mail.
+pub fn link_mark(head: &Head, links: &[iris_clean::Link], links_cut: bool) -> bool {
+    let from_domain = head::domain(head.from_addr.as_deref().unwrap_or(""));
+    link::deceptive(
+        links,
+        links_cut,
+        from_domain,
+        dmarc_of(head) == Some("pass"),
+    )
+}
+
 /// [`analyze`] for the first bytes of a message, with the flags of
 /// [`Text::of_cut`]. A link past the cut can be missing, so the mark `link`
 /// reads the flags too.
@@ -219,17 +245,7 @@ pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) ->
     let mut marks = Vec::new();
     let from = head.from_addr.as_deref().unwrap_or("");
     let from_domain = head::domain(from);
-    // A DMARC result counts only with its `header.from` domain, and only
-    // for the domain of this From address.
-    let dmarc = head
-        .auth
-        .as_ref()
-        .filter(|a| {
-            a.dmarc_from
-                .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case(from_domain))
-        })
-        .and_then(|a| a.dmarc.as_deref());
+    let dmarc = dmarc_of(&head);
     // Mail with the label SENT is yours (spec 1 section 6.7): its own
     // `From` header cannot make it a spoof or a DMARC fail.
     let sent = cx.labels.iter().any(|l| l == "SENT");
@@ -246,14 +262,7 @@ pub fn analyze_cut(raw: &[u8], raw_cut: bool, html_after: bool, cx: &Context) ->
             }
         }
     }
-    if !sent
-        && link::deceptive(
-            &text.links,
-            text.links_cut,
-            from_domain,
-            dmarc == Some("pass"),
-        )
-    {
+    if !sent && link_mark(&head, &text.links, text.links_cut) {
         marks.push(Mark::Link);
     }
     if cx.labels.iter().any(|l| l == "SPAM") {

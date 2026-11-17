@@ -824,3 +824,96 @@ fn the_waits_model_mark_clears_on_each_input_change() {
     b.model(false, None);
     assert_eq!(waits(&b), Some(0), "model set");
 }
+
+/// HTML mail with the text of a feed item and one link that shows
+/// `bank.example.com` and goes to `target`. No DMARC result.
+fn bank(target: &str) -> String {
+    format!(
+        "From: Bank <alerts@bank-mail.example.org>\nTo: owner@example.com\nSubject: Invoice\n\
+         Date: Tue, 30 Dec 2025 08:00:00 +0000\nContent-Type: text/html\n\n\
+         <p>Pay the invoice by Friday.</p><p><a href=\"{target}\">https://bank.example.com/pay</a></p>\n"
+    )
+}
+
+#[test]
+fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
+    let b = store("link-upgrade");
+    b.model(false, None);
+    let ok = b.add("ok", "t1", 1, &["INBOX"]);
+    let m = b.add_raw(
+        "m",
+        "t2",
+        1,
+        &bank("https://bank.example.com/pay"),
+        &["INBOX"],
+    );
+    // The same answer for both messages: the quote is only in `m`.
+    for _ in 0..2 {
+        b.script.push(Ok((
+            r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
+          "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
+                .into(),
+            usage(100, 10),
+        )));
+    }
+    b.run(&Limits::default()).unwrap();
+    let items = "SELECT count(*) FROM item_source s JOIN item i ON i.id = s.item_id
+                 WHERE s.message_id = MSG AND s.role = 'origin' AND i.form <> 'conversation'";
+    let items_of = |b: &Box_, m: i64| b.col(&items.replace("MSG", &m.to_string())).unwrap();
+    assert_eq!(items_of(&b, m), 1);
+    let calls = b.script.calls();
+    // The state of a store of the engine before the mark: the file of the
+    // message has a deceptive link, and the message is understood.
+    let evil = bank("https://evil.example.net/pay").replace('\n', "\r\n");
+    let sha = b.store.put_content(evil.as_bytes()).unwrap();
+    let ok_at = b.col(&format!(
+        "SELECT understood_at FROM message WHERE id = {ok}"
+    ));
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![m, sha],
+            )?;
+            tx.execute_batch("DROP TABLE link_check; PRAGMA user_version = 17;")?;
+            Ok(())
+        })
+        .unwrap();
+    let Box_ {
+        _dir,
+        store,
+        account,
+        script,
+    } = b;
+    drop(store);
+    let b = Box_ {
+        store: Store::open(&_dir.0).unwrap(),
+        _dir,
+        account,
+        script,
+    };
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(2));
+    b.run(&Limits::default()).unwrap();
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [m], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
+    assert_eq!(items_of(&b, m), 0, "quarantine keeps no item");
+    assert!(b.understood(m));
+    assert_eq!(b.script.calls(), calls, "no model call");
+    // The other message keeps its understanding, and each row went.
+    assert_eq!(
+        b.col(&format!(
+            "SELECT understood_at FROM message WHERE id = {ok}"
+        )),
+        ok_at
+    );
+    assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
+}

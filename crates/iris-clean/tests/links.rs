@@ -133,24 +133,38 @@ fn an_html_part_past_the_part_limit_cuts_the_links() {
     assert!(clean(&html(&body)).links_cut);
 }
 
+/// The message header of a multipart message with the boundary `b`.
+const TOP: &[u8] =
+    b"From: a@example.com\r\nContent-Type: multipart/mixed;\r\n\tboundary=\"b\"\r\n\r\n";
+
+fn with_top(before: &[u8]) -> Vec<u8> {
+    [TOP, before].concat()
+}
+
 #[test]
 fn html_part_in_finds_an_html_part_header_past_the_cut() {
     for (before, rest) in [
         (&b""[..], &b"--b\r\nContent-Type: text/html\r\n"[..]),
         (b"--b\r\n", b"content-type: TEXT/HTML; charset=utf-8"),
         (b"--b\r\nContent-Type: text", b"\r\n /\r\n html"),
-        (b"", b"--b\r\nContent-Type:\r\n\ttext/html\r\n\r\n<p>"),
+        (b"", b"--B  \r\nContent-Type:\r\n\ttext/html\r\n\r\n<p>"),
         (
             b"--b\r\nContent-Type: text/plain\r\n\r\nQU",
             b"JD\r\n--b\r\nX: y\r\nContent-Type: text/html\r\n\r\n",
         ),
         // The header ends past the cut, so its body is past the cut.
         (b"--b\r\nContent-Type: text/html", b"\r\n\r\n<p>"),
+        // A nested multipart declares its own boundary.
+        (
+            b"--b\r\nContent-Type: multipart/alternative; boundary=in\r\n\r\n",
+            b"--in\r\nContent-Type: text/html\r\n\r\n",
+        ),
     ] {
+        let before = with_top(before);
         assert!(
-            html_part_in(before, rest).unwrap(),
+            html_part_in(&before, rest).unwrap(),
             "{}|{}",
-            String::from_utf8_lossy(before),
+            String::from_utf8_lossy(&before),
             String::from_utf8_lossy(rest)
         );
     }
@@ -159,7 +173,7 @@ fn html_part_in_finds_an_html_part_header_past_the_cut() {
         (b"--b\r\n", b"text/htm"),
         (b"--b\r\n", b"xxtextext/html"),
         // `text/html` in the body of a plain attachment, also as a line
-        // that looks like a header.
+        // that looks like a header, also after a line with `--`.
         (
             b"--b\r\nContent-Type: text/plain\r\n\r\nAAAA",
             b"AAA\r\nContent-Type: text/html\r\n",
@@ -167,6 +181,18 @@ fn html_part_in_finds_an_html_part_header_past_the_cut() {
         (
             b"",
             b"--b\r\nContent-Type: text/plain\r\n\r\nSee text/html.\r\nContent-Type: text/html\r\n",
+        ),
+        (
+            b"--b\r\nContent-Type: text/plain\r\n\r\n",
+            b"-- note\r\nContent-Type: text/html\r\n\r\n",
+        ),
+        (
+            b"--b\r\nContent-Type: text/plain\r\n\r\n",
+            b"--bb\r\nContent-Type: text/html\r\n\r\n",
+        ),
+        (
+            b"--b\r\nContent-Type: text/plain\r\n\r\n",
+            b"--b-- x\r\nContent-Type: text/html\r\n\r\n",
         ),
         (
             b"--b\r\nX-Note: text/html\r\nContent-Type: text/csv\r\n\r\n",
@@ -178,13 +204,20 @@ fn html_part_in_finds_an_html_part_header_past_the_cut() {
             b"more</p>\r\n",
         ),
     ] {
+        let before = with_top(before);
         assert!(
-            !html_part_in(before, rest).unwrap(),
+            !html_part_in(&before, rest).unwrap(),
             "{}|{}",
-            String::from_utf8_lossy(before),
+            String::from_utf8_lossy(&before),
             String::from_utf8_lossy(rest)
         );
     }
+    // With no declared boundary, a `--b` line starts no part header.
+    assert!(!html_part_in(
+        b"Subject: x\r\n\r\n",
+        &b"--b\r\nContent-Type: text/html\r\n\r\n"[..]
+    )
+    .unwrap());
 }
 
 #[test]
@@ -299,11 +332,14 @@ fn generated_parts_give_the_html_answer_of_their_headers() {
         "Content-Type: text/html",
         " text/html",
         "",
+        "-- note",
+        "--bb",
+        "--b-- x",
     ];
     let mut r = Rng(0xD1B5_4A32_D192_ED03);
     let mut found = 0;
     for _ in 0..3000 {
-        let mut bytes = Vec::new();
+        let mut bytes = TOP.to_vec();
         // For each part: its start, the start of its body, and its type.
         let mut parts = Vec::new();
         for _ in 0..r.below(5) {

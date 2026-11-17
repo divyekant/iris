@@ -262,7 +262,11 @@ pub fn run(store: &Store, connect: Connect, limits: &Limits, now_ms: i64) -> Res
         )?;
         Ok((row, calls, tx.last_insert_rowid()))
     })?;
-    let result = run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms);
+    // Mail understood before the mark `link` gets its link check first, so
+    // this run understands a deceptive one again (migration 18).
+    let result = store::recheck_links(store)
+        .map_err(Error::Understand)
+        .and_then(|_| run_messages(store, connect, row.as_ref(), calls, run, limits, now_ms));
     let stop = result.as_ref().map_or(Stop::Error, |s| *s);
     let keep_idle = limits.keep_idle || result.is_err();
     let report = store.write(|tx| {

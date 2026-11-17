@@ -210,10 +210,12 @@ not used makes no cut in either case.
   parser limit; a message that Iris cannot parse. `clean_cut(raw, true)`
   reads the first bytes of a longer message: `links_cut` is also true when
   an HTML part reaches the end of `raw`. The caller reads the rest of the
-  file with `html_part_in`, which is true when a MIME part header in the
-  bytes (after a `--` boundary line, up to the empty line) has the type
-  `text/html`, with any case, white space or folding. `text/html` in a part
-  body does not count. The caller then sets `links_cut` too,
+  file with `html_part_in`. It reads the message from its start, for the
+  boundaries that the `multipart` headers declare, and is true when a MIME
+  part header past the cut (after a delimiter line of a declared boundary,
+  up to the empty line) has the type `text/html`, with any case, white
+  space or folding. `text/html` in a part body does not count, also after
+  a line that starts with `--` but is not a delimiter. The caller then sets `links_cut` too,
   because the rest can hold an HTML part that a mail client shows. The
   links of an attached message are not in the list.
 - Images go out. The `alt` text stays, unless `width` or `height` is `0` or
