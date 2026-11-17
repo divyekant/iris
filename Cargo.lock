@@ -1061,6 +1061,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iris-workspace"
+version = "0.0.0"
+dependencies = [
+ "iris-job",
+ "iris-spec",
+ "iris-store",
+ "iris-talk",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
