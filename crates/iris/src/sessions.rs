@@ -59,6 +59,13 @@ struct State {
     /// The jobs with a launch thread. Rule 0 of the reap check: the
     /// supervisor does not touch a session of such a job.
     launching: HashSet<i64>,
+    /// The jobs whose stop came during a launch: a revoke retry of the
+    /// launch ends its new session with `stop`.
+    stopping: HashSet<i64>,
+    /// The egress proxies of launches that ended with no running session.
+    /// Each proxy, here and in [`Live`], runs until the reap of its
+    /// session: a process of the agent can still use the port until then.
+    parked: HashMap<i64, Proxy>,
     /// The sessions whose helper this engine started, by session ID.
     running: HashMap<i64, Live>,
     /// The reason of the last failed reap check of each session.
@@ -265,6 +272,13 @@ impl Sessions {
                 // that runs always has its name.
                 let logged = Cell::new(session);
                 let after = |step: Step, s: i64| {
+                    if step == Step::Registered
+                        && s != session
+                        && self.state().stopping.contains(&job)
+                    {
+                        // The launch sees the end and stops.
+                        let _ = iris_job::end(&self.store, s, EndReason::Stop, None, now_ms());
+                    }
                     if step == Step::Registered && proxy.is_some() && s != logged.get() {
                         match move_log(&self.egress_log(logged.get()), &self.egress_log(s)) {
                             Ok(()) => logged.set(s),
@@ -305,6 +319,7 @@ impl Sessions {
         };
         let mut st = self.state();
         st.launching.remove(&job);
+        st.stopping.remove(&job);
         match outcome {
             Some((Outcome::Running(r), proxy)) => {
                 st.running.insert(
@@ -324,7 +339,7 @@ impl Sessions {
             Some((Outcome::Ended { session, why, .. } | Outcome::Open { session, why }, proxy)) => {
                 say!("iris: {}: {why}", format_session_id(session));
                 if let Some(p) = proxy {
-                    let _ = p.stop();
+                    st.parked.insert(session, p);
                 }
             }
             None => {}
@@ -354,33 +369,37 @@ impl Sessions {
     }
 
     /// `job.stop`: ends the open session of `job` with `stop`, then waits
-    /// up to [`STOP_WAIT`] for the reap. Gives the session, and `Ok` if it
-    /// was reaped, else the reason of the last failed reap check.
+    /// up to [`STOP_WAIT`] for the reap. A stop during a launch also ends
+    /// each session that a revoke retry of the launch registers. Gives the
+    /// last session of the job, and `Ok` if the launch is over and that
+    /// session was reaped, else the reason that it is not.
     #[allow(clippy::type_complexity)]
     pub fn stop(&self, job: i64) -> Result<(i64, Result<(), String>), String> {
-        let open = iris_job::open_session(&self.store, job).map_err(|e| e.to_string())?;
-        let session = match open {
-            Some(s) => {
-                iris_job::end(&self.store, s.id, EndReason::Stop, None, now_ms())
-                    .map_err(|e| e.to_string())?;
-                s.id
+        {
+            let mut st = self.state();
+            if st.launching.contains(&job) {
+                st.stopping.insert(job);
             }
-            None => {
-                last_session(&self.store, job)?
-                    .ok_or("the job has no session")?
-                    .id
-            }
-        };
+        }
         let end = Instant::now() + STOP_WAIT;
         loop {
+            let last = last_session(&self.store, job)?.ok_or("the job has no session")?;
+            if last.ended_ms.is_none() {
+                iris_job::end(&self.store, last.id, EndReason::Stop, None, now_ms())
+                    .map_err(|e| e.to_string())?;
+            }
             self.turn(now_ms());
-            let s = iris_job::session(&self.store, session).map_err(|e| e.to_string())?;
-            if s.reaped_ms.is_some() {
-                return Ok((session, Ok(())));
+            let launching = self.state().launching.contains(&job);
+            let last = last_session(&self.store, job)?.ok_or("the job has no session")?;
+            if !launching && last.reaped_ms.is_some() {
+                return Ok((last.id, Ok(())));
             }
             if Instant::now() >= end {
-                let why = self.state().left.get(&session).cloned();
-                return Ok((session, Err(why.unwrap_or_else(|| "not known".into()))));
+                let why = match launching {
+                    true => Some("the launch of the job still runs".to_string()),
+                    false => self.state().left.get(&last.id).cloned(),
+                };
+                return Ok((last.id, Err(why.unwrap_or_else(|| "not known".into()))));
             }
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -406,8 +425,14 @@ impl Sessions {
                 };
                 match reaped {
                     Ok(()) => {
-                        if let Some(l) = st.running.remove(&s.id) {
+                        if let Some(mut l) = st.running.remove(&s.id) {
                             let _ = std::fs::remove_file(&l.socket_path);
+                            if let Some(p) = l.proxy.take() {
+                                let _ = p.stop();
+                            }
+                        }
+                        if let Some(p) = st.parked.remove(&s.id) {
+                            let _ = p.stop();
                         }
                         st.left.remove(&s.id);
                         done.push(s.job_id);
@@ -464,14 +489,13 @@ impl Sessions {
     }
 
     /// The shutdown order: the grant ended in the store; close the socket,
-    /// close the pipe (the helper stops the group), stop the proxy and the
-    /// isolation. Each turn calls it again until the reap.
+    /// close the pipe (the helper stops the group), and stop the isolation.
+    /// Each turn calls it again until the reap. The egress proxy stops only
+    /// at the reap, so its port is not free for a new session while a
+    /// process of this agent can still use it.
     fn shutdown(&self, session: i64, l: &mut Live) {
         l.socket = None;
         l.pipe = None;
-        if let Some(p) = l.proxy.take() {
-            let _ = p.stop();
-        }
         if let Ok(iso) = &self.isolation {
             let _ = iso.stop(session);
         }

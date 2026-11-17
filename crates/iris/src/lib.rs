@@ -549,6 +549,15 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
         c => add_request(c)?.map(|r| ("add", r, false)),
     };
     if let Command::Job { command } = &cli.command {
+        // A bad job ID is a usage error, before the engine or the store.
+        let (JobCommand::Run { id, .. } | JobCommand::Stop { id } | JobCommand::Session { id }) =
+            command;
+        if iris_job::parse_job_id(id).is_none() {
+            return Err(socket::Failure {
+                code: socket::code::USAGE,
+                error: format!("{id} is not a job ID"),
+            });
+        }
         let dir = match &data {
             Ok(d) => d,
             Err(f) => {
