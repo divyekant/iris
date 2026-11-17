@@ -139,7 +139,12 @@ pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
         };
         after = last;
         for id in ids {
-            if link_mark_of(store, id) {
+            // A file that Iris cannot read keeps its row: the check runs
+            // again when a sync repairs the file.
+            let Some(mark) = link_mark_of(store, id) else {
+                continue;
+            };
+            if mark {
                 // Hostile mail never reaches the model (section 6.7), so no
                 // model is necessary.
                 if understand(store, id, &crate::budget::NoModel, now_ms).is_ok() {
@@ -163,25 +168,20 @@ pub fn recheck_links(store: &Store, now_ms: i64) -> Result<u64> {
     }
 }
 
-/// True when the received message `id` that is not gone has a deceptive
-/// link. A file that Iris cannot read gets no mark here: the sync check
-/// fetches it again, and then understanding runs again.
-fn link_mark_of(store: &Store, id: i64) -> bool {
-    let Ok(row) = read_row(store, id) else {
-        return false;
-    };
-    let path = row.sha.as_deref().and_then(|s| store.content_path(s));
+/// True when the received message `id` has a deceptive link, false when
+/// it has none, is gone or is your own mail. `None` when Iris cannot read
+/// its file now.
+fn link_mark_of(store: &Store, id: i64) -> Option<bool> {
+    let row = read_row(store, id).ok()?;
     let own = row.labels.iter().any(|l| l == "SENT" || l == "DRAFT");
-    match path {
-        Some(path) if !row.gone && !own => {
-            read_raw(&path).is_ok_and(|(raw, raw_cut, html_after)| {
-                let c = iris_clean::clean_cut(&raw, raw_cut);
-                let head = crate::Head::parse(&raw);
-                crate::link_mark(&head, &c.links, c.links_cut || html_after)
-            })
-        }
-        _ => false,
+    if row.gone || own {
+        return Some(false);
     }
+    let path = row.sha.as_deref().and_then(|s| store.content_path(s))?;
+    let (raw, raw_cut, html_after) = read_raw(&path).ok()?;
+    let c = iris_clean::clean_cut(&raw, raw_cut);
+    let head = crate::Head::parse(&raw);
+    Some(crate::link_mark(&head, &c.links, c.links_cut || html_after))
 }
 
 /// Run understanding on message `message` (its row ID): steps 1 to 8. Run

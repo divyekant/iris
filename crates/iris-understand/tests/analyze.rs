@@ -335,6 +335,7 @@ fn the_link_check_reads_the_text_that_a_person_sees() {
         "<ul><li><a href=\"https://evil.example.net/\"><b>https://bank.example.com</b></a></li></ul>",
         "<a href=\"https://evil.example.net/\">https://&#x202e;moc.elpmaxe.knab</a>",
         "<a href=\"https://evil.example.net/\">&nbsp;https://bank.example.com&nbsp;</a>",
+        "<a href=\"https://evil.example.net/\">https://bank.<br>example.com/login</a>",
     ] {
         assert_eq!(run(&html_body(body), &[], &[], &[]), vec![Mark::Link], "{body}");
     }

@@ -853,8 +853,10 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
         );
     }
     let m = b.add_raw("m", "t2", 1, &honest, &["INBOX"]);
+    // A message whose file is missing at the check.
+    let lost = b.add_raw("lost", "t3", 1, &honest, &["INBOX"]);
     // The same answer for each message.
-    for _ in 0..=pages {
+    for _ in 0..pages + 2 {
         b.script.push(Ok((
             r#"{"items": [{"form": "feed", "status": "new", "title": "Invoice",
           "quote": "Pay the invoice by Friday.", "confidence": 0.5}], "phishing": false}"#
@@ -872,6 +874,9 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
     // message has a deceptive link, and the message is understood.
     let evil = bank("https://evil.example.net/pay").replace('\n', "\r\n");
     let sha = b.store.put_content(evil.as_bytes()).unwrap();
+    let evil2 = bank("https://evil2.example.net/pay").replace('\n', "\r\n");
+    let sha2 = b.store.put_content(evil2.as_bytes()).unwrap();
+    std::fs::remove_file(b.store.content_path(&sha2).unwrap()).unwrap();
     let ok_at = b.col(&format!(
         "SELECT understood_at FROM message WHERE id = {ok}"
     ));
@@ -880,6 +885,10 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
             tx.execute(
                 "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
                 rusqlite::params![m, sha],
+            )?;
+            tx.execute(
+                "UPDATE message SET content_sha256 = ?2 WHERE id = ?1",
+                rusqlite::params![lost, sha2],
             )?;
             tx.execute_batch("DROP TABLE link_check; PRAGMA user_version = 17;")?;
             Ok(())
@@ -900,7 +909,7 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
     };
     assert_eq!(
         b.col("SELECT count(*) FROM link_check"),
-        Some(pages as i64 + 1)
+        Some(pages as i64 + 2)
     );
     // One run, with a model that Iris cannot make: the check needs none.
     let fail = |_: &ModelRow| -> Result<Box<dyn Model>, String> { Err("no model".into()) };
@@ -926,5 +935,24 @@ fn mail_understood_before_the_link_mark_gets_the_link_check_once() {
         )),
         ok_at
     );
+    // The missing file keeps its row. After a repair with the same
+    // bytes, the next run gives the mark.
+    assert_eq!(
+        b.col("SELECT max(message_id) FROM link_check WHERE (SELECT count(*) FROM link_check) = 1"),
+        Some(lost)
+    );
+    b.store.put_content(evil2.as_bytes()).unwrap();
+    let _ = batch::run(&b.store, &fail, &Limits::default(), NOW);
+    let marks: String = b
+        .store
+        .read(|c| {
+            Ok(
+                c.query_row("SELECT hostile FROM message WHERE id = ?1", [lost], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .unwrap();
+    assert_eq!(marks, r#"["link"]"#);
     assert_eq!(b.col("SELECT count(*) FROM link_check"), Some(0));
 }
