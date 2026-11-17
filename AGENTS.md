@@ -301,7 +301,7 @@ Write the name as "Iris", not "IRIS". The program and the command are `iris`.
 | `crates/iris-triage/` | Triage: stores the proposal of observe mode as a changeset of the author `triage`, one for each account, with a new revision only when the proposal changes. No provider client and no model call. | `engine` |
 | `crates/iris-job/` | The job of release 4: a goal with limits for an agent, its states (working, waiting, needs you, done), the events of each move, and the scope (the threads and items that the person gives to the job). | `engine` |
 | `crates/iris-workspace/` | The workspace of a job: a folder with only the mail and the state of the scope of the job, as clean files. | `engine` |
-| `crates/iris-session/` | The session of a job: the egress proxy of an agent (a `CONNECT` tunnel to the allowed model hosts, at public addresses only). The launcher and the hold helper come next. | `engine` |
+| `crates/iris-session/` | The session of a job: `agents.toml` and the adapter and environment of each agent tool, the `Isolation` interface, and the egress proxy of an agent (a `CONNECT` tunnel to the allowed model hosts, at public addresses only). The hold helper and the launch come next. | `engine` |
 | `client/` | The web client in TypeScript and Svelte. The build makes static files that the program embeds. | `client` |
 
 ### Base decisions

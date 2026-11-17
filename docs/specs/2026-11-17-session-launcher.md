@@ -142,7 +142,7 @@ allow_hosts = ["api.my-tool.example"]
 - A name of the file can not be `claude-code` or `codex`.
 - `command` has 1 to 32 strings. The first string is the program.
 - `pass_env` names environment variables that the session gets, if the
-  engine has them. Each name is `[A-Z_][A-Z0-9_]*`. A name that starts with
+  engine has them, at most 32. Each name is `[A-Z_][A-Z0-9_]*`. A name that starts with
   `IRIS` is refused. The proxy names (`HTTPS_PROXY`, `HTTP_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, in any case) are refused, because only the
   engine sets them.
@@ -153,7 +153,7 @@ allow_hosts = ["api.my-tool.example"]
   no wildcard. An IP address is refused. The default is no host: the agent
   has no network.
 - The engine reads the file at each `run`. An error in the file refuses the
-  run, with the line of the error. The file never changes a running session.
+  run, with the line of the error. A file larger than 64 KiB is refused. The file never changes a running session.
 
 The environment of the agent is empty, then gets only these variables, if
 the engine has them: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
@@ -847,12 +847,14 @@ and `dependsOn` on the board.
 |---|---|---|
 | R4-04 | This spec. | R4-02 |
 | R4-04b | Migration 21 and the session functions in `iris-job`. | R4-04 |
-| R4-04c | The crate `iris-session`: adapters, `agents.toml`, the hold helper and the launch. | R4-04b |
+| R4-04c | The crate `iris-session`: adapters, `agents.toml`, the environment of the agent and the `Isolation` interface. | R4-04b |
+| R4-04g | The hold helper in `iris-session`. | R4-04c |
+| R4-04h | The launch in `iris-session`. | R4-04g |
 | R4-04d | The egress proxy in `iris-session`. | R4-04 |
-| R4-04e | The engine: supervisor, reap check, requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04c, R4-04d |
+| R4-04e | The engine: supervisor, reap check, requests, session socket, egress ports, verbs and session mode. It also changes the fixed rules of `JOB.md` in `iris-workspace` to the text of the workspace spec. | R4-04h, R4-04d |
 | R4-04f | The read verbs `search`, `show` and `list` on the session socket. | R4-04e |
 
-R4-05 (the isolation of each system) depends on R4-04c and R4-04d. The
+R4-05 (the isolation of each system) depends on R4-04c, R4-04d and R4-04g. The
 cards that need a running session (R4-08, R4-11, R5-04) depend on R4-04e.
 
 ## Spec checks
