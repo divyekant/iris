@@ -7,6 +7,7 @@
   import { watch } from "../clock";
   import { copyText, liveCode, party, timeLeft } from "../format";
   import { href } from "../route";
+  import AccountPill from "./AccountPill.svelte";
 
   let { item, now: start = new Date() }: { item: Item; now?: Date } = $props();
   // svelte-ignore state_referenced_locally
@@ -28,6 +29,7 @@
       <a href={href.item(item.id)}>{party(item.issuer)}</a>
       <span>Ends {timeLeft(item.expires, now)}</span>
     </div>
+    <AccountPill {item} />
     <button type="button" onclick={copy}>{copied === "done" ? "Copied" : "Copy"}</button>
     {#if copied === "failed"}<p class="failed" role="status">The browser did not allow the copy. Select the code and copy it.</p>{/if}
   </div>
