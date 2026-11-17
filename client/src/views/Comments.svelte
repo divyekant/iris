@@ -11,7 +11,7 @@
   type Comment = { id: number; changeset: string; revision: number; text: string; at: string };
 
   // `refused` loads the request again after a 409: the request changed after the page loaded it.
-  let { changeset: c, agent, refused = () => {} }: { changeset: Changeset; agent: string; refused?: (why: string) => void } = $props();
+  let { changeset: c, agent, refused = () => {} }: { changeset: Changeset; agent: string; refused?: (why: string) => unknown } = $props();
   // The box opens from one quiet button (option B, the owner's pick).
   let writing = $state(false);
 
@@ -51,8 +51,10 @@
     e.preventDefault();
     if (!ready) return;
     const body = text;
-    if (body !== keyed) {
-      keyed = body;
+    // A key names one text on one revision: a new revision after a 409 gets a new key.
+    const sig = `${c.revision}\n${body}`;
+    if (sig !== keyed) {
+      keyed = sig;
       key = globalThis.crypto.randomUUID();
     }
     busy = true;
@@ -64,9 +66,17 @@
       saved = `Iris gave your comment to ${agent}. The agent reads it in its next session and sends a new revision.`;
     } catch (err) {
       const status = (err as { status?: number }).status;
-      if (status === 409) refused(`Iris did not save your comment: ${words(err)} Here is the request as it is now.`);
+      if (status === 409) {
+        keyed = "";
+        // Busy until the request loads again, so that the next send names the new revision.
+        await refused(`Iris did not save your comment: ${words(err)} Here is the request as it is now.`);
+      }
       // With no answer or a 5xx, the result is unknown. The same text sends the same key, so Iris saves it once.
-      else if (status === undefined || status >= 500) problem = "Iris does not know if it saved your comment. Send it again: Iris keeps it only once.";
+      else if (status === undefined || status >= 500) {
+        problem = "Iris does not know if it saved your comment. Send it again: Iris keeps it only once.";
+        // Spec section 4: after a lost answer, load the comments again. A saved comment then shows.
+        load();
+      }
       else problem = words(err);
     } finally {
       busy = false;

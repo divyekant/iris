@@ -175,3 +175,39 @@ test("the comments stay after the last decision, with no link", async () => {
     view.destroy();
   }
 });
+
+test("after a 409 the same text gets a new key", async () => {
+  let n = 0;
+  const sent = serve(() => (n++ === 0 ? [409, { error: "the changeset has a newer revision" }] : [200, { id: 9, changeset: "cs-9", revision: 2, text: "Keep it.", at: "2026-11-15T09:30:00Z" }]));
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset(job) });
+  try {
+    await write(view, "Keep it.");
+    await until(() => view.target.querySelector(".request > [role=alert]"));
+    await until(() => !view.target.querySelector(".comments textarea").disabled);
+    await write(view, "Keep it.");
+    await until(() => sent.length === 2 && view.target.querySelector(".comments [role=status]"));
+    assert.notEqual(sent[1].key, sent[0].key, "the old key names a refused revision");
+  } finally {
+    view.destroy();
+  }
+});
+
+test("after an unknown result the comments load again", async () => {
+  let saved = false;
+  serve(
+    (b) => {
+      saved = true;
+      throw new TypeError(`lost after the save of ${b.text}`);
+    },
+    async () => [200, { comments: saved ? [old, { id: 5, changeset: "cs-9", revision: 2, text: "Keep it.", at: "2026-11-15T09:30:00Z" }] : [old] }],
+  );
+  const view = await mount("/src/views/Request.svelte", { changeset: changeset(job) });
+  try {
+    await write(view, "Keep it.");
+    await until(() => view.target.querySelector(".comments [role=alert]"));
+    // The engine saved it: the list shows it after the load.
+    await until(() => view.target.querySelectorAll(".comments li").length === 2);
+  } finally {
+    view.destroy();
+  }
+});
