@@ -860,10 +860,16 @@ applies it.
    `bulk` do not apply to an undo. Only Stop (release 4) holds it.
 3. The apply reads the labels at Gmail as in step 2 of section 7.2. The
    inverse changes only the messages that still have the `post` state of
-   the entry, and that no later ledger entry changed (`done`, or listed
-   `unknown`), except the actions of the undos of the same entry. A
-   message that changed after the entry (for example, the person moved it
-   in Gmail, or a later action of Iris changed it) stays as it is. The
+   the entry, and on which no later change of Iris stands. A later entry
+   with the message listed `unknown` blocks. A later entry with the
+   message `done` is a change. The change stands if no undo of it with the
+   message `done` stands. So an undo that changed the message back cancels
+   the change, an undo of that undo makes it stand again, and each retry
+   of an undo counts. An undo entry is not a change by itself, unless it
+   undoes an entry before this entry. The actions of the undos of this
+   entry do not count. A message that changed after the entry (for
+   example, the person moved it in Gmail, or a later action of Iris that
+   stands changed it) stays as it is. The
    result counts these messages as unchanged. Known limit (issue #225):
    a change in Gmail outside Iris that puts the message back in the `post`
    state is not detected, and the undo reverses it.
@@ -906,7 +912,7 @@ An undo of an undo is a new action, not a delete of the record.
 | A link of an action whose target is not the whole entry (`{"ledger": ["l-N"]}`), whose verb is not the inverse of the entry, with other arguments, a step 2 of an entry that is not `trash`, or a step 2 with no step 1 of the same entry in the same changeset | A link lets an action skip the mode, or makes `untrash` for an entry that is not a trash | The trigger `ledger_undo_insert` refuses the link. The end of a ledger entry records an undo only when the entry of step 1 exists, so it never fails on the link. The trigger `ledger_undo_action` refuses a change of the verb, the targets or the arguments of a linked action, also in a draft. Submit denies a linked action with another target, and also denies `untrash` unless the action is step 1 of the undo of a `trash` entry. The apply changes only the messages that the entry changed, whatever the targets. |
 | An entry with no message with `done`, or each such message gone | An undo that changes nothing | `undo` refuses it. Nothing is written. |
 | A message that changed at Gmail after the entry | The undo reverses a change of the person | The apply reads the labels at Gmail, and skips the message if it does not have the `post` state. A change outside Iris that ends in the `post` state is not detected (issue #225). |
-| A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message with a later `ledger_message` row with `done` or `unknown`, except the rows of the undos of the same entry. A later change stands if no undo of it with a `done` row of the message stands. So an undo that changed the message back cancels the change, an undo of that undo makes the change stand again, and each retry of an undo counts. An undo entry is not a later change by itself, unless it undoes an entry before the first entry. A row with the result `unknown` blocks. So an undo of the newest entry, then an undo of the entry before it, returns each message to its first state (card R2-13). |
+| A message that a later entry of Iris changed (for example `archive`, `inbox`, `archive`, then the undo of the first `archive`) | The undo reverses the later action | The apply skips each message on which a later change of Iris stands, by the rule of step 3. The check reads only the ledger rows and undo links of that message. So an undo of the newest entry, then an undo of the entry before it, returns each message to its first state (card R2-13). |
 | A gone message, or HTTP 404 | A call on a message that does not exist | `undo` leaves a gone message out of the targets. The apply lists a message that Gmail does not have as gone. |
 | The mode `observe` | The person cannot reverse a change while Iris observes | The mode does not hold an undo. The apply checks the link of migration 23. |
 | Action 2 of the undo of `trash` before action 1 ends | An `archive` of a message that is still in the trash, or that `untrash` did not change | The apply of action 2 waits. Action 2 changes only the messages with `done` in the entry of action 1. |

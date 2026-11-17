@@ -1175,14 +1175,21 @@ fn later_change_stands(c: &Connection, o: i64, message: i64) -> iris_store::Resu
     if done.is_empty() {
         return Ok(false);
     }
-    // The undo links from `o` on: target entry -> its undo entries.
+    // The undo links from `o` on, of the undo entries with a row of the
+    // message: target entry -> its undo entries. An undo changes only
+    // messages that its target changed, so each chain of the message is
+    // here, and the maps hold only the history of this one message.
     let mut undos: HashMap<i64, Vec<i64>> = HashMap::new();
     let mut target_of: HashMap<i64, i64> = HashMap::new();
     let mut st = c.prepare_cached(
-        "SELECT x.ledger_id, l.id FROM ledger_undo x JOIN ledger l ON l.action_id = x.action_id
-         WHERE x.ledger_id >= ?1",
+        "SELECT x.ledger_id, lm.ledger_id FROM ledger_message lm
+         JOIN ledger l ON l.id = lm.ledger_id
+         JOIN ledger_undo x ON x.action_id = l.action_id
+         WHERE lm.message_id = ?1 AND lm.ledger_id > ?2 AND x.ledger_id >= ?2",
     )?;
-    for r in st.query_map([o], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+    for r in st.query_map(params![message, o], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })? {
         let (target, undo) = r?;
         undos.entry(target).or_default().push(undo);
         target_of.insert(undo, target);
