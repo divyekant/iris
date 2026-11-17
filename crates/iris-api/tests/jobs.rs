@@ -365,3 +365,58 @@ async fn one_job_is_one_read_of_the_store() {
     assert_eq!(v["threads"]["t-1"]["id"], "m-1");
     assert_eq!(v["changesets"].as_array().unwrap().len(), 1);
 }
+
+async fn post(store: &Arc<Store>, uri: &str, body: Value) -> (StatusCode, Value) {
+    let auth = Arc::new(Auth::new("127.0.0.1:4800".parse().unwrap()).unwrap());
+    let req = Request::post(uri)
+        .header("host", "127.0.0.1:4800")
+        .header("authorization", auth.bearer())
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = iris_api::router(store.clone(), auth)
+        .oneshot(req)
+        .await
+        .unwrap();
+    let code = res.status();
+    let body = to_bytes(res.into_body(), 64 << 20).await.unwrap();
+    (code, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+/// Card R5-05: the person answers the question of a job once.
+#[tokio::test]
+async fn the_person_answers_the_question_of_a_job_once() {
+    let dir = temp("answer");
+    let s = store(&dir);
+    let job = iris_job::create(&s, "Pay the invoice.", None, NOW).unwrap();
+    let uri = format!("/api/jobs/{}/answer", iris_job::format_job_id(job));
+    // No question yet.
+    let (code, _) = post(&s, &uri, json!({ "answer": "The blue card." })).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    ask(&s, job, "Which card?", None, NOW + 1).unwrap();
+    for bad in [
+        json!({}),
+        json!({ "answer": " \n " }),
+        json!({ "answer": "x".repeat(10_001) }),
+        json!({ "answer": "a\u{0}b" }),
+    ] {
+        let (code, v) = post(&s, &uri, bad.clone()).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{bad}");
+        assert!(v["error"].is_string(), "{bad}");
+    }
+    assert_eq!(
+        post(&s, "/api/jobs/j-999/answer", json!({ "answer": "Yes." }))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (code, doc) = post(&s, &uri, json!({ "answer": " The blue card. " })).await;
+    assert_eq!(code, StatusCode::OK, "{doc}");
+    assert_eq!(doc["job"]["state"], "working");
+    let last = doc["job"]["events"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["answer"], "The blue card.");
+    assert_eq!(last["by"], "person");
+    // A second answer finds no question.
+    let (code, _) = post(&s, &uri, json!({ "answer": "The red card." })).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+}

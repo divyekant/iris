@@ -61,6 +61,23 @@ pub fn jobs(store: &Store, state: &str, limit: u32, after: Option<&str>) -> Resu
     })
 }
 
+/// The answer of the person to the question of the job `row` (card
+/// R5-05). The job moves to `working`, and the engine starts a new session
+/// with the answer in `JOB.md`. A job that asks no question now gives
+/// `Conflict`: for example a second answer, or a job that the person ended.
+pub fn answer_job(store: &Store, row: i64, text: &str, now_ms: i64) -> Result<()> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 10_000 || text.contains('\0') {
+        return Err(Error::Query(
+            "the answer must have 1 to 10000 characters and no NUL character".into(),
+        ));
+    }
+    iris_job::answer(store, row, text, now_ms).map_err(|e| match e {
+        iris_job::Error::Refused(_) => Error::Conflict("The job asks no question now.".into()),
+        e => job_error(e),
+    })
+}
+
 /// The row of the job `id` (`j-42`), or `None` if no job has it.
 pub fn job_row(store: &Store, id: &str) -> Result<Option<i64>> {
     let Some(row) = iris_job::parse_job_id(id) else {

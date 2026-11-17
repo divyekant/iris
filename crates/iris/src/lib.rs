@@ -109,6 +109,13 @@ pub enum Command {
         #[arg(long)]
         why: Option<String>,
     },
+    /// In a job workspace: end the session, and ask the person one
+    /// question. Iris shows it in the brief, and starts a new session of
+    /// the job with the answer in `JOB.md`. A verb of a session only.
+    Ask {
+        /// The question, at most 2000 characters.
+        question: String,
+    },
     /// Copy the data folder to a new folder while the engine runs.
     Backup {
         /// The backup folder. It must not exist, or must be empty.
@@ -579,7 +586,7 @@ pub fn run(cli: Cli) -> Result<(), socket::Failure> {
             return r;
         }
     }
-    if let Command::List { .. } | Command::Wait { .. } = &cli.command {
+    if let Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } = &cli.command {
         return Err(socket::Failure {
             code: socket::code::USAGE,
             error: "this is a verb of a session: run it in a job workspace".into(),
@@ -697,6 +704,18 @@ fn session_run(path: &std::path::Path, c: &Command) -> Result<(), socket::Failur
             "{} waits until {}",
             verbs::field(r["job"].as_str().unwrap_or("-")),
             verbs::field(r["until"].as_str().unwrap_or("-"))
+        );
+        return Ok(());
+    }
+    if let Command::Ask { question } = c {
+        // The ask ends this session: after a lost answer, `iris status` in
+        // a new session, or the job page, shows the state of the job.
+        let args = serde_json::json!({ "question": question });
+        let r = socket::request_at(path, "ask", args, socket::ANSWER_WAIT, "iris status")
+            .map_err(unreachable)?;
+        println!(
+            "{} asks the person and waits for the answer",
+            verbs::field(r["job"].as_str().unwrap_or("-"))
         );
         return Ok(());
     }
@@ -1149,7 +1168,9 @@ fn command(cli: &Cli, open: &dyn Fn() -> Result<Store, String>) -> Result<(), St
         }
         Command::Show { id, json } => print(verbs::show(&open()?, id, *json)),
         // `run` refuses it in host mode, before the store.
-        Command::List { .. } | Command::Wait { .. } => Err("this is a verb of a session".into()),
+        Command::List { .. } | Command::Wait { .. } | Command::Ask { .. } => {
+            Err("this is a verb of a session".into())
+        }
         Command::Watch { command } => print(verbs::watch(&open()?, command)),
         Command::Job {
             command: JobCommand::Session { id },
