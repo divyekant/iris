@@ -662,3 +662,24 @@ fn a_person_counts_once_for_each_message() {
     // Sam: message 7 from Sam (also in its To and Cc); message 10 from you.
     assert_eq!(count("people/p-3.json"), (Some(1), Some(1)));
 }
+
+/// A message of the list of a ref stays granted when sync moves it to
+/// another thread: the build writes it in the file of its thread now.
+#[test]
+fn a_granted_message_that_moves_stays_granted() {
+    let tmp = TempDir::new("moved");
+    let store = store(&tmp.0.join("data"));
+    let job = create(&store, "Goal.", None, NOW).unwrap();
+    add_scope(&store, job, Ref::Thread(1), By::Person, NOW).unwrap();
+    store
+        .write(|tx| Ok(tx.execute_batch("UPDATE message SET thread_id = 2 WHERE id = 1;")?))
+        .unwrap();
+    let ws = tmp.0.join("ws");
+    build(&store, job, &ws).unwrap();
+    let (paths, text) = walk(&ws);
+    assert!(text.contains("DANA-TEXT"));
+    assert!(paths.contains("threads/t-2.md"));
+    assert!(paths.contains("commitments/c-1.json"));
+    // Only the moved message of thread 2: not the other mail of thread 2.
+    assert!(!text.contains("OTHER-THREAD-TEXT"));
+}
