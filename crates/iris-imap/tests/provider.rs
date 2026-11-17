@@ -2,6 +2,7 @@
 //! has zero differences after each change, and the failure list of the spec
 //! (docs/specs/2026-11-17-imap-provider.md) holds. No network.
 
+use std::collections::BTreeSet;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,6 +20,7 @@ fn provider(fake: &FakeImap) -> Imap<TcpStream> {
     let addr = fake.addr();
     Imap::new(OWNER, USER, move || {
         let s = TcpStream::connect(addr)?;
+        s.set_nodelay(true)?;
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
         Ok(s)
     })
@@ -346,8 +348,10 @@ fn random_changes_keep_zero_differences() {
 fn labels_of_special_folders_and_flags() {
     let fake = FakeImap::start(Caps::ALL);
     fake.create("Sent", Some("\\Sent"));
+    fake.create("Drafts", Some("\\Drafts"));
     let sent = fake.add("Sent", Mailbox::new(15, 1).raw(0), &["\\Seen"]);
     let draft = fake.add("INBOX", Mailbox::new(16, 1).raw(0), &["\\Seen", "\\Draft"]);
+    let in_drafts = fake.add("Drafts", Mailbox::new(17, 1).raw(0), &["\\Seen", "\\Draft"]);
     let mail = provider(&fake);
     let validity = |f: &str| {
         let c = cursor(&mail);
@@ -365,13 +369,99 @@ fn labels_of_special_folders_and_flags() {
         labels(format!("{}:{sent}:Sent", validity("Sent"))),
         vec!["folder:Sent"]
     );
+    // Nor DRAFT: a folder or a flag is not proof that the owner wrote it.
     assert_eq!(
         labels(format!("{}:{draft}:INBOX", validity("INBOX"))),
-        vec!["INBOX", "DRAFT"]
+        vec!["INBOX"]
     );
+    assert_eq!(
+        labels(format!("{}:{in_drafts}:Drafts", validity("Drafts"))),
+        vec!["folder:Drafts"]
+    );
+    let ids: Vec<String> = mail
+        .labels(PASSWORD)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.id)
+        .collect();
+    assert!(!ids.iter().any(|i| i == "SENT" || i == "DRAFT"), "{ids:?}");
     // A label that labels() does not give is never reported as made.
     assert!(matches!(
         mail.create_label(PASSWORD, "Work"),
         Err(Error::Api { status: 400, .. })
     ));
+}
+
+fn small(i: usize) -> Vec<u8> {
+    format!("Message-ID: <m{i}@x>\r\nSubject: {i}\r\n\r\nbody {i}\r\n").into_bytes()
+}
+
+/// A page of changes for a new folder holds at most 2,000 records, and the
+/// sync of a folder of more than one page is still exact.
+#[test]
+fn changes_pages() {
+    for caps in [
+        Caps::ALL,
+        Caps {
+            qresync: false,
+            ..Caps::ALL
+        },
+    ] {
+        let (fake, _) = filled(caps, 3);
+        let mail = provider(&fake);
+        let store = Store::open(&data_dir(&format!("pages-{}", caps.qresync))).unwrap();
+        let account = store.add_account("imap", OWNER).unwrap();
+        first_sync(&store, &mail, account, PASSWORD).unwrap();
+        let c = cursor(&mail);
+        fake.create("Big", None);
+        let uids: Vec<u32> = (0..2100).map(|i| fake.add("Big", small(i), &[])).collect();
+        let mut page = None;
+        let mut added = BTreeSet::new();
+        loop {
+            let p = mail.changes(PASSWORD, &c, page.as_deref()).unwrap();
+            let n: usize = p.history.iter().map(|h| h.changes.len()).sum();
+            assert!(n <= 2000, "{n} records in one page");
+            for ch in p.history.into_iter().flat_map(|h| h.changes) {
+                if let iris_provider::Change::Added(m) = ch {
+                    added.insert(m.id);
+                }
+            }
+            match p.next_page_token {
+                Some(t) => page = Some(t),
+                None => break,
+            }
+        }
+        assert_eq!(added.len(), 2100);
+        sync(&store, &mail, account, PASSWORD).unwrap();
+        assert_clean(&store, &mail, account);
+        // A flag change and a removal in a known folder.
+        fake.remove("Big", uids[5]);
+        for u in uids.iter().skip(6).take(50) {
+            fake.set_flags("Big", *u, &["\\Flagged"]);
+        }
+        sync(&store, &mail, account, PASSWORD).unwrap();
+        assert_clean(&store, &mail, account);
+    }
+}
+
+/// The message pages read each folder once, INBOX first, also when a
+/// folder comes before the current one in the order between two calls.
+#[test]
+fn message_pages_follow_folder_names() {
+    let fake = FakeImap::start(Caps::ALL);
+    fake.create("b", None);
+    fake.add("INBOX", small(0), &[]);
+    fake.add("b", small(1), &[]);
+    let mail = provider(&fake);
+    let first = mail.messages(PASSWORD, None, None).unwrap();
+    assert!(first.messages[0].id.ends_with(":INBOX"));
+    // A folder made before the current one in the order is not in this
+    // sequence; the cursor of a later changes call gets it.
+    fake.create("a", None);
+    fake.add("a", small(2), &[]);
+    let second = mail
+        .messages(PASSWORD, None, first.next_page_token.as_deref())
+        .unwrap();
+    assert!(second.messages[0].id.ends_with(":b"), "{second:?}");
+    assert_eq!(second.next_page_token, None);
 }

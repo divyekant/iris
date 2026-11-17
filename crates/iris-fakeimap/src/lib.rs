@@ -96,6 +96,8 @@ impl FakeImap {
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let state = shared.clone();
+                // No Nagle delay: each command waits for its answer.
+                let _ = stream.set_nodelay(true);
                 thread::spawn(move || {
                     let _ = serve(stream, &state);
                 });
@@ -503,10 +505,13 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                         let hits: Vec<String> = f
                             .messages
                             .iter()
-                            .filter(|(_, m)| match key.as_str() {
+                            .filter(|(u, m)| match key.as_str() {
                                 "UNSEEN" => !has(m, "\\Seen"),
                                 "FLAGGED" => has(m, "\\Flagged"),
                                 "KEYWORD" => has(m, &arg),
+                                "UID" => uid_set(&arg, u32::MAX)
+                                    .iter()
+                                    .any(|(a, b)| (*a..=*b).contains(u)),
                                 _ => false,
                             })
                             .map(|(u, _)| u.to_string())
@@ -518,14 +523,24 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                     }
                 }
             }
-            "UID" if w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("FETCH")) => {
+            // `UID FETCH`, and `FETCH` by sequence numbers.
+            "UID" | "FETCH"
+                if w[1] == "FETCH" || w.get(2).is_some_and(|x| x.eq_ignore_ascii_case("FETCH")) =>
+            {
+                let by_uid = w[1] == "UID";
+                let at = if by_uid { 3 } else { 2 };
                 let s = lock();
                 match conn.folder.as_ref().and_then(|n| s.folders.get(n)) {
                     None => "BAD no folder".to_owned(),
                     Some(f) => {
-                        let items = w.get(4).map(|x| x.to_ascii_uppercase()).unwrap_or_default();
-                        let modifiers =
-                            w.get(5).map(|x| x.to_ascii_uppercase()).unwrap_or_default();
+                        let items = w
+                            .get(at + 1)
+                            .map(|x| x.to_ascii_uppercase())
+                            .unwrap_or_default();
+                        let modifiers = w
+                            .get(at + 2)
+                            .map(|x| x.to_ascii_uppercase())
+                            .unwrap_or_default();
                         let mods = words(modifiers.trim_matches(['(', ')']));
                         let since = mods
                             .iter()
@@ -533,13 +548,20 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             .and_then(|i| mods.get(i + 1))
                             .and_then(|x| x.parse::<u64>().ok());
                         let vanished = mods.iter().any(|x| x == "VANISHED");
+                        let max = if by_uid {
+                            f.messages.keys().next_back().copied().unwrap_or(0)
+                        } else {
+                            f.messages.len() as u32
+                        };
+                        let ranges = uid_set(w.get(at).map(String::as_str).unwrap_or(""), max);
                         if (since.is_some() && !conn.condstore)
-                            || (vanished && (!conn.qresync || since.is_none()))
+                            || (vanished && (!conn.qresync || since.is_none() || !by_uid))
                         {
                             "BAD modifier not enabled".to_owned()
+                        } else if !by_uid && ranges.iter().any(|(a, b)| *a == 0 || *b > max) {
+                            // RFC 3501: a sequence number above EXISTS is an error.
+                            "BAD no such message".to_owned()
                         } else {
-                            let max = f.messages.keys().next_back().copied().unwrap_or(0);
-                            let ranges = uid_set(w.get(3).map(String::as_str).unwrap_or(""), max);
                             let inside =
                                 |u: u32| ranges.iter().any(|(a, b)| (*a..=*b).contains(&u));
                             let since = since.unwrap_or(0);
@@ -559,7 +581,8 @@ fn serve(stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                             }
                             let mut bytes = reply.into_bytes();
                             for (seq, (uid, m)) in f.messages.iter().enumerate() {
-                                if !inside(*uid) || m.modseq <= since {
+                                let key = if by_uid { *uid } else { seq as u32 + 1 };
+                                if !inside(key) || m.modseq <= since {
                                     continue;
                                 }
                                 let mut parts = vec![format!("UID {uid}")];

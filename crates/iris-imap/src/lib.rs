@@ -122,6 +122,8 @@ pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<Tls> {
     let tcp = tcp.ok_or(last)?;
     tcp.set_read_timeout(Some(timeout))?;
     tcp.set_write_timeout(Some(timeout))?;
+    // Each command waits for its answer: no Nagle delay.
+    tcp.set_nodelay(true)?;
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
@@ -191,6 +193,8 @@ pub enum Search<'a> {
     Flagged,
     /// A keyword: an IMAP atom, else [`Error::Name`].
     Keyword(&'a str),
+    /// The UIDs from the first to the second.
+    Uids(u32, u32),
 }
 
 /// One message in a folder.
@@ -560,6 +564,76 @@ impl<S: Read + Write> Session<S> {
         })
     }
 
+    /// Each message of the open folder with a sequence number in
+    /// `low..=high` (at most `EXISTS`), and with `since` only the messages
+    /// with a mod-sequence above it.
+    pub fn window(
+        &mut self,
+        low: u32,
+        high: u32,
+        since: Option<u64>,
+        mut each: impl FnMut(Entry),
+    ) -> Result<()> {
+        let modifier = match since {
+            Some(_) if !self.condstore() => return Err(Error::Missing("CONDSTORE")),
+            Some(m) => format!(" (CHANGEDSINCE {m})"),
+            None => String::new(),
+        };
+        let cmd =
+            format!("FETCH {low}:{high} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS}){modifier}");
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The messages of the open folder with the UIDs `uids` (each one that
+    /// exists).
+    pub fn fetch_uids(&mut self, uids: &[u32], mut each: impl FnMut(Entry)) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set: Vec<String> = uids.iter().map(u32::to_string).collect();
+        let cmd = format!(
+            "UID FETCH {} (UID FLAGS INTERNALDATE RFC822.SIZE {HEADS})",
+            set.join(",")
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Fetch(_, attrs) = r {
+                if let Some(e) = entry(&attrs).filter(|e| uids.contains(&e.uid)) {
+                    each(e);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Each UID range of the open folder removed after `since`. Needs
+    /// `QRESYNC`. The changed messages are not read.
+    pub fn vanished(
+        &mut self,
+        since: u64,
+        mut each: impl FnMut(std::ops::RangeInclusive<u32>),
+    ) -> Result<()> {
+        if !self.qresync {
+            return Err(Error::Missing("QRESYNC"));
+        }
+        let cmd = format!(
+            "UID FETCH 1:{} (UID) (CHANGEDSINCE {since} VANISHED)",
+            u32::MAX
+        );
+        self.run(&cmd, None, |r, _| {
+            if let Response::Vanished { uids, .. } = r {
+                uids.into_iter().for_each(&mut each);
+            }
+            Ok(())
+        })
+    }
+
     /// Each message of the open folder with a UID in `from..=to` (`to`
     /// `None` is `*`).
     pub fn list(&mut self, from: u32, to: Option<u32>, mut each: impl FnMut(Entry)) -> Result<()> {
@@ -611,6 +685,7 @@ impl<S: Read + Write> Session<S> {
             Search::Flagged => "FLAGGED".to_owned(),
             Search::Keyword(k) if is_atom(k) => format!("KEYWORD {k}"),
             Search::Keyword(_) => return Err(Error::Name),
+            Search::Uids(a, b) => format!("UID {a}:{b}"),
         };
         let mut out = Vec::new();
         self.run(&format!("UID SEARCH {key}"), None, |r, _| {

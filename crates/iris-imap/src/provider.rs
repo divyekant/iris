@@ -12,13 +12,17 @@ use iris_provider::{
 
 use crate::{Auth, Entry, Folder, Search, Session, Special};
 
-/// The UID width of one page of [`Provider::messages`].
+/// The messages of one page of [`Provider::messages`], and of one page of
+/// [`Provider::changes`] for a new folder.
 const WINDOW: u32 = 2000;
+/// The sequence numbers of one page of [`Provider::changes`] for a known
+/// folder: only the changed messages of them come back.
+const CHANGED_WINDOW: u32 = 20_000;
 /// The most UIDs of a search in one page.
 const SEARCH_PAGE: usize = 500;
-/// The largest `VANISHED` range that the provider turns into deletes. A
-/// larger range gives a full resync.
-const VANISHED_MAX: u64 = 100_000;
+/// The most deletes of one folder in one [`Provider::changes`] sequence.
+/// More give a full resync.
+const DELETES_MAX: u32 = 20_000;
 
 /// An IMAP account as a mail provider. The `token` of each call is the
 /// password. The calls run one at a time on one session.
@@ -92,14 +96,34 @@ fn not_supported() -> Error {
     api("notSupported", "IMAP accounts cannot do this yet")
 }
 
-/// The folders that hold mail: selectable, and not a view of other folders.
+/// The folders that hold mail: selectable, and not a view of other
+/// folders. In the page order of spec section 2.
 fn mail_folders<S: Read + Write>(s: &mut Session<S>) -> Result<Vec<Folder>> {
-    Ok(s.folders()
+    let mut v: Vec<Folder> = s
+        .folders()
         .map_err(read_error)?
         .into_iter()
         // shortcut: mail only in `\All` (Gmail over IMAP) does not sync, issue #633.
         .filter(|f| f.selectable && !matches!(f.special, Some(Special::All | Special::Flagged)))
-        .collect())
+        .collect();
+    v.sort_by(|a, b| order(&a.name).cmp(&order(&b.name)));
+    Ok(v)
+}
+
+/// The page order of a folder (spec section 2): `INBOX` first, then by name.
+fn order(name: &str) -> (bool, &[u8]) {
+    (!name.eq_ignore_ascii_case("INBOX"), name.as_bytes())
+}
+
+/// The first folder after `name` in the page order that `keep` takes.
+fn after<'a>(
+    folders: &'a [Folder],
+    name: &str,
+    keep: impl Fn(&Folder) -> bool,
+) -> Option<&'a Folder> {
+    folders
+        .iter()
+        .find(|f| order(&f.name) > order(name) && keep(f))
 }
 
 /// The label of a folder: (ID, name, kind).
@@ -109,10 +133,9 @@ fn folder_label(f: &Folder) -> (String, String, &'static str) {
         return fixed("INBOX");
     }
     match f.special {
-        Some(Special::Drafts) => fixed("DRAFT"),
         Some(Special::Junk) => fixed("SPAM"),
         Some(Special::Trash) => fixed("TRASH"),
-        // `\Sent` too: no IMAP message gets SENT (spec section 4).
+        // `\Sent` and `\Drafts` too: no IMAP message gets SENT or DRAFT (spec section 4).
         Some(_) => (format!("folder:{}", f.name), f.name.clone(), "system"),
         None => (format!("folder:{}", f.name), f.name.clone(), "user"),
     }
@@ -127,9 +150,6 @@ fn labels_of(f: &Folder, flags: &[String]) -> Vec<String> {
     }
     if has("\\Flagged") {
         out.push("STARRED".into());
-    }
-    if has("\\Draft") && out[0] != "DRAFT" {
-        out.push("DRAFT".into());
     }
     out.extend(
         flags
@@ -226,80 +246,89 @@ fn mark_of(e: &crate::Examined) -> Mark {
     }
 }
 
-/// The changes of one folder after `old`. `None`: a full resync is needed.
-fn folder_changes<S: Read + Write>(
+/// Where a [`Provider::changes`] sequence is (spec section 5).
+enum At {
+    /// The start of the folder `name`: no window read yet.
+    Folder(String),
+    /// The window of `name` with the highest sequence number `high`.
+    /// `mark` is the `EXAMINE` of the folder before its first window.
+    Window { name: String, mark: Mark, high: u32 },
+}
+
+/// A page token of [`Provider::changes`]: the place, then the cursor
+/// lines of the folders done.
+fn changes_token(at: &At, done: &str) -> String {
+    match at {
+        At::Folder(name) => format!("F\n{name}\n{done}"),
+        At::Window { name, mark, high } => format!("W {high}\n{}{done}", mark_line(name, *mark)),
+    }
+}
+
+fn parse_changes_token(p: &str) -> Option<(At, String)> {
+    let (head, rest) = p.split_once('\n')?;
+    if head == "F" {
+        let (name, done) = rest.split_once('\n')?;
+        return Some((At::Folder(name.to_owned()), done.to_owned()));
+    }
+    let high = head.strip_prefix("W ")?.parse().ok()?;
+    let (line, done) = rest.split_once('\n')?;
+    let (name, mark) = parse_cursor(line)?.pop_first()?;
+    Some((At::Window { name, mark, high }, done.to_owned()))
+}
+
+fn deleted(validity: u32, uid: u32, folder: &str) -> Change {
+    let id = message_id(validity, uid, folder);
+    Change::Deleted(HistoryMessage {
+        thread_id: id.clone(),
+        id,
+        label_ids: Vec::new(),
+    })
+}
+
+/// The removals of folder `f` (open) between `old` and `mark`, read after
+/// its last window. `None`: a full resync is needed.
+fn removals<S: Read + Write>(
     s: &mut Session<S>,
     f: &Folder,
-    old: Option<Mark>,
-    now: &crate::Examined,
+    old: Mark,
+    mark: Mark,
 ) -> Result<Option<Vec<Change>>> {
     let mut out = Vec::new();
-    let Some(old) = old else {
-        s.list(1, None, |e| {
-            out.push(Change::Added(history_message(f, now.uidvalidity, &e)))
+    if s.qresync() {
+        let mut n = 0u64;
+        s.vanished(old.modseq, |r| {
+            n += u64::from(r.end() - r.start()) + 1;
+            if n <= u64::from(DELETES_MAX) {
+                out.extend(r.map(|uid| deleted(mark.validity, uid, &f.name)));
+            }
         })
         .map_err(read_error)?;
-        return Ok(Some(out));
+        return Ok((n <= u64::from(DELETES_MAX)).then_some(out));
+    }
+    // `CONDSTORE` only (spec section 5).
+    if old.next == 0 || mark.next < old.next || mark.next - old.next > DELETES_MAX {
+        return Ok(None);
+    }
+    let present: BTreeSet<u32> = if mark.next > old.next {
+        s.search(Search::Uids(old.next, mark.next - 1))
+            .map_err(read_error)?
+            .into_iter()
+            .filter(|u| (old.next..mark.next).contains(u))
+            .collect()
+    } else {
+        BTreeSet::new()
     };
-    if old.validity != now.uidvalidity {
+    // Removed = count before - (count now - new UIDs).
+    if i64::from(mark.count) - present.len() as i64 != i64::from(old.count) {
         return Ok(None);
     }
-    let modseq = now.highest_modseq.unwrap_or(0);
-    let next = now.uidnext.unwrap_or(0);
-    if modseq == old.modseq && now.exists == old.count && next == old.next {
-        return Ok(Some(out));
-    }
-    if old.modseq == 0 || modseq == 0 {
-        return Ok(None);
-    }
-    let mut new_uids = BTreeSet::new();
-    let mut too_wide = false;
-    s.changes(old.modseq, |c| match c {
-        crate::Change::Entry(e) => {
-            if old.next > 0 && e.uid >= old.next {
-                new_uids.insert(e.uid);
-            }
-            out.push(Change::Added(history_message(f, now.uidvalidity, &e)));
-        }
-        crate::Change::Vanished(r) => {
-            if (*r.end() as u64) - (*r.start() as u64) >= VANISHED_MAX {
-                too_wide = true;
-                return;
-            }
-            for uid in r {
-                let id = message_id(now.uidvalidity, uid, &f.name);
-                out.push(Change::Deleted(HistoryMessage {
-                    thread_id: id.clone(),
-                    id,
-                    label_ids: Vec::new(),
-                }));
-            }
-        }
-    })
-    .map_err(read_error)?;
-    if too_wide {
-        return Ok(None);
-    }
-    if !s.qresync() {
-        // Removed = count before - (count now - new messages now) (spec section 5).
-        let kept = now.exists as i64 - new_uids.len() as i64;
-        if old.next == 0 || next < old.next || kept != old.count as i64 {
-            return Ok(None);
-        }
-        // A UID from the `UIDNEXT` of `from` that is not here now came and
-        // went after `from`: the first sync can have listed it. Delete it.
-        if u64::from(next - old.next) >= VANISHED_MAX {
-            return Ok(None);
-        }
-        for uid in (old.next..next).filter(|u| !new_uids.contains(u)) {
-            let id = message_id(now.uidvalidity, uid, &f.name);
-            out.push(Change::Deleted(HistoryMessage {
-                thread_id: id.clone(),
-                id,
-                label_ids: Vec::new(),
-            }));
-        }
-    }
+    // A UID from the `UIDNEXT` of `from` that is not here now came and went
+    // after `from`: the first sync can have listed it. Delete it.
+    out.extend(
+        (old.next..mark.next)
+            .filter(|u| !present.contains(u))
+            .map(|uid| deleted(mark.validity, uid, &f.name)),
+    );
     Ok(Some(out))
 }
 
@@ -360,15 +389,18 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
     ) -> Result<MessagePage> {
         self.with(token, |s| {
             let folders: Vec<Folder> = mail_folders(s)?;
-            // The page token: `<folder index>:<UID bound>`, the bound not included.
-            let (mut i, mut bound) = match page.and_then(|p| p.split_once(':')) {
-                Some((a, b)) => (
-                    a.parse::<usize>()
-                        .map_err(|_| Error::Decode("page token".into()))?,
-                    b.parse::<u64>()
-                        .map_err(|_| Error::Decode("page token".into()))?,
-                ),
-                None => (0, u64::MAX),
+            // The page token: `<UID bound>:<folder>`, the bound not included.
+            let (name, bound) = match page {
+                Some(p) => {
+                    let (b, n) = p
+                        .split_once(':')
+                        .ok_or(Error::Decode("page token".into()))?;
+                    let b = b
+                        .parse::<u64>()
+                        .map_err(|_| Error::Decode("page token".into()))?;
+                    (Some(n), b)
+                }
+                None => (None, u64::MAX),
             };
             let search = match label {
                 Some("UNREAD") => Some(Search::Unseen),
@@ -382,39 +414,43 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                 Some(l) => folder_label(f).0 == l,
             };
             let mut messages = Vec::new();
-            while let Some(f) = folders.get(i) {
-                if !folder_match(f) {
-                    i += 1;
-                    bound = u64::MAX;
-                    continue;
-                }
+            // The folder of the page. A folder deleted during the sequence
+            // gives the next one: its mail is gone too.
+            let found = match name {
+                Some(n) => folders
+                    .iter()
+                    .find(|f| f.name == n && folder_match(f))
+                    .map(|f| (f, bound))
+                    .or_else(|| after(&folders, n, folder_match).map(|f| (f, u64::MAX))),
+                None => folders
+                    .iter()
+                    .find(|f| folder_match(f))
+                    .map(|f| (f, u64::MAX)),
+            };
+            if let Some((f, bound)) = found {
                 let e = s.examine(&f.name).map_err(read_error)?;
-                let top = bound.min(e.uidnext.map_or(u64::MAX, u64::from));
-                let (lo, wanted) = match search {
+                let mut got: Vec<Entry> = Vec::new();
+                // The next bound: a UID for a search, else a sequence number.
+                let more = match search {
                     Some(key) => {
                         let mut uids: Vec<u32> = s.search(key).map_err(read_error)?;
-                        uids.retain(|u| (*u as u64) < top);
+                        uids.retain(|u| u64::from(*u) < bound);
                         uids.sort_unstable_by(|a, b| b.cmp(a));
+                        let full = uids.len() > SEARCH_PAGE;
                         uids.truncate(SEARCH_PAGE);
-                        let lo = uids.last().map_or(1, |u| *u as u64);
-                        (lo, Some(uids.into_iter().collect::<BTreeSet<u32>>()))
+                        s.fetch_uids(&uids, |en| got.push(en)).map_err(read_error)?;
+                        uids.last().filter(|_| full).copied()
                     }
-                    None => (top.saturating_sub(WINDOW as u64).max(1), None),
-                };
-                let mut got: Vec<Entry> = Vec::new();
-                if top > 1 && wanted.as_ref().is_none_or(|w| !w.is_empty()) {
-                    let hi = if top == u64::MAX {
-                        None
-                    } else {
-                        Some((top - 1) as u32)
-                    };
-                    s.list(lo as u32, hi, |en| {
-                        if wanted.as_ref().is_none_or(|w| w.contains(&en.uid)) {
-                            got.push(en)
+                    None => {
+                        let high = u64::from(e.exists).min(bound.saturating_sub(1)) as u32;
+                        let low = high.saturating_sub(WINDOW - 1).max(1);
+                        if high > 0 {
+                            s.window(low, high, None, |en| got.push(en))
+                                .map_err(read_error)?;
                         }
-                    })
-                    .map_err(read_error)?;
-                }
+                        (low > 1).then_some(low)
+                    }
+                };
                 got.sort_by_key(|e| std::cmp::Reverse(e.uid));
                 messages.extend(got.iter().map(|en| {
                     let m = history_message(f, e.uidvalidity, en);
@@ -423,16 +459,11 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
                         thread_id: m.thread_id,
                     }
                 }));
-                let more = lo > 1
-                    && top != u64::MAX
-                    && wanted.as_ref().is_none_or(|w| w.len() == SEARCH_PAGE);
-                let next = if more {
-                    Some(format!("{i}:{lo}"))
+                let next = if let Some(lo) = more {
+                    Some(format!("{lo}:{}", f.name))
                 } else {
-                    folders[i + 1..]
-                        .iter()
-                        .position(folder_match)
-                        .map(|k| format!("{}:{}", i + 1 + k, u64::MAX))
+                    after(&folders, &f.name, folder_match)
+                        .map(|g| format!("{}:{}", u64::MAX, g.name))
                 };
                 return Ok(MessagePage {
                     messages,
@@ -448,43 +479,93 @@ impl<S: Read + Write + Send> Provider for Imap<S> {
 
     fn changes(&self, token: &str, from: &str, page: Option<&str>) -> Result<HistoryPage> {
         let old = parse_cursor(from).ok_or(Error::HistoryExpired)?;
-        // The page token: the folder index, then the cursor lines of the pages before.
-        let (i, done) = match page {
-            Some(p) => {
-                let (i, rest) = p.split_once('\n').unwrap_or((p, ""));
-                (
-                    i.parse::<usize>()
-                        .map_err(|_| Error::Decode("page token".into()))?,
-                    rest.to_owned(),
-                )
-            }
-            None => (0, String::new()),
+        let start = match page {
+            Some(p) => Some(parse_changes_token(p).ok_or(Error::Decode("page token".into()))?),
+            None => None,
         };
         self.with(token, |s| {
             let folders = mail_folders(s)?;
             if old.keys().any(|n| !folders.iter().any(|f| &f.name == n)) {
                 return Err(Error::HistoryExpired);
             }
-            let mut done = done;
-            let mut changes = Vec::new();
-            if let Some(f) = folders.get(i) {
-                let now = s.examine(&f.name).map_err(read_error)?;
-                done.push_str(&mark_line(&f.name, mark_of(&now)));
-                changes = folder_changes(s, f, old.get(&f.name).copied(), &now)?
-                    .ok_or(Error::HistoryExpired)?;
+            let (at, mut done) = match start {
+                Some(x) => x,
+                None => match folders.first() {
+                    Some(f) => (At::Folder(f.name.clone()), String::new()),
+                    None => return Err(Error::HistoryExpired),
+                },
+            };
+            let name = match &at {
+                At::Folder(n) | At::Window { name: n, .. } => n.clone(),
+            };
+            // A folder deleted during the sequence: start again.
+            let f = folders
+                .iter()
+                .find(|f| f.name == name)
+                .ok_or(Error::HistoryExpired)?;
+            let now = s.examine(&f.name).map_err(read_error)?;
+            let (mark, high) = match at {
+                At::Folder(_) => (mark_of(&now), now.exists),
+                // Removals since the token lower `EXISTS`.
+                At::Window { mark, high, .. } => (mark, high.min(now.exists)),
+            };
+            let before = old.get(&f.name).copied();
+            if now.uidvalidity != mark.validity
+                || before.is_some_and(|b| b.validity != mark.validity)
+            {
+                return Err(Error::HistoryExpired);
             }
-            let last = i + 1 >= folders.len();
+            let unchanged = before.is_some_and(|b| {
+                b.modseq == mark.modseq && b.count == mark.count && b.next == mark.next
+            });
+            if before.is_some_and(|b| b.modseq == 0 || mark.modseq == 0) && !unchanged {
+                return Err(Error::HistoryExpired);
+            }
+            let mut changes = Vec::new();
+            if !unchanged {
+                // Newest first, in windows of sequence numbers: dense, so the
+                // page count follows the message count (spec section 5).
+                let width = if before.is_some() {
+                    CHANGED_WINDOW
+                } else {
+                    WINDOW
+                };
+                let low = high.saturating_sub(width - 1).max(1);
+                if high > 0 {
+                    s.window(low, high, before.map(|b| b.modseq), |e| {
+                        changes.push(Change::Added(history_message(f, mark.validity, &e)))
+                    })
+                    .map_err(read_error)?;
+                }
+                if low > 1 {
+                    let at = At::Window {
+                        name: f.name.clone(),
+                        mark,
+                        high: low - 1,
+                    };
+                    return Ok(HistoryPage {
+                        history: vec![History { changes }],
+                        cursor: from.to_owned(),
+                        next_page_token: Some(changes_token(&at, &done)),
+                    });
+                }
+                if let Some(b) = before {
+                    changes.extend(removals(s, f, b, mark)?.ok_or(Error::HistoryExpired)?);
+                }
+            }
+            done.push_str(&mark_line(&f.name, mark));
+            let next = after(&folders, &f.name, |_| true);
             // The cursor of this page: the new lines so far, the old lines of the rest.
             let mut cursor = done.clone();
-            for f in folders.iter().skip(i + 1) {
-                if let Some(m) = old.get(&f.name) {
-                    cursor.push_str(&mark_line(&f.name, *m));
+            for g in folders.iter().filter(|g| order(&g.name) > order(&f.name)) {
+                if let Some(m) = old.get(&g.name) {
+                    cursor.push_str(&mark_line(&g.name, *m));
                 }
             }
             Ok(HistoryPage {
                 history: vec![History { changes }],
                 cursor,
-                next_page_token: (!last).then(|| format!("{}\n{done}", i + 1)),
+                next_page_token: next.map(|g| changes_token(&At::Folder(g.name.clone()), &done)),
             })
         })
     }
