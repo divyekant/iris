@@ -1,0 +1,19 @@
+[package]
+name = "iris-workspace"
+description = "The workspace of an Iris job: a folder with only the mail and the state that the job needs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+iris-job = { version = "0.0.0", path = "../iris-job" }
+iris-store = { version = "0.0.0", path = "../iris-store" }
+iris-talk = { version = "0.0.0", path = "../iris-talk" }
+# Same version as iris-store, so the program has one copy of SQLite.
+rusqlite = "=0.43.0"
+serde_json = "1"
+
+[dev-dependencies]
+iris-spec = { version = "0.0.0", path = "../iris-spec" }

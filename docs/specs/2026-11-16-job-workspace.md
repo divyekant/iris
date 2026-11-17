@@ -150,7 +150,9 @@ The granted messages of a job:
   `job_scope_message` in the same write transaction, so the grant does not
   depend on a date or a row ID: a message that sync adds later with an
   older date, or that a later fetch moves into the thread from another
-  thread, is not in that list. No other message of the thread is granted
+  thread, is not in that list. A message of the list that a later fetch
+  moves to another thread stays granted, in the file of its thread now.
+  No other message of the thread is granted
   by the thread ref, also not a reply: the reply headers come from the
   sender, so they cannot grant mail. A new message comes into the
   workspace only when the person or the engine for the person adds it,
