@@ -32,7 +32,9 @@ The app builds on macOS only. CI has no macOS job: CI tests
    ```
 
 3. Copy `target/release/bundle/macos/Iris.app` to `/Applications`, then open
-   it.
+   it. Do not open the app from the build folder or from a download folder:
+   in a temporary or translocated folder, macOS does not know the app by its
+   ID, so the notices show with no click action.
 
 The build makes an app with an ad-hoc signature. It is not notarized
 (issue #542).
@@ -45,4 +47,4 @@ The build makes an app with an ad-hoc signature. It is not notarized
 | `src/mac.rs` | The window, the menu bar icon and the notices. macOS only. |
 | `ui/` | The local pages: "Iris is not running" and "Install Iris first". |
 | `capabilities/engine.json` | The one Tauri permission of the engine page: a drag of the window. |
-| `icons/` | The app icon and the menu bar icons. |
+| `icons/` | The app icon (`icon@2x.png`, 1024 px) and the menu bar icons. |

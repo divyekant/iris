@@ -243,7 +243,9 @@ fn start(app: AppHandle) {
 /// The notice thread: ask the engine each [`engine::POLL`], show each new
 /// notice, and keep the menu bar dot current.
 fn notices(app: AppHandle) {
-    let _ = mac_notification_sys::set_application(ID);
+    // A failed `set_application` leaves the hook too: ask LaunchServices
+    // first, and use `osascript` when it does not know the app.
+    let native = known_app(ID) && mac_notification_sys::set_application(ID).is_ok();
     let socket = app.state::<Shell>().socket.clone();
     let waiting = Arc::new(AtomicUsize::new(0));
     let mut poll = engine::Poll::default();
@@ -257,7 +259,7 @@ fn notices(app: AppHandle) {
             }
             menu_bar(&app, page.open);
             for n in page.notices {
-                notify(&app, n, &waiting);
+                notify(&app, n, native, &waiting);
             }
             if page.more {
                 continue;
@@ -296,14 +298,60 @@ fn menu_bar(app: &AppHandle, open: u64) {
         1 => "1 notice".to_string(),
         n => format!("{n} notices"),
     };
-    if let Some(item) = shell.count.lock().unwrap().as_ref() {
+    // A named guard: a temporary in the tail would outlive `shell`.
+    let count = shell.count.lock().unwrap();
+    if let Some(item) = count.as_ref() {
         let _ = item.set_text(text);
     }
 }
 
-/// Show one notice. A click opens its route in the window. If the notice API
-/// fails, the fixed `osascript` of the engine shows it.
-fn notify(app: &AppHandle, n: engine::Notice, waiting: &Arc<AtomicUsize>) {
+/// True when LaunchServices finds an app with the bundle ID `id`. Only then
+/// may `mac-notification-sys` run: on a miss, its `set_application` leaves a
+/// hook that gives the whole process the ID of Terminal. A miss occurs for an
+/// app in a temporary folder, for example an app that macOS translocated.
+fn known_app(id: &str) -> bool {
+    use std::ffi::c_void;
+    type CfRef = *const c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithBytes(
+            alloc: CfRef,
+            bytes: *const u8,
+            len: isize,
+            encoding: u32,
+            external: u8,
+        ) -> CfRef;
+        fn CFRelease(cf: CfRef);
+    }
+    #[link(name = "CoreServices", kind = "framework")]
+    extern "C" {
+        fn LSCopyApplicationURLsForBundleIdentifier(id: CfRef, error: *mut CfRef) -> CfRef;
+    }
+    const UTF8: u32 = 0x0800_0100;
+    // SAFETY: each object that a Create or Copy call gives is released once.
+    unsafe {
+        let s = CFStringCreateWithBytes(std::ptr::null(), id.as_ptr(), id.len() as isize, UTF8, 0);
+        if s.is_null() {
+            return false;
+        }
+        let urls = LSCopyApplicationURLsForBundleIdentifier(s, std::ptr::null_mut());
+        CFRelease(s);
+        if urls.is_null() {
+            return false;
+        }
+        CFRelease(urls);
+        true
+    }
+}
+
+/// Show one notice. With `native`, through the notice API, and a click
+/// opens its route in the window. Else, or if the notice API fails, the
+/// fixed `osascript` of the engine shows it, with no click action.
+fn notify(app: &AppHandle, n: engine::Notice, native: bool, waiting: &Arc<AtomicUsize>) {
+    if !native {
+        let _ = engine::osascript(&n.title, &n.body).status();
+        return;
+    }
     let wait = waiting.fetch_add(1, Ordering::Relaxed) < WAIT_MAX;
     let waiting = waiting.clone();
     let app = app.clone();
