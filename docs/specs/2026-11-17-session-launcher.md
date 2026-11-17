@@ -470,20 +470,38 @@ no network stops them. The engine gives each session one narrow path out:
   address that it connects to: it refuses a loopback, private, link-local,
   unique local, multicast, unspecified, documentation or other reserved
   address (IPv4 and IPv6, also an IPv4 address mapped in IPv6). The proxy
-  connects only to the checked address, never to the name again, so a
+  connects only to the checked address, on port 443 whatever port the
+  resolver gives, never to the name again, so a
   second resolution cannot change it. If no address passes, the request
   gets `403` with the reason `address_not_public`. A local model host is
   not supported in a session (known limit, with an issue). Each other request,
   host or port gets `403` and closes.
-- The proxy relays the bytes and does not read them. TLS runs from the
-  agent to the model host, so the engine sees no key and no text.
+- Two names can share one address (a CDN), so the name of the `CONNECT`
+  alone does not keep other sites out. After the `200`, the proxy reads
+  the first TLS message of the agent, the ClientHello (at most 16 KiB, in
+  10 s), with the parser of `rustls`. The tunnel opens only if its server
+  name (SNI) is the host of the `CONNECT`. Else the proxy closes the
+  connection with the reason `sni_not_allowed`, or `not_tls` for bytes
+  that are not a ClientHello. The proxy sends the ClientHello on to the
+  host, then relays the bytes and does not read them. TLS runs from the
+  agent to the model host, so the engine sees no key and no text. A site
+  of the same CDN that serves a request with another name inside TLS
+  (domain fronting), or a client that hides the name with Encrypted
+  Client Hello, is a known limit (issue).
 - The proxy writes one line for each connection to its own file,
   `<data dir>/sessions/se-<id>.egress.log` (mode `0600`). For an allowed
   `CONNECT`, the line has the host (a value of the allowed list, as the
-  list writes it), the bytes in each direction, and the result. For a
-  refused request, the line has only a fixed reason (`not_connect`,
-  `host_not_allowed`, `port_not_allowed`, `address_not_public`, `too_long`) and no text of the
-  request. Only the proxy writes this file,
+  list writes it), the bytes in each direction, and the result
+  (`closed`, `stopped` or `connect_failed`). For a refused request, the
+  line has only a fixed reason (`not_connect`, `host_not_allowed`,
+  `port_not_allowed`, `address_not_public`, `too_long`, `too_many` for a
+  ninth open connection or a resolver worker past the bound, `timeout`
+  for a head or a ClientHello that does not come in 10 s, `not_tls`,
+  `sni_not_allowed`, `no_resources` when the engine has no file
+  descriptor or thread for the connection) and no text of the request. For a connection that closes, or
+  that a stop ends, before a full head, the line has `ended` and
+  `no_head` or `stopped`. So each connection gets exactly one line.
+  Only the proxy writes this file,
   so it needs no shared append path with the helper. The file has a limit
   of 1 MiB. At the limit the proxy writes one line that says the rest is
   dropped, then only counts: at the end of the session it writes one last
@@ -491,6 +509,13 @@ no network stops them. The engine gives each session one narrow path out:
   two logs of a session never pass 64 KiB and 1 MiB. An egress line holds
   no text of the agent: only a value of the allowed list, numbers and
   fixed words.
+- The proxy resolves and connects in a worker thread, for at most 10 s.
+  A stop does not wait for the worker: a stalled resolver cannot hold the
+  end of a session. A worker that is still in the resolver stays until the
+  resolver returns, then drops its connection. It holds only the host name
+  and the resolver, not the log or the streams of the proxy. At most 16
+  workers live in the Iris process at one time, over all sessions, also
+  after a stop; a `CONNECT` past this bound gets `403` with `too_many`.
 - When the session ends, the engine closes the port and each open
   connection of the session.
 
@@ -652,6 +677,7 @@ is refused before a row is written.
 | The engine restarts while the group still runs | The session stays live until the group is empty; no time sets `reaped_at` | Supervisor test with a group that ignores `SIGTERM` for 8 seconds |
 | `kill` gives an error other than `ESRCH` | The check fails; the session stays live | Unit test of the check with a fake `kill` |
 | A `CONNECT` to a host that is not allowed, or a port other than 443, or a request that is not `CONNECT` | `403`, closed, one egress log line with a fixed reason and no request text | Proxy test: `CONNECT <marker>:443` leaves no marker in the log |
+| A `CONNECT` to an allowed host, then a ClientHello with another server name (a site that shares the address) | Closed before any byte reaches the host; `sni_not_allowed` in the egress log | Proxy test with two names on one test server |
 | A revoke right after the gate commits, before the agent reads a file | The agent exists at the commit (the gate waited for `started`), so the revoke ends a running session and the supervisor stops it | Launch test: revoke hook right after the commit; the session ends with `revoke` and its group stops |
 | The helper does not confirm the spawn in 2 seconds | Roll back; `launch_failed`; the helper stops a late agent | Launch test with a helper that waits 3 seconds |
 | The agent and its children exit before the helper signals the group | The agent stays a zombie until after the last signal, so its group ID is not reused | Helper test: the agent exits at once, and the helper sends the signals before the reap (test hook that records the order) |
@@ -659,7 +685,7 @@ is refused before a row is written.
 | The answer of `job.run` is lost | The command says the result is unknown and names `iris job session`; a retry is refused with the live session ID | Command test with a socket that closes before the answer |
 | A revoke or a stop during the build, then at once a second `run` | The first session stays live until its launch thread returns after its cleanup; the second `run` is refused at the register until then | Launch test: a build hook that waits, a stop, then a second `run` that fails until the first thread returned |
 | `iris job stop` during steps 3 to 5 of a launch | The launch ends with `stop`, no retry; `iris job session` shows the end with no start | Launch test with a stop hook |
-| An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 100,000 refused connections and a small limit |
+| An agent that opens connections without end | The egress log stops at 1 MiB, then counts; the engine memory stays bounded (8 open connections) | Proxy test with 200 refused connections and a small limit |
 | The engine is killed and an agent process left the group (`setsid`) | The helper sees the end of the pipe, stops the group and calls `Isolation::stop`; if the helper is killed too, the lifetime rule ends the process | Helper test with the test isolation that records `stop`; R4-05 test of the lifetime rule on each system |
 | An agent that prints a passed key or a file of the agent tool | Nothing of it is stored; the log has only status lines | Helper test: a script prints a marker value to both pipes, and no file of the data folder holds it |
 | A connection to the egress port of another session | The other session is not reached: each port belongs to one session, and the isolation permits only its own port | R4-05 test |
@@ -683,8 +709,10 @@ is refused before a row is written.
 
 Memory: the supervisor holds one small record for each running session
 (the child handle, the pipes, the session ID, the egress listener). The
-proxy uses one thread and two 16 KiB buffers for each open connection, at
-most 8 connections for each session. The helper reads the output of the
+proxy uses two threads (one for each direction), two 16 KiB buffers and
+a ClientHello buffer of at most 16 KiB for each open connection, at most
+8 connections for each session, and at most 16 resolver threads in the
+process. The helper reads the output of the
 agent with one 16 KiB buffer. The helper is a second copy of the program, but it
 only waits: its resident memory is small, and the build measures it
 (open question 1).
