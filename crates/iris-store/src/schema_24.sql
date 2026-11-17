@@ -8,6 +8,9 @@
 --    step 1 of the undo of a state entry.
 -- 3. The view ledger_can_undo lists a state entry with one or more items in
 --    `post`: a state entry changes no message.
+-- A state entry needs the IDs of its correction rows in `ops`, so an entry
+-- from before this migration has no undo: its undo cannot remove its
+-- corrections, and the next conversation update would set them again.
 
 PRAGMA writable_schema = ON;
 UPDATE sqlite_schema
@@ -40,8 +43,11 @@ WHEN NOT EXISTS (SELECT 1 FROM changeset_action a JOIN changeset c ON c.id = a.c
                            'archive>inbox', 'inbox>archive', 'read>unread', 'unread>read',
                            'label>unlabel', 'unlabel>label', 'trash>untrash', 'untrash>trash'))
                         -- The undo of a state entry: `restore`, with no arguments.
+                        -- An entry from before migration 24 has no IDs of its
+                        -- correction rows, so it has no undo.
                         OR (new.step = 1 AND json(a.args) = '{}' AND a.verb = 'restore'
-                            AND o.verb IN ('close', 'decline', 'defer', 'correct'))
+                            AND o.verb IN ('close', 'decline', 'defer', 'correct')
+                            AND json_type(l.ops, '$.corrections') = 'array')
                         OR (new.step = 2 AND o.verb = 'trash' AND a.verb = 'archive'
                             -- Step 1 of the same entry, in the same changeset.
                             AND EXISTS (SELECT 1 FROM ledger_undo u1
@@ -70,7 +76,8 @@ CREATE VIEW ledger_can_undo AS
          -- A state entry changed items, not messages: its `post` holds them.
          OR EXISTS (SELECT 1 FROM changeset_action o, json_each(l.post) p
                     WHERE o.id = l.action_id
-                      AND o.verb IN ('close', 'decline', 'defer', 'correct')))
+                      AND o.verb IN ('close', 'decline', 'defer', 'correct')
+                      AND json_type(l.ops, '$.corrections') = 'array'))
     AND NOT EXISTS (SELECT 1 FROM ledger_undo u JOIN changeset_action a ON a.id = u.action_id
                     WHERE u.ledger_id = l.id
                       AND coalesce(a.state, 'proposed') IN ('proposed', 'in_review', 'approved'));

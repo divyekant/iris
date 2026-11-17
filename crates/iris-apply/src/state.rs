@@ -284,7 +284,7 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
     let (mut was, mut now) = (Map::new(), Map::new());
     let mut counts = Counts::default();
     for (item, doc, later) in rows {
-        let Ok(mut doc) = serde_json::from_str::<Value>(&doc) else {
+        let Ok(doc) = serde_json::from_str::<Value>(&doc) else {
             counts.unchanged += 1;
             continue;
         };
@@ -296,9 +296,18 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
             counts.unchanged += 1;
             continue;
         }
-        for f in &fields {
-            set(&mut doc, f, pre[&id][f].clone());
+        // `set_field` is the path rule of a correction, with array indices.
+        // A path that does not fit leaves the item as it is.
+        let mut new = doc.clone();
+        let fits = fields.iter().all(|f| match &pre[&id][f] {
+            Value::Null => remove(&mut new, f),
+            v => iris_talk::set_field(&mut new, f, v.clone()),
+        });
+        if !fits {
+            counts.unchanged += 1;
+            continue;
         }
+        let mut doc = new;
         // The sender ID of each party follows its address, as for a correction.
         let mut failed = None;
         iris_understand::set_senders(&mut doc, &mut |addr, name| {
@@ -347,20 +356,19 @@ fn restore(tx: &Transaction, action: i64, now_ms: i64) -> std::result::Result<Ou
     Ok(Outcome::Applied(counts))
 }
 
-/// Set the field at a dotted path to `value`; `null` removes the field.
-fn set(doc: &mut Value, field: &str, value: Value) {
+/// Remove the field at a dotted path. Gives false, and changes nothing, if
+/// the field is an element of an array: a removal would move the others.
+fn remove(doc: &mut Value, field: &str) -> bool {
+    if doc.pointer(&pointer(field)).is_none() {
+        return true;
+    }
     let (parent, last) = match field.rsplit_once('.') {
         Some((p, l)) => (pointer(p), l),
         None => (String::new(), field),
     };
-    // The item has the `post` values, so the parent of a field with a value is there.
-    let Some(Value::Object(map)) = doc.pointer_mut(&parent) else {
-        return;
-    };
-    if value.is_null() {
-        map.remove(last);
-    } else {
-        map.insert(last.to_string(), value);
+    match doc.pointer_mut(&parent) {
+        Some(Value::Object(map)) => map.remove(last).is_some(),
+        _ => false,
     }
 }
 

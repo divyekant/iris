@@ -851,3 +851,101 @@ fn the_undo_of_an_address_correction_sets_the_sender_again() {
         json!(format!("p-{}", old.as_i64().unwrap()))
     );
 }
+
+/// Invariant: the undo sets each field of the entry back, also an element
+/// of an array (`fields.items.0` of a receipt).
+#[test]
+fn the_undo_of_a_correction_of_an_array_element_sets_it_back() {
+    let b = setup("undo-array", "open", None);
+    let mut receipt = iris_spec::read_json(
+        &iris_spec::schema_dir()
+            .join("examples")
+            .join("record-receipt.json"),
+    );
+    receipt["id"] = json!("r-1");
+    b.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE item SET form = 'record', status = 'kept', doc = ?1 WHERE id = 1",
+                [receipt.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let before = b.doc()["fields"]["items"].clone();
+    let me = Author {
+        kind: AuthorKind::Person,
+        name: None,
+        session: None,
+        job: None,
+    };
+    let s = &b.store;
+    let args = json!({
+        "field": "fields.items.0",
+        "value": { "name": "Another book", "quantity": 2,
+                   "amount": { "value": "12.25", "currency": "EUR" } }
+    });
+    let cs = iris_changeset::create(s, &me, now()).unwrap();
+    iris_changeset::add_action(
+        s,
+        cs,
+        &me,
+        Verb::Correct,
+        &["r-1"],
+        args.as_object().unwrap(),
+        None,
+    )
+    .unwrap();
+    iris_changeset::submit(s, cs, &me, "Fix the line.", now()).unwrap();
+    let id = b
+        .one("SELECT max(id) FROM changeset_action")
+        .as_i64()
+        .unwrap();
+    let hash = b.one(&format!(
+        "SELECT hash FROM changeset_action WHERE id = {id}"
+    ));
+    let action = ActionId {
+        changeset: cs,
+        revision: 1,
+        n: 1,
+    };
+    iris_changeset::approve(s, action, hash.as_str().unwrap(), now()).unwrap();
+    assert!(matches!(apply_state(s, id), Ok(Outcome::Applied(_))));
+    assert_ne!(b.doc()["fields"]["items"], before);
+    let (_, outcome) = b.undo(id);
+    assert!(
+        matches!(outcome, Outcome::Applied(ref c) if c.changed == 1),
+        "{outcome:?}"
+    );
+    assert_eq!(b.doc()["fields"]["items"], before);
+    assert_eq!(b.one("SELECT status FROM item WHERE id = 1"), json!("kept"));
+}
+
+/// An entry from before migration 24 has no IDs of its correction rows in
+/// `ops`, so it has no undo: the undo could not remove its corrections.
+#[test]
+fn a_state_entry_with_no_correction_ids_has_no_undo() {
+    let b = setup("undo-old", "open", None);
+    let a = b.approved(Verb::Defer, json!({ "date": "2099-01-05" }));
+    assert!(matches!(apply_state(&b.store, a), Ok(Outcome::Applied(_))));
+    b.store
+        .write(|tx| {
+            // The ledger refuses a change of `ops`: drop the trigger to make
+            // an entry of an older store.
+            tx.execute("DROP TRIGGER ledger_change", [])?;
+            tx.execute(
+                "UPDATE ledger SET ops = json_remove(ops, '$.corrections') WHERE action_id = ?1",
+                [a],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let entry = b.ledger_of(a);
+    assert_eq!(
+        b.one(&format!(
+            "SELECT count(*) FROM ledger_can_undo WHERE ledger_id = {entry}"
+        )),
+        json!(0)
+    );
+    assert!(iris_apply::undo(&b.store, entry, now()).is_err());
+}
