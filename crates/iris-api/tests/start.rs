@@ -200,6 +200,29 @@ async fn a_second_start_finds_the_open_job() {
     assert_eq!(v["job"], json!("j-1"));
     assert_eq!(d.jobs(), 1);
 
+    // A retry after the item closed still finds the job.
+    d.1.write(|tx| {
+        tx.execute("UPDATE item SET status = 'done' WHERE id = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (code, v) = d
+        .post(
+            "/api/jobs",
+            json!({"item": "c-1", "goal": "Go.", "messages": []}),
+        )
+        .await;
+    assert_eq!(
+        (code, &v["job"]),
+        (StatusCode::CONFLICT, &json!("j-1")),
+        "{v}"
+    );
+    d.1.write(|tx| {
+        tx.execute("UPDATE item SET status = 'open' WHERE id = 1", [])?;
+        Ok(())
+    })
+    .unwrap();
+
     // After the end of that job, a new job can start.
     iris_job::finish(
         &d.1,

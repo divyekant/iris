@@ -358,11 +358,8 @@ pub fn start_job(
         Refused(&'static str),
     }
     let out = iris_job::transaction(store, |c| {
-        match check_item(c, form, row)? {
-            Check::Ok => {}
-            Check::NotFound => return Ok(Out::Done(Started::NotFound)),
-            Check::Refused(why) => return Ok(Out::Refused(why)),
-        }
+        // First: a retry after a lost answer finds the job, also when the
+        // item closed after that start.
         let open: Option<i64> = c
             .query_row(
                 "SELECT j.id FROM job_scope s JOIN job j ON j.id = s.job_id
@@ -374,6 +371,11 @@ pub fn start_job(
             .optional()?;
         if let Some(j) = open {
             return Ok(Out::Done(Started::Open(iris_job::format_job_id(j))));
+        }
+        match check_item(c, form, row)? {
+            Check::Ok => {}
+            Check::NotFound => return Ok(Out::Done(Started::NotFound)),
+            Check::Refused(why) => return Ok(Out::Refused(why)),
         }
         if grant_list(c, row)?.into_iter().collect::<BTreeSet<_>>() != seen {
             return Ok(Out::Refused("The mail changed. Look at it again."));
