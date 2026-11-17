@@ -381,3 +381,30 @@ fn the_parent_of_a_reply_is_fixed_at_submit() {
         .unwrap();
     assert_eq!((p.message, p.gone), (2, true));
 }
+
+/// The flags of a write action read the same threads as the hostile check:
+/// the threads of its messages and the thread of its draft. A send whose
+/// thread has only gone messages still flags a stranger (issue #346).
+#[test]
+fn a_stranger_thread_flags_first_contact_with_gone_messages() {
+    let dir = TempDir::new("first");
+    let s = store(&dir);
+    s.write(|tx| {
+        Ok(tx.execute(
+            "INSERT INTO sender(address, kind) VALUES ('priya@example.com', 'stranger')",
+            [],
+        )?)
+    })
+    .unwrap();
+    let flags = |a: &Value| a["flags"].clone();
+    let got = one(&s, AuthorKind::Person, Verb::Draft, &["t-1"], REPLY());
+    assert_eq!(flags(&got), json!(["first_contact"]), "{got}");
+    s.write(|tx| Ok(tx.execute("UPDATE message SET gone_at = 1 WHERE thread_id = 1", [])?))
+        .unwrap();
+    let got = one(&s, AuthorKind::Person, Verb::Send, &["d-1"], json!({}));
+    assert_eq!(state(&got), "proposed", "{got}");
+    assert_eq!(flags(&got), json!(["first_contact"]), "{got}");
+    // A new mail has no thread, so no thread can make it a first contact.
+    let got = one(&s, AuthorKind::Person, Verb::Draft, &["a-1"], MAIL());
+    assert_eq!(flags(&got), json!([]), "{got}");
+}

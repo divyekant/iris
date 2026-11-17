@@ -196,13 +196,13 @@ fn a_request_that_is_not_valid_writes_nothing() {
         }
     }
     assert_eq!(changesets(&store), 0);
-    // Through the socket too, and a line over 64 KiB.
+    // Through the socket too, and a line over the limit.
     assert_eq!(raw(&d, b"not json\n")["code"], json!(code::USAGE));
     let mut long = vec![b' '; socket::MAX_LINE];
     long.push(b'\n');
     let a = raw(&d, &long);
     assert_eq!(a["code"], json!(code::USAGE));
-    assert!(a["error"].as_str().unwrap().contains("64 KiB"));
+    assert!(a["error"].as_str().unwrap().contains("limit"));
 }
 
 #[test]
@@ -516,19 +516,68 @@ fn a_large_document_streams_and_a_stalled_reader_frees_its_slot() {
 }
 
 #[test]
-fn a_request_over_64_kib_gives_code_2_before_the_connect() {
+fn a_request_over_the_limit_gives_code_2_before_the_connect() {
     let d = dir("big");
     std::fs::create_dir_all(&d).unwrap();
     // No engine: code 2 comes before code 4.
     let e = socket::request(&d, "add", json!({ "why": "w".repeat(socket::MAX_LINE) })).unwrap_err();
     assert_eq!(e.code, code::USAGE, "{e}");
+    // An argument cannot hold the limit (Linux keeps one at 128 KiB): a
+    // draft file can.
+    let file = d.join("big.json");
+    let body = "w".repeat(socket::MAX_LINE);
+    std::fs::write(
+        &file,
+        json!({ "to": ["p@x.org"], "body": body }).to_string(),
+    )
+    .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_iris"))
         .arg("--data")
         .arg(&d)
-        .args(["close", "c-1", "--why", &"w".repeat(socket::MAX_LINE)])
+        .args(["draft", "a-1", file.to_str().unwrap()])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// Each draft content that passes the checks fits in one request: a body
+/// of `MAX_BODY` bytes that JSON writes 6 bytes for each byte, and the
+/// most recipients, through the program and the engine.
+#[test]
+fn the_largest_valid_draft_goes_through_the_command() {
+    let (store, d) = engine("largest");
+    mailbox(&store);
+    let to: Vec<String> = (0..iris_compose::MAX_RECIPIENTS)
+        .map(|i| {
+            format!(
+                "{}{i}@{}.org",
+                "p".repeat(60),
+                vec!["d".repeat(60); 3].join(".")
+            )
+        })
+        .collect();
+    let body = "\u{1}".repeat(iris_compose::MAX_BODY);
+    let subject = "\"".repeat(iris_compose::MAX_SUBJECT);
+    let mail = json!({ "to": to, "subject": subject, "body": body });
+    let content: iris_compose::Content = serde_json::from_value(mail.clone()).unwrap();
+    assert!(content.check().is_ok(), "the content is not valid");
+    let file = d.join("largest.json");
+    std::fs::write(&file, mail.to_string()).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_iris"))
+        .arg("--data")
+        .arg(&d)
+        .args(["draft", "a-1", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let args: String = store
+        .read(|c| Ok(c.query_row("SELECT args FROM changeset_action", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&args).unwrap(), mail);
 }
 
 /// Random answer lines: the parser never gives success without the result
@@ -582,15 +631,95 @@ fn an_answer_that_is_not_valid_is_not_a_success() {
     assert!(socket::parse_answer("drafts", ok).is_none());
 }
 
-/// Until the apply and the release of a write verb exist, the command
-/// refuses `draft` and `send`, so no approved action has no apply path.
+/// The command adds and submits the write verbs: a new mail to an account
+/// and a send of a draft keep their targets and arguments.
 #[test]
-fn the_write_verbs_wait_for_their_apply() {
+fn the_command_adds_and_submits_draft_and_send() {
     let (store, d) = engine("write");
     mailbox(&store);
-    for verb in ["draft", "send"] {
-        let r = json!({ "verb": verb, "targets": ["a-1"], "args": {} });
-        let e = socket::request(&d, "add", r).unwrap_err();
-        assert!(e.to_string().contains("not available yet"), "{verb}: {e}");
+    store
+        .write(|tx| {
+            // The draft that an applied draft action made at Gmail.
+            tx.execute_batch(
+                "INSERT INTO changeset(author_kind, created_at) VALUES ('person', 0);
+                 INSERT INTO changeset_action(changeset_id, revision, n, verb, targets, args)
+                   VALUES (1, 1, 1, 'draft', '{\"accounts\":[\"a-1\"]}', '{}');
+                 INSERT INTO draft(account_id, provider_id, message_id_hdr, content, hash, raw,
+                                   action_id, created_at, updated_at)
+                   VALUES (1, 'r1', 'iris.1@example.com', '{}', 'h1', x'00', 1, 0, 0);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let mail = json!({ "to": ["p@example.org"], "subject": "Hi", "body": "Hello" });
+    for (verb, target, args, key) in [
+        ("draft", "a-1", mail, "accounts"),
+        ("send", "d-1", json!({}), "drafts"),
+    ] {
+        let r = add(&d, verb, &[target], args.clone(), None);
+        let cs = r["changeset"].as_str().unwrap();
+        let doc =
+            socket::request(&d, "submit", json!({ "changeset": cs, "why": "Write." })).unwrap();
+        let a = &doc["actions"][0];
+        assert_eq!(a["verb"], json!(verb), "{doc}");
+        assert_eq!(a["targets"][key], json!([target]), "{doc}");
+        assert_eq!(a["args"], args, "{doc}");
+        assert_eq!(a["decision"]["state"], json!("proposed"), "{doc}");
     }
+}
+
+/// `iris draft <target> <file>` and `iris send <draft>` add their actions
+/// through the socket (specification 2, section 8.2). A file that is not
+/// JSON is a usage error.
+#[test]
+fn the_cli_adds_draft_and_send() {
+    let (store, d) = engine("cli-write");
+    mailbox(&store);
+    let iris = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_iris"))
+            .arg("--data")
+            .arg(&d)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let file = d.join("mail.json");
+    let mail = json!({ "to": ["p@example.org"], "subject": "Hi", "body": "Hello" });
+    std::fs::write(&file, mail.to_string()).unwrap();
+    let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = iris(&["send", "d-7"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: Vec<(String, String, String)> = store
+        .read(|c| {
+            let mut st =
+                c.prepare("SELECT verb, targets, args FROM changeset_action ORDER BY id")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(
+        (rows[0].0.as_str(), parse(&rows[0].1)),
+        ("draft", json!({ "accounts": ["a-1"] }))
+    );
+    assert_eq!(parse(&rows[0].2), mail);
+    assert_eq!(
+        (rows[1].0.as_str(), parse(&rows[1].1)),
+        ("send", json!({ "drafts": ["d-7"] }))
+    );
+    std::fs::write(&file, "to: p@example.org").unwrap();
+    let out = iris(&["draft", "a-1", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2));
 }

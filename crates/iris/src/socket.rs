@@ -18,8 +18,13 @@ use serde_json::{json, Value};
 pub const SOCKET: &str = "iris.sock";
 /// The engine lock in the data folder: one engine for each data folder.
 pub const LOCK: &str = "engine.lock";
-/// The longest request line, with its newline.
-pub const MAX_LINE: usize = 64 * 1024;
+/// The longest request line, with its newline. It holds each draft whose
+/// content passes the checks (`iris_compose::MAX_BODY`): JSON writes one
+/// byte of a body as at most 6 bytes (`\u0001`), and 64 KiB holds the
+/// other fields. The engine reads a line only from the same user, and
+/// grows the buffer only as bytes arrive.
+pub const MAX_LINE: usize = 6 * iris_compose::MAX_BODY + 64 * 1024;
+const MAX_LINE_TEXT: &str = "the request is longer than the limit (1.6 MiB)";
 /// The longest wait of the engine for a request line.
 pub const READ_WAIT: Duration = Duration::from_secs(10);
 /// The most connections at the same time.
@@ -207,7 +212,7 @@ async fn connection(
         });
         if line.last() != Some(&b'\n') {
             out.write_all(&failure_line(&usage(
-                "the request is longer than 64 KiB, or has no newline",
+                "the request is longer than the limit (1.6 MiB), or has no newline",
             )))?;
         } else {
             answer(&store, &line, &mut out)?;
@@ -373,14 +378,6 @@ fn work(store: &Store, line: &[u8]) -> Result<Done, Failure> {
             let verb = text(args, "verb")?
                 .and_then(Verb::parse)
                 .ok_or_else(|| usage("verb must be a verb of specification 2, section 4"))?;
-            // shortcut: draft and send wait for their apply and release (card
-            // R3-01, part 4, issue #340); remove this refusal in that PR.
-            if matches!(verb, Verb::Draft | Verb::Send) {
-                return Err(usage(format!(
-                    "{} is not available yet: Iris cannot apply it",
-                    verb.as_str()
-                )));
-            }
             let targets: Vec<&str> = args["targets"]
                 .as_array()
                 .filter(|t| !t.is_empty())
@@ -474,7 +471,7 @@ pub fn request_with(dir: &Path, verb: &str, args: Value, wait: Duration) -> Resu
         serde_json::to_vec(&json!({"v": 1, "verb": verb, "args": args})).expect("plain JSON");
     line.push(b'\n');
     if line.len() > MAX_LINE {
-        return Err(usage("the request is longer than 64 KiB"));
+        return Err(usage(MAX_LINE_TEXT));
     }
     let path = dir.join(SOCKET);
     let mut stream = std::os::unix::net::UnixStream::connect(&path).map_err(|_| {

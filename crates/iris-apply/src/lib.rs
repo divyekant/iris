@@ -26,8 +26,10 @@
 //! reads the labels at Gmail. See the failure list in specification 2,
 //! section 7.2.
 
+mod send;
 mod state;
 
+pub use send::{release, HOLD_MS, SENT_OTHER};
 pub use state::{apply_state, apply_states};
 
 use iris_gmail::{Gmail, BATCH_LIMIT};
@@ -55,8 +57,12 @@ pub enum Error {
     /// stays as it was. Apply again after the other apply.
     Busy,
     /// The verb has no Gmail apply: a state verb applies with
-    /// [`apply_state`].
+    /// [`apply_state`], and a `send` with [`release`].
     Verb(String),
+    /// A sent copy had other content than the approved content (ledger
+    /// error [`SENT_OTHER`]). Each release stops until the owner checks
+    /// assumption 6 of the send spec. The action stays as it was.
+    SendStopped,
 }
 
 impl std::fmt::Display for Error {
@@ -68,6 +74,7 @@ impl std::fmt::Display for Error {
             Error::Busy => write!(f, "another apply runs now"),
             Error::OtherMailbox => write!(f, "the token is of another mailbox"),
             Error::Verb(v) => write!(f, "the verb {v} has no Gmail apply"),
+            Error::SendStopped => write!(f, "{SENT_OTHER}: each send stops until the owner checks"),
         }
     }
 }
@@ -119,6 +126,13 @@ pub enum Outcome {
     Waiting,
     /// 14 days passed after the submit: the state is `expired`.
     Expired,
+    /// A send waits for its hold delay until this time, in milliseconds
+    /// since 1970. The action stays `approved`.
+    Hold(i64),
+    /// The result of a `drafts.create` or `drafts.send` call is not known
+    /// yet. The ledger row stays in `writing`, and the recovery decides
+    /// later. No call is made again.
+    Pending,
 }
 
 /// An open action expires 14 days after its submit (section 5.5).
@@ -318,6 +332,7 @@ pub fn apply(
         })?;
     let (verb, approved_hash, decided_by, writing, writing_account) =
         head.ok_or(Error::NotApproved(action))?;
+    let write_verb = verb == "draft" || verb == "send";
     // The label name of `label` and `unlabel`; submit checked the argument.
     let label: Option<String> = match verb.as_str() {
         "label" | "unlabel" => store.read(|c| {
@@ -331,6 +346,11 @@ pub fn apply(
     };
     let mut change = match (verb.as_str(), &label) {
         ("label" | "unlabel", Some(_)) => Change {
+            add: Vec::new(),
+            remove: Vec::new(),
+            trash: false,
+        },
+        _ if write_verb => Change {
             add: Vec::new(),
             remove: Vec::new(),
             trash: false,
@@ -355,6 +375,10 @@ pub fn apply(
         r.recover_account()?;
         run = Some(r);
     }
+    // A send leaves only through the release, after its hold.
+    if verb == "send" {
+        return Err(Error::Verb(verb));
+    }
     if let Some(o) = check(store, account, action, &decided_by, approved_hash)? {
         return Ok(o);
     }
@@ -366,6 +390,9 @@ pub fn apply(
             r
         }
     };
+    if verb == "draft" {
+        return send::draft(&mut run, action);
+    }
     // Step 1: the user label of `label` and `unlabel`. A label that Gmail
     // does not have is made now, with no ledger entry: it stays after an
     // undo (section 7.2).
@@ -781,6 +808,9 @@ impl<'a, 'b> Run<'a, 'b> {
     /// never started is read again for its `pre`. Then the calls that never
     /// started continue.
     fn recover(&mut self, ledger: i64) -> Result<Outcome> {
+        if send::is_write(self.store, ledger)? {
+            return send::recover(self, ledger);
+        }
         let (call, change) = self.store.read(|c| {
             let call: i64 =
                 c.query_row("SELECT call FROM ledger WHERE id = ?1", [ledger], |r| {
@@ -1038,10 +1068,17 @@ fn check(
         decide(store, action, "in_review", reason)?;
         return Ok(Some(Outcome::Review(reason.into())));
     }
+    // Each mailbox that the action names: the account of each message,
+    // of its draft, and each account target of a new mail. All must be the
+    // mailbox of this apply.
     let other_account: bool = store.read(|c| {
         Ok(c.query_row(
             "SELECT EXISTS (SELECT 1 FROM action_message am JOIN message m ON m.id = am.message_id
-               WHERE am.action_id = ?1 AND m.account_id <> ?2)",
+               WHERE am.action_id = ?1 AND m.account_id <> ?2)
+             OR EXISTS (SELECT 1 FROM action_draft ad JOIN draft d ON d.id = ad.draft_id
+               WHERE ad.action_id = ?1 AND d.account_id <> ?2)
+             OR EXISTS (SELECT 1 FROM changeset_action a, json_each(a.targets, '$.accounts') t
+               WHERE a.id = ?1 AND t.value <> 'a-' || ?2)",
             params![action, account],
             |r| r.get(0),
         )?)
@@ -1056,7 +1093,7 @@ fn check(
     let reason = if now_hash.1 != approved_hash.unwrap_or_default() {
         Some("The action changed after its approval.")
     } else if other_account {
-        Some("The action has messages of another account.")
+        Some("The action names another account.")
     } else {
         None
     };
