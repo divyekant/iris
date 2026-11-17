@@ -50,6 +50,7 @@ class Runner(unittest.TestCase):
             "items.jsonl": json.dumps({"form": "memo"}) + "\n",
             "signal-lines.jsonl": json.dumps(GOOD) + "\n\n" + json.dumps(GOOD) + "\n",
             "policy.toml": "version = 2\nmode = \"apply\"\n",
+            "signal-deep.json": "[" * 100000 + "]" * 100000,
         }
         for name, data in bad.items():
             code, out = check({name: data})
@@ -129,6 +130,24 @@ class Runner(unittest.TestCase):
                 self.assertEqual(check({"signal-a.json": "{}"})[0], 2)
         finally:
             Path.read_bytes = old
+
+    def test_an_incomplete_kit_is_exit_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            spec, schemas = run.SPEC, run.SCHEMAS
+            try:
+                # No VERSION file.
+                run.SPEC = Path(d)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(run.main(["--version"]), 2)
+                    self.assertEqual(run.main(["self-test"]), 2)
+                # A schema that is not JSON.
+                run.SPEC = spec
+                run.SCHEMAS = Path(d)
+                (Path(d) / "feed.schema.json").write_text("{")
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(run.main(["self-test"]), 2)
+            finally:
+                run.SPEC, run.SCHEMAS = spec, schemas
 
     def test_usage_is_exit_2(self):
         with contextlib.redirect_stderr(io.StringIO()):

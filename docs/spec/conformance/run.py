@@ -130,7 +130,7 @@ def documents(path):
     if path.suffix == ".toml":
         try:
             return [(path.name, "policy", toml_value(tomllib.loads(text)), None)]
-        except (ValueError, tomllib.TOMLDecodeError) as e:
+        except (ValueError, RecursionError, tomllib.TOMLDecodeError) as e:
             return [(path.name, None, None, str(e))]
     if path.suffix == ".json":
         lines = [(path.name, text)]
@@ -146,7 +146,7 @@ def documents(path):
             continue
         try:
             doc = parse_json(line)
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:  # RecursionError: very deep nesting
             out.append((label, None, None, str(e)))
             continue
         out.append((label, select(base, doc), doc, None))
@@ -224,10 +224,10 @@ def check(validators, minor, folder):
 
 
 def main(argv):
-    if argv == ["--version"]:
-        print(kit_version()[0])
-        return 0
     try:
+        if argv == ["--version"]:
+            print(kit_version()[0])
+            return 0
         _, _, minor = kit_version()
         if argv == ["self-test"]:
             return self_test(load_validators(), minor)
@@ -235,10 +235,11 @@ def main(argv):
             return check(load_validators(), minor, Path(argv[1]))
         print("usage: run.py self-test | run.py check <folder> | run.py --version", file=sys.stderr)
         return 2
-    except (KitError, OSError) as e:
-        # A file or a folder that cannot be read is not a verdict on a
-        # document: exit 2, as for each other error of the kit.
-        print(f"error: {e}", file=sys.stderr)
+    except Exception as e:
+        # Each document error is a verdict inside check_file, so an
+        # exception here is the kit or the file system (a missing VERSION,
+        # a schema that is not JSON, a read error): exit 2.
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
 
 
