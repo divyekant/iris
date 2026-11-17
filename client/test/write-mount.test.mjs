@@ -56,6 +56,28 @@ async function fill(app, to = "sam@okafor.example ") {
   app.flushSync();
 }
 
+test("generated hashes: #/write/<id> opens a reply only for one canonical thread ID and no other part", () => {
+  let seed = 23;
+  const rand = (n) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % n);
+  const pieces = ["#/write", "/", "t-", "m-", "0", "1", "9", "x", "%", "%2F", "-", "write", "#"];
+  let replies = 0;
+  for (let i = 0; i < 5000; i++) {
+    const start = ["#/write/t-", "#/write/", "#write/t-", ""][rand(4)];
+    const hash = start + Array.from({ length: rand(6) }, () => pieces[rand(pieces.length)]).join("");
+    const r = route.parse(hash);
+    if (r.view !== "write") continue;
+    const rest = hash.replace(/^#\/?/, "");
+    if (r.thread === null) assert.match(rest, /^write\/?$/, hash);
+    else {
+      assert.equal(rest, `write/${r.thread}`, hash);
+      assert.match(r.thread, route.THREAD_ID, hash);
+      replies++;
+    }
+  }
+  assert.ok(replies > 0, "some generated hashes open a reply");
+  for (let n = 1; n < 2000; n += 7) assert.deepEqual(route.parse(route.href.reply(`t-${n}`)), { view: "write", thread: `t-${n}` });
+});
+
 test("the routes of the write view", () => {
   assert.deepEqual(route.parse("#/write"), { view: "write", thread: null });
   assert.deepEqual(route.parse("#/write/"), { view: "write", thread: null });
@@ -243,6 +265,63 @@ test("a reply with no valid recipient opens the chips at once", async () => {
   try {
     assert.ok(app.target.querySelector("#write-to"));
     assert.equal(app.target.querySelector(".who"), null);
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a reload shows an unfinished copy address, so Send never sends to an address that the form hides", async () => {
+  const net = serve(() => [201, { write: "cs-7" }]);
+  let app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app);
+    [...app.target.querySelectorAll("button")].find((b) => b.textContent === "Add copy").click();
+    app.flushSync();
+    type(app.target.querySelector("#write-cc"), "ana@example.com");
+    app.flushSync();
+    app.destroy();
+    app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+    assert.equal(app.target.querySelector("#write-cc")?.value, "ana@example.com", "the copy field shows after the reload");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a reply with restored open address text shows the fields, not the one line", async () => {
+  const saved = { account: "a-1", to: ["priya@example.com"], cc: [], subject: "", body: "Yes.", key: "k-0123456789abcdef", sig: "", flags: [], toText: "", ccText: "ana@example.com" };
+  window.sessionStorage.setItem("iris.write.t-2", JSON.stringify(saved));
+  const net = serve(() => [201, { write: "cs-9" }]);
+  const app = await mount("/src/views/Write.svelte", { start: { thread: "t-2", reply: REPLY }, every: 20 });
+  try {
+    assert.equal(app.target.querySelector(".who"), null);
+    assert.equal(app.target.querySelector("#write-cc")?.value, "ana@example.com");
+  } finally {
+    app.destroy();
+    net.restore();
+  }
+});
+
+test("a press with an unfinished address and a lost answer: the retry sends the same key", async () => {
+  let lost = true;
+  const net = serve((path, method) => {
+    if (method === "POST" && lost) throw new Error("no answer");
+    if (method === "POST") return [200, { write: "cs-8" }];
+    return [200, { state: "saving" }];
+  });
+  const app = await mount("/src/views/Write.svelte", { start: { accounts: ACCOUNTS }, every: 20 });
+  try {
+    await fill(app, "sam@okafor.example");
+    press(app);
+    await until(() => text(app.target).includes("Iris does not know if it took the mail"));
+    lost = false;
+    press(app);
+    await until(() => net.posts().length === 2);
+    const [first, second] = net.posts();
+    assert.deepEqual(first.body.to, ["sam@okafor.example"]);
+    assert.equal(second.body.key, first.body.key, "one content, one key");
+    assert.equal(JSON.parse(window.sessionStorage.getItem("iris.write.new") ?? "null")?.key ?? first.body.key, first.body.key);
   } finally {
     app.destroy();
     net.restore();

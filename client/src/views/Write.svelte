@@ -92,16 +92,20 @@
 
   // The parent is part of the content: a reply to a new parent is a new mail.
   let content = $derived(JSON.stringify([thread ? [thread, reply?.parent.id] : account, to, cc, thread ? "" : subject, body]));
-  $effect(() => {
+  // One key for one content: a new content gets a new key. Send calls it too,
+  // after it ends the open address text, so each press sends the key of its own content.
+  function rekey() {
     const now = content;
-    untrack(() => {
-      if (now !== sig) {
-        sig = now;
-        key = globalThis.crypto.randomUUID();
-        flags = [];
-        unknown = false;
-      }
-    });
+    if (now !== sig) {
+      sig = now;
+      key = globalThis.crypto.randomUUID();
+      flags = [];
+      unknown = false;
+    }
+  }
+  $effect(() => {
+    void content;
+    untrack(rekey);
   });
   // Save each part of the form that a reload must keep: the text of an address
   // not yet a chip, and the warnings that the next press sends, too.
@@ -145,6 +149,7 @@
   async function send() {
     typed("to", true);
     typed("cc", true);
+    rekey();
     if (!ready) return;
     busy = true;
     problem = "";
@@ -348,11 +353,12 @@
         <select bind:value={account}>{#each accounts as a (a.id)}<option value={`a-${a.id}`}>{a.address}</option>{/each}</select>
       </label>
     {/if}
-    {#if reply && !editing && to.some(valid)}
+    <!-- Each address that Send can send shows in the form: open address text opens the fields. -->
+    {#if reply && !editing && to.some(valid) && !toText && !ccText}
       <p class="who">Reply to <strong>{named}</strong>{#if cc.length}<span class="faint">, copy to {cc.join(", ")}</span>{/if}<button type="button" class="end" onclick={() => (editing = true)}>Change</button></p>
     {:else}
       {#each [["to", "To"], ["cc", "Copy"]] as const as [field, label] (field)}
-        {#if field === "to" || copy}
+        {#if field === "to" || copy || cc.length > 0 || ccText !== ""}
           <div class="line">
             <label class="k" for="write-{field}">{label}</label>
             {#each field === "to" ? to : cc as a (a)}
@@ -365,7 +371,7 @@
             {:else}
               <input id="write-cc" type="text" autocomplete="off" bind:value={ccText} oninput={() => typed("cc")} onkeydown={(e) => keydown("cc", e)} onblur={() => typed("cc", true)} />
             {/if}
-            {#if field === "to" && !copy}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
+            {#if field === "to" && !copy && cc.length === 0 && ccText === ""}<button type="button" class="end" onclick={() => (copy = true)}>Add copy</button>{/if}
           </div>
         {/if}
       {/each}

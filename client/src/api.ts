@@ -293,7 +293,7 @@ export type ReplyStart = {
   to: string[];
   cc: string[];
   subject: string;
-  /** The subject of the parent as it is: the title of the view. */
+  /** The subject of the parent as it is. The view shows it with no leading "Re:" as its title. */
   topic: string;
   /** The newest mails of the thread, oldest first; the last one is the parent. */
   conversation: {
